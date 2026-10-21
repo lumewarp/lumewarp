@@ -1,4 +1,5 @@
 import { useId, useState, type FormEvent, type ReactNode } from "react";
+import { ApiError } from "../api/errors";
 import { Dialog } from "./Dialog";
 
 type Validators<V> = { [K in keyof V]?: (value: V[K], all: V) => string | undefined };
@@ -24,6 +25,27 @@ export function useForm<V extends object>(initial: V, validators: Validators<V> 
       setErrors((e) => ({ ...e, [k]: undefined }));
     },
     validate: () => validate(values),
+    setError(k: keyof V, message: string) {
+      setErrors((e) => ({ ...e, [k]: message }));
+    },
+    /**
+     * Run a submit; a 422 naming one of this form's fields is shown inline on that field
+     * (keep the dialog open) instead of as a form-level error. `alias` maps API field names
+     * to form field names (e.g. budget_nano_usd -> budget_usd).
+     */
+    async run(fn: () => Promise<unknown>, alias: Record<string, keyof V> = {}): Promise<boolean | void> {
+      try {
+        await fn();
+      } catch (err) {
+        const field = err instanceof ApiError ? err.field : undefined;
+        const key = field && (alias[field] ?? (field in (values as object) ? (field as keyof V) : undefined));
+        if (err instanceof ApiError && key) {
+          setErrors((e) => ({ ...e, [key]: err.message }));
+          return false;
+        }
+        throw err;
+      }
+    },
     reset: (v: V = initial) => {
       setValues(v);
       setErrors({});
@@ -74,7 +96,7 @@ export function TextField({ label, value, onChange, error, hint, type = "text", 
 }
 
 /** Number input where an empty string means "no limit" (null). */
-export function NumberField({ label, value, onChange, error, hint, min = 0, step }: { label: string; value: number | null; onChange: (v: number | null) => void; error?: string; hint?: string; min?: number; step?: number }) {
+export function NumberField({ label, value, onChange, error, hint, min = 0, step }: { label: string; value: number | null; onChange: (v: number | null) => void; error?: string; hint?: string; min?: number; step?: number | "any" }) {
   return (
     <Field label={label} error={error} hint={hint}>
       {(p) => (
@@ -101,10 +123,10 @@ export function SelectField({ label, value, onChange, options, error, hint }: { 
 }
 
 /** Comma-separated list input (model allow-lists). */
-export function ListField({ label, value, onChange, hint }: { label: string; value: string[]; onChange: (v: string[]) => void; hint?: string }) {
+export function ListField({ label, value, onChange, hint, error }: { label: string; value: string[]; onChange: (v: string[]) => void; hint?: string; error?: string }) {
   return (
-    <Field label={label} hint={hint}>
-      {(p) => <input {...p} className="input" value={value.join(", ")} placeholder="all models" onChange={(e) => onChange(e.target.value.split(",").map((s) => s.trim()).filter(Boolean))} />}
+    <Field label={label} hint={hint} error={error}>
+      {(p) => <input {...p} className="input" value={value.join(", ")} placeholder="model aliases" onChange={(e) => onChange(e.target.value.split(",").map((s) => s.trim()).filter(Boolean))} />}
     </Field>
   );
 }

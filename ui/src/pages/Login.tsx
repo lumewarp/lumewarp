@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
-import { api, useMock } from "../api";
+import { api } from "../api";
 import { clearToken, setToken } from "../auth";
 import { TextField } from "../components/Form";
 
@@ -39,7 +39,6 @@ export function Login() {
         </div>
         <h1>Sign in</h1>
         <p className="muted">Use a personal access token or the bootstrap admin token.</p>
-        {useMock && <p className="muted">Mock mode: any token works; start it with “viewer” for a read-only session.</p>}
         <TextField label="Access token" type="password" value={token} onChange={setTok} error={error} autoFocus />
         <button className="btn btn-primary" disabled={busy}>
           {busy ? "Signing in…" : "Sign in"}

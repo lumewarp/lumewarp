@@ -8,19 +8,26 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "gen:api": "LUMEWARP_DATABASE_URL=postgresql+asyncpg://nobody:nothing@127.0.0.1:1/none uv run --project ../control-plane python -m lumewarp_control_plane openapi -o openapi.json && openapi-typescript openapi.json -o src/api/schema.d.ts && rm openapi.json",
+    "build:cp": "pnpm build && node scripts/copy-static.mjs",
+    "test:e2e": "pnpm build:cp && playwright test"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.104.5",
     "@tanstack/react-router": "^1.170.45",
+    "clsx": "^2.1.1",
+    "openapi-fetch": "~0.13.8",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1",
-    "clsx": "^2.1.1"
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^24.19.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
+    "openapi-typescript": "^7.13.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.4"
   },

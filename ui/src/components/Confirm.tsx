@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Dialog } from "./Dialog";
+import { useToast } from "./Toast";
 
 interface Props {
   open: boolean;
@@ -12,10 +13,13 @@ interface Props {
 
 export function ConfirmDialog({ open, title, message, confirmLabel = "Delete", onConfirm, onClose }: Props) {
   const [busy, setBusy] = useState(false);
+  const toast = useToast();
   const run = async () => {
     setBusy(true);
     try {
       await onConfirm();
+    } catch (e) {
+      toast("error", e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
       onClose();

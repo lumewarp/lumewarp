@@ -1,8 +1,11 @@
 import { createRootRoute, createRoute, createRouter, Outlet, redirect } from "@tanstack/react-router";
 import { getToken } from "./auth";
 import { Layout } from "./components/Layout";
+import { Access } from "./pages/Access";
 import { Audit } from "./pages/Audit";
+import { Config } from "./pages/Config";
 import { Deployments } from "./pages/Deployments";
+import { Gateways } from "./pages/Gateways";
 import { Keys } from "./pages/Keys";
 import { Login } from "./pages/Login";
 import { Orgs } from "./pages/Orgs";
@@ -49,6 +52,9 @@ const routeTree = rootRoute.addChildren([
     page("/upstreams", Upstreams),
     page("/usage", Usage),
     page("/audit", Audit),
+    page("/access", Access),
+    page("/gateways", Gateways),
+    page("/config", Config),
     page("/settings", Settings),
   ]),
 ]);
