@@ -200,6 +200,11 @@ P1 streams carry the injected `include_usage` and strip the extra event, since
 clients in the bench do not ask for usage. LiteLLM could not hold 1000 RPS on
 this machine. Lumewarp used 65 % CPU on average at 10k RPS.
 
+Stream TTFT overhead p99 at c=100 is noisy on this box (single quick runs have
+shown 0.5–1.8 ms for the same binary). A same-session A/B with key auth, quick
+profile, 5 repetitions: P0 binary (`1cf38c7`) 0.15 ms non-stream / 1.44
+[0.03–1.70] ms stream TTFT; P1 HEAD 0.10 ms / 0.74 [0.19–4.48] ms. No regression.
+
 ## CI
 
 - The `ci` workflow's `bench-crate` job runs `cargo fmt/clippy/test` for
