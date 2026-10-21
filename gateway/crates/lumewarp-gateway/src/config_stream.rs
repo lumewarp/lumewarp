@@ -49,10 +49,13 @@ pub fn compile(snapshot: &Snapshot, runtime: &Arc<Runtime>) -> Result<Router, Ap
 
 /// Starts the stream task. `current` is the snapshot already active in
 /// `slot` (an empty one carrying only the scope when cold-booting).
+/// `has_base` says whether `current` is a real, complete snapshot (loaded
+/// cache); without one every delta is refused until a full has been applied.
 pub fn spawn(
     config: StreamConfig,
     current: Snapshot,
     digest: Vec<u8>,
+    has_base: bool,
     slot: server::Snapshot,
     runtime: Arc<Runtime>,
 ) -> anyhow::Result<JoinHandle<()>> {
@@ -76,6 +79,7 @@ pub fn spawn(
         config,
         current: Arc::new(current),
         digest,
+        has_base,
         slot,
         runtime,
     };
@@ -90,6 +94,9 @@ struct Client {
     current: Arc<Snapshot>,
     /// Opaque control-plane digest of `current`; echoed in Hello.
     digest: Vec<u8>,
+    /// A valid complete base exists: a loaded cache or an applied full. Never
+    /// inferred from version numbers (the empty cold-boot base has version 0).
+    has_base: bool,
     slot: server::Snapshot,
     runtime: Arc<Runtime>,
 }
@@ -180,10 +187,17 @@ impl Client {
             None => 0,
         };
         let target_digest = update.target_digest.clone();
+        let refuse_delta = !self.has_base && matches!(update.update, Some(Update::Delta(_)));
         let base = self.current.clone();
         let runtime = self.runtime.clone();
         let dir = self.config.state_dir.clone();
         let applied = tokio::task::spawn_blocking(move || {
+            if refuse_delta {
+                return Err(ApplyError {
+                    code: NackCode::BaseMismatch,
+                    reason: "delta received but no complete base snapshot is held".into(),
+                });
+            }
             apply_update(&base, update, &target_digest, &dir, &runtime)
                 .map(|(s, r)| (s, r, target_digest))
         })
@@ -196,6 +210,7 @@ impl Client {
                 tracing::info!(version = next.version, "config applied");
                 self.current = Arc::new(next);
                 self.digest = digest;
+                self.has_base = true;
                 GatewayMessage {
                     msg: Some(Msg::Ack(Ack { version })),
                 }

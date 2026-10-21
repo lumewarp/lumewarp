@@ -138,7 +138,32 @@ impl ScopeState {
         }
     }
 
-    /// Takes one rpm token; returns the GCRA increment to refund on rollback.
+    /// Gives back one rpm token taken by a request that is being rolled back.
+    /// The amount is one interval of the bucket's *current* rpm, not what the
+    /// request paid: a snapshot swap may have rescaled the bucket in between,
+    /// and refunding stale units could underflow or over-credit it. Saturates
+    /// at zero (a TAT in the past is an idle bucket anyway).
+    fn refund_rpm(&self) {
+        let rpm = self.rpm.load(Ordering::Relaxed);
+        if rpm == 0 {
+            return;
+        }
+        let interval = interval_us(rpm);
+        let mut tat = self.tat_us.load(Ordering::Relaxed);
+        loop {
+            match self.tat_us.compare_exchange_weak(
+                tat,
+                tat.saturating_sub(interval),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(actual) => tat = actual,
+            }
+        }
+    }
+
+    /// Takes one rpm token; returns the GCRA increment (nonzero) on success.
     fn take_rpm(&self, rpm: u32, now_us: u64) -> Result<u64, RateLimited> {
         if self.rpm.load(Ordering::Relaxed) != rpm {
             self.rescale(rpm, now_us);
@@ -217,7 +242,7 @@ pub struct Registry {
 /// One scope's share of an admitted request.
 struct Taken {
     state: Arc<ScopeState>,
-    /// GCRA increment, refunded only if the request is rolled back.
+    /// Nonzero when an rpm token was taken; refunded only on rollback.
     rpm_us: u64,
     parallel: bool,
 }
@@ -250,10 +275,7 @@ impl Permit {
     fn rollback(self) {
         for taken in self.inline.iter().flatten().chain(&self.overflow) {
             if taken.rpm_us != 0 {
-                taken
-                    .state
-                    .tat_us
-                    .fetch_sub(taken.rpm_us, Ordering::Relaxed);
+                taken.state.refund_rpm();
             }
         }
     }
@@ -545,6 +567,37 @@ mod tests {
         );
         // Anonymous charges are ignored.
         registry.charge_tokens(&Caller::Anonymous, 1_000_000);
+    }
+
+    #[test]
+    fn rollback_after_rescale_does_not_underflow() {
+        let now = 10_000_000_000;
+        let state = ScopeState::default();
+        // A admits under rpm=10 (interval 6s) and will roll back later.
+        let a = state.take_rpm(10, now).unwrap();
+        assert_eq!(a, 6_000_000);
+        // B's snapshot raises the limit to rpm=100 and rescales the bucket.
+        state.take_rpm(100, now).unwrap();
+        let before = state.tat_us.load(Ordering::Relaxed);
+        assert!(before < now + 2_000_000, "debt is in new units: {before}");
+        // A is rejected by another scope and rolls back.
+        state.refund_rpm();
+        let tat = state.tat_us.load(Ordering::Relaxed);
+        assert!(tat <= before, "refund never charges");
+        assert!(tat < now + 2_000_000, "no underflow: {tat}");
+        // The bucket is still usable and still limits at the new rate.
+        for _ in 0..99 {
+            state.take_rpm(100, now).unwrap();
+        }
+        assert!(state.take_rpm(100, now).is_err());
+
+        // A refund larger than the whole debt saturates at zero.
+        let fresh = ScopeState::default();
+        fresh.take_rpm(10, 1000).unwrap();
+        fresh.tat_us.store(5, Ordering::Relaxed);
+        fresh.refund_rpm();
+        assert_eq!(fresh.tat_us.load(Ordering::Relaxed), 0);
+        fresh.take_rpm(10, 1000).unwrap();
     }
 
     #[test]

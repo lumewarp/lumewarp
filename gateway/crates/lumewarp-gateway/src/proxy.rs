@@ -34,7 +34,7 @@ use crate::{
     ratelimit::Permit,
     router::{Deployment, InFlight, Router},
     telemetry,
-    usage::{Captured, RequestCtx, SseFilter, Tee, UsageCapture},
+    usage::{Captured, PendingCapture, RequestCtx, SseFilter, Tee, UsageCapture},
 };
 
 pub type BoxError = Box<dyn Error + Send + Sync>;
@@ -415,7 +415,9 @@ pub async fn forward(
     // The downstream protocol version is independent of the upstream connection.
     parts.version = hyper::Version::HTTP_11;
     let upstream_request = Request::from_parts(parts, Full::new(rewritten));
-    let capture = |status: StatusCode| UsageCapture {
+    // Held across the upstream await: dropping this future (client gone
+    // before headers) still accounts the request once, as cancelled.
+    let pending = PendingCapture::new(UsageCapture {
         runtime: router.runtime.clone(),
         caller: caller.clone(),
         request,
@@ -424,7 +426,12 @@ pub async fn forward(
         config_version: router.version,
         endpoint,
         stream,
-        status: status.as_u16(),
+        status: 499,
+    });
+    let failed = |pending: PendingCapture, status: StatusCode| {
+        let mut capture = pending.take();
+        capture.status = status.as_u16();
+        capture.finalize(RequestOutcome::UpstreamError, UsageState::Missing, None);
     };
     observation.upstream_started = Some(Instant::now());
     let response =
@@ -436,11 +443,7 @@ pub async fn forward(
                 } else {
                     UpstreamError::Protocol
                 });
-                capture(StatusCode::BAD_GATEWAY).finalize(
-                    RequestOutcome::UpstreamError,
-                    UsageState::Missing,
-                    None,
-                );
+                failed(pending, StatusCode::BAD_GATEWAY);
                 return error::json(
                     StatusCode::BAD_GATEWAY,
                     "upstream_error",
@@ -449,11 +452,7 @@ pub async fn forward(
             }
             Err(_) => {
                 observation.handles.upstream_error(UpstreamError::Timeout);
-                capture(StatusCode::GATEWAY_TIMEOUT).finalize(
-                    RequestOutcome::UpstreamError,
-                    UsageState::Missing,
-                    None,
-                );
+                failed(pending, StatusCode::GATEWAY_TIMEOUT);
                 return error::json(
                     StatusCode::GATEWAY_TIMEOUT,
                     "upstream_timeout",
@@ -465,7 +464,8 @@ pub async fn forward(
     let (mut parts, body) = response.into_parts();
     strip_response_headers(&mut parts.headers);
     let meter = Meter::select(&parts, stream, inject, include_usage.requested());
-    let capture = capture(parts.status);
+    let mut capture = pending.take();
+    capture.status = parts.status.as_u16();
     Response::from_parts(
         parts,
         MeteredBody {
@@ -569,6 +569,15 @@ impl Meter {
         if !parts.status.is_success() {
             return Self::Off;
         }
+        // Before choosing a parser: compressed bytes are never parsed or
+        // filtered, whatever the content type.
+        if parts
+            .headers
+            .get(header::CONTENT_ENCODING)
+            .is_some_and(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
+        {
+            return Self::Encoded;
+        }
         let json = parts
             .headers
             .get(header::CONTENT_TYPE)
@@ -579,13 +588,6 @@ impl Meter {
             } else {
                 Self::Off
             };
-        }
-        if parts
-            .headers
-            .get(header::CONTENT_ENCODING)
-            .is_some_and(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
-        {
-            return Self::Encoded;
         }
         Self::Json(Tee::default())
     }

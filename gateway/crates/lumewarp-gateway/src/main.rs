@@ -174,6 +174,7 @@ async fn main() -> anyhow::Result<()> {
             };
             let slot = Arc::new(ArcSwapOption::empty());
             let mut digest = Vec::new();
+            let mut has_base = false;
             match snapshot::load_with_digest(&state_dir, &scope) {
                 Ok(Some((cached, cached_digest))) => {
                     match config_stream::compile(&cached, &runtime) {
@@ -186,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
                             slot.store(Some(Arc::new(router)));
                             current = cached;
                             digest = cached_digest;
+                            has_base = true;
                         }
                         Err(err) => tracing::error!(%err, "cached snapshot rejected; not ready"),
                     }
@@ -203,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
                 },
                 current,
                 digest,
+                has_base,
                 slot.clone(),
                 runtime.clone(),
             )?);

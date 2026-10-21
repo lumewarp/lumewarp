@@ -236,6 +236,8 @@ pub struct SseFilter {
     /// The last frame ended with the CR of an event's final blank line;
     /// `Some(dropped)` says whether a following LF goes with a dropped event.
     boundary_cr: Option<bool>,
+    /// Non-empty lines terminated so far in the current event.
+    event_lines: u32,
     /// An event exceeded `MAX_SSE_EVENT`: forwarding untouched from then on.
     overflowed: bool,
     /// The last usage object seen; `Err` if it could not be read.
@@ -252,6 +254,7 @@ impl SseFilter {
             line_open: false,
             prev_cr: false,
             boundary_cr: None,
+            event_lines: 0,
             overflowed: false,
             usage: None,
             data: Vec::new(),
@@ -306,12 +309,17 @@ impl SseFilter {
             self.line_open = false;
             self.prev_cr = byte == b'\r';
             pos = index + 1;
+            if !empty {
+                self.event_lines = self.event_lines.saturating_add(1);
+            }
             if empty {
                 if self.prev_cr && bytes.get(pos) == Some(&b'\n') {
                     pos += 1;
                     self.prev_cr = false;
                 }
-                let dropped = self.event(&frame, event_start..pos, &mut out);
+                let single_line = self.event_lines <= 1;
+                self.event_lines = 0;
+                let dropped = self.event(&frame, event_start..pos, single_line, &mut out);
                 event_start = pos;
                 if self.overflowed {
                     // Forward the rest of the frame untouched.
@@ -357,7 +365,8 @@ impl SseFilter {
             return Bytes::new();
         }
         let carry = std::mem::take(&mut self.carry);
-        self.inspect(&carry);
+        // Unterminated last event: line count unknown, take the joined path.
+        self.inspect(&carry, false);
         if self.strip {
             Bytes::from(carry)
         } else {
@@ -376,9 +385,26 @@ impl SseFilter {
 
     /// One complete event: `carry` followed by `frame[range]`. Returns
     /// whether it was dropped.
-    fn event(&mut self, frame: &Bytes, range: Range<usize>, out: &mut Out) -> bool {
+    fn event(
+        &mut self,
+        frame: &Bytes,
+        range: Range<usize>,
+        single_line: bool,
+        out: &mut Out,
+    ) -> bool {
+        if self.carry.len() + range.len() > MAX_SSE_EVENT {
+            // Too large to inspect, however the frames were cut: forward it
+            // and everything after it untouched.
+            self.overflowed = true;
+            if self.strip {
+                out.keep_bytes(&self.carry);
+                out.keep(range);
+            }
+            self.carry = Vec::new();
+            return false;
+        }
         if self.carry.is_empty() {
-            let drop = self.inspect(&frame[range.clone()]);
+            let drop = self.inspect(&frame[range.clone()], single_line);
             if self.strip && !drop {
                 out.keep(range);
             }
@@ -386,15 +412,7 @@ impl SseFilter {
         }
         let mut carry = std::mem::take(&mut self.carry);
         carry.extend_from_slice(&frame[range]);
-        if carry.len() > MAX_SSE_EVENT {
-            // Completed, but too large to have been held: give up the same way.
-            self.overflowed = true;
-            if self.strip {
-                out.keep_bytes(&carry);
-            }
-            return false;
-        }
-        let drop = self.inspect(&carry);
+        let drop = self.inspect(&carry, single_line);
         if self.strip && !drop {
             out.keep_bytes(&carry);
         }
@@ -406,13 +424,21 @@ impl SseFilter {
     }
 
     /// Records usage from one event; returns whether to drop it.
-    fn inspect(&mut self, event: &[u8]) -> bool {
+    /// `single_line`: the event has at most one non-empty line (the push
+    /// loop counted them).
+    fn inspect(&mut self, event: &[u8], single_line: bool) -> bool {
         #[derive(Deserialize)]
         struct Chunk {
             choices: Option<Vec<IgnoredAny>>,
             usage: Option<RawUsage>,
         }
-        if !has_usage_object(event) {
+        // Fast path: in a single-line event nothing can sit between the key
+        // and its value, so the raw check is exact (`"usage":null` chunks
+        // stop here without touching the data). Otherwise `"usage"` and `:{`
+        // may sit on different `data:` lines; a JSON key itself cannot span
+        // lines, so its raw presence is still required.
+        if !has_usage_object(event) && (single_line || memmem::find(event, b"\"usage\"").is_none())
+        {
             return false;
         }
         let mut single: Option<&[u8]> = None;
@@ -442,7 +468,7 @@ impl SseFilter {
         } else {
             single.unwrap_or_default()
         };
-        if !json_object(data) {
+        if !json_object(data) || !has_usage_object(data) {
             return false;
         }
         let Ok(chunk) = serde_json::from_slice::<Chunk>(data) else {
@@ -604,6 +630,32 @@ impl UsageCapture {
             cost_nano_usd: cost.unwrap_or(0),
             cost_known: cost.is_some(),
         });
+    }
+}
+
+/// Owns a capture while the request waits for upstream headers. If the
+/// request future is dropped there (client gone, server shutdown abort), the
+/// capture finalizes as CLIENT_CANCELLED / MISSING; every other path `take`s
+/// it, so each request is accounted exactly once.
+pub struct PendingCapture(Option<UsageCapture>);
+
+impl PendingCapture {
+    /// `capture.status` should be the cancellation status (499).
+    pub fn new(capture: UsageCapture) -> Self {
+        Self(Some(capture))
+    }
+
+    /// Hands the capture to whoever finalizes it next.
+    pub fn take(mut self) -> UsageCapture {
+        self.0.take().expect("capture taken once")
+    }
+}
+
+impl Drop for PendingCapture {
+    fn drop(&mut self) {
+        if let Some(capture) = self.0.take() {
+            capture.finalize(RequestOutcome::ClientCancelled, UsageState::Missing, None);
+        }
     }
 }
 
@@ -823,7 +875,25 @@ impl Reporter {
         let mut attempts = 0u32;
         loop {
             let n = batch.len() as u64;
-            match self.report(batch.clone(), *deadline).await {
+            let result = {
+                let report = self.report(batch.clone(), *deadline);
+                tokio::pin!(report);
+                match *deadline {
+                    Some(_) => report.await,
+                    None => tokio::select! {
+                        result = &mut report => result,
+                        until = stopped(stop) => {
+                            // Shutdown while the RPC is in flight: wait for it
+                            // no longer than the shutdown deadline.
+                            *deadline = Some(until);
+                            tokio::time::timeout_at(until, report)
+                                .await
+                                .unwrap_or(Err(ReportError::Retry))
+                        }
+                    },
+                }
+            };
+            match result {
                 Ok(()) => {
                     self.metrics.usage_batch(n, 0);
                     batch.clear();
@@ -988,6 +1058,8 @@ pub(crate) mod fake_cp {
         fail: AtomicU32,
         /// Next calls answered INVALID_ARGUMENT (nothing recorded).
         reject: AtomicU32,
+        /// Next calls never answered.
+        hang: AtomicU32,
     }
 
     #[derive(Clone)]
@@ -1021,6 +1093,9 @@ pub(crate) mod fake_cp {
                 }
                 if take(&state.reject) {
                     return Err(Status::invalid_argument("injected"));
+                }
+                if take(&state.hang) {
+                    std::future::pending::<()>().await;
                 }
                 let authorization = request
                     .metadata()
@@ -1077,6 +1152,7 @@ pub(crate) mod fake_cp {
                 reports: tx,
                 fail: AtomicU32::new(0),
                 reject: AtomicU32::new(0),
+                hang: AtomicU32::new(0),
             });
             let svc = Svc(state.clone());
             let task = tokio::spawn(async move {
@@ -1103,6 +1179,10 @@ pub(crate) mod fake_cp {
 
         pub fn reject_next(&self, n: u32) {
             self.state.reject.store(n, Ordering::SeqCst);
+        }
+
+        pub fn hang_next(&self, n: u32) {
+            self.state.hang.store(n, Ordering::SeqCst);
         }
 
         pub async fn next(&mut self) -> Report {
@@ -1354,6 +1434,84 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         let (chunks, filter) = run(true, other, &[7]);
         assert_eq!(joined(&chunks), other.as_slice());
         assert_eq!(filter.captured(), Captured::Missing);
+    }
+
+    #[test]
+    fn usage_key_and_object_on_different_data_lines() {
+        // Joined data is valid JSON; the raw event has `data:` between the
+        // key and its object.
+        let usage = b"data: {\"choices\":[],\"usage\"\ndata: :{\"prompt_tokens\":2,\"completion_tokens\":3}}\n\n";
+        let expected_tokens = Captured::Reported(Tokens {
+            prompt: 2,
+            completion: 3,
+        });
+        let crlf = |s: &[u8]| -> Vec<u8> {
+            String::from_utf8(s.to_vec())
+                .unwrap()
+                .replace('\n', "\r\n")
+                .into_bytes()
+        };
+        for convert in [crlf, |s: &[u8]| s.to_vec()] {
+            let input = [convert(STREAM), convert(usage), convert(DONE)].concat();
+            let expected = [convert(STREAM), convert(DONE)].concat();
+            for cut in 0..=input.len() {
+                let (chunks, filter) = run(true, &input, &[cut]);
+                assert_eq!(joined(&chunks), expected, "cut {cut}");
+                assert_eq!(filter.captured(), expected_tokens, "cut {cut}");
+                let (chunks, filter) = run(false, &input, &[cut]);
+                assert_eq!(joined(&chunks), input, "cut {cut}");
+                assert_eq!(filter.captured(), expected_tokens, "cut {cut}");
+            }
+            let every: Vec<usize> = (1..input.len()).collect();
+            let (chunks, filter) = run(true, &input, &every);
+            assert_eq!(joined(&chunks), expected);
+            assert_eq!(filter.captured(), expected_tokens);
+        }
+        // `"usage": null` split the same way is still not usage.
+        let null = b"data: {\"choices\":[{\"delta\":{}}],\"usage\"\ndata: :null}\n\n";
+        let (chunks, filter) = run(true, null, &[]);
+        assert_eq!(joined(&chunks), null.as_slice());
+        assert_eq!(filter.captured(), Captured::Missing);
+    }
+
+    #[test]
+    fn oversized_event_is_handled_the_same_in_one_or_many_frames() {
+        // A complete usage-only event just over the limit (padding in an
+        // unknown field), followed by a normal usage event.
+        let big = [
+            b"data: {\"choices\":[],\"pad\":\"".as_slice(),
+            &vec![b'a'; MAX_SSE_EVENT],
+            b"\",\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+        ]
+        .concat();
+        let input = [STREAM, &big, USAGE_EVENT, DONE].concat();
+        let start = STREAM.len();
+        let end = start + big.len();
+        for strip in [true, false] {
+            for cuts in [
+                vec![start, end],                              // the event alone in one frame
+                vec![],                                        // everything in one frame
+                (1..input.len()).step_by(64 * 1024).collect(), // many frames
+                vec![start + 10, end - 10],                    // carry + completion
+            ] {
+                let (chunks, filter) = run(strip, &input, &cuts);
+                assert_eq!(joined(&chunks), input, "strip={strip} cuts={cuts:?}");
+                assert_eq!(filter.captured(), Captured::Invalid, "cuts={cuts:?}");
+            }
+        }
+        // At the limit it is still inspected (and stripped).
+        let fits = [
+            b"data: {\"choices\":[],\"pad\":\"".as_slice(),
+            &vec![b'a'; MAX_SSE_EVENT - 200],
+            b"\",\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+        ]
+        .concat();
+        assert!(fits.len() <= MAX_SSE_EVENT);
+        for cuts in [vec![], vec![100, 600_000]] {
+            let (chunks, filter) = run(true, &[fits.as_slice(), DONE].concat(), &cuts);
+            assert_eq!(joined(&chunks), DONE);
+            assert!(matches!(filter.captured(), Captured::Reported(_)));
+        }
     }
 
     #[test]
@@ -1633,6 +1791,34 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         handle.shutdown(Duration::from_millis(200)).await;
         // Everything still queued at the deadline is counted as dropped.
         assert!(metric(&metrics, "lumewarp_usage_events_dropped_total 30"));
+    }
+
+    #[tokio::test]
+    async fn shutdown_while_a_report_hangs_counts_everything_unsent() {
+        let mut cp = FakeUsage::start(None).await;
+        cp.hang_next(u32::MAX);
+        let metrics = Arc::new(Metrics::new());
+        let (sink, handle) = spawn_reporter(
+            config(cp.url(), 100, 1, Duration::from_millis(10)),
+            metrics.clone(),
+        );
+        sink.try_record(event("in-flight"));
+        // Let the first Report go out and hang.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        sink.try_record(event("queued-1"));
+        sink.try_record(event("queued-2"));
+        let started = Instant::now();
+        handle.shutdown(Duration::from_millis(300)).await;
+        // Finished by itself before the deadline (no abort needed).
+        assert!(started.elapsed() < Duration::from_millis(300));
+        let text = metrics.encode(&Default::default()).unwrap();
+        assert!(
+            text.contains("lumewarp_usage_events_dropped_total 3"),
+            "{text}"
+        );
+        assert!(text.contains("lumewarp_usage_queue_depth 0"), "{text}");
+        assert!(text.contains("lumewarp_usage_events_reported_total 0"));
+        assert!(cp.reports.try_recv().is_err());
     }
 
     #[tokio::test]

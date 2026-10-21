@@ -542,3 +542,31 @@ impl Gw {
         }
     }
 }
+
+#[tokio::test]
+async fn cold_boot_delta_with_base_zero_is_refused_until_a_full_arrives() {
+    let env = env();
+    let mut cp = FakeCp::start().await;
+    let gw = Gw::spawn(&cp.url(), &env.state, &env.work, "gw-1");
+    let mut conn = cp.accept().await;
+    hello(&mut conn).await;
+
+    // base_version 0 matches the empty cold-boot placeholder numerically, but
+    // no complete base exists: never ready, nothing persisted, no ACK.
+    conn.send(delta(0, 1, &[("k1", "secret-1")]));
+    let nack = recv_nack(&mut conn).await;
+    assert_eq!(nack.code(), NackCode::BaseMismatch);
+    assert_eq!((nack.version, nack.have_version), (1, 0));
+    assert_eq!(gw.readyz().await, 503);
+    assert_eq!(gw.models("secret-1").await, 503);
+    assert!(!env.state.join("snapshot.pb").exists());
+
+    conn.send(full(snapshot(1, &[("k1", "secret-1")])));
+    ack(&mut conn, 1, &env.state).await;
+    assert_eq!(gw.readyz().await, 200);
+
+    // With a base applied, deltas work again.
+    conn.send(delta(1, 2, &[("k2", "secret-2")]));
+    ack(&mut conn, 2, &env.state).await;
+    assert_eq!(gw.models("secret-2").await, 200);
+}

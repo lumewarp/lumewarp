@@ -264,6 +264,8 @@ struct Script {
     status: u16,
     headers: Vec<(&'static str, &'static str)>,
     frames: Frames,
+    /// Headers are sent only after this fires (or its sender is dropped).
+    gate: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 /// A response body fed by the test; reports its own drop.
@@ -329,6 +331,9 @@ impl Upstream {
                                 .expect("a scripted upstream response");
                             let (dropped, closed) = tokio::sync::oneshot::channel();
                             let _ = tx.send(Received { path, body, closed });
+                            if let Some(gate) = script.gate {
+                                let _ = gate.await;
+                            }
                             let mut response = Response::builder().status(script.status);
                             for (name, value) in script.headers {
                                 response = response.header(name, value);
@@ -382,7 +387,22 @@ impl Upstream {
             status,
             headers,
             frames,
+            gate: None,
         });
+    }
+
+    /// Queues a JSON response held back until the returned sender fires.
+    fn respond_gated(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (open, gate) = tokio::sync::oneshot::channel();
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(Ok(Bytes::from_static(CHAT_JSON))).unwrap();
+        self.scripts.lock().unwrap().push_back(Script {
+            status: 200,
+            headers: vec![("content-type", "application/json")],
+            frames: rx,
+            gate: Some(gate),
+        });
+        open
     }
 
     async fn received(&mut self) -> Received {
@@ -1027,4 +1047,82 @@ async fn report_retries_until_the_control_plane_accepts() {
         metrics.value("lumewarp_usage_events_reported_total", &[]),
         1.0
     );
+}
+
+#[tokio::test]
+async fn client_abort_before_upstream_headers_is_reported_once() {
+    use tokio::io::AsyncWriteExt;
+    let (mut cp, mut upstream, gateway) = setup().await;
+    let open = upstream.respond_gated();
+    let body = r#"{"model":"public","stream":true}"#;
+    let mut socket = tokio::net::TcpStream::connect(gateway.addr).await.unwrap();
+    socket
+        .write_all(
+            format!(
+                "POST /v1/chat/completions HTTP/1.1\r\nhost: gw\r\nauthorization: Bearer {KEY}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let received = upstream.received().await;
+    // The upstream holds its headers; the client goes away (TCP close).
+    drop(socket);
+    let event = cp.event().await;
+    assert_eq!(
+        state(&event),
+        (RequestOutcome::ClientCancelled, UsageState::Missing)
+    );
+    assert_eq!(
+        (
+            event.status,
+            event.model.as_str(),
+            event.deployment.as_str()
+        ),
+        (499, "public", "d")
+    );
+    assert!(!event.cost_known);
+    // Releasing the upstream afterwards must not produce a second event.
+    let _ = open.send(());
+    let _ = bounded(received.closed).await;
+    cp.no_more_events().await;
+}
+
+#[tokio::test]
+async fn compressed_streams_pass_through_unparsed() {
+    let (mut cp, mut upstream, gateway) = setup().await;
+    // Not real gzip: what matters is that the bytes are never parsed or
+    // filtered, even though they look like a usage-only event.
+    let encoded: &[u8] = &[CONTENT, USAGE, DONE].concat();
+    let (tx, rx) = mpsc::channel(2);
+    tx.try_send(Ok(Bytes::copy_from_slice(&encoded[..30])))
+        .unwrap();
+    tx.try_send(Ok(Bytes::copy_from_slice(&encoded[30..])))
+        .unwrap();
+    drop(tx);
+    upstream.push(
+        200,
+        vec![
+            ("content-type", "text/event-stream"),
+            ("content-encoding", "gzip"),
+        ],
+        rx,
+    );
+    let response = gateway
+        .post(
+            "/v1/chat/completions",
+            KEY,
+            r#"{"model":"public","stream":true}"#,
+        )
+        .await;
+    assert_eq!(response.headers()["content-encoding"], "gzip");
+    assert_eq!(bytes(response).await, encoded);
+    upstream.received().await;
+    let event = cp.event().await;
+    assert_eq!(
+        state(&event),
+        (RequestOutcome::Completed, UsageState::Invalid)
+    );
+    assert_eq!((event.prompt_tokens, event.cost_known), (0, false));
 }
