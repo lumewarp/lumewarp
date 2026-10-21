@@ -38,6 +38,8 @@ from lumewarp_control_plane.windows import month_window
 log = logging.getLogger(__name__)
 _MAX_BIGINT = 2**63 - 1
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+# asyncpg caps one statement at 32767 bind parameters; 21 columns per event row.
+_INSERT_CHUNK_EVENTS = 1000
 _USAGE_FIELDS = (
     "request_id",
     "gateway_id",
@@ -325,13 +327,16 @@ async def _evaluate_budgets(
         hard_crossed = (
             hard is not None and total.cost_nano_usd >= hard and total.exceeded_at is None
         )
+        # A zero budget is exceeded before any spend, so it can never be "crossed" by cost;
+        # it counts once, when the window is first marked exceeded.
         hard_threshold_crossed = (
             hard is not None and previous_cost < hard <= total.cost_nano_usd
-        ) or (hard == 0 and previous_cost == 0 and total.cost_nano_usd == 0)
+        ) or (hard == 0 and hard_crossed)
         soft_crossed = (
             soft is not None and total.cost_nano_usd >= soft and total.soft_notified_at is None
         )
-        if window_start == current_window and hard_threshold_crossed:
+        current = window_start == current_window
+        if current and hard_threshold_crossed:
             hard_current_month_exceeded = True
         if not hard_crossed and not soft_crossed:
             continue
@@ -351,32 +356,36 @@ async def _evaluate_budgets(
                     "budget_nano_usd": hard,
                 },
             )
-            await enqueue_budget_event(
-                session,
-                BudgetEvent(
-                    kind="hard",
-                    scope_type=total.scope_type,
-                    scope_id=total.scope_id,
-                    org_id=org_id,
-                    window_start=window_start,
-                    spent_nano_usd=total.cost_nano_usd,
-                    budget_nano_usd=hard,
-                ),
-            )
+            if current:
+                # Late events for a closed month still mark and audit it, but a
+                # "budget exceeded" notification for last month after rollover only confuses.
+                await enqueue_budget_event(
+                    session,
+                    BudgetEvent(
+                        kind="hard",
+                        scope_type=total.scope_type,
+                        scope_id=total.scope_id,
+                        org_id=org_id,
+                        window_start=window_start,
+                        spent_nano_usd=total.cost_nano_usd,
+                        budget_nano_usd=hard,
+                    ),
+                )
         if soft_crossed:
             total.soft_notified_at = now
-            await enqueue_budget_event(
-                session,
-                BudgetEvent(
-                    kind="soft",
-                    scope_type=total.scope_type,
-                    scope_id=total.scope_id,
-                    org_id=org_id,
-                    window_start=window_start,
-                    spent_nano_usd=total.cost_nano_usd,
-                    budget_nano_usd=soft,
-                ),
-            )
+            if current:
+                await enqueue_budget_event(
+                    session,
+                    BudgetEvent(
+                        kind="soft",
+                        scope_type=total.scope_type,
+                        scope_id=total.scope_id,
+                        org_id=org_id,
+                        window_start=window_start,
+                        spent_nano_usd=total.cost_nano_usd,
+                        budget_nano_usd=soft,
+                    ),
+                )
     return hard_current_month_exceeded
 
 
@@ -388,16 +397,21 @@ async def _persist_events(
     accepted: int,
     scope_name: str | None,
 ) -> int:
-    insert_stmt = pg_insert(UsageEvent).values([item.values for item in by_id.values()])
-    inserted_ids = set(
-        (
-            await session.execute(
-                insert_stmt.on_conflict_do_nothing(
-                    index_elements=[UsageEvent.request_id]
-                ).returning(UsageEvent.request_id)
-            )
-        ).scalars()
-    )
+    # Insert in request_id order so overlapping batches take event row locks in one order.
+    ordered = [by_id[request_id] for request_id in sorted(by_id)]
+    inserted_ids: set[uuid.UUID] = set()
+    for start in range(0, len(ordered), _INSERT_CHUNK_EVENTS):
+        chunk = ordered[start : start + _INSERT_CHUNK_EVENTS]
+        insert_stmt = pg_insert(UsageEvent).values([item.values for item in chunk])
+        inserted_ids.update(
+            (
+                await session.execute(
+                    insert_stmt.on_conflict_do_nothing(
+                        index_elements=[UsageEvent.request_id]
+                    ).returning(UsageEvent.request_id)
+                )
+            ).scalars()
+        )
     duplicates = set(by_id) - inserted_ids
     if duplicates:
         existing_rows = (

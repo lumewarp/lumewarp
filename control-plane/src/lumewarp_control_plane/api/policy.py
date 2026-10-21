@@ -9,14 +9,15 @@ into an accidental grant after a later edit.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane.errors import ApiError
-from lumewarp_control_plane.models import ApiKey, ModelAccess, Org, Project, Team
+from lumewarp_control_plane.models import ApiKey, KeyLifecycle, ModelAccess, Org, Project, Team
 
 if TYPE_CHECKING:
     from lumewarp_control_plane.api.schemas import PolicyFields
@@ -248,15 +249,59 @@ async def parent_effective_for_project(session: AsyncSession, project: Project) 
     return await project_effective(session, project)
 
 
+def _live_keys(*conditions: Any) -> Select[tuple[ApiKey]]:
+    """Keys that still compile into a usable grant; revoked keys never constrain parents."""
+    return (
+        select(ApiKey)
+        .where(ApiKey.lifecycle != KeyLifecycle.REVOKED, *conditions)
+        .order_by(ApiKey.id)
+    )
+
+
+def _group[T](rows: Sequence[T], key: Callable[[T], uuid.UUID]) -> dict[uuid.UUID, list[T]]:
+    grouped: dict[uuid.UUID, list[T]] = {}
+    for row in rows:
+        grouped.setdefault(key(row), []).append(row)
+    return grouped
+
+
+def _check_keys(parent: Effective, keys: Sequence[ApiKey], prefix: str) -> None:
+    for key in keys:
+        path = f"{prefix}.keys.{key.id}" if prefix else f"keys.{key.id}"
+        check_narrowing(parent, policy_of(key), path)
+
+
+def _check_projects(
+    parent: Effective,
+    projects: Sequence[Project],
+    keys: dict[uuid.UUID, list[ApiKey]],
+) -> None:
+    for project in projects:
+        prefix = f"projects.{project.id}"
+        policy = policy_of(project)
+        check_narrowing(parent, policy, prefix)
+        _check_keys(effective(parent, policy), keys.get(project.id, ()), prefix)
+
+
 async def validate_descendants_after_org_update(
     session: AsyncSession, org: Org, proposed: Policy
 ) -> None:
+    """Three queries for the whole subtree (teams, projects, live keys), then in memory."""
     org_eff = effective(None, proposed)
     teams = (
         await session.scalars(select(Team).where(Team.org_id == org.id).order_by(Team.id))
     ).all()
+    projects = (
+        await session.scalars(select(Project).where(Project.org_id == org.id).order_by(Project.id))
+    ).all()
+    keys = _group(
+        (await session.scalars(_live_keys(ApiKey.org_id == org.id))).all(), lambda k: k.project_id
+    )
+    by_team = _group(projects, lambda p: p.team_id)
     for team in teams:
-        await _check_team_subtree(session, team, org_eff, f"teams.{team.id}")
+        policy = policy_of(team)
+        check_narrowing(org_eff, policy, f"teams.{team.id}")
+        _check_projects(effective(org_eff, policy), by_team.get(team.id, ()), keys)
 
 
 async def validate_descendants_after_team_update(
@@ -268,44 +313,17 @@ async def validate_descendants_after_team_update(
             select(Project).where(Project.team_id == team.id).order_by(Project.id)
         )
     ).all()
-    for project in projects:
-        await _check_project_subtree(session, project, team_eff, f"projects.{project.id}")
-
-
-async def _check_team_subtree(
-    session: AsyncSession, team: Team, parent: Effective, prefix: str
-) -> None:
-    policy = policy_of(team)
-    check_narrowing(parent, policy, prefix)
-    await validate_descendants_after_team_update(session, team, parent, policy)
-
-
-async def _check_project_subtree(
-    session: AsyncSession, project: Project, parent: Effective, prefix: str
-) -> None:
-    policy = policy_of(project)
-    check_narrowing(parent, policy, prefix)
-    project_eff = effective(parent, policy)
-    keys = (
-        await session.scalars(
-            select(ApiKey).where(ApiKey.project_id == project.id).order_by(ApiKey.id)
-        )
-    ).all()
-    for key in keys:
-        check_narrowing(project_eff, policy_of(key), f"{prefix}.keys.{key.id}")
+    keys = _group(
+        (await session.scalars(_live_keys(ApiKey.team_id == team.id))).all(), lambda k: k.project_id
+    )
+    _check_projects(team_eff, projects, keys)
 
 
 async def validate_descendants_after_project_update(
     session: AsyncSession, project: Project, parent: Effective, proposed: Policy
 ) -> None:
-    project_eff = effective(parent, proposed)
-    keys = (
-        await session.scalars(
-            select(ApiKey).where(ApiKey.project_id == project.id).order_by(ApiKey.id)
-        )
-    ).all()
-    for key in keys:
-        check_narrowing(project_eff, policy_of(key), f"keys.{key.id}")
+    keys = (await session.scalars(_live_keys(ApiKey.project_id == project.id))).all()
+    _check_keys(effective(parent, proposed), keys, "")
 
 
 def ensure_unique_ids(ids: list[uuid.UUID], field: str = "deployment_ids") -> None:

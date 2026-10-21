@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Response, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import audit, rbac
@@ -67,25 +67,48 @@ async def _deployment_ids(session: SessionDep, ids: list[uuid.UUID]) -> list[uui
     return ids
 
 
-async def _route_out(session: AsyncSession, row: Route) -> RouteOut:
-    links = (
-        await session.scalars(
-            select(RouteDeployment)
-            .where(RouteDeployment.route_id == row.id)
-            .order_by(RouteDeployment.position)
-        )
-    ).all()
-    return RouteOut(
-        id=row.id,
-        model=row.model,
-        strategy=row.strategy,
-        deployments=[
-            RouteDeploymentOut(deployment_id=link.deployment_id, position=link.position)
-            for link in links
-        ],
-        created_at=row.created_at,
-        updated_at=row.updated_at,
+async def _check_positive_weight(
+    session: AsyncSession, strategy: RoutingStrategy, ids: list[uuid.UUID]
+) -> None:
+    """A weighted route whose deployments all have weight 0 makes the gateway NACK."""
+    if strategy is not RoutingStrategy.WEIGHTED:
+        return
+    total = await session.scalar(
+        select(func.coalesce(func.sum(Deployment.weight), 0)).where(Deployment.id.in_(ids))
     )
+    if not total:
+        raise validation_error(
+            "deployment_ids", "a weighted route needs deployments with a positive total weight"
+        )
+
+
+async def _routes_out(session: AsyncSession, rows: list[Route]) -> list[RouteOut]:
+    links: dict[uuid.UUID, list[RouteDeploymentOut]] = {row.id: [] for row in rows}
+    if rows:
+        found = await session.scalars(
+            select(RouteDeployment)
+            .where(RouteDeployment.route_id.in_(links))
+            .order_by(RouteDeployment.route_id, RouteDeployment.position)
+        )
+        for link in found:
+            links[link.route_id].append(
+                RouteDeploymentOut(deployment_id=link.deployment_id, position=link.position)
+            )
+    return [
+        RouteOut(
+            id=row.id,
+            model=row.model,
+            strategy=row.strategy,
+            deployments=links[row.id],
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+        for row in rows
+    ]
+
+
+async def _route_out(session: AsyncSession, row: Route) -> RouteOut:
+    return (await _routes_out(session, [row]))[0]
 
 
 # --------------------------------------------------------------------------- upstreams
@@ -340,6 +363,27 @@ async def update_deployment(
         row.price_input_nano_usd_per_mtok = price_in
         row.price_output_nano_usd_per_mtok = price_out
         await session.flush()
+        if "weight" in body.model_fields_set:
+            starved = await session.scalar(
+                select(Route.model)
+                .join(RouteDeployment, RouteDeployment.route_id == Route.id)
+                .join(Deployment, Deployment.id == RouteDeployment.deployment_id)
+                .where(
+                    Route.strategy == RoutingStrategy.WEIGHTED,
+                    Route.id.in_(
+                        select(RouteDeployment.route_id).where(
+                            RouteDeployment.deployment_id == row.id
+                        )
+                    ),
+                )
+                .group_by(Route.id, Route.model)
+                .having(func.coalesce(func.sum(Deployment.weight), 0) == 0)
+                .limit(1)
+            )
+            if starved is not None:
+                raise validation_error(
+                    "weight", f"would leave weighted route {starved!r} with no positive weight"
+                )
         await session.refresh(row)
         audit.record(
             session,
@@ -401,9 +445,7 @@ async def list_routes(
     rbac.require(principal, rbac.Action.ROUTING_READ, rbac.ResourceScope())
     stmt = select(Route).order_by(Route.id)
     rows, next_cursor = await uuid_page(session, stmt, Route.id, limit, cursor)
-    return Page[RouteOut](
-        items=[await _route_out(session, row) for row in rows], next_cursor=next_cursor
-    )
+    return Page[RouteOut](items=await _routes_out(session, rows), next_cursor=next_cursor)
 
 
 @router.post(
@@ -422,6 +464,7 @@ async def create_route(
     _check_strategy(body.strategy)
     async with mutation(session):
         ids = await _deployment_ids(session, body.deployment_ids)
+        await _check_positive_weight(session, body.strategy, ids)
         row = Route(model=body.model, strategy=body.strategy)
         session.add(row)
         await session.flush()
@@ -476,6 +519,21 @@ async def update_route(
             row.strategy = body.strategy
         if body.deployment_ids is not None:
             ids = await _deployment_ids(session, body.deployment_ids)
+        elif body.strategy is not None:
+            ids = list(
+                (
+                    await session.scalars(
+                        select(RouteDeployment.deployment_id).where(
+                            RouteDeployment.route_id == row.id
+                        )
+                    )
+                ).all()
+            )
+        else:
+            ids = []
+        if ids:
+            await _check_positive_weight(session, row.strategy, ids)
+        if body.deployment_ids is not None:
             await session.execute(delete(RouteDeployment).where(RouteDeployment.route_id == row.id))
             for position, deployment_id in enumerate(ids):
                 session.add(

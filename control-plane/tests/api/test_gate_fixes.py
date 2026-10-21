@@ -1,0 +1,486 @@
+"""Regressions for the C2 gate findings (B1, B2, S1-S6, N1-N6)."""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
+
+from sqlalchemy import select
+
+from lumewarp_control_plane.app import create_app
+from lumewarp_control_plane.models import (
+    GatewaySession,
+    GatewayToken,
+    Scope,
+)
+from lumewarp_control_plane.security import SecretKind, generate_secret
+from lumewarp_control_plane.settings import Settings
+from tests.api.helpers import (
+    BOOTSTRAP_AUTH,
+    auth,
+    grant,
+    org_tree,
+    suffix,
+    user_with_token,
+)
+
+API = "/api/v1"
+
+
+def _post(client, path, **body):
+    return client.post(f"{API}{path}", json=body, headers=BOOTSTRAP_AUTH)
+
+
+def _patch(client, path, **body):
+    return client.patch(f"{API}{path}", json=body, headers=BOOTSTRAP_AUTH)
+
+
+def _deployment(client, *, weight=1, upstream_id=None):
+    if upstream_id is None:
+        upstream_id = _post(
+            client, "/upstreams", name=f"up-{suffix()}", kind="vllm", base_url="http://h:1/v1"
+        ).json()["id"]
+    resp = _post(
+        client,
+        "/deployments",
+        name=f"dep-{suffix()}",
+        upstream_id=upstream_id,
+        upstream_model="m",
+        weight=weight,
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+def _org_chain(client, **org_policy):
+    org = _post(client, "/orgs", name=f"org-{suffix()}", **org_policy).json()
+    team = _post(client, f"/orgs/{org['id']}/teams", name=f"team-{suffix()}").json()
+    project = _post(client, f"/teams/{team['id']}/projects", name=f"proj-{suffix()}").json()
+    return org, team, project
+
+
+# ------------------------------------------------------------------------------ B1
+
+
+def test_weighted_route_needs_positive_total_weight(client) -> None:
+    zero = _deployment(client, weight=0)
+    live = _deployment(client, weight=2, upstream_id=zero["upstream_id"])
+
+    bad = _post(client, "/routes", model=f"m-{suffix()}", deployment_ids=[zero["id"]])
+    assert bad.status_code == 422
+    assert "deployment_ids" in bad.json()["error"]["message"]
+
+    # least_in_flight ignores weights, so an all-zero route is fine there.
+    ok = _post(
+        client,
+        "/routes",
+        model=f"m-{suffix()}",
+        strategy="least_in_flight",
+        deployment_ids=[zero["id"]],
+    )
+    assert ok.status_code == 201, ok.text
+    route_id = ok.json()["id"]
+    # ...but switching it to weighted is not.
+    assert _patch(client, f"/routes/{route_id}", strategy="weighted").status_code == 422
+    assert _patch(client, f"/routes/{route_id}", deployment_ids=[live["id"]]).status_code == 200
+    assert _patch(client, f"/routes/{route_id}", strategy="weighted").status_code == 200
+    # Replacing the deployments of a weighted route with all-zero ones is rejected.
+    assert _patch(client, f"/routes/{route_id}", deployment_ids=[zero["id"]]).status_code == 422
+
+
+def test_deployment_weight_update_cannot_starve_weighted_route(client) -> None:
+    dep = _deployment(client, weight=1)
+    spare = _deployment(client, weight=1, upstream_id=dep["upstream_id"])
+    route = _post(client, "/routes", model=f"m-{suffix()}", deployment_ids=[dep["id"]]).json()
+
+    resp = _patch(client, f"/deployments/{dep['id']}", weight=0)
+    assert resp.status_code == 422
+    assert "weight" in resp.json()["error"]["message"]
+    assert (
+        client.get(f"{API}/deployments/{dep['id']}", headers=BOOTSTRAP_AUTH).json()["weight"] == 1
+    )
+
+    # With another positive deployment in the route the weight may drop to 0.
+    _patch(client, f"/routes/{route['id']}", deployment_ids=[dep["id"], spare["id"]])
+    assert _patch(client, f"/deployments/{dep['id']}", weight=0).status_code == 200
+    # Zeroing the last positive one is rejected again.
+    assert _patch(client, f"/deployments/{spare['id']}", weight=0).status_code == 422
+    # Weights on unrelated deployments are unaffected.
+    other = _deployment(client, weight=3, upstream_id=dep["upstream_id"])
+    assert _patch(client, f"/deployments/{other['id']}", weight=0).status_code == 200
+
+
+# ------------------------------------------------------------------------------ B2
+
+
+async def test_org_admin_cannot_touch_owner_grants(client, committed) -> None:
+    org, _, _ = await org_tree(committed, prefix="owner-guard")
+    admin, admin_secret = await user_with_token(committed)
+    owner, owner_secret = await user_with_token(committed)
+    other_owner, _ = await user_with_token(committed)
+    await grant(committed, admin, org, role="admin")
+    owner_grant = await grant(committed, owner, org, role="owner")
+    other_grant = await grant(committed, other_owner, org, role="owner")
+    await committed.commit()
+
+    demote = client.patch(
+        f"{API}/memberships/{owner_grant.id}", json={"role": "admin"}, headers=auth(admin_secret)
+    )
+    assert demote.status_code == 403
+    remove = client.delete(f"{API}/memberships/{other_grant.id}", headers=auth(admin_secret))
+    assert remove.status_code == 403
+
+    # An owner may demote another owner.
+    ok = client.patch(
+        f"{API}/memberships/{other_grant.id}", json={"role": "admin"}, headers=auth(owner_secret)
+    )
+    assert ok.status_code == 200
+
+
+# ------------------------------------------------------------------------------ S1
+
+
+def test_revoked_keys_do_not_block_narrowing(client) -> None:
+    org, _, project = _org_chain(client, rpm_limit=100)
+    key = _post(client, f"/projects/{project['id']}/keys", name="k", rpm_limit=50).json()["key"]
+
+    blocked = _patch(client, f"/orgs/{org['id']}", rpm_limit=10)
+    assert blocked.status_code == 422
+    assert f"keys.{key['id']}" in blocked.json()["error"]["message"]
+
+    assert _post(client, f"/keys/{key['id']}/revoke").status_code == 200
+    assert _patch(client, f"/orgs/{org['id']}", rpm_limit=10).status_code == 200
+
+    # The project still cannot be deleted (keys are history), and the message says why.
+    resp = client.delete(f"{API}/projects/{project['id']}", headers=BOOTSTRAP_AUTH)
+    assert resp.status_code == 409
+    assert "usage history" in resp.json()["error"]["message"]
+
+
+# ------------------------------------------------------------------------------ S2
+
+
+async def test_hierarchy_mutations_take_the_scope_lock_first(client, committed, api_scope) -> None:
+    org, team, _ = _org_chain(client, rpm_limit=100)
+    _patch(client, f"/teams/{team['id']}", rpm_limit=90)
+
+    await committed.execute(select(Scope.name).where(Scope.name == api_scope).with_for_update())
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        # Fails validation (team rpm 90 > 10), so without an up-front lock it would return at
+        # once; with it the request waits for the scope lock before validating.
+        future = pool.submit(_patch, client, f"/orgs/{org['id']}", rpm_limit=10)
+        await asyncio.sleep(0.7)
+        assert not future.done()
+        await committed.commit()
+        assert future.result(timeout=10).status_code == 422
+
+
+# ------------------------------------------------------------------------------ S3
+
+
+async def test_gateways_are_scoped(client, committed, api_scope) -> None:
+    other_scope = f"other-{suffix()}"
+    committed.add(Scope(name=other_scope))
+    await committed.flush()
+    foreign_id = f"gw-foreign-{suffix()}"
+    secret = generate_secret(SecretKind.GATEWAY_TOKEN)
+    foreign_token = GatewayToken(
+        scope=other_scope,
+        gateway_id=foreign_id,
+        name="foreign",
+        token_hash=secret.hash,
+        display_prefix=secret.display_prefix,
+    )
+    committed.add(foreign_token)
+    committed.add(GatewaySession(scope=other_scope, gateway_id=foreign_id, connected=True))
+    await committed.commit()
+
+    listed = client.get(f"{API}/gateways?limit=500", headers=BOOTSTRAP_AUTH).json()["items"]
+    assert foreign_id not in {item["gateway_id"] for item in listed}
+    revoke = client.post(
+        f"{API}/gateways/{foreign_id}/tokens/{foreign_token.id}/revoke", headers=BOOTSTRAP_AUTH
+    )
+    assert revoke.status_code == 404
+
+    # Pagination happens in the database and walks every gateway exactly once.
+    ids = [f"gw-page-{suffix()}" for _ in range(3)]
+    for gateway_id in ids:
+        assert _post(client, "/gateways", gateway_id=gateway_id).status_code == 201
+    seen: list[str] = []
+    cursor = None
+    while True:
+        url = f"{API}/gateways?limit=2" + (f"&cursor={cursor}" if cursor else "")
+        page = client.get(url, headers=BOOTSTRAP_AUTH).json()
+        seen.extend(item["gateway_id"] for item in page["items"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+    assert len(seen) == len(set(seen))
+    assert set(ids) <= set(seen)
+    assert seen == sorted(seen)
+
+
+# ------------------------------------------------------------------------------ S4
+
+
+async def test_no_existence_leak_across_orgs(client, committed) -> None:
+    org, team, _ = await org_tree(committed, prefix="leak-a")
+    other_org, other_team, _ = await org_tree(committed, prefix="leak-b")
+    viewer, secret = await user_with_token(committed)
+    victim, _ = await user_with_token(committed)
+    await grant(committed, viewer, org, team=team, role="viewer")
+    other_grant = await grant(committed, victim, other_org, role="admin")
+    await committed.commit()
+    headers = auth(secret)
+
+    def membership(org_id, user_id, team_id=None):
+        body = {"user_id": str(user_id), "org_id": str(org_id), "role": "admin"}
+        if team_id is not None:
+            body.update(team_id=str(team_id), role="viewer")
+        return client.post(f"{API}/memberships", json=body, headers=headers)
+
+    # Existing foreign org and a random org look identical.
+    assert membership(other_org.id, victim.id).status_code == 404
+    assert membership(uuid.uuid4(), victim.id).status_code == 404
+    assert membership(org.id, victim.id, other_team.id).status_code == 404
+    assert membership(org.id, victim.id, uuid.uuid4()).status_code == 404
+    # In a visible org, an unknown user is indistinguishable from a known one until the
+    # caller is allowed to manage memberships.
+    assert membership(org.id, victim.id).status_code == 403
+    assert membership(org.id, uuid.uuid4()).status_code == 403
+
+    for foreign in (other_grant.id, uuid.uuid4()):
+        assert (
+            client.patch(
+                f"{API}/memberships/{foreign}", json={"role": "owner"}, headers=headers
+            ).status_code
+            == 404
+        )
+        assert client.delete(f"{API}/memberships/{foreign}", headers=headers).status_code == 404
+
+    for path in (
+        f"/memberships?team_id={other_team.id}",
+        f"/memberships?team_id={uuid.uuid4()}",
+        f"/memberships?org_id={other_org.id}",
+        f"/memberships?org_id={uuid.uuid4()}",
+        f"/audit?team_id={other_team.id}",
+        f"/audit?team_id={uuid.uuid4()}",
+        f"/audit?org_id={other_org.id}",
+        f"/audit?org_id={uuid.uuid4()}",
+        f"/usage?org_id={other_org.id}",
+        f"/usage?org_id={uuid.uuid4()}",
+    ):
+        assert client.get(f"{API}{path}", headers=headers).status_code == 404, path
+
+
+# ------------------------------------------------------------------------------ S5
+
+
+def test_openapi_documents_the_real_error_body(api_settings: Settings) -> None:
+    schema = create_app(api_settings).openapi()
+    operations = [
+        (path, method, op)
+        for path, item in schema["paths"].items()
+        if path.startswith(API)
+        for method, op in item.items()
+    ]
+    assert len(operations) == 55
+    for path, method, op in operations:
+        for status in ("401", "403", "404", "409", "422"):
+            ref = op["responses"][status]["content"]["application/json"]["schema"]["$ref"]
+            assert ref.endswith("/ErrorBody"), (path, method, status)
+    assert "HTTPValidationError" not in schema["components"]["schemas"]
+    assert set(schema["components"]["schemas"]["ErrorBody"]["properties"]) == {"error"}
+    delete_user = schema["paths"][f"{API}/users/{{user_id}}"]["delete"]
+    assert delete_user["operationId"] == "deleteUser"
+    assert "204" in delete_user["responses"]
+
+
+# ------------------------------------------------------------------------------ S6
+
+
+def test_list_routes_returns_ordered_deployments_for_every_route(client) -> None:
+    deployments = [_deployment(client)]
+    deployments += [
+        _deployment(client, upstream_id=deployments[0]["upstream_id"]) for _ in range(2)
+    ]
+    expected = {}
+    for index in range(4):
+        order = [d["id"] for d in deployments[index % 3 :] + deployments[: index % 3]]
+        route = _post(client, "/routes", model=f"m-{suffix()}", deployment_ids=order)
+        assert route.status_code == 201
+        expected[route.json()["id"]] = order
+    items = client.get(f"{API}/routes?limit=500", headers=BOOTSTRAP_AUTH).json()["items"]
+    for item in items:
+        if item["id"] in expected:
+            assert [d["deployment_id"] for d in item["deployments"]] == expected[item["id"]]
+            assert [d["position"] for d in item["deployments"]] == [0, 1, 2]
+
+
+def test_org_narrowing_checks_the_whole_subtree(client) -> None:
+    org = _post(client, "/orgs", name=f"org-{suffix()}", rpm_limit=100).json()
+    teams = [
+        _post(client, f"/orgs/{org['id']}/teams", name=f"t-{suffix()}").json() for _ in range(3)
+    ]
+    projects = [
+        _post(client, f"/teams/{team['id']}/projects", name=f"p-{suffix()}").json()
+        for team in teams
+    ]
+    key = _post(client, f"/projects/{projects[2]['id']}/keys", name="k", rpm_limit=40).json()["key"]
+    resp = _patch(client, f"/orgs/{org['id']}", rpm_limit=30)
+    assert resp.status_code == 422
+    assert (
+        f"projects.{projects[2]['id']}.keys.{key['id']}.rpm_limit"
+        in resp.json()["error"]["message"]
+    )
+    assert _patch(client, f"/orgs/{org['id']}", rpm_limit=40).status_code == 200
+
+
+# ------------------------------------------------------------------------------ N1-N2
+
+
+def test_api_key_ref_is_ascii_only(client) -> None:
+    for ref in ("ÉNV", "ＫＥＹ１", "1ABC", "A-B"):
+        resp = _post(
+            client,
+            "/upstreams",
+            name=f"u-{suffix()}",
+            kind="vllm",
+            base_url="http://h:1",
+            api_key_ref=ref,
+        )
+        assert resp.status_code == 422, ref
+    up = _post(
+        client, "/upstreams", name=f"u-{suffix()}", kind="vllm", base_url="http://h:1"
+    ).json()
+    assert _patch(client, f"/upstreams/{up['id']}", api_key_ref="ÉNV").status_code == 422
+    assert _patch(client, f"/upstreams/{up['id']}", api_key_ref="_OK_1").status_code == 200
+
+
+def test_names_and_aliases_are_clean(client) -> None:
+    dep = _deployment(client)
+    resp = _post(client, "/routes", model="  spaced alias\n", deployment_ids=[dep["id"]])
+    assert resp.status_code == 422
+    resp = _post(client, "/routes", model="  padded  ", deployment_ids=[dep["id"]])
+    assert resp.status_code == 201
+    assert resp.json()["model"] == "padded"
+
+    assert _post(client, "/orgs", name="   ").status_code == 422
+    org = _post(client, "/orgs", name=f"org-{suffix()}").json()
+    assert _patch(client, f"/orgs/{org['id']}", name=" \t").status_code == 422
+    assert (
+        _patch(
+            client, f"/orgs/{org['id']}", allowed_models=["a b"], model_access="list"
+        ).status_code
+        == 422
+    )
+    # Allowlist entries and route aliases share one normalisation.
+    ok = _patch(client, f"/orgs/{org['id']}", allowed_models=[" padded "], model_access="list")
+    assert ok.status_code == 200
+    assert ok.json()["allowed_models"] == ["padded"]
+
+
+# ------------------------------------------------------------------------------ N3-N6
+
+
+async def test_usage_day_buckets_are_utc(client, committed) -> None:
+    from tests.api.helpers import key_row, usage_event
+
+    org, _, project = await org_tree(committed, prefix="tz")
+    key = await key_row(committed, project)
+    ts = datetime(2026, 3, 10, 23, 30, tzinfo=UTC)
+    committed.add(usage_event(key, ts=ts))
+    await committed.commit()
+    # The bucket is the UTC calendar day; the query pins the zone instead of relying on the
+    # connection's TimeZone setting.
+    resp = client.get(
+        f"{API}/usage",
+        params={
+            "org_id": str(org.id),
+            "group_by": "day",
+            "from": "2026-03-10T00:00:00+00:00",
+            "to": "2026-03-11T00:00:00+00:00",
+        },
+        headers=BOOTSTRAP_AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    assert [row["date"] for row in resp.json()["items"]] == ["2026-03-10"]
+
+
+def test_past_expiry_is_rejected_on_create(client) -> None:
+    _, _, project = _org_chain(client)
+    past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+    assert (
+        _post(client, f"/projects/{project['id']}/keys", name="k", expires_at=past).status_code
+        == 422
+    )
+    assert (
+        _post(client, f"/projects/{project['id']}/keys", name="k", expires_at=future).status_code
+        == 201
+    )
+    assert _post(client, "/users/me/tokens", name="t", expires_at=past).status_code == 422
+
+
+def test_superuser_cannot_lock_itself_out(client) -> None:
+    admin = _post(client, "/users", email=f"root-{suffix()}@example.com", is_superuser=True).json()
+    admin_auth = auth(_pat_for(client, admin["id"]))
+    resp = client.patch(
+        f"{API}/users/{admin['id']}", json={"is_superuser": False}, headers=admin_auth
+    )
+    assert resp.status_code == 409
+    resp = client.patch(f"{API}/users/{admin['id']}", json={"is_active": False}, headers=admin_auth)
+    assert resp.status_code == 409
+    assert client.delete(f"{API}/users/{admin['id']}", headers=admin_auth).status_code == 409
+    # Another superuser (here the bootstrap token) may still change it.
+    assert _patch(client, f"/users/{admin['id']}", is_superuser=False).status_code == 200
+
+
+def _pat_for(client, user_id: str) -> str:
+    # The bootstrap principal cannot own tokens and the API only mints tokens for the caller,
+    # so insert the token row directly with the same hashing the API uses.
+    import asyncio as _asyncio
+
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+    from lumewarp_control_plane.models import PersonalAccessToken
+
+    new = generate_secret(SecretKind.PAT)
+    url = client.app.state.settings.database_url
+
+    async def go() -> None:
+        engine = create_async_engine(url)
+        async with AsyncSession(engine) as session:
+            session.add(
+                PersonalAccessToken(
+                    user_id=uuid.UUID(user_id),
+                    name="t",
+                    token_hash=new.hash,
+                    display_prefix=new.display_prefix,
+                )
+            )
+            await session.commit()
+        await engine.dispose()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(_asyncio.run, go()).result(timeout=10)
+    return new.secret
+
+
+def test_query_ranges_are_capped(client) -> None:
+    org, _, _ = _org_chain(client)
+    wide = {"from": "2024-01-01T00:00:00+00:00", "to": "2026-01-01T00:00:00+00:00"}
+    for path in ("/audit", "/usage"):
+        resp = client.get(
+            f"{API}{path}", params={**wide, "org_id": org["id"]}, headers=BOOTSTRAP_AUTH
+        )
+        assert resp.status_code == 422, path
+        assert "400 days" in resp.json()["error"]["message"]
+    ok = {"from": "2026-01-01T00:00:00+00:00", "to": "2026-06-01T00:00:00+00:00"}
+    for path in ("/audit", "/usage"):
+        resp = client.get(
+            f"{API}{path}", params={**ok, "org_id": org["id"]}, headers=BOOTSTRAP_AUTH
+        )
+        assert resp.status_code == 200, (path, resp.text)

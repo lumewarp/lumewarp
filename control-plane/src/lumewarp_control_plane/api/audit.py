@@ -19,6 +19,7 @@ from lumewarp_control_plane.api.common import (
     LimitDep,
     SessionDep,
     aware,
+    ensure_range,
     parse_int_cursor,
     validation_error,
 )
@@ -65,7 +66,9 @@ async def list_audit(
 
     if team_id is not None:
         team = await session.get(Team, team_id)
-        if team is None:
+        if team is None or not rbac.authorize(
+            principal, rbac.Action.READ, rbac.ResourceScope(team.org_id, team.id)
+        ):
             raise not_found("team not found")
         if org_id is not None and org_id != team.org_id:
             raise not_found("team_id does not match org_id")
@@ -76,7 +79,9 @@ async def list_audit(
             raise forbidden("audit.read not allowed")
     elif org_id is not None:
         org = await session.get(Org, org_id)
-        if org is None:
+        if org is None or not rbac.authorize(
+            principal, rbac.Action.ORG_READ, rbac.ResourceScope(org.id)
+        ):
             raise not_found("org not found")
         if not principal.is_superuser and not rbac.authorize(
             principal, rbac.Action.AUDIT_READ, rbac.ResourceScope(org.id)
@@ -111,6 +116,8 @@ async def list_audit(
         stmt = stmt.where(AuditLog.ts < end)
     if start is not None and end is not None and end <= start:
         raise validation_error("to", "must be after from")
+    if start is not None and end is not None:
+        ensure_range(start, end)
     if cursor is not None:
         stmt = stmt.where(AuditLog.id < parse_int_cursor(cursor))
     rows = list((await session.scalars(stmt.limit(limit + 1))).all())

@@ -18,6 +18,7 @@ from lumewarp_control_plane.api.common import (
     ensure_org_read,
     ensure_parent_matches,
     ensure_team_read,
+    lock_scope,
     mutation,
     uuid_page,
 )
@@ -73,6 +74,7 @@ async def create_team(
     settings: SettingsDep,
 ) -> TeamOut:
     async with mutation(session):
+        await lock_scope(session, settings)
         org = await session.get(Org, org_id)
         if org is None:
             raise not_found("org not found")
@@ -118,6 +120,7 @@ async def update_team(
     settings: SettingsDep,
 ) -> TeamOut:
     async with mutation(session):
+        await lock_scope(session, settings)
         ensure_not_null(body, "name")
         row = await session.get(Team, team_id)
         if row is None:

@@ -5,23 +5,24 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import Depends, Query, Request
-from sqlalchemy import Select
+from sqlalchemy import Select, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import outbox, rbac
 from lumewarp_control_plane.db import get_session
 from lumewarp_control_plane.errors import ApiError, not_found
-from lumewarp_control_plane.models import ApiKey, Org, Project, Team
+from lumewarp_control_plane.models import ApiKey, Org, Project, Scope, Team
 from lumewarp_control_plane.security import Principal
 from lumewarp_control_plane.settings import Settings
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 LimitDep = Annotated[int, Query(ge=1, le=500)]
+MAX_QUERY_RANGE = timedelta(days=400)
 
 
 def app_settings(request: Request) -> Settings:
@@ -62,6 +63,25 @@ async def enqueue_recompile(session: AsyncSession, settings: Settings, reason: s
         return await outbox.enqueue_recompile(session, settings.scope, reason)
     except LookupError as exc:
         raise conflict(f"config scope {settings.scope!r} is not initialized") from exc
+
+
+async def lock_scope(session: AsyncSession, settings: Settings) -> None:
+    """Take the scope row lock first thing in a hierarchy mutation.
+
+    Narrowing validation reads ancestors and descendants; without the lock a parent
+    narrowing and a child widening can both validate against the old state and both commit.
+    Holding it from the start makes the later reads see the latest committed state.
+    """
+    locked = await session.scalar(
+        select(Scope.name).where(Scope.name == settings.scope).with_for_update()
+    )
+    if locked is None:
+        raise conflict(f"config scope {settings.scope!r} is not initialized")
+
+
+def ensure_range(start: datetime, end: datetime) -> None:
+    if end - start > MAX_QUERY_RANGE:
+        raise validation_error("from", f"range must not exceed {MAX_QUERY_RANGE.days} days")
 
 
 def parse_uuid_cursor(cursor: str) -> uuid.UUID:

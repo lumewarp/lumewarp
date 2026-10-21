@@ -18,6 +18,7 @@ from lumewarp_control_plane.api.common import (
     ensure_parent_matches,
     ensure_project_read,
     ensure_team_read,
+    lock_scope,
     mutation,
     uuid_page,
 )
@@ -79,6 +80,7 @@ async def create_project(
     settings: SettingsDep,
 ) -> ProjectOut:
     async with mutation(session):
+        await lock_scope(session, settings)
         team = await session.get(Team, team_id)
         if team is None:
             raise not_found("team not found")
@@ -129,6 +131,7 @@ async def update_project(
     settings: SettingsDep,
 ) -> ProjectOut:
     async with mutation(session):
+        await lock_scope(session, settings)
         ensure_not_null(body, "name")
         row = await session.get(Project, project_id)
         if row is None:
@@ -198,7 +201,10 @@ async def delete_project(
         )
         key = await session.scalar(select(ApiKey.id).where(ApiKey.project_id == row.id).limit(1))
         if key is not None:
-            raise conflict("project still has keys; revoke them first")
+            raise conflict(
+                "project has keys; keys are kept for usage history even once revoked, "
+                "so a project that ever had a key cannot be deleted"
+            )
         await session.delete(row)
         audit.record(
             session,

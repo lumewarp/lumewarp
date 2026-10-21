@@ -16,6 +16,7 @@ from lumewarp_control_plane.models import (
     ApiKey,
     ConfigOutbox,
     NotifierChannel,
+    NotifierOutbox,
     Org,
     Project,
     Scope,
@@ -227,8 +228,6 @@ async def test_concurrent_reports_flip_budget_once(session_factory: SessionFacto
             )
             == 1
         )
-        from lumewarp_control_plane.models import NotifierOutbox
-
         assert (
             await session.scalar(
                 select(func.count())
@@ -275,7 +274,12 @@ async def test_budget_raise_crossing_recompiles_again(session_factory: SessionFa
 
 @pytest.mark.asyncio
 async def test_late_previous_month_event_uses_its_event_window(session_factory: SessionFactory):
-    scope_name, key = await _seed(session_factory, hard_budget=1)
+    scope_name, key = await _seed(
+        session_factory,
+        hard_budget=1,
+        soft_budget=1,
+        webhook_url="https://notify.example.test/budget",
+    )
     current_start, _ = month_window(datetime.now(UTC))
     previous = current_start - timedelta(milliseconds=1)
     event = _event(key, timestamp=previous, cost=2)
@@ -313,6 +317,15 @@ async def test_late_previous_month_event_uses_its_event_window(session_factory: 
                     ConfigOutbox.scope == scope_name,
                     ConfigOutbox.reason == "usage budget exceeded",
                 )
+            )
+            == 0
+        )
+        # The old window is marked and audited, but no "exceeded" notification goes out.
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(NotifierOutbox)
+                .where(NotifierOutbox.payload["org_id"].astext == str(key.org_id))
             )
             == 0
         )
@@ -375,3 +388,78 @@ async def test_monthly_rollover_runs_on_startup(session_factory: SessionFactory)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+async def test_batch_at_configured_maximum_is_ingested(session_factory: SessionFactory):
+    from lumewarp_control_plane.settings import Settings
+
+    maximum = Settings().max_usage_batch_events
+    scope_name, key = await _seed(session_factory)
+    events = [_event(key, cost=1) for _ in range(maximum)]
+    # Reverse order: the insert sorts by request_id anyway.
+    events.reverse()
+    async with session_factory() as session, session.begin():
+        assert (
+            await ingest(
+                session, "gateway-a", events, scope_name=scope_name, max_batch_events=maximum
+            )
+            == maximum
+        )
+    async with session_factory() as session:
+        total = await session.scalar(
+            select(UsageTotal).where(
+                UsageTotal.scope_type == ScopeType.KEY, UsageTotal.scope_id == key.id
+            )
+        )
+        assert total is not None
+        assert (total.cost_nano_usd, total.request_count) == (maximum, maximum)
+    # Replaying the full batch is idempotent.
+    async with session_factory() as session, session.begin():
+        assert (
+            await ingest(
+                session, "gateway-a", events, scope_name=scope_name, max_batch_events=maximum
+            )
+            == maximum
+        )
+    with pytest.raises(InvalidUsageBatch, match="maximum"):
+        async with session_factory() as session, session.begin():
+            await ingest(
+                session,
+                "gateway-a",
+                [*events, _event(key)],
+                scope_name=scope_name,
+                max_batch_events=maximum,
+            )
+
+
+def test_batch_cap_stays_under_driver_parameter_limit():
+    from pydantic import ValidationError
+
+    from lumewarp_control_plane.settings import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(max_usage_batch_events=10_001)
+
+
+@pytest.mark.asyncio
+async def test_zero_budget_recompiles_once_for_zero_cost_batches(session_factory: SessionFactory):
+    scope_name, key = await _seed(session_factory, hard_budget=0)
+    for _ in range(3):
+        event = _event(key, cost=0)
+        event.cost_known = False
+        event.usage_state = usage_pb2.USAGE_STATE_MISSING
+        async with session_factory() as session, session.begin():
+            await ingest(session, "gateway-a", [event], scope_name=scope_name)
+    async with session_factory() as session:
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(ConfigOutbox)
+                .where(
+                    ConfigOutbox.scope == scope_name,
+                    ConfigOutbox.reason == "usage budget exceeded",
+                )
+            )
+            == 1
+        )

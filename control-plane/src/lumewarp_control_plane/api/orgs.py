@@ -16,6 +16,7 @@ from lumewarp_control_plane.api.common import (
     enqueue_recompile,
     ensure_not_null,
     ensure_org_read,
+    lock_scope,
     mutation,
     uuid_page,
 )
@@ -99,6 +100,7 @@ async def update_org(
     settings: SettingsDep,
 ) -> OrgOut:
     async with mutation(session):
+        await lock_scope(session, settings)
         ensure_not_null(body, "name")
         row = await session.get(Org, org_id)
         if row is None:

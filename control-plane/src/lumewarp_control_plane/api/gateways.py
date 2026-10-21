@@ -5,10 +5,11 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, status
-from sqlalchemy import select
+from fastapi import APIRouter, Request, status
+from sqlalchemy import select, union
 
 from lumewarp_control_plane import audit, rbac
+from lumewarp_control_plane import grpc as grpc_services
 from lumewarp_control_plane.api.common import (
     LimitDep,
     SessionDep,
@@ -34,27 +35,40 @@ router = APIRouter(tags=["gateways"])
 async def list_gateways(
     principal: CurrentPrincipal,
     session: SessionDep,
+    settings: SettingsDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[GatewayOut]:
     rbac.require(principal, rbac.Action.GATEWAY_READ, rbac.ResourceScope())
+    scope = settings.scope
+    ids = union(
+        select(GatewaySession.gateway_id).where(GatewaySession.scope == scope),
+        select(GatewayToken.gateway_id).where(GatewayToken.scope == scope),
+    ).subquery()
+    id_stmt = select(ids.c.gateway_id).order_by(ids.c.gateway_id)
+    if cursor is not None:
+        id_stmt = id_stmt.where(ids.c.gateway_id > cursor)
+    gateway_ids = list((await session.scalars(id_stmt.limit(limit + 1))).all())
+    page = gateway_ids[:limit]
     sessions = {
         row.gateway_id: row
         for row in (
-            await session.scalars(select(GatewaySession).order_by(GatewaySession.gateway_id))
+            await session.scalars(
+                select(GatewaySession).where(
+                    GatewaySession.scope == scope, GatewaySession.gateway_id.in_(page)
+                )
+            )
         ).all()
     }
     tokens: dict[str, list[GatewayToken]] = {}
     for row in (
         await session.scalars(
-            select(GatewayToken).order_by(GatewayToken.gateway_id, GatewayToken.created_at)
+            select(GatewayToken)
+            .where(GatewayToken.scope == scope, GatewayToken.gateway_id.in_(page))
+            .order_by(GatewayToken.gateway_id, GatewayToken.created_at)
         )
     ).all():
         tokens.setdefault(row.gateway_id, []).append(row)
-    gateway_ids = sorted(set(sessions) | set(tokens))
-    if cursor is not None:
-        gateway_ids = [gateway_id for gateway_id in gateway_ids if gateway_id > cursor]
-    page = gateway_ids[:limit]
     items: list[GatewayOut] = []
     for gateway_id in page:
         row = sessions.get(gateway_id)
@@ -129,13 +143,15 @@ async def create_gateway_token(
 async def revoke_gateway_token(
     gateway_id: str,
     token_id: uuid.UUID,
+    request: Request,
     principal: CurrentPrincipal,
     session: SessionDep,
+    settings: SettingsDep,
 ) -> GatewayTokenOut:
     rbac.require(principal, rbac.Action.GATEWAY_TOKEN_MANAGE, rbac.ResourceScope())
     async with mutation(session):
         row = await session.get(GatewayToken, token_id)
-        if row is None or row.gateway_id != gateway_id:
+        if row is None or row.gateway_id != gateway_id or row.scope != settings.scope:
             raise not_found("gateway token not found")
         if row.revoked_at is None:
             row.revoked_at = datetime.now(UTC)
@@ -149,4 +165,9 @@ async def revoke_gateway_token(
                 principal=principal,
                 details={"gateway_id": row.gateway_id, "name": row.name},
             )
+    # Streams also re-check their token periodically; this makes revocation immediate.
+    runtime = getattr(request.app.state, "runtime", None)
+    server = getattr(runtime, "grpc_server", None)
+    if server is not None and (registry := grpc_services.registry_for(server)) is not None:
+        registry.close_token(token_id)
     return GatewayTokenOut.model_validate(row)

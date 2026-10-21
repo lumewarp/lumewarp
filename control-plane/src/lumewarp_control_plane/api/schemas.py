@@ -6,13 +6,21 @@ never contain hashes or raw secrets.
 
 from __future__ import annotations
 
+import re
 import uuid
+from datetime import UTC, datetime
 from datetime import date as date_type
-from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from lumewarp_control_plane.models import (
     KeyLifecycle,
@@ -24,9 +32,57 @@ from lumewarp_control_plane.models import (
     UsageState,
 )
 
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_MODEL_NAME = re.compile(r"[^\s\x00-\x1f\x7f]+")
+
+
+def _not_blank(value: str) -> str:
+    if not value.strip():
+        raise ValueError("must not be blank")
+    return value
+
+
+def _model_name(value: str) -> str:
+    """Strip, then require a non-empty alias without whitespace or control characters."""
+    name = value.strip()
+    if not _MODEL_NAME.fullmatch(name):
+        raise ValueError(
+            "model names must be non-empty and contain no whitespace or control characters"
+        )
+    return name
+
+
+def _env_name(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not _ENV_NAME.fullmatch(value):
+        raise ValueError("api_key_ref must be an environment variable name")
+    return value
+
+
+def _future(value: datetime | None) -> datetime | None:
+    if value is not None and value.tzinfo is not None and value <= datetime.now(UTC):
+        raise ValueError("expires_at must be in the future")
+    return value
+
+
+Name = Annotated[str, Field(min_length=1, max_length=200), AfterValidator(_not_blank)]
+ModelName = Annotated[str, Field(min_length=1, max_length=400), AfterValidator(_model_name)]
+
 
 class ApiModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class ErrorDetail(BaseModel):
+    code: str
+    message: str
+
+
+class ErrorBody(BaseModel):
+    """The `{error: {code, message}}` shape every non-2xx response uses."""
+
+    error: ErrorDetail
 
 
 class ReadModel(BaseModel):
@@ -63,9 +119,7 @@ class PolicyFields(ApiModel):
             return None
         cleaned: list[str] = []
         for item in value:
-            name = item.strip()
-            if not name:
-                raise ValueError("model names must be non-empty")
+            name = _model_name(item)
             if name not in cleaned:
                 cleaned.append(name)
         return cleaned
@@ -90,11 +144,11 @@ class PolicyOut(ReadModel):
 
 
 class OrgCreate(PolicyFields):
-    name: str = Field(min_length=1, max_length=200)
+    name: Name
 
 
 class OrgUpdate(PolicyFields):
-    name: str | None = Field(default=None, min_length=1, max_length=200)
+    name: Name | None = None
 
 
 class OrgOut(PolicyOut):
@@ -105,13 +159,13 @@ class OrgOut(PolicyOut):
 
 
 class TeamCreate(PolicyFields):
-    name: str = Field(min_length=1, max_length=200)
+    name: Name
     # Accepted only so the client can prove which parent it meant; must match the URL.
     org_id: uuid.UUID | None = None
 
 
 class TeamUpdate(PolicyFields):
-    name: str | None = Field(default=None, min_length=1, max_length=200)
+    name: Name | None = None
     org_id: uuid.UUID | None = None
 
 
@@ -124,13 +178,13 @@ class TeamOut(PolicyOut):
 
 
 class ProjectCreate(PolicyFields):
-    name: str = Field(min_length=1, max_length=200)
+    name: Name
     org_id: uuid.UUID | None = None
     team_id: uuid.UUID | None = None
 
 
 class ProjectUpdate(PolicyFields):
-    name: str | None = Field(default=None, min_length=1, max_length=200)
+    name: Name | None = None
     org_id: uuid.UUID | None = None
     team_id: uuid.UUID | None = None
 
@@ -145,7 +199,7 @@ class ProjectOut(PolicyOut):
 
 
 class KeyCreate(PolicyFields):
-    name: str = Field(min_length=1, max_length=200)
+    name: Name
     expires_at: datetime | None = None
     org_id: uuid.UUID | None = None
     team_id: uuid.UUID | None = None
@@ -156,11 +210,11 @@ class KeyCreate(PolicyFields):
     def _aware_expiry(cls, value: datetime | None) -> datetime | None:
         if value is not None and value.tzinfo is None:
             raise ValueError("expires_at must include a timezone")
-        return value
+        return _future(value)
 
 
 class KeyUpdate(PolicyFields):
-    name: str | None = Field(default=None, min_length=1, max_length=200)
+    name: Name | None = None
     expires_at: datetime | None = None
     lifecycle: KeyLifecycle | None = None
     org_id: uuid.UUID | None = None
@@ -199,7 +253,7 @@ class KeyCreated(ApiModel):
 
 
 class UpstreamCreate(ApiModel):
-    name: str = Field(min_length=1, max_length=200)
+    name: Name
     kind: UpstreamKind
     base_url: str = Field(min_length=1)
     api_key_ref: str | None = Field(default=None, max_length=200)
@@ -218,18 +272,12 @@ class UpstreamCreate(ApiModel):
 
     @field_validator("api_key_ref")
     @classmethod
-    def _env_name(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        if not value or not (value[0].isalpha() or value[0] == "_"):
-            raise ValueError("api_key_ref must be an environment variable name")
-        if not all(c.isalnum() or c == "_" for c in value):
-            raise ValueError("api_key_ref must be an environment variable name")
-        return value
+    def _check_api_key_ref(cls, value: str | None) -> str | None:
+        return _env_name(value)
 
 
 class UpstreamUpdate(ApiModel):
-    name: str | None = Field(default=None, min_length=1, max_length=200)
+    name: Name | None = None
     kind: UpstreamKind | None = None
     base_url: str | None = Field(default=None, min_length=1)
     api_key_ref: str | None = Field(default=None, max_length=200)
@@ -250,14 +298,8 @@ class UpstreamUpdate(ApiModel):
 
     @field_validator("api_key_ref")
     @classmethod
-    def _env_name(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        if not value or not (value[0].isalpha() or value[0] == "_"):
-            raise ValueError("api_key_ref must be an environment variable name")
-        if not all(c.isalnum() or c == "_" for c in value):
-            raise ValueError("api_key_ref must be an environment variable name")
-        return value
+    def _check_api_key_ref(cls, value: str | None) -> str | None:
+        return _env_name(value)
 
 
 class UpstreamOut(ReadModel):
@@ -273,7 +315,7 @@ class UpstreamOut(ReadModel):
 
 
 class DeploymentCreate(ApiModel):
-    name: str = Field(min_length=1, max_length=200)
+    name: Name
     upstream_id: uuid.UUID
     upstream_model: str = Field(min_length=1, max_length=400)
     weight: int = Field(default=1, ge=0)
@@ -290,7 +332,7 @@ class DeploymentCreate(ApiModel):
 
 
 class DeploymentUpdate(ApiModel):
-    name: str | None = Field(default=None, min_length=1, max_length=200)
+    name: Name | None = None
     upstream_id: uuid.UUID | None = None
     upstream_model: str | None = Field(default=None, min_length=1, max_length=400)
     weight: int | None = Field(default=None, ge=0)
@@ -311,13 +353,13 @@ class DeploymentOut(ReadModel):
 
 
 class RouteCreate(ApiModel):
-    model: str = Field(min_length=1, max_length=400)
+    model: ModelName
     strategy: RoutingStrategy = RoutingStrategy.WEIGHTED
     deployment_ids: list[uuid.UUID] = Field(min_length=1)
 
 
 class RouteUpdate(ApiModel):
-    model: str | None = Field(default=None, min_length=1, max_length=400)
+    model: ModelName | None = None
     strategy: RoutingStrategy | None = None
     deployment_ids: list[uuid.UUID] | None = Field(default=None, min_length=1)
 
@@ -381,7 +423,7 @@ class MeOut(ApiModel):
 
 
 class TokenCreate(ApiModel):
-    name: str = Field(min_length=1, max_length=200)
+    name: Name
     expires_at: datetime | None = None
 
     @field_validator("expires_at")
@@ -389,7 +431,7 @@ class TokenCreate(ApiModel):
     def _aware_expiry(cls, value: datetime | None) -> datetime | None:
         if value is not None and value.tzinfo is None:
             raise ValueError("expires_at must include a timezone")
-        return value
+        return _future(value)
 
 
 class TokenOut(ReadModel):

@@ -42,10 +42,19 @@ async def _get_membership(session: AsyncSession, membership_id: uuid.UUID) -> Me
 def _require_manage(
     principal: CurrentPrincipal, membership: Membership, role: str | None = None
 ) -> None:
+    """Existing membership: invisible (404) unless readable, then 403 unless manageable.
+
+    Touching an Owner grant, either as the current or the new role, needs ORG_GRANT_OWNER.
+    """
     scope = rbac.ResourceScope(membership.org_id, membership.team_id)
     if membership.team_id is not None:
+        if not rbac.authorize(principal, rbac.Action.READ, scope):
+            raise not_found("membership not found")
         rbac.require(principal, rbac.Action.TEAM_MEMBERSHIP_MANAGE, scope)
-    elif role == "owner":
+        return
+    if not rbac.authorize(principal, rbac.Action.ORG_READ, scope):
+        raise not_found("membership not found")
+    if membership.role == "owner" or role == "owner":
         rbac.require(principal, rbac.Action.ORG_GRANT_OWNER, scope)
     else:
         rbac.require(principal, rbac.Action.ORG_MEMBERSHIP_MANAGE, scope)
@@ -63,7 +72,9 @@ async def list_memberships(
 ) -> Page[MembershipOut]:
     if team_id is not None:
         team = await session.get(Team, team_id)
-        if team is None:
+        if team is None or not rbac.authorize(
+            principal, rbac.Action.READ, rbac.ResourceScope(team.org_id, team.id)
+        ):
             raise not_found("team not found")
         if org_id is not None and org_id != team.org_id:
             raise not_found("team_id does not match org_id")
@@ -74,7 +85,9 @@ async def list_memberships(
         )
     elif org_id is not None:
         org = await session.get(Org, org_id)
-        if org is None:
+        if org is None or not rbac.authorize(
+            principal, rbac.Action.ORG_READ, rbac.ResourceScope(org.id)
+        ):
             raise not_found("org not found")
         rbac.require(principal, rbac.Action.ORG_MEMBERSHIP_MANAGE, rbac.ResourceScope(org.id))
     elif not principal.is_superuser:
@@ -104,19 +117,24 @@ async def create_membership(
     body: MembershipCreate, principal: CurrentPrincipal, session: SessionDep
 ) -> MembershipOut:
     async with mutation(session):
-        user = await session.get(User, body.user_id)
-        if user is None:
-            raise validation_error("user_id", "unknown user")
+        # Visibility first so unknown and forbidden ids look the same (404); the user is
+        # only resolved once the caller is known to be allowed to manage this org/team.
         org = await session.get(Org, body.org_id)
-        if org is None:
-            raise validation_error("org_id", "unknown org")
+        if org is None or not rbac.authorize(
+            principal, rbac.Action.ORG_READ, rbac.ResourceScope(org.id)
+        ):
+            raise not_found("org not found")
         team: Team | None = None
         if body.team_id is not None:
             team = await session.get(Team, body.team_id)
-            if team is None:
-                raise validation_error("team_id", "unknown team")
-            if team.org_id != org.id:
-                raise not_found("team_id does not match org_id")
+            if (
+                team is None
+                or team.org_id != org.id
+                or not rbac.authorize(
+                    principal, rbac.Action.READ, rbac.ResourceScope(org.id, team.id)
+                )
+            ):
+                raise not_found("team not found")
             if body.role not in TEAM_ROLES:
                 raise validation_error("role", "team roles are admin, member, viewer")
             rbac.require(
@@ -135,6 +153,9 @@ async def create_membership(
                     rbac.Action.ORG_MEMBERSHIP_MANAGE,
                     rbac.ResourceScope(org.id),
                 )
+        user = await session.get(User, body.user_id)
+        if user is None:
+            raise validation_error("user_id", "unknown user")
         row = Membership(
             user_id=user.id,
             org_id=org.id,
@@ -170,12 +191,12 @@ async def update_membership(
 ) -> MembershipOut:
     async with mutation(session):
         row = await _get_membership(session, membership_id)
+        _require_manage(principal, row, body.role)
         if row.team_id is not None:
             if body.role not in TEAM_ROLES:
                 raise validation_error("role", "team roles are admin, member, viewer")
         elif body.role not in ORG_ROLES:
             raise validation_error("role", "org roles are owner, admin")
-        _require_manage(principal, row, body.role)
         row.role = body.role
         await session.flush()
         await session.refresh(row)

@@ -12,7 +12,7 @@ import logging
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 
-from sqlalchemy import func, literal, select, update
+from sqlalchemy import func, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from lumewarp_control_plane import outbox
@@ -25,6 +25,7 @@ from lumewarp_control_plane.compiler.compile import (
     CompileError,
     compile_scope,
 )
+from lumewarp_control_plane.compiler.validate import SnapshotInvalid, validate_snapshot
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.models import (
     ConfigOutbox,
@@ -109,18 +110,23 @@ async def store_version(
     rollback_of_version: int | None = None,
     now: datetime | None = None,
 ) -> int:
-    """Stamp `snapshot` with version and time, store it immutably, and NOTIFY. Caller holds
-    the scope's advisory lock and commits.
+    """Stamp `snapshot` with version and time, check it against every gateway invariant,
+    store it immutably, and NOTIFY. Caller holds the scope's advisory lock and commits.
+    Raises CompileError (nothing stored) for a snapshot a gateway would reject.
     """
     settings = get_settings()
     now = now or datetime.now(UTC)
     snapshot.version = version
     snapshot.created_at_unix_ms = int(now.timestamp() * 1000)
-    payload = snapshot.SerializeToString(deterministic=True)
-    if len(payload) > settings.max_snapshot_bytes:
-        raise CompileError(
-            f"snapshot is {len(payload)} bytes, over the limit of {settings.max_snapshot_bytes}"
+    try:
+        validate_snapshot(
+            snapshot,
+            max_bytes=settings.max_snapshot_bytes,
+            max_keys=settings.max_snapshot_keys,
         )
+    except SnapshotInvalid as exc:
+        raise CompileError(str(exc)) from exc
+    payload = snapshot.SerializeToString(deterministic=True)
     session.add(
         ConfigVersion(
             scope=scope,
@@ -300,6 +306,14 @@ async def rollback_routing(
     if row is None or row.payload is None:
         raise LookupError(f"config version {to_version} of scope {scope!r} is not retained")
     old = pb.Snapshot.FromString(row.payload)
+    # deployments.weight is a Postgres INTEGER; versions published before plugin weights
+    # were capped could carry larger uint32 weights. Refuse cleanly instead of a DB error.
+    too_heavy = [d.name for d in old.deployments if d.weight > plugin_api.MAX_WEIGHT]
+    if too_heavy:
+        raise CompileError(
+            f"version {to_version} has deployment weights above {plugin_api.MAX_WEIGHT} "
+            f"({', '.join(too_heavy)}); it cannot be restored"
+        )
 
     await _restore_routing(session, old)
     revision = await outbox.enqueue_recompile(session, scope, f"rollback to {to_version}")
@@ -341,24 +355,33 @@ async def compact_versions(session: AsyncSession, scope: str, *, retain: int | N
         .order_by(ConfigVersion.version.desc())
         .limit(retain)
     )
-    referenced = set()
-    for row in await session.execute(
-        select(
-            GatewaySession.acked_version,
-            GatewaySession.pending_version,
-            GatewaySession.hello_have_version,
-        ).where(GatewaySession.scope == scope)
-    ):
-        referenced.update(v for v in row if v is not None)
+    # Session pins are evaluated inside the same UPDATE statement (one snapshot), never
+    # from a set read earlier: a gateway whose session row committed before the statement
+    # keeps its base. One that commits later and finds its base compacted gets a full
+    # snapshot, which the protocol allows.
+    pinned = (
+        select(literal(1))
+        .select_from(GatewaySession)
+        .where(
+            GatewaySession.scope == ConfigVersion.scope,
+            or_(
+                GatewaySession.acked_version == ConfigVersion.version,
+                GatewaySession.pending_version == ConfigVersion.version,
+                GatewaySession.hello_have_version == ConfigVersion.version,
+            ),
+        )
+        .exists()
+    )
     result = await session.execute(
         update(ConfigVersion)
         .where(
             ConfigVersion.scope == scope,
             ConfigVersion.payload.is_not(None),
             ConfigVersion.version.not_in(recent.scalar_subquery()),
-            ConfigVersion.version.not_in(referenced) if referenced else literal(True),
+            ~pinned,
         )
         .values(payload=None, compacted_at=func.now())
+        .execution_options(synchronize_session=False)
     )
     return result.rowcount or 0
 

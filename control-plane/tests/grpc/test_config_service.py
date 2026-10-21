@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from datetime import UTC, datetime
 
 import grpc
 import pytest
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import (
@@ -139,13 +141,32 @@ async def _start(factory: SessionFactory, scope: str, *, ack_timeout: float = 1.
     return server, channel, cpb_grpc.ConfigServiceStub(channel)
 
 
-async def _open_stream(stub, token: str, gateway_id: str, have_version: int = 0, scope: str = ""):
+def _digest(scope: str, version: int) -> bytes:
+    """The digest _seed/_publish store for a version."""
+    payload = snapshot_pb2.Snapshot(
+        scope=scope, version=version, created_at_unix_ms=version
+    ).SerializeToString(deterministic=True)
+    return hashlib.sha256(payload).digest()
+
+
+async def _open_stream(
+    stub,
+    token: str,
+    gateway_id: str,
+    have_version: int = 0,
+    scope: str = "",
+    have_digest: bytes | None = None,
+):
+    """Hello; by default have_digest is the stored digest of have_version (if any)."""
+    if have_digest is None:
+        have_digest = _digest(scope, have_version) if have_version and scope else b""
     call = stub.Stream(metadata=(("authorization", f"Bearer {token}"),))
     await call.write(
         cpb.GatewayMessage(
             hello=cpb.Hello(
                 gateway_id=gateway_id,
                 have_version=have_version,
+                have_digest=have_digest,
                 gateway_version="test-gateway",
                 scope=scope,
             )
@@ -166,6 +187,7 @@ async def test_full_then_delta_after_ack_and_session_mirror(
         initial = await call.read()
         assert initial.WhichOneof("update") == "full"
         assert initial.full.version == 1
+        assert initial.target_digest == _digest(scope, 1)
         await call.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
 
         await _publish(session_factory, scope, 2)
@@ -174,6 +196,7 @@ async def test_full_then_delta_after_ack_and_session_mirror(
         assert delta.WhichOneof("update") == "delta"
         assert delta.delta.base_version == 1
         assert delta.delta.version == 2
+        assert delta.target_digest == _digest(scope, 2)
         await call.write(cpb.GatewayMessage(ack=cpb.Ack(version=2)))
         await asyncio.sleep(0.05)
 
@@ -430,5 +453,240 @@ async def test_quarantine_survives_gateway_reconnect(session_factory: SessionFac
         reconnected.cancel()
     finally:
         first_call.cancel()
+        await channel.close()
+        await server.stop(0)
+
+
+async def _nack_invalid(call, version: int) -> None:
+    await call.write(
+        cpb.GatewayMessage(nack=cpb.Nack(version=version, code=cpb.NACK_CODE_INVALID_CONFIG))
+    )
+
+
+@pytest.mark.asyncio
+async def test_restored_control_plane_with_divergent_digest_sends_full(
+    session_factory: SessionFactory, monkeypatch
+):
+    # The gateway holds a v1/v2 from before a control-plane restore: same numbers, other content.
+    _stub_diff(monkeypatch)
+    scope, tokens = await _seed(
+        session_factory, versions=(1, 2), gateways=("gateway-a", "gateway-b")
+    )
+    server, channel, stub = await _start(session_factory, scope)
+    behind = await _open_stream(
+        stub, tokens["gateway-a"], "gateway-a", 1, scope, have_digest=b"\x01" * 32
+    )
+    current = await _open_stream(
+        stub, tokens["gateway-b"], "gateway-b", 2, scope, have_digest=b"\x02" * 32
+    )
+    try:
+        update_a, update_b = await asyncio.gather(
+            asyncio.wait_for(behind.read(), 2), asyncio.wait_for(current.read(), 2)
+        )
+        assert update_a.WhichOneof("update") == "full"
+        assert update_a.full.version == 2
+        # Even at the same version number, a digest mismatch is divergent content.
+        assert update_b.WhichOneof("update") == "full"
+        assert update_b.full.version == 2
+        assert update_b.target_digest == _digest(scope, 2)
+    finally:
+        behind.cancel()
+        current.cancel()
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.asyncio
+async def test_matching_digest_at_desired_version_sends_nothing(session_factory: SessionFactory):
+    scope, tokens = await _seed(session_factory, versions=(1,))
+    server, channel, stub = await _start(session_factory, scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", 1, scope)
+    try:
+        waiting = asyncio.create_task(call.read())
+        await asyncio.sleep(0.2)
+        assert not waiting.done(), "up-to-date gateway received an update"
+        waiting.cancel()
+    finally:
+        call.cancel()
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hello", ["ahead_of_restore", "other_scope"])
+async def test_nacked_forced_full_is_never_followed_by_delta(
+    session_factory: SessionFactory, monkeypatch, hello: str
+):
+    _stub_diff(monkeypatch)
+    scope, tokens = await _seed(session_factory, versions=(1,))
+    server, channel, stub = await _start(session_factory, scope)
+    if hello == "ahead_of_restore":
+        # Gateway kept its own v2; the control plane was restored to v1.
+        call = await _open_stream(
+            stub, tokens["gateway-a"], "gateway-a", 2, scope, have_digest=b"\x03" * 32
+        )
+    else:
+        call = await _open_stream(
+            stub, tokens["gateway-a"], "gateway-a", 1, "other-scope", have_digest=_digest(scope, 1)
+        )
+    try:
+        first = await asyncio.wait_for(call.read(), 2)
+        assert first.WhichOneof("update") == "full"
+        assert first.full.version == 1
+        await _nack_invalid(call, 1)
+
+        await _publish(session_factory, scope, 2)
+        registry_for(server).notify_published(scope, 2)
+        update = await asyncio.wait_for(call.read(), 2)
+        assert update.WhichOneof("update") == "full"
+        assert update.full.version == 2
+    finally:
+        call.cancel()
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.asyncio
+async def test_revoked_token_stream_is_closed_by_registry_hook(session_factory: SessionFactory):
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    try:
+        assert (await call.read()).full.version == 1
+        await call.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
+        async with session_factory() as session:
+            token_id = (
+                await session.execute(
+                    select(GatewayToken.id).where(
+                        GatewayToken.scope == scope, GatewayToken.gateway_id == "gateway-a"
+                    )
+                )
+            ).scalar_one()
+        assert registry_for(server).close_token(token_id) == 1
+        with pytest.raises(grpc.aio.AioRpcError) as error:
+            await asyncio.wait_for(call.read(), 1)
+        assert error.value.code() is grpc.StatusCode.PERMISSION_DENIED
+    finally:
+        call.cancel()
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.asyncio
+async def test_revoked_token_stream_is_closed_by_periodic_recheck(
+    session_factory: SessionFactory, monkeypatch
+):
+    from lumewarp_control_plane import grpc as grpc_services
+
+    monkeypatch.setattr(grpc_services, "_TOKEN_RECHECK_SECONDS", 0.1)
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    try:
+        assert (await call.read()).full.version == 1
+        await call.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
+        async with session_factory() as session, session.begin():
+            await session.execute(
+                update(GatewayToken)
+                .where(GatewayToken.scope == scope, GatewayToken.gateway_id == "gateway-a")
+                .values(revoked_at=datetime.now(UTC))
+            )
+        # A version published after revocation must not reach the stream.
+        await _publish(session_factory, scope, 2)
+        with pytest.raises(grpc.aio.AioRpcError) as error:
+            while True:
+                update_msg = await asyncio.wait_for(call.read(), 1)
+                assert update_msg.WhichOneof("update") is None, "revoked stream got an update"
+        assert error.value.code() is grpc.StatusCode.PERMISSION_DENIED
+    finally:
+        call.cancel()
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.asyncio
+async def test_idle_sessions_do_not_load_payloads_and_diffs_are_shared(
+    session_factory: SessionFactory, monkeypatch
+):
+    from lumewarp_control_plane import compiler
+    from lumewarp_control_plane import grpc as grpc_services
+
+    monkeypatch.setattr(grpc_services, "_PUBLISH_POLL_SECONDS", 0.02)
+    diffs = []
+
+    def diff(old, new):
+        diffs.append((old.version, new.version))
+        return cpb.Delta(base_version=old.version, version=new.version)
+
+    monkeypatch.setattr(compiler, "diff", diff)
+    loads = []
+    original = grpc_services.SessionRegistry._snapshot
+
+    async def counting_snapshot(self, session, scope_name, version, *args):
+        loads.append(version)
+        return await original(self, session, scope_name, version, *args)
+
+    monkeypatch.setattr(grpc_services.SessionRegistry, "_snapshot", counting_snapshot)
+    parses = []
+    original_parse = snapshot_pb2.Snapshot.FromString
+    monkeypatch.setattr(
+        snapshot_pb2.Snapshot,
+        "FromString",
+        staticmethod(lambda payload: parses.append(len(payload)) or original_parse(payload)),
+    )
+
+    scope, tokens = await _seed(
+        session_factory, versions=(1,), gateways=("gateway-a", "gateway-b", "gateway-c")
+    )
+    server, channel, stub = await _start(session_factory, scope)
+    calls = [
+        await _open_stream(stub, tokens[g], g, 1, scope)
+        for g in ("gateway-a", "gateway-b", "gateway-c")
+    ]
+    try:
+        # Up to date and idle for ~15 poll ticks: nothing is loaded or parsed.
+        await asyncio.sleep(0.3)
+        assert loads == [] and parses == []
+
+        await _publish(session_factory, scope, 2)
+        registry_for(server).notify_published(scope, 2)
+        updates = await asyncio.gather(*(asyncio.wait_for(c.read(), 2) for c in calls))
+        assert all(u.delta.base_version == 1 and u.delta.version == 2 for u in updates)
+        assert diffs == [(1, 2)], "each session recomputed the same diff"
+        assert len(parses) == 2  # v1 and v2, once each
+    finally:
+        for c in calls:
+            c.cancel()
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.asyncio
+async def test_replaced_stream_is_closed_without_further_updates(session_factory: SessionFactory):
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    old = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    try:
+        assert (await old.read()).full.version == 1
+        await old.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
+        await asyncio.sleep(0.05)
+        new = await _open_stream(stub, tokens["gateway-a"], "gateway-a", 1, scope)
+        registry = registry_for(server)
+        for _ in range(100):
+            current = registry._sessions.get((scope, "gateway-a"))
+            if current is not None and current.hello_version == 1:
+                break
+            await asyncio.sleep(0.01)
+        await _publish(session_factory, scope, 2)
+        registry_for(server).notify_published(scope, 2)
+        with pytest.raises(grpc.aio.AioRpcError) as error:
+            while True:
+                message = await asyncio.wait_for(old.read(), 2)
+                assert message.WhichOneof("update") is None, "replaced stream got an update"
+        assert error.value.code() is grpc.StatusCode.UNAVAILABLE
+        assert (await asyncio.wait_for(new.read(), 2)).delta.version == 2
+        new.cancel()
+    finally:
+        old.cancel()
         await channel.close()
         await server.stop(0)

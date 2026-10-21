@@ -144,7 +144,8 @@ async def test_failing_plugins_are_skipped() -> None:
             lp("garbage", Garbage()),
             lp("unknown-deployment", Fixed(9, "nope")),
             lp("negative", Fixed(-1)),
-            lp("too-big", Fixed(2**32)),
+            lp("too-big", Fixed(2**31)),
+            lp("zeroes-weighted-route", Fixed(0)),
         ],
         timeout_seconds=0.1,
     )
@@ -152,7 +153,7 @@ async def test_failing_plugins_are_skipped() -> None:
 
 
 async def test_later_plugin_wins() -> None:
-    assert await apply_router_plugins(ROUTES, [lp("a", Fixed(5)), lp("b", Fixed(0))]) == {"d1": 0}
+    assert await apply_router_plugins(ROUTES, [lp("a", Fixed(5)), lp("b", Fixed(3))]) == {"d1": 3}
 
 
 def test_api_version_mismatch_and_load_errors_skipped(monkeypatch) -> None:

@@ -25,6 +25,7 @@ from lumewarp_control_plane.api.common import (
     aware,
     ensure_key_read,
     ensure_project_read,
+    ensure_range,
     ensure_team_read,
     month_start,
     validation_error,
@@ -96,6 +97,8 @@ def _decode_cursor(cursor: str, groups: list[str]) -> list[Any]:
                 parsed = datetime.fromisoformat(value)
             except (ValueError, TypeError) as exc:
                 raise validation_error("cursor", "invalid cursor") from exc
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(UTC).replace(tzinfo=None)
             converted.append(parsed)
         else:
             converted.append(value)
@@ -159,7 +162,9 @@ async def _check_scope_filters(
         return
     if org_id is not None:
         org = await session.get(Org, org_id)
-        if org is None:
+        if org is None or not rbac.authorize(
+            principal, rbac.Action.ORG_READ, rbac.ResourceScope(org.id)
+        ):
             raise not_found("org not found")
         if not rbac.authorize(principal, rbac.Action.READ, rbac.ResourceScope(org.id)):
             raise forbidden("read not allowed for the whole org; filter by team_id")
@@ -228,7 +233,7 @@ async def _events_page(
     cursor: str | None,
 ) -> Page[UsageRowOut]:
     fields = {
-        "day": func.date_trunc("day", UsageEvent.ts),
+        "day": func.date_trunc("day", func.timezone("UTC", UsageEvent.ts)),
         "model": UsageEvent.model,
         "org": UsageEvent.org_id,
         "team": UsageEvent.team_id,
@@ -352,4 +357,5 @@ async def get_usage(
     )
     if use_totals:
         return await _totals_page(session, groups[0], start, end, filters, limit, cursor)
+    ensure_range(start, end)
     return await _events_page(session, groups, principal, start, end, filters, model, limit, cursor)

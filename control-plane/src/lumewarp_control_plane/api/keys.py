@@ -23,6 +23,7 @@ from lumewarp_control_plane.api.common import (
     ensure_not_null,
     ensure_parent_matches,
     ensure_project_read,
+    lock_scope,
     mutation,
     uuid_page,
     validation_error,
@@ -83,6 +84,7 @@ async def create_key(
     settings: SettingsDep,
 ) -> KeyCreated:
     async with mutation(session):
+        await lock_scope(session, settings)
         project = await session.get(Project, project_id)
         if project is None:
             raise not_found("project not found")
@@ -145,6 +147,7 @@ async def update_key(
     settings: SettingsDep,
 ) -> KeyOut:
     async with mutation(session):
+        await lock_scope(session, settings)
         ensure_not_null(body, "name")
         row = await session.get(ApiKey, key_id)
         if row is None:

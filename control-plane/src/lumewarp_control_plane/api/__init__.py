@@ -27,8 +27,22 @@ from lumewarp_control_plane.api import (
     usage,
     users,
 )
+from lumewarp_control_plane.api.schemas import ErrorBody
 
-router = APIRouter(prefix="/api/v1")
+# Declared once so the OpenAPI document describes the real `{error: {code, message}}` body
+# (and replaces FastAPI's default 422 `HTTPValidationError`) for every operation.
+_ERROR_RESPONSES: dict[int | str, dict] = {
+    status: {"model": ErrorBody, "description": description}
+    for status, description in (
+        (401, "Missing or invalid credentials"),
+        (403, "Not allowed"),
+        (404, "Not found"),
+        (409, "Conflict"),
+        (422, "Validation error"),
+    )
+}
+
+router = APIRouter(prefix="/api/v1", responses=_ERROR_RESPONSES)
 router.include_router(orgs.router)
 router.include_router(teams.router)
 router.include_router(projects.router)

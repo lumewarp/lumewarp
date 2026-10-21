@@ -11,6 +11,7 @@ import contextvars
 import logging
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -36,7 +37,13 @@ from lumewarp_control_plane.settings import Settings
 from lumewarp_control_plane.usage import InvalidUsageBatch, ingest
 
 log = logging.getLogger(__name__)
-_PUBLISH_POLL_SECONDS = 0.5
+# Fallback only: in-process publishes wake streams via SessionRegistry.notify_published.
+# Each poll reads version metadata, never payloads.
+_PUBLISH_POLL_SECONDS = 2.0
+# Bound on how long a revoked token's open stream survives if close_token was not called.
+_TOKEN_RECHECK_SECONDS = 5.0
+_SNAPSHOT_CACHE_ENTRIES = 4
+_UPDATE_CACHE_ENTRIES = 8
 _RETRY_INITIAL_SECONDS = 1.0
 _RETRY_MAX_SECONDS = 60.0
 _GRPC_HARD_MESSAGE_LIMIT = 64 * 1024 * 1024
@@ -173,6 +180,7 @@ class _GatewayAuthInterceptor(grpc.aio.ServerInterceptor):
 class _PendingUpdate:
     message: config_service_pb2.ConfigUpdate
     version: int
+    digest: bytes
     sent_at: float
     retry_at: float | None = None
     retry_delay: float = _RETRY_INITIAL_SECONDS
@@ -183,21 +191,27 @@ class _StreamState:
     identity: GatewayIdentity
     session_id: uuid.UUID
     hello_version: int
+    hello_digest: bytes
     hello_scope_matches: bool
     gateway_version: str
     capabilities: list[str]
     peer: str | None
     connected_at: datetime
     wake: asyncio.Event = field(default_factory=asyncio.Event)
+    # Last version the gateway reported or ACKed; status only, never a delta base by itself.
     acked_version: int = 0
-    first_update: bool = True
-    force_full: bool = False
+    # (version, digest) the gateway is known to hold with this control plane's content: the
+    # Hello's version once its digest is verified, then each ACKed version. None means the
+    # next update must be full (no Hello match, BASE_MISMATCH, or a full not yet ACKed).
+    base: tuple[int, bytes] | None = None
+    hello_checked: bool = False
     pending: _PendingUpdate | None = None
     quarantined_versions: set[int] = field(default_factory=set)
     last_nack_version: int | None = None
     last_nack_code: str | None = None
     last_nack_reason: str | None = None
-    replaced: bool = False
+    # Set when the stream must end (replaced by a newer connection, token revoked).
+    closed: tuple[grpc.StatusCode, str] | None = None
 
     @property
     def scope(self) -> str:
@@ -207,20 +221,129 @@ class _StreamState:
     def gateway_id(self) -> str:
         return self.identity.gateway_id
 
+    def close(self, code: grpc.StatusCode, details: str) -> None:
+        if self.closed is None:
+            self.closed = (code, details)
+        self.wake.set()
+
+
+_UpdateKey = tuple[str, int, bytes, tuple[int, bytes] | None]
+
 
 class SessionRegistry:
-    """Track one active ACK/pending state machine per ``(scope, gateway_id)``."""
+    """Track one active ACK/pending state machine per ``(scope, gateway_id)``.
+
+    It also caches parsed snapshots and built updates keyed by ``(scope, version, digest)``
+    (plus the delta base), so N gateways moving between the same versions cost one payload
+    load and one diff.
+    """
 
     def __init__(self, session_factory: SessionFactory | None = None) -> None:
         self.session_factory = session_factory
         self._sessions: dict[tuple[str, str], _StreamState] = {}
         self._lock = asyncio.Lock()
+        self._build_lock = asyncio.Lock()
+        self._snapshots: OrderedDict[tuple[str, int, bytes], snapshot_pb2.Snapshot] = OrderedDict()
+        self._updates: OrderedDict[_UpdateKey, config_service_pb2.ConfigUpdate] = OrderedDict()
 
     def notify_published(self, scope: str, version: int) -> None:
         """Wake all live streams in the changed scope; polling covers missed notifications."""
         for state in tuple(self._sessions.values()):
             if state.scope == scope:
                 state.wake.set()
+
+    def close_token(self, token_id: uuid.UUID) -> int:
+        """End every live stream authenticated with ``token_id`` (PERMISSION_DENIED).
+
+        Call it after the revocation commits; streams also re-check their token every
+        ``_TOKEN_RECHECK_SECONDS``, so this only makes revocation immediate. Returns the
+        number of streams closed.
+        """
+        closed = 0
+        for state in tuple(self._sessions.values()):
+            if state.identity.token_id == token_id:
+                state.close(grpc.StatusCode.PERMISSION_DENIED, "gateway token revoked")
+                closed += 1
+        return closed
+
+    async def _snapshot(
+        self,
+        session: AsyncSession,
+        scope: str,
+        version: int,
+        digest: bytes,
+        max_bytes: int,
+    ) -> snapshot_pb2.Snapshot | None:
+        """Parsed payload of a version, or None once it has been compacted."""
+        key = (scope, version, digest)
+        cached = self._snapshots.get(key)
+        if cached is not None:
+            self._snapshots.move_to_end(key)
+            return cached
+        row = (
+            await session.execute(
+                select(ConfigVersion.payload, ConfigVersion.digest).where(
+                    ConfigVersion.scope == scope, ConfigVersion.version == version
+                )
+            )
+        ).one_or_none()
+        if row is None or row.payload is None:
+            return None
+        if row.digest != digest:
+            raise RuntimeError("config version digest changed while building an update")
+        if len(row.payload) > max_bytes:
+            raise RuntimeError("published config snapshot exceeds configured byte limit")
+        snapshot = snapshot_pb2.Snapshot.FromString(row.payload)
+        if snapshot.version != version or snapshot.scope != scope:
+            raise RuntimeError("stored config version payload metadata is inconsistent")
+        self._snapshots[key] = snapshot
+        while len(self._snapshots) > _SNAPSHOT_CACHE_ENTRIES:
+            self._snapshots.popitem(last=False)
+        return snapshot
+
+    async def build_update(
+        self,
+        session: AsyncSession,
+        settings: Settings,
+        scope: str,
+        version: int,
+        digest: bytes,
+        base: tuple[int, bytes] | None,
+    ) -> config_service_pb2.ConfigUpdate:
+        """Full (``base is None``) or delta update to ``version``, carrying its digest."""
+        key: _UpdateKey = (scope, version, digest, base)
+        async with self._build_lock:
+            cached = self._updates.get(key)
+            if cached is not None:
+                self._updates.move_to_end(key)
+                return cached
+            max_bytes = min(settings.max_snapshot_bytes, _GRPC_HARD_MESSAGE_LIMIT)
+            target = await self._snapshot(session, scope, version, digest, max_bytes)
+            if target is None:
+                raise RuntimeError("latest config version payload has been compacted")
+            base_snapshot = None
+            if base is not None:
+                base_snapshot = await self._snapshot(session, scope, *base, max_bytes)
+            if base_snapshot is None:
+                # A base compacted after the retention check also lands here.
+                key = (scope, version, digest, None)
+                cached = self._updates.get(key)
+                if cached is not None:
+                    return cached
+                update = config_service_pb2.ConfigUpdate(full=target, target_digest=digest)
+            else:
+                # C3 owns this semantic diff.
+                from lumewarp_control_plane.compiler import diff
+
+                update = config_service_pb2.ConfigUpdate(
+                    delta=diff(base_snapshot, target), target_digest=digest
+                )
+            if update.ByteSize() > min(settings.grpc_max_message_bytes, _GRPC_HARD_MESSAGE_LIMIT):
+                raise RuntimeError("config update exceeds configured gRPC message limit")
+            self._updates[key] = update
+            while len(self._updates) > _UPDATE_CACHE_ENTRIES:
+                self._updates.popitem(last=False)
+            return update
 
     async def _mirror(self, state: _StreamState, *, disconnected: bool = False) -> None:
         if self.session_factory is None:
@@ -284,6 +407,7 @@ class SessionRegistry:
             identity=identity,
             session_id=uuid7(),
             hello_version=hello.have_version,
+            hello_digest=bytes(hello.have_digest),
             hello_scope_matches=hello.scope == identity.scope,
             gateway_version=hello.gateway_version,
             capabilities=list(hello.supported_capabilities),
@@ -299,8 +423,15 @@ class SessionRegistry:
         async with self._lock:
             old = self._sessions.get(key)
             if old is not None:
-                old.replaced = True
-                old.wake.set()
+                # Replicas must not share a gateway_id/token: they would evict each other.
+                log.warning(
+                    "gateway %s/%s reconnected; replacing its previous stream (peer %s -> %s)",
+                    identity.scope,
+                    identity.gateway_id,
+                    old.peer,
+                    peer,
+                )
+                old.close(grpc.StatusCode.UNAVAILABLE, "gateway stream replaced")
             self._sessions[key] = state
         try:
             await self._mirror(state)
@@ -318,72 +449,73 @@ async def _desired_update(
     session_factory: SessionFactory,
     registry: SessionRegistry,
 ) -> config_service_pb2.ConfigUpdate | None:
-    if state.pending is not None:
+    """Pick the next update for an idle session from version metadata; payloads are only
+    loaded (through the registry cache) when an update is actually sent."""
+    if state.pending is not None or state.closed is not None:
         return None
     async with session_factory() as session:
-        desired = (
+        latest = (
             await session.execute(
-                select(ConfigVersion)
+                select(ConfigVersion.version, ConfigVersion.digest)
                 .where(ConfigVersion.scope == state.scope)
                 .order_by(ConfigVersion.version.desc())
                 .limit(1)
             )
-        ).scalar_one_or_none()
-        if desired is None:
+        ).one_or_none()
+        if latest is None:
             return None
-        version = desired.version
+        version, digest = latest.version, bytes(latest.digest)
         if version in state.quarantined_versions:
             return None
-        if desired.payload is None:
-            raise RuntimeError("latest config version payload has been compacted")
-        if len(desired.payload) > min(settings.max_snapshot_bytes, _GRPC_HARD_MESSAGE_LIMIT):
-            raise RuntimeError("published config snapshot exceeds configured byte limit")
-        target = snapshot_pb2.Snapshot.FromString(desired.payload)
-        if target.version != version or target.scope != state.scope:
-            raise RuntimeError("stored config version payload metadata is inconsistent")
-
-        full = state.force_full
-        base_row = None
-        if not full and state.first_update:
-            if not state.hello_scope_matches or state.hello_version > version:
-                full = True
-            elif state.hello_version == version:
-                return None
-        elif not full and version == state.acked_version:
-            return None
-        elif not full and version < state.acked_version:
-            full = True
-        if not full:
-            if state.acked_version > version:
-                full = True
-            if not full:
-                base_row = (
-                    await session.execute(
-                        select(ConfigVersion).where(
-                            ConfigVersion.scope == state.scope,
-                            ConfigVersion.version == state.acked_version,
-                        )
+        if not state.hello_checked:
+            # The Hello version is a delta base only if it is this scope's content: same
+            # scope, not ahead of us (restore from backup) and the digest we stored for it.
+            state.hello_checked = True
+            if (
+                state.hello_scope_matches
+                and 0 < state.hello_version <= version
+                and state.hello_digest
+            ):
+                stored = await session.scalar(
+                    select(ConfigVersion.digest).where(
+                        ConfigVersion.scope == state.scope,
+                        ConfigVersion.version == state.hello_version,
                     )
-                ).scalar_one_or_none()
-                if base_row is None or base_row.payload is None:
-                    full = True
-        if full:
-            update = config_service_pb2.ConfigUpdate(full=target)
+                )
+                if stored is not None and bytes(stored) == state.hello_digest:
+                    state.base = (state.hello_version, state.hello_digest)
+        base = state.base
+        if base == (version, digest):
+            return None
+        if base is not None and base[0] < version:
+            row = (
+                await session.execute(
+                    select(ConfigVersion.digest, ConfigVersion.compacted_at).where(
+                        ConfigVersion.scope == state.scope, ConfigVersion.version == base[0]
+                    )
+                )
+            ).one_or_none()
+            if row is None or row.compacted_at is not None or bytes(row.digest) != base[1]:
+                base = None
         else:
-            # C3 owns this semantic diff. The session always uses its ACKed (or initial
-            # Hello.have_version) payload, never a process-global last-sent version.
-            from lumewarp_control_plane.compiler import diff
-
-            base = snapshot_pb2.Snapshot.FromString(base_row.payload)
-            delta = diff(base, target)
-            update = config_service_pb2.ConfigUpdate(delta=delta)
-        if update.ByteSize() > min(settings.grpc_max_message_bytes, _GRPC_HARD_MESSAGE_LIMIT):
-            raise RuntimeError("config update exceeds configured gRPC message limit")
-        state.pending = _PendingUpdate(message=update, version=version, sent_at=time.monotonic())
-        state.first_update = False
-        state.force_full = False
+            base = None
+        update = await registry.build_update(session, settings, state.scope, version, digest, base)
+        if state.closed is not None or state.pending is not None:
+            return None
+        state.pending = _PendingUpdate(
+            message=update, version=version, digest=digest, sent_at=time.monotonic()
+        )
+        if update.WhichOneof("update") == "full":
+            # A NACKed full is never followed by a delta: no base until this one is ACKed.
+            state.base = None
     await registry._mirror(state)
-    return state.pending.message
+    return update
+
+
+async def _token_active(session_factory: SessionFactory, token_id: uuid.UUID) -> bool:
+    async with session_factory() as session:
+        token = await session.get(GatewayToken, token_id)
+        return token is not None and token.revoked_at is None
 
 
 class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
@@ -414,154 +546,152 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
             )
 
         async with self.registry.stream(identity, hello, context.peer()) as state:
+            update = await _desired_update(
+                state, self.settings, self.session_factory, self.registry
+            )
+            if update is not None:
+                yield update
+            request_task = asyncio.create_task(anext(request_iterator))
+            wake_task = None
+            token_check_at = time.monotonic() + _TOKEN_RECHECK_SECONDS
             try:
-                update = await _desired_update(
-                    state, self.settings, self.session_factory, self.registry
-                )
-                if update is not None:
-                    yield update
-                request_task = asyncio.create_task(anext(request_iterator))
-                wake_task = None
-                try:
-                    while True:
-                        if state.replaced:
-                            await context.abort(
-                                grpc.StatusCode.UNAVAILABLE, "gateway stream replaced"
+                while True:
+                    if state.closed is not None:
+                        await context.abort(*state.closed)
+                    if wake_task is None:
+                        wake_task = asyncio.create_task(state.wake.wait())
+                    pending = state.pending
+                    now = time.monotonic()
+                    deadlines = [_PUBLISH_POLL_SECONDS, max(0.0, token_check_at - now)]
+                    if pending is not None:
+                        if pending.retry_at is not None:
+                            deadlines.append(max(0.0, pending.retry_at - now))
+                        else:
+                            deadlines.append(
+                                max(
+                                    0.0,
+                                    self.settings.ack_timeout_seconds - (now - pending.sent_at),
+                                )
                             )
-                        if wake_task is None:
-                            wake_task = asyncio.create_task(state.wake.wait())
-                        pending = state.pending
-                        now = time.monotonic()
-                        deadlines = [_PUBLISH_POLL_SECONDS]
-                        if pending is not None:
-                            if pending.retry_at is not None:
-                                deadlines.append(max(0.0, pending.retry_at - now))
-                            else:
-                                deadlines.append(
-                                    max(
-                                        0.0,
-                                        self.settings.ack_timeout_seconds - (now - pending.sent_at),
-                                    )
-                                )
-                        timeout = min(deadlines)
-                        done, _ = await asyncio.wait(
-                            (request_task, wake_task),
-                            timeout=timeout,
-                            return_when=asyncio.FIRST_COMPLETED,
-                        )
-                        if request_task in done:
-                            try:
-                                incoming = request_task.result()
-                            except StopAsyncIteration:
-                                return
-                            request_task = asyncio.create_task(anext(request_iterator))
-                            kind = incoming.WhichOneof("msg")
-                            if kind == "hello":
-                                await context.abort(
-                                    grpc.StatusCode.INVALID_ARGUMENT, "Hello may only be sent once"
-                                )
-                            pending = state.pending
-                            if pending is None or kind not in ("ack", "nack"):
-                                await context.abort(
-                                    grpc.StatusCode.INVALID_ARGUMENT,
-                                    "ACK/NACK without a pending update",
-                                )
-                            reply = getattr(incoming, kind)
-                            if reply.version != pending.version:
-                                await context.abort(
-                                    grpc.StatusCode.INVALID_ARGUMENT,
-                                    "ACK/NACK version does not match pending update",
-                                )
-                            if kind == "ack":
-                                state.acked_version = pending.version
-                                state.pending = None
-                                state.last_nack_version = None
-                                state.last_nack_code = None
-                                state.last_nack_reason = None
-                                await self.registry._mirror(state)
-                            else:
-                                code = reply.code
-                                if code not in (
-                                    config_service_pb2.NACK_CODE_BASE_MISMATCH,
-                                    config_service_pb2.NACK_CODE_INVALID_CONFIG,
-                                    config_service_pb2.NACK_CODE_UNSUPPORTED_FEATURE,
-                                    config_service_pb2.NACK_CODE_PERSIST_FAILED,
-                                ):
-                                    await context.abort(
-                                        grpc.StatusCode.INVALID_ARGUMENT, "unknown NACK code"
-                                    )
-                                state.last_nack_version = pending.version
-                                state.last_nack_code = config_service_pb2.NackCode.Name(code)
-                                state.last_nack_reason = {
-                                    config_service_pb2.NACK_CODE_BASE_MISMATCH: "base mismatch",
-                                    config_service_pb2.NACK_CODE_INVALID_CONFIG: "invalid config",
-                                    config_service_pb2.NACK_CODE_UNSUPPORTED_FEATURE: (
-                                        "unsupported feature"
-                                    ),
-                                    config_service_pb2.NACK_CODE_PERSIST_FAILED: "persist failed",
-                                }[code]
-                                if code == config_service_pb2.NACK_CODE_BASE_MISMATCH:
-                                    state.acked_version = reply.have_version
-                                    state.pending = None
-                                    state.force_full = True
-                                elif code in (
-                                    config_service_pb2.NACK_CODE_INVALID_CONFIG,
-                                    config_service_pb2.NACK_CODE_UNSUPPORTED_FEATURE,
-                                ):
-                                    state.quarantined_versions.add(pending.version)
-                                    state.pending = None
-                                else:
-                                    pending.retry_at = time.monotonic() + pending.retry_delay
-                                    pending.retry_delay = min(
-                                        pending.retry_delay * 2, _RETRY_MAX_SECONDS
-                                    )
-                                await self.registry._mirror(state)
-
-                            update = await _desired_update(
-                                state, self.settings, self.session_factory, self.registry
-                            )
-                            if update is not None:
-                                yield update
-                            continue
-
-                        if wake_task in done:
-                            state.wake.clear()
-                            wake_task = None
-                        now = time.monotonic()
-                        pending = state.pending
-                        if pending is not None:
-                            if pending.retry_at is not None and now >= pending.retry_at:
-                                pending.retry_at = None
-                                pending.sent_at = now
-                                await self.registry._mirror(state)
-                                yield pending.message
-                            elif (
-                                pending.retry_at is None
-                                and now - pending.sent_at >= self.settings.ack_timeout_seconds
-                            ):
-                                await context.abort(
-                                    grpc.StatusCode.DEADLINE_EXCEEDED,
-                                    "config update ACK timeout",
-                                )
-                        elif wake_task is None or wake_task.done() or not state.wake.is_set():
-                            # Polling is deliberate: it recovers even when the compiler could
-                            # not reach this process to deliver an in-memory wake-up.
-                            update = await _desired_update(
-                                state, self.settings, self.session_factory, self.registry
-                            )
-                            if update is not None:
-                                yield update
-                finally:
-                    request_task.cancel()
-                    if wake_task is not None:
-                        wake_task.cancel()
-                    await asyncio.gather(
-                        request_task,
-                        *(tuple([wake_task]) if wake_task is not None else ()),
-                        return_exceptions=True,
+                    done, _ = await asyncio.wait(
+                        (request_task, wake_task),
+                        timeout=min(deadlines),
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
-            except asyncio.CancelledError:
-                raise
+                    # A replaced or revoked stream must not emit anything after its wake-up.
+                    if state.closed is not None:
+                        await context.abort(*state.closed)
+                    if time.monotonic() >= token_check_at:
+                        if not await _token_active(self.session_factory, identity.token_id):
+                            await context.abort(
+                                grpc.StatusCode.PERMISSION_DENIED, "gateway token revoked"
+                            )
+                        token_check_at = time.monotonic() + _TOKEN_RECHECK_SECONDS
+
+                    if request_task in done:
+                        try:
+                            incoming = request_task.result()
+                        except StopAsyncIteration:
+                            return
+                        request_task = asyncio.create_task(anext(request_iterator))
+                        await self._handle_reply(state, incoming, context)
+                        update = await _desired_update(
+                            state, self.settings, self.session_factory, self.registry
+                        )
+                        if update is not None:
+                            yield update
+                        continue
+
+                    if wake_task in done:
+                        state.wake.clear()
+                        wake_task = None
+                    now = time.monotonic()
+                    pending = state.pending
+                    if pending is not None:
+                        if pending.retry_at is not None and now >= pending.retry_at:
+                            pending.retry_at = None
+                            pending.sent_at = now
+                            await self.registry._mirror(state)
+                            yield pending.message
+                        elif (
+                            pending.retry_at is None
+                            and now - pending.sent_at >= self.settings.ack_timeout_seconds
+                        ):
+                            await context.abort(
+                                grpc.StatusCode.DEADLINE_EXCEEDED,
+                                "config update ACK timeout",
+                            )
+                    else:
+                        # Polling is deliberate: it recovers even when the compiler could
+                        # not reach this process to deliver an in-memory wake-up.
+                        update = await _desired_update(
+                            state, self.settings, self.session_factory, self.registry
+                        )
+                        if update is not None:
+                            yield update
+            finally:
+                request_task.cancel()
+                if wake_task is not None:
+                    wake_task.cancel()
+                await asyncio.gather(
+                    request_task,
+                    *(tuple([wake_task]) if wake_task is not None else ()),
+                    return_exceptions=True,
+                )
+
+    async def _handle_reply(self, state: _StreamState, incoming, context) -> None:
+        kind = incoming.WhichOneof("msg")
+        if kind == "hello":
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Hello may only be sent once")
+        pending = state.pending
+        if pending is None or kind not in ("ack", "nack"):
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT, "ACK/NACK without a pending update"
+            )
+        reply = getattr(incoming, kind)
+        if reply.version != pending.version:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "ACK/NACK version does not match pending update",
+            )
+        if kind == "ack":
+            state.acked_version = pending.version
+            state.base = (pending.version, pending.digest)
+            state.pending = None
+            state.last_nack_version = None
+            state.last_nack_code = None
+            state.last_nack_reason = None
+            await self.registry._mirror(state)
+            return
+
+        code = reply.code
+        reasons = {
+            config_service_pb2.NACK_CODE_BASE_MISMATCH: "base mismatch",
+            config_service_pb2.NACK_CODE_INVALID_CONFIG: "invalid config",
+            config_service_pb2.NACK_CODE_UNSUPPORTED_FEATURE: "unsupported feature",
+            config_service_pb2.NACK_CODE_PERSIST_FAILED: "persist failed",
+        }
+        if code not in reasons:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "unknown NACK code")
+        state.last_nack_version = pending.version
+        state.last_nack_code = config_service_pb2.NackCode.Name(code)
+        state.last_nack_reason = reasons[code]
+        if code == config_service_pb2.NACK_CODE_BASE_MISMATCH:
+            state.acked_version = reply.have_version
+            state.base = None
+            state.pending = None
+        elif code in (
+            config_service_pb2.NACK_CODE_INVALID_CONFIG,
+            config_service_pb2.NACK_CODE_UNSUPPORTED_FEATURE,
+        ):
+            # The gateway keeps its previous version, so a delta base (if any) still holds;
+            # after a NACKed full, base is already None.
+            state.quarantined_versions.add(pending.version)
+            state.pending = None
+        else:
+            pending.retry_at = time.monotonic() + pending.retry_delay
+            pending.retry_delay = min(pending.retry_delay * 2, _RETRY_MAX_SECONDS)
+        await self.registry._mirror(state)
 
 
 class _UsageService(usage_pb2_grpc.UsageServiceServicer):

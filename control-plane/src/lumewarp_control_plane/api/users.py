@@ -5,13 +5,14 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Response, status
 from sqlalchemy import select
 
 from lumewarp_control_plane import audit, rbac
 from lumewarp_control_plane.api.common import (
     LimitDep,
     SessionDep,
+    conflict,
     mutation,
     uuid_page,
     validation_error,
@@ -222,6 +223,8 @@ async def update_user(
         row = await session.get(User, user_id)
         if row is None:
             raise not_found("user not found")
+        if row.id == principal.user_id and (body.is_superuser is False or body.is_active is False):
+            raise conflict("you cannot remove your own superuser or active status")
         for name in ("email", "display_name", "is_superuser", "is_active"):
             if name in body.model_fields_set:
                 setattr(row, name, getattr(body, name))
@@ -241,14 +244,19 @@ async def update_user(
 @router.delete(
     "/users/{user_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
     operation_id="deleteUser",
 )
-async def delete_user(user_id: uuid.UUID, principal: CurrentPrincipal, session: SessionDep) -> None:
+async def delete_user(
+    user_id: uuid.UUID, principal: CurrentPrincipal, session: SessionDep
+) -> Response:
     rbac.require(principal, rbac.Action.USER_MANAGE, _INSTALLATION)
     async with mutation(session):
         row = await session.get(User, user_id)
         if row is None:
             raise not_found("user not found")
+        if row.id == principal.user_id:
+            raise conflict("you cannot delete yourself")
         email = row.email
         await session.delete(row)
         audit.record(
@@ -259,4 +267,4 @@ async def delete_user(user_id: uuid.UUID, principal: CurrentPrincipal, session: 
             principal=principal,
             details={"email": email},
         )
-    return None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

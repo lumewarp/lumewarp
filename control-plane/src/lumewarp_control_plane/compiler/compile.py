@@ -4,13 +4,19 @@ import logging
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import plugins as plugin_api
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
+from lumewarp_control_plane.compiler.validate import (
+    RESERVED_ALIASES,
+    SnapshotInvalid,
+    upstream_url_problem,
+    validate_snapshot,
+)
 from lumewarp_control_plane.models import (
     ApiKey,
     Deployment,
@@ -52,8 +58,6 @@ ROUTING_STRATEGY = {
 # snapshot (with a warning) rather than published, because the gateway would NACK the
 # whole snapshot UNSUPPORTED_FEATURE and block unrelated changes such as revocations.
 SUPPORTED_STRATEGIES = {RoutingStrategy.WEIGHTED, RoutingStrategy.LEAST_IN_FLIGHT}
-# Reserved by the gateway for its metrics label.
-RESERVED_ALIASES = {"unknown"}
 
 
 class CompileError(Exception):
@@ -104,8 +108,23 @@ def rate_limit_scope(level: ScopeType, entity) -> pb.RateLimitScope | None:
     )
 
 
+EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+ONE_MS = timedelta(milliseconds=1)
+
+
 def _ms(ts: datetime) -> int:
-    return int(ts.timestamp() * 1000)
+    """Exact Unix milliseconds (floored), without float rounding."""
+    return (ts - EPOCH) // ONE_MS
+
+
+def expiry_ms(expires_at: datetime | None) -> int:
+    """Wire expiry. 0 is the "never expires" sentinel, so only NULL maps to it; any
+    expiry at or before the epoch (including sub-millisecond ones that floor to 0) becomes
+    1 ms, which every gateway treats as long expired. Never negative (a gateway NACKs that).
+    """
+    if expires_at is None:
+        return 0
+    return max(_ms(expires_at), 1)
 
 
 async def compile_scope(
@@ -138,8 +157,13 @@ async def compile_scope(
       ACTIVE. Revoked keys are left out (the gateway answers 401 for them either way), so
       revocation is a key removal in deltas. Expiry is passed through as
       `expires_at_unix_ms` and enforced by the gateway.
-    - Routes without deployments, with an unsupported strategy or a reserved alias are
-      left out and reported in `warnings`.
+    - Source rows the gateway would reject are left out and reported in `warnings`:
+      upstreams with an invalid base URL (and their deployments), deployments with an
+      empty upstream_model, and routes that end up without deployments, use an
+      unsupported strategy or a reserved alias, or are weighted with zero total weight.
+      Expiry: NULL -> 0 (never); at or before the epoch -> 1 ms (expired).
+    - The result is checked against every gateway invariant (`validate.validate_snapshot`,
+      mirroring snapshot.rs::validate and Router::compile); a violation is a CompileError.
     - Router plugins (default: discovered `lumewarp.router` plugins) may override
       deployment weights; a failing plugin is skipped.
     - Enforces settings.max_snapshot_bytes / max_snapshot_keys (CompileError).
@@ -168,7 +192,18 @@ async def compile_scope(
         members.setdefault(rd.route_id, []).append(rd.deployment_id)
 
     snap = pb.Snapshot(scope=scope)
+    # Source entities the gateway would reject are left out (with a warning) instead of
+    # failing the compile, so one bad routing row never blocks revocations or budget
+    # blocks for the whole fleet. The API should already refuse them (422).
+    valid_upstreams: set[uuid.UUID] = set()
     for u in upstreams:
+        if (problem := upstream_url_problem(u.base_url)) is not None:
+            warnings.append(f"upstream {u.name!r} left out: base_url {problem}")
+            continue
+        if not u.name:
+            warnings.append("upstream with an empty name left out")
+            continue
+        valid_upstreams.add(u.id)
         snap.upstreams.append(
             pb.Upstream(
                 name=u.name,
@@ -179,21 +214,43 @@ async def compile_scope(
                 stream_usage_mode=STREAM_USAGE_MODE[u.stream_usage_mode],
             )
         )
+    valid_deployments = []
+    for d in deployments:
+        if d.upstream_id not in valid_upstreams:
+            warnings.append(f"deployment {d.name!r} left out: its upstream is left out")
+        elif not d.name or not d.upstream_model:
+            warnings.append(f"deployment {d.name!r} left out: empty name or upstream_model")
+        else:
+            valid_deployments.append(d)
+    valid_deployment_ids = {d.id for d in valid_deployments}
 
     route_views: list[plugin_api.RouteView] = []
     for r in routes:
-        names = [deployment_by_id[d].name for d in members.get(r.id, [])]
-        if r.model in RESERVED_ALIASES:
-            warnings.append(f"route {r.model!r} left out: alias is reserved")
+        member_ids = members.get(r.id, [])
+        dropped = [deployment_by_id[i].name for i in member_ids if i not in valid_deployment_ids]
+        member_ids = [i for i in member_ids if i in valid_deployment_ids]
+        if dropped:
+            warnings.append(f"route {r.model!r}: left-out deployments {dropped} removed")
+        if not r.model or r.model in RESERVED_ALIASES:
+            warnings.append(f"route {r.model!r} left out: alias is empty or reserved")
             continue
-        if not names:
+        if not member_ids:
             warnings.append(f"route {r.model!r} left out: no deployments")
             continue
         if r.strategy not in SUPPORTED_STRATEGIES:
             warnings.append(f"route {r.model!r} left out: strategy {r.strategy.value} unsupported")
             continue
+        if r.strategy is RoutingStrategy.WEIGHTED and not sum(
+            deployment_by_id[i].weight for i in member_ids
+        ):
+            warnings.append(f"route {r.model!r} left out: weighted with zero total weight")
+            continue
         snap.routes.append(
-            pb.ModelRoute(model=r.model, deployments=names, strategy=ROUTING_STRATEGY[r.strategy])
+            pb.ModelRoute(
+                model=r.model,
+                deployments=[deployment_by_id[i].name for i in member_ids],
+                strategy=ROUTING_STRATEGY[r.strategy],
+            )
         )
         route_views.append(
             plugin_api.RouteView(
@@ -208,7 +265,7 @@ async def compile_scope(
                         price_input_nano_usd_per_mtok=d.price_input_nano_usd_per_mtok,
                         price_output_nano_usd_per_mtok=d.price_output_nano_usd_per_mtok,
                     )
-                    for d in (deployment_by_id[i] for i in members[r.id])
+                    for d in (deployment_by_id[i] for i in member_ids)
                 ),
             )
         )
@@ -220,7 +277,7 @@ async def compile_scope(
         if router_plugins and route_views
         else {}
     )
-    for d in deployments:
+    for d in valid_deployments:
         dep = pb.Deployment(
             name=d.name,
             upstream=upstream_name[d.upstream_id],
@@ -298,14 +355,17 @@ async def compile_scope(
                 team_id=str(k.team_id),
                 project_id=str(k.project_id),
                 status=status,
-                expires_at_unix_ms=_ms(k.expires_at) if k.expires_at else 0,
+                expires_at_unix_ms=expiry_ms(k.expires_at),
                 policy=policy,
             )
         )
 
-    size = snap.ByteSize()
-    if size > max_bytes:
-        raise CompileError(f"snapshot is {size} bytes, over the limit of {max_bytes}")
+    # Defensive: everything above should already guarantee this. A snapshot the gateway
+    # would NACK is never published.
+    try:
+        validate_snapshot(snap, max_bytes=max_bytes, max_keys=max_keys)
+    except SnapshotInvalid as exc:
+        raise CompileError(str(exc)) from exc
     for w in warnings:
         log.warning("compile %s: %s", scope, w)
     return CompiledSnapshot(

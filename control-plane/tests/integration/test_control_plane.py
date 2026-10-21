@@ -77,17 +77,20 @@ class Gateway:
         self.metadata = (("authorization", f"Bearer {token}"),)
         self.gateway_id = gateway_id
         self.snapshot = pb.Snapshot()
+        # ConfigUpdate.target_digest of self.snapshot, echoed in Hello.have_digest.
+        self.digest = b""
         self.call = None
 
-    async def connect(self, have: pb.Snapshot | None = None) -> None:
+    async def connect(self, have: tuple[pb.Snapshot, bytes] | None = None) -> None:
         if have is not None:
-            self.snapshot = have
+            self.snapshot, self.digest = have
         self.call = cpb_grpc.ConfigServiceStub(self.channel).Stream(metadata=self.metadata)
         await self.call.write(
             cpb.GatewayMessage(
                 hello=cpb.Hello(
                     gateway_id=self.gateway_id,
                     have_version=self.snapshot.version,
+                    have_digest=self.digest,
                     scope=self.snapshot.scope,
                     gateway_version="itest",
                 )
@@ -100,6 +103,7 @@ class Gateway:
             self.snapshot = update.full
         else:
             self.snapshot = apply_delta(self.snapshot, update.delta)
+        self.digest = update.target_digest
         await self.call.write(cpb.GatewayMessage(ack=cpb.Ack(version=self.snapshot.version)))
         return update
 
@@ -122,10 +126,10 @@ class Gateway:
         await self.channel.close()
 
 
-async def _load_version(cp: ControlPlane, version: int) -> pb.Snapshot:
+async def _load_version(cp: ControlPlane, version: int) -> tuple[pb.Snapshot, bytes]:
     async with cp.app.state.session_factory() as s:
         row = await s.get(ConfigVersion, (SCOPE, version))
-        return pb.Snapshot.FromString(row.payload)
+        return pb.Snapshot.FromString(row.payload), row.digest
 
 
 async def test_end_to_end(cp: ControlPlane) -> None:
