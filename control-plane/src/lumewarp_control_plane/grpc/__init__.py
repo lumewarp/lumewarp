@@ -375,10 +375,12 @@ class SessionRegistry:
             key: getattr(stmt.excluded, key) for key in values if key not in ("scope", "gateway_id")
         }
         # A replaced stream must not overwrite the newer connection's status row on exit.
+        # Session ids are UUIDv7 (time-ordered), so a newer session may take over the row
+        # of an older one while an older session can never overwrite a newer one.
         stmt = stmt.on_conflict_do_update(
             index_elements=[GatewaySession.scope, GatewaySession.gateway_id],
             set_=updates,
-            where=GatewaySession.session_id == stmt.excluded.session_id,
+            where=GatewaySession.session_id <= stmt.excluded.session_id,
         )
         async with self.session_factory() as session, session.begin():
             await session.execute(stmt)

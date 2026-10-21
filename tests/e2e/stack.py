@@ -1,0 +1,436 @@
+"""Process harness for the P1 end-to-end tests: Postgres database, control plane, mock
+upstream and gateway, all real processes on ephemeral ports.
+"""
+
+import asyncio
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from collections.abc import Callable
+from pathlib import Path
+
+import asyncpg
+import httpx
+
+ROOT = Path(__file__).resolve().parents[2]
+ADMIN_TOKEN = "e2e-bootstrap-token"
+SCOPE = "e2e"
+GATEWAY_ID = "gw-e2e"
+FORBIDDEN_PORTS = {9000, 5432, 8080, 8081}
+DB_PREFIX = "lumewarp_e2e_"
+
+
+def env_path(name: str, default: str) -> Path:
+    return Path(os.environ.get(name, ROOT / default))
+
+
+GATEWAY_BIN = env_path("E2E_GATEWAY_BIN", "gateway/target/debug/lumewarp")
+MOCK_BIN = env_path("E2E_MOCK_BIN", "bench/mock-upstream/target/release/mock-upstream")
+# Server-level DSN (any database on the server, used to create/drop the test database).
+PG_DSN = os.environ.get("E2E_PG_URL", "postgresql://lumewarp:lumewarp@127.0.0.1:55432/lumewarp")
+
+
+def free_port() -> int:
+    while True:
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        if port not in FORBIDDEN_PORTS:
+            return port
+
+
+def wait_for(predicate: Callable[[], object], timeout: float, what: str, interval: float = 0.05):
+    deadline = time.monotonic() + timeout
+    last: Exception | None = None
+    while True:
+        try:
+            value = predicate()
+            if value:
+                return value
+        except Exception as err:  # noqa: BLE001 - polled condition may fail transiently
+            last = err
+        if time.monotonic() > deadline:
+            raise AssertionError(
+                f"timed out after {timeout}s waiting for {what} (last error: {last})"
+            )
+        time.sleep(interval)
+
+
+def pg(dsn: str, sql: str, *args):
+    async def run():
+        conn = await asyncpg.connect(dsn)
+        try:
+            return await conn.fetch(sql, *args)
+        finally:
+            await conn.close()
+
+    return asyncio.run(run())
+
+
+class Proc:
+    def __init__(self, name: str, argv: list[str], env: dict[str, str], logdir: Path) -> None:
+        self.name = name
+        self.argv = argv
+        self.env = env
+        self.log = logdir / f"{name}.log"
+        self.popen: subprocess.Popen | None = None
+
+    def start(self) -> None:
+        assert self.popen is None or self.popen.poll() is not None
+        run_dir = os.environ.get("E2E_RUN_DIR")
+        with open(self.log, "ab") as out:
+            self.popen = subprocess.Popen(
+                self.argv,
+                env=self.env,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        if run_dir:  # lets scripts/e2e-p1.sh reap strays if pytest itself is killed
+            with open(Path(run_dir) / "pids", "a") as pids:
+                pids.write(f"{self.popen.pid}\n")
+
+    def alive(self) -> bool:
+        return self.popen is not None and self.popen.poll() is None
+
+    def stop(self, timeout: float = 15.0) -> None:
+        p = self.popen
+        if p is None or p.poll() is not None:
+            return
+        try:
+            os.killpg(p.pid, signal.SIGTERM)
+            p.wait(timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            p.wait()
+        except ProcessLookupError:
+            pass
+
+    def kill(self) -> None:
+        if self.popen is not None and self.popen.poll() is None:
+            try:
+                os.killpg(self.popen.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            self.popen.wait()
+
+    def text(self) -> str:
+        return self.log.read_text(errors="replace") if self.log.exists() else ""
+
+
+class Gateway:
+    def __init__(self, stack: "Stack", state_dir: Path, gateway_id: str, token: str, tag: str):
+        self.stack = stack
+        self.state_dir = state_dir
+        self.port = free_port()
+        self.admin_port = free_port()
+        local = stack.dir / f"{tag}.yaml"
+        local.write_text(
+            f"server:\n  listen: '127.0.0.1:{self.port}'\n"
+            f"  admin_listen: '127.0.0.1:{self.admin_port}'\n  shutdown_grace_ms: 1000\n"
+        )
+        env = {**stack.base_env, "E2E_GATEWAY_TOKEN": token, "RUST_LOG": "info"}
+        env.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
+        self.proc = Proc(
+            tag,
+            [
+                str(GATEWAY_BIN),
+                "--control-plane",
+                f"http://127.0.0.1:{stack.grpc_port}",
+                "--gateway-token-env",
+                "E2E_GATEWAY_TOKEN",
+                "--state-dir",
+                str(state_dir),
+                "--scope",
+                SCOPE,
+                "--gateway-id",
+                gateway_id,
+                "--local-config",
+                str(local),
+            ],
+            env,
+            stack.dir,
+        )
+        self.proc.start()
+        self.http = httpx.Client(timeout=10)
+
+    def url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def wait_listening(self) -> None:
+        def up():
+            assert self.proc.alive(), f"gateway exited:\n{self.proc.text()}"
+            return (
+                httpx.get(f"http://127.0.0.1:{self.admin_port}/healthz", timeout=1).status_code
+                == 200
+            )
+
+        wait_for(up, 15, "gateway admin listener")
+
+    def readyz(self) -> int:
+        return httpx.get(f"http://127.0.0.1:{self.admin_port}/readyz", timeout=2).status_code
+
+    def wait_ready(self, timeout: float = 15) -> None:
+        wait_for(lambda: self.readyz() == 200, timeout, "gateway /readyz 200")
+
+    def metrics(self) -> str:
+        return httpx.get(f"http://127.0.0.1:{self.admin_port}/metrics", timeout=2).text
+
+    def metric(self, name: str) -> float | None:
+        for line in self.metrics().splitlines():
+            if line.startswith(name + " "):
+                return float(line.split()[1])
+        return None
+
+    def chat(self, key: str | None, *, stream: bool = False, model: str = "mock") -> httpx.Response:
+        headers = {"authorization": f"Bearer {key}"} if key else {}
+        body = {"model": model, "messages": [{"role": "user", "content": "hi"}]}
+        if stream:
+            body["stream"] = True
+        return self.http.post(self.url("/v1/chat/completions"), json=body, headers=headers)
+
+    def stop(self) -> None:
+        self.proc.stop()
+        self.http.close()
+
+
+class Stack:
+    """One database, control plane, mock upstream; gateways are started by the tests."""
+
+    def __init__(self) -> None:
+        self.dir = Path(tempfile.mkdtemp(prefix="lumewarp-e2e-", dir=os.environ.get("E2E_RUN_DIR")))
+        self.db_name = DB_PREFIX + uuid.uuid4().hex[:12]
+        self.http_port = free_port()
+        self.grpc_port = free_port()
+        self.mock_port = free_port()
+        self.gateways: list[Gateway] = []
+        self.api_url = f"http://127.0.0.1:{self.http_port}/api/v1"
+        base, _, _ = PG_DSN.rpartition("/")
+        self.dsn = f"{base}/{self.db_name}"
+        self.sa_url = self.dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
+        self.base_env = {
+            k: v for k, v in os.environ.items() if not k.startswith(("LUMEWARP_", "OTEL_"))
+        }
+        self.cp_env = {
+            **self.base_env,
+            "LUMEWARP_DATABASE_URL": self.sa_url,
+            "LUMEWARP_BOOTSTRAP_TOKEN": ADMIN_TOKEN,
+            "LUMEWARP_SCOPE": SCOPE,
+            "LUMEWARP_HTTP_BIND": f"127.0.0.1:{self.http_port}",
+            "LUMEWARP_GRPC_BIND": f"127.0.0.1:{self.grpc_port}",
+        }
+        cp = [sys.executable, "-m", "lumewarp_control_plane"]
+        self.cp_cmd = cp
+        self.cp = Proc("control-plane", [*cp, "serve"], self.cp_env, self.dir)
+        self.mock = Proc(
+            "mock-upstream",
+            [
+                str(MOCK_BIN),
+                "--listen",
+                f"127.0.0.1:{self.mock_port}",
+                "--latency-ms",
+                "5",
+                "--stream-chunks",
+                "4",
+                "--chunk-interval-ms",
+                "2",
+            ],
+            self.base_env,
+            self.dir,
+        )
+        self.admin = httpx.Client(timeout=15)
+        self.gateway_token = ""
+
+    # lifecycle ---------------------------------------------------------------------
+
+    def setup(self) -> None:
+        if run_dir := os.environ.get("E2E_RUN_DIR"):
+            with open(Path(run_dir) / "dbs", "a") as dbs:
+                dbs.write(f"{self.db_name}\n")
+        pg(PG_DSN, f'CREATE DATABASE "{self.db_name}"')
+        self._run_cli("migrate")
+        out = self._run_cli("bootstrap", "--gateway-id", GATEWAY_ID, "--scope", SCOPE)
+        self.gateway_token = out.strip().splitlines()[-1]
+        assert self.gateway_token.startswith("lwg-"), out
+        self.mock.start()
+        wait_for(
+            lambda: (
+                httpx.get(f"http://127.0.0.1:{self.mock_port}/health", timeout=1).status_code == 200
+            ),
+            10,
+            "mock upstream",
+        )
+        self.start_cp()
+
+    def _run_cli(self, *args: str) -> str:
+        res = subprocess.run(
+            [*self.cp_cmd, *args], env=self.cp_env, capture_output=True, text=True, timeout=60
+        )
+        assert res.returncode == 0, f"{args} failed:\n{res.stdout}\n{res.stderr}"
+        return res.stdout
+
+    def start_cp(self) -> None:
+        self.cp.start()
+
+        def up():
+            assert self.cp.alive(), f"control plane exited:\n{self.cp.text()}"
+            return (
+                httpx.get(f"http://127.0.0.1:{self.http_port}/readyz", timeout=1).status_code == 200
+            )
+
+        wait_for(up, 30, "control plane /readyz")
+
+    def stop_cp(self) -> None:
+        self.cp.stop()
+
+    def start_gateway(
+        self, state_dir: Path | None = None, tag: str | None = None, *, wait_ready: bool = True
+    ) -> Gateway:
+        tag = tag or f"gateway-{len(self.gateways)}"
+        gw = Gateway(self, state_dir or self.dir / "state", GATEWAY_ID, self.gateway_token, tag)
+        self.gateways.append(gw)
+        gw.wait_listening()
+        if wait_ready:
+            gw.wait_ready()
+        return gw
+
+    def teardown(self) -> None:
+        for gw in self.gateways:
+            gw.stop()
+        self.cp.stop()
+        self.mock.stop()
+        self.admin.close()
+        try:
+            pg(PG_DSN, f'DROP DATABASE IF EXISTS "{self.db_name}" WITH (FORCE)')
+        except Exception as err:  # noqa: BLE001
+            print(f"warning: could not drop {self.db_name}: {err}", file=sys.stderr)
+
+    def logs(self) -> str:
+        parts = []
+        for log in sorted(self.dir.glob("*.log")):
+            lines = [
+                ln
+                for ln in log.read_text(errors="replace").splitlines()
+                if ' HTTP/1.1" 200' not in ln
+            ]
+            parts.append(f"===== {log.name} =====\n" + "\n".join(lines)[-6000:])
+        return "\n".join(parts)
+
+    def cleanup_dir(self) -> None:
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    # REST --------------------------------------------------------------------------
+
+    def api(self, method: str, path: str, token: str = ADMIN_TOKEN, **kwargs) -> httpx.Response:
+        return self.admin.request(
+            method, self.api_url + path, headers={"authorization": f"Bearer {token}"}, **kwargs
+        )
+
+    def ok(self, method: str, path: str, token: str = ADMIN_TOKEN, **kwargs) -> dict:
+        r = self.api(method, path, token, **kwargs)
+        assert r.status_code in (200, 201), (method, path, r.status_code, r.text)
+        return r.json()
+
+    def seed(self, *, priced: bool = True, project_budget: int | None = None) -> "Seeded":
+        up = self.ok(
+            "POST",
+            "/upstreams",
+            json={
+                "name": "mock",
+                "kind": "openai_compatible",
+                "base_url": f"http://127.0.0.1:{self.mock_port}/v1",
+            },
+        )
+        dep = {"name": "mock-a", "upstream_id": up["id"], "upstream_model": "mock"}
+        if priced:
+            dep |= {
+                "price_input_nano_usd_per_mtok": 1_000_000_000,
+                "price_output_nano_usd_per_mtok": 2_000_000_000,
+            }
+        dep = self.ok("POST", "/deployments", json=dep)
+        self.ok("POST", "/routes", json={"model": "mock", "deployment_ids": [dep["id"]]})
+        org = self.ok("POST", "/orgs", json={"name": "acme", "model_access": "all"})
+        team = self.ok("POST", f"/orgs/{org['id']}/teams", json={"name": "ml"})
+        body = {"name": "chat"}
+        if project_budget is not None:
+            body["budget_nano_usd"] = project_budget
+        project = self.ok("POST", f"/teams/{team['id']}/projects", json=body)
+        keys = {}
+        for name in ("a", "b"):
+            created = self.ok(
+                "POST",
+                f"/projects/{project['id']}/keys",
+                json={"name": f"key-{name}", "model_access": "all"},
+            )
+            keys[name] = Key(created["key"]["id"], created["secret"])
+        self.wait_key_count(2)
+        return Seeded(org["id"], team["id"], project["id"], keys["a"], keys["b"])
+
+    def create_pat(self, email: str, org_id: str, team_id: str | None, role: str) -> str:
+        """User + membership via REST; the PAT row is inserted directly (the bootstrap
+        principal cannot own tokens)."""
+        from lumewarp_control_plane.security import SecretKind, generate_secret
+
+        user = self.ok("POST", "/users", json={"email": email})
+        self.ok(
+            "POST",
+            "/memberships",
+            json={"user_id": user["id"], "org_id": org_id, "team_id": team_id, "role": role},
+        )
+        new = generate_secret(SecretKind.PAT)
+        pg(
+            self.dsn,
+            "INSERT INTO personal_access_tokens (id, user_id, name, token_hash, display_prefix) "
+            "VALUES ($1, $2, 'e2e', $3, $4)",
+            uuid.uuid4(),
+            uuid.UUID(user["id"]),
+            new.hash,
+            new.display_prefix,
+        )
+        return new.secret
+
+    def usage_rows(self) -> list[asyncpg.Record]:
+        return pg(self.dsn, "SELECT * FROM usage_events ORDER BY id")
+
+    def gateway_status(self, gateway_id: str = GATEWAY_ID) -> dict | None:
+        for item in self.ok("GET", "/gateways")["items"]:
+            if item["gateway_id"] == gateway_id:
+                return item
+        return None
+
+    def wait_key_count(self, count: int) -> None:
+        """Publishing is asynchronous (outbox + compiler loop): wait until a version has them."""
+        wait_for(
+            lambda: (
+                self.ok("GET", "/config/versions", params={"limit": 1})["items"][0]["key_count"]
+                == count
+            ),
+            10,
+            f"config version with {count} keys",
+        )
+
+    def current_version(self) -> int:
+        return self.ok("GET", "/config/versions", params={"limit": 1})["items"][0]["version"]
+
+
+class Key:
+    def __init__(self, id: str, secret: str) -> None:
+        self.id = id
+        self.secret = secret
+
+
+class Seeded:
+    def __init__(self, org_id, team_id, project_id, a: Key, b: Key) -> None:
+        self.org_id, self.team_id, self.project_id, self.a, self.b = (
+            org_id,
+            team_id,
+            project_id,
+            a,
+            b,
+        )
