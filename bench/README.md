@@ -9,7 +9,8 @@ gate: Lumewarp p99 overhead clearly below LiteLLM's).
   Lumewarp / LiteLLM, runs the load, samples CPU/PSS, aggregates results.
 - `scripts/ci_check.py` — CI gate over the latest `results.json` (used by the
   `bench` workflow).
-- `lumewarp/config.yaml` — standalone gateway config for the bench (no API keys).
+- `lumewarp/config.yaml` — standalone gateway config for the bench (open by
+  default; `BENCH_AUTH=1` templates a per-run key into `server.api_keys`).
 - `litellm/config.yaml` — LiteLLM pointed at the mock upstream, quiet settings,
   pinned version.
 - `results/` — run output (gitignored; only `.gitkeep` is tracked).
@@ -54,10 +55,18 @@ error rate is ≤ 1%, and direct is not saturated. **A6 is judged at 1000 RPS**;
 the 300 RPS row (and any other rate) is informational but shown in the same
 table with reasons.
 
-No client auth on either gateway: Lumewarp's bench config leaves
-`server.api_keys` unset, and LiteLLM runs without a master key via its
-local-only `dangerously_permit_weak_or_unset_master_key` flag. No DB, no spend
-logging, no retries, no message logging. Do not deploy these configs.
+By default there is no client auth on either gateway: Lumewarp's bench config
+leaves `server.api_keys` empty, and LiteLLM runs without a master key via its
+local-only `dangerously_permit_weak_or_unset_master_key` flag. Set
+`BENCH_AUTH=1` to measure the authenticated path instead: `run.sh` generates a
+random 32-byte key per run, writes its SHA-256 into the templated Lumewarp
+`server.api_keys` list, sets LiteLLM's `general_settings.master_key` (and drops
+the weak-key escape hatch), and sends `Authorization: Bearer …` from `oha` and
+`sse-bench` to both gateways. The direct mock-upstream baseline stays
+unauthenticated, and `meta.json` / `summary.md` record `auth: on|off`.
+
+No DB, no spend logging, no retries, no message logging. Do not deploy these
+configs.
 
 The mock only has fast paths for model `mock`; the driver always sends
 `"model": "mock"` (dynamic model names are serialized per request and would skew
@@ -85,6 +94,7 @@ embedding responses. Default off.
 bench/scripts/run.sh --quick        # ~3 min including LiteLLM startup
 bench/scripts/run.sh --full         # 3 reps of 300/1k/5k/10k + stream 100/1000, ~30 min
 bench/scripts/run.sh --quick --no-build
+BENCH_AUTH=1 bench/scripts/run.sh --quick   # authenticated path (per-run key)
 bench/scripts/run.sh --help         # all environment overrides
 ```
 
@@ -98,7 +108,8 @@ MOCK_PORT=9100 LUMEWARP_PORT=4100 LITELLM_PORT=4101 bench/scripts/run.sh --quick
 ```
 
 Other useful overrides: `MOCK_LATENCY_MS` (default 50), `MOCK_STREAM_CHUNKS`,
-`MOCK_CHUNK_INTERVAL_MS`, `MOCK_HEADERS_FIRST` (see below), `LITELLM_WORKERS`,
+`MOCK_CHUNK_INTERVAL_MS`, `MOCK_HEADERS_FIRST` (see below), `BENCH_AUTH`
+(`0`/`1`, default `0`), `LITELLM_WORKERS`,
 `LITELLM_VERSION`, `DURATION_SECS`, `WARMUP_SECS`, `RATES`,
 `STREAM_CONCURRENCIES`, `REPEAT`, `SETTLE_SECS`, `HEALTH_TIMEOUT_SECS`,
 `RESULTS_DIR`, `RUN_ID`, plus `MOCK_BIN`/`SSE_BENCH_BIN`/`LUMEWARP_BIN` for
@@ -125,7 +136,8 @@ not meaningful.
 
 ```
 bench/results/<UTC timestamp>/
-  meta.json                  machine, git sha, versions, knobs, binary hashes
+  meta.json                  machine, git sha, versions, knobs, auth on/off,
+                             binary hashes
   results.json               per target/scenario medians + overhead + flags
   summary.md                 markdown tables + machine info
   scenarios.jsonl            manifest consumed by the aggregator

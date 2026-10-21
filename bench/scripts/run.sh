@@ -51,6 +51,9 @@ Environment overrides (defaults):
   MOCK_CHUNK_INTERVAL_MS=10   delay between mock SSE chunks
   MOCK_HEADERS_FIRST=0        pass --headers-first to the mock (SSE headers
                               before the prefill delay, like vLLM/OpenAI)
+  BENCH_AUTH=0                client auth: 1 generates one random key per run,
+                              configures it on both gateways and sends it as a
+                              bearer (the direct mock target stays open)
   LITELLM_VERSION=1.106.2     litellm[proxy] pin (must match bench/litellm/config.yaml)
   LITELLM_WORKERS=$(nproc)    LiteLLM --num_workers
   DURATION_SECS               measured duration per scenario (profile default)
@@ -101,6 +104,7 @@ MOCK_LATENCY_MS="${MOCK_LATENCY_MS:-50}"
 MOCK_STREAM_CHUNKS="${MOCK_STREAM_CHUNKS:-20}"
 MOCK_CHUNK_INTERVAL_MS="${MOCK_CHUNK_INTERVAL_MS:-10}"
 MOCK_HEADERS_FIRST="${MOCK_HEADERS_FIRST:-0}"
+BENCH_AUTH="${BENCH_AUTH:-0}"
 LITELLM_VERSION="${LITELLM_VERSION:-1.106.2}"
 LITELLM_WORKERS="${LITELLM_WORKERS:-$(nproc)}"
 HEALTH_TIMEOUT_SECS="${HEALTH_TIMEOUT_SECS:-180}"
@@ -143,6 +147,17 @@ done
 [[ "$REPEAT" =~ ^[1-9][0-9]*$ ]] || die "REPEAT must be a positive integer"
 [[ "$MOCK_HEADERS_FIRST" == "0" || "$MOCK_HEADERS_FIRST" == "1" ]] ||
   die "MOCK_HEADERS_FIRST must be 0 or 1"
+case "$BENCH_AUTH" in
+  0) AUTH=0 ;;
+  1) AUTH=1 ;;
+  *) die "BENCH_AUTH must be 0 or 1 (got: $BENCH_AUTH)" ;;
+esac
+AUTH_MODE="off"
+BENCH_API_KEY=""
+BENCH_API_KEY_SHA256=""
+if (( AUTH )); then
+  AUTH_MODE="on"
+fi
 
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid RUN_ID: $RUN_ID"
@@ -217,6 +232,25 @@ fi
 [[ -x "$SSE_BENCH_BIN" ]] || die "sse-bench binary not found: $SSE_BENCH_BIN"
 [[ -x "$LUMEWARP_BIN" ]] || die "lumewarp binary not found: $LUMEWARP_BIN"
 
+# --------------------------------------------------------------------------- #
+# Client auth (BENCH_AUTH=1)
+# --------------------------------------------------------------------------- #
+
+# One random key per run, never written to meta.json/logs. The gateway only
+# gets its SHA-256 (server.api_keys); LiteLLM gets the raw key as master_key
+# and the load generators send it as a bearer. The direct mock target is the
+# unauthenticated baseline and never sends it.
+if (( AUTH )); then
+  read -r BENCH_API_KEY BENCH_API_KEY_SHA256 < <(
+    python3 -I -c 'import hashlib, secrets; key = secrets.token_hex(32); print(key, hashlib.sha256(key.encode()).hexdigest())'
+  )
+  [[ "$BENCH_API_KEY" =~ ^[0-9a-f]{64}$ ]] || die "failed to generate a bench API key"
+  [[ "$BENCH_API_KEY_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "failed to hash the bench API key"
+  log "client auth: on (per-run bearer key, sha256 ${BENCH_API_KEY_SHA256:0:12}…; direct target stays open)"
+else
+  log "client auth: off"
+fi
+
 fd_limit="$(ulimit -n)"
 if (( fd_limit < 4096 )); then
   log "warning: open-file limit is ${fd_limit}; high-rate scenarios may be capped by connections"
@@ -241,7 +275,7 @@ mkdir -p "$RUN_DIR/logs" "$RUN_DIR/configs" "$RUN_DIR/nonstream" "$RUN_DIR/strea
 : > "$RUN_DIR/scenarios.jsonl"
 
 log "run directory: $RUN_DIR"
-log "profile: $PROFILE, targets: direct / lumewarp / litellm, repetitions: $REPEAT"
+log "profile: $PROFILE, targets: direct / lumewarp / litellm, auth: $AUTH_MODE, repetitions: $REPEAT"
 
 # --------------------------------------------------------------------------- #
 # Cleanup
@@ -298,13 +332,16 @@ require_port_free() {
 
 wait_for_http() {
   local name="$1" url="$2" timeout="$3" pid="$4" logfile="$5"
+  shift 5
   local deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
     if ! kill -0 "$pid" 2>/dev/null; then
       tail -n 40 "$logfile" >&2 2>/dev/null || true
       die "$name exited before becoming healthy (see $logfile)"
     fi
-    if curl -fsS -m 2 -o /dev/null "$url" 2>/dev/null; then
+    # Extra args are curl options (e.g. an Authorization header when
+    # BENCH_AUTH=1 makes LiteLLM's /health require the master key).
+    if curl -fsS -m 2 -o /dev/null "$@" "$url" 2>/dev/null; then
       log "$name healthy at $url"
       return 0
     fi
@@ -339,13 +376,27 @@ wait_for_http "mock upstream" "http://127.0.0.1:$MOCK_PORT/health" "$HEALTH_TIME
 
 # Lumewarp (configs are templated so ports can be overridden).
 LUMEWARP_CONFIG="$RUN_DIR/configs/lumewarp.yaml"
-sed -e "s|127\.0\.0\.1:9000|127.0.0.1:${MOCK_PORT}|g" \
-  -e "s|127\.0\.0\.1:4000|127.0.0.1:${LUMEWARP_PORT}|g" \
-  "$BENCH_DIR/lumewarp/config.yaml" >"$LUMEWARP_CONFIG"
+LUMEWARP_SED=(
+  -e "s|127\.0\.0\.1:9000|127.0.0.1:${MOCK_PORT}|g"
+  -e "s|127\.0\.0\.1:4000|127.0.0.1:${LUMEWARP_PORT}|g"
+)
+if (( AUTH )); then
+  LUMEWARP_SED+=(
+    -e "s|api_keys: \[\] # __BENCH_API_KEYS__|api_keys: [\"${BENCH_API_KEY_SHA256}\"] # __BENCH_API_KEYS__|"
+  )
+fi
+sed "${LUMEWARP_SED[@]}" "$BENCH_DIR/lumewarp/config.yaml" >"$LUMEWARP_CONFIG"
 grep -q "127.0.0.1:${MOCK_PORT}/v1" "$LUMEWARP_CONFIG" ||
   die "failed to template mock port into $LUMEWARP_CONFIG"
 grep -q "listen: 127.0.0.1:${LUMEWARP_PORT}" "$LUMEWARP_CONFIG" ||
   die "failed to template lumewarp port into $LUMEWARP_CONFIG"
+if (( AUTH )); then
+  grep -q "api_keys: \[\"${BENCH_API_KEY_SHA256}\"\]" "$LUMEWARP_CONFIG" ||
+    die "failed to template server.api_keys into $LUMEWARP_CONFIG"
+else
+  grep -q "^  api_keys: \[\]" "$LUMEWARP_CONFIG" ||
+    die "server.api_keys should stay empty without BENCH_AUTH=1 in $LUMEWARP_CONFIG"
+fi
 
 log "starting lumewarp on 127.0.0.1:$LUMEWARP_PORT"
 "$LUMEWARP_BIN" --config "$LUMEWARP_CONFIG" >"$RUN_DIR/logs/lumewarp.log" 2>&1 &
@@ -355,10 +406,29 @@ wait_for_http "lumewarp" "http://127.0.0.1:$LUMEWARP_PORT/healthz" "$HEALTH_TIME
 
 # LiteLLM (pinned; uvx caches after the first run).
 LITELLM_CONFIG="$RUN_DIR/configs/litellm.yaml"
-sed -e "s|127\.0\.0\.1:9000/v1|127.0.0.1:${MOCK_PORT}/v1|g" \
-  "$BENCH_DIR/litellm/config.yaml" >"$LITELLM_CONFIG"
+LITELLM_SED=(
+  -e "s|127\.0\.0\.1:9000/v1|127.0.0.1:${MOCK_PORT}/v1|g"
+)
+if (( AUTH )); then
+  LITELLM_SED+=(
+    -e "s|^  # master_key: __BENCH_MASTER_KEY__$|  master_key: \"${BENCH_API_KEY}\"|"
+    -e "s|^  dangerously_permit_weak_or_unset_master_key: true$|  # BENCH_AUTH=1: master_key is set, so the weak-key escape hatch is removed.|"
+  )
+fi
+sed "${LITELLM_SED[@]}" "$BENCH_DIR/litellm/config.yaml" >"$LITELLM_CONFIG"
 grep -q "127.0.0.1:${MOCK_PORT}/v1" "$LITELLM_CONFIG" ||
   die "failed to template mock port into $LITELLM_CONFIG"
+if (( AUTH )); then
+  grep -qx "  master_key: \"${BENCH_API_KEY}\"" "$LITELLM_CONFIG" ||
+    die "failed to template general_settings.master_key into $LITELLM_CONFIG"
+  if grep -q "^  dangerously_permit_weak_or_unset_master_key:" "$LITELLM_CONFIG"; then
+    die "BENCH_AUTH=1 must remove dangerously_permit_weak_or_unset_master_key from $LITELLM_CONFIG"
+  fi
+else
+  if grep -q "^  master_key:" "$LITELLM_CONFIG"; then
+    die "general_settings.master_key must stay unset without BENCH_AUTH=1 in $LITELLM_CONFIG"
+  fi
+fi
 
 log "starting LiteLLM ${LITELLM_VERSION} on 127.0.0.1:$LITELLM_PORT with ${LITELLM_WORKERS} workers (first run downloads packages)"
 env \
@@ -374,7 +444,12 @@ env \
   >"$RUN_DIR/logs/litellm.log" 2>&1 &
 LITELLM_PID=$!
 SERVER_PIDS+=("$LITELLM_PID")
-wait_for_http "litellm" "http://127.0.0.1:$LITELLM_PORT/health" "$HEALTH_TIMEOUT_SECS" "$LITELLM_PID" "$RUN_DIR/logs/litellm.log"
+LITELLM_HEALTH_ARGS=()
+if (( AUTH )); then
+  # /health is behind user_api_key_auth once a master key is configured.
+  LITELLM_HEALTH_ARGS+=(-H "Authorization: Bearer ${BENCH_API_KEY}")
+fi
+wait_for_http "litellm" "http://127.0.0.1:$LITELLM_PORT/health" "$HEALTH_TIMEOUT_SECS" "$LITELLM_PID" "$RUN_DIR/logs/litellm.log" "${LITELLM_HEALTH_ARGS[@]}"
 
 # Let LiteLLM's workers finish booting (health is served before every worker is
 # ready) and let the whole machine settle before the direct baseline.
@@ -470,7 +545,11 @@ run_load() {
 run_oha() {
   local target="$1" rate="$2" duration="$3" out="$4"
   local conns
+  local -a auth_args=()
   conns="$(connections_for_rate "$rate")"
+  if (( AUTH )) && [[ "$target" != "direct" ]]; then
+    auth_args+=(-H "Authorization: Bearer ${BENCH_API_KEY}")
+  fi
   run_load oha \
     --no-tui \
     --output-format json \
@@ -483,14 +562,20 @@ run_oha() {
     -T application/json \
     -d "$REQUEST_BODY" \
     -t 600s \
+    "${auth_args[@]}" \
     "$(base_url "$target")/v1/chat/completions"
 }
 
 run_sse() {
   local target="$1" concurrency="$2" duration="$3" out="$4"
+  local -a auth_args=()
+  if (( AUTH )) && [[ "$target" != "direct" ]]; then
+    auth_args+=(--api-key "$BENCH_API_KEY")
+  fi
   run_load "$SSE_BENCH_BIN" \
     --url "$(base_url "$target")" \
     --model "$MODEL" \
+    "${auth_args[@]}" \
     --concurrency "$concurrency" \
     --duration-secs "$duration" \
     --out "$out"
@@ -612,6 +697,7 @@ python3 -I "$SCRIPT_DIR/write_meta.py" \
   --run-dir "$RUN_DIR" \
   --run-id "$RUN_ID" \
   --profile "$PROFILE" \
+  --auth "$AUTH_MODE" \
   --started-at "$STARTED_AT" \
   --repo-root "$REPO_ROOT" \
   --mock-port "$MOCK_PORT" \

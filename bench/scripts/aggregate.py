@@ -621,6 +621,7 @@ def render_summary(results: dict[str, Any]) -> str:
     versions = meta.get("versions") or {}
     config = meta.get("config") or {}
     git = meta.get("git") or {}
+    auth = meta.get("auth") or "off"
     lines: list[str] = []
     add = lines.append
 
@@ -640,7 +641,10 @@ def render_summary(results: dict[str, Any]) -> str:
         f"{config.get('mock_chunk_interval_ms', '?')} ms"
     )
     add(f"- repetitions: {config.get('repetitions', 1)} (medians shown)")
-    add("- client auth: none on both gateways (bench config)")
+    if auth == "on":
+        add("- client auth: on (`BENCH_AUTH=1`, one per-run bearer key on both gateways)")
+    else:
+        add("- client auth: none on both gateways (bench config)")
     add("")
     add("**Overhead** = latency through the gateway − latency direct to the mock upstream,")
     add("measured at the same offered load. Negative values are run-to-run noise.")

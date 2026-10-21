@@ -101,6 +101,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--profile", required=True, choices=("quick", "full"))
+    parser.add_argument(
+        "--auth",
+        required=True,
+        choices=("on", "off"),
+        help="whether a per-run bearer key was configured on both gateways",
+    )
     parser.add_argument("--started-at", required=True, help="ISO-8601 UTC start time")
     parser.add_argument("--repo-root", required=True, type=Path)
     parser.add_argument("--mock-port", type=int, required=True)
@@ -126,6 +132,7 @@ def main(argv: list[str]) -> int:
     meta = {
         "run_id": args.run_id,
         "profile": args.profile,
+        "auth": args.auth,
         "started_at": args.started_at,
         "finished_at": datetime.now(tz=timezone.utc).isoformat(),
         "machine": {

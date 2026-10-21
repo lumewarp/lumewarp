@@ -48,6 +48,20 @@ jobs:
 
   control-plane:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: lumewarp
+          POSTGRES_PASSWORD: lumewarp
+          POSTGRES_DB: lumewarp
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U lumewarp -d lumewarp"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     defaults:
       run:
         working-directory: control-plane
@@ -84,3 +98,19 @@ jobs:
           input: proto
           breaking: false
           push: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Check generated protobuf code is current
+        run: |
+          ./scripts/gen-proto.sh
+          if ! git diff --exit-code -- control-plane/src/lumewarp_control_plane/_proto; then
+            echo "::error::generated protobuf code is stale; run scripts/gen-proto.sh and commit the result"
+            exit 1
+          fi
+          status="$(git status --porcelain -- control-plane/src/lumewarp_control_plane/_proto)"
+          if [[ -n "$status" ]]; then
+            printf '%s\n' "$status"
+            echo "::error::scripts/gen-proto.sh produced untracked files under control-plane/src/lumewarp_control_plane/_proto; commit the generated code"
+            exit 1
+          fi

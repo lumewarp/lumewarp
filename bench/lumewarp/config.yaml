@@ -3,11 +3,16 @@
 #   lumewarp --config bench/lumewarp/config.yaml
 #
 # One upstream (the mock) and one route, so the benchmark measures the gateway
-# hot path and nothing else. `server.api_keys` is deliberately unset: the bench
+# hot path and nothing else. `server.api_keys` is empty by default: the bench
 # compares the unauthenticated hot path against LiteLLM with no master key.
-# run.sh rewrites the ports below if MOCK_PORT / LUMEWARP_PORT are overridden.
+# With BENCH_AUTH=1, run.sh replaces the empty list below with the SHA-256 of
+# that run's key (the raw key only goes to the load generators). run.sh rewrites
+# the ports below if MOCK_PORT / LUMEWARP_PORT are overridden.
 server:
   listen: 127.0.0.1:4000
+  # Empty list = no client auth. BENCH_AUTH=1 templates this line; the marker
+  # stays so the driver can verify the substitution.
+  api_keys: [] # __BENCH_API_KEYS__
 
 upstreams:
   - name: mock

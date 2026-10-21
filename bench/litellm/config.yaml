@@ -7,9 +7,12 @@
 #   - no database (no DATABASE_URL is exported by run.sh, store_model_in_db off)
 #   - no spend/error logging, no background health checks, no retries
 #   - no message logging (prompts must never be logged)
-#   - no master key is required, matching Lumewarp's open bench config.
+#   - no master key by default, matching Lumewarp's open bench config.
 #     LiteLLM 1.106+ refuses to boot without a key; the flag below is the
 #     documented local-only escape hatch. Never use it outside the bench.
+#   - BENCH_AUTH=1 replaces the commented master_key line with a random per-run
+#     key and removes the escape hatch, so both gateways require the same
+#     bearer while the direct mock target stays unauthenticated.
 model_list:
   - model_name: mock
     litellm_params:
@@ -28,4 +31,7 @@ general_settings:
   store_model_in_db: false
   background_health_checks: false
   health_check_interval: 0
+  # BENCH_AUTH=1 turns the commented line below into a real per-run key and
+  # comments out the weak-key escape hatch underneath it.
+  # master_key: __BENCH_MASTER_KEY__
   dangerously_permit_weak_or_unset_master_key: true
