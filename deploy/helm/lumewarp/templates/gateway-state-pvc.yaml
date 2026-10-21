@@ -1,0 +1,21 @@
+{{- if and .Values.gateway.enabled .Values.gateway.stateDir.persistence.enabled (not .Values.gateway.stateDir.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "lumewarp.gateway.name" . }}-state
+  labels:
+    {{- include "lumewarp.gateway.labels" . | nindent 4 }}
+  {{- with .Values.gateway.stateDir.persistence.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.gateway.stateDir.persistence.accessModes | nindent 4 }}
+  {{- with .Values.gateway.stateDir.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.gateway.stateDir.persistence.size }}
+{{- end }}

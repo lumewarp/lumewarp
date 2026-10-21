@@ -2,10 +2,14 @@
 
 A Rust HTTP/1.1 gateway for OpenAI-compatible HTTP/HTTPS upstreams, including
 vLLM and OpenAI. It compiles only from a protobuf config `Snapshot`
-(`proto/lumewarp/config/v1/snapshot.proto`); standalone mode reads YAML at
-startup and converts it to the same snapshot. No control plane, database, or
-Python is in the request path. (The control-plane config stream is P1 work in
-progress; this README covers standalone mode.)
+(`proto/lumewarp/config/v1/snapshot.proto`). No control plane, database, or
+Python is in the request path.
+
+Two modes are available:
+
+- **standalone** (`--config`): read YAML at startup and convert it to a snapshot.
+- **control-plane** (`--control-plane`): boot from a cached snapshot, follow the
+  versioned gRPC config stream and report usage back to the control plane.
 
 ## Run locally
 
@@ -62,6 +66,97 @@ For a real upstream, change `base_url`, `upstream_model`, and optionally
 vLLM examples; its `OPENAI_API_KEY` variable must be set even if only the vLLM
 route will be used.
 
+## Control-plane mode
+
+Standalone mode (`--config`) reads the whole configuration from YAML. In
+control-plane mode the gateway follows the control plane's config stream and
+reports usage to the same endpoint:
+
+```sh
+# The token is printed once by `lumewarp-control-plane bootstrap` or created in
+# the Admin UI; the control plane stores only its SHA-256 hash.
+export LUMEWARP_GATEWAY_TOKEN='lwg-...'
+
+lumewarp \
+  --control-plane http://127.0.0.1:50051 \
+  --gateway-token-env LUMEWARP_GATEWAY_TOKEN \
+  --state-dir /tmp/lumewarp-state \
+  --scope default \
+  --gateway-id gw-1 \
+  --local-config /etc/lumewarp/local.yaml
+```
+
+The token is read from the named environment variable, sent as
+`authorization: Bearer <token>` on the config stream and usage reports, and never
+written to disk. `--gateway-id` defaults to `gateway`; use one identity per
+replica when several gateways share a scope. `--local-config` is a YAML file
+with only the `server:` block described below (listener, admin listener,
+timeouts); upstreams, routes, teams and keys (including `server.api_keys`) are
+ignored in this mode.
+
+### Flags
+
+| Flag | Environment variable | Default | Meaning |
+| --- | --- | --- | --- |
+| `--config`, `-c` | `LUMEWARP_CONFIG` | required for standalone | Standalone YAML. Conflicts with every control-plane flag. |
+| `--control-plane URL` | `LUMEWARP_CONTROL_PLANE` | unset | Control-plane gRPC URL (`http://` or `https://`). Enables control-plane mode and requires the three flags below. |
+| `--gateway-token-env NAME` | none | required in control-plane mode | Name of the environment variable that holds the gateway token. |
+| `--state-dir DIR` | none | required in control-plane mode | Directory for the last good snapshot. It is created `0700` on the first successful persist. |
+| `--scope SCOPE` | none | required in control-plane mode | Config scope this gateway serves. Must match the control plane and the cached snapshot. |
+| `--gateway-id ID` | none | `gateway` | Identity sent in the stream `Hello`; shown in the control-plane gateway list. |
+| `--local-config FILE` | none | unset | YAML with only `server:` listener/timeout settings. Without it the defaults from the YAML reference apply. |
+
+A minimal local config only needs the listeners:
+
+```yaml
+server:
+  listen: 0.0.0.0:4000
+  admin_listen: 0.0.0.0:9464
+```
+
+The admin listener stays unauthenticated; keep it private (see the auth section).
+
+### Boot and readiness
+
+- On start the gateway reads `<state-dir>/snapshot.pb`. The file has a trailing
+  SHA-256, is size-capped and must carry the configured scope; a corrupt,
+  truncated or wrong-scope file is never served.
+- With a valid snapshot it serves `/v1/*` immediately and connects to the
+  control plane in the background. Without one it stays not ready: `/v1/*`
+  returns 503 `not_ready` **before authentication**, the admin `/readyz` returns
+  503, and the process never falls back to an open router.
+- Control-plane mode always requires a key: with zero keys in the snapshot every
+  `/v1/*` request is 401. A revoked, suspended or expired key is 401; a key over
+  budget is 429 `insufficient_quota` (the control plane flips its status).
+- The stream sends `Hello` with the cached version, scope and digest, then
+  applies at most one update at a time: apply to a private copy, validate,
+  compile, persist (`snapshot.pb.tmp` → fsync → rename → fsync directory), swap
+  with ArcSwap, then ACK. A persist failure NACKs `PERSIST_FAILED` and keeps
+  serving the previous version. ACK therefore means "active and durable": a
+  restart boots into that version even while the control plane is down.
+- Reconnects use exponential backoff from 0.5 s to 30 s with full jitter.
+  `lumewarp_config_stream_connected`, `lumewarp_config_version` and
+  `lumewarp_config_apply_failures_total{code}` expose the stream state.
+
+### Usage reporting
+
+Control-plane mode also enables usage reporting to the same URL with the same
+token. Each finalized proxied request (including a rejection for a known key)
+produces one event with a UUIDv7 `request_id`: tokens, model/deployment/route,
+status, config version and cost computed from `deployments[].price`. Events
+enter a bounded in-memory queue (100,000) and are reported every 1 s or every
+500 events. Failed batches retry from the queue with backoff; when the queue is
+full new events are dropped and `lumewarp_usage_events_dropped_total`
+increments. There is no disk spool: a gateway crash loses queued events, and a
+long control-plane outage eventually drops them. On shutdown the reporter
+flushes for up to 5 s.
+
+For streams the gateway injects `stream_options.include_usage: true` when the
+upstream's `stream_usage_mode` is `include_usage` (the default) and the client
+did not ask for usage; the extra usage-only chunk is stripped before it reaches
+the client. `passthrough` disables the injection for upstreams that do not
+support it. Non-stream usage is parsed from a bounded copy of the response body.
+
 ## YAML reference
 
 The complete schema is in
@@ -95,8 +190,8 @@ YAML strings is not implemented. P0 files load unchanged.
 **Auth mode.** If neither `server.api_keys` nor `keys` configures any key, the
 gateway is open: every `/v1/*` request is anonymous and `Authorization` is
 ignored. As soon as one key exists, every `/v1/*` request (including
-`/v1/models`) needs a valid key. Control-plane mode will always require keys,
-so an empty key set there rejects everything.
+`/v1/models`) needs a valid key. Control-plane mode always requires keys, so
+an empty key set there rejects every `/v1/*` request.
 
 Send one `Authorization: Bearer <key>` header. The gateway hashes the key with
 SHA-256 and looks it up (one hash, one map lookup). Bearer scheme matching is
@@ -137,7 +232,7 @@ the gateway.
 | `upstreams[].base_url` | Required | Absolute HTTP/HTTPS base URI, with an authority and without userinfo or a query. Include `/v1` when that is the upstream API prefix. |
 | `upstreams[].api_key_env` | Absent | Name of the environment variable containing the raw upstream bearer token, **not** the token or a client-key hash. |
 | `upstreams[].timeout_ms` | `600000` | Unsigned 32-bit millisecond timeout from issuing the upstream request through receipt of response headers, including connection establishment. Does not limit response-body or stream lifetime. (A snapshot value of 0 also means the default.) |
-| `upstreams[].stream_usage_mode` | `include_usage` | `include_usage` (the gateway may force `stream_options.include_usage` upstream for metering) or `passthrough` (upstream does not support it). Not acted on yet. |
+| `upstreams[].stream_usage_mode` | `include_usage` | `include_usage` (the gateway may force `stream_options.include_usage` upstream for metering and strips the extra chunk if the client did not ask) or `passthrough` (upstream does not support it; no injection). |
 
 All upstreams are compiled at startup. A configured `api_key_env` must exist,
 contain a valid Unicode value, and produce a valid Authorization header;
@@ -197,8 +292,12 @@ rustls with WebPKI roots.
 `max_parallel_requests` (each `0`/absent = unlimited). They are compiled into
 per-key `RateLimitScope`s (team scope first, then key scope); limiter state is
 keyed by scope id, so it survives reloads, and it is local to one gateway
-instance (N instances allow up to N times the limit). Enforcement is not active
-yet: the limiter currently admits every request.
+instance (N instances allow up to N times the limit). A request acquires all of
+its scopes or none: `requests_per_minute` and `max_parallel_requests` are checked
+before forwarding (`max_parallel` is held until the response body ends, errors or
+is dropped); `tokens_per_minute` is charged after usage is known and blocks later
+requests in the same window. A rejection is 429 `rate_limit_exceeded` with
+`Retry-After`.
 
 ### Routing
 
@@ -220,6 +319,7 @@ running on the previous one.
 | Primary | `POST /v1/embeddings` | Same routing and passthrough. |
 | Primary | `GET /v1/models` | Local OpenAI-shaped model list from configured route aliases, not upstream discovery. |
 | Primary and admin | `GET /healthz` | Local liveness response `ok`; does not probe upstreams. |
+| Admin only | `GET /readyz` | `ready` (200) once a router is loaded; 503 JSON `not_ready` in control-plane mode before the first snapshot is applied. |
 | Admin only | `GET /metrics` | Prometheus-scrapable OpenMetrics text. |
 
 Other paths or methods return 404, not 405 (unauthenticated `/v1/*` requests can
@@ -230,17 +330,21 @@ top-level object with exactly one string `model` field. `stream` may be boolean,
 null, or absent; null/absent means false. Duplicate `model` or `stream` fields
 are rejected. Known-field errors do not echo client bodies.
 
-Only the raw JSON value of the top-level `model` field is replaced. Every other
-accepted request-body byte is preserved, including whitespace, field order,
-unknown fields, nested objects, and string escapes. Examples include `tools`,
-`extra_body`, `guided_json`, and `stream_options`. Unknown-field semantics are
-left to the upstream; no `stream_options.include_usage` is injected.
+The gateway rewrites only what it must: the raw JSON value of the top-level
+`model` field, and `stream_options.include_usage` for an eligible stream when
+the client did not ask for usage (see control-plane mode). Every other accepted
+request-body byte is preserved, including whitespace, field order, unknown
+fields, nested objects, and string escapes. Examples include `tools`,
+`extra_body`, `guided_json`, and the rest of `stream_options`. Unknown-field
+semantics are left to the upstream.
 
-Responses are not collected or translated: status and remaining end-to-end
-headers are forwarded, with data frames passed through as they arrive. SSE works
-without waiting for the final event. HTTP framing/chunk boundaries are managed
-by hyper; they are not a byte-for-byte wire-format guarantee. Response JSON
-`model` values remain the upstream model, not the public alias.
+Responses are not translated: status and remaining end-to-end headers are
+forwarded, with data frames passed through as they arrive. The only removed SSE
+event is the usage-only chunk the gateway itself requested, and only when the
+client did not ask for it. SSE works without waiting for the final event. HTTP
+framing/chunk boundaries are managed by hyper; they are not a byte-for-byte
+wire-format guarantee. Response JSON `model` values remain the upstream model,
+not the public alias.
 
 ### Headers
 
@@ -281,7 +385,7 @@ shape:
 | 408 | `request_timeout` | Proxied request body exceeded `body_read_timeout_ms`. |
 | 413 | `request_too_large` | Request body exceeds 32 MiB; oversized Content-Length can be rejected before reading it. |
 | 429 | `insufficient_quota` | The key's status is `budget_exceeded`. |
-| 429 | `rate_limit_exceeded` | A rate-limit scope is exhausted; includes `Retry-After`. (Not emitted until limits are enforced.) |
+| 429 | `rate_limit_exceeded` | A rate-limit scope is exhausted; includes `Retry-After`. |
 | 500 | `metrics_error` | Admin metrics encoding failed. |
 | 502 | `upstream_error` | Upstream connection or response-header protocol failure. |
 | 504 | `upstream_timeout` | Upstream response headers did not arrive within `timeout_ms`. |
@@ -316,11 +420,16 @@ the whole process, so counters are never reset by a config change.
 | `lumewarp_config_apply_failures_total` | Counter | `code` (`base_mismatch`, `invalid_config`, `unsupported_feature`, `persist_failed`, `unspecified`) |
 | `lumewarp_config_stream_connected` | Gauge | None; `1` while connected to the control plane. |
 | `lumewarp_usage_events_dropped_total` / `_reported_total` / `_failed_total` | Counter | None |
+| `lumewarp_usage_queue_depth` | Gauge | None; events waiting to be reported. |
+| `lumewarp_usage_capture_total` | Counter | `state` (`unspecified`, `reported`, `missing`, `partial`, `invalid`); metering gaps. |
 | `lumewarp_tokens_total` | Counter | `model`, `team`, `direction` (`input`/`output`) |
 | `lumewarp_spend_total` | Counter | `team`, `project`; USD. |
 
-The config-stream, usage and token/spend series are registered now but only
-move once the control-plane stream and usage reporting land.
+The config-stream series move in control-plane mode; `lumewarp_config_info` is
+set only in standalone mode. Usage event counters and queue depth move in
+control-plane mode. Token and spend series move in both modes whenever the
+upstream reports usage; control-plane mode forces stream usage where the
+upstream supports it.
 
 Label semantics:
 
@@ -417,9 +526,11 @@ when the enable switch is unset.
 On SIGTERM (Unix) or Ctrl-C, both listeners stop accepting, active HTTP
 connections begin graceful shutdown, and in-flight responses can drain for up
 to `shutdown_grace_ms`. At the deadline remaining connection tasks are aborted.
-If OTel is enabled, exporter shutdown/flush follows; the SDK's shutdown timeout
-is 5 seconds. Exporter shutdown failures only warn and do not change an otherwise
-successful exit code.
+In control-plane mode the config stream task is then aborted and the usage
+reporter flushes what is queued for up to 5 seconds. If OTel is enabled,
+exporter shutdown/flush follows; the SDK's shutdown timeout is 5 seconds.
+Exporter shutdown failures only warn and do not change an otherwise successful
+exit code.
 
 For Kubernetes, set `terminationGracePeriodSeconds` **above**
 `shutdown_grace_ms / 1000 + 5`, with extra margin for scheduling and any lifecycle
@@ -427,18 +538,23 @@ hooks. The default drain alone is 25 seconds; a 30-second pod grace period leave
 no margin when an exporter stalls. Also override the default loopback admin bind
 if Prometheus scrapes from outside the pod.
 
-The gateway does not yet implement:
+Listener and timeout settings are read at startup and do not change without a
+restart; in control-plane mode only the config snapshot is hot-swapped. The
+gateway does not yet implement:
 
 - application-level retries, fallback chains, circuit breaking, active upstream
-  health checks, or latency-aware routing;
-- hot reload, gRPC config delivery, or persisted snapshots; restart to change
-  configuration or environment-resolved credentials;
-- token, TPOT, spend, circuit, vLLM-load, or MCP metrics; upstream usage fields
-  pass through without gateway accounting;
+  health checks, or latency/vLLM-load-aware routing (`lowest_latency` is
+  recognized by the schema but rejected by validation);
+- canary or percentage config rollout; publishing and rollback are whole-scope
+  versions driven by the control plane;
+- Redis-backed or global rate limits (limits are local per gateway instance);
+  budgets are eventual and in-flight streams are not cut; usage events are lost
+  when the bounded queue is full or the gateway crashes;
+- TPOT, circuit, vLLM-load or MCP metrics; control-plane SSO/JWT/mTLS client
+  authentication and MCP/A2A proxying (P2);
 - an idle timeout on upstream response bodies after headers (including
   non-stream bodies); `timeout_ms` stops at response headers;
-- rate-limit enforcement, usage reporting, the control-plane config stream and
-  on-disk snapshot boot (P1 work in progress), JWT, or client TLS termination.
+- client TLS termination (terminate it in front of the gateway).
 
 See the [architecture](../docs/architecture.md) for planned capabilities, not a
 statement that those features ship today.

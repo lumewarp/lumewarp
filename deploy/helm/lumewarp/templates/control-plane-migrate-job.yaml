@@ -1,0 +1,59 @@
+{{- if and .Values.controlPlane.enabled .Values.controlPlane.migrate.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "lumewarp.controlPlane.name" . }}-migrate
+  labels:
+    {{- include "lumewarp.controlPlane.labels" . | nindent 4 }}
+  annotations:
+    # The Job must finish before the new control-plane pod starts. On upgrades the old
+    # pod is still running (the Deployment uses Recreate), so plan for a short outage.
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: {{ .Values.controlPlane.migrate.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "lumewarp.controlPlane.selectorLabels" . | nindent 8 }}
+      {{- with .Values.controlPlane.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controlPlane.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "lumewarp.controlPlane.image" . | quote }}
+          imagePullPolicy: {{ .Values.controlPlane.image.pullPolicy }}
+          command:
+            - python
+            - -m
+            - lumewarp_control_plane
+          args:
+            - migrate
+          env:
+            - name: LUMEWARP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "controlPlane.databaseUrl.secretName is required" .Values.controlPlane.databaseUrl.secretName }}
+                  key: {{ .Values.controlPlane.databaseUrl.key }}
+            - name: LUMEWARP_SCOPE
+              value: {{ .Values.controlPlane.scope | quote }}
+          resources:
+            {{- toYaml .Values.controlPlane.resources | nindent 12 }}
+          {{- with .Values.controlPlane.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

@@ -117,7 +117,7 @@ flowchart TB
 
 ## Metrics 與 Alert
 
-gateway 與 control plane 都原生輸出 Prometheus `/metrics` 與 OTLP（metrics + traces）。
+gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control plane 的 metrics 與 OTLP 為後續階段（見「P1 已實作」）。
 
 | 指標 | 標籤 | 用途 |
 | --- | --- | --- |
@@ -134,9 +134,45 @@ gateway 與 control plane 都原生輸出 Prometheus `/metrics` 與 OTLP（metri
 
 ### P0 已實作
 
-目前 gateway 提供 `lumewarp_requests_total`、`lumewarp_request_duration_seconds`、`lumewarp_gateway_overhead_seconds`、`lumewarp_request_body_read_seconds`、`lumewarp_ttft_seconds`、`lumewarp_upstream_errors_total`、`lumewarp_in_flight_requests`、`lumewarp_config_version`（YAML 為 0）與 `lumewarp_config_info`，由獨立 admin listener 的 `/metrics` 輸出；尚無 `team` 標籤、token／TPOT／spend 計量或 OTLP metrics，OTLP traces 為選用。非串流與串流的 overhead 均為「body 讀完 → upstream request 送出」加「upstream headers 收到 → handler 返回」；串流再加第一個 frame 已 ready 到轉交的本地處理時間，不含等待 upstream headers、prefill、後續 body 生成或 client socket flush／ACK。未路由的請求以 body 讀完到 handler 返回近似，未讀 body 則從 request start 計；取消中的 upload 只進 body-read duration，不算 overhead。此為內部處理時間近似，不同於 bench 的 gateway／direct 端到端延遲差值。完整操作、TTFT／body-read 與標籤定義見 [gateway README](../gateway/README.md)。
+P0 當時 gateway 提供 `lumewarp_requests_total`、`lumewarp_request_duration_seconds`、`lumewarp_gateway_overhead_seconds`、`lumewarp_request_body_read_seconds`、`lumewarp_ttft_seconds`、`lumewarp_upstream_errors_total`、`lumewarp_in_flight_requests`、`lumewarp_config_version`（YAML 為 0）與 `lumewarp_config_info`，由獨立 admin listener 的 `/metrics` 輸出；當時尚無 `team` 標籤、token／TPOT／spend 計量或 OTLP metrics，OTLP traces 為選用。P1 新增的指標見下節。非串流與串流的 overhead 均為「body 讀完 → upstream request 送出」加「upstream headers 收到 → handler 返回」；串流再加第一個 frame 已 ready 到轉交的本地處理時間，不含等待 upstream headers、prefill、後續 body 生成或 client socket flush／ACK。未路由的請求以 body 讀完到 handler 返回近似，未讀 body 則從 request start 計；取消中的 upload 只進 body-read duration，不算 overhead。此為內部處理時間近似，不同於 bench 的 gateway／direct 端到端延遲差值。完整操作、TTFT／body-read 與標籤定義見 [gateway README](../gateway/README.md)。
 
-API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 附 Prometheus rules + Grafana dashboard（維運）；control plane 內建預算告警，經 webhook / Slack / Email / PagerDuty（業務），可用 notifier plugin 擴充。每個請求一條 OTel trace，接續 W3C `traceparent`。log 預設不記 prompt/response。
+API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可選 ServiceMonitor；Prometheus rules 與 Grafana dashboard 規劃中（維運）；control plane 內建預算告警，經 webhook / Slack / Email / PagerDuty（業務），可用 notifier plugin 擴充。每個請求一條 OTel trace，接續 W3C `traceparent`。log 預設不記 prompt/response。
+
+## P1 已實作
+
+P1 的 control plane、設定串流、Org/Team/Project 與 Admin UI 第一版已實作；SSO 與進階路由仍屬 P2。以下只列現況，設計內容以上文為準。
+
+**Control plane（`control-plane/`）**
+
+- 單一 Python 程序：FastAPI（HTTP 8091）＋ gRPC（50051）的 ConfigService／UsageService／health，加上 compiler loop、月結 rollover 與 notifier outbox；`/readyz` 檢查 DB、migration head 與背景服務，`/healthz` 為 liveness，gRPC 意外停止會讓程序結束。
+- Postgres schema 由 Alembic 管理（單一 scope）；bootstrap token（安裝層 superuser）與每人 PAT，RBAC 為 Owner／Admin／Member／Viewer。
+- REST `/api/v1`：org／team／project／key（含撤銷）、預算／限流／模型 allowlist、upstream／deployment／route（含價格）、使用者與 membership、usage 聚合、audit、gateway 狀態與 token、config versions 與 routing rollback。
+- 設定發布：寫入交易內同時寫 outbox；compiler 以 advisory lock 序列化，產生不可變版本快照；gRPC 串流支援全量／delta、digest、ACK／NACK、base mismatch 重送全量、壞版本隔離與 persist 重試，舊版 payload 依保留策略壓縮。
+- 用量與預算：`UsageService.Report` 以 `request_id` 冪等寫入，同一交易累計 key／project／team／org 的 UTC 月總額並評估預算；超額把 key 翻成 `BUDGET_EXCEEDED` 並推新版本（eventual，約 5 秒內；不切斷進行中的串流）。soft limit 走 notifier outbox（內建 webhook，可換 plugin）。
+- Plugin：`lumewarp.router`（編譯期調整 deployment 權重，2 秒逾時，非法輸出整批丟棄）與 `lumewarp.notifier`（outbox 投遞）已接上；`lumewarp.auth` 只有 protocol，P1 不呼叫。
+- Admin UI：Vite 靜態檔由 control plane 掛在 `/`，登入用 bootstrap token 或 PAT；API 文件在 `/docs`，OpenAPI 可離線輸出。UI 沒 build 時只有 API。
+
+**Gateway（`gateway/`）**
+
+- 新增 control-plane 模式：`--control-plane`、`--gateway-token-env`、`--state-dir`、`--scope`、`--gateway-id`、`--local-config`；standalone YAML 模式不變。
+- 開機先載入 `<state-dir>/snapshot.pb`（驗證 scope、長度與結尾 SHA-256）並立即服務，再背景連線；沒有可用快照時 `/v1/*` 與 `/readyz` 回 503，不會退回 open router。每次套用先持久化再 swap 再 ACK，重啟可回到最後 ACK 的版本。
+- CP 模式一律要求 key；status／expiry／allowlist 與預算狀態照舊（401／403／429）。rpm、tpm、max_parallel 在每個 gateway 行程本機累計（N 個實例可有 N 倍上限），429 帶 `Retry-After`。
+- 用量：串流在上游支援時注入 `stream_options.include_usage`，客戶端沒要求時剝除多出的 usage chunk；事件經有界佇列（100k）每 1 秒或 500 筆批次送出，滿了就丟並計數；token／spend 指標與 `deployment.price` 成本換算已接上。
+- 指標：config stream 連線／版本／NACK code、usage 佇列與 capture 狀態、tokens／spend 皆已輸出；`/metrics` 仍在 admin listener。
+
+**部署**
+
+- `deploy/helm/lumewarp`：control plane 與 gateway 的 Deployment／Service、DB URL 與 gateway token 的既有 Secret 參照、`/readyz`＋`/healthz` probes、gateway state dir（emptyDir 預設、PVC 選用）、migration hook Job、可選 ServiceMonitor。
+- `deploy/dev/compose.yaml` 提供本機 Postgres 16。
+
+**尚未包含（延後）**
+
+- OIDC／SSO、JWT／mTLS 用戶端認證、SCIM、auth plugin 執行（P2）。
+- 跨 gateway 的共享限流（Redis 對帳）、ClickHouse、control plane 的 Prometheus `/metrics` 與 OTLP metrics／traces；gateway 只有選用的 OTLP traces，沒有 metrics exporter。
+- Canary／百分比切流、vLLM 負載感知與最低延遲路由、fallback／retry／circuit breaker、主動健康檢查。
+- 預算為 eventual；佇列滿或 gateway 重啟會遺失用量事件，進行中的串流不會因超額被切斷；月窗口固定為 UTC 日曆月。
+- MCP／A2A 代理與其稽核、工具權限。
+- repo 內尚無正式 container image 建置（Dockerfile）；Helm chart 假設映像已建好。
 
 ## 效能目標（尚未實測）
 

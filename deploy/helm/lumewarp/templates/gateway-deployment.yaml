@@ -1,0 +1,156 @@
+{{- if .Values.gateway.enabled }}
+{{- $persistence := .Values.gateway.stateDir.persistence }}
+{{- if and $persistence.enabled (not $persistence.existingClaim) (gt (int .Values.gateway.replicaCount) 1) (not (has "ReadWriteMany" $persistence.accessModes)) }}
+{{- fail "gateway.stateDir.persistence with more than one replica needs a ReadWriteMany claim (or existingClaim); otherwise set gateway.replicaCount=1" }}
+{{- end }}
+{{- if not (hasSuffix (printf ":%v" .Values.gateway.service.port) .Values.gateway.server.listen) }}
+{{- fail "gateway.server.listen must end with gateway.service.port; the Service and probes use the named container ports" }}
+{{- end }}
+{{- if not (hasSuffix (printf ":%v" .Values.gateway.service.adminPort) .Values.gateway.server.adminListen) }}
+{{- fail "gateway.server.adminListen must end with gateway.service.adminPort; the Service and probes use the named container ports" }}
+{{- end }}
+{{- $controlPlaneUrl := .Values.gateway.controlPlaneUrl }}
+{{- if not $controlPlaneUrl }}
+{{- if not .Values.controlPlane.enabled }}
+{{- fail "gateway.controlPlaneUrl is required when controlPlane.enabled=false" }}
+{{- end }}
+{{- $scheme := ternary "https" "http" .Values.controlPlane.grpcTls.enabled }}
+{{- $controlPlaneUrl = printf "%s://%s:%v" $scheme (include "lumewarp.controlPlane.name" .) .Values.controlPlane.service.grpcPort }}
+{{- end }}
+{{- $scope := default .Values.controlPlane.scope .Values.gateway.scope }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lumewarp.gateway.name" . }}
+  labels:
+    {{- include "lumewarp.gateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicaCount }}
+  {{- if $persistence.enabled }}
+  # A ReadWriteOnce claim cannot be attached to two pods; restart instead of rolling.
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "lumewarp.gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lumewarp.gateway.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/gateway-configmap.yaml") . | sha256sum }}
+        {{- with .Values.gateway.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds }}
+      containers:
+        - name: gateway
+          image: {{ include "lumewarp.gateway.image" . | quote }}
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          # The image must put the gateway binary on PATH.
+          command:
+            - lumewarp
+          args:
+            - --control-plane=$(LUMEWARP_CONTROL_PLANE_URL)
+            - --gateway-token-env={{ required "gateway.tokenEnvVar is required" .Values.gateway.tokenEnvVar }}
+            - --state-dir={{ .Values.gateway.stateDir.path }}
+            - --scope=$(LUMEWARP_SCOPE)
+            {{- if .Values.gateway.gatewayId }}
+            - --gateway-id={{ .Values.gateway.gatewayId }}
+            {{- else }}
+            - --gateway-id=$(POD_NAME)
+            {{- end }}
+            - --local-config=/etc/lumewarp/config.yaml
+            {{- with .Values.gateway.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.gateway.service.port }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ .Values.gateway.service.adminPort }}
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: LUMEWARP_CONTROL_PLANE_URL
+              value: {{ $controlPlaneUrl | quote }}
+            - name: LUMEWARP_SCOPE
+              value: {{ $scope | quote }}
+            - name: {{ .Values.gateway.tokenEnvVar }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "gateway.token.secretName is required" .Values.gateway.token.secretName }}
+                  key: {{ .Values.gateway.token.key }}
+            {{- with .Values.gateway.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # /readyz is 503 until a valid snapshot is loaded (cold boot with the control
+          # plane unreachable) or after a rejected snapshot. Liveness stays 200 so the
+          # pod is not restarted for being unready.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: admin
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          {{- with .Values.gateway.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/lumewarp
+              readOnly: true
+            - name: state
+              mountPath: {{ .Values.gateway.stateDir.path }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "lumewarp.gateway.name" . }}-config
+        - name: state
+          {{- if $persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-state" (include "lumewarp.gateway.name" .)) $persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.gateway.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.gateway.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

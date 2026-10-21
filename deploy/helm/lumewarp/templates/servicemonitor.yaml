@@ -1,0 +1,25 @@
+{{- if .Values.serviceMonitor.enabled }}
+{{- if not .Values.gateway.enabled }}
+{{- fail "serviceMonitor.enabled requires gateway.enabled=true; the control plane has no Prometheus endpoint in P1" }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "lumewarp.gateway.name" . }}
+  labels:
+    {{- include "lumewarp.gateway.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "lumewarp.gateway.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: admin
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+      {{- with .Values.serviceMonitor.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+{{- end }}

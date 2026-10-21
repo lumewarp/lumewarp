@@ -1,0 +1,138 @@
+{{- if .Values.controlPlane.enabled }}
+{{- if ne (int .Values.controlPlane.replicaCount) 1 }}
+{{- fail "controlPlane.replicaCount must be 1 in P1; the compiler and background loops are single-process" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lumewarp.controlPlane.name" . }}
+  labels:
+    {{- include "lumewarp.controlPlane.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.controlPlane.replicaCount }}
+  # One writer: the compiler, rollover scheduler and notifier loop must not run in
+  # two pods. Recreate avoids overlap during upgrades.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "lumewarp.controlPlane.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lumewarp.controlPlane.selectorLabels" . | nindent 8 }}
+      {{- with .Values.controlPlane.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controlPlane.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.controlPlane.terminationGracePeriodSeconds }}
+      containers:
+        - name: control-plane
+          image: {{ include "lumewarp.controlPlane.image" . | quote }}
+          imagePullPolicy: {{ .Values.controlPlane.image.pullPolicy }}
+          command:
+            - python
+            - -m
+            - lumewarp_control_plane
+          args:
+            - serve
+            {{- with .Values.controlPlane.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.controlPlane.service.httpPort }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.controlPlane.service.grpcPort }}
+              protocol: TCP
+          env:
+            - name: LUMEWARP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "controlPlane.databaseUrl.secretName is required" .Values.controlPlane.databaseUrl.secretName }}
+                  key: {{ .Values.controlPlane.databaseUrl.key }}
+            - name: LUMEWARP_HTTP_BIND
+              value: "0.0.0.0:{{ .Values.controlPlane.service.httpPort }}"
+            - name: LUMEWARP_GRPC_BIND
+              value: "0.0.0.0:{{ .Values.controlPlane.service.grpcPort }}"
+            - name: LUMEWARP_SCOPE
+              value: {{ .Values.controlPlane.scope | quote }}
+            {{- if .Values.controlPlane.bootstrapToken.secretName }}
+            - name: LUMEWARP_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.controlPlane.bootstrapToken.secretName }}
+                  key: {{ .Values.controlPlane.bootstrapToken.key }}
+            {{- end }}
+            {{- if .Values.controlPlane.grpcTls.enabled }}
+            - name: LUMEWARP_GRPC_TLS_CERT_FILE
+              value: /etc/lumewarp/tls/{{ .Values.controlPlane.grpcTls.certKey }}
+            - name: LUMEWARP_GRPC_TLS_KEY_FILE
+              value: /etc/lumewarp/tls/{{ .Values.controlPlane.grpcTls.keyKey }}
+            {{- end }}
+            {{- with .Values.controlPlane.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.controlPlane.resources | nindent 12 }}
+          {{- with .Values.controlPlane.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.controlPlane.grpcTls.enabled }}
+          volumeMounts:
+            - name: grpc-tls
+              mountPath: /etc/lumewarp/tls
+              readOnly: true
+          {{- end }}
+      {{- if .Values.controlPlane.grpcTls.enabled }}
+      volumes:
+        - name: grpc-tls
+          secret:
+            secretName: {{ required "controlPlane.grpcTls.secretName is required when grpcTls.enabled" .Values.controlPlane.grpcTls.secretName }}
+            items:
+              - key: {{ .Values.controlPlane.grpcTls.certKey }}
+                path: {{ .Values.controlPlane.grpcTls.certKey }}
+              - key: {{ .Values.controlPlane.grpcTls.keyKey }}
+                path: {{ .Values.controlPlane.grpcTls.keyKey }}
+      {{- end }}
+      {{- with .Values.controlPlane.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controlPlane.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controlPlane.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

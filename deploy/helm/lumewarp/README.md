@@ -1,0 +1,145 @@
+# Lumewarp Helm chart
+
+Deploys the Lumewarp control plane and Rust gateway. The control plane owns Postgres,
+compiles versioned config snapshots and serves the Admin UI; the gateway follows the
+config stream, keeps the last ACKed snapshot on a local volume and never calls the
+control plane from the request path.
+
+Design: [`docs/architecture.md`](../../../docs/architecture.md). Stream and boot
+semantics: [`docs/config-protocol.md`](../../../docs/config-protocol.md).
+
+## Prerequisites
+
+- Kubernetes 1.25+ and Helm 3.
+- A reachable PostgreSQL 16+ database and a Secret containing its SQLAlchemy async URL
+  (`postgresql+asyncpg://user:password@host:5432/db`).
+- Container images for both components. **This repository does not contain Dockerfiles
+  yet**; build and push images yourself and set the repositories/tags in `values.yaml`.
+  - Gateway image: the `lumewarp` binary on `PATH`.
+  - Control-plane image: the `lumewarp_control_plane` Python package installed for
+    `python -m lumewarp_control_plane`; include the built Admin UI
+    (`cd ui && pnpm build:cp`) if the UI should be served at `/`.
+
+## Install
+
+Create the database secret first:
+
+```sh
+kubectl create namespace lumewarp
+kubectl -n lumewarp create secret generic lumewarp-control-plane \
+  --from-literal=database-url='postgresql+asyncpg://lumewarp:secret@postgres.example:5432/lumewarp'
+```
+
+The control plane creates gateway tokens itself, so a fresh install has no gateway token
+yet. Install the control plane first, bootstrap a token, then enable the gateway:
+
+```sh
+helm install lumewarp deploy/helm/lumewarp -n lumewarp \
+  --set gateway.enabled=false
+
+# Optional: the pre-install hook Job ran `migrate`. Create a gateway token:
+kubectl -n lumewarp exec deploy/lumewarp-control-plane -- \
+  python -m lumewarp_control_plane bootstrap --gateway-id gw-1
+
+kubectl -n lumewarp create secret generic lumewarp-gateway \
+  --from-literal=token='lwg-...'
+
+helm upgrade lumewarp deploy/helm/lumewarp -n lumewarp \
+  --reuse-values --set gateway.enabled=true
+```
+
+Alternatively set `controlPlane.bootstrapToken.secretName` to an existing Secret holding
+`LUMEWARP_BOOTSTRAP_TOKEN` for UI/API superuser access. It does not replace the first
+`bootstrap` call: that command also creates the scope row, and gateway tokens can only be
+created after the scope exists.
+
+`controlPlane.databaseUrl.secretName` defaults to `lumewarp-control-plane` and
+`gateway.token.secretName` to `lumewarp-gateway`; both must exist before the respective
+pods start.
+
+## What gets deployed
+
+| Object | Notes |
+| --- | --- |
+| Control-plane Deployment | One replica. Runs the HTTP API + UI, gRPC ConfigService/UsageService, compiler loop, monthly rollover and notifier loop. `strategy: Recreate`. |
+| Control-plane Service | `http` (8091) and `grpc` (50051) ports. |
+| Migration Job | Helm `pre-install,pre-upgrade` hook running `python -m lumewarp_control_plane migrate` with the database Secret. |
+| Gateway Deployment | `replicaCount` replicas (default 2). Boots from its state volume, then follows the config stream; `/readyz` stays 503 until a snapshot is loaded. |
+| Gateway Service | `http` (4000) and `admin` (9464, `/metrics` + `/readyz`) ports. |
+| Gateway state PVC | Only when `gateway.stateDir.persistence.enabled=true`; otherwise an `emptyDir` per pod. |
+| ServiceMonitor | Optional, gateway admin port only. Requires the Prometheus Operator CRDs. |
+
+Readiness/liveness:
+
+- Control plane: `/readyz` requires a reachable database, migrations at head and live
+  gRPC/compiler/rollover/notifier tasks; `/healthz` is liveness.
+- Gateway: `/readyz` on the admin port requires a loaded snapshot; `/healthz` stays
+  healthy during a control-plane outage so Kubernetes does not restart a gateway that is
+  correctly serving its cached config.
+
+## Important P1 limits
+
+- **Control plane replicas must stay at 1.** The compiler, rollover scheduler and
+  notifier loop are single-process; the chart uses `Recreate`.
+- **Migration is a pre-upgrade hook.** The old control-plane pod is still running while
+  the schema migrates (Rolling/Recreate), so expect a short outage window on upgrades.
+- **Gateway state is per pod.** With the default `emptyDir`, a new pod has no cache and
+  returns 503 on `/readyz` and `/v1/*` until the first full snapshot arrives. With a
+  `ReadWriteOnce` PVC, keep `gateway.replicaCount=1`; the chart refuses to render more
+  than one replica unless the access modes include `ReadWriteMany`. If the gateway image
+  runs as non-root, set `gateway.podSecurityContext.fsGroup` so the PVC is writable.
+- **gRPC is plaintext by default.** Set `controlPlane.grpcTls.enabled` to terminate TLS on
+  the control-plane listener, but note that the gateway verifies with the WebPKI root
+  store only; a private CA must be added to the gateway image. Inside a trusted cluster,
+  plaintext plus NetworkPolicy is the simple option.
+- **Budgets are eventual.** A key can exceed its budget briefly while usage batches are in
+  flight; in-flight streams are not cut. Usage events are dropped when the gateway's
+  bounded queue is full.
+- **The control plane has no Prometheus endpoint in P1.** `serviceMonitor` scrapes only
+  the gateway.
+
+## Values
+
+Common values (see [`values.yaml`](values.yaml) for the complete list):
+
+| Value | Default | Meaning |
+| --- | --- | --- |
+| `controlPlane.enabled` | `true` | Deploy the control plane. |
+| `controlPlane.replicaCount` | `1` | Must stay 1 in P1. |
+| `controlPlane.image.repository` / `.tag` | `ghcr.io/lumewarp/lumewarp-control-plane` / chart appVersion | Control-plane image. |
+| `controlPlane.databaseUrl.secretName` / `.key` | `lumewarp-control-plane` / `database-url` | Existing Secret with `LUMEWARP_DATABASE_URL`. |
+| `controlPlane.bootstrapToken.secretName` / `.key` | unset / `bootstrap-token` | Optional `LUMEWARP_BOOTSTRAP_TOKEN`. |
+| `controlPlane.scope` | `default` | Config scope published to gateways. |
+| `controlPlane.service.httpPort` / `.grpcPort` | `8091` / `50051` | Service and container ports. |
+| `controlPlane.grpcTls.enabled` | `false` | Serve gateway gRPC over TLS from a Secret. |
+| `controlPlane.migrate.enabled` | `true` | Run the migration hook Job. |
+| `gateway.enabled` | `true` | Deploy the gateway. |
+| `gateway.replicaCount` | `2` | Number of gateway pods. |
+| `gateway.image.repository` / `.tag` | `ghcr.io/lumewarp/lumewarp-gateway` / chart appVersion | Gateway image. |
+| `gateway.token.secretName` / `.key` | `lumewarp-gateway` / `token` | Existing Secret with a control-plane-created gateway token. |
+| `gateway.controlPlaneUrl` | empty | Defaults to the control-plane Service gRPC URL in this namespace. |
+| `gateway.scope` | empty | Defaults to `controlPlane.scope`. |
+| `gateway.gatewayId` | empty | Defaults to the pod name. |
+| `gateway.stateDir.path` | `/var/lib/lumewarp` | Snapshot directory. |
+| `gateway.stateDir.persistence.enabled` | `false` | Use a PVC instead of `emptyDir`. |
+| `gateway.stateDir.persistence.existingClaim` | empty | Use an existing claim. |
+| `gateway.server.*` | see values | `server:` block of the gateway's local YAML (listeners/timeouts). `adminListen` must be reachable by probes. |
+| `serviceMonitor.enabled` | `false` | Render a ServiceMonitor for the gateway admin port. |
+| `serviceMonitor.labels` | `{}` | Extra labels so your Prometheus selects the ServiceMonitor. |
+
+All pods honour `nodeSelector`, `tolerations`, `affinity`, `resources`,
+`podSecurityContext`, `securityContext`, `extraEnv` and `extraArgs` (per component), plus
+global `imagePullSecrets`, `nameOverride`, `fullnameOverride` and `commonLabels`.
+
+## Verify a release
+
+```sh
+helm lint deploy/helm/lumewarp
+helm template lumewarp deploy/helm/lumewarp -n lumewarp \
+  --set controlPlane.databaseUrl.secretName=db \
+  --set gateway.token.secretName=gw
+```
+
+`kubectl port-forward svc/lumewarp-control-plane 8091:8091` reaches the UI/API; probe the
+gateway with `kubectl port-forward svc/lumewarp-gateway 4000:4000` and
+`curl localhost:4000/healthz`.

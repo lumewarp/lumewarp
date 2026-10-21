@@ -1,6 +1,14 @@
 apiVersion: v2
 name: lumewarp
-description: Lumewarp LLM gateway
+description: Lumewarp LLM gateway (control plane + Rust data plane)
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+keywords:
+  - llm
+  - gateway
+  - openai
+  - vllm
+sources:
+  - https://github.com/lumewarp/lumewarp

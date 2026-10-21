@@ -1,0 +1,37 @@
+Lumewarp has been installed in namespace {{ .Release.Namespace }}.
+
+{{- if .Values.controlPlane.enabled }}
+
+Control plane
+  UI / API:  http://{{ include "lumewarp.controlPlane.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.controlPlane.service.httpPort }}/
+  API base:  http://{{ include "lumewarp.controlPlane.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.controlPlane.service.httpPort }}/api/v1
+  OpenAPI:   http://{{ include "lumewarp.controlPlane.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.controlPlane.service.httpPort }}/docs
+  gRPC:      {{ include "lumewarp.controlPlane.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.controlPlane.service.grpcPort }}
+
+  Log in at / with a personal access token, or with the installation bootstrap token
+  from `controlPlane.bootstrapToken` if it is configured.
+{{- end }}
+
+{{- if .Values.gateway.enabled }}
+
+Gateway
+  API:       http://{{ include "lumewarp.gateway.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.gateway.service.port }}/v1
+  Metrics:   http://{{ include "lumewarp.gateway.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.gateway.service.adminPort }}/metrics
+
+  The gateway needs a token created by the control plane (`lwg-...`) in Secret
+  {{ .Values.gateway.token.secretName | quote }} key {{ .Values.gateway.token.key | quote }}.
+  {{- if .Values.controlPlane.enabled }}
+  If the pods are waiting, create the Secret and restart the Deployment:
+    kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "lumewarp.controlPlane.name" . }} -- \
+      python -m lumewarp_control_plane bootstrap --gateway-id gw-1
+    kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.gateway.token.secretName }} \
+      --from-literal={{ .Values.gateway.token.key }}="<the printed lwg-... token>"
+    kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ include "lumewarp.gateway.name" . }}
+  {{- else }}
+  Create that Secret from a token issued by the external control plane, then restart the
+  Deployment if needed.
+  {{- end }}
+{{- else }}
+
+The gateway is disabled (`gateway.enabled=false`).
+{{- end }}

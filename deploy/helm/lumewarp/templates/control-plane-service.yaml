@@ -1,0 +1,21 @@
+{{- if .Values.controlPlane.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lumewarp.controlPlane.name" . }}
+  labels:
+    {{- include "lumewarp.controlPlane.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.controlPlane.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.controlPlane.service.httpPort }}
+      targetPort: http
+      protocol: TCP
+    - name: grpc
+      port: {{ .Values.controlPlane.service.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+  selector:
+    {{- include "lumewarp.controlPlane.selectorLabels" . | nindent 4 }}
+{{- end }}

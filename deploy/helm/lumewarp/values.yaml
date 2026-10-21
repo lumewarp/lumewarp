@@ -1,3 +1,144 @@
-# Populated as the gateway and control plane gain deployable images.
+# Default values for the lumewarp chart.
+#
+# The chart deploys two components:
+#   - controlPlane: FastAPI HTTP API + Admin UI, gRPC config/usage services, config
+#     compiler, budget rollover scheduler and notifier loop.
+#   - gateway: Rust data plane. Each replica follows the control-plane config stream and
+#     keeps its last ACKed snapshot on a local state volume.
+#
+# Images are not built by this chart. Build and push them, then set
+# image.repository and image.tag. The gateway image must contain the `lumewarp` binary;
+# the control-plane image must contain the `lumewarp_control_plane` Python package (and
+# the built Admin UI if it should be served at /).
+
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+commonLabels: {}
+
+controlPlane:
+  enabled: true
+  # The gRPC server, compiler loop, rollover scheduler and notifier loop must run
+  # exactly once per installation. P1 does not support scaling this Deployment.
+  replicaCount: 1
+  image:
+    repository: ghcr.io/lumewarp/lumewarp-control-plane
+    # Empty = .Chart.AppVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+  # Existing Secret holding the SQLAlchemy async URL, e.g.
+  # postgresql+asyncpg://user:password@postgres:5432/lumewarp
+  databaseUrl:
+    secretName: lumewarp-control-plane
+    key: database-url
+  # Optional existing Secret holding LUMEWARP_BOOTSTRAP_TOKEN (installation superuser).
+  # Without it, log in with a personal access token created out of band.
+  bootstrapToken:
+    secretName: ""
+    key: bootstrap-token
+  # Snapshot scope this installation publishes; gateways must use the same value.
+  scope: default
+  service:
+    type: ClusterIP
+    httpPort: 8091
+    grpcPort: 50051
+  # Optional TLS for the gateway-facing gRPC listener. Both files are read from one
+  # Secret. The gateway verifies with the WebPKI root store, so a private CA certificate
+  # will not work unless that CA is installed in the gateway image. When enabled and
+  # gateway.controlPlaneUrl is empty, the gateway URL defaults to https://.
+  grpcTls:
+    enabled: false
+    secretName: ""
+    certKey: tls.crt
+    keyKey: tls.key
+  # Run `python -m lumewarp_control_plane migrate` as a pre-install/pre-upgrade Job.
+  # Requires the database to exist and be reachable when Helm installs the release.
+  migrate:
+    enabled: true
+    backoffLimit: 3
+  podAnnotations: {}
+  podSecurityContext: {}
+  securityContext: {}
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraEnv: []
+  extraArgs: []
+  # Readiness drains background services; uvicorn allows about 10 s of graceful shutdown.
+  terminationGracePeriodSeconds: 20
+
 gateway:
-  replicas: 2
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: ghcr.io/lumewarp/lumewarp-gateway
+    tag: ""
+    pullPolicy: IfNotPresent
+  # Existing Secret holding a gateway token created by the control plane (`lwg-...`).
+  # See the chart README for the bootstrap order.
+  token:
+    secretName: lumewarp-gateway
+    key: token
+  # Environment variable that carries the token to the gateway. The token is never
+  # written to the state volume.
+  tokenEnvVar: LUMEWARP_GATEWAY_TOKEN
+  # Empty = http://<control-plane Service>:<controlPlane.service.grpcPort> in this namespace.
+  controlPlaneUrl: ""
+  # Empty = controlPlane.scope.
+  scope: ""
+  # Empty = the pod name, so every replica has its own gateway identity.
+  gatewayId: ""
+  # Local listener settings. Only the `server:` block is used in control-plane mode.
+  # adminListen must be reachable from the kubelet for /readyz and /metrics probes.
+  server:
+    listen: "0.0.0.0:4000"
+    adminListen: "0.0.0.0:9464"
+    shutdownGraceMs: 25000
+    headerReadTimeoutMs: 30000
+    bodyReadTimeoutMs: 30000
+  stateDir:
+    path: /var/lib/lumewarp
+    # emptyDir is the default, so a replica without a cached snapshot cold-boots from
+    # the control plane. Enable persistence for PVC-backed snapshots.
+    persistence:
+      enabled: false
+      # Use an existing claim instead of creating one. With a ReadWriteOnce claim,
+      # keep replicaCount at 1.
+      existingClaim: ""
+      storageClass: ""
+      accessModes:
+        - ReadWriteOnce
+      size: 1Gi
+      # For example {helm.sh/resource-policy: keep} to survive `helm uninstall`.
+      annotations: {}
+  service:
+    type: ClusterIP
+    port: 4000
+    adminPort: 9464
+  # Must exceed server.shutdownGraceMs / 1000 + 5 s (OTLP exporter shutdown) + margin.
+  terminationGracePeriodSeconds: 35
+  podAnnotations: {}
+  podSecurityContext: {}
+  securityContext: {}
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraEnv: []
+  extraArgs: []
+
+serviceMonitor:
+  # Requires the Prometheus Operator CRDs. Scrapes the gateway admin listener only; the
+  # control plane does not expose a Prometheus endpoint in P1.
+  enabled: false
+  interval: 30s
+  scrapeTimeout: ""
+  labels: {}
