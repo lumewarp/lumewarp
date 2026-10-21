@@ -81,6 +81,36 @@ impl From<AuthError> for Response<ProxyBody> {
     }
 }
 
+/// A failed `authenticate`. `key` is set when the bearer matched a known key
+/// that was rejected (expired, revoked, suspended → 401; budget → 429), so
+/// the caller can report a REJECTED usage event; it is `None` for missing,
+/// malformed or unknown keys, which are never reported.
+pub struct AuthRejection {
+    pub error: AuthError,
+    pub key: Option<Arc<KeyContext>>,
+}
+
+impl std::fmt::Debug for AuthRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthRejection")
+            .field("error", &self.error)
+            .field("key_id", &self.key.as_ref().map(|key| &key.key_id))
+            .finish()
+    }
+}
+
+impl From<AuthError> for AuthRejection {
+    fn from(error: AuthError) -> Self {
+        Self { error, key: None }
+    }
+}
+
+impl From<AuthRejection> for Response<ProxyBody> {
+    fn from(rejection: AuthRejection) -> Self {
+        rejection.error.into()
+    }
+}
+
 fn bearer(headers: &HeaderMap) -> Option<&str> {
     let mut values = headers.get_all(header::AUTHORIZATION).iter();
     let value = values.next()?;
@@ -94,22 +124,26 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 
 /// One sha256 and one map lookup; no allocation besides the `Arc` clone.
 /// Expiry uses the coarse clock (an atomic load, at most a few ms stale).
-pub fn authenticate(router: &Router, headers: &HeaderMap) -> Result<Caller, AuthError> {
+pub fn authenticate(router: &Router, headers: &HeaderMap) -> Result<Caller, AuthRejection> {
     if router.auth_mode == AuthMode::Open {
         return Ok(Caller::Anonymous);
     }
     let key = bearer(headers).ok_or(AuthError::InvalidApiKey)?;
     let hash: [u8; 32] = Sha256::digest(key.as_bytes()).into();
     let key = router.keys.get(&hash).ok_or(AuthError::InvalidApiKey)?;
+    let reject = |error| AuthRejection {
+        error,
+        key: Some(key.clone()),
+    };
     // Lifecycle and expiry take priority over quota.
     if key.expires_at_ms != 0 && clock::unix_ms() >= key.expires_at_ms {
-        return Err(AuthError::InvalidApiKey);
+        return Err(reject(AuthError::InvalidApiKey));
     }
     match key.status {
         KeyStatus::Active => Ok(Caller::Key(key.clone())),
-        KeyStatus::BudgetExceeded => Err(AuthError::InsufficientQuota),
+        KeyStatus::BudgetExceeded => Err(reject(AuthError::InsufficientQuota)),
         KeyStatus::Revoked | KeyStatus::Suspended | KeyStatus::Unspecified => {
-            Err(AuthError::InvalidApiKey)
+            Err(reject(AuthError::InvalidApiKey))
         }
     }
 }
@@ -133,6 +167,11 @@ mod tests {
     };
     use lumewarp_proto::config::v1 as pb;
 
+    /// The error of a failed authentication, `None` on success.
+    fn err(result: Result<Caller, AuthRejection>) -> Option<AuthError> {
+        result.err().map(|rejection| rejection.error)
+    }
+
     fn headers(value: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, value.parse().unwrap());
@@ -146,13 +185,13 @@ mod tests {
     #[test]
     fn bearer_parsing() {
         let router = router(&base(), AuthMode::RequireKey);
-        assert!(matches!(
-            authenticate(&router, &HeaderMap::new()),
-            Err(AuthError::InvalidApiKey)
-        ));
+        assert_eq!(
+            err(authenticate(&router, &HeaderMap::new())),
+            Some(AuthError::InvalidApiKey)
+        );
         for bad in ["Bearer wrong", "Basic s1", "Bearer ", "s1"] {
             assert_eq!(
-                authenticate(&router, &headers(bad)).err(),
+                err(authenticate(&router, &headers(bad))),
                 Some(AuthError::InvalidApiKey),
                 "{bad}"
             );
@@ -163,7 +202,7 @@ mod tests {
         let mut duplicate = headers("Bearer s1");
         duplicate.append(header::AUTHORIZATION, "Bearer s1".parse().unwrap());
         assert_eq!(
-            authenticate(&router, &duplicate).err(),
+            err(authenticate(&router, &duplicate)),
             Some(AuthError::InvalidApiKey)
         );
     }
@@ -181,7 +220,7 @@ mod tests {
         let closed = router(&s, AuthMode::RequireKey);
         for h in [HeaderMap::new(), headers("Bearer s1"), headers("Bearer ")] {
             assert_eq!(
-                authenticate(&closed, &h).err(),
+                err(authenticate(&closed, &h)),
                 Some(AuthError::InvalidApiKey)
             );
         }
@@ -211,10 +250,22 @@ mod tests {
         });
         let router = router(&s, AuthMode::RequireKey);
         let auth = |secret: &str| authenticate(&router, &headers(&format!("Bearer {secret}")));
+        let rejected_key = |secret: &str| auth(secret).err().unwrap().key.map(|k| k.key_id.clone());
         for id in ["revoked", "suspended", "expired", "expired-budget"] {
-            assert_eq!(auth(id).err(), Some(AuthError::InvalidApiKey), "{id}");
+            assert_eq!(err(auth(id)), Some(AuthError::InvalidApiKey), "{id}");
         }
-        assert_eq!(auth("budget").err(), Some(AuthError::InsufficientQuota));
+        assert_eq!(err(auth("budget")), Some(AuthError::InsufficientQuota));
+        // Known-but-rejected keys carry their context; unknown keys do not.
+        for id in [
+            "revoked",
+            "suspended",
+            "expired",
+            "expired-budget",
+            "budget",
+        ] {
+            assert_eq!(rejected_key(id).as_deref(), Some(id));
+        }
+        assert!(rejected_key("unknown").is_none());
         let future = auth("future").unwrap();
         assert!(check_model(&future, "m1").is_ok());
         assert_eq!(

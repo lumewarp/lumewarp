@@ -67,7 +67,7 @@ pub(crate) mod test_alloc {
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Context;
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use clap::Parser;
 use lumewarp_config::{AuthMode, Config};
 use sha2::{Digest, Sha256};
@@ -94,8 +94,8 @@ async fn main() -> anyhow::Result<()> {
         .metrics
         .set_yaml_hash(&hex::encode(Sha256::digest(yaml.as_bytes()))[..12]);
     runtime.metrics.config_applied(router.version);
-    let snapshot = Arc::new(ArcSwap::from_pointee(router));
-    let result = server::serve(&settings, snapshot, telemetry.is_some()).await;
+    let snapshot = Arc::new(ArcSwapOption::from_pointee(router));
+    let result = server::serve(&settings, snapshot, runtime, telemetry.is_some()).await;
     if let Some(provider) = telemetry {
         match tokio::task::spawn_blocking(move || provider.shutdown()).await {
             Ok(Ok(())) => {}

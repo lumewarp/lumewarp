@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Context;
-use arc_swap::{ArcSwap, ArcSwapOption};
+use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use hyper::{
     body::Incoming, header, server::conn::http1, service::service_fn, Method, Request, Response,
@@ -19,44 +19,32 @@ use crate::{
     auth, error,
     metrics::{self, HandleKey, Observation, ROUTES},
     proxy::{self, full_body, ProxyBody, UpstreamClient},
-    router::Router,
+    router::{KeyContext, Router},
     runtime::Runtime,
     telemetry,
+    usage::{RequestCtx, UsageEvent},
 };
-
-/// Standalone handle: a router is always present.
-pub type Snapshot = Arc<ArcSwap<Router>>;
 
 /// The active router, absent until the first snapshot is applied (control-
 /// plane cold boot without an on-disk snapshot). The config stream stores
-/// into it; every request loads it exactly once.
-pub type RouterSlot = Arc<ArcSwapOption<Router>>;
+/// into it; every request loads it exactly once, so a request in progress
+/// keeps the router it started with across swaps.
+pub type Snapshot = Arc<ArcSwapOption<Router>>;
 
 /// Readiness: a router is loaded. Without one, `/v1/*` returns 503
-/// `not_ready` and the admin `/readyz` returns 503; nothing falls back to an
-/// open router.
+/// `not_ready` (before authentication) and the admin `/readyz` returns 503;
+/// nothing falls back to an open router.
 #[allow(dead_code)] // For the control-plane boot path (G2).
-pub fn ready(slot: &RouterSlot) -> bool {
-    slot.load().is_some()
+pub fn ready(snapshot: &Snapshot) -> bool {
+    snapshot.load().is_some()
 }
 
-/// Standalone entry point: serves a router that is always present.
+/// Serves whatever router `snapshot` holds. `runtime` is the process-lifetime
+/// state (metrics, limiters, usage sink), usable while no router is loaded;
+/// every router stored in `snapshot` must be compiled with this `runtime`.
 pub async fn serve(
     config: &lumewarp_config::LocalSettings,
     snapshot: Snapshot,
-    otel: bool,
-) -> anyhow::Result<()> {
-    let router = snapshot.load_full();
-    let runtime = router.runtime.clone();
-    let slot = Arc::new(ArcSwapOption::new(Some(router)));
-    serve_with(config, slot, runtime, otel).await
-}
-
-/// Serves whatever router `slot` holds; `runtime` provides metrics while it
-/// is empty. Routers stored in `slot` must share this `runtime`.
-pub async fn serve_with(
-    config: &lumewarp_config::LocalSettings,
-    snapshot: RouterSlot,
     runtime: Arc<Runtime>,
     otel: bool,
 ) -> anyhow::Result<()> {
@@ -169,7 +157,7 @@ async fn shutdown_signal() -> anyhow::Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 async fn handle(
-    snapshot: RouterSlot,
+    snapshot: Snapshot,
     runtime: Arc<Runtime>,
     client: UpstreamClient,
     req: Request<Incoming>,
@@ -245,6 +233,42 @@ fn admin_response(
     }
 }
 
+/// A known key was rejected before the request reached a model: report it so
+/// the control plane sees blocked traffic. Only runs on rejections.
+fn rejected_event(
+    router: &Router,
+    key: &KeyContext,
+    request: &RequestCtx,
+    endpoint: usize,
+    status: StatusCode,
+) -> UsageEvent {
+    use lumewarp_proto::usage::v1::{RequestOutcome, UsageState};
+    UsageEvent {
+        request_id: request.request_id.to_string(),
+        timestamp_unix_ms: request.started_at_unix_ms
+            + request.started.elapsed().as_millis() as i64,
+        key_id: key.key_id.to_string(),
+        org_id: key.org_id.to_string(),
+        team_id: key.team_id.to_string(),
+        project_id: key.project_id.to_string(),
+        // The body is not read before authentication.
+        model: String::new(),
+        deployment: String::new(),
+        route: ROUTES[endpoint].into(),
+        status: status.as_u16().into(),
+        stream: false,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        duration_ms: request.started.elapsed().as_millis() as u32,
+        config_version: router.version,
+        usage_state: UsageState::Missing as i32,
+        outcome: RequestOutcome::Rejected as i32,
+        started_at_unix_ms: request.started_at_unix_ms,
+        cost_nano_usd: 0,
+        cost_known: false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch(
     router: Option<&Router>,
@@ -278,9 +302,21 @@ async fn dispatch(
             "Gateway has no config snapshot yet",
         );
     };
+    let request = RequestCtx::new(observation.started);
     let caller = match auth::authenticate(router, req.headers()) {
         Ok(caller) => caller,
-        Err(err) => return err.into(),
+        Err(rejection) => {
+            if let Some(key) = &rejection.key {
+                runtime.usage.try_record(rejected_event(
+                    router,
+                    key,
+                    &request,
+                    endpoint,
+                    rejection.error.status(),
+                ));
+            }
+            return rejection.into();
+        }
     };
     // Authenticated traffic carries the caller's team even when it never
     // reaches a model (/v1/models, malformed bodies); failed auth stays "".
@@ -300,6 +336,7 @@ async fn dispatch(
                 observation,
                 endpoint,
                 caller,
+                request,
                 body_read_timeout,
             )
             .await
@@ -311,8 +348,10 @@ async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usage::UsageSink;
     use http_body_util::{BodyExt, Full};
     use hyper_util::{client::legacy::Client, rt::TokioExecutor};
+    use lumewarp_proto::usage::v1::{RequestOutcome, UsageState};
 
     fn free_addr() -> std::net::SocketAddr {
         std::net::TcpListener::bind("127.0.0.1:0")
@@ -321,57 +360,90 @@ mod tests {
             .unwrap()
     }
 
-    #[tokio::test]
-    async fn cold_boot_is_not_ready_until_a_router_is_stored() {
-        let (_, snapshot) = lumewarp_config::Config::parse(
-            "routes: []\nupstreams: []\nkeys: [{key_id: k, key_sha256: '2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b', allow_all_models: true}]",
-        )
-        .unwrap();
-        let runtime = Runtime::new();
-        let slot: RouterSlot = Arc::new(ArcSwapOption::empty());
-        let settings = lumewarp_config::LocalSettings {
-            listen: free_addr(),
-            admin_listen: free_addr(),
-            shutdown_grace_ms: 1000,
-            header_read_timeout_ms: 1000,
-            body_read_timeout_ms: 1000,
-        };
-        let server = tokio::spawn({
-            let (slot, runtime, settings) = (slot.clone(), runtime.clone(), settings.clone());
-            async move { serve_with(&settings, slot, runtime, false).await }
-        });
-        let client = Client::builder(TokioExecutor::new()).build_http::<Full<Bytes>>();
-        let get = |addr: std::net::SocketAddr, path: &str, auth: Option<&str>| {
+    fn sha256(secret: &str) -> String {
+        let digest = <sha2::Sha256 as sha2::Digest>::digest(secret.as_bytes());
+        digest.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    struct TestServer {
+        settings: lumewarp_config::LocalSettings,
+        client: Client<hyper_util::client::legacy::connect::HttpConnector, Full<Bytes>>,
+        task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    }
+
+    impl TestServer {
+        fn start(snapshot: Snapshot, runtime: Arc<Runtime>) -> Self {
+            let settings = lumewarp_config::LocalSettings {
+                listen: free_addr(),
+                admin_listen: free_addr(),
+                shutdown_grace_ms: 1000,
+                header_read_timeout_ms: 1000,
+                body_read_timeout_ms: 1000,
+            };
+            let task = tokio::spawn({
+                let settings = settings.clone();
+                async move { serve(&settings, snapshot, runtime, false).await }
+            });
+            let client = Client::builder(TokioExecutor::new()).build_http();
+            Self {
+                settings,
+                client,
+                task,
+            }
+        }
+
+        async fn get(&self, admin: bool, path: &str, auth: Option<&str>) -> (u16, Bytes) {
+            let addr = if admin {
+                self.settings.admin_listen
+            } else {
+                self.settings.listen
+            };
             let mut request = Request::builder().uri(format!("http://{addr}{path}"));
             if let Some(auth) = auth {
                 request = request.header(header::AUTHORIZATION, auth);
             }
             let request = request.body(Full::new(Bytes::new())).unwrap();
-            let client = client.clone();
-            async move {
-                for _ in 0..200 {
-                    match client.request(request.clone()).await {
-                        Ok(response) => {
-                            let status = response.status().as_u16();
-                            let body = response.into_body().collect().await.unwrap().to_bytes();
-                            return (status, body);
-                        }
-                        Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            for _ in 0..200 {
+                match self.client.request(request.clone()).await {
+                    Ok(response) => {
+                        let status = response.status().as_u16();
+                        let body = response.into_body().collect().await.unwrap().to_bytes();
+                        return (status, body);
                     }
+                    Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
                 }
-                panic!("server did not start");
             }
-        };
-        assert_eq!(get(settings.admin_listen, "/readyz", None).await.0, 503);
-        assert_eq!(get(settings.admin_listen, "/healthz", None).await.0, 200);
-        assert_eq!(get(settings.listen, "/healthz", None).await.0, 200);
-        let (status, body) = get(settings.listen, "/v1/models", None).await;
+            panic!("server did not start");
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn cold_boot_is_not_ready_until_a_router_is_stored() {
+        let (_, snapshot) = lumewarp_config::Config::parse(&format!(
+            "routes: []\nupstreams: []\nkeys: [{{key_id: k, key_sha256: '{}', allow_all_models: true}}]",
+            sha256("secret")
+        ))
+        .unwrap();
+        let runtime = Runtime::new();
+        let slot: Snapshot = Arc::new(ArcSwapOption::empty());
+        assert!(!ready(&slot));
+        let server = TestServer::start(slot.clone(), runtime.clone());
+        assert_eq!(server.get(true, "/readyz", None).await.0, 503);
+        assert_eq!(server.get(true, "/healthz", None).await.0, 200);
+        assert_eq!(server.get(false, "/healthz", None).await.0, 200);
+        let (status, body) = server.get(false, "/v1/models", None).await;
         assert_eq!(status, 503);
         assert!(String::from_utf8_lossy(&body).contains("not_ready"));
         // Even with what would become a valid key: never an open router.
         let auth = Some("Bearer secret");
-        assert_eq!(get(settings.listen, "/v1/models", auth).await.0, 503);
-        let (status, metrics) = get(settings.admin_listen, "/metrics", None).await;
+        assert_eq!(server.get(false, "/v1/models", auth).await.0, 503);
+        let (status, metrics) = server.get(true, "/metrics", None).await;
         assert_eq!(status, 200);
         assert!(String::from_utf8_lossy(&metrics).contains(
             "lumewarp_requests_total{model=\"\",route=\"models\",deployment=\"\",team=\"\",status=\"503\"} 2"
@@ -380,9 +452,73 @@ mod tests {
             Router::compile(&snapshot, lumewarp_config::AuthMode::RequireKey, &runtime).unwrap();
         slot.store(Some(Arc::new(router)));
         assert!(ready(&slot));
-        assert_eq!(get(settings.admin_listen, "/readyz", None).await.0, 200);
-        assert_eq!(get(settings.listen, "/v1/models", None).await.0, 401);
-        assert_eq!(get(settings.listen, "/v1/models", auth).await.0, 200);
-        server.abort();
+        assert_eq!(server.get(true, "/readyz", None).await.0, 200);
+        assert_eq!(server.get(false, "/v1/models", None).await.0, 401);
+        assert_eq!(server.get(false, "/v1/models", auth).await.0, 200);
+    }
+
+    #[tokio::test]
+    async fn known_key_rejections_emit_usage_events() {
+        let key = |id: &str, extra: &str| {
+            format!(
+                "  - {{key_id: {id}, key_sha256: '{}', team_id: t1, project_id: p1, allow_all_models: true{extra}}}\n",
+                sha256(id)
+            )
+        };
+        let yaml = format!(
+            "routes: []\nupstreams: []\nteams: [{{id: t1, org_id: o1}}]\nkeys:\n{}{}{}{}",
+            key("ok", ""),
+            key("revoked", ", status: revoked"),
+            key("expired", ", expires_at_unix_ms: 1000"),
+            key("budget", ", status: budget_exceeded"),
+        );
+        let (_, snapshot) = lumewarp_config::Config::parse(&yaml).unwrap();
+        let (sink, mut events) = UsageSink::for_test();
+        let runtime = Runtime::with_usage(Arc::new(crate::metrics::Metrics::new()), sink);
+        let router =
+            Router::compile(&snapshot, lumewarp_config::AuthMode::RequireKey, &runtime).unwrap();
+        let version = router.version;
+        let slot: Snapshot = Arc::new(ArcSwapOption::from_pointee(router));
+        let server = TestServer::start(slot, runtime);
+
+        // Unknown, missing and accepted keys report nothing here.
+        assert_eq!(server.get(false, "/v1/models", None).await.0, 401);
+        let unknown = server.get(false, "/v1/models", Some("Bearer nope")).await;
+        assert_eq!(unknown.0, 401);
+        assert_eq!(
+            server.get(false, "/v1/models", Some("Bearer ok")).await.0,
+            200
+        );
+        assert!(events.try_recv().is_err());
+
+        for (secret, status) in [("revoked", 401), ("expired", 401), ("budget", 429)] {
+            let before = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64;
+            let auth = format!("Bearer {secret}");
+            assert_eq!(
+                server.get(false, "/v1/models", Some(&auth)).await.0,
+                status,
+                "{secret}"
+            );
+            let event = events.try_recv().expect("rejection event");
+            assert!(events.try_recv().is_err(), "one event per request");
+            assert_eq!(event.status, status as u32, "{secret}");
+            assert_eq!(event.outcome, RequestOutcome::Rejected as i32);
+            assert_eq!(event.usage_state, UsageState::Missing as i32);
+            assert_eq!(event.key_id, secret);
+            assert_eq!(event.org_id, "o1");
+            assert_eq!(event.team_id, "t1");
+            assert_eq!(event.project_id, "p1");
+            assert_eq!(event.model, "");
+            assert_eq!(event.route, "models");
+            assert_eq!(event.config_version, version);
+            assert_eq!((event.prompt_tokens, event.completion_tokens), (0, 0));
+            let id = uuid::Uuid::parse_str(&event.request_id).unwrap();
+            assert_eq!(id.get_version_num(), 7);
+            assert!(event.started_at_unix_ms >= before - 5, "{secret}");
+            assert!(event.timestamp_unix_ms >= event.started_at_unix_ms);
+        }
     }
 }

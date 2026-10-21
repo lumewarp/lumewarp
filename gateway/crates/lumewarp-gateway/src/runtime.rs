@@ -6,20 +6,31 @@ use std::{
     sync::{atomic::AtomicUsize, atomic::Ordering, Arc, Mutex},
 };
 
-use crate::{metrics::Metrics, ratelimit};
+use crate::{metrics::Metrics, ratelimit, usage::UsageSink};
 
 pub struct Runtime {
-    pub metrics: Metrics,
+    /// Shared with the usage reporter, which exists before the runtime.
+    pub metrics: Arc<Metrics>,
     pub inflight: InFlightRegistry,
     pub limiters: ratelimit::Registry,
+    /// Fixed at construction, before serving: `UsageSink::disabled()` in
+    /// standalone mode, the `spawn_reporter` sink in control-plane mode.
+    pub usage: UsageSink,
 }
 
 impl Runtime {
+    /// Standalone: fresh metrics, usage disabled.
     pub fn new() -> Arc<Self> {
+        Self::with_usage(Arc::new(Metrics::new()), UsageSink::disabled())
+    }
+
+    /// Control plane: `metrics` is the `Arc` given to `spawn_reporter`.
+    pub fn with_usage(metrics: Arc<Metrics>, usage: UsageSink) -> Arc<Self> {
         Arc::new(Self {
-            metrics: Metrics::new(),
+            metrics,
             inflight: InFlightRegistry::default(),
             limiters: ratelimit::Registry::new(),
+            usage,
         })
     }
 

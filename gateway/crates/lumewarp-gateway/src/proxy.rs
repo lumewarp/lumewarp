@@ -28,6 +28,7 @@ use crate::{
     ratelimit::Permit,
     router::{Deployment, InFlight, Router},
     telemetry,
+    usage::RequestCtx,
 };
 
 pub type BoxError = Box<dyn Error + Send + Sync>;
@@ -111,6 +112,7 @@ impl<'a> RequestFields<'a> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn forward(
     router: &Router,
     client: &UpstreamClient,
@@ -118,6 +120,8 @@ pub async fn forward(
     observation: &mut Observation,
     endpoint: usize,
     caller: Caller,
+    // Request identity for usage reporting (G4).
+    _request: RequestCtx,
     body_read_timeout: Duration,
 ) -> Response<ProxyBody> {
     let (mut parts, incoming) = req.into_parts();
