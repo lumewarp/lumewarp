@@ -7,7 +7,7 @@
 use std::{
     collections::HashMap,
     pin::Pin,
-    sync::{atomic::AtomicU64, Arc, Mutex},
+    sync::{atomic::AtomicU64, Arc, Mutex, OnceLock},
     task::{Context, Poll},
     time::{Duration, Instant},
 };
@@ -18,7 +18,7 @@ use hyper::{
     body::{Body, Frame, SizeHint},
     StatusCode,
 };
-use lumewarp_proto::config::v1::NackCode;
+use lumewarp_proto::{config::v1::NackCode, usage::v1::UsageState};
 use prometheus_client::{
     encoding::{text::encode, EncodeLabelSet},
     metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
@@ -62,12 +62,8 @@ fn nack_label(code: NackCode) -> &'static str {
     }
 }
 
-#[allow(dead_code)] // Used by usage finalization (W2).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TokenDirection {
-    Input,
-    Output,
-}
+/// `lumewarp_usage_capture_total{state}` labels, indexed by `UsageState`.
+const USAGE_STATES: [&str; 5] = ["unspecified", "reported", "missing", "partial", "invalid"];
 const ERROR_KINDS: [&str; 4] = ["connect", "timeout", "stream", "protocol"];
 
 pub enum UpstreamError {
@@ -141,6 +137,11 @@ struct SpendLabels {
     team: String,
     project: String,
 }
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct UsageStateLabels {
+    state: &'static str,
+}
+type SpendCounter = Counter<f64, AtomicU64>;
 
 type Histograms<L> = Family<L, Histogram, fn() -> Histogram>;
 fn duration_histogram() -> Histogram {
@@ -158,6 +159,11 @@ fn overhead_histogram() -> Histogram {
 pub struct RequestMetrics {
     pub model: String,
     pub deployment: String,
+    team: String,
+    /// (input, output) `lumewarp_tokens_total` series, created on first use
+    /// so routes nobody meters do not export zero series.
+    tokens: OnceLock<[Counter; 2]>,
+    token_family: Family<TokenLabels, Counter>,
     counters: [Counter; 15],
     duration: Histogram,
     overhead: Histogram,
@@ -171,6 +177,24 @@ impl RequestMetrics {
         if let Some(errors) = &self.errors {
             errors[kind as usize].inc();
         }
+    }
+
+    /// Adds upstream-reported tokens for this handle's model and team.
+    /// Allocation-free after the first call per label set.
+    pub fn record_tokens(&self, input: u64, output: u64) {
+        let [input_counter, output_counter] = self.tokens.get_or_init(|| {
+            ["input", "output"].map(|direction| {
+                self.token_family
+                    .get_or_create(&TokenLabels {
+                        model: self.model.clone(),
+                        team: self.team.clone(),
+                        direction,
+                    })
+                    .clone()
+            })
+        });
+        input_counter.inc_by(input);
+        output_counter.inc_by(output);
     }
 }
 
@@ -204,22 +228,20 @@ pub struct Metrics {
     config_info: Family<ConfigLabels, Gauge>,
     gauges: Family<DeploymentLabels, Gauge>,
     config_version: Gauge,
-    // Written only through the methods the config stream and usage reporter
-    // call (W2); registered here so their series exist from boot.
-    #[allow(dead_code)]
+    // Written only through the methods the config stream calls (W2);
+    // registered here so their series exist from boot.
     config_apply_failures: Family<NackLabels, Counter>,
-    #[allow(dead_code)]
     config_stream_connected: Gauge,
-    #[allow(dead_code)]
     usage_dropped: Counter,
-    #[allow(dead_code)]
     usage_reported: Counter,
-    #[allow(dead_code)]
     usage_failed: Counter,
-    #[allow(dead_code)]
+    usage_queue_depth: Gauge,
+    usage_capture: [Counter; USAGE_STATES.len()],
     tokens: Family<TokenLabels, Counter>,
-    #[allow(dead_code)]
-    spend: Family<SpendLabels, Counter<f64, AtomicU64>>,
+    spend: Family<SpendLabels, SpendCounter>,
+    /// team -> project -> spend series, so recording spend is lock- and
+    /// allocation-free after the first request of a (team, project).
+    spend_cache: papaya::HashMap<Box<str>, papaya::HashMap<Box<str>, SpendCounter>>,
 }
 
 impl Metrics {
@@ -239,6 +261,13 @@ impl Metrics {
         let usage_dropped = Counter::default();
         let usage_reported = Counter::default();
         let usage_failed = Counter::default();
+        let usage_queue_depth = Gauge::default();
+        let usage_capture_family = Family::<UsageStateLabels, Counter>::default();
+        let usage_capture = USAGE_STATES.map(|state| {
+            usage_capture_family
+                .get_or_create(&UsageStateLabels { state })
+                .clone()
+        });
         let tokens = Family::default();
         let spend = Family::default();
         registry.register(
@@ -317,6 +346,16 @@ impl Metrics {
             usage_failed.clone(),
         );
         registry.register(
+            "lumewarp_usage_queue_depth",
+            "Usage events waiting in the report queue",
+            usage_queue_depth.clone(),
+        );
+        registry.register(
+            "lumewarp_usage_capture",
+            "Finalized requests by usage state (missing/partial/invalid = metering gaps)",
+            usage_capture_family,
+        );
+        registry.register(
             "lumewarp_tokens",
             "Upstream-reported tokens by public model, team and direction",
             tokens.clone(),
@@ -344,8 +383,11 @@ impl Metrics {
             usage_dropped,
             usage_reported,
             usage_failed,
+            usage_queue_depth,
+            usage_capture,
             tokens,
             spend,
+            spend_cache: papaya::HashMap::new(),
         }
     }
 
@@ -354,7 +396,6 @@ impl Metrics {
             .set(i64::try_from(version).unwrap_or(i64::MAX));
     }
 
-    #[allow(dead_code)] // Config stream (W2).
     pub fn config_apply_failed(&self, code: NackCode) {
         self.config_apply_failures
             .get_or_create(&NackLabels {
@@ -363,46 +404,57 @@ impl Metrics {
             .inc();
     }
 
-    #[allow(dead_code)] // Config stream (W2).
     pub fn config_stream_connected(&self, connected: bool) {
         self.config_stream_connected.set(i64::from(connected));
     }
 
-    #[allow(dead_code)] // Usage reporter (W2).
     pub fn usage_dropped(&self) {
         self.usage_dropped.inc();
     }
 
-    #[allow(dead_code)] // Usage reporter (W2).
+    pub fn usage_dropped_n(&self, n: u64) {
+        self.usage_dropped.inc_by(n);
+    }
+
     /// `sent` events were accepted; `failed` events were in a failed attempt.
     pub fn usage_batch(&self, sent: u64, failed: u64) {
         self.usage_reported.inc_by(sent);
         self.usage_failed.inc_by(failed);
     }
 
-    #[allow(dead_code)] // Usage finalization (W2).
-    /// `model` is the public alias and `team` the team id (`""` anonymous).
-    pub fn tokens(&self, model: &str, team: &str, direction: TokenDirection, n: u64) {
-        self.tokens
-            .get_or_create(&TokenLabels {
-                model: model.into(),
-                team: team.into(),
-                direction: match direction {
-                    TokenDirection::Input => "input",
-                    TokenDirection::Output => "output",
-                },
-            })
-            .inc_by(n);
+    pub fn usage_queue_depth(&self, depth: usize) {
+        self.usage_queue_depth
+            .set(i64::try_from(depth).unwrap_or(i64::MAX));
     }
 
-    #[allow(dead_code)] // Usage finalization (W2).
+    /// One finalized request (or reported rejection) in `state`.
+    pub fn usage_captured(&self, state: UsageState) {
+        if let Some(counter) = self.usage_capture.get(state as usize) {
+            counter.inc();
+        }
+    }
+
+    /// `team` / `project` are ids (`""` anonymous). Allocates only the first
+    /// time a (team, project) pair is seen.
     pub fn spend(&self, team: &str, project: &str, nano_usd: u64) {
-        self.spend
-            .get_or_create(&SpendLabels {
-                team: team.into(),
-                project: project.into(),
-            })
-            .inc_by(nano_usd as f64 / 1e9);
+        let teams = self.spend_cache.pin();
+        let projects = match teams.get(team) {
+            Some(projects) => projects,
+            None => teams.get_or_insert_with(team.into(), papaya::HashMap::new),
+        };
+        let projects = projects.pin();
+        let counter = match projects.get(project) {
+            Some(counter) => counter,
+            None => projects.get_or_insert_with(project.into(), || {
+                self.spend
+                    .get_or_create(&SpendLabels {
+                        team: team.into(),
+                        project: project.into(),
+                    })
+                    .clone()
+            }),
+        };
+        counter.inc_by(nano_usd as f64 / 1e9);
     }
 
     pub fn set_yaml_hash(&self, hash: &str) {
@@ -520,6 +572,9 @@ impl Metrics {
         Arc::new(RequestMetrics {
             model: model.into(),
             deployment: deployment.into(),
+            team: team.into(),
+            tokens: OnceLock::new(),
+            token_family: self.tokens.clone(),
             counters,
             duration,
             overhead,
@@ -881,6 +936,24 @@ routes:
     }
 
     #[test]
+    fn usage_metrics_are_allocation_free_after_first_use() {
+        let metrics = Metrics::new();
+        let handles = metrics.handles("public", "d", 0, "t1");
+        let record = || {
+            handles.record_tokens(3, 4);
+            metrics.spend("t1", "p1", 1);
+            metrics.usage_captured(UsageState::Reported);
+        };
+        record();
+        let ((allocations, _), ()) = crate::test_alloc::count(record);
+        assert_eq!(allocations, 0);
+        let text = metrics.encode(&InFlightRegistry::default()).unwrap();
+        assert!(text.contains(
+            "lumewarp_tokens_total{model=\"public\",team=\"t1\",direction=\"output\"} 8"
+        ));
+    }
+
+    #[test]
     fn later_task_methods() {
         let metrics = Metrics::new();
         let inflight = InFlightRegistry::default();
@@ -890,16 +963,26 @@ routes:
         metrics.config_stream_connected(true);
         metrics.usage_dropped();
         metrics.usage_batch(500, 3);
-        metrics.tokens("public", "t1", TokenDirection::Input, 10);
-        metrics.tokens("public", "t1", TokenDirection::Output, 4);
-        metrics.spend("t1", "p1", 1_500_000_000);
+        metrics.usage_dropped_n(2);
+        metrics.usage_queue_depth(7);
+        metrics.usage_captured(UsageState::Reported);
+        metrics.usage_captured(UsageState::Partial);
+        let handles = metrics.handles("public", "d", 0, "t1");
+        handles.record_tokens(10, 4);
+        metrics.spend("t1", "p1", 1_000_000_000);
+        metrics.spend("t1", "p1", 500_000_000);
+        metrics.spend("t1", "p2", 1);
         let text = metrics.encode(&inflight).unwrap();
         for line in [
             "lumewarp_config_version 42",
             "lumewarp_config_apply_failures_total{code=\"persist_failed\"} 2",
             "lumewarp_config_apply_failures_total{code=\"invalid_config\"} 0",
             "lumewarp_config_stream_connected 1",
-            "lumewarp_usage_events_dropped_total 1",
+            "lumewarp_usage_events_dropped_total 3",
+            "lumewarp_usage_queue_depth 7",
+            "lumewarp_usage_capture_total{state=\"reported\"} 1",
+            "lumewarp_usage_capture_total{state=\"partial\"} 1",
+            "lumewarp_usage_capture_total{state=\"invalid\"} 0",
             "lumewarp_usage_events_reported_total 500",
             "lumewarp_usage_events_failed_total 3",
             "lumewarp_tokens_total{model=\"public\",team=\"t1\",direction=\"input\"} 10",

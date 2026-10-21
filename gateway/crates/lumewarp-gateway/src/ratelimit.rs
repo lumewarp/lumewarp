@@ -358,7 +358,6 @@ impl Registry {
 
     /// Debits the tpm window of every scope of the caller's key that has a
     /// tokens-per-minute limit. Called once usage is known (off the hot path).
-    #[allow(dead_code)] // Called from usage finalization (W2, G4).
     pub fn charge_tokens(&self, caller: &Caller, tokens: u64) {
         let Caller::Key(key) = caller else {
             return;

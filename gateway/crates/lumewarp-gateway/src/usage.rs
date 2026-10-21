@@ -1,18 +1,52 @@
-//! Usage events produced off the request path.
+//! Usage metering and reporting.
 //!
-//! The interface below is frozen (GI). `UsageSink` is a bounded, non-blocking
-//! queue handle; `spawn_reporter` owns the batcher that drains it into
-//! `UsageService.Report`. The reporter body is a stub until G4 fills it.
+//! Metering runs inside the response body wrapper (`proxy.rs`): an SSE event
+//! filter for streams and a bounded tee for JSON bodies capture the upstream
+//! `usage`. `UsageCapture` finalizes exactly once per request into metrics,
+//! the tpm limiter and one `UsageEvent` on the `UsageSink`. Events go through
+//! a bounded queue to a batcher that reports them to `UsageService.Report`,
+//! off the request path.
+//!
+//! The public interface of `RequestCtx`, `ReporterConfig`, `ReporterHandle`,
+//! `spawn_reporter` and `UsageSink` is frozen (GI).
 
 use std::{
+    ops::Range,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use bytes::{Bytes, BytesMut};
+use lumewarp_proto::config::v1::Price;
 pub use lumewarp_proto::usage::v1::UsageEvent;
-use tokio::sync::mpsc;
+use lumewarp_proto::usage::v1::{
+    usage_service_client::UsageServiceClient, ReportRequest, RequestOutcome, UsageState,
+};
+use memchr::memmem;
+use serde::{de::IgnoredAny, Deserialize};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::Instant as TokioInstant,
+};
+use tonic::{
+    metadata::{Ascii, MetadataValue},
+    transport::{Channel, ClientTlsConfig, Endpoint},
+};
+use tracing::Instrument;
 
-use crate::metrics::Metrics;
+use crate::{
+    auth::Caller,
+    metrics::{Metrics, RequestMetrics, ROUTES},
+    router::Deployment,
+    runtime::Runtime,
+};
+
+/// Largest SSE event the stream filter buffers. A longer event stops
+/// filtering for the rest of the stream (bytes are forwarded untouched) and
+/// the usage is reported INVALID.
+pub const MAX_SSE_EVENT: usize = 1024 * 1024;
+/// Largest non-stream body kept for usage parsing; longer is INVALID.
+pub const MAX_JSON_CAPTURE: usize = 4 * 1024 * 1024;
 
 /// Created once per `/v1/*` request at entry in `server.rs`, never from client
 /// headers, and passed by value into `proxy::forward`. `request_id` is the
@@ -41,7 +75,547 @@ impl RequestCtx {
     }
 }
 
-#[allow(dead_code)] // Built by G2 (main.rs), consumed by G4 (reporter).
+// ---------------------------------------------------------------------------
+// Usage parsing
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tokens {
+    pub prompt: u64,
+    pub completion: u64,
+}
+
+/// OpenAI `usage`. Embeddings report only prompt/total tokens.
+#[derive(Deserialize)]
+struct RawUsage {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+}
+
+impl RawUsage {
+    fn tokens(&self) -> Option<Tokens> {
+        let prompt = self.prompt_tokens?;
+        let completion = self
+            .completion_tokens
+            .or_else(|| self.total_tokens.map(|total| total.saturating_sub(prompt)))
+            .unwrap_or(0);
+        Some(Tokens { prompt, completion })
+    }
+}
+
+/// What metering found in a response body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Captured {
+    Reported(Tokens),
+    Missing,
+    Invalid,
+}
+
+fn json_object(bytes: &[u8]) -> bool {
+    // Derived struct deserializers also accept arrays; usage lives in objects.
+    bytes.iter().copied().find(|b| !b.is_ascii_whitespace()) == Some(b'{')
+}
+
+/// Parses `usage` from a complete non-stream JSON response body.
+pub fn parse_response_usage(body: &[u8]) -> Captured {
+    #[derive(Deserialize)]
+    struct Response {
+        usage: Option<RawUsage>,
+    }
+    if !json_object(body) {
+        return Captured::Invalid;
+    }
+    match serde_json::from_slice::<Response>(body) {
+        Ok(Response { usage: Some(usage) }) => {
+            usage.tokens().map_or(Captured::Invalid, Captured::Reported)
+        }
+        Ok(Response { usage: None }) => Captured::Missing,
+        Err(_) => Captured::Invalid,
+    }
+}
+
+/// Whether some `"usage"` key in `event` is followed by an object (not
+/// `null`). A cheap prefilter: chunks of an include_usage stream all carry
+/// `"usage":null` except the final one.
+fn has_usage_object(event: &[u8]) -> bool {
+    memmem::find_iter(event, b"\"usage\"").any(|at| {
+        let mut rest = event[at + 7..]
+            .iter()
+            .copied()
+            .skip_while(u8::is_ascii_whitespace);
+        rest.next() == Some(b':') && rest.find(|b| !b.is_ascii_whitespace()) == Some(b'{')
+    })
+}
+
+/// Calls `f` with every line of `bytes` (terminated by CRLF, LF or CR).
+fn for_each_line<'a>(bytes: &'a [u8], mut f: impl FnMut(&'a [u8])) {
+    let mut start = 0;
+    let mut i = 0;
+    while let Some(at) = memchr::memchr2(b'\n', b'\r', &bytes[i..]) {
+        let end = i + at;
+        f(&bytes[start..end]);
+        i = end + 1;
+        if bytes[end] == b'\r' && bytes.get(i) == Some(&b'\n') {
+            i += 1;
+        }
+        start = i;
+    }
+    if start < bytes.len() {
+        f(&bytes[start..]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSE filter
+// ---------------------------------------------------------------------------
+
+/// Builds the bytes forwarded for one frame. Kept ranges that form a prefix
+/// of the frame are returned as a zero-copy slice.
+struct Out<'a> {
+    frame: &'a Bytes,
+    prefix: usize,
+    buf: Option<BytesMut>,
+}
+
+impl<'a> Out<'a> {
+    fn new(frame: &'a Bytes) -> Self {
+        Self {
+            frame,
+            prefix: 0,
+            buf: None,
+        }
+    }
+
+    fn materialize(&mut self) -> &mut BytesMut {
+        let (frame, prefix) = (self.frame, self.prefix);
+        self.buf.get_or_insert_with(|| {
+            let mut buf = BytesMut::with_capacity(frame.len());
+            buf.extend_from_slice(&frame[..prefix]);
+            buf
+        })
+    }
+
+    fn keep(&mut self, range: Range<usize>) {
+        if self.buf.is_none() && range.start == self.prefix {
+            self.prefix = range.end;
+        } else {
+            let frame = self.frame;
+            self.materialize().extend_from_slice(&frame[range]);
+        }
+    }
+
+    fn keep_bytes(&mut self, bytes: &[u8]) {
+        self.materialize().extend_from_slice(bytes);
+    }
+
+    fn finish(self) -> Bytes {
+        match self.buf {
+            Some(buf) => buf.freeze(),
+            None => self.frame.slice(..self.prefix),
+        }
+    }
+}
+
+/// Event-boundary SSE parser over arbitrary frame splits.
+///
+/// Captures the last (cumulative) `usage` object of the stream. With `strip`
+/// it also removes usage-only events (`choices` empty or absent plus a
+/// `usage` object), which the gateway added by forcing `include_usage`; then
+/// bytes of an incomplete event are held back until the event ends, so the
+/// client only ever receives whole events. Without `strip` every frame is
+/// forwarded as is and only a copy of an incomplete event is kept.
+pub struct SseFilter {
+    strip: bool,
+    /// Bytes of the current incomplete event (at most `MAX_SSE_EVENT`).
+    carry: Vec<u8>,
+    /// The current line has at least one byte.
+    line_open: bool,
+    /// The last byte seen was a CR line terminator (a following LF belongs to it).
+    prev_cr: bool,
+    /// The last frame ended with the CR of an event's final blank line;
+    /// `Some(dropped)` says whether a following LF goes with a dropped event.
+    boundary_cr: Option<bool>,
+    /// An event exceeded `MAX_SSE_EVENT`: forwarding untouched from then on.
+    overflowed: bool,
+    /// The last usage object seen; `Err` if it could not be read.
+    usage: Option<Result<Tokens, ()>>,
+    /// Scratch buffer for multi-line `data`.
+    data: Vec<u8>,
+}
+
+impl SseFilter {
+    pub fn new(strip: bool) -> Self {
+        Self {
+            strip,
+            carry: Vec::new(),
+            line_open: false,
+            prev_cr: false,
+            boundary_cr: None,
+            overflowed: false,
+            usage: None,
+            data: Vec::new(),
+        }
+    }
+
+    /// Whether forwarded bytes can differ from upstream bytes.
+    pub fn strips(&self) -> bool {
+        self.strip
+    }
+
+    /// Whether `push_eof` may still return bytes.
+    pub fn holds_bytes(&self) -> bool {
+        self.strip && !self.overflowed && !self.carry.is_empty()
+    }
+
+    /// Feeds one upstream data frame; returns the bytes to forward (possibly
+    /// empty, never more than were received so far).
+    pub fn push(&mut self, frame: Bytes) -> Bytes {
+        if self.overflowed {
+            return frame;
+        }
+        let bytes = &frame[..];
+        if bytes.is_empty() {
+            return frame;
+        }
+        let mut out = Out::new(&frame);
+        let mut event_start = 0;
+        let mut pos = 0;
+        if let Some(dropped) = self.boundary_cr.take() {
+            if bytes[0] == b'\n' {
+                // The LF of a CRLF blank line split across frames ends the
+                // previous event: forward or drop it along with that event.
+                if self.strip && !dropped {
+                    out.keep(0..1);
+                }
+                self.prev_cr = false;
+                event_start = 1;
+                pos = 1;
+            }
+        }
+        while let Some(at) = memchr::memchr2(b'\n', b'\r', &bytes[pos..]) {
+            let index = pos + at;
+            let byte = bytes[index];
+            if byte == b'\n' && self.prev_cr && index == pos {
+                // Second half of a CRLF split across frames.
+                self.prev_cr = false;
+                pos = index + 1;
+                continue;
+            }
+            let empty = !self.line_open && index == pos;
+            self.line_open = false;
+            self.prev_cr = byte == b'\r';
+            pos = index + 1;
+            if empty {
+                if self.prev_cr && bytes.get(pos) == Some(&b'\n') {
+                    pos += 1;
+                    self.prev_cr = false;
+                }
+                let dropped = self.event(&frame, event_start..pos, &mut out);
+                event_start = pos;
+                if self.overflowed {
+                    // Forward the rest of the frame untouched.
+                    if self.strip {
+                        out.keep(event_start..bytes.len());
+                        return out.finish();
+                    }
+                    return frame;
+                }
+                if self.prev_cr && pos == bytes.len() {
+                    self.boundary_cr = Some(dropped);
+                }
+            }
+        }
+        if pos < bytes.len() {
+            self.line_open = true;
+            self.prev_cr = false;
+        }
+        let tail = event_start..bytes.len();
+        if !tail.is_empty() {
+            if self.carry.len() + tail.len() > MAX_SSE_EVENT {
+                self.overflowed = true;
+                if self.strip {
+                    out.keep_bytes(&self.carry);
+                    out.keep(tail);
+                }
+                self.carry = Vec::new();
+                return if self.strip { out.finish() } else { frame };
+            }
+            self.carry.extend_from_slice(&bytes[tail]);
+        }
+        if self.strip {
+            out.finish()
+        } else {
+            frame
+        }
+    }
+
+    /// End of the upstream body: returns held bytes of an unterminated last
+    /// event (which is still inspected for usage, never dropped).
+    pub fn push_eof(&mut self) -> Bytes {
+        if self.overflowed || self.carry.is_empty() {
+            return Bytes::new();
+        }
+        let carry = std::mem::take(&mut self.carry);
+        self.inspect(&carry);
+        if self.strip {
+            Bytes::from(carry)
+        } else {
+            Bytes::new()
+        }
+    }
+
+    pub fn captured(&self) -> Captured {
+        match self.usage {
+            _ if self.overflowed => Captured::Invalid,
+            Some(Ok(tokens)) => Captured::Reported(tokens),
+            Some(Err(())) => Captured::Invalid,
+            None => Captured::Missing,
+        }
+    }
+
+    /// One complete event: `carry` followed by `frame[range]`. Returns
+    /// whether it was dropped.
+    fn event(&mut self, frame: &Bytes, range: Range<usize>, out: &mut Out) -> bool {
+        if self.carry.is_empty() {
+            let drop = self.inspect(&frame[range.clone()]);
+            if self.strip && !drop {
+                out.keep(range);
+            }
+            return drop;
+        }
+        let mut carry = std::mem::take(&mut self.carry);
+        carry.extend_from_slice(&frame[range]);
+        if carry.len() > MAX_SSE_EVENT {
+            // Completed, but too large to have been held: give up the same way.
+            self.overflowed = true;
+            if self.strip {
+                out.keep_bytes(&carry);
+            }
+            return false;
+        }
+        let drop = self.inspect(&carry);
+        if self.strip && !drop {
+            out.keep_bytes(&carry);
+        }
+        carry.clear();
+        if carry.capacity() <= 64 * 1024 {
+            self.carry = carry;
+        }
+        drop
+    }
+
+    /// Records usage from one event; returns whether to drop it.
+    fn inspect(&mut self, event: &[u8]) -> bool {
+        #[derive(Deserialize)]
+        struct Chunk {
+            choices: Option<Vec<IgnoredAny>>,
+            usage: Option<RawUsage>,
+        }
+        if !has_usage_object(event) {
+            return false;
+        }
+        let mut single: Option<&[u8]> = None;
+        let mut lines = 0;
+        self.data.clear();
+        for_each_line(event, |line| {
+            let Some(value) = line.strip_prefix(b"data:") else {
+                return;
+            };
+            let value = value.strip_prefix(b" ").unwrap_or(value);
+            lines += 1;
+            match lines {
+                1 => single = Some(value),
+                2 => {
+                    self.data.extend_from_slice(single.unwrap_or_default());
+                    self.data.push(b'\n');
+                    self.data.extend_from_slice(value);
+                }
+                _ => {
+                    self.data.push(b'\n');
+                    self.data.extend_from_slice(value);
+                }
+            }
+        });
+        let data = if lines > 1 {
+            &self.data[..]
+        } else {
+            single.unwrap_or_default()
+        };
+        if !json_object(data) {
+            return false;
+        }
+        let Ok(chunk) = serde_json::from_slice::<Chunk>(data) else {
+            return false;
+        };
+        let Some(usage) = chunk.usage else {
+            return false;
+        };
+        self.usage = Some(usage.tokens().ok_or(()));
+        self.strip && chunk.choices.is_none_or(|choices| choices.is_empty())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Non-stream tee
+// ---------------------------------------------------------------------------
+
+/// Bounded copy of a non-stream body (reference-counted frames, no memcpy
+/// until the end, and none at all for a single-frame body).
+#[derive(Default)]
+pub struct Tee {
+    first: Option<Bytes>,
+    rest: Vec<Bytes>,
+    len: usize,
+    overflowed: bool,
+}
+
+impl Tee {
+    pub fn push(&mut self, data: &Bytes) {
+        if self.overflowed || data.is_empty() {
+            return;
+        }
+        if self.len + data.len() > MAX_JSON_CAPTURE {
+            *self = Self {
+                overflowed: true,
+                ..Self::default()
+            };
+            return;
+        }
+        self.len += data.len();
+        match self.first {
+            None => self.first = Some(data.clone()),
+            Some(_) => self.rest.push(data.clone()),
+        }
+    }
+
+    pub fn finish(self) -> Captured {
+        if self.overflowed {
+            return Captured::Invalid;
+        }
+        let Some(first) = self.first else {
+            return parse_response_usage(b"");
+        };
+        if self.rest.is_empty() {
+            return parse_response_usage(&first);
+        }
+        let mut body = Vec::with_capacity(self.len);
+        body.extend_from_slice(&first);
+        for chunk in &self.rest {
+            body.extend_from_slice(chunk);
+        }
+        parse_response_usage(&body)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Capture
+// ---------------------------------------------------------------------------
+
+/// Cost of `tokens` at `price` in nano-USD, rounded half up. `None` when the
+/// arithmetic overflows (reported as unknown cost, never as a wrong number).
+pub fn cost_nano_usd(price: &Price, tokens: Tokens) -> Option<u64> {
+    let input = u128::from(tokens.prompt).checked_mul(price.input_nano_usd_per_mtok.into())?;
+    let output =
+        u128::from(tokens.completion).checked_mul(price.output_nano_usd_per_mtok.into())?;
+    let total = input.checked_add(output)?.checked_add(500_000)? / 1_000_000;
+    u64::try_from(total).ok()
+}
+
+/// Everything needed to account one request once it ends. Holds only `Arc`
+/// clones; nothing is allocated until `finalize`.
+pub struct UsageCapture {
+    pub runtime: Arc<Runtime>,
+    pub caller: Caller,
+    pub request: RequestCtx,
+    /// Model label (route alias or `unknown`) and the caller's team.
+    pub handles: Arc<RequestMetrics>,
+    /// The deployment (with the price) this request was served with.
+    pub deployment: Option<Arc<Deployment>>,
+    pub config_version: u64,
+    /// Index into `ROUTES`.
+    pub endpoint: usize,
+    pub stream: bool,
+    pub status: u16,
+}
+
+impl UsageCapture {
+    /// Records tokens/spend metrics and the tpm charge (only for REPORTED
+    /// usage) and emits the event. Consumes the capture: exactly once.
+    pub fn finalize(self, outcome: RequestOutcome, state: UsageState, tokens: Option<Tokens>) {
+        let tokens = tokens.filter(|_| state == UsageState::Reported);
+        let cost = tokens.and_then(|tokens| {
+            let price = self.deployment.as_ref()?.price.as_ref()?;
+            cost_nano_usd(price, tokens)
+        });
+        let metrics = &self.runtime.metrics;
+        if outcome != RequestOutcome::Rejected {
+            metrics.usage_captured(state);
+        }
+        let (team, project) = match &self.caller {
+            Caller::Key(key) => (&*key.team_id, &*key.project_id),
+            Caller::Anonymous => ("", ""),
+        };
+        if let Some(tokens) = tokens {
+            self.handles.record_tokens(tokens.prompt, tokens.completion);
+            self.runtime.limiters.charge_tokens(
+                &self.caller,
+                tokens.prompt.saturating_add(tokens.completion),
+            );
+            if let Some(nano_usd) = cost.filter(|&nano_usd| nano_usd > 0) {
+                metrics.spend(team, project, nano_usd);
+            }
+        }
+        if !self.runtime.usage.enabled() {
+            return;
+        }
+        let elapsed = self.request.started.elapsed();
+        let (key_id, org_id) = match &self.caller {
+            Caller::Key(key) => (key.key_id.to_string(), key.org_id.to_string()),
+            Caller::Anonymous => (String::new(), String::new()),
+        };
+        let tokens = tokens.unwrap_or_default();
+        self.runtime.usage.try_record(UsageEvent {
+            request_id: self.request.request_id.to_string(),
+            timestamp_unix_ms: self
+                .request
+                .started_at_unix_ms
+                .saturating_add(i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)),
+            key_id,
+            org_id,
+            team_id: team.into(),
+            project_id: project.into(),
+            model: self.handles.model.clone(),
+            deployment: self
+                .deployment
+                .as_ref()
+                .map(|d| d.name.clone())
+                .unwrap_or_default(),
+            route: ROUTES[self.endpoint].into(),
+            status: self.status.into(),
+            stream: self.stream,
+            prompt_tokens: tokens.prompt,
+            completion_tokens: tokens.completion,
+            duration_ms: u32::try_from(elapsed.as_millis()).unwrap_or(u32::MAX),
+            config_version: self.config_version,
+            usage_state: state as i32,
+            outcome: outcome as i32,
+            started_at_unix_ms: self.request.started_at_unix_ms,
+            cost_nano_usd: cost.unwrap_or(0),
+            cost_known: cost.is_some(),
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reporter
+// ---------------------------------------------------------------------------
+
+const RETRY_MIN: Duration = Duration::from_millis(500);
+const RETRY_MAX: Duration = Duration::from_secs(30);
+const REPORT_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub struct ReporterConfig {
     /// Control-plane gRPC endpoint, e.g. `http://127.0.0.1:50051`.
     pub endpoint: String,
@@ -56,7 +630,6 @@ pub struct ReporterConfig {
     pub flush_interval: Duration,
 }
 
-#[allow(dead_code)] // Used by G2 (main.rs).
 impl ReporterConfig {
     pub const DEFAULT_CAPACITY: usize = 100_000;
     pub const DEFAULT_BATCH_MAX: usize = 500;
@@ -64,19 +637,25 @@ impl ReporterConfig {
 }
 
 /// Owns the background reporter task.
-#[allow(dead_code)] // Shut down by G2 (main.rs).
 pub struct ReporterHandle {
     task: Option<tokio::task::JoinHandle<()>>,
+    stop: Option<oneshot::Sender<TokioInstant>>,
 }
 
-#[allow(dead_code)] // Shut down by G2 (main.rs).
 impl ReporterHandle {
-    /// Flushes what it can until `deadline`, then stops the task.
-    pub async fn shutdown(self, deadline: Duration) {
-        // G4: signal the batcher to flush and wait up to `deadline`.
-        if let Some(task) = self.task {
-            if tokio::time::timeout(deadline, task).await.is_err() {
+    /// Stops batching, reports what is queued (retrying failures) until
+    /// `deadline`, then stops the task. Unsent events are counted as dropped.
+    pub async fn shutdown(mut self, deadline: Duration) {
+        let until = TokioInstant::now() + deadline;
+        // The batcher stops a little early so it can count what it gives up.
+        let margin = (deadline / 10).min(Duration::from_millis(100));
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(until - margin);
+        }
+        if let Some(mut task) = self.task.take() {
+            if tokio::time::timeout_at(until, &mut task).await.is_err() {
                 tracing::warn!("usage reporter did not stop before the deadline");
+                task.abort();
             }
         }
     }
@@ -84,37 +663,280 @@ impl ReporterHandle {
 
 /// Starts the reporter (control-plane mode). The returned sink goes into
 /// `Runtime::with_usage`; `metrics` is the same `Arc` the runtime uses.
-#[allow(dead_code)] // Called from main.rs in control-plane mode (G2).
 pub fn spawn_reporter(cfg: ReporterConfig, metrics: Arc<Metrics>) -> (UsageSink, ReporterHandle) {
-    // G4 stub: drain and discard so the queue never fills. Replace with the
-    // batching UsageService client.
-    let (tx, mut rx) = mpsc::channel::<UsageEvent>(cfg.capacity.max(1));
-    let task = tokio::spawn(async move {
-        let _ = (&cfg.endpoint, &cfg.token, &cfg.gateway_id, &metrics);
-        while rx.recv().await.is_some() {}
-    });
+    let (tx, rx) = mpsc::channel::<UsageEvent>(cfg.capacity.max(1));
+    let (stop, stopped) = oneshot::channel();
+    let reporter = Reporter::new(&cfg, metrics.clone());
+    let task = tokio::spawn(reporter.run(rx, stopped));
     (
-        UsageSink { tx: Some(tx) },
-        ReporterHandle { task: Some(task) },
+        UsageSink {
+            tx: Some(tx),
+            metrics: Some(metrics),
+        },
+        ReporterHandle {
+            task: Some(task),
+            stop: Some(stop),
+        },
     )
+}
+
+enum ReportError {
+    /// Worth retrying (network, unavailable, auth not yet valid...).
+    Retry,
+    /// The control plane rejected the batch as invalid; retrying cannot help.
+    Rejected,
+}
+
+/// Resolves with the shutdown deadline. A dropped `ReporterHandle` (no
+/// shutdown requested) never resolves: the reporter keeps running.
+async fn stopped(stop: &mut Option<oneshot::Receiver<TokioInstant>>) -> TokioInstant {
+    if let Some(receiver) = stop {
+        let result = receiver.await;
+        *stop = None;
+        if let Ok(until) = result {
+            return until;
+        }
+    }
+    std::future::pending().await
+}
+
+struct Reporter {
+    client: Option<UsageServiceClient<Channel>>,
+    authorization: Option<MetadataValue<Ascii>>,
+    gateway_id: String,
+    batch_max: usize,
+    flush_interval: Duration,
+    metrics: Arc<Metrics>,
+}
+
+fn channel(endpoint: &str) -> Result<Channel, tonic::transport::Error> {
+    let mut endpoint = Endpoint::from_shared(endpoint.to_owned())?
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REPORT_TIMEOUT);
+    if endpoint.uri().scheme_str() == Some("https") {
+        endpoint = endpoint.tls_config(ClientTlsConfig::new().with_webpki_roots())?;
+    }
+    Ok(endpoint.connect_lazy())
+}
+
+impl Reporter {
+    fn new(cfg: &ReporterConfig, metrics: Arc<Metrics>) -> Self {
+        let client = match channel(&cfg.endpoint) {
+            Ok(channel) => Some(UsageServiceClient::new(channel)),
+            Err(err) => {
+                tracing::error!(%err, endpoint = %cfg.endpoint, "invalid usage endpoint; usage events will be dropped");
+                None
+            }
+        };
+        let authorization = match format!("Bearer {}", cfg.token).parse::<MetadataValue<Ascii>>() {
+            Ok(mut value) => {
+                value.set_sensitive(true);
+                Some(value)
+            }
+            Err(_) => {
+                tracing::error!(
+                    "gateway token is not a valid header value; usage events will be dropped"
+                );
+                None
+            }
+        };
+        Self {
+            client,
+            authorization,
+            gateway_id: cfg.gateway_id.clone(),
+            batch_max: cfg.batch_max.max(1),
+            flush_interval: cfg.flush_interval,
+            metrics,
+        }
+    }
+
+    async fn run(
+        mut self,
+        mut rx: mpsc::Receiver<UsageEvent>,
+        stop: oneshot::Receiver<TokioInstant>,
+    ) {
+        let mut stop = Some(stop);
+        let mut batch = Vec::with_capacity(self.batch_max);
+        let mut deadline: Option<TokioInstant> = None;
+        let mut closed = false;
+        loop {
+            if deadline.is_none() && !closed {
+                if batch.is_empty() {
+                    tokio::select! {
+                        n = rx.recv_many(&mut batch, self.batch_max) => closed = n == 0,
+                        until = stopped(&mut stop) => deadline = Some(until),
+                    }
+                }
+                let flush_at = TokioInstant::now() + self.flush_interval;
+                while deadline.is_none() && !closed && batch.len() < self.batch_max {
+                    let room = self.batch_max - batch.len();
+                    tokio::select! {
+                        n = rx.recv_many(&mut batch, room) => closed = n == 0,
+                        _ = tokio::time::sleep_until(flush_at) => break,
+                        until = stopped(&mut stop) => deadline = Some(until),
+                    }
+                }
+            }
+            if deadline.is_some() || closed {
+                // Draining: take what is queued, never wait for more.
+                while batch.len() < self.batch_max {
+                    match rx.try_recv() {
+                        Ok(event) => batch.push(event),
+                        Err(_) => break,
+                    }
+                }
+                if batch.is_empty() {
+                    break;
+                }
+            }
+            self.metrics.usage_queue_depth(rx.len());
+            if !batch.is_empty() {
+                self.send(&mut batch, &rx, &mut deadline, &mut stop).await;
+            }
+            if deadline.is_some_and(|until| TokioInstant::now() >= until) {
+                break;
+            }
+        }
+        rx.close();
+        let mut lost = batch.len() as u64;
+        while rx.try_recv().is_ok() {
+            lost += 1;
+        }
+        if lost > 0 {
+            self.metrics.usage_dropped_n(lost);
+            tracing::warn!(lost, "usage events not reported before shutdown");
+        }
+        self.metrics.usage_queue_depth(0);
+    }
+
+    /// Reports `batch`, retrying with jittered exponential backoff until it is
+    /// accepted, rejected as invalid, or the shutdown deadline passes. Empties
+    /// `batch` except when the deadline passed with the batch unsent.
+    async fn send(
+        &mut self,
+        batch: &mut Vec<UsageEvent>,
+        queue: &mpsc::Receiver<UsageEvent>,
+        deadline: &mut Option<TokioInstant>,
+        stop: &mut Option<oneshot::Receiver<TokioInstant>>,
+    ) {
+        let mut backoff = RETRY_MIN;
+        let mut attempts = 0u32;
+        loop {
+            let n = batch.len() as u64;
+            match self.report(batch.clone(), *deadline).await {
+                Ok(()) => {
+                    self.metrics.usage_batch(n, 0);
+                    batch.clear();
+                    return;
+                }
+                Err(ReportError::Rejected) => {
+                    self.metrics.usage_dropped_n(n);
+                    batch.clear();
+                    return;
+                }
+                Err(ReportError::Retry) => self.metrics.usage_batch(0, n),
+            }
+            self.metrics.usage_queue_depth(queue.len());
+            attempts += 1;
+            let half = backoff / 2;
+            let sleep = half + half.mul_f64(fastrand::f64());
+            match *deadline {
+                Some(until) => {
+                    if TokioInstant::now() + sleep >= until {
+                        tokio::time::sleep_until(until).await;
+                        return;
+                    }
+                    tokio::time::sleep(sleep).await;
+                }
+                None => tokio::select! {
+                    _ = tokio::time::sleep(sleep) => {}
+                    until = stopped(stop) => *deadline = Some(until),
+                },
+            }
+            if attempts == 1 {
+                tracing::debug!("retrying usage report");
+            }
+            backoff = (backoff * 2).min(RETRY_MAX);
+        }
+    }
+
+    async fn report(
+        &mut self,
+        events: Vec<UsageEvent>,
+        deadline: Option<TokioInstant>,
+    ) -> Result<(), ReportError> {
+        let (Some(client), Some(authorization)) = (&mut self.client, &self.authorization) else {
+            return Err(ReportError::Retry);
+        };
+        let n = events.len();
+        let mut request = tonic::Request::new(ReportRequest {
+            gateway_id: self.gateway_id.clone(),
+            events,
+        });
+        request
+            .metadata_mut()
+            .insert("authorization", authorization.clone());
+        let until = deadline
+            .unwrap_or_else(|| TokioInstant::now() + REPORT_TIMEOUT)
+            .min(TokioInstant::now() + REPORT_TIMEOUT);
+        let span = tracing::info_span!("usage.report", events = n);
+        match tokio::time::timeout_at(until, client.report(request).instrument(span)).await {
+            Ok(Ok(response)) => {
+                let accepted = response.get_ref().accepted as usize;
+                if accepted != n {
+                    tracing::warn!(accepted, sent = n, "usage report accepted count mismatch");
+                }
+                Ok(())
+            }
+            Ok(Err(status)) if status.code() == tonic::Code::InvalidArgument => {
+                tracing::error!(
+                    events = n,
+                    "control plane rejected a usage batch as invalid; dropping it"
+                );
+                Err(ReportError::Rejected)
+            }
+            Ok(Err(status)) => {
+                tracing::warn!(code = ?status.code(), events = n, "usage report failed");
+                Err(ReportError::Retry)
+            }
+            Err(_) => {
+                tracing::warn!(events = n, "usage report timed out");
+                Err(ReportError::Retry)
+            }
+        }
+    }
 }
 
 /// Non-blocking producer handle; cheap to call on any path.
 pub struct UsageSink {
     tx: Option<mpsc::Sender<UsageEvent>>,
+    /// Counts drops; `None` for sinks without a registry (tests).
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl UsageSink {
     /// Standalone mode: events are discarded.
     pub fn disabled() -> Self {
-        Self { tx: None }
+        Self {
+            tx: None,
+            metrics: None,
+        }
     }
 
-    /// Never blocks. A full queue drops the event (G4: count it with
-    /// `Metrics::usage_dropped`).
+    /// Whether events go anywhere; callers skip building them otherwise.
+    pub fn enabled(&self) -> bool {
+        self.tx.is_some()
+    }
+
+    /// Never blocks. A full (or closed) queue drops the event and counts it
+    /// in `lumewarp_usage_events_dropped_total`.
     pub fn try_record(&self, event: UsageEvent) {
         if let Some(tx) = &self.tx {
-            let _ = tx.try_send(event);
+            if tx.try_send(event).is_err() {
+                if let Some(metrics) = &self.metrics {
+                    metrics.usage_dropped();
+                }
+            }
         }
     }
 
@@ -123,13 +945,228 @@ impl UsageSink {
     #[cfg(test)]
     pub fn for_test() -> (Self, mpsc::Receiver<UsageEvent>) {
         let (tx, rx) = mpsc::channel(1024);
-        (Self { tx: Some(tx) }, rx)
+        (
+            Self {
+                tx: Some(tx),
+                metrics: None,
+            },
+            rx,
+        )
+    }
+}
+
+/// In-process fake `UsageService` (the proto crate generates clients only).
+#[cfg(test)]
+pub(crate) mod fake_cp {
+    use std::{
+        convert::Infallible,
+        net::SocketAddr,
+        sync::{
+            atomic::{AtomicU32, Ordering},
+            Arc,
+        },
+        task::{Context, Poll},
+    };
+
+    use lumewarp_proto::usage::v1::{ReportRequest, ReportResponse};
+    use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::{
+        codegen::{http, BoxFuture, Service},
+        server::NamedService,
+        Request, Response, Status,
+    };
+
+    pub struct Report {
+        pub authorization: Option<String>,
+        pub request: ReportRequest,
+    }
+
+    struct State {
+        reports: mpsc::UnboundedSender<Report>,
+        /// Next calls answered UNAVAILABLE (nothing recorded).
+        fail: AtomicU32,
+        /// Next calls answered INVALID_ARGUMENT (nothing recorded).
+        reject: AtomicU32,
+    }
+
+    #[derive(Clone)]
+    struct Svc(Arc<State>);
+
+    impl NamedService for Svc {
+        const NAME: &'static str = "lumewarp.usage.v1.UsageService";
+    }
+
+    struct ReportImpl(Arc<State>);
+    impl tonic::server::UnaryService<ReportRequest> for ReportImpl {
+        type Response = ReportResponse;
+        type Future = BoxFuture<Response<ReportResponse>, Status>;
+
+        fn call(&mut self, request: Request<ReportRequest>) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                let take = |counter: &AtomicU32| {
+                    let mut n = counter.load(Ordering::SeqCst);
+                    while n > 0 {
+                        match counter.compare_exchange(n, n - 1, Ordering::SeqCst, Ordering::SeqCst)
+                        {
+                            Ok(_) => return true,
+                            Err(current) => n = current,
+                        }
+                    }
+                    false
+                };
+                if take(&state.fail) {
+                    return Err(Status::unavailable("injected"));
+                }
+                if take(&state.reject) {
+                    return Err(Status::invalid_argument("injected"));
+                }
+                let authorization = request
+                    .metadata()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                let request = request.into_inner();
+                let accepted = request.events.len() as u32;
+                let _ = state.reports.send(Report {
+                    authorization,
+                    request,
+                });
+                Ok(Response::new(ReportResponse { accepted }))
+            })
+        }
+    }
+
+    impl Service<http::Request<tonic::body::Body>> for Svc {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: http::Request<tonic::body::Body>) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                if req.uri().path() != "/lumewarp.usage.v1.UsageService/Report" {
+                    return Ok(Status::unimplemented("unknown method").into_http());
+                }
+                let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                Ok(grpc.unary(ReportImpl(state), req).await)
+            })
+        }
+    }
+
+    pub struct FakeUsage {
+        pub addr: SocketAddr,
+        pub reports: mpsc::UnboundedReceiver<Report>,
+        state: Arc<State>,
+        task: JoinHandle<()>,
+    }
+
+    impl FakeUsage {
+        pub async fn start(addr: Option<SocketAddr>) -> Self {
+            let listener = TcpListener::bind(addr.unwrap_or(([127, 0, 0, 1], 0).into()))
+                .await
+                .expect("bind fake usage service");
+            let addr = listener.local_addr().unwrap();
+            let (tx, reports) = mpsc::unbounded_channel();
+            let state = Arc::new(State {
+                reports: tx,
+                fail: AtomicU32::new(0),
+                reject: AtomicU32::new(0),
+            });
+            let svc = Svc(state.clone());
+            let task = tokio::spawn(async move {
+                let _ = tonic::transport::Server::builder()
+                    .add_service(svc)
+                    .serve_with_incoming(TcpListenerStream::new(listener))
+                    .await;
+            });
+            Self {
+                addr,
+                reports,
+                state,
+                task,
+            }
+        }
+
+        pub fn url(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+
+        pub fn fail_next(&self, n: u32) {
+            self.state.fail.store(n, Ordering::SeqCst);
+        }
+
+        pub fn reject_next(&self, n: u32) {
+            self.state.reject.store(n, Ordering::SeqCst);
+        }
+
+        pub async fn next(&mut self) -> Report {
+            tokio::time::timeout(std::time::Duration::from_secs(10), self.reports.recv())
+                .await
+                .expect("usage report within 10 s")
+                .expect("fake usage service stopped")
+        }
+    }
+
+    impl Drop for FakeUsage {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{fake_cp::FakeUsage, *};
+
+    const STREAM: &[u8] = b"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}],\"usage\":null}\n\n\
+data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"say \\\"usage\\\": {1}\"},\"finish_reason\":null}],\"usage\": null}\n\n\
+: keep-alive\n\n\
+data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\xe6\xa8\xa1\xe5\x9e\x8b\"},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n";
+    const USAGE_EVENT: &[u8] = b"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"total_tokens\":18,\"completion_tokens\":7}}\n\n";
+    const DONE: &[u8] = b"data: [DONE]\n\n";
+    const TOKENS: Tokens = Tokens {
+        prompt: 11,
+        completion: 7,
+    };
+
+    fn recorded() -> Vec<u8> {
+        [STREAM, USAGE_EVENT, DONE].concat()
+    }
+
+    fn stripped() -> Vec<u8> {
+        [STREAM, DONE].concat()
+    }
+
+    /// Feeds `input` split at `cuts`; returns forwarded chunks and the filter.
+    fn run(strip: bool, input: &[u8], cuts: &[usize]) -> (Vec<Bytes>, SseFilter) {
+        let mut filter = SseFilter::new(strip);
+        let mut chunks = Vec::new();
+        let mut at = 0;
+        for &cut in cuts.iter().chain(std::iter::once(&input.len())) {
+            chunks.push(filter.push(Bytes::copy_from_slice(&input[at..cut])));
+            at = cut;
+        }
+        chunks.push(filter.push_eof());
+        (chunks, filter)
+    }
+
+    fn joined(chunks: &[Bytes]) -> Vec<u8> {
+        chunks.concat()
+    }
+
+    /// Every non-empty chunk the client sees must end on an event boundary.
+    fn whole_events(chunks: &[Bytes]) -> bool {
+        chunks
+            .iter()
+            .filter(|c| !c.is_empty())
+            .all(|c| c.ends_with(b"\n\n") || c.ends_with(b"\r\n\r\n") || c.ends_with(b"\r\r"))
+    }
 
     #[test]
     fn request_ids_are_unique_v7() {
@@ -144,8 +1181,10 @@ mod tests {
 
     #[test]
     fn sinks() {
+        assert!(!UsageSink::disabled().enabled());
         UsageSink::disabled().try_record(UsageEvent::default());
         let (sink, mut rx) = UsageSink::for_test();
+        assert!(sink.enabled());
         sink.try_record(UsageEvent {
             key_id: "k".into(),
             ..Default::default()
@@ -153,21 +1192,523 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap().key_id, "k");
     }
 
-    #[tokio::test]
-    async fn stub_reporter_lifecycle() {
-        let (sink, handle) = spawn_reporter(
-            ReporterConfig {
-                endpoint: "http://127.0.0.1:1".into(),
-                token: "t".into(),
-                gateway_id: "g".into(),
-                capacity: ReporterConfig::DEFAULT_CAPACITY,
-                batch_max: ReporterConfig::DEFAULT_BATCH_MAX,
-                flush_interval: ReporterConfig::DEFAULT_FLUSH_INTERVAL,
-            },
-            Arc::new(Metrics::new()),
+    #[test]
+    fn full_queue_drops_and_counts() {
+        let metrics = Arc::new(Metrics::new());
+        let (tx, mut rx) = mpsc::channel(2);
+        let sink = UsageSink {
+            tx: Some(tx),
+            metrics: Some(metrics.clone()),
+        };
+        for _ in 0..5 {
+            sink.try_record(UsageEvent::default());
+        }
+        let text = metrics.encode(&Default::default()).unwrap();
+        assert!(
+            text.contains("lumewarp_usage_events_dropped_total 3"),
+            "{text}"
         );
+        rx.close();
+        while rx.try_recv().is_ok() {}
         sink.try_record(UsageEvent::default());
-        drop(sink);
+        let text = metrics.encode(&Default::default()).unwrap();
+        assert!(
+            text.contains("lumewarp_usage_events_dropped_total 4"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn strips_only_the_usage_event_at_every_split_offset() {
+        let input = recorded();
+        for cut in 0..=input.len() {
+            let (chunks, filter) = run(true, &input, &[cut]);
+            assert_eq!(joined(&chunks), stripped(), "cut at {cut}");
+            assert!(
+                whole_events(&chunks),
+                "partial event forwarded at cut {cut}"
+            );
+            assert_eq!(filter.captured(), Captured::Reported(TOKENS), "cut {cut}");
+        }
+    }
+
+    #[test]
+    fn passthrough_is_byte_identical_at_every_split_offset() {
+        let input = recorded();
+        for cut in 0..=input.len() {
+            let (chunks, filter) = run(false, &input, &[cut]);
+            assert_eq!(joined(&chunks), input, "cut at {cut}");
+            assert_eq!(filter.captured(), Captured::Reported(TOKENS), "cut {cut}");
+        }
+    }
+
+    #[test]
+    fn one_byte_frames_and_random_splits() {
+        let input = recorded();
+        let every: Vec<usize> = (1..input.len()).collect();
+        for strip in [true, false] {
+            let (chunks, filter) = run(strip, &input, &every);
+            let expected = if strip { stripped() } else { input.clone() };
+            assert_eq!(joined(&chunks), expected);
+            assert_eq!(filter.captured(), Captured::Reported(TOKENS));
+        }
+        let mut rng = fastrand::Rng::with_seed(7);
+        for _ in 0..500 {
+            let mut cuts: Vec<usize> = (0..rng.usize(1..12))
+                .map(|_| rng.usize(0..=input.len()))
+                .collect();
+            cuts.sort_unstable();
+            for strip in [true, false] {
+                let (chunks, filter) = run(strip, &input, &cuts);
+                let expected = if strip { stripped() } else { input.clone() };
+                assert_eq!(joined(&chunks), expected, "cuts {cuts:?}");
+                assert_eq!(filter.captured(), Captured::Reported(TOKENS));
+            }
+        }
+    }
+
+    #[test]
+    fn crlf_cr_and_multiline_data() {
+        let crlf = |s: &[u8]| -> Vec<u8> {
+            String::from_utf8(s.to_vec())
+                .unwrap()
+                .replace('\n', "\r\n")
+                .into_bytes()
+        };
+        let cr = |s: &[u8]| -> Vec<u8> {
+            String::from_utf8(s.to_vec())
+                .unwrap()
+                .replace('\n', "\r")
+                .into_bytes()
+        };
+        // Multi-line data, an id field and a comment inside the usage event.
+        let usage = b"id: 9\n: note\ndata: {\"choices\":[],\ndata: \"usage\":{\"prompt_tokens\":3,\ndata:\"completion_tokens\":4}}\n\n";
+        for convert in [crlf, cr, |s: &[u8]| s.to_vec()] {
+            let input = [convert(STREAM), convert(usage), convert(DONE)].concat();
+            let expected = [convert(STREAM), convert(DONE)].concat();
+            for cut in 0..=input.len() {
+                let (chunks, filter) = run(true, &input, &[cut]);
+                assert_eq!(joined(&chunks), expected, "cut {cut}");
+                assert_eq!(
+                    filter.captured(),
+                    Captured::Reported(Tokens {
+                        prompt: 3,
+                        completion: 4
+                    })
+                );
+                let (chunks, _) = run(false, &input, &[cut]);
+                assert_eq!(joined(&chunks), input);
+            }
+        }
+    }
+
+    #[test]
+    fn usage_with_content_is_kept_and_last_usage_wins() {
+        let mixed = b"data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n";
+        let input = [mixed.as_slice(), USAGE_EVENT, DONE].concat();
+        let (chunks, filter) = run(true, &input, &[]);
+        assert_eq!(joined(&chunks), [mixed.as_slice(), DONE].concat());
+        assert_eq!(filter.captured(), Captured::Reported(TOKENS));
+        // Usage-only event without a `choices` key also counts as usage-only.
+        let bare = b"data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":5}}\n\n";
+        let (chunks, filter) = run(true, &[bare.as_slice(), DONE].concat(), &[]);
+        assert_eq!(joined(&chunks), DONE);
+        assert_eq!(
+            filter.captured(),
+            Captured::Reported(Tokens {
+                prompt: 2,
+                completion: 5
+            })
+        );
+    }
+
+    #[test]
+    fn missing_invalid_and_odd_streams() {
+        // No usage at all; empty frames; EOF without DONE or final blank line.
+        let input = b"data: {\"choices\":[{\"delta\":{}}]}\n\ndata: {\"choices\":[]}";
+        for strip in [true, false] {
+            let (chunks, filter) = run(strip, input, &[0, 0, 5, 5]);
+            assert_eq!(joined(&chunks), input.as_slice());
+            assert_eq!(filter.captured(), Captured::Missing);
+        }
+        // Unterminated final usage event: forwarded, still metered.
+        let input = [STREAM, &USAGE_EVENT[..USAGE_EVENT.len() - 2]].concat();
+        let (chunks, filter) = run(true, &input, &[10]);
+        assert_eq!(joined(&chunks), input);
+        assert_eq!(filter.captured(), Captured::Reported(TOKENS));
+        // Unreadable usage numbers.
+        let bad = b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":\"x\"}}\n\n";
+        let (chunks, filter) = run(true, bad, &[]);
+        assert_eq!(
+            joined(&chunks),
+            bad.as_slice(),
+            "unparseable events are kept"
+        );
+        assert_eq!(filter.captured(), Captured::Missing);
+        let bad = b"data: {\"choices\":[],\"usage\":{\"completion_tokens\":1}}\n\n";
+        let (chunks, filter) = run(true, bad, &[]);
+        assert!(joined(&chunks).is_empty());
+        assert_eq!(filter.captured(), Captured::Invalid);
+        // Non-JSON data and an error event pass untouched.
+        let other = b"event: error\ndata: upstream \"usage\": {broken\n\ndata: [1]\n\n";
+        let (chunks, filter) = run(true, other, &[7]);
+        assert_eq!(joined(&chunks), other.as_slice());
+        assert_eq!(filter.captured(), Captured::Missing);
+    }
+
+    #[test]
+    fn oversized_event_stops_filtering() {
+        let big = [
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"".as_slice(),
+            &vec![b'a'; MAX_SSE_EVENT],
+            b"\"}}]}\n\n",
+        ]
+        .concat();
+        let input = [STREAM, &big, USAGE_EVENT, DONE].concat();
+        let cuts: Vec<usize> = (1..input.len()).step_by(16 * 1024).collect();
+        for strip in [true, false] {
+            let (chunks, filter) = run(strip, &input, &cuts);
+            assert_eq!(joined(&chunks), input, "forwarded untouched after overflow");
+            assert_eq!(filter.captured(), Captured::Invalid);
+        }
+    }
+
+    #[test]
+    fn whole_event_frames_do_not_allocate() {
+        let frames: Vec<Bytes> = [STREAM, USAGE_EVENT, DONE]
+            .iter()
+            .map(|b| Bytes::from_static(b))
+            .collect();
+        for strip in [true, false] {
+            let mut filter = SseFilter::new(strip);
+            // Warm up the scratch buffer.
+            for frame in &frames {
+                filter.push(frame.clone());
+            }
+            let ((allocations, _), _) = crate::test_alloc::count(|| {
+                for frame in &frames {
+                    std::hint::black_box(filter.push(frame.clone()));
+                }
+            });
+            assert_eq!(allocations, 0, "strip={strip}");
+        }
+    }
+
+    #[test]
+    fn tee_and_response_usage() {
+        let chat = br#"{"id":"x","choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#;
+        let mut tee = Tee::default();
+        tee.push(&Bytes::from_static(chat));
+        assert_eq!(
+            tee.finish(),
+            Captured::Reported(Tokens {
+                prompt: 5,
+                completion: 2
+            })
+        );
+        let mut tee = Tee::default();
+        for chunk in chat.chunks(3) {
+            tee.push(&Bytes::copy_from_slice(chunk));
+        }
+        assert_eq!(
+            tee.finish(),
+            Captured::Reported(Tokens {
+                prompt: 5,
+                completion: 2
+            })
+        );
+        let embeddings =
+            br#"{"object":"list","data":[],"usage":{"prompt_tokens":8,"total_tokens":8}}"#;
+        assert_eq!(
+            parse_response_usage(embeddings),
+            Captured::Reported(Tokens {
+                prompt: 8,
+                completion: 0
+            })
+        );
+        assert_eq!(
+            parse_response_usage(br#"{"object":"x"}"#),
+            Captured::Missing
+        );
+        assert_eq!(
+            parse_response_usage(br#"{"usage":null}"#),
+            Captured::Missing
+        );
+        assert_eq!(parse_response_usage(b"not json"), Captured::Invalid);
+        assert_eq!(parse_response_usage(b"[1]"), Captured::Invalid);
+        assert_eq!(parse_response_usage(b""), Captured::Invalid);
+        assert_eq!(
+            parse_response_usage(br#"{"usage":{"prompt_tokens":-1}}"#),
+            Captured::Invalid
+        );
+        let mut tee = Tee::default();
+        let chunk = Bytes::from(vec![b' '; 1024 * 1024]);
+        for _ in 0..5 {
+            tee.push(&chunk);
+        }
+        assert_eq!(tee.finish(), Captured::Invalid);
+    }
+
+    #[test]
+    fn cost_is_fixed_point_and_checked() {
+        let price = Price {
+            input_nano_usd_per_mtok: 150_000_000,     // $0.15 / Mtok
+            output_nano_usd_per_mtok: 12_000_000_000, // $12 / Mtok
+        };
+        let t = |prompt, completion| Tokens { prompt, completion };
+        assert_eq!(cost_nano_usd(&price, t(1_000_000, 0)), Some(150_000_000));
+        assert_eq!(cost_nano_usd(&price, t(11, 7)), Some(1650 + 84_000));
+        // Rounded half up: 0.499999 -> 0, 0.5 -> 1, 0.999998 -> 1.
+        let tiny = Price {
+            input_nano_usd_per_mtok: 1,
+            output_nano_usd_per_mtok: 499_999,
+        };
+        assert_eq!(cost_nano_usd(&tiny, t(0, 1)), Some(0));
+        assert_eq!(cost_nano_usd(&tiny, t(1, 1)), Some(1));
+        assert_eq!(cost_nano_usd(&tiny, t(0, 2)), Some(1));
+        let max = Price {
+            input_nano_usd_per_mtok: u64::MAX,
+            output_nano_usd_per_mtok: u64::MAX,
+        };
+        assert_eq!(cost_nano_usd(&max, t(u64::MAX, u64::MAX)), None);
+        assert_eq!(cost_nano_usd(&max, t(1_000_000, 0)), Some(u64::MAX));
+    }
+
+    fn event(id: &str) -> UsageEvent {
+        UsageEvent {
+            request_id: id.into(),
+            ..Default::default()
+        }
+    }
+
+    fn config(
+        endpoint: String,
+        capacity: usize,
+        batch_max: usize,
+        flush: Duration,
+    ) -> ReporterConfig {
+        ReporterConfig {
+            endpoint,
+            token: "gw-token".into(),
+            gateway_id: "gw-1".into(),
+            capacity,
+            batch_max,
+            flush_interval: flush,
+        }
+    }
+
+    fn metric(metrics: &Metrics, line: &str) -> bool {
+        metrics.encode(&Default::default()).unwrap().contains(line)
+    }
+
+    #[tokio::test]
+    async fn batches_by_size_and_interval_with_bearer() {
+        let mut cp = FakeUsage::start(None).await;
+        let metrics = Arc::new(Metrics::new());
+        let (sink, handle) = spawn_reporter(
+            config(cp.url(), 100, 3, Duration::from_millis(200)),
+            metrics.clone(),
+        );
+        for i in 0..4 {
+            sink.try_record(event(&format!("r{i}")));
+        }
+        let first = cp.next().await;
+        assert_eq!(first.authorization.as_deref(), Some("Bearer gw-token"));
+        assert_eq!(first.request.gateway_id, "gw-1");
+        assert_eq!(first.request.events.len(), 3);
+        let started = Instant::now();
+        let second = cp.next().await;
+        assert_eq!(second.request.events.len(), 1, "flushed by the interval");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let ids: Vec<_> = first
+            .request
+            .events
+            .iter()
+            .chain(&second.request.events)
+            .map(|e| e.request_id.clone())
+            .collect();
+        assert_eq!(ids, ["r0", "r1", "r2", "r3"]);
         handle.shutdown(Duration::from_secs(1)).await;
+        assert!(metric(&metrics, "lumewarp_usage_events_reported_total 4"));
+    }
+
+    #[tokio::test]
+    async fn control_plane_down_then_up_delivers_once() {
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reserved.local_addr().unwrap();
+        drop(reserved);
+        let metrics = Arc::new(Metrics::new());
+        let (sink, handle) = spawn_reporter(
+            config(
+                format!("http://{addr}"),
+                100,
+                500,
+                Duration::from_millis(50),
+            ),
+            metrics.clone(),
+        );
+        sink.try_record(event("only-once"));
+        // At least one attempt fails while nothing listens.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !metric(&metrics, "lumewarp_usage_events_failed_total 1")
+                && !metric(&metrics, "lumewarp_usage_events_failed_total 2")
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a failed attempt");
+        let mut cp = FakeUsage::start(Some(addr)).await;
+        let report = cp.next().await;
+        assert_eq!(report.request.events.len(), 1);
+        assert_eq!(report.request.events[0].request_id, "only-once");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1500), cp.reports.recv())
+                .await
+                .is_err(),
+            "event reported twice"
+        );
+        assert!(metric(&metrics, "lumewarp_usage_events_reported_total 1"));
+        handle.shutdown(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn unavailable_is_retried_and_invalid_batches_are_dropped() {
+        let mut cp = FakeUsage::start(None).await;
+        cp.fail_next(2);
+        let metrics = Arc::new(Metrics::new());
+        let (sink, handle) = spawn_reporter(
+            config(cp.url(), 100, 500, Duration::from_millis(10)),
+            metrics.clone(),
+        );
+        sink.try_record(event("retried"));
+        let report = cp.next().await;
+        assert_eq!(report.request.events[0].request_id, "retried");
+        assert!(metric(&metrics, "lumewarp_usage_events_failed_total 2"));
+        cp.reject_next(1);
+        sink.try_record(event("invalid"));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !metric(&metrics, "lumewarp_usage_events_dropped_total 1") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("rejected batch is dropped and counted");
+        sink.try_record(event("after"));
+        assert_eq!(cp.next().await.request.events[0].request_id, "after");
+        handle.shutdown(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn overflow_drops_while_the_control_plane_is_down() {
+        let metrics = Arc::new(Metrics::new());
+        let (sink, handle) = spawn_reporter(
+            config("http://127.0.0.1:1".into(), 4, 2, Duration::from_millis(10)),
+            metrics.clone(),
+        );
+        // The batcher holds at most one batch (2) in retry; the queue holds 4.
+        for i in 0..20 {
+            sink.try_record(event(&format!("e{i}")));
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        for i in 20..30 {
+            sink.try_record(event(&format!("e{i}")));
+        }
+        let text = metrics.encode(&Default::default()).unwrap();
+        let dropped: u64 = text
+            .lines()
+            .find_map(|l| l.strip_prefix("lumewarp_usage_events_dropped_total "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(dropped >= 24, "dropped {dropped}:\n{text}");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !metric(&metrics, "lumewarp_usage_queue_depth 4") {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("queue depth reported while retrying");
+        handle.shutdown(Duration::from_millis(200)).await;
+        // Everything still queued at the deadline is counted as dropped.
+        assert!(metric(&metrics, "lumewarp_usage_events_dropped_total 30"));
+    }
+
+    #[tokio::test]
+    async fn shutdown_flushes_queued_events() {
+        let mut cp = FakeUsage::start(None).await;
+        let metrics = Arc::new(Metrics::new());
+        let (sink, handle) = spawn_reporter(
+            config(cp.url(), 100, 500, Duration::from_secs(60)),
+            metrics.clone(),
+        );
+        for i in 0..3 {
+            sink.try_record(event(&format!("s{i}")));
+        }
+        handle.shutdown(Duration::from_secs(5)).await;
+        let report = cp.next().await;
+        assert_eq!(report.request.events.len(), 3);
+        assert!(metric(&metrics, "lumewarp_usage_events_reported_total 3"));
+        // A dropped handle (no shutdown) keeps the reporter running.
+        let (sink, handle) = spawn_reporter(
+            config(cp.url(), 100, 500, Duration::from_millis(10)),
+            metrics.clone(),
+        );
+        drop(handle);
+        sink.try_record(event("detached"));
+        assert_eq!(cp.next().await.request.events[0].request_id, "detached");
+    }
+
+    /// Release-mode cost of the stream filter per frame:
+    /// `cargo test --release -p lumewarp-gateway sse_filter_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing benchmark; run explicitly in release mode"]
+    fn bench_sse_filter_cost() {
+        use std::hint::black_box;
+        let content: &[u8] = b"data: {\"id\":\"chatcmpl-0123456789\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"mock\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello \"},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\n";
+        let frame = Bytes::from_static(content);
+        let usage = Bytes::from_static(USAGE_EVENT);
+        const N: u32 = 2_000_000;
+        let report = |name: &str, f: &mut dyn FnMut()| {
+            for _ in 0..10_000 {
+                f();
+            }
+            let start = Instant::now();
+            for _ in 0..N {
+                f();
+            }
+            println!(
+                "{name:<44} {:>7.1} ns/frame",
+                start.elapsed().as_nanos() as f64 / f64::from(N)
+            );
+        };
+        let mut filter = SseFilter::new(true);
+        report("strip, whole content event (~230 B)", &mut || {
+            black_box(filter.push(black_box(frame.clone())));
+        });
+        let mut filter = SseFilter::new(false);
+        report("observe, whole content event", &mut || {
+            black_box(filter.push(black_box(frame.clone())));
+        });
+        let (a, b) = (frame.slice(..100), frame.slice(100..));
+        let mut filter = SseFilter::new(true);
+        report("strip, event split over 2 frames (per event)", &mut || {
+            black_box(filter.push(black_box(a.clone())));
+            black_box(filter.push(black_box(b.clone())));
+        });
+        let mut filter = SseFilter::new(true);
+        report("strip, usage-only event (parsed, dropped)", &mut || {
+            black_box(filter.push(black_box(usage.clone())));
+        });
+        let body = Bytes::from_static(br#"{"id":"chatcmpl-0123456789","object":"chat.completion","created":1700000000,"model":"mock","choices":[{"index":0,"message":{"role":"assistant","content":"Hello from mock."},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":16,"total_tokens":24}}"#);
+        report("non-stream tee + usage parse (~250 B body)", &mut || {
+            let mut tee = Tee::default();
+            tee.push(black_box(&body));
+            black_box(tee.finish());
+        });
+        report("baseline: Bytes clone", &mut || {
+            black_box(black_box(&frame).clone());
+        });
     }
 }

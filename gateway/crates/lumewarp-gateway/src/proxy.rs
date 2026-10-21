@@ -1,12 +1,14 @@
 use std::{
     borrow::Cow,
     error::Error,
+    ops::Range,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
     time::{Duration, Instant},
 };
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, Limited};
 use hyper::{
     body::{Body, Frame, Incoming, SizeHint},
@@ -18,17 +20,21 @@ use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
     rt::TokioExecutor,
 };
+use lumewarp_proto::{
+    config::v1::StreamUsageMode,
+    usage::v1::{RequestOutcome, UsageState},
+};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
 use crate::{
     auth::{self, Caller},
     error,
-    metrics::{Observation, UpstreamError},
+    metrics::{Observation, RequestMetrics, UpstreamError},
     ratelimit::Permit,
     router::{Deployment, InFlight, Router},
     telemetry,
-    usage::RequestCtx,
+    usage::{Captured, RequestCtx, SseFilter, Tee, UsageCapture},
 };
 
 pub type BoxError = Box<dyn Error + Send + Sync>;
@@ -61,6 +67,37 @@ pub struct RequestFields<'a> {
     model: &'a RawValue,
     #[serde(default, borrow)]
     stream: Option<&'a RawValue>,
+    #[serde(default, borrow, deserialize_with = "raw_value")]
+    stream_options: Option<&'a RawValue>,
+}
+
+/// Keeps an explicit JSON `null` as `Some(raw null)`: plain `Option`
+/// deserialization would turn it into `None` and a splice would then add a
+/// duplicate key.
+fn raw_value<'de: 'a, 'a, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<&'a RawValue>, D::Error> {
+    <&RawValue>::deserialize(deserializer).map(Some)
+}
+
+/// Where the client's `stream_options.include_usage` stands, with the raw
+/// tokens a splice replaces.
+#[derive(Debug)]
+pub enum IncludeUsage<'a> {
+    /// No `stream_options`, or `"stream_options": null` (the raw `null`).
+    NoOptions(Option<&'a RawValue>),
+    /// A `stream_options` object without `include_usage`.
+    NoField(&'a RawValue),
+    /// The client asked for usage.
+    True,
+    /// `include_usage` is `false` or `null` (the raw value).
+    Off(&'a RawValue),
+}
+
+impl IncludeUsage<'_> {
+    pub fn requested(&self) -> bool {
+        matches!(self, Self::True)
+    }
 }
 
 impl<'a> RequestFields<'a> {
@@ -80,6 +117,8 @@ impl<'a> RequestFields<'a> {
                 "Expected exactly one string model field"
             } else if message.starts_with("duplicate field `stream`") {
                 "Expected at most one boolean or null stream field"
+            } else if message.starts_with("duplicate field `stream_options`") {
+                "Expected at most one stream_options field"
             } else {
                 "Invalid JSON request object"
             }
@@ -100,15 +139,120 @@ impl<'a> RequestFields<'a> {
             .map(|value| value.flatten().unwrap_or(false))
     }
 
-    pub fn rewrite(&self, body: &[u8], upstream_model_json: &[u8]) -> Bytes {
+    /// Locates `stream_options.include_usage` without re-serializing; other
+    /// `stream_options` fields are ignored and preserved.
+    pub fn include_usage(&self) -> Result<IncludeUsage<'a>, &'static str> {
+        #[derive(Deserialize)]
+        struct StreamOptions<'a> {
+            #[serde(default, borrow, deserialize_with = "raw_value")]
+            include_usage: Option<&'a RawValue>,
+        }
+        let Some(raw) = self.stream_options else {
+            return Ok(IncludeUsage::NoOptions(None));
+        };
+        let text: &'a str = raw.get();
+        if text == "null" {
+            return Ok(IncludeUsage::NoOptions(Some(raw)));
+        }
+        if !text.starts_with('{') {
+            return Err("Expected stream_options to be an object or null");
+        }
+        let options: StreamOptions<'a> = serde_json::from_str(text)
+            .map_err(|_| "Expected at most one boolean or null stream_options.include_usage")?;
+        let Some(value) = options.include_usage else {
+            return Ok(IncludeUsage::NoField(raw));
+        };
+        match serde_json::from_str::<Option<bool>>(value.get()) {
+            Ok(Some(true)) => Ok(IncludeUsage::True),
+            Ok(_) => Ok(IncludeUsage::Off(value)),
+            Err(_) => Err("Expected a boolean or null stream_options.include_usage"),
+        }
+    }
+
+    /// Replaces the model token and, with `force_usage`, makes
+    /// `stream_options.include_usage` true; every other byte is preserved.
+    pub fn rewrite(
+        &self,
+        body: &[u8],
+        upstream_model_json: &[u8],
+        force_usage: Option<&IncludeUsage<'_>>,
+    ) -> Bytes {
         // RawValue borrows the exact original token, including string escapes.
-        let start = self.model.get().as_ptr() as usize - body.as_ptr() as usize;
-        let end = start + self.model.get().len();
-        let mut output = Vec::with_capacity(body.len() - (end - start) + upstream_model_json.len());
-        output.extend_from_slice(&body[..start]);
-        output.extend_from_slice(upstream_model_json);
-        output.extend_from_slice(&body[end..]);
+        let span = |raw: &RawValue| {
+            let start = raw.get().as_ptr() as usize - body.as_ptr() as usize;
+            start..start + raw.get().len()
+        };
+        let mut edits: [Option<(Range<usize>, &[u8])>; 2] =
+            [Some((span(self.model), upstream_model_json)), None];
+        edits[1] = match force_usage {
+            None | Some(IncludeUsage::True) => None,
+            Some(IncludeUsage::NoOptions(None)) => {
+                let open = body
+                    .iter()
+                    .position(|&b| b == b'{')
+                    .expect("validated object");
+                Some((
+                    open + 1..open + 1,
+                    br#""stream_options":{"include_usage":true},"#,
+                ))
+            }
+            Some(IncludeUsage::NoOptions(Some(null))) => {
+                Some((span(null), br#"{"include_usage":true}"#))
+            }
+            Some(IncludeUsage::NoField(options)) => {
+                let at = span(options).start + 1;
+                let empty = options.get()[1..].trim_start().starts_with('}');
+                let insert: &[u8] = if empty {
+                    br#""include_usage":true"#
+                } else {
+                    br#""include_usage":true,"#
+                };
+                Some((at..at, insert))
+            }
+            Some(IncludeUsage::Off(value)) => Some((span(value), b"true")),
+        };
+        if let [Some(a), Some(b)] = &edits {
+            if b.0.start < a.0.start {
+                edits.swap(0, 1);
+            }
+        }
+        let added: usize = edits.iter().flatten().map(|(_, new)| new.len()).sum();
+        let mut output = Vec::with_capacity(body.len() + added);
+        let mut at = 0;
+        for (range, new) in edits.iter().flatten() {
+            output.extend_from_slice(&body[at..range.start]);
+            output.extend_from_slice(new);
+            at = range.end;
+        }
+        output.extend_from_slice(&body[at..]);
         Bytes::from(output)
+    }
+}
+
+/// Reports a request rejected after its model was parsed (403 / 429). Only
+/// keyed callers are reported: anonymous rejections would be unattributable.
+fn report_rejection(
+    router: &Router,
+    caller: &Caller,
+    request: RequestCtx,
+    handles: Arc<RequestMetrics>,
+    endpoint: usize,
+    stream: bool,
+    status: StatusCode,
+) {
+    if matches!(caller, Caller::Key(_)) && router.runtime.usage.enabled() {
+        UsageCapture {
+            runtime: router.runtime.clone(),
+            caller: caller.clone(),
+            request,
+            handles,
+            deployment: None,
+            config_version: router.version,
+            endpoint,
+            stream,
+            status: status.as_u16(),
+        }
+        .finalize(RequestOutcome::Rejected, UsageState::Missing, None);
     }
 }
 
@@ -120,8 +264,7 @@ pub async fn forward(
     observation: &mut Observation,
     endpoint: usize,
     caller: Caller,
-    // Request identity for usage reporting (G4).
-    _request: RequestCtx,
+    request: RequestCtx,
     body_read_timeout: Duration,
 ) -> Response<ProxyBody> {
     let (mut parts, incoming) = req.into_parts();
@@ -194,9 +337,23 @@ pub async fn forward(
             )
         }
     };
+    let include_usage = match fields.include_usage() {
+        Ok(include_usage) => include_usage,
+        Err(message) => return error::json(StatusCode::BAD_REQUEST, "invalid_request", message),
+    };
     // Before route lookup, so denied callers cannot probe which aliases exist.
     if let Err(err) = auth::check_model(&caller, &model) {
-        observation.routed(router.rejected_model(&caller, &model, endpoint), stream);
+        let handles = router.rejected_model(&caller, &model, endpoint);
+        observation.routed(handles.clone(), stream);
+        report_rejection(
+            router,
+            &caller,
+            request,
+            handles,
+            endpoint,
+            stream,
+            err.status(),
+        );
         return err.into();
     }
     let Some(route) = router.routes.get(model.as_ref()) else {
@@ -206,7 +363,17 @@ pub async fn forward(
     let permit = match router.runtime.limiters.admit(&caller) {
         Ok(permit) => permit,
         Err(limited) => {
-            observation.routed(router.rejected_model(&caller, &model, endpoint), stream);
+            let handles = router.rejected_model(&caller, &model, endpoint);
+            observation.routed(handles.clone(), stream);
+            report_rejection(
+                router,
+                &caller,
+                request,
+                handles,
+                endpoint,
+                stream,
+                StatusCode::TOO_MANY_REQUESTS,
+            );
             return error::rate_limited(limited.retry_after_secs);
         }
     };
@@ -214,7 +381,16 @@ pub async fn forward(
     observation.routed(guard.metrics.clone(), stream);
     let deployment = &guard.deployment;
     tracing::debug!(deployment = %deployment.name, stream, "proxying request");
-    let rewritten = fields.rewrite(&body, &deployment.upstream_model_json);
+    // Streams carry usage only with include_usage; force it where the upstream
+    // supports it and strip the extra event again if the client did not ask.
+    let inject = stream
+        && deployment.stream_usage_mode == StreamUsageMode::IncludeUsage
+        && !include_usage.requested();
+    let rewritten = fields.rewrite(
+        &body,
+        &deployment.upstream_model_json,
+        inject.then_some(&include_usage),
+    );
     let uri = match upstream_uri(deployment, &parts.uri) {
         Ok(uri) => uri,
         Err(_) => {
@@ -238,40 +414,68 @@ pub async fn forward(
     }
     // The downstream protocol version is independent of the upstream connection.
     parts.version = hyper::Version::HTTP_11;
-    let request = Request::from_parts(parts, Full::new(rewritten));
-    observation.upstream_started = Some(Instant::now());
-    let response = match tokio::time::timeout(deployment.timeout, client.request(request)).await {
-        Ok(Ok(response)) => response,
-        Ok(Err(err)) => {
-            observation.handles.upstream_error(if err.is_connect() {
-                UpstreamError::Connect
-            } else {
-                UpstreamError::Protocol
-            });
-            return error::json(
-                StatusCode::BAD_GATEWAY,
-                "upstream_error",
-                "Upstream connection failed",
-            );
-        }
-        Err(_) => {
-            observation.handles.upstream_error(UpstreamError::Timeout);
-            return error::json(
-                StatusCode::GATEWAY_TIMEOUT,
-                "upstream_timeout",
-                "Upstream response timed out",
-            );
-        }
+    let upstream_request = Request::from_parts(parts, Full::new(rewritten));
+    let capture = |status: StatusCode| UsageCapture {
+        runtime: router.runtime.clone(),
+        caller: caller.clone(),
+        request,
+        handles: guard.metrics.clone(),
+        deployment: Some(guard.deployment.clone()),
+        config_version: router.version,
+        endpoint,
+        stream,
+        status: status.as_u16(),
     };
+    observation.upstream_started = Some(Instant::now());
+    let response =
+        match tokio::time::timeout(deployment.timeout, client.request(upstream_request)).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(err)) => {
+                observation.handles.upstream_error(if err.is_connect() {
+                    UpstreamError::Connect
+                } else {
+                    UpstreamError::Protocol
+                });
+                capture(StatusCode::BAD_GATEWAY).finalize(
+                    RequestOutcome::UpstreamError,
+                    UsageState::Missing,
+                    None,
+                );
+                return error::json(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream_error",
+                    "Upstream connection failed",
+                );
+            }
+            Err(_) => {
+                observation.handles.upstream_error(UpstreamError::Timeout);
+                capture(StatusCode::GATEWAY_TIMEOUT).finalize(
+                    RequestOutcome::UpstreamError,
+                    UsageState::Missing,
+                    None,
+                );
+                return error::json(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "upstream_timeout",
+                    "Upstream response timed out",
+                );
+            }
+        };
     observation.headers_received = Some(Instant::now());
     let (mut parts, body) = response.into_parts();
     strip_response_headers(&mut parts.headers);
+    let meter = Meter::select(&parts, stream, inject, include_usage.requested());
+    let capture = capture(parts.status);
     Response::from_parts(
         parts,
-        StreamingBody {
+        MeteredBody {
             body,
             guard: Some(guard),
             permit: Some(permit),
+            meter,
+            capture: Some(capture),
+            end: None,
+            held: None,
         }
         .boxed_unsync(),
     )
@@ -344,20 +548,140 @@ fn strip_response_headers(headers: &mut HeaderMap) {
     }
 }
 
-struct StreamingBody {
+/// How a response body is metered.
+enum Meter {
+    /// Nothing to read: error status, or a passthrough stream the client did
+    /// not ask usage for. Reported MISSING.
+    Off,
+    Sse(SseFilter),
+    Json(Tee),
+    /// Content-encoded body; not decompressed. Reported INVALID.
+    Encoded,
+}
+
+impl Meter {
+    fn select(
+        parts: &hyper::http::response::Parts,
+        stream: bool,
+        inject: bool,
+        requested: bool,
+    ) -> Self {
+        if !parts.status.is_success() {
+            return Self::Off;
+        }
+        let json = parts
+            .headers
+            .get(header::CONTENT_TYPE)
+            .is_some_and(|value| value.as_bytes().starts_with(b"application/json"));
+        if stream && !json {
+            return if inject || requested {
+                Self::Sse(SseFilter::new(inject))
+            } else {
+                Self::Off
+            };
+        }
+        if parts
+            .headers
+            .get(header::CONTENT_ENCODING)
+            .is_some_and(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
+        {
+            return Self::Encoded;
+        }
+        Self::Json(Tee::default())
+    }
+
+    fn holds_bytes(&self) -> bool {
+        matches!(self, Self::Sse(filter) if filter.holds_bytes())
+    }
+
+    fn rewrites(&self) -> bool {
+        matches!(self, Self::Sse(filter) if filter.strips())
+    }
+}
+
+/// Upstream response body: meters usage while forwarding, holds the
+/// deployment reservation and rate-limit permit until EOF / error / drop,
+/// and finalizes the usage capture exactly once when dropped.
+struct MeteredBody {
     body: Incoming,
     guard: Option<InFlight>,
     permit: Option<Permit>,
+    meter: Meter,
+    capture: Option<UsageCapture>,
+    /// Set when the upstream body ended (EOF or error).
+    end: Option<RequestOutcome>,
+    /// A trailers frame waiting behind flushed SSE bytes.
+    held: Option<Frame<Bytes>>,
 }
 
-impl StreamingBody {
+impl MeteredBody {
     fn release(&mut self) -> Option<InFlight> {
         self.permit.take();
         self.guard.take()
     }
+
+    fn meter(&mut self, data: Bytes) -> Bytes {
+        match &mut self.meter {
+            Meter::Sse(filter) => filter.push(data),
+            Meter::Json(tee) => {
+                tee.push(&data);
+                data
+            }
+            Meter::Off | Meter::Encoded => data,
+        }
+    }
+
+    /// Upstream EOF: returns bytes still held by the SSE filter.
+    fn eof(&mut self) -> Bytes {
+        self.end = Some(RequestOutcome::Completed);
+        self.release();
+        match &mut self.meter {
+            Meter::Sse(filter) => filter.push_eof(),
+            _ => Bytes::new(),
+        }
+    }
+
+    fn finalize(&mut self) {
+        let Some(capture) = self.capture.take() else {
+            return;
+        };
+        let end = self.end.or_else(|| {
+            // Never polled to EOF, but nothing was left (e.g. an empty body).
+            (self.body.is_end_stream() && !self.meter.holds_bytes())
+                .then_some(RequestOutcome::Completed)
+        });
+        let completed = end == Some(RequestOutcome::Completed);
+        let outcome = match end {
+            Some(RequestOutcome::Completed) if capture.status >= 500 => {
+                RequestOutcome::UpstreamError
+            }
+            Some(outcome) => outcome,
+            None => RequestOutcome::ClientCancelled,
+        };
+        let (captured, partial) = match std::mem::replace(&mut self.meter, Meter::Off) {
+            Meter::Sse(filter) => (filter.captured(), !completed),
+            Meter::Json(tee) if completed => (tee.finish(), false),
+            Meter::Json(_) => (Captured::Missing, true),
+            Meter::Encoded => (Captured::Invalid, false),
+            Meter::Off => (Captured::Missing, false),
+        };
+        let (state, tokens) = match captured {
+            Captured::Reported(tokens) => (UsageState::Reported, Some(tokens)),
+            Captured::Invalid => (UsageState::Invalid, None),
+            Captured::Missing if partial => (UsageState::Partial, None),
+            Captured::Missing => (UsageState::Missing, None),
+        };
+        capture.finalize(outcome, state, tokens);
+    }
 }
 
-impl Body for StreamingBody {
+impl Drop for MeteredBody {
+    fn drop(&mut self) {
+        self.finalize();
+    }
+}
+
+impl Body for MeteredBody {
     type Data = Bytes;
     type Error = BoxError;
 
@@ -365,32 +689,85 @@ impl Body for StreamingBody {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
-        match Pin::new(&mut self.body).poll_frame(cx) {
-            Poll::Ready(None) => {
-                self.release();
-                Poll::Ready(None)
-            }
-            Poll::Ready(Some(Err(err))) => {
-                if let Some(guard) = self.release() {
-                    guard.metrics.upstream_error(UpstreamError::Stream);
+        let this = &mut *self;
+        if let Some(frame) = this.held.take() {
+            return Poll::Ready(Some(Ok(frame)));
+        }
+        if this.end.is_some() {
+            return Poll::Ready(None);
+        }
+        loop {
+            match Pin::new(&mut this.body).poll_frame(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => {
+                    let tail = this.eof();
+                    return if tail.is_empty() {
+                        Poll::Ready(None)
+                    } else {
+                        Poll::Ready(Some(Ok(Frame::data(tail))))
+                    };
                 }
-                Poll::Ready(Some(Err(Box::new(err))))
-            }
-            Poll::Ready(Some(Ok(frame))) => {
-                if self.body.is_end_stream() {
-                    self.release();
+                Poll::Ready(Some(Err(err))) => {
+                    this.end = Some(RequestOutcome::UpstreamError);
+                    if let Some(guard) = this.release() {
+                        guard.metrics.upstream_error(UpstreamError::Stream);
+                    }
+                    return Poll::Ready(Some(Err(Box::new(err))));
                 }
-                Poll::Ready(Some(Ok(frame)))
+                Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
+                    Ok(data) => {
+                        let mut data = this.meter(data);
+                        if this.body.is_end_stream() {
+                            let tail = this.eof();
+                            if !tail.is_empty() {
+                                data = if data.is_empty() {
+                                    tail
+                                } else {
+                                    let mut joined =
+                                        BytesMut::with_capacity(data.len() + tail.len());
+                                    joined.extend_from_slice(&data);
+                                    joined.extend_from_slice(&tail);
+                                    joined.freeze()
+                                };
+                            }
+                            if data.is_empty() {
+                                return Poll::Ready(None);
+                            }
+                        } else if data.is_empty() {
+                            // Held back or dropped: nothing to forward yet.
+                            continue;
+                        }
+                        return Poll::Ready(Some(Ok(Frame::data(data))));
+                    }
+                    Err(frame) => {
+                        if this.body.is_end_stream() {
+                            let tail = this.eof();
+                            if !tail.is_empty() {
+                                this.held = Some(frame);
+                                return Poll::Ready(Some(Ok(Frame::data(tail))));
+                            }
+                        }
+                        return Poll::Ready(Some(Ok(frame)));
+                    }
+                },
             }
-            Poll::Pending => Poll::Pending,
         }
     }
 
     fn is_end_stream(&self) -> bool {
-        self.body.is_end_stream()
+        self.held.is_none()
+            && (self.end.is_some() || (self.body.is_end_stream() && !self.meter.holds_bytes()))
     }
+
     fn size_hint(&self) -> SizeHint {
-        self.body.size_hint()
+        if self.meter.rewrites() {
+            // Stripping changes the length; only the upper bound would hold.
+            SizeHint::default()
+        } else if self.end.is_some() {
+            SizeHint::with_exact(0)
+        } else {
+            self.body.size_hint()
+        }
     }
 }
 
@@ -407,7 +784,79 @@ mod tests {
         let expected = String::from_utf8(body.to_vec())
             .unwrap()
             .replace("\"public\"", "\"actual\"");
-        assert_eq!(fields.rewrite(body, br#""actual""#), expected.as_bytes());
+        assert_eq!(
+            fields.rewrite(body, br#""actual""#, None),
+            expected.as_bytes()
+        );
+    }
+
+    fn forced(body: &[u8]) -> Result<String, &'static str> {
+        let fields = RequestFields::parse(body)?;
+        let include_usage = fields.include_usage()?;
+        let rewritten = fields.rewrite(body, br#""up""#, Some(&include_usage));
+        Ok(String::from_utf8(rewritten.to_vec()).unwrap())
+    }
+
+    #[test]
+    fn forces_include_usage_by_splicing() {
+        for (body, expected) in [
+            (
+                r#" { "model":"public", "stream":true }"#,
+                r#" {"stream_options":{"include_usage":true}, "model":"up", "stream":true }"#,
+            ),
+            (
+                r#"{"stream_options":null,"model":"public"}"#,
+                r#"{"stream_options":{"include_usage":true},"model":"up"}"#,
+            ),
+            (
+                r#"{"model":"public","stream_options":{ }}"#,
+                r#"{"model":"up","stream_options":{"include_usage":true }}"#,
+            ),
+            (
+                r#"{"model":"public","stream_options":{"continuous_usage_stats":true,"x":{"include_usage":false}}}"#,
+                r#"{"model":"up","stream_options":{"include_usage":true,"continuous_usage_stats":true,"x":{"include_usage":false}}}"#,
+            ),
+            (
+                r#"{"stream_options":{"include_usage" : false},"model":"public","extra_body":{"guided_json":{}}}"#,
+                r#"{"stream_options":{"include_usage" : true},"model":"up","extra_body":{"guided_json":{}}}"#,
+            ),
+            (
+                r#"{"model":"public","stream_options":{"include_usage":null}}"#,
+                r#"{"model":"up","stream_options":{"include_usage":true}}"#,
+            ),
+            (
+                r#"{"model":"public","stream_options":{"include_usage":true}}"#,
+                r#"{"model":"up","stream_options":{"include_usage":true}}"#,
+            ),
+        ] {
+            assert_eq!(forced(body.as_bytes()).unwrap(), expected, "{body}");
+            let rewritten = forced(body.as_bytes()).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&rewritten).unwrap();
+            assert_eq!(value["stream_options"]["include_usage"], true);
+        }
+        let fields =
+            RequestFields::parse(br#"{"model":"m","stream_options":{"include_usage":true}}"#)
+                .unwrap();
+        assert!(fields.include_usage().unwrap().requested());
+        let fields = RequestFields::parse(br#"{"model":"m"}"#).unwrap();
+        assert!(!fields.include_usage().unwrap().requested());
+    }
+
+    #[test]
+    fn rejects_invalid_stream_options() {
+        for body in [
+            r#"{"model":"m","stream_options":true}"#,
+            r#"{"model":"m","stream_options":[]}"#,
+            r#"{"model":"m","stream_options":{"include_usage":"yes"}}"#,
+            r#"{"model":"m","stream_options":{"include_usage":1}}"#,
+            r#"{"model":"m","stream_options":{"include_usage":true,"include_usage":false}}"#,
+        ] {
+            assert!(forced(body.as_bytes()).is_err(), "{body}");
+        }
+        assert_eq!(
+            RequestFields::parse(br#"{"model":"m","stream_options":{},"stream_options":{}}"#).err(),
+            Some("Expected at most one stream_options field")
+        );
     }
 
     #[test]
@@ -415,7 +864,7 @@ mod tests {
         let body = br#"{"model":"\u6a21\u578b\"\\","other":"\u1234"}"#;
         let fields = RequestFields::parse(body).unwrap();
         assert_eq!(fields.model().unwrap(), "模型\"\\");
-        let rewritten = fields.rewrite(body, &serde_json::to_vec("上游\"\\").unwrap());
+        let rewritten = fields.rewrite(body, &serde_json::to_vec("上游\"\\").unwrap(), None);
         assert_eq!(
             std::str::from_utf8(&rewritten).unwrap(),
             "{\"model\":\"上游\\\"\\\\\",\"other\":\"\\u1234\"}"

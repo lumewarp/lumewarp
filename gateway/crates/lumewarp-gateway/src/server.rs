@@ -34,7 +34,7 @@ pub type Snapshot = Arc<ArcSwapOption<Router>>;
 /// Readiness: a router is loaded. Without one, `/v1/*` returns 503
 /// `not_ready` (before authentication) and the admin `/readyz` returns 503;
 /// nothing falls back to an open router.
-#[allow(dead_code)] // For the control-plane boot path (G2).
+#[cfg(test)]
 pub fn ready(snapshot: &Snapshot) -> bool {
     snapshot.load().is_some()
 }

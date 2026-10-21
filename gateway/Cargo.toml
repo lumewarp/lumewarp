@@ -42,7 +42,9 @@ thiserror = "2"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time", "sync"] }
 tracing = "0.1"
+tokio-stream = "0.1"
 uuid = { version = "1.10", features = ["v7", "fast-rng"] }
+memchr = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.release]

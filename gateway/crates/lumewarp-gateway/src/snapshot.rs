@@ -23,6 +23,9 @@ pub const MAX_KEYS: usize = 200_000;
 pub const FILE_NAME: &str = "snapshot.pb";
 const TMP_NAME: &str = "snapshot.pb.tmp";
 const DIGEST_LEN: usize = 32;
+const LEN_FIELD: usize = 4;
+/// Upper bound for the opaque control-plane digest.
+const MAX_DIGEST_BYTES: u32 = 1024;
 
 /// Becomes a NACK. `reason` is sanitized: names and ids only, never secrets.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -366,17 +369,34 @@ pub fn apply(base: &Snapshot, update: ConfigUpdate) -> Result<Snapshot, ApplyErr
     }
 }
 
-/// Atomically replaces `<dir>/snapshot.pb`: payload followed by its sha256,
-/// written to a 0600 temp file, fsynced, renamed, then the directory fsynced.
-/// Creates `dir` (0700) if missing. Blocking: call from the apply task only.
+/// Atomically replaces `<dir>/snapshot.pb`. Equivalent to `store_with_digest`
+/// with an empty digest.
+#[cfg(test)]
 pub fn store(dir: &Path, snapshot: &Snapshot) -> io::Result<()> {
-    let payload = snapshot.encode_to_vec();
-    if payload.len() > MAX_SNAPSHOT_BYTES {
+    store_with_digest(dir, snapshot, &[])
+}
+
+/// Atomically replaces `<dir>/snapshot.pb`: `payload || digest || len(digest)
+/// as u32 BE || sha256(everything before)`, written to a 0600 temp file,
+/// fsynced, renamed, then the directory fsynced. `digest` is the control
+/// plane's opaque `target_digest`, kept in the same file so the two can never
+/// diverge. Creates `dir` (0700) if missing. Blocking: call from the apply
+/// task only.
+pub fn store_with_digest(dir: &Path, snapshot: &Snapshot, digest: &[u8]) -> io::Result<()> {
+    let mut data = snapshot.encode_to_vec();
+    if data.len() > MAX_SNAPSHOT_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "snapshot exceeds the size cap",
         ));
     }
+    let digest_len = u32::try_from(digest.len())
+        .ok()
+        .filter(|&n| n <= MAX_DIGEST_BYTES)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "digest too large"))?;
+    data.extend_from_slice(digest);
+    data.extend_from_slice(&digest_len.to_be_bytes());
+    let checksum = Sha256::digest(&data);
     create_dir(dir)?;
     let tmp = dir.join(TMP_NAME);
     {
@@ -388,8 +408,8 @@ pub fn store(dir: &Path, snapshot: &Snapshot) -> io::Result<()> {
         // `mode` applies only on creation; a leftover temp file may differ.
         #[cfg(unix)]
         file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-        file.write_all(&payload)?;
-        file.write_all(&Sha256::digest(&payload))?;
+        file.write_all(&data)?;
+        file.write_all(&checksum)?;
         file.sync_all()?;
     }
     fs::rename(&tmp, dir.join(FILE_NAME))?;
@@ -406,32 +426,44 @@ fn create_dir(dir: &Path) -> io::Result<()> {
 
 /// Reads `<dir>/snapshot.pb`. `Ok(None)` when absent; corrupt, oversized or
 /// wrong-scope files are errors, and the caller must not serve from them.
+#[cfg(test)]
 pub fn load(dir: &Path, scope: &str) -> Result<Option<Snapshot>, LoadError> {
+    Ok(load_with_digest(dir, scope)?.map(|(snapshot, _)| snapshot))
+}
+
+/// Like `load`, also returning the persisted `target_digest`.
+pub fn load_with_digest(dir: &Path, scope: &str) -> Result<Option<(Snapshot, Vec<u8>)>, LoadError> {
     let file = match File::open(dir.join(FILE_NAME)) {
         Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err.into()),
     };
-    let cap = MAX_SNAPSHOT_BYTES + DIGEST_LEN;
+    let cap = MAX_SNAPSHOT_BYTES + MAX_DIGEST_BYTES as usize + DIGEST_LEN + LEN_FIELD;
     let mut data = Vec::new();
     file.take(cap as u64 + 1).read_to_end(&mut data)?;
     if data.len() > cap {
         return Err(LoadError::TooLarge);
     }
-    if data.len() < DIGEST_LEN {
+    if data.len() < DIGEST_LEN + LEN_FIELD {
         return Err(LoadError::Corrupt);
     }
-    let (payload, digest) = data.split_at(data.len() - DIGEST_LEN);
-    if Sha256::digest(payload).as_slice() != digest {
+    let (body, checksum) = data.split_at(data.len() - DIGEST_LEN);
+    if Sha256::digest(body).as_slice() != checksum {
         return Err(LoadError::Corrupt);
     }
+    let (rest, len) = body.split_at(body.len() - LEN_FIELD);
+    let len = u32::from_be_bytes(len.try_into().expect("4 bytes")) as usize;
+    if len > rest.len() {
+        return Err(LoadError::Corrupt);
+    }
+    let (payload, digest) = rest.split_at(rest.len() - len);
     let snapshot = Snapshot::decode(payload).map_err(|_| LoadError::Corrupt)?;
     if snapshot.scope != scope {
         return Err(LoadError::WrongScope {
             found: snapshot.scope,
         });
     }
-    Ok(Some(snapshot))
+    Ok(Some((snapshot, digest.to_vec())))
 }
 
 #[cfg(test)]
@@ -521,6 +553,7 @@ pub(crate) mod tests {
             &base(),
             ConfigUpdate {
                 update: Some(Update::Delta(delta)),
+                ..Default::default()
             },
         )
     }
@@ -628,6 +661,7 @@ pub(crate) mod tests {
             &s,
             ConfigUpdate {
                 update: Some(Update::Delta(delta(3))),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -650,7 +684,7 @@ pub(crate) mod tests {
         d.remove_teams = vec!["t2".into()];
         assert_code(apply_delta(d), NackCode::InvalidConfig);
         assert_code(
-            apply(&base(), ConfigUpdate { update: None }),
+            apply(&base(), ConfigUpdate::default()),
             NackCode::InvalidConfig,
         );
         // Removing a team still referenced by a key fails validation afterwards.
@@ -678,6 +712,7 @@ pub(crate) mod tests {
         full.api_keys.clear();
         let update = |s: Snapshot| ConfigUpdate {
             update: Some(Update::Full(s)),
+            ..Default::default()
         };
         // An older version is accepted (control plane restored from backup).
         let mut newer = base();
@@ -808,6 +843,11 @@ pub(crate) mod tests {
         assert!(load(&dir, "scope-a").unwrap().is_none());
         store(&dir, &base()).unwrap();
         assert_eq!(load(&dir, "scope-a").unwrap(), Some(base()));
+        store_with_digest(&dir, &base(), b"opaque").unwrap();
+        assert_eq!(
+            load_with_digest(&dir, "scope-a").unwrap(),
+            Some((base(), b"opaque".to_vec()))
+        );
         let mut next = base();
         next.version = 2;
         store(&dir, &next).unwrap();
@@ -859,8 +899,10 @@ pub(crate) mod tests {
         let root = temp_dir();
         let path = root.path().join(FILE_NAME);
         let file = File::create(&path).unwrap();
-        file.set_len((MAX_SNAPSHOT_BYTES + DIGEST_LEN + 1) as u64)
-            .unwrap();
+        file.set_len(
+            (MAX_SNAPSHOT_BYTES + MAX_DIGEST_BYTES as usize + DIGEST_LEN + LEN_FIELD + 1) as u64,
+        )
+        .unwrap();
         assert!(matches!(load(root.path(), ""), Err(LoadError::TooLarge)));
     }
 

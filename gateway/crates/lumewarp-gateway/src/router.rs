@@ -37,10 +37,8 @@ pub struct Deployment {
     /// Metering context, immutable for every request holding this deployment:
     /// a request keeps the price it started with across snapshot swaps.
     /// `None` = price unknown (cost reported unknown, never 0).
-    #[allow(dead_code)] // Read by usage capture (W2).
     pub price: Option<Price>,
     /// Resolved: UNSPECIFIED is stored as `IncludeUsage`.
-    #[allow(dead_code)] // Read by usage capture (W2).
     pub stream_usage_mode: StreamUsageMode,
     /// Interned deployment name for metric handle lookups.
     pub label: LabelId,
@@ -48,7 +46,6 @@ pub struct Deployment {
 
 /// A compiled virtual key with its already-resolved effective policy.
 // Ids and scopes are read by usage reporting and rate limiting (W2).
-#[allow(dead_code)]
 pub struct KeyContext {
     pub key_id: Arc<str>,
     pub org_id: Arc<str>,
