@@ -1,69 +1,181 @@
 """FastAPI app factory and process lifespan.
 
-One process: uvicorn (1 worker) + grpc.aio server + background loops, all started in the
-lifespan. Readiness = DB reachable + migrations at head + every background task alive.
+One supervised process: uvicorn (1 worker) + grpc.aio ConfigService/UsageService + the
+compiler loop + the budget rollover scheduler + the notifier delivery loop, all started
+and stopped in the FastAPI lifespan.
+
+Readiness = DB reachable + migrations at head + every background service alive. A
+background service that stops on its own is logged and fails readiness; if it is the gRPC
+server, the process is asked to exit (`fatal_handler`, SIGTERM by default) because
+gateways can no longer get config.
 """
 
 import asyncio
 import logging
+import os
+import signal
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from lumewarp_control_plane import __version__, migrate
+from lumewarp_control_plane import __version__, compiler, migrate, notifier, usage
+from lumewarp_control_plane import grpc as grpc_services
 from lumewarp_control_plane.api import router as api_router
-from lumewarp_control_plane.db import SessionFactory, create_engine, create_session_factory
-from lumewarp_control_plane.errors import install_handlers
+from lumewarp_control_plane.db import create_engine, create_session_factory
+from lumewarp_control_plane.errors import error_body, install_handlers
 from lumewarp_control_plane.settings import Settings, get_settings
 
 log = logging.getLogger(__name__)
 
 READY_TIMEOUT_SECONDS = 2.0
+# Deadline for draining gRPC streams and stopping loops on shutdown.
+SHUTDOWN_GRACE_SECONDS = 5.0
+NOTIFIER_INTERVAL_SECONDS = 1.0
+# Services whose unexpected exit makes the process exit, not only unready.
+FATAL_SERVICES = frozenset({"grpc"})
 
-# A long-running coroutine; returning or raising makes the process not ready.
-BackgroundService = Callable[[Settings, SessionFactory], Awaitable[None]]
+
+def _terminate_process(service: str) -> None:
+    log.critical("background service %s stopped; shutting down the process", service)
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
-def background_services(settings: Settings) -> dict[str, BackgroundService]:
-    """Services started by the lifespan when settings.background_enabled.
+@dataclass
+class Runtime:
+    """Background services of one app instance (app.state.runtime)."""
 
-    Integration (W2b) registers here: "grpc" (wraps grpc.serve and waits for
-    termination), "compiler" (loops compiler.publish_pending, woken by
-    outbox.RECOMPILE_CHANNEL), "rollover" (usage.rollover_scheduler) and "notifier"
-    (loops notifier.deliver_pending).
+    stop: asyncio.Event = field(default_factory=asyncio.Event)
+    tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    grpc_server: object | None = None
+    grpc_port: int | None = None
+    failures: dict[str, str] = field(default_factory=dict)
+
+
+async def _notifier_loop(app: FastAPI, stop: asyncio.Event) -> None:
+    factory = app.state.session_factory
+    while not stop.is_set():
+        try:
+            await notifier.deliver_pending(factory)
+        except Exception:
+            log.exception("notifier delivery step failed")
+        try:
+            await asyncio.wait_for(stop.wait(), NOTIFIER_INTERVAL_SECONDS)
+        except TimeoutError:
+            pass
+
+
+def _supervise(
+    app: FastAPI, runtime: Runtime, name: str, coro: Awaitable[None]
+) -> asyncio.Task[None]:
+    async def run() -> None:
+        try:
+            await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            runtime.failures[name] = type(exc).__name__
+            log.exception("background service %s crashed", name)
+        else:
+            if runtime.stop.is_set():
+                return
+            runtime.failures[name] = "exited"
+            log.error("background service %s exited unexpectedly", name)
+        if name in FATAL_SERVICES and not runtime.stop.is_set():
+            app.state.fatal_handler(name)
+
+    return asyncio.create_task(run(), name=f"lumewarp:{name}")
+
+
+async def start_background(app: FastAPI) -> Runtime:
+    settings: Settings = app.state.settings
+    factory = app.state.session_factory
+    runtime = Runtime()
+    # Bind errors surface here and abort startup.
+    server = await grpc_services.serve(settings, factory)
+    runtime.grpc_server = server
+    runtime.grpc_port = grpc_services.bound_port(server)
+    registry = grpc_services.registry_for(server)
+
+    def on_published(scope: str, version: int) -> None:
+        if registry is not None:
+            registry.notify_published(scope, version)
+
+    runtime.tasks["grpc"] = _supervise(app, runtime, "grpc", server.wait_for_termination())
+    runtime.tasks["compiler"] = _supervise(
+        app,
+        runtime,
+        "compiler",
+        compiler.run_compiler_loop(
+            factory, runtime.stop, scope=settings.scope, on_published=on_published
+        ),
+    )
+    runtime.tasks["rollover"] = _supervise(
+        app, runtime, "rollover", usage.rollover_scheduler(settings, factory)
+    )
+    runtime.tasks["notifier"] = _supervise(
+        app, runtime, "notifier", _notifier_loop(app, runtime.stop)
+    )
+    log.info("gRPC listening on port %s", runtime.grpc_port)
+    return runtime
+
+
+async def stop_background(runtime: Runtime, grace: float = SHUTDOWN_GRACE_SECONDS) -> None:
+    """Stop accepting streams, signal loops, and wait for everything within `grace`
+    seconds; whatever is still running after that is cancelled.
     """
-    return {}
+    runtime.stop.set()
+    if runtime.grpc_server is not None:
+        await runtime.grpc_server.stop(grace)
+    tasks = list(runtime.tasks.values())
+    # The rollover scheduler sleeps until the next month: cancel it right away.
+    if (rollover := runtime.tasks.get("rollover")) is not None:
+        rollover.cancel()
+    if tasks:
+        _, pending = await asyncio.wait(tasks, timeout=grace)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
-    tasks: dict[str, asyncio.Task[None]] = {}
-    if settings.background_enabled:
-        for name, service in background_services(settings).items():
-            tasks[name] = asyncio.create_task(
-                service(settings, app.state.session_factory), name=name
-            )
-    app.state.tasks = tasks
+    runtime = await start_background(app) if settings.background_enabled else Runtime()
+    app.state.runtime = runtime
+    app.state.tasks = runtime.tasks
     try:
         yield
     finally:
-        for task in tasks.values():
-            task.cancel()
-        await asyncio.gather(*tasks.values(), return_exceptions=True)
+        await stop_background(runtime)
         await app.state.engine.dispose()
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def _static_module():
+    """The Admin UI static module (U2), or None before it exists."""
+    try:
+        from lumewarp_control_plane import static  # type: ignore[attr-defined]
+    except ImportError:
+        return None
+    return static
+
+
+def create_app(
+    settings: Settings | None = None,
+    *,
+    fatal_handler: Callable[[str], None] | None = None,
+) -> FastAPI:
     settings = settings or get_settings()
     app = FastAPI(title="Lumewarp control plane", version=__version__, lifespan=lifespan)
     app.state.settings = settings
     app.state.engine = create_engine(settings)
     app.state.session_factory = create_session_factory(app.state.engine)
+    app.state.runtime = Runtime()
     app.state.tasks = {}
+    app.state.fatal_handler = fatal_handler or _terminate_process
     install_handlers(app)
     app.include_router(api_router)
 
@@ -74,7 +186,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/readyz", tags=["health"])
     async def readyz() -> JSONResponse:
-        """Readiness: DB reachable, schema at the migration head, background tasks alive."""
+        """Readiness: DB reachable, schema at the migration head, gRPC server, compiler
+        loop, rollover scheduler and notifier loop alive.
+        """
         checks = {"database": "ok", "migrations": "ok"}
         try:
             async with asyncio.timeout(READY_TIMEOUT_SECONDS):
@@ -88,12 +202,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             log.warning("readiness: database check failed: %s", exc)
             checks["database"] = "unreachable"
             checks["migrations"] = "unknown"
-        for name, task in app.state.tasks.items():
-            checks[f"task:{name}"] = "stopped" if task.done() else "ok"
+        runtime: Runtime = app.state.runtime
+        for name, task in runtime.tasks.items():
+            checks[name] = "ok" if not task.done() else runtime.failures.get(name, "stopped")
         ready = all(v == "ok" for v in checks.values())
         return JSONResponse(
             {"status": "ready" if ready else "not_ready", "checks": checks},
             status_code=200 if ready else 503,
         )
+
+    if (static := _static_module()) is not None:
+        # Registered before the UI so its SPA fallback never swallows unknown API paths:
+        # those stay JSON 404s.
+        @app.api_route(
+            "/api/{path:path}",
+            methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+            include_in_schema=False,
+        )
+        async def api_not_found(request: Request, path: str) -> JSONResponse:
+            return JSONResponse(error_body("not_found", "Not Found"), status_code=404)
+
+        static.mount_static(app)
 
     return app

@@ -36,6 +36,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lumewarp_control_plane"]
+# The built Admin UI (ui: `pnpm build:cp`) is gitignored, so name it explicitly to ship it.
+artifacts = ["src/lumewarp_control_plane/static/**"]
 
 [tool.ruff]
 line-length = 100
