@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package lumewarp.config.v1;
+
+import "lumewarp/config/v1/snapshot.proto";
+
+// Control plane -> gateway config stream. The gateway opens the stream,
+// receives a full snapshot first, then deltas, and ACKs/NACKs each version.
+service ConfigService {
+  rpc Stream(stream GatewayMessage) returns (stream ConfigUpdate);
+}
+
+message GatewayMessage {
+  oneof msg {
+    Hello hello = 1;
+    Ack ack = 2;
+    Nack nack = 3;
+  }
+}
+
+message Hello {
+  string gateway_id = 1;
+  // Version of the snapshot persisted on disk, 0 if none.
+  uint64 have_version = 2;
+}
+
+message Ack {
+  uint64 version = 1;
+}
+
+message Nack {
+  uint64 version = 1;
+  string reason = 2;
+}
+
+message ConfigUpdate {
+  oneof update {
+    Snapshot full = 1;
+    Delta delta = 2;
+  }
+}
+
+// Applies on top of base_version to produce version.
+message Delta {
+  uint64 base_version = 1;
+  uint64 version = 2;
+  repeated Upstream upsert_upstreams = 3;
+  repeated string remove_upstreams = 4;
+  repeated Deployment upsert_deployments = 5;
+  repeated string remove_deployments = 6;
+  repeated ModelRoute upsert_routes = 7;
+  repeated string remove_routes = 8;
+}

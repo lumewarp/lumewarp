@@ -1,0 +1,3 @@
+# Populated as the gateway and control plane gain deployable images.
+gateway:
+  replicas: 2

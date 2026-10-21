@@ -1,0 +1,7 @@
+# LiteLLM proxy config for the benchmark; points at the mock upstream.
+model_list:
+  - model_name: mock
+    litellm_params:
+      model: openai/mock
+      api_base: http://127.0.0.1:9000/v1
+      api_key: sk-mock

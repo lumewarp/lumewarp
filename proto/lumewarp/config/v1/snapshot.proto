@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package lumewarp.config.v1;
+
+// A fully resolved, immutable config snapshot. The control plane's config
+// compiler expands inheritance before emitting it; the gateway never resolves
+// anything at request time. Standalone YAML mode uses the same schema.
+message Snapshot {
+  // Monotonically increasing. Rollback = re-push an older snapshot under a
+  // new version.
+  uint64 version = 1;
+  repeated Upstream upstreams = 2;
+  repeated Deployment deployments = 3;
+  repeated ModelRoute routes = 4;
+}
+
+// An OpenAI-compatible endpoint (vLLM, OpenAI, or anything speaking the API).
+message Upstream {
+  string name = 1;
+  UpstreamKind kind = 2;
+  // e.g. "http://vllm-0:8000/v1"
+  string base_url = 3;
+  // Name of an env var / secret holding the bearer token; never the value.
+  string api_key_ref = 4;
+  uint32 timeout_ms = 5;
+}
+
+enum UpstreamKind {
+  UPSTREAM_KIND_UNSPECIFIED = 0;
+  UPSTREAM_KIND_OPENAI = 1;
+  UPSTREAM_KIND_VLLM = 2;
+  UPSTREAM_KIND_OPENAI_COMPATIBLE = 3;
+}
+
+// A concrete model served by one upstream.
+message Deployment {
+  string name = 1;
+  string upstream = 2;
+  // Model name sent upstream (may differ from the public alias).
+  string upstream_model = 3;
+  uint32 weight = 4;
+}
+
+// Public model alias -> deployments.
+message ModelRoute {
+  string model = 1;
+  repeated string deployments = 2;
+  RoutingStrategy strategy = 3;
+}
+
+enum RoutingStrategy {
+  ROUTING_STRATEGY_UNSPECIFIED = 0;
+  ROUTING_STRATEGY_WEIGHTED = 1;
+  ROUTING_STRATEGY_LEAST_IN_FLIGHT = 2;
+  ROUTING_STRATEGY_LOWEST_LATENCY = 3;
+}

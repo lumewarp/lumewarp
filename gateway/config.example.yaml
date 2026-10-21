@@ -1,0 +1,26 @@
+# Standalone mode: `lumewarp --config config.example.yaml`
+server:
+  listen: 0.0.0.0:4000
+
+upstreams:
+  - name: vllm-local
+    kind: vllm
+    base_url: http://localhost:8000/v1
+  - name: openai
+    kind: openai
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+
+deployments:
+  - name: llama-vllm
+    upstream: vllm-local
+    upstream_model: meta-llama/Llama-3.1-8B-Instruct
+  - name: gpt-4o-mini
+    upstream: openai
+    upstream_model: gpt-4o-mini
+
+routes:
+  - model: llama-3.1-8b
+    deployments: [llama-vllm]
+  - model: gpt-4o-mini
+    deployments: [gpt-4o-mini]
