@@ -1,8 +1,9 @@
 {{- if .Values.gateway.enabled }}
 {{- $persistence := .Values.gateway.stateDir.persistence }}
-{{- if and $persistence.enabled (not $persistence.existingClaim) (gt (int .Values.gateway.replicaCount) 1) (not (has "ReadWriteMany" $persistence.accessModes)) }}
-{{- fail "gateway.stateDir.persistence with more than one replica needs a ReadWriteMany claim (or existingClaim); otherwise set gateway.replicaCount=1" }}
+{{- if gt (int .Values.gateway.replicaCount) 1 }}
+{{- fail "gateway.replicaCount must be 1 in P1: one gateway token is bound to one gateway id and multi-replica gateways are deferred. Deploy one release per gateway identity instead." }}
 {{- end }}
+{{- $gatewayId := required "gateway.gatewayId is required: it must equal the gateway id the token was issued for" .Values.gateway.gatewayId }}
 {{- if not (hasSuffix (printf ":%v" .Values.gateway.service.port) .Values.gateway.server.listen) }}
 {{- fail "gateway.server.listen must end with gateway.service.port; the Service and probes use the named container ports" }}
 {{- end }}
@@ -49,10 +50,9 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.gateway.podSecurityContext }}
+      {{- $podSecurityContext := mergeOverwrite (dict "runAsNonRoot" true "runAsUser" 65532 "runAsGroup" 65532 "fsGroup" 65532 "fsGroupChangePolicy" "OnRootMismatch") (.Values.gateway.podSecurityContext | default (dict)) }}
       securityContext:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml $podSecurityContext | nindent 8 }}
       terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds }}
       containers:
         - name: gateway
@@ -66,11 +66,7 @@ spec:
             - --gateway-token-env={{ required "gateway.tokenEnvVar is required" .Values.gateway.tokenEnvVar }}
             - --state-dir={{ .Values.gateway.stateDir.path }}
             - --scope=$(LUMEWARP_SCOPE)
-            {{- if .Values.gateway.gatewayId }}
-            - --gateway-id={{ .Values.gateway.gatewayId }}
-            {{- else }}
-            - --gateway-id=$(POD_NAME)
-            {{- end }}
+            - --gateway-id={{ $gatewayId }}
             - --local-config=/etc/lumewarp/config.yaml
             {{- with .Values.gateway.extraArgs }}
             {{- toYaml . | nindent 12 }}
@@ -83,10 +79,6 @@ spec:
               containerPort: {{ .Values.gateway.service.adminPort }}
               protocol: TCP
           env:
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
             - name: LUMEWARP_CONTROL_PLANE_URL
               value: {{ $controlPlaneUrl | quote }}
             - name: LUMEWARP_SCOPE

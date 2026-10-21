@@ -3,8 +3,8 @@
 # The chart deploys two components:
 #   - controlPlane: FastAPI HTTP API + Admin UI, gRPC config/usage services, config
 #     compiler, budget rollover scheduler and notifier loop.
-#   - gateway: Rust data plane. Each replica follows the control-plane config stream and
-#     keeps its last ACKed snapshot on a local state volume.
+#   - gateway: Rust data plane. It follows the control-plane config stream and keeps its
+#     last ACKed snapshot on a local state volume.
 #
 # Images are not built by this chart. Build and push them, then set
 # image.repository and image.tag. The gateway image must contain the `lumewarp` binary;
@@ -74,7 +74,9 @@ controlPlane:
 
 gateway:
   enabled: true
-  replicaCount: 2
+  # P1 binds one gateway token to one gateway id and does not support multi-replica
+  # gateways. The chart rejects replicaCount > 1; deploy one release per gateway identity.
+  replicaCount: 1
   image:
     repository: ghcr.io/lumewarp/lumewarp-gateway
     tag: ""
@@ -91,8 +93,10 @@ gateway:
   controlPlaneUrl: ""
   # Empty = controlPlane.scope.
   scope: ""
-  # Empty = the pod name, so every replica has its own gateway identity.
-  gatewayId: ""
+  # Required: the gateway id this token was issued for. It is never derived from the
+  # pod name. Change it together with `bootstrap --gateway-id` and the token Secret.
+  # The default matches the documented install example.
+  gatewayId: "gw-1"
   # Local listener settings. Only the `server:` block is used in control-plane mode.
   # adminListen must be reachable from the kubelet for /readyz and /metrics probes.
   server:
@@ -103,14 +107,15 @@ gateway:
     bodyReadTimeoutMs: 30000
   stateDir:
     path: /var/lib/lumewarp
-    # emptyDir is the default, so a replica without a cached snapshot cold-boots from
-    # the control plane. Enable persistence for PVC-backed snapshots.
+    # emptyDir is the default, so a pod without a cached snapshot cold-boots from the
+    # control plane. Enable persistence for a ReadWriteOnce PVC-backed snapshot.
     persistence:
       enabled: false
-      # Use an existing claim instead of creating one. With a ReadWriteOnce claim,
-      # keep replicaCount at 1.
+      # Use an existing claim instead of creating one. It must be ReadWriteOnce and
+      # used by this single gateway replica.
       existingClaim: ""
       storageClass: ""
+      # Only ReadWriteOnce is supported in P1; shared state across gateways is not.
       accessModes:
         - ReadWriteOnce
       size: 1Gi
@@ -123,7 +128,14 @@ gateway:
   # Must exceed server.shutdownGraceMs / 1000 + 5 s (OTLP exporter shutdown) + margin.
   terminationGracePeriodSeconds: 35
   podAnnotations: {}
-  podSecurityContext: {}
+  # The gateway image runs as 65532:65532. fsGroup makes emptyDir and RWO PVC mounts
+  # writable by that user; override only if a custom image uses another UID/GID.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    fsGroupChangePolicy: OnRootMismatch
   securityContext: {}
   resources:
     requests:

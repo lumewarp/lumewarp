@@ -73,8 +73,9 @@ control-plane mode the gateway follows the control plane's config stream and
 reports usage to the same endpoint:
 
 ```sh
-# The token is printed once by `lumewarp-control-plane bootstrap` or created in
-# the Admin UI; the control plane stores only its SHA-256 hash.
+# Issue the token for this gateway id (`bootstrap --gateway-id gw-1`, or create it
+# for gw-1 in the Admin UI); the control plane binds the token to that id and stores
+# only its SHA-256 hash.
 export LUMEWARP_GATEWAY_TOKEN='lwg-...'
 
 lumewarp \
@@ -88,11 +89,15 @@ lumewarp \
 
 The token is read from the named environment variable, sent as
 `authorization: Bearer <token>` on the config stream and usage reports, and never
-written to disk. `--gateway-id` defaults to `gateway`; use one identity per
-replica when several gateways share a scope. `--local-config` is a YAML file
-with only the `server:` block described below (listener, admin listener,
-timeouts); upstreams, routes, teams and keys (including `server.api_keys`) are
-ignored in this mode.
+written to disk. `--gateway-id` defaults to `gateway` for local runs, but the
+control plane binds each token to one gateway id: `Hello.gateway_id` must equal
+the id the token was issued for. The Helm chart requires a non-empty
+`gateway.gatewayId` (default `gw-1`) and runs one replica; multi-replica gateways
+are deferred in P1, so deploy one release per gateway identity instead. The
+chart runs the pod as UID/GID 65532 with `fsGroup: 65532` so the mounted state
+directory is writable. `--local-config` is a YAML file with only the `server:`
+block described below (listener, admin listener, timeouts); upstreams, routes,
+teams and keys (including `server.api_keys`) are ignored in this mode.
 
 ### Flags
 
@@ -103,7 +108,7 @@ ignored in this mode.
 | `--gateway-token-env NAME` | none | required in control-plane mode | Name of the environment variable that holds the gateway token. |
 | `--state-dir DIR` | none | required in control-plane mode | Directory for the last good snapshot. It is created `0700` on the first successful persist. |
 | `--scope SCOPE` | none | required in control-plane mode | Config scope this gateway serves. Must match the control plane and the cached snapshot. |
-| `--gateway-id ID` | none | `gateway` | Identity sent in the stream `Hello`; shown in the control-plane gateway list. |
+| `--gateway-id ID` | none | `gateway` | Identity sent in the stream `Hello`; must match the id the token was issued for and is shown in the control-plane gateway list. The Helm chart sets `gateway.gatewayId`. |
 | `--local-config FILE` | none | unset | YAML with only `server:` listener/timeout settings. Without it the defaults from the YAML reference apply. |
 
 A minimal local config only needs the listeners:

@@ -32,7 +32,9 @@ kubectl -n lumewarp create secret generic lumewarp-control-plane \
 ```
 
 The control plane creates gateway tokens itself, so a fresh install has no gateway token
-yet. Install the control plane first, bootstrap a token, then enable the gateway:
+yet. A token is bound to one gateway id. The example uses `gw-1`; the chart's
+`gateway.gatewayId` defaults to `gw-1`, and the two must match (or both use the id you
+chose). Install the control plane first, bootstrap a token, then enable the gateway:
 
 ```sh
 helm install lumewarp deploy/helm/lumewarp -n lumewarp \
@@ -46,8 +48,13 @@ kubectl -n lumewarp create secret generic lumewarp-gateway \
   --from-literal=token='lwg-...'
 
 helm upgrade lumewarp deploy/helm/lumewarp -n lumewarp \
-  --reuse-values --set gateway.enabled=true
+  --reuse-values --set gateway.enabled=true --set gateway.gatewayId=gw-1
 ```
+
+The gateway Deployment runs one replica in P1: a token identifies one gateway, so do not
+scale it. If you need more gateway instances, deploy another release (normally in a
+separate namespace, or with `controlPlane.enabled=false`) with its own `gateway.gatewayId`
+and token.
 
 Alternatively set `controlPlane.bootstrapToken.secretName` to an existing Secret holding
 `LUMEWARP_BOOTSTRAP_TOKEN` for UI/API superuser access. It does not replace the first
@@ -65,7 +72,7 @@ pods start.
 | Control-plane Deployment | One replica. Runs the HTTP API + UI, gRPC ConfigService/UsageService, compiler loop, monthly rollover and notifier loop. `strategy: Recreate`. |
 | Control-plane Service | `http` (8091) and `grpc` (50051) ports. |
 | Migration Job | Helm `pre-install,pre-upgrade` hook running `python -m lumewarp_control_plane migrate` with the database Secret. |
-| Gateway Deployment | `replicaCount` replicas (default 2). Boots from its state volume, then follows the config stream; `/readyz` stays 503 until a snapshot is loaded. |
+| Gateway Deployment | One replica. The token is bound to `gateway.gatewayId`; boots from its state volume, then follows the config stream; `/readyz` stays 503 until a snapshot is loaded. |
 | Gateway Service | `http` (4000) and `admin` (9464, `/metrics` + `/readyz`) ports. |
 | Gateway state PVC | Only when `gateway.stateDir.persistence.enabled=true`; otherwise an `emptyDir` per pod. |
 | ServiceMonitor | Optional, gateway admin port only. Requires the Prometheus Operator CRDs. |
@@ -84,11 +91,17 @@ Readiness/liveness:
   notifier loop are single-process; the chart uses `Recreate`.
 - **Migration is a pre-upgrade hook.** The old control-plane pod is still running while
   the schema migrates (Rolling/Recreate), so expect a short outage window on upgrades.
-- **Gateway state is per pod.** With the default `emptyDir`, a new pod has no cache and
-  returns 503 on `/readyz` and `/v1/*` until the first full snapshot arrives. With a
-  `ReadWriteOnce` PVC, keep `gateway.replicaCount=1`; the chart refuses to render more
-  than one replica unless the access modes include `ReadWriteMany`. If the gateway image
-  runs as non-root, set `gateway.podSecurityContext.fsGroup` so the PVC is writable.
+- **One gateway replica and one token per gateway id.** P1 binds each gateway token to a
+  single `gateway_id`. `gateway.replicaCount` must stay 1; the chart rejects higher
+  values. `gateway.gatewayId` must equal the id used when the token was issued. Deploy one
+  release per gateway identity if you need more gateway instances.
+- **Gateway state volume.** With the default `emptyDir`, a new pod has no cache and returns
+  503 on `/readyz` and `/v1/*` until the first full snapshot arrives. A chart-created PVC
+  must be `ReadWriteOnce` (other access modes are rejected), and an `existingClaim` must
+  also be RWO and used only by this single replica. The chart runs the gateway as
+  UID/GID 65532 with `fsGroup: 65532`, so both emptyDir and PVC mounts are writable; no
+  manual `fsGroup` is needed. Override `gateway.podSecurityContext` only for a custom
+  image with another UID/GID.
 - **gRPC is plaintext by default.** Set `controlPlane.grpcTls.enabled` to terminate TLS on
   the control-plane listener, but note that the gateway verifies with the WebPKI root
   store only; a private CA must be added to the gateway image. Inside a trusted cluster,
@@ -115,15 +128,16 @@ Common values (see [`values.yaml`](values.yaml) for the complete list):
 | `controlPlane.grpcTls.enabled` | `false` | Serve gateway gRPC over TLS from a Secret. |
 | `controlPlane.migrate.enabled` | `true` | Run the migration hook Job. |
 | `gateway.enabled` | `true` | Deploy the gateway. |
-| `gateway.replicaCount` | `2` | Number of gateway pods. |
+| `gateway.replicaCount` | `1` | Must stay 1 in P1; one token per gateway id. |
 | `gateway.image.repository` / `.tag` | `ghcr.io/lumewarp/lumewarp-gateway` / chart appVersion | Gateway image. |
 | `gateway.token.secretName` / `.key` | `lumewarp-gateway` / `token` | Existing Secret with a control-plane-created gateway token. |
 | `gateway.controlPlaneUrl` | empty | Defaults to the control-plane Service gRPC URL in this namespace. |
 | `gateway.scope` | empty | Defaults to `controlPlane.scope`. |
-| `gateway.gatewayId` | empty | Defaults to the pod name. |
+| `gateway.gatewayId` | `gw-1` | Required; must equal the gateway id the token was issued for. It is never derived from the pod name. |
+| `gateway.podSecurityContext` | UID/GID/fsGroup `65532`, `runAsNonRoot: true` | Matches the gateway image so emptyDir/PVC mounts are writable. Override only for a custom image with another UID/GID. |
 | `gateway.stateDir.path` | `/var/lib/lumewarp` | Snapshot directory. |
-| `gateway.stateDir.persistence.enabled` | `false` | Use a PVC instead of `emptyDir`. |
-| `gateway.stateDir.persistence.existingClaim` | empty | Use an existing claim. |
+| `gateway.stateDir.persistence.enabled` | `false` | Use a RWO PVC instead of `emptyDir`. |
+| `gateway.stateDir.persistence.existingClaim` | empty | Use an existing RWO claim; it must be used by this single replica only. |
 | `gateway.server.*` | see values | `server:` block of the gateway's local YAML (listeners/timeouts). `adminListen` must be reachable by probes. |
 | `serviceMonitor.enabled` | `false` | Render a ServiceMonitor for the gateway admin port. |
 | `serviceMonitor.labels` | `{}` | Extra labels so your Prometheus selects the ServiceMonitor. |
@@ -138,7 +152,13 @@ global `imagePullSecrets`, `nameOverride`, `fullnameOverride` and `commonLabels`
 helm lint deploy/helm/lumewarp
 helm template lumewarp deploy/helm/lumewarp -n lumewarp \
   --set controlPlane.databaseUrl.secretName=db \
+  --set gateway.gatewayId=gw-1 \
   --set gateway.token.secretName=gw
+
+# Expected to fail: one token is bound to one gateway id; multi-replica gateways are
+# deferred in P1.
+helm template lumewarp deploy/helm/lumewarp -n lumewarp \
+  --set gateway.replicaCount=2
 ```
 
 `kubectl port-forward svc/lumewarp-control-plane 8091:8091` reaches the UI/API; probe the
