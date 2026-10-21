@@ -4,9 +4,17 @@ package lumewarp.config.v1;
 
 import "lumewarp/config/v1/snapshot.proto";
 
-// Control plane -> gateway config stream. The gateway opens the stream,
-// receives a full snapshot first, then deltas, and ACKs/NACKs each version.
+// Control plane -> gateway config stream. The gateway opens the stream and
+// sends Hello; the control plane answers with a full snapshot, or a delta
+// whose base_version == Hello.have_version when it still retains that base.
+// At most one update per stream is un-ACKed at a time. ACK means the version
+// is validated, durably persisted and active. See docs/config-protocol.md.
+// The gateway authenticates with `authorization: Bearer <gateway token>`
+// metadata; the token is bound to a gateway id and scope by the control plane.
 service ConfigService {
+  // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
   rpc Stream(stream GatewayMessage) returns (stream ConfigUpdate);
 }
 
@@ -20,8 +28,14 @@ message GatewayMessage {
 
 message Hello {
   string gateway_id = 1;
-  // Version of the snapshot persisted on disk, 0 if none.
+  // Version of the snapshot persisted on disk, 0 if none. The control plane
+  // sends a full snapshot unless it can send a delta from this version.
   uint64 have_version = 2;
+  // Diagnostic only.
+  string gateway_version = 3;
+  repeated string supported_capabilities = 4;
+  // Scope of the on-disk snapshot, empty if none.
+  string scope = 5;
 }
 
 message Ack {
@@ -30,7 +44,23 @@ message Ack {
 
 message Nack {
   uint64 version = 1;
+  // Sanitized, never contains secrets.
   string reason = 2;
+  // Version the gateway is actually running.
+  uint64 have_version = 3;
+  NackCode code = 4;
+}
+
+enum NackCode {
+  NACK_CODE_UNSPECIFIED = 0;
+  // Delta base != gateway's version; control plane answers with a full.
+  NACK_CODE_BASE_MISMATCH = 1;
+  // Snapshot failed validation; control plane must not resend the same
+  // version (quarantine it) until a newer version exists.
+  NACK_CODE_INVALID_CONFIG = 2;
+  NACK_CODE_UNSUPPORTED_FEATURE = 3;
+  // Could not persist to disk; control plane may retry with backoff.
+  NACK_CODE_PERSIST_FAILED = 4;
 }
 
 message ConfigUpdate {
@@ -40,7 +70,9 @@ message ConfigUpdate {
   }
 }
 
-// Applies on top of base_version to produce version.
+// Applies on top of base_version to produce version. A gateway whose current
+// version != base_version NACKs it, and the control plane answers with a full
+// snapshot.
 message Delta {
   uint64 base_version = 1;
   uint64 version = 2;
@@ -50,4 +82,12 @@ message Delta {
   repeated string remove_deployments = 6;
   repeated ModelRoute upsert_routes = 7;
   repeated string remove_routes = 8;
+  repeated ApiKey upsert_api_keys = 9;
+  // key_id values.
+  repeated string remove_api_keys = 10;
+  repeated Team upsert_teams = 11;
+  repeated string remove_teams = 12;
+  // Target snapshot metadata, replaced wholesale.
+  int64 created_at_unix_ms = 13;
+  repeated string required_capabilities = 14;
 }

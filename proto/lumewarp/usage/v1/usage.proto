@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package lumewarp.usage.v1;
+
+// Gateway -> control plane usage reporting. The gateway batches events off the
+// request path and reports them asynchronously; a failed report is retried
+// from a bounded buffer and dropped (and counted) when the buffer is full.
+// Authenticated with the same gateway token as ConfigService; the control
+// plane ignores ReportRequest.gateway_id in favour of the token's identity.
+service UsageService {
+  // All-or-nothing: success means every event is durably accounted (already
+  // seen request_ids count as accepted, so accepted == len(events)). An
+  // invalid batch fails with INVALID_ARGUMENT and nothing is recorded.
+  rpc Report(ReportRequest) returns (ReportResponse);
+}
+
+message ReportRequest {
+  string gateway_id = 1;
+  repeated UsageEvent events = 2;
+}
+
+message ReportResponse {
+  uint32 accepted = 1;
+}
+
+message UsageEvent {
+  // Gateway-generated UUID, fixed at request start and reused on retries;
+  // never derived from client or upstream ids. The control plane dedupes on
+  // it.
+  string request_id = 1;
+  // Completion time; budget windows are attributed by this timestamp (UTC).
+  int64 timestamp_unix_ms = 2;
+  string key_id = 3;
+  string org_id = 4;
+  string team_id = 5;
+  string project_id = 6;
+  // Public alias.
+  string model = 7;
+  string deployment = 8;
+  // Endpoint: chat_completions | completions | embeddings.
+  string route = 9;
+  uint32 status = 10;
+  bool stream = 11;
+  uint64 prompt_tokens = 12;
+  uint64 completion_tokens = 13;
+  reserved 14;
+  reserved "cost_usd";
+  uint32 duration_ms = 15;
+  // Snapshot version the request was served with; its deployment price is
+  // the one used for cost.
+  uint64 config_version = 16;
+  UsageState usage_state = 17;
+  RequestOutcome outcome = 18;
+  int64 started_at_unix_ms = 19;
+  // nano-USD computed from the deployment price. Meaningful only when
+  // cost_known is true (price present and usage_state REPORTED).
+  uint64 cost_nano_usd = 20;
+  bool cost_known = 21;
+}
+
+enum UsageState {
+  USAGE_STATE_UNSPECIFIED = 0;
+  // Upstream reported final usage.
+  USAGE_STATE_REPORTED = 1;
+  // No usage available (passthrough stream, upstream omitted it).
+  USAGE_STATE_MISSING = 2;
+  // Stream ended early (cancel / error) before final usage arrived.
+  USAGE_STATE_PARTIAL = 3;
+  // Body exceeded the capture cap or could not be parsed.
+  USAGE_STATE_INVALID = 4;
+}
+
+enum RequestOutcome {
+  REQUEST_OUTCOME_UNSPECIFIED = 0;
+  REQUEST_OUTCOME_COMPLETED = 1;
+  REQUEST_OUTCOME_CLIENT_CANCELLED = 2;
+  REQUEST_OUTCOME_UPSTREAM_ERROR = 3;
+  REQUEST_OUTCOME_REJECTED = 4;
+}
