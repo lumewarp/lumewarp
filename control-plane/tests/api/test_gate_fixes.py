@@ -312,7 +312,7 @@ def test_openapi_documents_the_real_error_body(api_settings: Settings) -> None:
         if path.startswith(API)
         for method, op in item.items()
     ]
-    assert len(operations) == 55
+    assert len(operations) == 56
     for path, method, op in operations:
         for status in ("401", "403", "404", "409", "422"):
             ref = op["responses"][status]["content"]["application/json"]["schema"]["$ref"]
@@ -465,34 +465,9 @@ def test_superuser_cannot_lock_itself_out(client) -> None:
 
 
 def _pat_for(client, user_id: str) -> str:
-    # The bootstrap principal cannot own tokens and the API only mints tokens for the caller,
-    # so insert the token row directly with the same hashing the API uses.
-    import asyncio as _asyncio
-
-    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-
-    from lumewarp_control_plane.models import PersonalAccessToken
-
-    new = generate_secret(SecretKind.PAT)
-    url = client.app.state.settings.database_url
-
-    async def go() -> None:
-        engine = create_async_engine(url)
-        async with AsyncSession(engine) as session:
-            session.add(
-                PersonalAccessToken(
-                    user_id=uuid.UUID(user_id),
-                    name="t",
-                    token_hash=new.hash,
-                    display_prefix=new.display_prefix,
-                )
-            )
-            await session.commit()
-        await engine.dispose()
-
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        pool.submit(_asyncio.run, go()).result(timeout=10)
-    return new.secret
+    response = _post(client, f"/users/{user_id}/tokens", name="t")
+    assert response.status_code == 201, response.text
+    return response.json()["secret"]
 
 
 def test_query_ranges_are_capped(client) -> None:

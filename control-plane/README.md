@@ -115,7 +115,6 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 | `LUMEWARP_ACK_TIMEOUT_SECONDS` | `30` | Close a config session that has not ACKed/NACKed within this time. |
 | `LUMEWARP_CONFIG_VERSIONS_RETAINED` | `50` | Versions whose payloads compaction keeps (the latest is always kept; session-pinned bases are kept too). |
 | `LUMEWARP_MAX_USAGE_BATCH_EVENTS` | `10000` | Maximum events per `UsageService.Report` (1–10000; keeps asyncpg's parameter count in range). |
-| `LUMEWARP_BUDGET_FLIP_DEADLINE_SECONDS` | `5.0` | Declared in settings; P1 budget flips are event-driven and do not read this deadline as a timeout. |
 | `LUMEWARP_BACKGROUND_ENABLED` | `true` | Start gRPC and the loops in `serve`. Tests set `false`; keep it true in production. |
 
 ## Bootstrap credentials and RBAC
@@ -131,7 +130,12 @@ token, which is never stored:
 | Virtual API key | `lw-` | Clients calling the gateway; created in a project; the gateway only receives its hash in the snapshot. |
 
 The bootstrap token is not tied to a user: it is an installation superuser, has no PATs of
-its own, and is meant to create the first users/memberships. RBAC roles are Owner, Admin,
+its own, and is meant to create the first users/memberships. Installation superusers
+(bootstrap or a superuser PAT) can issue a PAT for an active user with
+`POST /api/v1/users/{user_id}/tokens` using `{"name":"initial access"}` (optional
+`expires_at`). The secret is returned only on creation; issuance is audited with the
+actor and target user, never the secret. Org/team admins cannot use this endpoint.
+RBAC roles are Owner, Admin,
 Member and Viewer at organization/team scope; child scopes can only narrow their parent's
 allowlists, limits and budgets. See `rbac.py` and the API schema for the exact matrix.
 
@@ -204,7 +208,9 @@ Later plugins win on conflicts. Notifier plugins get the channel's `config` mapp
   "recompile" outbox row in one transaction. One compiler loop per scope, serialized with a
   Postgres advisory lock, expands inheritance and writes an immutable, complete
   `config_versions` snapshot with digest and source revision. A failed compile leaves the
-  previous version current.
+  previous version current. Serialization conflicts retry with bounded jitter. Unchanged
+  compiled content reuses the latest version, including after a control-plane restart;
+  publication metadata is excluded from the content comparison.
 - Gateways get a full snapshot, then deltas; each update is applied, validated, persisted
   and swapped by the gateway before it ACKs. NACK `BASE_MISMATCH` triggers a full,
   `INVALID_CONFIG`/`UNSUPPORTED_FEATURE` quarantines the version, `PERSIST_FAILED` retries.
@@ -214,7 +220,9 @@ Later plugins win on conflicts. Notifier plugins get the channel's `config` mapp
   adds cost to key, project, team and org totals for the UTC calendar month in the same
   transaction, then budget evaluation flips exhausted scopes to `BUDGET_EXCEEDED` and
   publishes a new version (eventual; in-flight streams are not cut). Soft-limit
-  notifications go through the notifier outbox.
+  notifications go through the notifier outbox. Budget publishing targets the protocol's
+  5 s eventual-enforcement window; it is not a configurable per-flip timeout. The unused
+  `LUMEWARP_BUDGET_FLIP_DEADLINE_SECONDS` setting has been removed.
 - P1 stores usage in Postgres; ClickHouse is later. While the control plane is down the
   gateway keeps serving from its snapshot, but usage batches queue in memory and are lost
   if the queue fills or the gateway restarts.

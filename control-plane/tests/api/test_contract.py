@@ -21,6 +21,7 @@ EXPECTED_OPERATION_IDS = {
     "createTeam",
     "createUpstream",
     "createUser",
+    "createUserToken",
     "deleteDeployment",
     "deleteMembership",
     "deleteOrg",
@@ -83,7 +84,7 @@ def test_openapi_operation_ids_are_stable_and_unique() -> None:
             ids.append(operation["operationId"])
     assert len(ids) == len(set(ids))
     assert set(ids) == EXPECTED_OPERATION_IDS
-    assert len(ids) == 55
+    assert len(ids) == 56
 
 
 async def test_mutation_writes_audit_and_outbox_in_one_transaction(

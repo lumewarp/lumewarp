@@ -75,6 +75,8 @@ async def test_publish_basic(factory) -> None:
     assert (snap.version, snap.scope) == (1, SCOPE) and snap.created_at_unix_ms > 0
 
     r2 = await touch(factory)
+    async with factory() as s, s.begin():
+        await s.execute(update(ApiKey).values(rpm_limit=17))
     r3 = await touch(factory)
     assert await publish(factory) == 2
     assert [r[:2] for r in await outbox_rows(factory)] == [
@@ -88,7 +90,9 @@ async def test_publish_basic(factory) -> None:
 async def test_concurrent_publishers_are_serialized(factory) -> None:
     await seed_scope(factory)
     published = []
-    for _ in range(6):
+    for i in range(6):
+        async with factory() as s, s.begin():
+            await add_route(s, f"m{i}", [(f"d{i}", None)])
         await touch(factory)
         results = await asyncio.gather(*(publish(factory) for _ in range(3)))
         new = [v for v in results if v is not None]
@@ -104,8 +108,12 @@ async def test_concurrent_writes_and_publishes(factory) -> None:
     await seed_scope(factory)
 
     async def writer() -> None:
-        for _ in range(10):
-            await touch(factory)
+        for i in range(10):
+            async with factory() as s, s.begin():
+                await add_route(s, f"m{i}", [(f"d{i}", None)])
+                from lumewarp_control_plane import outbox
+
+                await outbox.enqueue_recompile(s, SCOPE, "route.create")
             await asyncio.sleep(0)
 
     async def publisher() -> None:
@@ -351,6 +359,8 @@ async def test_compiler_loop(factory) -> None:
         async with asyncio.timeout(5):
             while not seen:
                 await asyncio.sleep(0.02)
+        async with factory() as s, s.begin():
+            await add_route(s, "m", [("d", None)])
         await touch(factory)
         async with asyncio.timeout(5):
             while len(seen) < 2:

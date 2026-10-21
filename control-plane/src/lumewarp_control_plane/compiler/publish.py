@@ -9,10 +9,12 @@ every version published before it got the lock. Rollback takes it transaction-le
 import asyncio
 import hashlib
 import logging
+import random
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 
 from sqlalchemy import func, literal, or_, select, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from lumewarp_control_plane import outbox
@@ -47,6 +49,11 @@ log = logging.getLogger(__name__)
 # NOTIFY channel with payload "<scope>:<version>", sent on commit of a new version.
 PUBLISHED_CHANNEL = "lumewarp_config_published"
 MAX_ERROR_CHARS = 2000
+SERIALIZATION_ATTEMPTS = 5
+
+
+def _serialization_failure(exc: DBAPIError) -> bool:
+    return getattr(exc.orig, "sqlstate", None) == "40001"
 
 
 def lock_key(scope: str):
@@ -169,6 +176,18 @@ async def _publish_locked(
     version = (latest[0] if latest else 0) + 1
     try:
         compiled = await compile_scope(session, scope, now=now, router_plugins=router_plugins)
+        if latest is not None:
+            previous = await session.get(ConfigVersion, (scope, latest[0]))
+            if previous.payload is not None:
+                # Ignore publication metadata when comparing content. The stored wire
+                # digest and payload remain immutable (including their original stamp).
+                old = pb.Snapshot.FromString(previous.payload)
+                compiled.snapshot.version = old.version
+                compiled.snapshot.created_at_unix_ms = old.created_at_unix_ms
+                payload = compiled.snapshot.SerializeToString(deterministic=True)
+                if hashlib.sha256(payload).digest() == previous.digest:
+                    await _mark(session, scope, revision, OutboxStatus.DONE, version=latest[0])
+                    return None
         await store_version(
             session,
             scope,
@@ -195,11 +214,12 @@ async def publish_pending(
     """One step of the compiler loop for `scope` (default settings.scope).
 
     Under the scope's advisory lock, in one REPEATABLE READ transaction: if there are
-    pending `config_outbox` rows, compile; if the compiled source_revision is newer than
-    the latest published version's, store a new `config_versions` row and mark the
-    covered outbox rows done. A compile failure marks them failed and keeps the previous
-    version current; nothing partial is published. Returns the newly published version,
-    or None if nothing was published.
+    pending `config_outbox` rows, compile; if the source revision is newer and the
+    compiled content changed, store a new `config_versions` row. Mark covered outbox
+    rows done even when content is unchanged. Serialization failures retry the entire
+    transaction with bounded full jitter and a fresh snapshot. A compile failure marks
+    rows failed and keeps the previous version current; nothing partial is published.
+    Returns the newly published version, or None if nothing was published.
     """
     scope = scope or get_settings().scope
     async with _engine(session_factory).connect() as conn:
@@ -207,9 +227,16 @@ async def publish_pending(
         await conn.commit()
         try:
             await conn.execution_options(isolation_level="REPEATABLE READ")
-            async with AsyncSession(bind=conn, expire_on_commit=False) as session:
-                async with session.begin():
-                    return await _publish_locked(session, scope, now, router_plugins)
+            for attempt in range(SERIALIZATION_ATTEMPTS):
+                try:
+                    async with AsyncSession(bind=conn, expire_on_commit=False) as session:
+                        async with session.begin():
+                            return await _publish_locked(session, scope, now, router_plugins)
+                except DBAPIError as exc:
+                    if not _serialization_failure(exc) or attempt == SERIALIZATION_ATTEMPTS - 1:
+                        raise
+                    log.info("retrying serialization conflict for scope %s", scope)
+                    await asyncio.sleep(random.uniform(0, min(0.01 * 2**attempt, 0.2)))
         finally:
             await conn.execute(select(func.pg_advisory_unlock(lock_key(scope))))
             await conn.commit()
@@ -416,6 +443,14 @@ async def run_compiler_loop(
                 async with session_factory() as session, session.begin():
                     await compact_versions(session, scope)
             backoff = interval_seconds
+        except DBAPIError as exc:
+            if _serialization_failure(exc):
+                log.warning(
+                    "compiler serialization retries exhausted for scope %s; retrying", scope
+                )
+            else:
+                log.exception("compiler loop step failed for scope %s", scope)
+            backoff = min(backoff * 2, 5.0)
         except Exception:
             log.exception("compiler loop step failed for scope %s", scope)
             backoff = min(backoff * 2, 5.0)

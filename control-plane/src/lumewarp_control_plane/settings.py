@@ -45,7 +45,6 @@ class Settings(BaseSettings):
     config_versions_retained: int = 50
     # Usage ingestion keeps every key/request id IN-list under asyncpg's 32767-parameter cap.
     max_usage_batch_events: int = Field(default=10_000, ge=1, le=10_000)
-    budget_flip_deadline_seconds: float = 5.0
 
     # Run the gRPC server and background loops in `serve`. Tests turn it off.
     background_enabled: bool = True

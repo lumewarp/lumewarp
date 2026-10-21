@@ -30,7 +30,7 @@ from lumewarp_control_plane.api.schemas import (
 )
 from lumewarp_control_plane.errors import ApiError, not_found
 from lumewarp_control_plane.models import PersonalAccessToken, User
-from lumewarp_control_plane.security import CurrentPrincipal, SecretKind, generate_secret
+from lumewarp_control_plane.security import CurrentPrincipal, Principal, SecretKind, generate_secret
 
 router = APIRouter(tags=["users"])
 
@@ -149,10 +149,40 @@ async def create_own_token(
 ) -> TokenCreated:
     if principal.user_id is None:
         raise ApiError(400, "bad_request", "the bootstrap token cannot own personal tokens")
+    return await _issue_token(body, principal, session, principal.user_id)
+
+
+@router.post(
+    "/users/{user_id}/tokens",
+    response_model=TokenCreated,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="createUserToken",
+)
+async def create_user_token(
+    user_id: uuid.UUID,
+    body: TokenCreate,
+    principal: CurrentPrincipal,
+    session: SessionDep,
+    response: Response,
+) -> TokenCreated:
+    """Issue a PAT on behalf of a user; only installation superusers may do so."""
+    rbac.require(principal, rbac.Action.USER_MANAGE, _INSTALLATION)
+    response.headers["Cache-Control"] = "no-store"
+    return await _issue_token(body, principal, session, user_id)
+
+
+async def _issue_token(
+    body: TokenCreate, principal: Principal, session: SessionDep, user_id: uuid.UUID
+) -> TokenCreated:
     new = generate_secret(SecretKind.PAT)
     async with mutation(session):
+        user = await session.get(User, user_id)
+        if user is None:
+            raise not_found("user not found")
+        if not user.is_active:
+            raise conflict("cannot issue a token for an inactive user")
         row = PersonalAccessToken(
-            user_id=principal.user_id,
+            user_id=user_id,
             name=body.name,
             token_hash=new.hash,
             display_prefix=new.display_prefix,
@@ -167,7 +197,7 @@ async def create_own_token(
             resource_type="token",
             resource_id=row.id,
             principal=principal,
-            details={"name": row.name},
+            details={"name": row.name, "user_id": user_id},
         )
     return TokenCreated(token=TokenOut.model_validate(row), secret=new.secret)
 
