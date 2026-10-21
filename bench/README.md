@@ -179,6 +179,27 @@ python3 -I bench/scripts/aggregate.py --selftest
   load generator.
 - Benchmark results are local artifacts: `bench/results/*` is gitignored.
 
+## Recorded results
+
+Same machine for every run: 20 × i7-12700, WSL2, idle, mock latency 50 ms,
+20 SSE chunks × 10 ms, LiteLLM 1.106.2 with 20 workers, medians of 3 runs.
+Overhead p99 is the median with the min–max across runs.
+
+| run | auth | rate / conc | Lumewarp ovh p99 ms | LiteLLM ovh p99 ms |
+|---|---|---|---:|---:|
+| P0 quick (`1cf38c7`) | off | 1000 RPS | 0.10 [0.08–0.23] | 3882 (saturated) |
+| P0 quick | off | stream c=100, TTFT | 0.51 [0.16–0.70] | – |
+| P1 full (`2a60f24`) | key | 300 RPS | 0.20 [0.15–0.21] | 40.0 |
+| P1 full | key | 1000 RPS | 0.07 [0.00–0.12] | 4288 (saturated) |
+| P1 full | key | 5000 RPS | 0.20 [0.12–0.24] | 25128 (saturated) |
+| P1 full | key | 10000 RPS | 0.23 [0.08–0.27] | 27581 (saturated, 3% errors) |
+| P1 full | key | stream c=100, TTFT | 0.67 [-2.98–0.77] | 518 |
+| P1 full | key | stream c=1000, TTFT | 2.30 [2.05–2.40] | 4678 |
+
+P1 streams carry the injected `include_usage` and strip the extra event, since
+clients in the bench do not ask for usage. LiteLLM could not hold 1000 RPS on
+this machine. Lumewarp used 65 % CPU on average at 10k RPS.
+
 ## CI
 
 - The `ci` workflow's `bench-crate` job runs `cargo fmt/clippy/test` for
