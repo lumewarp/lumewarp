@@ -1,0 +1,24 @@
+# Local development dependencies for Lumewarp.
+# Postgres listens on 127.0.0.1:55432 so it never collides with another
+# project's database on 5432.
+name: lumewarp-dev
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: lumewarp
+      POSTGRES_USER: lumewarp
+      POSTGRES_PASSWORD: lumewarp
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - lumewarp-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lumewarp -d lumewarp"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  lumewarp-pg:

@@ -1,0 +1,92 @@
+from google.protobuf.internal import containers as _containers
+from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
+from google.protobuf import descriptor as _descriptor
+from google.protobuf import message as _message
+from collections.abc import Iterable as _Iterable, Mapping as _Mapping
+from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
+
+DESCRIPTOR: _descriptor.FileDescriptor
+
+class UsageState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    USAGE_STATE_UNSPECIFIED: _ClassVar[UsageState]
+    USAGE_STATE_REPORTED: _ClassVar[UsageState]
+    USAGE_STATE_MISSING: _ClassVar[UsageState]
+    USAGE_STATE_PARTIAL: _ClassVar[UsageState]
+    USAGE_STATE_INVALID: _ClassVar[UsageState]
+
+class RequestOutcome(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    REQUEST_OUTCOME_UNSPECIFIED: _ClassVar[RequestOutcome]
+    REQUEST_OUTCOME_COMPLETED: _ClassVar[RequestOutcome]
+    REQUEST_OUTCOME_CLIENT_CANCELLED: _ClassVar[RequestOutcome]
+    REQUEST_OUTCOME_UPSTREAM_ERROR: _ClassVar[RequestOutcome]
+    REQUEST_OUTCOME_REJECTED: _ClassVar[RequestOutcome]
+USAGE_STATE_UNSPECIFIED: UsageState
+USAGE_STATE_REPORTED: UsageState
+USAGE_STATE_MISSING: UsageState
+USAGE_STATE_PARTIAL: UsageState
+USAGE_STATE_INVALID: UsageState
+REQUEST_OUTCOME_UNSPECIFIED: RequestOutcome
+REQUEST_OUTCOME_COMPLETED: RequestOutcome
+REQUEST_OUTCOME_CLIENT_CANCELLED: RequestOutcome
+REQUEST_OUTCOME_UPSTREAM_ERROR: RequestOutcome
+REQUEST_OUTCOME_REJECTED: RequestOutcome
+
+class ReportRequest(_message.Message):
+    __slots__ = ("gateway_id", "events")
+    GATEWAY_ID_FIELD_NUMBER: _ClassVar[int]
+    EVENTS_FIELD_NUMBER: _ClassVar[int]
+    gateway_id: str
+    events: _containers.RepeatedCompositeFieldContainer[UsageEvent]
+    def __init__(self, gateway_id: _Optional[str] = ..., events: _Optional[_Iterable[_Union[UsageEvent, _Mapping]]] = ...) -> None: ...
+
+class ReportResponse(_message.Message):
+    __slots__ = ("accepted",)
+    ACCEPTED_FIELD_NUMBER: _ClassVar[int]
+    accepted: int
+    def __init__(self, accepted: _Optional[int] = ...) -> None: ...
+
+class UsageEvent(_message.Message):
+    __slots__ = ("request_id", "timestamp_unix_ms", "key_id", "org_id", "team_id", "project_id", "model", "deployment", "route", "status", "stream", "prompt_tokens", "completion_tokens", "duration_ms", "config_version", "usage_state", "outcome", "started_at_unix_ms", "cost_nano_usd", "cost_known")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    TIMESTAMP_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    KEY_ID_FIELD_NUMBER: _ClassVar[int]
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    TEAM_ID_FIELD_NUMBER: _ClassVar[int]
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    MODEL_FIELD_NUMBER: _ClassVar[int]
+    DEPLOYMENT_FIELD_NUMBER: _ClassVar[int]
+    ROUTE_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    STREAM_FIELD_NUMBER: _ClassVar[int]
+    PROMPT_TOKENS_FIELD_NUMBER: _ClassVar[int]
+    COMPLETION_TOKENS_FIELD_NUMBER: _ClassVar[int]
+    DURATION_MS_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_VERSION_FIELD_NUMBER: _ClassVar[int]
+    USAGE_STATE_FIELD_NUMBER: _ClassVar[int]
+    OUTCOME_FIELD_NUMBER: _ClassVar[int]
+    STARTED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    COST_NANO_USD_FIELD_NUMBER: _ClassVar[int]
+    COST_KNOWN_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    timestamp_unix_ms: int
+    key_id: str
+    org_id: str
+    team_id: str
+    project_id: str
+    model: str
+    deployment: str
+    route: str
+    status: int
+    stream: bool
+    prompt_tokens: int
+    completion_tokens: int
+    duration_ms: int
+    config_version: int
+    usage_state: UsageState
+    outcome: RequestOutcome
+    started_at_unix_ms: int
+    cost_nano_usd: int
+    cost_known: bool
+    def __init__(self, request_id: _Optional[str] = ..., timestamp_unix_ms: _Optional[int] = ..., key_id: _Optional[str] = ..., org_id: _Optional[str] = ..., team_id: _Optional[str] = ..., project_id: _Optional[str] = ..., model: _Optional[str] = ..., deployment: _Optional[str] = ..., route: _Optional[str] = ..., status: _Optional[int] = ..., stream: _Optional[bool] = ..., prompt_tokens: _Optional[int] = ..., completion_tokens: _Optional[int] = ..., duration_ms: _Optional[int] = ..., config_version: _Optional[int] = ..., usage_state: _Optional[_Union[UsageState, str]] = ..., outcome: _Optional[_Union[RequestOutcome, str]] = ..., started_at_unix_ms: _Optional[int] = ..., cost_nano_usd: _Optional[int] = ..., cost_known: _Optional[bool] = ...) -> None: ...
