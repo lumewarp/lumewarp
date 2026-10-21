@@ -5,8 +5,9 @@
 //! see `overhead_seconds` for the exact stream and non-stream approximation.
 
 use std::{
+    collections::HashMap,
     pin::Pin,
-    sync::{atomic::Ordering, Arc},
+    sync::{atomic::AtomicU64, Arc, Mutex},
     task::{Context, Poll},
     time::{Duration, Instant},
 };
@@ -17,6 +18,7 @@ use hyper::{
     body::{Body, Frame, SizeHint},
     StatusCode,
 };
+use lumewarp_proto::config::v1::NackCode;
 use prometheus_client::{
     encoding::{text::encode, EncodeLabelSet},
     metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
@@ -26,7 +28,7 @@ use tracing::Span;
 
 use crate::{
     proxy::{BoxError, ProxyBody},
-    router::Deployment,
+    runtime::InFlightRegistry,
 };
 
 pub const ROUTES: [&str; 7] = [
@@ -38,10 +40,34 @@ pub const ROUTES: [&str; 7] = [
     "metrics",
     "other",
 ];
-const STATUSES: [&str; 14] = [
+const STATUSES: [&str; 15] = [
     "200", "400", "401", "404", "408", "413", "429", "500", "502", "503", "504", "other", "204",
-    "499",
+    "499", "403",
 ];
+const NACK_CODES: [NackCode; 5] = [
+    NackCode::Unspecified,
+    NackCode::BaseMismatch,
+    NackCode::InvalidConfig,
+    NackCode::UnsupportedFeature,
+    NackCode::PersistFailed,
+];
+
+fn nack_label(code: NackCode) -> &'static str {
+    match code {
+        NackCode::Unspecified => "unspecified",
+        NackCode::BaseMismatch => "base_mismatch",
+        NackCode::InvalidConfig => "invalid_config",
+        NackCode::UnsupportedFeature => "unsupported_feature",
+        NackCode::PersistFailed => "persist_failed",
+    }
+}
+
+#[allow(dead_code)] // Used by usage finalization (W2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenDirection {
+    Input,
+    Output,
+}
 const ERROR_KINDS: [&str; 4] = ["connect", "timeout", "stream", "protocol"];
 
 pub enum UpstreamError {
@@ -74,6 +100,7 @@ struct RequestLabels {
     model: String,
     route: &'static str,
     deployment: String,
+    team: String,
     status: &'static str,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -99,6 +126,21 @@ struct ConfigLabels {
     source: &'static str,
     sha256: String,
 }
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct NackLabels {
+    code: &'static str,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct TokenLabels {
+    model: String,
+    team: String,
+    direction: &'static str,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct SpendLabels {
+    team: String,
+    project: String,
+}
 
 type Histograms<L> = Family<L, Histogram, fn() -> Histogram>;
 fn duration_histogram() -> Histogram {
@@ -116,7 +158,7 @@ fn overhead_histogram() -> Histogram {
 pub struct RequestMetrics {
     pub model: String,
     pub deployment: String,
-    counters: [Counter; 14],
+    counters: [Counter; 15],
     duration: Histogram,
     overhead: Histogram,
     body_read: Histogram,
@@ -132,8 +174,27 @@ impl RequestMetrics {
     }
 }
 
+/// Process-lifetime id of a label value (team id, alias or deployment name).
+/// Equal strings get equal ids in every snapshot; `""` is always 0.
+pub type LabelId = u32;
+
+/// Sparse handle-cache key: only label sets that were actually used exist.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct HandleKey {
+    pub team: LabelId,
+    pub model: LabelId,
+    pub deployment: LabelId,
+    /// Index into `ROUTES`.
+    pub route: u8,
+}
+
+/// Process-lifetime registry owned by `Runtime`; snapshot swaps never reset it.
 pub struct Metrics {
     registry: Registry,
+    label_ids: Mutex<HashMap<Box<str>, LabelId>>,
+    /// Lock-free reads; an entry is created on the first request with its
+    /// (team, model, deployment, route) and kept across snapshot swaps.
+    handle_cache: papaya::HashMap<HandleKey, Arc<RequestMetrics>>,
     requests: Family<RequestLabels, Counter>,
     durations: Histograms<Labels>,
     overhead: Histograms<EndpointLabels>,
@@ -141,8 +202,24 @@ pub struct Metrics {
     ttft: Histograms<TtftLabels>,
     errors: Family<ErrorLabels, Counter>,
     config_info: Family<ConfigLabels, Gauge>,
-    in_flight: Vec<(Arc<Deployment>, Gauge)>,
     gauges: Family<DeploymentLabels, Gauge>,
+    config_version: Gauge,
+    // Written only through the methods the config stream and usage reporter
+    // call (W2); registered here so their series exist from boot.
+    #[allow(dead_code)]
+    config_apply_failures: Family<NackLabels, Counter>,
+    #[allow(dead_code)]
+    config_stream_connected: Gauge,
+    #[allow(dead_code)]
+    usage_dropped: Counter,
+    #[allow(dead_code)]
+    usage_reported: Counter,
+    #[allow(dead_code)]
+    usage_failed: Counter,
+    #[allow(dead_code)]
+    tokens: Family<TokenLabels, Counter>,
+    #[allow(dead_code)]
+    spend: Family<SpendLabels, Counter<f64, AtomicU64>>,
 }
 
 impl Metrics {
@@ -156,6 +233,14 @@ impl Metrics {
         let errors = Family::default();
         let gauges = Family::default();
         let config_info = Family::default();
+        let config_version = Gauge::default();
+        let config_apply_failures = Family::default();
+        let config_stream_connected = Gauge::default();
+        let usage_dropped = Counter::default();
+        let usage_reported = Counter::default();
+        let usage_failed = Counter::default();
+        let tokens = Family::default();
+        let spend = Family::default();
         registry.register(
             "lumewarp_requests",
             "Completed requests, including dropped response bodies",
@@ -193,16 +278,58 @@ impl Metrics {
         );
         registry.register(
             "lumewarp_config_version",
-            "Standalone YAML config version",
-            Gauge::<i64>::default(),
+            "Active config snapshot version (standalone YAML is 0)",
+            config_version.clone(),
         );
         registry.register(
             "lumewarp_config_info",
             "Config source and first twelve hex SHA-256 characters",
             config_info.clone(),
         );
+        registry.register(
+            "lumewarp_config_apply_failures",
+            "Config updates rejected or not persisted, by NACK code",
+            config_apply_failures.clone(),
+        );
+        for code in NACK_CODES {
+            drop(config_apply_failures.get_or_create(&NackLabels {
+                code: nack_label(code),
+            }));
+        }
+        registry.register(
+            "lumewarp_config_stream_connected",
+            "1 while the control-plane config stream is connected",
+            config_stream_connected.clone(),
+        );
+        registry.register(
+            "lumewarp_usage_events_dropped",
+            "Usage events dropped because the report queue was full",
+            usage_dropped.clone(),
+        );
+        registry.register(
+            "lumewarp_usage_events_reported",
+            "Usage events accepted by the control plane",
+            usage_reported.clone(),
+        );
+        registry.register(
+            "lumewarp_usage_events_failed",
+            "Usage events in report attempts that failed (retried from the queue)",
+            usage_failed.clone(),
+        );
+        registry.register(
+            "lumewarp_tokens",
+            "Upstream-reported tokens by public model, team and direction",
+            tokens.clone(),
+        );
+        registry.register(
+            "lumewarp_spend",
+            "Spend in USD computed from deployment prices",
+            spend.clone(),
+        );
         Self {
             registry,
+            label_ids: Mutex::new(HashMap::from([("".into(), 0)])),
+            handle_cache: papaya::HashMap::new(),
             requests,
             durations,
             overhead,
@@ -210,9 +337,72 @@ impl Metrics {
             ttft,
             errors,
             config_info,
-            in_flight: Vec::new(),
             gauges,
+            config_version,
+            config_apply_failures,
+            config_stream_connected,
+            usage_dropped,
+            usage_reported,
+            usage_failed,
+            tokens,
+            spend,
         }
+    }
+
+    pub fn config_applied(&self, version: u64) {
+        self.config_version
+            .set(i64::try_from(version).unwrap_or(i64::MAX));
+    }
+
+    #[allow(dead_code)] // Config stream (W2).
+    pub fn config_apply_failed(&self, code: NackCode) {
+        self.config_apply_failures
+            .get_or_create(&NackLabels {
+                code: nack_label(code),
+            })
+            .inc();
+    }
+
+    #[allow(dead_code)] // Config stream (W2).
+    pub fn config_stream_connected(&self, connected: bool) {
+        self.config_stream_connected.set(i64::from(connected));
+    }
+
+    #[allow(dead_code)] // Usage reporter (W2).
+    pub fn usage_dropped(&self) {
+        self.usage_dropped.inc();
+    }
+
+    #[allow(dead_code)] // Usage reporter (W2).
+    /// `sent` events were accepted; `failed` events were in a failed attempt.
+    pub fn usage_batch(&self, sent: u64, failed: u64) {
+        self.usage_reported.inc_by(sent);
+        self.usage_failed.inc_by(failed);
+    }
+
+    #[allow(dead_code)] // Usage finalization (W2).
+    /// `model` is the public alias and `team` the team id (`""` anonymous).
+    pub fn tokens(&self, model: &str, team: &str, direction: TokenDirection, n: u64) {
+        self.tokens
+            .get_or_create(&TokenLabels {
+                model: model.into(),
+                team: team.into(),
+                direction: match direction {
+                    TokenDirection::Input => "input",
+                    TokenDirection::Output => "output",
+                },
+            })
+            .inc_by(n);
+    }
+
+    #[allow(dead_code)] // Usage finalization (W2).
+    pub fn spend(&self, team: &str, project: &str, nano_usd: u64) {
+        self.spend
+            .get_or_create(&SpendLabels {
+                team: team.into(),
+                project: project.into(),
+            })
+            .inc_by(nano_usd as f64 / 1e9);
     }
 
     pub fn set_yaml_hash(&self, hash: &str) {
@@ -224,30 +414,67 @@ impl Metrics {
             .set(1);
     }
 
-    pub fn register_deployment(&mut self, deployment: Arc<Deployment>) {
-        let gauge = self
-            .gauges
-            .get_or_create(&DeploymentLabels {
-                deployment: deployment.name.clone(),
-            })
-            .clone();
+    /// Pre-registers zero-valued per-deployment series.
+    pub fn register_deployment(&self, deployment: &str) {
+        drop(self.gauges.get_or_create(&DeploymentLabels {
+            deployment: deployment.into(),
+        }));
         for kind in ERROR_KINDS {
             drop(self.errors.get_or_create(&ErrorLabels {
-                deployment: deployment.name.clone(),
+                deployment: deployment.into(),
                 kind,
             }));
         }
-        self.in_flight.push((deployment, gauge));
     }
 
-    // Only called while compiling the snapshot. Request handling clones direct handles.
-    pub fn handles(&self, model: &str, deployment: &str, route: usize) -> Arc<RequestMetrics> {
+    /// Interns a label value. Compile time only (takes a lock).
+    pub fn label_id(&self, value: &str) -> LabelId {
+        let mut ids = self.label_ids.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&id) = ids.get(value) {
+            return id;
+        }
+        let id = LabelId::try_from(ids.len()).expect("fewer than 2^32 label values");
+        ids.insert(value.into(), id);
+        id
+    }
+
+    /// Request-path lookup: lock-free and allocation-free once `key` was used
+    /// in this process; the first use creates the series. `team`, `model` and
+    /// `deployment` must be the strings `key` was interned from.
+    pub fn cached_handles(
+        &self,
+        key: HandleKey,
+        team: &str,
+        model: &str,
+        deployment: &str,
+    ) -> Arc<RequestMetrics> {
+        let cache = self.handle_cache.pin();
+        if let Some(handles) = cache.get(&key) {
+            return handles.clone();
+        }
+        cache
+            .get_or_insert_with(key, || {
+                self.handles(model, deployment, key.route.into(), team)
+            })
+            .clone()
+    }
+
+    // Creates (or finds) the registry series for one label set. Cold path:
+    // allocates label strings and locks the families.
+    pub fn handles(
+        &self,
+        model: &str,
+        deployment: &str,
+        route: usize,
+        team: &str,
+    ) -> Arc<RequestMetrics> {
         let counters = std::array::from_fn(|i| {
             self.requests
                 .get_or_create(&RequestLabels {
                     model: model.into(),
                     route: ROUTES[route],
                     deployment: deployment.into(),
+                    team: team.into(),
                     status: STATUSES[i],
                 })
                 .clone()
@@ -302,9 +529,13 @@ impl Metrics {
         })
     }
 
-    pub fn encode(&self) -> Result<String, std::fmt::Error> {
-        for (deployment, gauge) in &self.in_flight {
-            gauge.set(deployment.in_flight.load(Ordering::Relaxed) as i64);
+    pub fn encode(&self, in_flight: &InFlightRegistry) -> Result<String, std::fmt::Error> {
+        for (deployment, count) in in_flight.counts() {
+            self.gauges
+                .get_or_create(&DeploymentLabels {
+                    deployment: deployment.to_string(),
+                })
+                .set(count as i64);
         }
         let mut output = String::new();
         encode(&mut output, &self.registry)?;
@@ -514,9 +745,16 @@ impl Body for ObservedBody {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// Records one finished request with `status` on `handles`.
+    pub fn finish_with(handles: &Arc<RequestMetrics>, status: u16) {
+        let mut observation = Observation::new(handles.clone(), Span::none(), false);
+        observation.status = StatusCode::from_u16(status).unwrap();
+        observation.finish();
+    }
     #[test]
     fn overhead_excludes_prefill_and_upload_but_ttft_includes_them() {
         let start = Instant::now();
@@ -527,7 +765,7 @@ mod tests {
         let first_ready = read + Duration::from_millis(300);
         let metrics = Metrics::new();
         let mut observation =
-            Observation::new(metrics.handles("public", "d", 0), Span::none(), false);
+            Observation::new(metrics.handles("public", "d", 0, ""), Span::none(), false);
         observation.started = start;
         observation.body_read_started = Some(start);
         observation.body_read = Some(read);
@@ -546,7 +784,7 @@ mod tests {
             Some(Duration::from_secs(1))
         );
         let mut cancelled_upload =
-            Observation::new(metrics.handles("", "", 0), Span::none(), false);
+            Observation::new(metrics.handles("", "", 0, ""), Span::none(), false);
         cancelled_upload.started = start;
         cancelled_upload.body_read_started = Some(start);
         assert_eq!(cancelled_upload.overhead(read), 0.0);
@@ -557,14 +795,14 @@ mod tests {
         observation.stream = false;
         observation.first_frame_forwarding = Duration::ZERO;
         assert!((observation.overhead(start + Duration::from_secs(10)) - 0.0011).abs() < 1e-9);
-        let text = metrics.encode().unwrap();
+        let text = metrics.encode(&InFlightRegistry::default()).unwrap();
         assert!(text.contains("lumewarp_ttft_seconds_sum{model=\"public\",deployment=\"d\"} 1.3"));
         assert!(text.contains("lumewarp_ttft_seconds_count{model=\"public\",deployment=\"d\"} 1"));
     }
 
     #[test]
     fn encoder_and_bounded_labels() {
-        let config = lumewarp_config::Config::from_yaml(
+        let (_, snapshot) = lumewarp_config::Config::parse(
             r#"
 upstreams:
   - {name: u, kind: vllm, base_url: 'http://localhost:8123/v1'}
@@ -575,16 +813,20 @@ routes:
 "#,
         )
         .unwrap();
-        let router = crate::router::Router::compile(&config).unwrap();
-        let metrics = &router.metrics;
+        let runtime = crate::runtime::Runtime::new();
+        let router =
+            crate::router::Router::compile(&snapshot, lumewarp_config::AuthMode::Open, &runtime)
+                .unwrap();
+        let anonymous = crate::auth::Caller::Anonymous;
+        let metrics = &runtime.metrics;
         metrics.set_yaml_hash("123456789abc");
         assert!(!router.routes.contains_key("client-supplied-secret-model"));
-        let mut observation = Observation::new(router.unknown[0].clone(), Span::none(), false);
+        let mut observation = Observation::new(router.unknown(&anonymous, 0), Span::none(), false);
         observation.status = StatusCode::NOT_FOUND;
         observation.finish();
         observation.finish();
-        let text = metrics.encode().unwrap();
-        assert!(text.contains("lumewarp_requests_total{model=\"unknown\",route=\"chat_completions\",deployment=\"\",status=\"404\"} 1"));
+        let text = runtime.encode_metrics().unwrap();
+        assert!(text.contains("lumewarp_requests_total{model=\"unknown\",route=\"chat_completions\",deployment=\"\",team=\"\",status=\"404\"} 1"));
         for name in [
             "lumewarp_requests_total",
             "lumewarp_request_duration_seconds",
@@ -595,6 +837,11 @@ routes:
             "lumewarp_in_flight_requests",
             "lumewarp_config_version",
             "lumewarp_config_info",
+            "lumewarp_config_apply_failures_total",
+            "lumewarp_config_stream_connected",
+            "lumewarp_usage_events_dropped_total",
+            "lumewarp_usage_events_reported_total",
+            "lumewarp_usage_events_failed_total",
         ] {
             assert!(text.contains(name), "missing {name}");
         }
@@ -604,28 +851,62 @@ routes:
         assert!(!text.contains("model=\"unknown\",route=\"metrics\""));
         assert!(!text.contains("model=\"unknown\",route=\"other\""));
         drop(Observation::new(
-            router.unknown[0].clone(),
+            router.unknown(&anonymous, 0),
             Span::none(),
             false,
         ));
-        assert!(metrics.encode().unwrap().contains(
-            "model=\"unknown\",route=\"chat_completions\",deployment=\"\",status=\"499\"} 1"
+        assert!(runtime.encode_metrics().unwrap().contains(
+            "model=\"unknown\",route=\"chat_completions\",deployment=\"\",team=\"\",status=\"499\"} 1"
         ));
-        let guard = router.routes["public"].acquire_for(0);
-        assert!(metrics
-            .encode()
+        let guard = router.acquire(&router.routes["public"], 0, &anonymous);
+        assert!(runtime
+            .encode_metrics()
             .unwrap()
             .contains("lumewarp_in_flight_requests{deployment=\"d\"} 1"));
         drop(guard);
-        assert!(metrics
-            .encode()
+        assert!(runtime
+            .encode_metrics()
             .unwrap()
             .contains("lumewarp_in_flight_requests{deployment=\"d\"} 0"));
-        let mut fallback = Observation::new(router.unknown[0].clone(), Span::none(), false);
+        let mut fallback = Observation::new(router.unknown(&anonymous, 0), Span::none(), false);
         fallback.status = StatusCode::IM_A_TEAPOT;
         drop(fallback);
-        assert!(metrics.encode().unwrap().contains(
-            "model=\"unknown\",route=\"chat_completions\",deployment=\"\",status=\"other\"} 1"
+        assert!(runtime.encode_metrics().unwrap().contains(
+            "model=\"unknown\",route=\"chat_completions\",deployment=\"\",team=\"\",status=\"other\"} 1"
         ));
+        finish_with(&router.unknown(&anonymous, 0), 403);
+        assert!(runtime.encode_metrics().unwrap().contains(
+            "model=\"unknown\",route=\"chat_completions\",deployment=\"\",team=\"\",status=\"403\"} 1"
+        ));
+    }
+
+    #[test]
+    fn later_task_methods() {
+        let metrics = Metrics::new();
+        let inflight = InFlightRegistry::default();
+        metrics.config_applied(42);
+        metrics.config_apply_failed(NackCode::PersistFailed);
+        metrics.config_apply_failed(NackCode::PersistFailed);
+        metrics.config_stream_connected(true);
+        metrics.usage_dropped();
+        metrics.usage_batch(500, 3);
+        metrics.tokens("public", "t1", TokenDirection::Input, 10);
+        metrics.tokens("public", "t1", TokenDirection::Output, 4);
+        metrics.spend("t1", "p1", 1_500_000_000);
+        let text = metrics.encode(&inflight).unwrap();
+        for line in [
+            "lumewarp_config_version 42",
+            "lumewarp_config_apply_failures_total{code=\"persist_failed\"} 2",
+            "lumewarp_config_apply_failures_total{code=\"invalid_config\"} 0",
+            "lumewarp_config_stream_connected 1",
+            "lumewarp_usage_events_dropped_total 1",
+            "lumewarp_usage_events_reported_total 500",
+            "lumewarp_usage_events_failed_total 3",
+            "lumewarp_tokens_total{model=\"public\",team=\"t1\",direction=\"input\"} 10",
+            "lumewarp_tokens_total{model=\"public\",team=\"t1\",direction=\"output\"} 4",
+            "lumewarp_spend_total{team=\"t1\",project=\"p1\"} 1.5",
+        ] {
+            assert!(text.contains(line), "missing {line}:\n{text}");
+        }
     }
 }

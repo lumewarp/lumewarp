@@ -253,6 +253,17 @@ impl Gateway {
         timeout_ms: u32,
         server_options: &str,
     ) -> Self {
+        Self::start_with(upstreams, authenticated, timeout_ms, server_options, "").await
+    }
+
+    /// `extra` is appended as top-level YAML (e.g. `teams:` / `keys:`).
+    pub async fn start_with(
+        upstreams: &[SocketAddr],
+        authenticated: bool,
+        timeout_ms: u32,
+        server_options: &str,
+        extra: &str,
+    ) -> Self {
         // Reserve distinct ports until immediately before spawning the child.
         let listen = StdListener::bind("127.0.0.1:0").unwrap();
         let admin = StdListener::bind("127.0.0.1:0").unwrap();
@@ -280,6 +291,7 @@ impl Gateway {
             .collect::<Vec<_>>()
             .join(", ");
         yaml.push_str(&format!("routes:\n  - {{model: public, deployments: [{deployments}], strategy: least_in_flight}}\n  - {{model: another-alias, deployments: [{deployments}]}}\n"));
+        yaml.push_str(extra);
         let dir = std::env::temp_dir().join(format!(
             "lumewarp-proxy-test-{}-{}",
             std::process::id(),

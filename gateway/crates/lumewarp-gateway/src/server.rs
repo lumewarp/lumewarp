@@ -16,7 +16,7 @@ use tokio::{net::TcpListener, sync::watch, task::JoinSet};
 use tracing::Instrument;
 
 use crate::{
-    error,
+    auth, error,
     metrics::{self, Observation, ROUTES},
     proxy::{self, full_body, ProxyBody, UpstreamClient},
     router::Router,
@@ -26,13 +26,14 @@ use crate::{
 pub type Snapshot = Arc<ArcSwap<Router>>;
 
 pub async fn serve(
-    config: &lumewarp_config::Server,
+    config: &lumewarp_config::LocalSettings,
     snapshot: Snapshot,
     otel: bool,
 ) -> anyhow::Result<()> {
     let listen = config.listen;
     let admin_listen = config.admin_listen;
     let header_read_timeout = Duration::from_millis(config.header_read_timeout_ms);
+    let body_read_timeout = Duration::from_millis(config.body_read_timeout_ms);
     let shutdown_grace = Duration::from_millis(config.shutdown_grace_ms);
     let client = proxy::client();
     let listener = TcpListener::bind(listen)
@@ -68,7 +69,7 @@ pub async fn serve(
                 let client = client.clone();
                 let mut draining = drain.subscribe();
                 connections.spawn(async move {
-                    let svc = service_fn(move |req| handle(snapshot.clone(), client.clone(), req, admin, otel));
+                    let svc = service_fn(move |req| handle(snapshot.clone(), client.clone(), req, admin, otel, body_read_timeout));
                     let mut builder = http1::Builder::new();
                     builder.timer(TokioTimer::new()).header_read_timeout(header_read_timeout);
                     let connection = builder.serve_connection(TokioIo::new(stream), svc);
@@ -141,6 +142,7 @@ async fn handle(
     req: Request<Incoming>,
     admin: bool,
     otel: bool,
+    body_read_timeout: Duration,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let started = Instant::now();
     let router = snapshot.load_full();
@@ -148,9 +150,17 @@ async fn handle(
     let span = telemetry::request_span(otel, req.headers(), ROUTES[endpoint]);
     let mut observation = Observation::new(router.rejected[endpoint].clone(), span.clone(), otel);
     observation.started = started;
-    let response = dispatch(&router, &client, req, admin, &mut observation, endpoint)
-        .instrument(span)
-        .await;
+    let response = dispatch(
+        &router,
+        &client,
+        req,
+        admin,
+        &mut observation,
+        endpoint,
+        body_read_timeout,
+    )
+    .instrument(span)
+    .await;
     Ok(observation.wrap(response))
 }
 
@@ -161,12 +171,13 @@ async fn dispatch(
     admin: bool,
     observation: &mut Observation,
     endpoint: usize,
+    body_read_timeout: Duration,
 ) -> Response<ProxyBody> {
     let path = req.uri().path();
     if admin {
         return match (req.method(), path) {
             (&Method::GET, "/healthz") => Response::new(full_body(Bytes::from_static(b"ok"))),
-            (&Method::GET, "/metrics") => match router.metrics.encode() {
+            (&Method::GET, "/metrics") => match router.runtime.encode_metrics() {
                 Ok(text) => Response::builder()
                     .header(
                         header::CONTENT_TYPE,
@@ -183,26 +194,41 @@ async fn dispatch(
             _ => error::json(StatusCode::NOT_FOUND, "not_found", "Not found"),
         };
     }
-    if path.starts_with("/v1/") && !router.auth.allows(req.headers()) {
-        return error::json(
-            StatusCode::UNAUTHORIZED,
-            "invalid_api_key",
-            "Invalid or missing API key",
-        );
+    if !path.starts_with("/v1/") {
+        return match (req.method(), path) {
+            (&Method::GET, "/healthz") => Response::builder()
+                .header(header::CONTENT_TYPE, "text/plain")
+                .body(full_body(Bytes::from_static(b"ok")))
+                .expect("static response parts are valid"),
+            _ => error::json(StatusCode::NOT_FOUND, "not_found", "Not found"),
+        };
     }
-    let response = match (req.method(), path) {
-        (&Method::GET, "/healthz") => Response::builder()
-            .header(header::CONTENT_TYPE, "text/plain")
-            .body(full_body(Bytes::from_static(b"ok")))
-            .expect("static response parts are valid"),
+    let caller = match auth::authenticate(router, req.headers()) {
+        Ok(caller) => caller,
+        Err(err) => return err.into(),
+    };
+    // Authenticated traffic carries the caller's team even when it never
+    // reaches a model (/v1/models, malformed bodies); failed auth stays "".
+    if caller.team_label() != 0 {
+        observation.handles = router.caller_handles(&caller, endpoint);
+    }
+    match (req.method(), path) {
         (&Method::GET, "/v1/models") => Response::builder()
             .header(header::CONTENT_TYPE, "application/json")
-            .body(full_body(router.models.clone()))
+            .body(full_body(router.models_for(&caller)))
             .expect("static response parts are valid"),
         (&Method::POST, "/v1/chat/completions" | "/v1/completions" | "/v1/embeddings") => {
-            proxy::forward(router, client, req, observation, endpoint).await
+            proxy::forward(
+                router,
+                client,
+                req,
+                observation,
+                endpoint,
+                caller,
+                body_read_timeout,
+            )
+            .await
         }
         _ => error::json(StatusCode::NOT_FOUND, "not_found", "Not found"),
-    };
-    response
+    }
 }

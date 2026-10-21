@@ -5,7 +5,9 @@ server:
   shutdown_grace_ms: 25000
   header_read_timeout_ms: 30000
   body_read_timeout_ms: 30000
-  # Optional SHA-256 hashes of client bearer keys (empty/absent means open access).
+  # Shorthand for keys with no team that may call every model: SHA-256 hex of
+  # each client bearer key. With no keys here and no `keys:` section the
+  # gateway is open (no client authentication).
   # api_keys: ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
 
 upstreams:
@@ -24,9 +26,36 @@ deployments:
   - name: gpt-4o-mini
     upstream: openai
     upstream_model: gpt-4o-mini
+    # Quoted decimal USD per 1M tokens, converted exactly to nano-USD.
+    # Omit `price` when unknown; explicit "0" means free.
+    price: { input_usd_per_mtok: "0.15", output_usd_per_mtok: "0.60" }
 
 routes:
   - model: llama-3.1-8b
     deployments: [llama-vllm]
   - model: gpt-4o-mini
     deployments: [gpt-4o-mini]
+
+# Teams are the bounded `team` metric label. Their rate limits are shared by
+# every key of the team (local to this gateway instance).
+teams:
+  - id: team-research
+    name: Research
+    org_id: org-acme
+    org_name: Acme
+    rate_limits: { requests_per_minute: 600, max_parallel_requests: 32 }
+
+# Virtual keys. Uncomment to require keys; any configured key turns auth on.
+# keys:
+#   - key_id: key-alice
+#     key_sha256: "2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b"
+#     team_id: team-research
+#     project_id: proj-chatbot
+#     status: active            # active | revoked | suspended | budget_exceeded
+#     expires_at_unix_ms: 0     # 0 = never
+#     allowed_models: [llama-3.1-8b]
+#     rate_limits: { requests_per_minute: 60 }
+#   - key_id: key-ops
+#     key_sha256: "f6f2a2b0a6f9a3e0f8b8d9c5f4a1e2d3c4b5a6978877665544332211aabbccdd"
+#     team_id: team-research
+#     allow_all_models: true

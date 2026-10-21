@@ -10,4 +10,5 @@ repository.workspace = true
 [dependencies]
 serde.workspace = true
 serde_yaml.workspace = true
+lumewarp-proto.workspace = true
 thiserror.workspace = true

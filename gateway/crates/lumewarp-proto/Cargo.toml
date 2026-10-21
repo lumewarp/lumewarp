@@ -1,0 +1,17 @@
+[package]
+name = "lumewarp-proto"
+description = "Generated Lumewarp protobuf types and gRPC client stubs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+prost.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+
+[build-dependencies]
+protox.workspace = true
+tonic-prost-build.workspace = true

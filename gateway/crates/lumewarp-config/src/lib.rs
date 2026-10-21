@@ -1,13 +1,17 @@
-//! Config snapshot schema shared by standalone YAML mode and (from P1) the
-//! control-plane gRPC stream.
+//! Local gateway settings and the standalone YAML format.
 //!
-//! These types mirror `proto/lumewarp/config/v1/snapshot.proto`. The proto is
-//! the source of truth; once the gRPC stream lands these will be generated
-//! from it rather than hand-written.
+//! The gateway compiles only from the proto `Snapshot`
+//! (`proto/lumewarp/config/v1/snapshot.proto`). Standalone YAML is parsed here
+//! and converted to a `Snapshot` with the same semantics the control plane
+//! produces; structural validation (references, enums, duplicates) happens
+//! once, on the snapshot, in the gateway.
 
 use std::{collections::HashSet, net::SocketAddr, path::Path};
 
-use serde::Deserialize;
+use lumewarp_proto::config::v1 as pb;
+use serde::{Deserialize, Deserializer};
+
+pub use lumewarp_proto::config::v1::Snapshot;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -22,6 +26,37 @@ pub enum ConfigError {
     Invalid(String),
 }
 
+/// Whether `/v1/*` requests must present a virtual key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    /// No key required; every request is anonymous. Standalone only.
+    Open,
+    /// A valid key is required. Zero keys means every request is rejected.
+    RequireKey,
+}
+
+impl AuthMode {
+    /// Standalone YAML is open iff it configures no keys at all.
+    pub fn standalone(snapshot: &Snapshot) -> Self {
+        if snapshot.api_keys.is_empty() {
+            Self::Open
+        } else {
+            Self::RequireKey
+        }
+    }
+}
+
+/// Process-local settings that never travel in a snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalSettings {
+    pub listen: SocketAddr,
+    pub admin_listen: SocketAddr,
+    pub shutdown_grace_ms: u64,
+    pub header_read_timeout_ms: u64,
+    pub body_read_timeout_ms: u64,
+}
+
+/// The standalone YAML document.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -33,6 +68,10 @@ pub struct Config {
     pub deployments: Vec<Deployment>,
     #[serde(default)]
     pub routes: Vec<ModelRoute>,
+    #[serde(default)]
+    pub teams: Vec<Team>,
+    #[serde(default)]
+    pub keys: Vec<Key>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,7 +87,7 @@ pub struct Server {
     pub header_read_timeout_ms: u64,
     #[serde(default = "default_read_timeout_ms")]
     pub body_read_timeout_ms: u64,
-    // TODO(P1): mirror in snapshot.proto
+    /// Shorthand: sha256 hex hashes of keys with no team that may call every model.
     #[serde(default)]
     pub api_keys: Vec<String>,
 }
@@ -92,9 +131,11 @@ pub struct Upstream {
     pub api_key_env: Option<String>,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u32,
+    #[serde(default)]
+    pub stream_usage_mode: StreamUsageMode,
 }
 
-fn default_timeout_ms() -> u32 {
+pub fn default_timeout_ms() -> u32 {
     600_000
 }
 
@@ -106,6 +147,14 @@ pub enum UpstreamKind {
     OpenaiCompatible,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamUsageMode {
+    #[default]
+    IncludeUsage,
+    Passthrough,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Deployment {
@@ -114,10 +163,25 @@ pub struct Deployment {
     pub upstream_model: String,
     #[serde(default = "default_weight")]
     pub weight: u32,
+    /// Absent = price unknown (usage metered, cost unknown); explicit zeros = free.
+    #[serde(default)]
+    pub price: Option<Price>,
 }
 
 fn default_weight() -> u32 {
     1
+}
+
+/// USD per one million tokens as decimals (e.g. `"0.15"` or `0.15`), parsed
+/// from the YAML text and converted exactly to nano-USD, never through
+/// floating point. At most nine fractional digits.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Price {
+    #[serde(deserialize_with = "usd")]
+    pub input_usd_per_mtok: u64,
+    #[serde(deserialize_with = "usd")]
+    pub output_usd_per_mtok: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -138,31 +202,161 @@ pub enum RoutingStrategy {
     LowestLatency,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimits {
+    #[serde(default)]
+    pub requests_per_minute: u32,
+    #[serde(default)]
+    pub tokens_per_minute: u64,
+    #[serde(default)]
+    pub max_parallel_requests: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Team {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub org_id: String,
+    #[serde(default)]
+    pub org_name: String,
+    /// Shared by every key of the team (limiter scope `team:<id>`).
+    #[serde(default)]
+    pub rate_limits: Option<RateLimits>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyStatus {
+    #[default]
+    Active,
+    Revoked,
+    Suspended,
+    BudgetExceeded,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Key {
+    pub key_id: String,
+    /// Lowercase sha256 hex of the full secret key.
+    pub key_sha256: String,
+    #[serde(default)]
+    pub team_id: String,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub status: KeyStatus,
+    /// 0 = never expires.
+    #[serde(default)]
+    pub expires_at_unix_ms: i64,
+    /// Fail-closed: without this or `allowed_models` the key may call nothing.
+    #[serde(default)]
+    pub allow_all_models: bool,
+    #[serde(default)]
+    pub allowed_models: Vec<String>,
+    /// Limiter scope `key:<key_id>`.
+    #[serde(default)]
+    pub rate_limits: Option<RateLimits>,
+}
+
+/// Parses `"12.345"` USD into nano-USD without going through floating point.
+pub fn parse_usd_nano(s: &str) -> Result<u64, String> {
+    let err = || {
+        format!("invalid USD amount {s:?}: expected a decimal string like \"0.15\" with at most 9 fractional digits")
+    };
+    let (whole, frac) = s.split_once('.').unwrap_or((s, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !frac.bytes().all(|b| b.is_ascii_digit())
+        || frac.len() > 9
+        || (s.contains('.') && frac.is_empty())
+    {
+        return Err(err());
+    }
+    let whole: u64 = whole.parse().map_err(|_| err())?;
+    let mut nanos = 0u64;
+    for (i, digit) in frac.bytes().enumerate() {
+        nanos += u64::from(digit - b'0') * 10u64.pow(8 - i as u32);
+    }
+    whole
+        .checked_mul(1_000_000_000)
+        .and_then(|n| n.checked_add(nanos))
+        .ok_or_else(err)
+}
+
+fn usd<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let s = String::deserialize(deserializer).map_err(|_| {
+        serde::de::Error::custom("prices must be decimal USD amounts, e.g. \"0.15\"")
+    })?;
+    parse_usd_nano(&s).map_err(serde::de::Error::custom)
+}
+
+fn rate_limit_scope(prefix: &str, id: &str, limits: &RateLimits) -> pb::RateLimitScope {
+    pb::RateLimitScope {
+        id: format!("{prefix}:{id}"),
+        limit: Some(pb::RateLimit {
+            requests_per_minute: limits.requests_per_minute,
+            tokens_per_minute: limits.tokens_per_minute,
+            max_parallel_requests: limits.max_parallel_requests,
+        }),
+    }
+}
+
+fn parse_hash(hex: &str, field: &str) -> Result<Vec<u8>, ConfigError> {
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    {
+        return Err(ConfigError::Invalid(format!(
+            "{field} must contain 64-character lowercase sha256 hex hashes"
+        )));
+    }
+    Ok((0..32)
+        .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("validated hex"))
+        .collect())
+}
+
 impl Config {
     pub fn from_yaml(s: &str) -> Result<Self, ConfigError> {
-        let config: Config = serde_yaml::from_str(s)?;
-        config.validate()?;
-        Ok(config)
+        Ok(serde_yaml::from_str(s)?)
     }
 
-    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+    /// Reads a standalone YAML file and converts it.
+    pub fn load(path: &Path) -> Result<(LocalSettings, Snapshot), ConfigError> {
         let s = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
             path: path.display().to_string(),
             source,
         })?;
-        Self::from_yaml(&s)
+        Self::parse(&s)
     }
 
-    fn validate(&self) -> Result<(), ConfigError> {
-        if self.server.listen == self.server.admin_listen {
+    /// Parses YAML text and converts it to local settings plus a snapshot.
+    pub fn parse(s: &str) -> Result<(LocalSettings, Snapshot), ConfigError> {
+        Self::from_yaml(s)?.into_parts()
+    }
+
+    pub fn into_parts(self) -> Result<(LocalSettings, Snapshot), ConfigError> {
+        let settings = self.local_settings()?;
+        let snapshot = self.to_snapshot()?;
+        Ok((settings, snapshot))
+    }
+
+    fn local_settings(&self) -> Result<LocalSettings, ConfigError> {
+        let server = &self.server;
+        if server.listen == server.admin_listen {
             return Err(ConfigError::Invalid(
                 "server.admin_listen must differ from server.listen".into(),
             ));
         }
         for (name, value) in [
-            ("shutdown_grace_ms", self.server.shutdown_grace_ms),
-            ("header_read_timeout_ms", self.server.header_read_timeout_ms),
-            ("body_read_timeout_ms", self.server.body_read_timeout_ms),
+            ("shutdown_grace_ms", server.shutdown_grace_ms),
+            ("header_read_timeout_ms", server.header_read_timeout_ms),
+            ("body_read_timeout_ms", server.body_read_timeout_ms),
         ] {
             if value == 0 {
                 return Err(ConfigError::Invalid(format!(
@@ -170,75 +364,143 @@ impl Config {
                 )));
             }
         }
-        for key in &self.server.api_keys {
-            if key.len() != 64
-                || !key
-                    .bytes()
-                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-            {
-                return Err(ConfigError::Invalid(
-                    "server.api_keys must contain 64-character lowercase sha256 hex hashes".into(),
-                ));
-            }
-        }
-        let upstreams = unique_names(self.upstreams.iter().map(|u| u.name.as_str()), "upstream")?;
-        let deployments = unique_names(
-            self.deployments.iter().map(|d| d.name.as_str()),
-            "deployment",
-        )?;
-        unique_names(self.routes.iter().map(|r| r.model.as_str()), "route")?;
-
-        for d in &self.deployments {
-            if !upstreams.contains(d.upstream.as_str()) {
-                return Err(ConfigError::Invalid(format!(
-                    "deployment {:?} references unknown upstream {:?}",
-                    d.name, d.upstream
-                )));
-            }
-        }
-        for r in &self.routes {
-            if r.model == "unknown" {
-                return Err(ConfigError::Invalid(
-                    "route alias 'unknown' is reserved for metrics".into(),
-                ));
-            }
-            if r.strategy == RoutingStrategy::LowestLatency {
-                return Err(ConfigError::Invalid(
-                    "lowest_latency is not supported yet".into(),
-                ));
-            }
-            if r.deployments.is_empty() {
-                return Err(ConfigError::Invalid(format!(
-                    "route {:?} has no deployments",
-                    r.model
-                )));
-            }
-            if let Some(d) = r
-                .deployments
-                .iter()
-                .find(|d| !deployments.contains(d.as_str()))
-            {
-                return Err(ConfigError::Invalid(format!(
-                    "route {:?} references unknown deployment {:?}",
-                    r.model, d
-                )));
-            }
-        }
-        Ok(())
+        Ok(LocalSettings {
+            listen: server.listen,
+            admin_listen: server.admin_listen,
+            shutdown_grace_ms: server.shutdown_grace_ms,
+            header_read_timeout_ms: server.header_read_timeout_ms,
+            body_read_timeout_ms: server.body_read_timeout_ms,
+        })
     }
-}
 
-fn unique_names<'a>(
-    names: impl Iterator<Item = &'a str>,
-    kind: &str,
-) -> Result<HashSet<&'a str>, ConfigError> {
-    let mut seen = HashSet::new();
-    for name in names {
-        if !seen.insert(name) {
-            return Err(ConfigError::Invalid(format!("duplicate {kind} {name:?}")));
+    /// Converts to a version-0 snapshot. References and duplicates are
+    /// checked by the gateway's snapshot validation, not here.
+    pub fn to_snapshot(&self) -> Result<Snapshot, ConfigError> {
+        let upstreams = self
+            .upstreams
+            .iter()
+            .map(|u| pb::Upstream {
+                name: u.name.clone(),
+                kind: match u.kind {
+                    UpstreamKind::Openai => pb::UpstreamKind::Openai,
+                    UpstreamKind::Vllm => pb::UpstreamKind::Vllm,
+                    UpstreamKind::OpenaiCompatible => pb::UpstreamKind::OpenaiCompatible,
+                } as i32,
+                base_url: u.base_url.clone(),
+                api_key_ref: u.api_key_env.clone().unwrap_or_default(),
+                timeout_ms: u.timeout_ms,
+                stream_usage_mode: match u.stream_usage_mode {
+                    StreamUsageMode::IncludeUsage => pb::StreamUsageMode::IncludeUsage,
+                    StreamUsageMode::Passthrough => pb::StreamUsageMode::Passthrough,
+                } as i32,
+            })
+            .collect();
+        let deployments = self
+            .deployments
+            .iter()
+            .map(|d| pb::Deployment {
+                name: d.name.clone(),
+                upstream: d.upstream.clone(),
+                upstream_model: d.upstream_model.clone(),
+                weight: d.weight,
+                price: d.price.as_ref().map(|p| pb::Price {
+                    input_nano_usd_per_mtok: p.input_usd_per_mtok,
+                    output_nano_usd_per_mtok: p.output_usd_per_mtok,
+                }),
+            })
+            .collect();
+        let routes = self
+            .routes
+            .iter()
+            .map(|r| pb::ModelRoute {
+                model: r.model.clone(),
+                deployments: r.deployments.clone(),
+                strategy: match r.strategy {
+                    RoutingStrategy::Weighted => pb::RoutingStrategy::Weighted,
+                    RoutingStrategy::LeastInFlight => pb::RoutingStrategy::LeastInFlight,
+                    RoutingStrategy::LowestLatency => pb::RoutingStrategy::LowestLatency,
+                } as i32,
+            })
+            .collect();
+        let teams: Vec<pb::Team> = self
+            .teams
+            .iter()
+            .map(|t| pb::Team {
+                id: t.id.clone(),
+                name: t.name.clone().unwrap_or_else(|| t.id.clone()),
+                org_id: t.org_id.clone(),
+                org_name: t.org_name.clone(),
+            })
+            .collect();
+        let mut api_keys = Vec::new();
+        let mut shorthand = HashSet::new();
+        for hex in &self.server.api_keys {
+            let hash = parse_hash(hex, "server.api_keys")?;
+            // P0 accepted duplicate shorthand entries; keep that, they are one key.
+            if !shorthand.insert(hex.as_str()) {
+                continue;
+            }
+            api_keys.push(pb::ApiKey {
+                // The hash is not secret; the full value keeps ids unique and
+                // stable across reorderings.
+                key_id: format!("api_keys:{hex}"),
+                key_hash: hash,
+                status: pb::KeyStatus::Active as i32,
+                policy: Some(pb::EffectivePolicy {
+                    allow_all_models: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
         }
+        for key in &self.keys {
+            let team = self.teams.iter().find(|t| t.id == key.team_id);
+            if !key.team_id.is_empty() && team.is_none() {
+                return Err(ConfigError::Invalid(format!(
+                    "key {:?} references unknown team {:?}",
+                    key.key_id, key.team_id
+                )));
+            }
+            let mut scopes = Vec::new();
+            if let Some(limits) = team.and_then(|t| t.rate_limits.as_ref()) {
+                scopes.push(rate_limit_scope("team", &key.team_id, limits));
+            }
+            if let Some(limits) = &key.rate_limits {
+                scopes.push(rate_limit_scope("key", &key.key_id, limits));
+            }
+            api_keys.push(pb::ApiKey {
+                key_id: key.key_id.clone(),
+                key_hash: parse_hash(&key.key_sha256, "keys[].key_sha256")?,
+                org_id: team.map(|t| t.org_id.clone()).unwrap_or_default(),
+                team_id: key.team_id.clone(),
+                project_id: key.project_id.clone(),
+                status: match key.status {
+                    KeyStatus::Active => pb::KeyStatus::Active,
+                    KeyStatus::Revoked => pb::KeyStatus::Revoked,
+                    KeyStatus::Suspended => pb::KeyStatus::Suspended,
+                    KeyStatus::BudgetExceeded => pb::KeyStatus::BudgetExceeded,
+                } as i32,
+                expires_at_unix_ms: key.expires_at_unix_ms,
+                policy: Some(pb::EffectivePolicy {
+                    allow_all_models: key.allow_all_models,
+                    allowed_models: key.allowed_models.clone(),
+                    rate_limit_scopes: scopes,
+                    budget_window_end_unix_ms: 0,
+                }),
+            });
+        }
+        Ok(Snapshot {
+            version: 0,
+            upstreams,
+            deployments,
+            routes,
+            api_keys,
+            teams,
+            created_at_unix_ms: 0,
+            required_capabilities: Vec::new(),
+            scope: String::new(),
+        })
     }
-    Ok(seen)
 }
 
 #[cfg(test)]
@@ -246,87 +508,234 @@ mod tests {
     use super::*;
 
     const EXAMPLE: &str = include_str!("../../../config.example.yaml");
+    const BENCH: &str = include_str!("../../../../bench/lumewarp/config.yaml");
 
     #[test]
-    fn example_config_parses() {
-        let config = Config::from_yaml(EXAMPLE).unwrap();
-        assert!(!config.routes.is_empty());
+    fn example_and_bench_configs_convert() {
+        for yaml in [EXAMPLE, BENCH] {
+            let (_, snapshot) = Config::parse(yaml).unwrap();
+            assert!(!snapshot.routes.is_empty());
+            assert_eq!(snapshot.version, 0);
+        }
+        let (_, snapshot) = Config::parse(BENCH).unwrap();
+        assert_eq!(AuthMode::standalone(&snapshot), AuthMode::Open);
+        let (_, example) = Config::parse(EXAMPLE).unwrap();
+        assert_eq!(AuthMode::standalone(&example), AuthMode::Open);
+        // The commented-out `keys:` block must stay valid YAML for this schema.
+        let mut in_keys = false;
+        let uncommented: String = EXAMPLE
+            .lines()
+            .map(|line| {
+                in_keys |= line == "# keys:";
+                match line.strip_prefix("# ") {
+                    Some(rest) if in_keys => format!("{rest}\n"),
+                    _ if in_keys && line == "#" => "\n".into(),
+                    _ => format!("{line}\n"),
+                }
+            })
+            .collect();
+        let (_, example) = Config::parse(&uncommented).unwrap();
+        assert_eq!(AuthMode::standalone(&example), AuthMode::RequireKey);
+        assert_eq!(example.api_keys.len(), 2);
+        assert_eq!(example.api_keys[0].org_id, "org-acme");
     }
 
     #[test]
-    fn rejects_unknown_deployment() {
-        let yaml = r#"
+    fn converts_upstreams_and_routes() {
+        let (_, s) = Config::parse(
+            r#"
 upstreams:
-  - { name: u, kind: vllm, base_url: "http://localhost:8000/v1" }
+  - { name: u, kind: vllm, base_url: "http://localhost:8000/v1", api_key_env: K, stream_usage_mode: passthrough }
 deployments:
-  - { name: d, upstream: u, upstream_model: m }
+  - { name: d, upstream: u, upstream_model: m, weight: 3, price: { input_usd_per_mtok: "0.15", output_usd_per_mtok: "12" } }
+  - { name: e, upstream: u, upstream_model: m }
 routes:
-  - { model: m, deployments: [missing] }
-"#;
-        assert!(matches!(
-            Config::from_yaml(yaml),
-            Err(ConfigError::Invalid(_))
-        ));
+  - { model: alias, deployments: [d, e], strategy: least_in_flight }
+"#,
+        )
+        .unwrap();
+        assert_eq!(s.upstreams[0].kind, pb::UpstreamKind::Vllm as i32);
+        assert_eq!(s.upstreams[0].api_key_ref, "K");
+        assert_eq!(s.upstreams[0].timeout_ms, 600_000);
+        assert_eq!(
+            s.upstreams[0].stream_usage_mode,
+            pb::StreamUsageMode::Passthrough as i32
+        );
+        assert_eq!(
+            s.deployments[0].price,
+            Some(pb::Price {
+                input_nano_usd_per_mtok: 150_000_000,
+                output_nano_usd_per_mtok: 12_000_000_000,
+            })
+        );
+        assert_eq!(s.deployments[1].price, None);
+        assert_eq!(s.deployments[0].weight, 3);
+        assert_eq!(
+            s.routes[0].strategy,
+            pb::RoutingStrategy::LeastInFlight as i32
+        );
     }
 
     #[test]
-    fn rejects_lowest_latency() {
-        let yaml = EXAMPLE.replace(
-            "deployments: [llama-vllm]",
-            "deployments: [llama-vllm]\n    strategy: lowest_latency",
+    fn usd_parsing_is_exact() {
+        assert_eq!(parse_usd_nano("0"), Ok(0));
+        assert_eq!(parse_usd_nano("0.000000001"), Ok(1));
+        assert_eq!(parse_usd_nano("0.1"), Ok(100_000_000));
+        assert_eq!(parse_usd_nano("2.5"), Ok(2_500_000_000));
+        assert_eq!(parse_usd_nano("18446744073.709551615"), Ok(u64::MAX));
+        for bad in [
+            "",
+            ".5",
+            "1.",
+            "-1",
+            "1e3",
+            "0.0000000001",
+            "18446744074",
+            " 1",
+            "1,5",
+        ] {
+            assert!(parse_usd_nano(bad).is_err(), "{bad}");
+        }
+        // Plain YAML numbers are read from their source text, never via f64.
+        let plain = r#"
+deployments:
+  - { name: d, upstream: u, upstream_model: m, price: { input_usd_per_mtok: 0.10, output_usd_per_mtok: 1.000000001 } }
+"#;
+        let (_, s) = Config::parse(plain).unwrap();
+        assert_eq!(
+            s.deployments[0].price,
+            Some(pb::Price {
+                input_nano_usd_per_mtok: 100_000_000,
+                output_nano_usd_per_mtok: 1_000_000_001,
+            })
         );
-        assert!(Config::from_yaml(&yaml)
+        for bad in ["1e-3", "-1", "true", "[1]"] {
+            let yaml = format!("deployments:\n  - {{ name: d, upstream: u, upstream_model: m, price: {{ input_usd_per_mtok: {bad}, output_usd_per_mtok: '1' }} }}");
+            assert!(Config::parse(&yaml).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn converts_teams_keys_and_shorthand() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let yaml = format!(
+            r#"
+server:
+  api_keys: ['{a}', '{a}']
+teams:
+  - {{ id: t1, org_id: o1, org_name: Org, rate_limits: {{ requests_per_minute: 60 }} }}
+  - {{ id: t2, name: Two }}
+keys:
+  - key_id: k1
+    key_sha256: '{b}'
+    team_id: t1
+    project_id: p1
+    status: revoked
+    expires_at_unix_ms: 5
+    allowed_models: [m1]
+    rate_limits: {{ max_parallel_requests: 2 }}
+  - {{ key_id: k2, key_sha256: '{}' }}
+"#,
+            "c".repeat(64)
+        );
+        let (_, s) = Config::parse(&yaml).unwrap();
+        assert_eq!(s.teams[0].name, "t1");
+        assert_eq!(s.teams[1].name, "Two");
+        assert_eq!(s.api_keys.len(), 3, "duplicate shorthand collapses");
+        let shorthand = &s.api_keys[0];
+        assert_eq!(shorthand.key_hash, vec![0xaa; 32]);
+        assert_eq!(shorthand.key_id, format!("api_keys:{a}"));
+        assert!(shorthand.policy.as_ref().unwrap().allow_all_models);
+        let k1 = &s.api_keys[1];
+        assert_eq!(k1.org_id, "o1");
+        assert_eq!(k1.project_id, "p1");
+        assert_eq!(k1.status, pb::KeyStatus::Revoked as i32);
+        assert_eq!(k1.expires_at_unix_ms, 5);
+        let policy = k1.policy.as_ref().unwrap();
+        assert!(!policy.allow_all_models);
+        assert_eq!(policy.allowed_models, ["m1"]);
+        let ids: Vec<_> = policy
+            .rate_limit_scopes
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(ids, ["team:t1", "key:k1"]);
+        assert_eq!(
+            policy.rate_limit_scopes[0]
+                .limit
+                .unwrap()
+                .requests_per_minute,
+            60
+        );
+        // Fail-closed default: no allow_all_models and no list = deny-all.
+        let k2 = s.api_keys[2].policy.as_ref().unwrap();
+        assert!(!k2.allow_all_models && k2.allowed_models.is_empty());
+        assert_eq!(s.api_keys[2].status, pb::KeyStatus::Active as i32);
+    }
+
+    #[test]
+    fn shorthand_ids_use_the_full_hash() {
+        let a = "a".repeat(64);
+        let b = format!("{}{}", "a".repeat(16), "b".repeat(48));
+        let (_, s) = Config::parse(&format!("server:\n  api_keys: ['{a}', '{b}', '{a}']")).unwrap();
+        let ids: Vec<_> = s.api_keys.iter().map(|k| k.key_id.clone()).collect();
+        assert_eq!(ids, [format!("api_keys:{a}"), format!("api_keys:{b}")]);
+    }
+
+    #[test]
+    fn rejects_bad_key_fields() {
+        for key in ["x".repeat(64), "A".repeat(64), "0".repeat(63)] {
+            assert!(Config::parse(&format!("server:\n  api_keys: ['{key}']")).is_err());
+            assert!(
+                Config::parse(&format!("keys:\n  - {{key_id: k, key_sha256: '{key}'}}")).is_err()
+            );
+        }
+        assert!(Config::parse(&format!("server:\n  api_keys: ['{}']", "a".repeat(64))).is_ok());
+        let unknown_team = format!(
+            "keys:\n  - {{key_id: k, key_sha256: '{}', team_id: nope}}",
+            "a".repeat(64)
+        );
+        assert!(Config::parse(&unknown_team)
             .unwrap_err()
             .to_string()
-            .contains("not supported yet"));
-    }
-
-    #[test]
-    fn validates_api_key_hashes() {
-        for key in ["x".repeat(64), "A".repeat(64), "0".repeat(63)] {
-            assert!(Config::from_yaml(&format!("server:\n  api_keys: ['{key}']")).is_err());
-        }
-        assert!(Config::from_yaml(&format!("server:\n  api_keys: ['{}']", "a".repeat(64))).is_ok());
+            .contains("unknown team"));
     }
 
     #[test]
     fn admin_listener_defaults_and_validation() {
-        let config = Config::from_yaml("").unwrap();
-        assert_eq!(
-            config.server.admin_listen,
-            "127.0.0.1:9464".parse().unwrap()
-        );
-        assert!(Config::from_yaml("server: {listen: '127.0.0.1:9464'}").is_err());
+        let (settings, _) = Config::parse("").unwrap();
+        assert_eq!(settings.admin_listen, "127.0.0.1:9464".parse().unwrap());
+        assert!(Config::parse("server: {listen: '127.0.0.1:9464'}").is_err());
     }
 
     #[test]
-    fn validates_timeouts_and_reserved_alias() {
-        let config = Config::from_yaml("").unwrap();
-        assert_eq!(config.server.shutdown_grace_ms, 25_000);
-        assert_eq!(config.server.header_read_timeout_ms, 30_000);
-        assert_eq!(config.server.body_read_timeout_ms, 30_000);
+    fn validates_timeouts() {
+        let (settings, _) = Config::parse("").unwrap();
+        assert_eq!(settings.shutdown_grace_ms, 25_000);
+        assert_eq!(settings.header_read_timeout_ms, 30_000);
+        assert_eq!(settings.body_read_timeout_ms, 30_000);
         for name in [
             "shutdown_grace_ms",
             "header_read_timeout_ms",
             "body_read_timeout_ms",
         ] {
-            assert!(Config::from_yaml(&format!("server: {{{name}: 0}}"))
+            assert!(Config::parse(&format!("server: {{{name}: 0}}"))
                 .unwrap_err()
                 .to_string()
                 .contains(name));
-            assert!(Config::from_yaml(&format!("server: {{{name}: 1}}")).is_ok());
+            assert!(Config::parse(&format!("server: {{{name}: 1}}")).is_ok());
         }
-        let yaml = EXAMPLE.replace("model: llama-3.1-8b", "model: unknown");
-        assert!(Config::from_yaml(&yaml)
-            .unwrap_err()
-            .to_string()
-            .contains("reserved"));
     }
 
     #[test]
     fn rejects_unknown_fields() {
         assert!(matches!(
-            Config::from_yaml("bogus: 1"),
+            Config::parse("bogus: 1"),
+            Err(ConfigError::Parse(_))
+        ));
+        assert!(matches!(
+            Config::parse("keys: [{key_id: k, key_sha256: x, bogus: 1}]"),
             Err(ConfigError::Parse(_))
         ));
     }

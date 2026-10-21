@@ -22,8 +22,10 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 
 use crate::{
+    auth::{self, Caller},
     error,
     metrics::{Observation, UpstreamError},
+    ratelimit::Permit,
     router::{Deployment, InFlight, Router},
     telemetry,
 };
@@ -115,6 +117,8 @@ pub async fn forward(
     req: Request<Incoming>,
     observation: &mut Observation,
     endpoint: usize,
+    caller: Caller,
+    body_read_timeout: Duration,
 ) -> Response<ProxyBody> {
     let (mut parts, incoming) = req.into_parts();
     if parts
@@ -132,7 +136,7 @@ pub async fn forward(
     }
     observation.reading_body();
     let collected = tokio::time::timeout(
-        router.body_read_timeout,
+        body_read_timeout,
         Limited::new(incoming, MAX_BODY).collect(),
     )
     .await;
@@ -186,11 +190,23 @@ pub async fn forward(
             )
         }
     };
+    // Before route lookup, so denied callers cannot probe which aliases exist.
+    if let Err(err) = auth::check_model(&caller, &model) {
+        observation.routed(router.rejected_model(&caller, &model, endpoint), stream);
+        return err.into();
+    }
     let Some(route) = router.routes.get(model.as_ref()) else {
-        observation.routed(router.unknown[endpoint].clone(), stream);
+        observation.routed(router.unknown(&caller, endpoint), stream);
         return error::json(StatusCode::NOT_FOUND, "model_not_found", "Model not found");
     };
-    let guard = route.acquire_for(endpoint);
+    let permit = match router.runtime.limiters.admit(&caller) {
+        Ok(permit) => permit,
+        Err(limited) => {
+            observation.routed(router.rejected_model(&caller, &model, endpoint), stream);
+            return error::rate_limited(limited.retry_after_secs);
+        }
+    };
+    let guard = router.acquire(route, endpoint, &caller);
     observation.routed(guard.metrics.clone(), stream);
     let deployment = &guard.deployment;
     tracing::debug!(deployment = %deployment.name, stream, "proxying request");
@@ -251,6 +267,7 @@ pub async fn forward(
         StreamingBody {
             body,
             guard: Some(guard),
+            permit: Some(permit),
         }
         .boxed_unsync(),
     )
@@ -326,6 +343,14 @@ fn strip_response_headers(headers: &mut HeaderMap) {
 struct StreamingBody {
     body: Incoming,
     guard: Option<InFlight>,
+    permit: Option<Permit>,
+}
+
+impl StreamingBody {
+    fn release(&mut self) -> Option<InFlight> {
+        self.permit.take();
+        self.guard.take()
+    }
 }
 
 impl Body for StreamingBody {
@@ -338,18 +363,18 @@ impl Body for StreamingBody {
     ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
         match Pin::new(&mut self.body).poll_frame(cx) {
             Poll::Ready(None) => {
-                self.guard.take();
+                self.release();
                 Poll::Ready(None)
             }
             Poll::Ready(Some(Err(err))) => {
-                if let Some(guard) = self.guard.take() {
+                if let Some(guard) = self.release() {
                     guard.metrics.upstream_error(UpstreamError::Stream);
                 }
                 Poll::Ready(Some(Err(Box::new(err))))
             }
             Poll::Ready(Some(Ok(frame))) => {
                 if self.body.is_end_stream() {
-                    self.guard.take();
+                    self.release();
                 }
                 Poll::Ready(Some(Ok(frame)))
             }
@@ -411,7 +436,7 @@ mod tests {
 
     #[test]
     fn precomputed_endpoints_preserve_prefix_and_query() {
-        let config = lumewarp_config::Config::from_yaml(
+        let (_, snapshot) = lumewarp_config::Config::parse(
             r#"
 upstreams:
   - {name: u, kind: vllm, base_url: 'http://localhost:8123/prefix/v1/'}
@@ -422,8 +447,13 @@ routes:
 "#,
         )
         .unwrap();
-        let router = Router::compile(&config).unwrap();
-        let guard = router.routes["public"].acquire();
+        let router = Router::compile(
+            &snapshot,
+            lumewarp_config::AuthMode::Open,
+            &crate::runtime::Runtime::new(),
+        )
+        .unwrap();
+        let guard = router.acquire(&router.routes["public"], 0, &Caller::Anonymous);
         let deployment = &guard.deployment;
         assert_eq!(deployment.host, "localhost:8123");
         assert_eq!(deployment.upstream_model_json, br#""actual""#.as_slice());
