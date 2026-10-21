@@ -1,7 +1,13 @@
-use std::{
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+//! Virtual-key authentication against the compiled snapshot.
+//!
+//! The bearer secret is hashed with SHA-256 and the 32-byte digest is looked
+//! up in a `HashMap`. No constant-time comparison is needed: the secret itself
+//! is never compared, and the lookup's timing can at most reveal information
+//! about the attacker's own digest relative to stored digests. Learning digest
+//! prefixes does not help find a preimage (keys are high-entropy random
+//! strings), so the timing side channel is not exploitable.
+
+use std::sync::Arc;
 
 use hyper::{header, HeaderMap, Response, StatusCode};
 use lumewarp_config::AuthMode;
@@ -11,6 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     error,
     proxy::ProxyBody,
+    ratelimit::clock,
     router::{KeyContext, Router},
 };
 
@@ -85,13 +92,8 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
     (scheme.eq_ignore_ascii_case("Bearer") && !key.is_empty()).then_some(key)
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64)
-}
-
 /// One sha256 and one map lookup; no allocation besides the `Arc` clone.
+/// Expiry uses the coarse clock (an atomic load, at most a few ms stale).
 pub fn authenticate(router: &Router, headers: &HeaderMap) -> Result<Caller, AuthError> {
     if router.auth_mode == AuthMode::Open {
         return Ok(Caller::Anonymous);
@@ -100,7 +102,7 @@ pub fn authenticate(router: &Router, headers: &HeaderMap) -> Result<Caller, Auth
     let hash: [u8; 32] = Sha256::digest(key.as_bytes()).into();
     let key = router.keys.get(&hash).ok_or(AuthError::InvalidApiKey)?;
     // Lifecycle and expiry take priority over quota.
-    if key.expires_at_ms != 0 && now_ms() >= key.expires_at_ms {
+    if key.expires_at_ms != 0 && clock::unix_ms() >= key.expires_at_ms {
         return Err(AuthError::InvalidApiKey);
     }
     match key.status {
@@ -235,5 +237,48 @@ mod tests {
             Response::from(AuthError::InsufficientQuota).status(),
             StatusCode::TOO_MANY_REQUESTS
         );
+    }
+
+    /// `cargo test --release --bin lumewarp bench_authenticate_and_admit -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing benchmark; run explicitly in release mode"]
+    fn bench_authenticate_and_admit() {
+        use std::{hint::black_box, time::Instant};
+        let scope = |id: &str| pb::RateLimitScope {
+            id: id.into(),
+            limit: Some(pb::RateLimit {
+                requests_per_minute: u32::MAX,
+                tokens_per_minute: u64::MAX,
+                max_parallel_requests: u32::MAX,
+            }),
+        };
+        let mut s = base();
+        s.api_keys[0].policy.as_mut().unwrap().rate_limit_scopes =
+            vec![scope("team:t1"), scope("key:k1")];
+        let open = router(&s, AuthMode::Open);
+        let keyed = router(&s, AuthMode::RequireKey);
+        let cases = [
+            ("open (anonymous)", &open, headers("Bearer s1")),
+            ("key, no scopes", &keyed, headers("Bearer s2")),
+            ("key, 2 scopes", &keyed, headers("Bearer s1")),
+            ("unknown key (401)", &keyed, headers("Bearer nope")),
+        ];
+        const N: u32 = 2_000_000;
+        for (name, router, headers) in cases {
+            let limiters = &router.runtime.limiters;
+            for _ in 0..10_000 {
+                if let Ok(caller) = authenticate(router, &headers) {
+                    drop(black_box(limiters.admit(&caller)));
+                }
+            }
+            let start = Instant::now();
+            for _ in 0..N {
+                if let Ok(caller) = authenticate(black_box(router), black_box(&headers)) {
+                    drop(black_box(limiters.admit(&caller)));
+                }
+            }
+            let ns = start.elapsed().as_nanos() as f64 / f64::from(N);
+            println!("authenticate+admit {name}: {ns:.1} ns/op");
+        }
     }
 }
