@@ -1,0 +1,40 @@
+# Both Dockerfiles use the repository root as build context:
+#   docker build -f gateway/Dockerfile .
+#   docker build -f control-plane/Dockerfile .
+# Keep the context small and deterministic; generated artifacts are rebuilt in
+# the images and host-specific dependencies must not leak in.
+
+.git
+.github
+.omh
+.idea
+.vscode
+.env
+
+# Python bytecode / test caches
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+control-plane/.venv
+control-plane/tests
+
+# Rust build output
+gateway/target
+
+# UI dependencies and build output (the image builds these from source)
+ui/node_modules
+ui/dist
+ui/.vite
+ui/test-results
+ui/playwright-report
+ui/tsconfig.tsbuildinfo
+ui/e2e
+ui/playwright.config.ts
+
+# Not needed by either image
+bench
+deploy
+docs
+tests
+scripts

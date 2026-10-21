@@ -172,7 +172,7 @@ P1 的 control plane、設定串流、Org/Team/Project 與 Admin UI 第一版已
 - Canary／百分比切流、vLLM 負載感知與最低延遲路由、fallback／retry／circuit breaker、主動健康檢查。
 - 預算為 eventual；佇列滿或 gateway 重啟會遺失用量事件，進行中的串流不會因超額被切斷；月窗口固定為 UTC 日曆月。
 - MCP／A2A 代理與其稽核、工具權限。
-- repo 內尚無正式 container image 建置（Dockerfile）；Helm chart 假設映像已建好。
+- `gateway/Dockerfile`、`control-plane/Dockerfile` 可建置映像，但尚未有發佈映像的 CI；Helm chart 需自行指定 repository/tag。
 
 ## 效能目標（尚未實測）
 

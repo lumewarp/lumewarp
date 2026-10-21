@@ -1,21 +1,31 @@
 # Lumewarp
 
 A fast, manageable LLM gateway for OpenAI-compatible upstreams (vLLM, OpenAI).
-P0 ships the standalone Rust data plane. The Python control plane and React admin
-UI are part of the [architecture roadmap](docs/architecture.md).
+Lumewarp has a Rust data plane (the gateway) and a Python control plane
+(management API, config compiler, Admin UI). The request path only reads an
+immutable in-memory config snapshot; it never touches Postgres or Python. Config
+updates and usage events are asynchronous.
+
+P1 is implemented: the control plane with Postgres, the versioned gRPC config
+stream with on-disk snapshot boot, Org/Team/Project and virtual keys, budgets and
+rate limits, usage accounting, plugins, and the first Admin UI. See the
+[architecture document](docs/architecture.md) for the design and its “P1 已實作”
+status; deferred work includes SSO/OIDC, advanced routing, MCP/A2A and an HA
+control plane.
 
 | Directory | What |
 | --- | --- |
 | `gateway/` | Data plane (Rust) |
 | `control-plane/` | Management API, config compiler, plugins (Python, uv) |
-| `ui/` | Admin UI (React + Vite, static) |
-| `proto/` | Config snapshot + config-stream gRPC schema |
+| `ui/` | Admin UI (React + Vite, static; served by the control plane) |
+| `proto/` | Config snapshot + config/usage gRPC schema |
 | `bench/` | Mock upstream and Lumewarp-vs-LiteLLM load tests |
-| `deploy/` | Helm chart, Prometheus rules, Grafana dashboards |
+| `deploy/` | Helm chart, dev compose, Prometheus/Grafana scaffolding |
 
-## Gateway quick start
+## Standalone gateway quick start
 
-Start a local OpenAI-compatible mock (separate terminal):
+Standalone mode reads one YAML file and needs no control plane or database.
+Start a local OpenAI-compatible mock in a separate terminal:
 
 ```sh
 cargo build --release --manifest-path bench/mock-upstream/Cargo.toml
@@ -50,8 +60,96 @@ curl -sS -N -H 'Content-Type: application/json' http://127.0.0.1:4000/v1/chat/co
 curl -sS http://127.0.0.1:9464/metrics
 ```
 
-See the [gateway reference](gateway/README.md) for authentication, every YAML
-field, header handling, errors, metrics, tracing, and P0 limits. See the
-[benchmark guide](bench/README.md) for load tests and measurement definitions.
+The gateway requires an API key as soon as the YAML contains one (`server.api_keys`
+or `keys`). See the [gateway reference](gateway/README.md) for authentication,
+every YAML field, header handling, errors, metrics, tracing, and limitations.
+
+## Control-plane quick start
+
+The control plane owns the config; the gateway follows it over gRPC and keeps the
+last ACKed snapshot on disk so it can keep serving (and restart) while the control
+plane is down.
+
+Start the mock upstream as above, then Postgres and the control plane:
+
+```sh
+./scripts/dev-db.sh up
+cd control-plane
+uv sync
+
+# Build the Admin UI once (Node 24 + pnpm); the control plane serves it at /.
+# Skip this for an API-only setup.
+(cd ../ui && pnpm install && pnpm build:cp)
+
+uv run lumewarp-control-plane migrate
+uv run lumewarp-control-plane bootstrap --gateway-id gw-local   # prints the lwg-... token once
+LUMEWARP_BOOTSTRAP_TOKEN=dev-admin uv run lumewarp-control-plane serve
+```
+
+The HTTP API/UI listens on `127.0.0.1:8091`; gateway-facing gRPC listens on
+`127.0.0.1:50051`. The dev Postgres from `scripts/dev-db.sh` listens on
+`127.0.0.1:55432`, so it does not collide with a local 5432.
+
+Start the gateway in another terminal:
+
+```sh
+cd gateway
+export LUMEWARP_GATEWAY_TOKEN='lwg-...'
+cargo run --release -- --control-plane http://127.0.0.1:50051 \
+  --gateway-token-env LUMEWARP_GATEWAY_TOKEN \
+  --state-dir /tmp/lumewarp-state --scope default --gateway-id gw-local
+```
+
+The gateway is not ready until the control plane publishes the first config
+version: `/v1/*` and the admin `/readyz` return 503, and the process never falls
+back to an open router. Open <http://127.0.0.1:8091/> and log in with `dev-admin`,
+then create:
+
+- an upstream for `http://127.0.0.1:9100/v1` (kind `openai_compatible`),
+- a deployment using upstream model `mock`,
+- a route with the public alias `demo`,
+- an organization/team/project and a project API key (the `lw-...` secret is shown
+  once).
+
+Creating those resources publishes a snapshot; the gateway becomes ready and
+accepts the key:
+
+```sh
+curl -sS -H "Authorization: Bearer lw-..." -H 'Content-Type: application/json' \
+  http://127.0.0.1:4000/v1/chat/completions \
+  --data-binary '{"model":"demo","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+Usage lands in the UI after the next report batch (about one second); budgets are
+enforced eventually. See the [control-plane README](control-plane/README.md) for
+settings, credentials/RBAC, plugins and operations, and
+[`docs/config-protocol.md`](docs/config-protocol.md) for the stream contract.
+
+## Container images
+
+Both Dockerfiles use the repository root as build context so the gateway can read
+`proto/` and the control-plane image can build `ui/`:
+
+```sh
+docker build -f gateway/Dockerfile -t ghcr.io/lumewarp/lumewarp-gateway:0.1.0 .
+docker build -f control-plane/Dockerfile -t ghcr.io/lumewarp/lumewarp-control-plane:0.1.0 .
+```
+
+The gateway image is distroless, runs as non-root and includes a writable
+`/var/lib/lumewarp` for the cached snapshot. The control-plane image runs the
+uv-installed package on Python 3.12 as non-root and includes the built Admin UI.
+The [Helm chart](deploy/helm/lumewarp/README.md) deploys both; set the image
+repositories/tags in its values.
+
+## More documentation
+
+- [Gateway reference](gateway/README.md) — modes, flags, YAML schema, auth,
+  streaming, errors, metrics, tracing.
+- [Control plane](control-plane/README.md) — uv install, settings, readiness,
+  RBAC, plugins, Admin UI, migrations.
+- [Architecture](docs/architecture.md) and
+  [config stream protocol](docs/config-protocol.md).
+- [Helm chart](deploy/helm/lumewarp/README.md) and
+  [benchmark guide](bench/README.md).
 
 Licensed under Apache-2.0.

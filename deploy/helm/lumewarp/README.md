@@ -13,8 +13,9 @@ semantics: [`docs/config-protocol.md`](../../../docs/config-protocol.md).
 - Kubernetes 1.25+ and Helm 3.
 - A reachable PostgreSQL 16+ database and a Secret containing its SQLAlchemy async URL
   (`postgresql+asyncpg://user:password@host:5432/db`).
-- Container images for both components. **This repository does not contain Dockerfiles
-  yet**; build and push images yourself and set the repositories/tags in `values.yaml`.
+- Container images for both components, built from `gateway/Dockerfile` and
+  `control-plane/Dockerfile` (no images are published yet); push them to your registry and
+  set the repositories/tags in `values.yaml`.
   - Gateway image: the `lumewarp` binary on `PATH`.
   - Control-plane image: the `lumewarp_control_plane` Python package installed for
     `python -m lumewarp_control_plane`; include the built Admin UI
