@@ -5,9 +5,10 @@
 //! policy on every request, so a new snapshot changes them in place. N
 //! gateway instances allow up to N times each limit (P1 decision).
 //!
-//! Per scope, all lock-free atomics:
+//! Per scope:
 //! - rpm: GCRA (equivalent to a token bucket with capacity `rpm`, refilled at
-//!   `rpm / 60` per second), one `AtomicU64` theoretical arrival time.
+//!   `rpm / 60` per second). A short mutex protects the rate and theoretical
+//!   arrival time together, including rescale, take and rollback.
 //! - max_parallel: an atomic counter; `Permit` holds a slot until it is
 //!   dropped, i.e. until the response body ends, errors or is dropped.
 //! - tpm: retrospective fixed one-minute window (on the gateway's monotonic
@@ -19,7 +20,7 @@
 
 use std::sync::{
     atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 use lumewarp_proto::config::v1::RateLimit;
@@ -91,13 +92,46 @@ const PRUNE_EVERY: usize = 1024;
 
 #[derive(Default)]
 struct ScopeState {
-    /// GCRA theoretical arrival time, microseconds on `clock::mono_ms`.
-    tat_us: AtomicU64,
-    /// The rpm `tat_us` was last advanced with (0 = never).
-    rpm: AtomicU32,
+    rpm: Mutex<RpmBucket>,
     parallel: AtomicU32,
     /// `(minute << TOKEN_BITS) | tokens` for the current tpm window.
     tpm_window: AtomicU64,
+}
+
+#[derive(Default)]
+struct RpmBucket {
+    /// GCRA theoretical arrival time, microseconds on `clock::mono_ms`.
+    tat_us: u64,
+    /// The rate the debt is expressed in (0 = never).
+    rate: u32,
+}
+
+impl RpmBucket {
+    /// Preserve counted requests, not the fraction of the minute. Round debt
+    /// up so repeated snapshot swaps cannot gradually forgive traffic.
+    fn rescale(&mut self, rpm: u32, now_us: u64) {
+        if self.rate != 0 && self.rate != rpm {
+            let debt = u128::from(self.tat_us.saturating_sub(now_us));
+            let scaled =
+                (debt * u128::from(interval_us(rpm))).div_ceil(u128::from(interval_us(self.rate)));
+            self.tat_us = now_us.saturating_add(u64::try_from(scaled).unwrap_or(u64::MAX));
+        }
+        self.rate = rpm;
+    }
+
+    fn take(&mut self, rpm: u32, now_us: u64) -> Result<u64, RateLimited> {
+        self.rescale(rpm, now_us);
+        let interval = interval_us(rpm);
+        let tolerance = interval * u64::from(rpm - 1);
+        let base = self.tat_us.max(now_us);
+        if base - now_us > tolerance {
+            return Err(RateLimited {
+                retry_after_secs: secs_ceil(base - now_us - tolerance),
+            });
+        }
+        self.tat_us = base + interval;
+        Ok(interval)
+    }
 }
 
 fn interval_us(rpm: u32) -> u64 {
@@ -114,80 +148,31 @@ impl ScopeState {
         limit != 0 && window >> TOKEN_BITS == minute && window & TOKEN_MASK >= limit
     }
 
-    /// A new snapshot changed this scope's rpm: keep the number of requests
-    /// already counted (not the fraction of the minute), so raising a limit
-    /// admits more at once and lowering it does not forgive recent traffic.
-    fn rescale(&self, rpm: u32, now_us: u64) {
-        let old = self.rpm.swap(rpm, Ordering::Relaxed);
-        if old == 0 || old == rpm {
-            return;
-        }
-        let (old_interval, new_interval) = (interval_us(old), interval_us(rpm));
-        let mut tat = self.tat_us.load(Ordering::Relaxed);
-        loop {
-            let debt = u128::from(tat.saturating_sub(now_us));
-            let scaled = debt * u128::from(new_interval) / u128::from(old_interval);
-            let next = now_us.saturating_add(u64::try_from(scaled).unwrap_or(u64::MAX));
-            match self
-                .tat_us
-                .compare_exchange_weak(tat, next, Ordering::Relaxed, Ordering::Relaxed)
-            {
-                Ok(_) => return,
-                Err(actual) => tat = actual,
-            }
-        }
-    }
-
     /// Gives back one rpm token taken by a request that is being rolled back.
     /// The amount is one interval of the bucket's *current* rpm, not what the
     /// request paid: a snapshot swap may have rescaled the bucket in between,
     /// and refunding stale units could underflow or over-credit it. Saturates
     /// at zero (a TAT in the past is an idle bucket anyway).
     fn refund_rpm(&self) {
-        let rpm = self.rpm.load(Ordering::Relaxed);
-        if rpm == 0 {
+        self.refund_rpm_with(|| {});
+    }
+
+    /// The no-op hook is optimized away in production; tests pause at the
+    /// reviewer's exact stale-interval interleaving point.
+    fn refund_rpm_with(&self, after_read: impl FnOnce()) {
+        let mut bucket = self.rpm.lock().unwrap();
+        if bucket.rate == 0 {
             return;
         }
-        let interval = interval_us(rpm);
-        let mut tat = self.tat_us.load(Ordering::Relaxed);
-        loop {
-            match self.tat_us.compare_exchange_weak(
-                tat,
-                tat.saturating_sub(interval),
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return,
-                Err(actual) => tat = actual,
-            }
-        }
+        let interval = interval_us(bucket.rate);
+        let tat = bucket.tat_us;
+        after_read();
+        bucket.tat_us = tat.saturating_sub(interval);
     }
 
     /// Takes one rpm token; returns the GCRA increment (nonzero) on success.
     fn take_rpm(&self, rpm: u32, now_us: u64) -> Result<u64, RateLimited> {
-        if self.rpm.load(Ordering::Relaxed) != rpm {
-            self.rescale(rpm, now_us);
-        }
-        let interval = interval_us(rpm);
-        let tolerance = interval * u64::from(rpm - 1);
-        let mut tat = self.tat_us.load(Ordering::Relaxed);
-        loop {
-            let base = tat.max(now_us);
-            if base - now_us > tolerance {
-                return Err(RateLimited {
-                    retry_after_secs: secs_ceil(base - now_us - tolerance),
-                });
-            }
-            match self.tat_us.compare_exchange_weak(
-                tat,
-                base + interval,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return Ok(interval),
-                Err(actual) => tat = actual,
-            }
-        }
+        self.rpm.lock().unwrap().take(rpm, now_us)
     }
 
     fn take_parallel(&self, max: u32) -> bool {
@@ -227,7 +212,7 @@ impl ScopeState {
 
     fn idle(&self, now_us: u64, minute: u64) -> bool {
         let window = self.tpm_window.load(Ordering::Relaxed);
-        self.tat_us.load(Ordering::Relaxed) <= now_us
+        self.rpm.lock().unwrap().tat_us <= now_us
             && self.parallel.load(Ordering::Relaxed) == 0
             && (window >> TOKEN_BITS != minute || window & TOKEN_MASK == 0)
     }
@@ -578,11 +563,11 @@ mod tests {
         assert_eq!(a, 6_000_000);
         // B's snapshot raises the limit to rpm=100 and rescales the bucket.
         state.take_rpm(100, now).unwrap();
-        let before = state.tat_us.load(Ordering::Relaxed);
+        let before = state.rpm.lock().unwrap().tat_us;
         assert!(before < now + 2_000_000, "debt is in new units: {before}");
         // A is rejected by another scope and rolls back.
         state.refund_rpm();
-        let tat = state.tat_us.load(Ordering::Relaxed);
+        let tat = state.rpm.lock().unwrap().tat_us;
         assert!(tat <= before, "refund never charges");
         assert!(tat < now + 2_000_000, "no underflow: {tat}");
         // The bucket is still usable and still limits at the new rate.
@@ -594,10 +579,138 @@ mod tests {
         // A refund larger than the whole debt saturates at zero.
         let fresh = ScopeState::default();
         fresh.take_rpm(10, 1000).unwrap();
-        fresh.tat_us.store(5, Ordering::Relaxed);
+        fresh.rpm.lock().unwrap().tat_us = 5;
         fresh.refund_rpm();
-        assert_eq!(fresh.tat_us.load(Ordering::Relaxed), 0);
+        assert_eq!(fresh.rpm.lock().unwrap().tat_us, 0);
         fresh.take_rpm(10, 1000).unwrap();
+    }
+
+    #[test]
+    fn r3_refund_racing_with_rescale_keeps_499_requests_charged() {
+        use std::sync::Barrier;
+
+        let state = ScopeState::default();
+        let now = 100_000_000_000;
+        state.take_rpm(1, now).unwrap();
+        let entered = Barrier::new(2);
+        let release = Barrier::new(2);
+        let taking = Barrier::new(2);
+        std::thread::scope(|s| {
+            let refund = s.spawn(|| {
+                state.refund_rpm_with(|| {
+                    // Pause after reading the old interval and TAT, exactly
+                    // where the reviewer forced the original CAS retry bug.
+                    entered.wait();
+                    release.wait();
+                });
+            });
+            entered.wait();
+            // Rescale/take cannot publish anything while refund holds this
+            // state. The old interleaving is now impossible, not just unlikely.
+            assert!(matches!(
+                state.rpm.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            let taker = s.spawn(|| {
+                taking.wait();
+                for _ in 0..499 {
+                    state.take_rpm(1000, now).unwrap();
+                }
+            });
+            taking.wait();
+            release.wait();
+            refund.join().unwrap();
+            taker.join().unwrap();
+        });
+        let remaining = (0..1001)
+            .take_while(|_| state.take_rpm(1000, now).is_ok())
+            .count();
+        assert_eq!(
+            remaining, 501,
+            "499 successful requests must remain charged"
+        );
+    }
+
+    #[test]
+    fn refund_waiting_for_rescale_uses_the_new_rate() {
+        use std::sync::Barrier;
+
+        let state = ScopeState::default();
+        let now = 100_000_000_000;
+        state.take_rpm(1, now).unwrap();
+        let mut bucket = state.rpm.lock().unwrap();
+        let entered = Barrier::new(2);
+        std::thread::scope(|s| {
+            let refund = s.spawn(|| {
+                entered.wait();
+                state.refund_rpm();
+            });
+            entered.wait();
+            for _ in 0..499 {
+                bucket.take(1000, now).unwrap();
+            }
+            drop(bucket);
+            refund.join().unwrap();
+        });
+        let remaining = (0..1001)
+            .take_while(|_| state.take_rpm(1000, now).is_ok())
+            .count();
+        assert_eq!(remaining, 501);
+    }
+
+    #[test]
+    fn concurrent_snapshot_rates_and_refunds_never_over_admit() {
+        use std::sync::Barrier;
+
+        const MAX: u32 = 1000;
+        // Freeze time: no refill can obscure an over-admission. Threads use
+        // overlapping old/new snapshot policies on the same persistent scope.
+        let now = 100_000_000_000;
+        for round in 0..8 {
+            let state = ScopeState::default();
+            let committed = AtomicUsize::new(0);
+            let start = Barrier::new(8);
+            std::thread::scope(|s| {
+                for thread in 0..8 {
+                    let (state, committed, start) = (&state, &committed, &start);
+                    s.spawn(move || {
+                        let mut rng = fastrand::Rng::with_seed(round * 8 + thread);
+                        start.wait();
+                        for _ in 0..10_000 {
+                            let rate = [1, 7, MAX][rng.usize(0..3)];
+                            if state.take_rpm(rate, now).is_ok() {
+                                if rng.usize(0..8) == 0 {
+                                    committed.fetch_add(1, Ordering::Relaxed);
+                                } else {
+                                    std::thread::yield_now();
+                                    state.refund_rpm();
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+            let admitted = committed.load(Ordering::Relaxed);
+            assert!(admitted <= MAX as usize, "round {round}: {admitted}");
+            let remaining = (0..=MAX)
+                .take_while(|_| state.take_rpm(MAX, now).is_ok())
+                .count();
+            assert_eq!(admitted + remaining, MAX as usize, "round {round}");
+        }
+    }
+
+    #[test]
+    fn rescale_never_rounds_away_fractional_debt() {
+        let now = 100_000_000_000;
+        let mut bucket = RpmBucket {
+            rate: 7,
+            tat_us: now + 1,
+        };
+        for _ in 0..100 {
+            bucket.rescale(1000, now);
+            bucket.rescale(7, now);
+            assert!(bucket.tat_us > now);
+        }
     }
 
     #[test]
@@ -693,6 +806,74 @@ mod tests {
         assert!(unix > 1_600_000_000_000);
         std::thread::sleep(std::time::Duration::from_millis(30));
         assert!(clock::mono_ms() >= start + 20);
+    }
+
+    /// Micro-measure only, not the HTTP benchmark suite:
+    /// `cargo test --release --bin lumewarp bench_rpm_state_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing micro-measure; run explicitly in release mode"]
+    fn bench_rpm_state_cost() {
+        use std::{hint::black_box, time::Instant};
+
+        // Previous split-atomic fast path, as a performance baseline only:
+        // it is not a safe implementation when rates change concurrently.
+        struct SplitAtomic {
+            rate: AtomicU32,
+            tat: AtomicU64,
+        }
+        impl SplitAtomic {
+            fn take(&self, rpm: u32, now: u64) -> bool {
+                assert_eq!(self.rate.load(Ordering::Relaxed), rpm);
+                let interval = interval_us(rpm);
+                let tolerance = interval * u64::from(rpm - 1);
+                let mut tat = self.tat.load(Ordering::Relaxed);
+                loop {
+                    let base = tat.max(now);
+                    if base - now > tolerance {
+                        return false;
+                    }
+                    match self.tat.compare_exchange_weak(
+                        tat,
+                        base + interval,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => return true,
+                        Err(actual) => tat = actual,
+                    }
+                }
+            }
+        }
+        const N: u32 = 2_000_000;
+        let report = |name: &str, f: &mut dyn FnMut(u64)| {
+            for i in 0..10_000u32 {
+                f(u64::from(i));
+            }
+            let start = Instant::now();
+            for i in 0..N {
+                f(black_box(u64::from(i) + US_PER_MINUTE));
+            }
+            println!(
+                "{name}: {:.1} ns/op",
+                start.elapsed().as_nanos() as f64 / f64::from(N)
+            );
+        };
+        let old = SplitAtomic {
+            rate: AtomicU32::new(u32::MAX),
+            tat: AtomicU64::new(0),
+        };
+        report("split atomic take (unsafe baseline)", &mut |now| {
+            black_box(old.take(black_box(u32::MAX), now));
+        });
+        let state = ScopeState::default();
+        report("consistent mutex take", &mut |now| {
+            black_box(state.take_rpm(black_box(u32::MAX), now)).unwrap();
+        });
+        let state = ScopeState::default();
+        report("consistent mutex take + refund", &mut |now| {
+            black_box(state.take_rpm(black_box(u32::MAX), now)).unwrap();
+            state.refund_rpm();
+        });
     }
 
     #[test]

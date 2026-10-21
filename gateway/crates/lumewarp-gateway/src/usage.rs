@@ -435,9 +435,11 @@ impl SseFilter {
         // Fast path: in a single-line event nothing can sit between the key
         // and its value, so the raw check is exact (`"usage":null` chunks
         // stop here without touching the data). Otherwise `"usage"` and `:{`
-        // may sit on different `data:` lines; a JSON key itself cannot span
-        // lines, so its raw presence is still required.
-        if !has_usage_object(event) && (single_line || memmem::find(event, b"\"usage\"").is_none())
+        // may sit on different `data:` lines. Unicode escapes can spell the
+        // key differently, so those events must reach the bounded JSON parser.
+        if !has_usage_object(event)
+            && memmem::find(event, b"\\u").is_none()
+            && (single_line || memmem::find(event, b"\"usage\"").is_none())
         {
             return false;
         }
@@ -468,7 +470,7 @@ impl SseFilter {
         } else {
             single.unwrap_or_default()
         };
-        if !json_object(data) || !has_usage_object(data) {
+        if !json_object(data) || (!has_usage_object(data) && memmem::find(data, b"\\u").is_none()) {
             return false;
         }
         let Ok(chunk) = serde_json::from_slice::<Chunk>(data) else {
@@ -1472,6 +1474,80 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         let (chunks, filter) = run(true, null, &[]);
         assert_eq!(joined(&chunks), null.as_slice());
         assert_eq!(filter.captured(), Captured::Missing);
+    }
+
+    #[test]
+    fn escaped_usage_keys_are_captured_at_every_frame_split() {
+        let expected_tokens = Captured::Reported(Tokens {
+            prompt: 2,
+            completion: 3,
+        });
+        for key in [r#""us\u0061ge""#, r#""\u0075\u0073\u0061\u0067\u0065""#] {
+            for newline in ["\n", "\r\n", "\r"] {
+                for multiline in [false, true] {
+                    let usage = if multiline {
+                        // No raw `"usage"` anywhere, with key/value on separate
+                        // data lines and a comment that must not join the JSON.
+                        format!(
+                            "id: 9{newline}data: {{\"choices\":[],{key}{newline}: note{newline}data: :{{\"prompt_tokens\":2,{newline}data: \"completion_tokens\":3}}}}{newline}{newline}"
+                        )
+                    } else {
+                        format!(
+                            "data: {{\"choices\":[],{key}:{{\"prompt_tokens\":2,\"completion_tokens\":3}}}}{newline}{newline}"
+                        )
+                    };
+                    let input = [STREAM, usage.as_bytes(), DONE].concat();
+                    for strip in [true, false] {
+                        let expected = if strip { stripped() } else { input.clone() };
+                        for cut in 0..=input.len() {
+                            let (chunks, filter) = run(strip, &input, &[cut]);
+                            assert_eq!(joined(&chunks), expected, "strip={strip} cut={cut}");
+                            assert_eq!(filter.captured(), expected_tokens, "cut={cut}");
+                        }
+                        let every: Vec<_> = (1..input.len()).collect();
+                        let (chunks, filter) = run(strip, &input, &every);
+                        assert_eq!(joined(&chunks), expected);
+                        assert_eq!(filter.captured(), expected_tokens);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn escaped_content_null_and_mixed_usage_preserve_semantics() {
+        let null = b"data: {\"choices\":[],\"us\\u0061ge\":null}\n\n";
+        let text = b"data: {\"choices\":[{\"delta\":{\"content\":\"\\u0075sage\"}}]}\n\n";
+        let nested = b"data: {\"extra\":{\"us\\u0061ge\":{\"prompt_tokens\":99}}}\n\n";
+        let mixed = b"data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}],\"us\\u0061ge\":{\"prompt_tokens\":2,\"completion_tokens\":3}}\n\n";
+        for strip in [true, false] {
+            for input in [null.as_slice(), text, nested] {
+                let (chunks, filter) = run(strip, input, &[]);
+                assert_eq!(joined(&chunks), input);
+                assert_eq!(filter.captured(), Captured::Missing);
+            }
+            let (chunks, filter) = run(strip, mixed, &[]);
+            assert_eq!(joined(&chunks), mixed.as_slice());
+            assert_eq!(
+                filter.captured(),
+                Captured::Reported(Tokens {
+                    prompt: 2,
+                    completion: 3
+                })
+            );
+        }
+        // Unicode fallback is still subject to the event-size bound.
+        let big = [
+            b"data: {\"pad\":\"".as_slice(),
+            &vec![b'a'; MAX_SSE_EVENT],
+            b"\",\"us\\u0061ge\":{\"prompt_tokens\":2}}\n\n",
+        ]
+        .concat();
+        for strip in [true, false] {
+            let (chunks, filter) = run(strip, &big, &[]);
+            assert_eq!(joined(&chunks), big);
+            assert_eq!(filter.captured(), Captured::Invalid);
+        }
     }
 
     #[test]
