@@ -139,6 +139,32 @@ async def test_org_admin_cannot_touch_owner_grants(client, committed) -> None:
     assert ok.status_code == 200
 
 
+async def test_last_org_owner_cannot_be_demoted_or_removed(client, committed) -> None:
+    org, _, _ = await org_tree(committed, prefix="last-owner")
+    owner, owner_secret = await user_with_token(committed)
+    second, _ = await user_with_token(committed)
+    owner_grant = await grant(committed, owner, org, role="owner")
+    second_grant = await grant(committed, second, org, role="owner")
+    await committed.commit()
+
+    # Two owners: one may go.
+    gone = client.delete(f"{API}/memberships/{second_grant.id}", headers=auth(owner_secret))
+    assert gone.status_code == 204
+
+    demote = client.patch(
+        f"{API}/memberships/{owner_grant.id}", json={"role": "admin"}, headers=BOOTSTRAP_AUTH
+    )
+    assert demote.status_code == 409
+    assert "owner" in demote.json()["error"]["message"]
+    remove = client.delete(f"{API}/memberships/{owner_grant.id}", headers=BOOTSTRAP_AUTH)
+    assert remove.status_code == 409
+    # Re-granting the same role is not a demotion.
+    same = client.patch(
+        f"{API}/memberships/{owner_grant.id}", json={"role": "owner"}, headers=BOOTSTRAP_AUTH
+    )
+    assert same.status_code == 200
+
+
 # ------------------------------------------------------------------------------ S1
 
 

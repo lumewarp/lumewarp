@@ -5,13 +5,14 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Response, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import audit, rbac
 from lumewarp_control_plane.api.common import (
     LimitDep,
     SessionDep,
+    conflict,
     mutation,
     uuid_page,
     validation_error,
@@ -58,6 +59,25 @@ def _require_manage(
         rbac.require(principal, rbac.Action.ORG_GRANT_OWNER, scope)
     else:
         rbac.require(principal, rbac.Action.ORG_MEMBERSHIP_MANAGE, scope)
+
+
+async def _keep_an_owner(session: AsyncSession, membership: Membership, role: str | None) -> None:
+    """409 when demoting or removing the org's last Owner grant."""
+    if membership.team_id is not None or membership.role != "owner" or role == "owner":
+        return
+    # Lock the org row so two concurrent demotions cannot both see another owner.
+    await session.execute(select(Org.id).where(Org.id == membership.org_id).with_for_update())
+    owners = await session.scalar(
+        select(func.count())
+        .select_from(Membership)
+        .where(
+            Membership.org_id == membership.org_id,
+            Membership.team_id.is_(None),
+            Membership.role == "owner",
+        )
+    )
+    if (owners or 0) <= 1:
+        raise conflict("an org must keep at least one owner")
 
 
 @router.get("/memberships", response_model=Page[MembershipOut], operation_id="listMemberships")
@@ -197,6 +217,7 @@ async def update_membership(
                 raise validation_error("role", "team roles are admin, member, viewer")
         elif body.role not in ORG_ROLES:
             raise validation_error("role", "org roles are owner, admin")
+        await _keep_an_owner(session, row, body.role)
         row.role = body.role
         await session.flush()
         await session.refresh(row)
@@ -225,6 +246,7 @@ async def delete_membership(
     async with mutation(session):
         row = await _get_membership(session, membership_id)
         _require_manage(principal, row)
+        await _keep_an_owner(session, row, None)
         await session.delete(row)
         audit.record(
             session,
