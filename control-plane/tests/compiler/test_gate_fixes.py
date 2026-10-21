@@ -483,7 +483,7 @@ async def test_compaction_sees_sessions_committed_before_the_statement(factory) 
     async with factory() as s, s.begin():
         await s.execute(select(1))  # transaction already running
         async with factory() as other, other.begin():
-            other.add(GatewaySession(scope=SCOPE, gateway_id="b", acked_version=1))
+            other.add(GatewaySession(scope=SCOPE, gateway_id="b", connected=True, acked_version=1))
         assert await compact_versions(s, SCOPE, retain=1) == 2  # 2 and 3 go, 1 is pinned
     async with factory() as s:
         row = await s.get(ConfigVersion, (SCOPE, 1))

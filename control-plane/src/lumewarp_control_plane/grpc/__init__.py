@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 
 import grpc
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -772,6 +772,15 @@ async def serve(settings: Settings, session_factory: SessionFactory) -> grpc.aio
         bound_port = server.add_insecure_port(settings.grpc_bind)
     if bound_port == 0:
         raise OSError(f"could not bind gRPC listener to {settings.grpc_bind}")
+    # P1 runs one control-plane instance per scope. Its process-local registry starts
+    # empty, so any connected mirror belongs to a previous process (possibly crashed).
+    # Commit before accepting streams; stale mirrors must not pin payloads indefinitely.
+    async with session_factory() as session, session.begin():
+        await session.execute(
+            update(GatewaySession)
+            .where(GatewaySession.scope == settings.scope, GatewaySession.connected.is_(True))
+            .values(connected=False, disconnected_at=func.now())
+        )
     await server.start()
     # grpc.aio.Server currently permits attributes; keep a side table fallback for future
     # implementations that use slots.

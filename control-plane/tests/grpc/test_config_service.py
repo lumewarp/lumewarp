@@ -19,6 +19,7 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import (
     snapshot_pb2,
 )
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2, usage_pb2_grpc
+from lumewarp_control_plane.compiler.publish import compact_versions
 from lumewarp_control_plane.db import SessionFactory, create_session_factory
 from lumewarp_control_plane.grpc import bound_port, registry_for, serve
 from lumewarp_control_plane.ids import uuid7
@@ -173,6 +174,73 @@ async def _open_stream(
         )
     )
     return call
+
+
+@pytest.mark.asyncio
+async def test_startup_disconnects_stale_mirrors_before_serving(session_factory: SessionFactory):
+    scope, _ = await _seed(session_factory, versions=(1, 2))
+    other_scope, _ = await _seed(session_factory)
+    old_seen = datetime(2025, 1, 1, tzinfo=UTC)
+    async with session_factory() as session, session.begin():
+        for name, connected in (("stale", True), ("offline", False)):
+            session.add(
+                GatewaySession(
+                    scope=scope,
+                    gateway_id=name,
+                    connected=connected,
+                    acked_version=1,
+                    pending_version=1,
+                    hello_have_version=1,
+                    last_seen_at=old_seen,
+                    disconnected_at=None if connected else old_seen,
+                    quarantined_version=1,
+                )
+            )
+        session.add(GatewaySession(scope=other_scope, gateway_id="other", connected=True))
+    server, channel, _ = await _start(session_factory, scope)
+    try:
+        async with session_factory() as session, session.begin():
+            stale = await session.get(GatewaySession, (scope, "stale"))
+            assert stale.connected is False
+            assert stale.disconnected_at > old_seen
+            assert stale.last_seen_at == old_seen
+            assert stale.acked_version == stale.pending_version == stale.hello_have_version == 1
+            assert stale.quarantined_version == 1
+            offline = await session.get(GatewaySession, (scope, "offline"))
+            assert offline.disconnected_at == old_seen
+            assert (await session.get(GatewaySession, (other_scope, "other"))).connected is True
+            assert await compact_versions(session, scope, retain=1) == 1
+    finally:
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.asyncio
+async def test_disconnected_gateway_reconnects_with_compacted_base_gets_full(
+    session_factory: SessionFactory,
+):
+    scope, tokens = await _seed(session_factory, versions=(1, 2))
+    server, channel, stub = await _start(session_factory, scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", 1, scope)
+    try:
+        assert (await asyncio.wait_for(call.read(), 2)).WhichOneof("update") == "delta"
+        # Graceful request EOF closes the stream and persists the disconnected mirror.
+        await call.done_writing()
+        assert await asyncio.wait_for(call.read(), 2) is grpc.aio.EOF
+        async with session_factory() as session, session.begin():
+            mirror = await session.get(GatewaySession, (scope, "gateway-a"))
+            assert mirror.connected is False
+            assert mirror.hello_have_version == mirror.acked_version == 1
+            assert await compact_versions(session, scope, retain=1) == 1
+        call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", 1, scope)
+        update = await asyncio.wait_for(call.read(), 2)
+        assert update.WhichOneof("update") == "full"
+        assert update.full.version == 2
+        assert update.target_digest == _digest(scope, 2)
+    finally:
+        call.cancel()
+        await channel.close()
+        await server.stop(0)
 
 
 @pytest.mark.asyncio

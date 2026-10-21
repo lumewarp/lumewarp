@@ -320,8 +320,9 @@ async def test_compaction(factory) -> None:
     async with factory() as s, s.begin():
         for v in range(1, 61):
             await store_version(s, SCOPE, pb.Snapshot(scope=SCOPE), version=v, source_revision=v)
-        s.add(GatewaySession(scope=SCOPE, gateway_id="a", acked_version=3, pending_version=5))
-        s.add(GatewaySession(scope=SCOPE, gateway_id="b", hello_have_version=7))
+        s.add(GatewaySession(scope=SCOPE, gateway_id="a", connected=True,
+                             acked_version=3, pending_version=5))  # fmt: skip
+        s.add(GatewaySession(scope=SCOPE, gateway_id="b", connected=True, hello_have_version=7))
     async with factory() as s, s.begin():
         assert await compact_versions(s, SCOPE, retain=50) == 10 - 3
     vs = {v.version: v for v in await versions(factory)}
@@ -336,6 +337,34 @@ async def test_compaction(factory) -> None:
                                                       hello_have_version=None))  # fmt: skip
         assert await compact_versions(s, SCOPE, retain=0) == 52
     assert [v.version for v in await versions(factory) if v.payload is not None] == [60]
+
+
+@pytest.mark.parametrize("removed", [False, True])
+async def test_compaction_releases_disconnected_or_removed_gateway(factory, removed) -> None:
+    await seed_scope(factory)
+    async with factory() as s, s.begin():
+        for v in range(1, 5):
+            await store_version(s, SCOPE, pb.Snapshot(scope=SCOPE), version=v, source_revision=v)
+        s.add(
+            GatewaySession(
+                scope=SCOPE,
+                gateway_id="gone",
+                connected=True,
+                hello_have_version=1,
+                acked_version=2,
+                pending_version=3,
+            )
+        )
+    async with factory() as s, s.begin():
+        assert await compact_versions(s, SCOPE, retain=1) == 0
+        gateway = await s.get(GatewaySession, (SCOPE, "gone"))
+        if removed:
+            await s.delete(gateway)
+        else:
+            gateway.connected = False
+        await s.flush()
+        assert await compact_versions(s, SCOPE, retain=1) == 3
+    assert [v.version for v in await versions(factory) if v.payload is not None] == [4]
 
 
 # --------------------------------------------------------------------------- loop

@@ -372,7 +372,7 @@ async def rollback_routing(
 async def compact_versions(session: AsyncSession, scope: str, *, retain: int | None = None) -> int:
     """Drop the payload of versions no longer needed, keeping: the latest `retain`
     versions (default settings.config_versions_retained, always including the latest)
-    and every version a gateway session has ACKed, has pending or announced in Hello.
+    and every version a connected gateway session has ACKed, pending or announced in Hello.
     Metadata (digest, revision) stays. Returns the number of versions compacted.
     """
     retain = max(1, retain if retain is not None else get_settings().config_versions_retained)
@@ -391,6 +391,7 @@ async def compact_versions(session: AsyncSession, scope: str, *, retain: int | N
         .select_from(GatewaySession)
         .where(
             GatewaySession.scope == ConfigVersion.scope,
+            GatewaySession.connected.is_(True),
             or_(
                 GatewaySession.acked_version == ConfigVersion.version,
                 GatewaySession.pending_version == ConfigVersion.version,
