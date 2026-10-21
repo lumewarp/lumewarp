@@ -1,0 +1,377 @@
+from __future__ import annotations
+
+import asyncio
+import uuid
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+from lumewarp_control_plane import outbox
+from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2
+from lumewarp_control_plane.db import SessionFactory, create_session_factory
+from lumewarp_control_plane.ids import uuid7
+from lumewarp_control_plane.models import (
+    ApiKey,
+    ConfigOutbox,
+    NotifierChannel,
+    Org,
+    Project,
+    Scope,
+    ScopeType,
+    Team,
+    UsageTotal,
+)
+from lumewarp_control_plane.models import (
+    UsageEvent as UsageEventRow,
+)
+from lumewarp_control_plane.security import SecretKind, generate_secret
+from lumewarp_control_plane.usage import InvalidUsageBatch, ingest, rollover_scheduler
+from lumewarp_control_plane.windows import month_window
+
+
+def _event(
+    key: ApiKey,
+    *,
+    request_id: uuid.UUID | None = None,
+    timestamp: datetime | None = None,
+    cost: int = 1,
+    model: str = "test-model",
+) -> usage_pb2.UsageEvent:
+    timestamp = timestamp or datetime.now(UTC)
+    return usage_pb2.UsageEvent(
+        request_id=str(request_id or uuid7()),
+        timestamp_unix_ms=int(timestamp.timestamp() * 1000),
+        key_id=str(key.id),
+        org_id=str(key.org_id),
+        team_id=str(key.team_id),
+        project_id=str(key.project_id),
+        model=model,
+        deployment="test-deployment",
+        route="chat_completions",
+        status=200,
+        prompt_tokens=10,
+        completion_tokens=5,
+        cost_nano_usd=cost,
+        cost_known=True,
+        duration_ms=10,
+        config_version=1,
+        usage_state=usage_pb2.USAGE_STATE_REPORTED,
+        outcome=usage_pb2.REQUEST_OUTCOME_COMPLETED,
+    )
+
+
+async def _seed(
+    factory: SessionFactory,
+    *,
+    hard_budget: int | None = None,
+    soft_budget: int | None = None,
+    webhook_url: str | None = None,
+) -> tuple[str, ApiKey]:
+    scope_name = f"usage-{uuid7().hex}"
+    suffix = uuid7().hex[-12:]
+    async with factory() as session, session.begin():
+        session.add(Scope(name=scope_name))
+        org = Org(
+            name=f"usage-org-{suffix}",
+            budget_nano_usd=hard_budget,
+            soft_budget_nano_usd=soft_budget,
+        )
+        session.add(org)
+        await session.flush()
+        team = Team(org_id=org.id, name=f"usage-team-{suffix}")
+        session.add(team)
+        await session.flush()
+        project = Project(org_id=org.id, team_id=team.id, name=f"usage-project-{suffix}")
+        session.add(project)
+        await session.flush()
+        secret = generate_secret(SecretKind.API_KEY)
+        key = ApiKey(
+            id=uuid7(),
+            org_id=org.id,
+            team_id=team.id,
+            project_id=project.id,
+            name="usage-key",
+            key_hash=secret.hash,
+            display_prefix=secret.display_prefix,
+        )
+        session.add(key)
+        await session.flush()
+        key_id = key.id
+        if webhook_url is not None:
+            session.add(
+                NotifierChannel(
+                    name=f"usage-webhook-{suffix}",
+                    kind="webhook",
+                    org_id=org.id,
+                    config={"url": webhook_url},
+                )
+            )
+    async with factory() as session:
+        key = await session.get(ApiKey, key_id)
+        assert key is not None
+        return scope_name, key
+
+
+@pytest.fixture(scope="module")
+async def c4_engine():
+    from tests.conftest import migrated_database
+
+    async with migrated_database() as url:
+        engine = create_async_engine(url)
+        try:
+            yield engine
+        finally:
+            await engine.dispose()
+
+
+@pytest.fixture(scope="module")
+async def session_factory(c4_engine: AsyncEngine) -> SessionFactory:
+    return create_session_factory(c4_engine)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_batch_replay_counts_once(session_factory: SessionFactory):
+    scope_name, key = await _seed(session_factory)
+    event = _event(key, request_id=uuid7(), cost=123)
+
+    for _ in range(2):
+        async with session_factory() as session, session.begin():
+            assert await ingest(session, "gateway-a", [event], scope_name=scope_name) == 1
+
+    async with session_factory() as session:
+        total = await session.scalar(
+            select(UsageTotal).where(
+                UsageTotal.scope_type == ScopeType.KEY,
+                UsageTotal.scope_id == key.id,
+            )
+        )
+        assert total is not None
+        assert (total.cost_nano_usd, total.request_count) == (123, 1)
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(UsageEventRow)
+                .where(UsageEventRow.request_id == uuid.UUID(event.request_id))
+            )
+            == 1
+        )
+
+    changed = usage_pb2.UsageEvent.FromString(event.SerializeToString())
+    changed.cost_nano_usd += 1
+    with pytest.raises(InvalidUsageBatch, match="different"):
+        async with session_factory() as session, session.begin():
+            await ingest(session, "gateway-a", [changed], scope_name=scope_name)
+
+
+@pytest.mark.asyncio
+async def test_conflicting_replay_rolls_back_other_batch_events(session_factory: SessionFactory):
+    scope_name, key = await _seed(session_factory)
+    existing = _event(key, cost=10)
+    async with session_factory() as session, session.begin():
+        await ingest(session, "gateway-a", [existing], scope_name=scope_name)
+
+    changed = usage_pb2.UsageEvent.FromString(existing.SerializeToString())
+    changed.model = "different-model"
+    other = _event(key, cost=20)
+    with pytest.raises(InvalidUsageBatch, match="different stored event"):
+        async with session_factory() as session, session.begin():
+            await ingest(session, "gateway-a", [other, changed], scope_name=scope_name)
+
+    async with session_factory() as session:
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(UsageEventRow)
+                .where(UsageEventRow.request_id == uuid.UUID(other.request_id))
+            )
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reports_flip_budget_once(session_factory: SessionFactory):
+    scope_name, key = await _seed(
+        session_factory,
+        hard_budget=100,
+        soft_budget=50,
+        webhook_url="https://notify.example.test/budget",
+    )
+    events = [_event(key, cost=60), _event(key, cost=60)]
+
+    async def report(event: usage_pb2.UsageEvent) -> int:
+        async with session_factory() as session, session.begin():
+            return await ingest(session, "gateway-a", [event], scope_name=scope_name)
+
+    assert await asyncio.gather(*(report(event) for event in events)) == [1, 1]
+    async with session_factory() as session:
+        total = await session.scalar(
+            select(UsageTotal).where(
+                UsageTotal.scope_type == ScopeType.ORG,
+                UsageTotal.scope_id == key.org_id,
+            )
+        )
+        assert total is not None
+        assert total.cost_nano_usd == 120
+        assert total.exceeded_at is not None
+        assert total.soft_notified_at is not None
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(ConfigOutbox)
+                .where(
+                    ConfigOutbox.scope == scope_name,
+                    ConfigOutbox.reason == "usage budget exceeded",
+                )
+            )
+            == 1
+        )
+        from lumewarp_control_plane.models import NotifierOutbox
+
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(NotifierOutbox)
+                .where(
+                    NotifierOutbox.event_type.in_(("budget.soft", "budget.hard")),
+                    NotifierOutbox.payload["org_id"].astext == str(key.org_id),
+                )
+            )
+            == 2
+        )
+
+
+@pytest.mark.asyncio
+async def test_budget_raise_crossing_recompiles_again(session_factory: SessionFactory):
+    scope_name, key = await _seed(session_factory, hard_budget=100)
+    first = _event(key, cost=120)
+    async with session_factory() as session, session.begin():
+        await ingest(session, "gateway-a", [first], scope_name=scope_name)
+
+    async with session_factory() as session, session.begin():
+        org = await session.get(Org, key.org_id)
+        assert org is not None
+        org.budget_nano_usd = 200
+        await outbox.enqueue_recompile(session, scope_name, "api.budget.update")
+
+    second = _event(key, cost=100)
+    async with session_factory() as session, session.begin():
+        await ingest(session, "gateway-a", [second], scope_name=scope_name)
+
+    async with session_factory() as session:
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(ConfigOutbox)
+                .where(
+                    ConfigOutbox.scope == scope_name,
+                    ConfigOutbox.reason.in_(("usage budget exceeded", "api.budget.update")),
+                )
+            )
+            == 3
+        )
+
+
+@pytest.mark.asyncio
+async def test_late_previous_month_event_uses_its_event_window(session_factory: SessionFactory):
+    scope_name, key = await _seed(session_factory, hard_budget=1)
+    current_start, _ = month_window(datetime.now(UTC))
+    previous = current_start - timedelta(milliseconds=1)
+    event = _event(key, timestamp=previous, cost=2)
+
+    async with session_factory() as session, session.begin():
+        assert await ingest(session, "gateway-a", [event], scope_name=scope_name) == 1
+
+    previous_window = month_window(previous)[0]
+    async with session_factory() as session:
+        total = await session.scalar(
+            select(UsageTotal).where(
+                UsageTotal.scope_type == ScopeType.ORG,
+                UsageTotal.scope_id == key.org_id,
+                UsageTotal.window_start == previous_window,
+            )
+        )
+        assert total is not None and total.cost_nano_usd == 2
+        assert total.exceeded_at is not None
+        assert (
+            await session.scalar(
+                select(UsageTotal).where(
+                    UsageTotal.scope_type == ScopeType.ORG,
+                    UsageTotal.scope_id == key.org_id,
+                    UsageTotal.window_start == current_start,
+                )
+            )
+            is None
+        )
+        # An over-budget late event for an old window must not block the current month.
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(ConfigOutbox)
+                .where(
+                    ConfigOutbox.scope == scope_name,
+                    ConfigOutbox.reason == "usage budget exceeded",
+                )
+            )
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+async def test_invalid_batch_is_all_or_nothing(session_factory: SessionFactory):
+    scope_name, key = await _seed(session_factory)
+    valid = _event(key)
+    invalid = _event(key)
+    invalid.org_id = str(uuid7())
+
+    with pytest.raises(InvalidUsageBatch, match="hierarchy"):
+        async with session_factory() as session, session.begin():
+            await ingest(session, "gateway-a", [valid, invalid], scope_name=scope_name)
+
+    async with session_factory() as session:
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(UsageEventRow)
+                .where(UsageEventRow.request_id == uuid.UUID(valid.request_id))
+            )
+            == 0
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(UsageTotal)
+                .where(UsageTotal.scope_id.in_((key.id, key.project_id, key.team_id, key.org_id)))
+            )
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+async def test_monthly_rollover_runs_on_startup(session_factory: SessionFactory):
+    scope_name = f"rollover-{uuid7().hex}"
+    async with session_factory() as session, session.begin():
+        session.add(Scope(name=scope_name))
+    from lumewarp_control_plane.settings import Settings
+
+    task = asyncio.create_task(rollover_scheduler(Settings(scope=scope_name), session_factory))
+    try:
+        for _ in range(50):
+            await asyncio.sleep(0.02)
+            async with session_factory() as session:
+                count = await session.scalar(
+                    select(func.count())
+                    .select_from(ConfigOutbox)
+                    .where(
+                        ConfigOutbox.scope == scope_name,
+                        ConfigOutbox.reason == "monthly budget rollover",
+                    )
+                )
+            if count:
+                break
+        assert count == 1
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task

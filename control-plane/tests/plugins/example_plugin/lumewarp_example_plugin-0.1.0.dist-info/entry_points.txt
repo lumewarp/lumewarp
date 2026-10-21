@@ -1,0 +1,5 @@
+[lumewarp.notifier]
+example = lumewarp_example_plugin:RecordingNotifier
+
+[lumewarp.router]
+example = lumewarp_example_plugin:CheapestFirstRouter

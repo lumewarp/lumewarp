@@ -1,0 +1,547 @@
+"""Pydantic request/response schemas for the admin API.
+
+Inputs reject unknown fields. Outputs are built from ORM rows (`from_attributes=True`) and
+never contain hashes or raw secrets.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import date as date_type
+from datetime import datetime
+from typing import Any
+from urllib.parse import urlsplit
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from lumewarp_control_plane.models import (
+    KeyLifecycle,
+    ModelAccess,
+    RequestOutcome,
+    RoutingStrategy,
+    StreamUsageMode,
+    UpstreamKind,
+    UsageState,
+)
+
+
+class ApiModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ReadModel(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+
+class Page[T](ReadModel):
+    items: list[T]
+    next_cursor: str | None = None
+
+
+# --------------------------------------------------------------------------- policy
+
+
+class PolicyFields(ApiModel):
+    """Writable policy columns shared by org/team/project/key.
+
+    `model_access`/`allowed_models` cannot be null; limits and budgets can be set to null
+    to clear them. On update, omitted fields keep their current value.
+    """
+
+    model_access: ModelAccess | None = None
+    allowed_models: list[str] | None = None
+    rpm_limit: int | None = Field(default=None, gt=0)
+    tpm_limit: int | None = Field(default=None, gt=0)
+    max_parallel: int | None = Field(default=None, gt=0)
+    budget_nano_usd: int | None = Field(default=None, ge=0)
+    soft_budget_nano_usd: int | None = Field(default=None, ge=0)
+
+    @field_validator("allowed_models")
+    @classmethod
+    def _clean_models(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        cleaned: list[str] = []
+        for item in value:
+            name = item.strip()
+            if not name:
+                raise ValueError("model names must be non-empty")
+            if name not in cleaned:
+                cleaned.append(name)
+        return cleaned
+
+    @model_validator(mode="after")
+    def _non_nullable_fields(self) -> PolicyFields:
+        if "model_access" in self.model_fields_set and self.model_access is None:
+            raise ValueError("model_access cannot be null")
+        if "allowed_models" in self.model_fields_set and self.allowed_models is None:
+            raise ValueError("allowed_models cannot be null; send [] to deny all")
+        return self
+
+
+class PolicyOut(ReadModel):
+    model_access: ModelAccess
+    allowed_models: list[str]
+    rpm_limit: int | None
+    tpm_limit: int | None
+    max_parallel: int | None
+    budget_nano_usd: int | None
+    soft_budget_nano_usd: int | None
+
+
+class OrgCreate(PolicyFields):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class OrgUpdate(PolicyFields):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class OrgOut(PolicyOut):
+    id: uuid.UUID
+    name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class TeamCreate(PolicyFields):
+    name: str = Field(min_length=1, max_length=200)
+    # Accepted only so the client can prove which parent it meant; must match the URL.
+    org_id: uuid.UUID | None = None
+
+
+class TeamUpdate(PolicyFields):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    org_id: uuid.UUID | None = None
+
+
+class TeamOut(PolicyOut):
+    id: uuid.UUID
+    org_id: uuid.UUID
+    name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectCreate(PolicyFields):
+    name: str = Field(min_length=1, max_length=200)
+    org_id: uuid.UUID | None = None
+    team_id: uuid.UUID | None = None
+
+
+class ProjectUpdate(PolicyFields):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    org_id: uuid.UUID | None = None
+    team_id: uuid.UUID | None = None
+
+
+class ProjectOut(PolicyOut):
+    id: uuid.UUID
+    org_id: uuid.UUID
+    team_id: uuid.UUID
+    name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class KeyCreate(PolicyFields):
+    name: str = Field(min_length=1, max_length=200)
+    expires_at: datetime | None = None
+    org_id: uuid.UUID | None = None
+    team_id: uuid.UUID | None = None
+    project_id: uuid.UUID | None = None
+
+    @field_validator("expires_at")
+    @classmethod
+    def _aware_expiry(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("expires_at must include a timezone")
+        return value
+
+
+class KeyUpdate(PolicyFields):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    expires_at: datetime | None = None
+    lifecycle: KeyLifecycle | None = None
+    org_id: uuid.UUID | None = None
+    team_id: uuid.UUID | None = None
+    project_id: uuid.UUID | None = None
+
+    @field_validator("expires_at")
+    @classmethod
+    def _aware_expiry(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("expires_at must include a timezone")
+        return value
+
+
+class KeyOut(PolicyOut):
+    id: uuid.UUID
+    org_id: uuid.UUID
+    team_id: uuid.UUID
+    project_id: uuid.UUID
+    name: str
+    display_prefix: str
+    lifecycle: KeyLifecycle
+    expires_at: datetime | None
+    revoked_at: datetime | None
+    created_by_user_id: uuid.UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class KeyCreated(ApiModel):
+    key: KeyOut
+    secret: str
+
+
+# --------------------------------------------------------------------------- routing
+
+
+class UpstreamCreate(ApiModel):
+    name: str = Field(min_length=1, max_length=200)
+    kind: UpstreamKind
+    base_url: str = Field(min_length=1)
+    api_key_ref: str | None = Field(default=None, max_length=200)
+    timeout_ms: int = Field(default=0, ge=0)
+    stream_usage_mode: StreamUsageMode = StreamUsageMode.INCLUDE_USAGE
+
+    @field_validator("base_url")
+    @classmethod
+    def _http_url(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError("base_url must be an absolute http(s) URL")
+        if parts.query or parts.fragment or parts.username or parts.password:
+            raise ValueError("base_url must not contain userinfo, query or fragment")
+        return value.rstrip("/")
+
+    @field_validator("api_key_ref")
+    @classmethod
+    def _env_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value or not (value[0].isalpha() or value[0] == "_"):
+            raise ValueError("api_key_ref must be an environment variable name")
+        if not all(c.isalnum() or c == "_" for c in value):
+            raise ValueError("api_key_ref must be an environment variable name")
+        return value
+
+
+class UpstreamUpdate(ApiModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    kind: UpstreamKind | None = None
+    base_url: str | None = Field(default=None, min_length=1)
+    api_key_ref: str | None = Field(default=None, max_length=200)
+    timeout_ms: int | None = Field(default=None, ge=0)
+    stream_usage_mode: StreamUsageMode | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _http_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError("base_url must be an absolute http(s) URL")
+        if parts.query or parts.fragment or parts.username or parts.password:
+            raise ValueError("base_url must not contain userinfo, query or fragment")
+        return value.rstrip("/")
+
+    @field_validator("api_key_ref")
+    @classmethod
+    def _env_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value or not (value[0].isalpha() or value[0] == "_"):
+            raise ValueError("api_key_ref must be an environment variable name")
+        if not all(c.isalnum() or c == "_" for c in value):
+            raise ValueError("api_key_ref must be an environment variable name")
+        return value
+
+
+class UpstreamOut(ReadModel):
+    id: uuid.UUID
+    name: str
+    kind: UpstreamKind
+    base_url: str
+    api_key_ref: str | None
+    timeout_ms: int
+    stream_usage_mode: StreamUsageMode
+    created_at: datetime
+    updated_at: datetime
+
+
+class DeploymentCreate(ApiModel):
+    name: str = Field(min_length=1, max_length=200)
+    upstream_id: uuid.UUID
+    upstream_model: str = Field(min_length=1, max_length=400)
+    weight: int = Field(default=1, ge=0)
+    price_input_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
+    price_output_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _price_pair(self) -> DeploymentCreate:
+        if (self.price_input_nano_usd_per_mtok is None) != (
+            self.price_output_nano_usd_per_mtok is None
+        ):
+            raise ValueError("price input and output must both be set or both be null")
+        return self
+
+
+class DeploymentUpdate(ApiModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    upstream_id: uuid.UUID | None = None
+    upstream_model: str | None = Field(default=None, min_length=1, max_length=400)
+    weight: int | None = Field(default=None, ge=0)
+    price_input_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
+    price_output_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
+
+
+class DeploymentOut(ReadModel):
+    id: uuid.UUID
+    name: str
+    upstream_id: uuid.UUID
+    upstream_model: str
+    weight: int
+    price_input_nano_usd_per_mtok: int | None
+    price_output_nano_usd_per_mtok: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RouteCreate(ApiModel):
+    model: str = Field(min_length=1, max_length=400)
+    strategy: RoutingStrategy = RoutingStrategy.WEIGHTED
+    deployment_ids: list[uuid.UUID] = Field(min_length=1)
+
+
+class RouteUpdate(ApiModel):
+    model: str | None = Field(default=None, min_length=1, max_length=400)
+    strategy: RoutingStrategy | None = None
+    deployment_ids: list[uuid.UUID] | None = Field(default=None, min_length=1)
+
+
+class RouteDeploymentOut(ReadModel):
+    deployment_id: uuid.UUID
+    position: int
+
+
+class RouteOut(ReadModel):
+    id: uuid.UUID
+    model: str
+    strategy: RoutingStrategy
+    deployments: list[RouteDeploymentOut]
+    created_at: datetime
+    updated_at: datetime
+
+
+# --------------------------------------------------------------------------- users
+
+
+class UserCreate(ApiModel):
+    email: str = Field(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+$")
+    display_name: str = Field(default="", max_length=200)
+    is_superuser: bool = False
+    is_active: bool = True
+
+
+class UserUpdate(ApiModel):
+    email: str | None = Field(
+        default=None, min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+$"
+    )
+    display_name: str | None = Field(default=None, max_length=200)
+    is_superuser: bool | None = None
+    is_active: bool | None = None
+
+
+class UserOut(ReadModel):
+    id: uuid.UUID
+    email: str
+    display_name: str
+    is_superuser: bool
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class GrantOut(ReadModel):
+    org_id: uuid.UUID
+    team_id: uuid.UUID | None
+    role: str
+
+
+class MeOut(ApiModel):
+    kind: str
+    user_id: uuid.UUID | None
+    email: str | None
+    display_name: str
+    is_superuser: bool
+    grants: list[GrantOut]
+
+
+class TokenCreate(ApiModel):
+    name: str = Field(min_length=1, max_length=200)
+    expires_at: datetime | None = None
+
+    @field_validator("expires_at")
+    @classmethod
+    def _aware_expiry(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("expires_at must include a timezone")
+        return value
+
+
+class TokenOut(ReadModel):
+    id: uuid.UUID
+    name: str
+    display_prefix: str
+    created_at: datetime
+    expires_at: datetime | None
+    last_used_at: datetime | None
+    revoked_at: datetime | None
+
+
+class TokenCreated(ApiModel):
+    token: TokenOut
+    secret: str
+
+
+# --------------------------------------------------------------------------- memberships
+
+
+class MembershipCreate(ApiModel):
+    user_id: uuid.UUID
+    org_id: uuid.UUID
+    team_id: uuid.UUID | None = None
+    role: str = Field(min_length=1, max_length=16)
+
+
+class MembershipUpdate(ApiModel):
+    role: str = Field(min_length=1, max_length=16)
+
+
+class MembershipOut(ReadModel):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    org_id: uuid.UUID
+    team_id: uuid.UUID | None
+    role: str
+    created_at: datetime
+    updated_at: datetime
+
+
+# --------------------------------------------------------------------------- usage
+
+
+class UsageRowOut(ApiModel):
+    date: date_type | None = None
+    model: str | None = None
+    org_id: uuid.UUID | None = None
+    team_id: uuid.UUID | None = None
+    project_id: uuid.UUID | None = None
+    key_id: uuid.UUID | None = None
+    requests: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cost_nano_usd: int
+    unknown_cost_count: int
+
+
+class UsageEventOut(ReadModel):
+    """Optional recent-event view (`include_events=1`), never the default list."""
+
+    request_id: uuid.UUID
+    ts: datetime
+    key_id: uuid.UUID
+    org_id: uuid.UUID
+    team_id: uuid.UUID
+    project_id: uuid.UUID
+    model: str
+    deployment: str
+    route: str
+    status: int
+    stream: bool
+    prompt_tokens: int
+    completion_tokens: int
+    cost_nano_usd: int
+    usage_state: UsageState
+    outcome: RequestOutcome
+
+
+# --------------------------------------------------------------------------- audit
+
+
+class AuditOut(ReadModel):
+    id: int
+    ts: datetime
+    actor_type: str
+    actor_id: str | None
+    action: str
+    resource_type: str
+    resource_id: str | None
+    org_id: uuid.UUID | None
+    team_id: uuid.UUID | None
+    details: dict[str, Any]
+
+
+# --------------------------------------------------------------------------- gateways/config
+
+
+class GatewayTokenCreate(ApiModel):
+    gateway_id: str = Field(min_length=1, max_length=200)
+    name: str = Field(default="", max_length=200)
+
+
+class GatewayTokenOut(ReadModel):
+    id: uuid.UUID
+    gateway_id: str
+    name: str
+    display_prefix: str
+    created_at: datetime
+    last_used_at: datetime | None
+    revoked_at: datetime | None
+
+
+class GatewayTokenCreated(ApiModel):
+    token: GatewayTokenOut
+    secret: str
+
+
+class GatewayOut(ApiModel):
+    gateway_id: str
+    connected: bool
+    gateway_version: str
+    capabilities: list[str]
+    acked_version: int | None
+    pending_version: int | None
+    last_nack_version: int | None
+    last_nack_code: str | None
+    last_nack_reason: str | None
+    quarantined_version: int | None
+    connected_at: datetime | None
+    disconnected_at: datetime | None
+    last_seen_at: datetime | None
+    tokens: list[GatewayTokenOut]
+
+
+class ConfigVersionOut(ApiModel):
+    scope: str
+    version: int
+    digest: str
+    size_bytes: int
+    key_count: int
+    source_revision: int
+    kind: str
+    rollback_of_version: int | None
+    created_at: datetime
+    compacted_at: datetime | None
+
+
+class RollbackCreate(ApiModel):
+    version: int = Field(gt=0)
+
+
+class RollbackOut(ApiModel):
+    version: int

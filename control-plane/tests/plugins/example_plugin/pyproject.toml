@@ -1,0 +1,17 @@
+# Example Lumewarp plugin package. Tests load it by putting this directory on sys.path
+# (the checked-in .dist-info makes the entry points discoverable without installing);
+# `pip install -e tests/plugins/example_plugin` registers the same entry points for real.
+[project]
+name = "lumewarp-example-plugin"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[project.entry-points."lumewarp.router"]
+example = "lumewarp_example_plugin:CheapestFirstRouter"
+
+[project.entry-points."lumewarp.notifier"]
+example = "lumewarp_example_plugin:RecordingNotifier"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
