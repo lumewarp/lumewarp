@@ -1,6 +1,12 @@
 # Standalone mode: `lumewarp --config config.example.yaml`
 server:
   listen: 0.0.0.0:4000
+  admin_listen: 127.0.0.1:9464
+  shutdown_grace_ms: 25000
+  header_read_timeout_ms: 30000
+  body_read_timeout_ms: 30000
+  # Optional SHA-256 hashes of client bearer keys (empty/absent means open access).
+  # api_keys: ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
 
 upstreams:
   - name: vllm-local

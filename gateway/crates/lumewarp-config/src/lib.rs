@@ -40,14 +40,41 @@ pub struct Config {
 pub struct Server {
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
+    #[serde(default = "default_admin_listen")]
+    pub admin_listen: SocketAddr,
+    #[serde(default = "default_shutdown_grace_ms")]
+    pub shutdown_grace_ms: u64,
+    #[serde(default = "default_read_timeout_ms")]
+    pub header_read_timeout_ms: u64,
+    #[serde(default = "default_read_timeout_ms")]
+    pub body_read_timeout_ms: u64,
+    // TODO(P1): mirror in snapshot.proto
+    #[serde(default)]
+    pub api_keys: Vec<String>,
 }
 
 impl Default for Server {
     fn default() -> Self {
         Self {
             listen: default_listen(),
+            admin_listen: default_admin_listen(),
+            shutdown_grace_ms: default_shutdown_grace_ms(),
+            header_read_timeout_ms: default_read_timeout_ms(),
+            body_read_timeout_ms: default_read_timeout_ms(),
+            api_keys: Vec::new(),
         }
     }
+}
+
+fn default_shutdown_grace_ms() -> u64 {
+    25_000
+}
+fn default_read_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_admin_listen() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 9464))
 }
 
 fn default_listen() -> SocketAddr {
@@ -127,9 +154,38 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.server.listen == self.server.admin_listen {
+            return Err(ConfigError::Invalid(
+                "server.admin_listen must differ from server.listen".into(),
+            ));
+        }
+        for (name, value) in [
+            ("shutdown_grace_ms", self.server.shutdown_grace_ms),
+            ("header_read_timeout_ms", self.server.header_read_timeout_ms),
+            ("body_read_timeout_ms", self.server.body_read_timeout_ms),
+        ] {
+            if value == 0 {
+                return Err(ConfigError::Invalid(format!(
+                    "server.{name} must be greater than zero"
+                )));
+            }
+        }
+        for key in &self.server.api_keys {
+            if key.len() != 64
+                || !key
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+            {
+                return Err(ConfigError::Invalid(
+                    "server.api_keys must contain 64-character lowercase sha256 hex hashes".into(),
+                ));
+            }
+        }
         let upstreams = unique_names(self.upstreams.iter().map(|u| u.name.as_str()), "upstream")?;
-        let deployments =
-            unique_names(self.deployments.iter().map(|d| d.name.as_str()), "deployment")?;
+        let deployments = unique_names(
+            self.deployments.iter().map(|d| d.name.as_str()),
+            "deployment",
+        )?;
         unique_names(self.routes.iter().map(|r| r.model.as_str()), "route")?;
 
         for d in &self.deployments {
@@ -141,13 +197,27 @@ impl Config {
             }
         }
         for r in &self.routes {
+            if r.model == "unknown" {
+                return Err(ConfigError::Invalid(
+                    "route alias 'unknown' is reserved for metrics".into(),
+                ));
+            }
+            if r.strategy == RoutingStrategy::LowestLatency {
+                return Err(ConfigError::Invalid(
+                    "lowest_latency is not supported yet".into(),
+                ));
+            }
             if r.deployments.is_empty() {
                 return Err(ConfigError::Invalid(format!(
                     "route {:?} has no deployments",
                     r.model
                 )));
             }
-            if let Some(d) = r.deployments.iter().find(|d| !deployments.contains(d.as_str())) {
+            if let Some(d) = r
+                .deployments
+                .iter()
+                .find(|d| !deployments.contains(d.as_str()))
+            {
                 return Err(ConfigError::Invalid(format!(
                     "route {:?} references unknown deployment {:?}",
                     r.model, d
@@ -193,7 +263,64 @@ deployments:
 routes:
   - { model: m, deployments: [missing] }
 "#;
-        assert!(matches!(Config::from_yaml(yaml), Err(ConfigError::Invalid(_))));
+        assert!(matches!(
+            Config::from_yaml(yaml),
+            Err(ConfigError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_lowest_latency() {
+        let yaml = EXAMPLE.replace(
+            "deployments: [llama-vllm]",
+            "deployments: [llama-vllm]\n    strategy: lowest_latency",
+        );
+        assert!(Config::from_yaml(&yaml)
+            .unwrap_err()
+            .to_string()
+            .contains("not supported yet"));
+    }
+
+    #[test]
+    fn validates_api_key_hashes() {
+        for key in ["x".repeat(64), "A".repeat(64), "0".repeat(63)] {
+            assert!(Config::from_yaml(&format!("server:\n  api_keys: ['{key}']")).is_err());
+        }
+        assert!(Config::from_yaml(&format!("server:\n  api_keys: ['{}']", "a".repeat(64))).is_ok());
+    }
+
+    #[test]
+    fn admin_listener_defaults_and_validation() {
+        let config = Config::from_yaml("").unwrap();
+        assert_eq!(
+            config.server.admin_listen,
+            "127.0.0.1:9464".parse().unwrap()
+        );
+        assert!(Config::from_yaml("server: {listen: '127.0.0.1:9464'}").is_err());
+    }
+
+    #[test]
+    fn validates_timeouts_and_reserved_alias() {
+        let config = Config::from_yaml("").unwrap();
+        assert_eq!(config.server.shutdown_grace_ms, 25_000);
+        assert_eq!(config.server.header_read_timeout_ms, 30_000);
+        assert_eq!(config.server.body_read_timeout_ms, 30_000);
+        for name in [
+            "shutdown_grace_ms",
+            "header_read_timeout_ms",
+            "body_read_timeout_ms",
+        ] {
+            assert!(Config::from_yaml(&format!("server: {{{name}: 0}}"))
+                .unwrap_err()
+                .to_string()
+                .contains(name));
+            assert!(Config::from_yaml(&format!("server: {{{name}: 1}}")).is_ok());
+        }
+        let yaml = EXAMPLE.replace("model: llama-3.1-8b", "model: unknown");
+        assert!(Config::from_yaml(&yaml)
+            .unwrap_err()
+            .to_string()
+            .contains("reserved"));
     }
 
     #[test]
