@@ -1,0 +1,23 @@
+[package]
+name = "mock-upstream"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+async-stream = "0.3"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+hdrhistogram = "7"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros", "signal", "sync"] }
+
+[profile.release]
+lto = true
+codegen-units = 1

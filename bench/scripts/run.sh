@@ -1,0 +1,639 @@
+#!/usr/bin/env bash
+#
+# Benchmark Lumewarp against LiteLLM on this machine.
+#
+# For each target (mock upstream directly, Lumewarp, LiteLLM) the script runs
+# the same offered load: fixed-rate non-streaming chat completions with oha and
+# concurrent SSE clients with sse-bench, while sampling CPU/PSS from /proc.
+# Results go to bench/results/<UTC timestamp>/ (results.json + summary.md).
+#
+# Overhead = latency through a gateway - latency direct to the mock upstream at
+# the same offered load. Saturation is recorded and flagged, never fatal.
+#
+# Usage: bench/scripts/run.sh [--quick|--full] [--no-build] [-h|--help]
+#
+# Exit codes: 0 for a completed run (even with saturation flags),
+#             2 for infrastructure failure (missing tool/binary, port in use,
+#             server failed to start or died mid-run).
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BENCH_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd -- "$BENCH_DIR/.." && pwd)"
+
+log() { printf '[bench] %s\n' "$*" >&2; }
+die() {
+  printf '[bench] ERROR: %s\n' "$*" >&2
+  exit 2
+}
+
+usage() {
+  cat <<'EOF'
+Benchmark Lumewarp vs LiteLLM vs the mock upstream directly.
+
+Usage: bench/scripts/run.sh [--quick|--full] [--no-build] [-h|--help]
+
+  --quick     1k RPS non-stream (15 s) + stream at concurrency 100 (default)
+  --full      300/1000/5000/10000 RPS non-stream (30 s + 5 s warmup) +
+              stream at concurrency 100 and 1000 (30 s each)
+  --no-build  do not run `cargo build --release` for mock/gateway
+
+Each scenario is repeated REPEAT times (1 for --quick, 3 for --full), with the
+per-repetition target order rotated; results report medians.
+
+Environment overrides (defaults):
+  MOCK_PORT=9000              Lumewarp-facing mock upstream port
+  LUMEWARP_PORT=4000          Lumewarp listen port
+  LITELLM_PORT=4001           LiteLLM listen port
+  MOCK_LATENCY_MS=50          mock upstream fixed latency
+  MOCK_STREAM_CHUNKS=20       mock SSE chunks per response
+  MOCK_CHUNK_INTERVAL_MS=10   delay between mock SSE chunks
+  MOCK_HEADERS_FIRST=0        pass --headers-first to the mock (SSE headers
+                              before the prefill delay, like vLLM/OpenAI)
+  LITELLM_VERSION=1.106.2     litellm[proxy] pin (must match bench/litellm/config.yaml)
+  LITELLM_WORKERS=$(nproc)    LiteLLM --num_workers
+  DURATION_SECS               measured duration per scenario (profile default)
+  WARMUP_SECS                 non-stream warmup per scenario (full: 5, quick: 0)
+  RATES=<profile default>     offered non-stream RPS (full: 300 1000 5000 10000)
+  STREAM_CONCURRENCIES="100"  stream concurrency levels
+  REPEAT=<profile>            repetitions per scenario (quick 1, full 3)
+  SETTLE_SECS=10              idle time after all servers are healthy
+  HEALTH_TIMEOUT_SECS=180     per-server health check timeout
+  RESULTS_DIR=bench/results   output root
+  RUN_ID=<UTC timestamp>      output directory name
+  MOCK_BIN / SSE_BENCH_BIN / LUMEWARP_BIN   override binary paths
+EOF
+}
+
+PROFILE=quick
+BUILD=1
+while (($# > 0)); do
+  case "$1" in
+    --quick)
+      PROFILE=quick
+      ;;
+    --full)
+      PROFILE=full
+      ;;
+    --no-build)
+      BUILD=0
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1 (try --help)"
+      ;;
+  esac
+  shift
+done
+
+# --------------------------------------------------------------------------- #
+# Knobs
+# --------------------------------------------------------------------------- #
+
+MOCK_PORT="${MOCK_PORT:-9000}"
+LUMEWARP_PORT="${LUMEWARP_PORT:-4000}"
+LITELLM_PORT="${LITELLM_PORT:-4001}"
+MOCK_LATENCY_MS="${MOCK_LATENCY_MS:-50}"
+MOCK_STREAM_CHUNKS="${MOCK_STREAM_CHUNKS:-20}"
+MOCK_CHUNK_INTERVAL_MS="${MOCK_CHUNK_INTERVAL_MS:-10}"
+MOCK_HEADERS_FIRST="${MOCK_HEADERS_FIRST:-0}"
+LITELLM_VERSION="${LITELLM_VERSION:-1.106.2}"
+LITELLM_WORKERS="${LITELLM_WORKERS:-$(nproc)}"
+HEALTH_TIMEOUT_SECS="${HEALTH_TIMEOUT_SECS:-180}"
+SETTLE_SECS="${SETTLE_SECS:-10}"
+RESULTS_DIR="${RESULTS_DIR:-$BENCH_DIR/results}"
+
+MOCK_BIN="${MOCK_BIN:-$BENCH_DIR/mock-upstream/target/release/mock-upstream}"
+SSE_BENCH_BIN="${SSE_BENCH_BIN:-$BENCH_DIR/mock-upstream/target/release/sse-bench}"
+LUMEWARP_BIN="${LUMEWARP_BIN:-$REPO_ROOT/gateway/target/release/lumewarp}"
+
+if [[ "$PROFILE" == "quick" ]]; then
+  DEFAULT_RATES="1000"
+  DEFAULT_DURATION=15
+  DEFAULT_WARMUP=0
+  DEFAULT_REPEAT=1
+  DEFAULT_STREAM_CONCURRENCIES="100"
+else
+  DEFAULT_RATES="300 1000 5000 10000"
+  DEFAULT_DURATION=30
+  DEFAULT_WARMUP=5
+  DEFAULT_REPEAT=3
+  DEFAULT_STREAM_CONCURRENCIES="100 1000"
+fi
+read -r -a RATE_LIST <<< "${RATES:-$DEFAULT_RATES}"
+read -r -a STREAM_CONCURRENCY_LIST <<< "${STREAM_CONCURRENCIES:-$DEFAULT_STREAM_CONCURRENCIES}"
+DURATION_SECS="${DURATION_SECS:-$DEFAULT_DURATION}"
+WARMUP_SECS="${WARMUP_SECS:-$DEFAULT_WARMUP}"
+REPEAT="${REPEAT:-$DEFAULT_REPEAT}"
+
+(( ${#RATE_LIST[@]} > 0 )) || die "no non-stream rates configured"
+(( ${#STREAM_CONCURRENCY_LIST[@]} > 0 )) || die "no stream concurrency levels configured"
+for rate in "${RATE_LIST[@]}"; do
+  [[ "$rate" =~ ^[1-9][0-9]*$ ]] || die "invalid non-stream rate: $rate (positive integer required)"
+done
+for concurrency in "${STREAM_CONCURRENCY_LIST[@]}"; do
+  [[ "$concurrency" =~ ^[1-9][0-9]*$ ]] || die "invalid stream concurrency: $concurrency (positive integer required)"
+done
+(( DURATION_SECS > 0 )) || die "DURATION_SECS must be > 0"
+(( MOCK_LATENCY_MS >= 0 )) || die "MOCK_LATENCY_MS must be >= 0"
+[[ "$REPEAT" =~ ^[1-9][0-9]*$ ]] || die "REPEAT must be a positive integer"
+[[ "$MOCK_HEADERS_FIRST" == "0" || "$MOCK_HEADERS_FIRST" == "1" ]] ||
+  die "MOCK_HEADERS_FIRST must be 0 or 1"
+
+RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid RUN_ID: $RUN_ID"
+
+REQUEST_BODY='{"model":"mock","messages":[{"role":"user","content":"benchmark"}],"max_tokens":16,"temperature":0}'
+MODEL="mock"
+
+# --------------------------------------------------------------------------- #
+# Process-tree helpers (LiteLLM forks workers, uvx wraps the real server)
+# --------------------------------------------------------------------------- #
+
+tree_pids() {
+  local root="$1"
+  local -a queue=("$root") out=()
+  local -A seen=()
+  local pid child ppid stat_file
+  while (( ${#queue[@]} > 0 )); do
+    pid="${queue[0]}"
+    queue=("${queue[@]:1}")
+    [[ -n "${seen[$pid]:-}" ]] && continue
+    seen["$pid"]=1
+    [[ -d "/proc/$pid" ]] && out+=("$pid")
+    for stat_file in /proc/[0-9]*/stat; do
+      child="${stat_file#/proc/}"
+      child="${child%/stat}"
+      ppid=""
+      if [[ -r "$stat_file" ]]; then
+        local raw
+        raw="$(<"$stat_file")" || continue
+        # Drop the pid and the parenthesised comm, then fields are
+        # "state ppid ...". cut on the *last* ')' (comm may contain spaces).
+        raw="${raw##*)}"
+        # shellcheck disable=SC2086 # intentional word splitting of stat fields
+        set -- $raw
+        ppid="${2:-}"
+      fi
+      [[ -n "$ppid" && "$ppid" == "$pid" ]] && queue+=("$child")
+    done
+  done
+  (( ${#out[@]} > 0 )) && printf '%s\n' "${out[@]}"
+}
+
+kill_tree() {
+  local root="$1" sig="${2:-TERM}"
+  local -a pids=()
+  local i
+  mapfile -t pids < <(tree_pids "$root")
+  for (( i = ${#pids[@]} - 1; i >= 0; i-- )); do
+    kill -s "$sig" "${pids[$i]}" 2>/dev/null || true
+  done
+}
+
+# --------------------------------------------------------------------------- #
+# Tooling and build
+# --------------------------------------------------------------------------- #
+
+for tool in oha curl python3 uvx nproc; do
+  command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
+done
+if (( BUILD )); then
+  command -v cargo >/dev/null 2>&1 || die "missing required tool: cargo (or pass --no-build)"
+fi
+
+if (( BUILD )); then
+  log "building mock-upstream + sse-bench (release)"
+  (cd "$BENCH_DIR/mock-upstream" && cargo build --release)
+  log "building lumewarp (release)"
+  (cd "$REPO_ROOT/gateway" && cargo build --release)
+fi
+
+[[ -x "$MOCK_BIN" ]] || die "mock-upstream binary not found: $MOCK_BIN"
+[[ -x "$SSE_BENCH_BIN" ]] || die "sse-bench binary not found: $SSE_BENCH_BIN"
+[[ -x "$LUMEWARP_BIN" ]] || die "lumewarp binary not found: $LUMEWARP_BIN"
+
+fd_limit="$(ulimit -n)"
+if (( fd_limit < 4096 )); then
+  log "warning: open-file limit is ${fd_limit}; high-rate scenarios may be capped by connections"
+fi
+
+log "oha: $(oha --version 2>/dev/null | head -n1)"
+
+# --------------------------------------------------------------------------- #
+# Run directory
+# --------------------------------------------------------------------------- #
+
+mkdir -p "$RESULTS_DIR"
+RESULTS_DIR="$(cd -- "$RESULTS_DIR" && pwd)"
+RUN_DIR="$RESULTS_DIR/$RUN_ID"
+suffix=1
+while [[ -e "$RUN_DIR" ]]; do
+  RUN_DIR="$RESULTS_DIR/${RUN_ID}-${suffix}"
+  suffix=$((suffix + 1))
+done
+RUN_ID="$(basename "$RUN_DIR")"
+mkdir -p "$RUN_DIR/logs" "$RUN_DIR/configs" "$RUN_DIR/nonstream" "$RUN_DIR/stream"
+: > "$RUN_DIR/scenarios.jsonl"
+
+log "run directory: $RUN_DIR"
+log "profile: $PROFILE, targets: direct / lumewarp / litellm, repetitions: $REPEAT"
+
+# --------------------------------------------------------------------------- #
+# Cleanup
+# --------------------------------------------------------------------------- #
+
+SERVER_PIDS=()
+SAMPLER_PID=""
+LOAD_PID=""
+STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+cleanup() {
+  local status=$?
+  trap - EXIT INT TERM
+  if [[ -n "$LOAD_PID" ]] && kill -0 "$LOAD_PID" 2>/dev/null; then
+    kill_tree "$LOAD_PID" TERM
+  fi
+  if [[ -n "$SAMPLER_PID" ]] && kill -0 "$SAMPLER_PID" 2>/dev/null; then
+    kill -TERM "$SAMPLER_PID" 2>/dev/null || true
+    wait "$SAMPLER_PID" 2>/dev/null || true
+  fi
+  local pid round alive
+  for pid in "${SERVER_PIDS[@]}"; do
+    kill_tree "$pid" TERM
+  done
+  for round in 1 2 3 4 5; do
+    alive=0
+    for pid in "${SERVER_PIDS[@]}"; do
+      kill -0 "$pid" 2>/dev/null && alive=1
+    done
+    (( alive == 0 )) && break
+    sleep 0.2
+  done
+  if [[ -n "$LOAD_PID" ]] && kill -0 "$LOAD_PID" 2>/dev/null; then
+    kill_tree "$LOAD_PID" KILL
+  fi
+  for pid in "${SERVER_PIDS[@]}"; do
+    kill_tree "$pid" KILL
+  done
+  wait 2>/dev/null || true
+  exit "$status"
+}
+trap cleanup EXIT INT TERM
+
+# --------------------------------------------------------------------------- #
+# Start servers
+# --------------------------------------------------------------------------- #
+
+require_port_free() {
+  local port="$1"
+  if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+    die "port $port is already in use; free it or override MOCK_PORT/LUMEWARP_PORT/LITELLM_PORT"
+  fi
+}
+
+wait_for_http() {
+  local name="$1" url="$2" timeout="$3" pid="$4" logfile="$5"
+  local deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      tail -n 40 "$logfile" >&2 2>/dev/null || true
+      die "$name exited before becoming healthy (see $logfile)"
+    fi
+    if curl -fsS -m 2 -o /dev/null "$url" 2>/dev/null; then
+      log "$name healthy at $url"
+      return 0
+    fi
+    sleep 1
+  done
+  tail -n 60 "$logfile" >&2 2>/dev/null || true
+  die "$name not healthy after ${timeout}s at $url (see $logfile)"
+}
+
+require_port_free "$MOCK_PORT"
+require_port_free "$LUMEWARP_PORT"
+require_port_free "$LITELLM_PORT"
+
+# Mock upstream.
+MOCK_EXTRA_ARGS=()
+MOCK_MODE=""
+if [[ "$MOCK_HEADERS_FIRST" == "1" ]]; then
+  MOCK_EXTRA_ARGS+=(--headers-first)
+  MOCK_MODE=", headers-first"
+fi
+log "starting mock upstream on 127.0.0.1:$MOCK_PORT (latency ${MOCK_LATENCY_MS}ms, ${MOCK_STREAM_CHUNKS} chunks x ${MOCK_CHUNK_INTERVAL_MS}ms${MOCK_MODE})"
+"$MOCK_BIN" \
+  --listen "127.0.0.1:$MOCK_PORT" \
+  --latency-ms "$MOCK_LATENCY_MS" \
+  --stream-chunks "$MOCK_STREAM_CHUNKS" \
+  --chunk-interval-ms "$MOCK_CHUNK_INTERVAL_MS" \
+  "${MOCK_EXTRA_ARGS[@]}" \
+  >"$RUN_DIR/logs/mock.log" 2>&1 &
+MOCK_PID=$!
+SERVER_PIDS+=("$MOCK_PID")
+wait_for_http "mock upstream" "http://127.0.0.1:$MOCK_PORT/health" "$HEALTH_TIMEOUT_SECS" "$MOCK_PID" "$RUN_DIR/logs/mock.log"
+
+# Lumewarp (configs are templated so ports can be overridden).
+LUMEWARP_CONFIG="$RUN_DIR/configs/lumewarp.yaml"
+sed -e "s|127\.0\.0\.1:9000|127.0.0.1:${MOCK_PORT}|g" \
+  -e "s|127\.0\.0\.1:4000|127.0.0.1:${LUMEWARP_PORT}|g" \
+  "$BENCH_DIR/lumewarp/config.yaml" >"$LUMEWARP_CONFIG"
+grep -q "127.0.0.1:${MOCK_PORT}/v1" "$LUMEWARP_CONFIG" ||
+  die "failed to template mock port into $LUMEWARP_CONFIG"
+grep -q "listen: 127.0.0.1:${LUMEWARP_PORT}" "$LUMEWARP_CONFIG" ||
+  die "failed to template lumewarp port into $LUMEWARP_CONFIG"
+
+log "starting lumewarp on 127.0.0.1:$LUMEWARP_PORT"
+"$LUMEWARP_BIN" --config "$LUMEWARP_CONFIG" >"$RUN_DIR/logs/lumewarp.log" 2>&1 &
+LUMEWARP_PID=$!
+SERVER_PIDS+=("$LUMEWARP_PID")
+wait_for_http "lumewarp" "http://127.0.0.1:$LUMEWARP_PORT/healthz" "$HEALTH_TIMEOUT_SECS" "$LUMEWARP_PID" "$RUN_DIR/logs/lumewarp.log"
+
+# LiteLLM (pinned; uvx caches after the first run).
+LITELLM_CONFIG="$RUN_DIR/configs/litellm.yaml"
+sed -e "s|127\.0\.0\.1:9000/v1|127.0.0.1:${MOCK_PORT}/v1|g" \
+  "$BENCH_DIR/litellm/config.yaml" >"$LITELLM_CONFIG"
+grep -q "127.0.0.1:${MOCK_PORT}/v1" "$LITELLM_CONFIG" ||
+  die "failed to template mock port into $LITELLM_CONFIG"
+
+log "starting LiteLLM ${LITELLM_VERSION} on 127.0.0.1:$LITELLM_PORT with ${LITELLM_WORKERS} workers (first run downloads packages)"
+env \
+  LITELLM_LOG=ERROR \
+  LITELLM_DONT_SHOW_FEEDBACK_BOX=True \
+  LITELLM_LOCAL_MODEL_COST_MAP=True \
+  DISABLE_SCHEMA_UPDATE=True \
+  uvx --from "litellm[proxy]==${LITELLM_VERSION}" litellm \
+  --config "$LITELLM_CONFIG" \
+  --host 127.0.0.1 \
+  --port "$LITELLM_PORT" \
+  --num_workers "$LITELLM_WORKERS" \
+  >"$RUN_DIR/logs/litellm.log" 2>&1 &
+LITELLM_PID=$!
+SERVER_PIDS+=("$LITELLM_PID")
+wait_for_http "litellm" "http://127.0.0.1:$LITELLM_PORT/health" "$HEALTH_TIMEOUT_SECS" "$LITELLM_PID" "$RUN_DIR/logs/litellm.log"
+
+# Let LiteLLM's workers finish booting (health is served before every worker is
+# ready) and let the whole machine settle before the direct baseline.
+log "settling for ${SETTLE_SECS}s"
+sleep "$SETTLE_SECS"
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+
+base_url() {
+  case "$1" in
+    direct) printf 'http://127.0.0.1:%s' "$MOCK_PORT" ;;
+    lumewarp) printf 'http://127.0.0.1:%s' "$LUMEWARP_PORT" ;;
+    litellm) printf 'http://127.0.0.1:%s' "$LITELLM_PORT" ;;
+    *) die "unknown target: $1" ;;
+  esac
+}
+
+server_pid() {
+  case "$1" in
+    direct) printf '%s' "$MOCK_PID" ;;
+    lumewarp) printf '%s' "$LUMEWARP_PID" ;;
+    litellm) printf '%s' "$LITELLM_PID" ;;
+    *) die "unknown target: $1" ;;
+  esac
+}
+
+logfile_for() {
+  case "$1" in
+    direct) printf '%s' "$RUN_DIR/logs/mock.log" ;;
+    *) printf '%s' "$RUN_DIR/logs/$1.log" ;;
+  esac
+}
+
+ensure_alive() {
+  local target="$1" pid logfile
+  pid="$(server_pid "$target")"
+  logfile="$(logfile_for "$target")"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    tail -n 40 "$logfile" >&2 2>/dev/null || true
+    die "target $target exited during the run (see $logfile)"
+  fi
+}
+
+connections_for_rate() {
+  local rate="$1" conns fd_limit fd_cap
+  # Half a second of requests in flight, so the connection count is not the
+  # bottleneck (the mock adds ~50 ms, gateways more when saturated).
+  conns=$(((rate + 1) / 2))
+  (( conns < 64 )) && conns=64
+  fd_limit="$(ulimit -n)"
+  fd_cap=$((fd_limit - 1024))
+  (( fd_cap < 64 )) && fd_cap=$((fd_limit / 2))
+  (( fd_cap < 64 )) && fd_cap=64
+  (( conns > fd_cap )) && conns=$fd_cap
+  printf '%s' "$conns"
+}
+
+start_sampler() {
+  local pid="$1" out="$2"
+  SAMPLER_PID=""
+  python3 -I "$SCRIPT_DIR/proc_sampler.py" --pid "$pid" --interval 1 --out "$out" \
+    >"$RUN_DIR/logs/sampler.log" 2>&1 &
+  SAMPLER_PID=$!
+  sleep 0.3
+  if ! kill -0 "$SAMPLER_PID" 2>/dev/null; then
+    log "warning: /proc sampler failed for pid $pid; CPU/PSS for this scenario will be missing"
+    SAMPLER_PID=""
+  fi
+}
+
+stop_sampler() {
+  if [[ -n "$SAMPLER_PID" ]] && kill -0 "$SAMPLER_PID" 2>/dev/null; then
+    kill -TERM "$SAMPLER_PID" 2>/dev/null || true
+    wait "$SAMPLER_PID" 2>/dev/null || true
+  fi
+  SAMPLER_PID=""
+}
+
+run_load() {
+  # Run a load generator in the background but wait for it, so the signal trap
+  # can fire immediately (and kill the load generator) instead of waiting for
+  # the current oha/sse-bench run to finish.
+  local status=0
+  "$@" &
+  LOAD_PID=$!
+  wait "$LOAD_PID" || status=$?
+  LOAD_PID=""
+  return "$status"
+}
+
+run_oha() {
+  local target="$1" rate="$2" duration="$3" out="$4"
+  local conns
+  conns="$(connections_for_rate "$rate")"
+  run_load oha \
+    --no-tui \
+    --output-format json \
+    -o "$out" \
+    -q "$rate" \
+    --latency-correction \
+    -z "${duration}s" \
+    -c "$conns" \
+    -m POST \
+    -T application/json \
+    -d "$REQUEST_BODY" \
+    -t 600s \
+    "$(base_url "$target")/v1/chat/completions"
+}
+
+run_sse() {
+  local target="$1" concurrency="$2" duration="$3" out="$4"
+  run_load "$SSE_BENCH_BIN" \
+    --url "$(base_url "$target")" \
+    --model "$MODEL" \
+    --concurrency "$concurrency" \
+    --duration-secs "$duration" \
+    --out "$out"
+}
+
+append_manifest() {
+  printf '%s\n' "$1" >>"$RUN_DIR/scenarios.jsonl"
+}
+
+# --------------------------------------------------------------------------- #
+# Scenarios
+# --------------------------------------------------------------------------- #
+
+run_nonstream() {
+  local target="$1" rate="$2" rep="$3"
+  local out_dir="$RUN_DIR/nonstream/$target"
+  local raw="$out_dir/rate-${rate}.rep${rep}.json"
+  local cpu="$out_dir/rate-${rate}.rep${rep}.cpu.csv"
+  local warmup="$out_dir/warmup-rate-${rate}.rep${rep}.json"
+  local conns
+  conns="$(connections_for_rate "$rate")"
+  mkdir -p "$out_dir"
+
+  ensure_alive "$target"
+  if (( WARMUP_SECS > 0 )); then
+    log "  warmup ${WARMUP_SECS}s: nonstream $target @ ${rate} rps (rep ${rep}/${REPEAT})"
+    if ! run_oha "$target" "$rate" "$WARMUP_SECS" "$warmup"; then
+      die "warmup oha failed: nonstream $target @ ${rate} rps"
+    fi
+    sleep 1
+  fi
+
+  ensure_alive "$target"
+  log "  measure ${DURATION_SECS}s: nonstream $target @ ${rate} rps (${conns} connections, rep ${rep}/${REPEAT})"
+  start_sampler "$(server_pid "$target")" "$cpu"
+  if ! run_oha "$target" "$rate" "$DURATION_SECS" "$raw"; then
+    stop_sampler
+    die "oha failed: nonstream $target @ ${rate} rps"
+  fi
+  stop_sampler
+  [[ -s "$raw" ]] || die "oha produced no JSON: nonstream $target @ ${rate} rps"
+  ensure_alive "$target"
+
+  append_manifest "{\"kind\":\"nonstream\",\"target\":\"${target}\",\"rate\":${rate},\"repetition\":${rep},\"connections\":${conns},\"duration_secs\":${DURATION_SECS},\"raw\":\"nonstream/${target}/rate-${rate}.rep${rep}.json\",\"cpu\":\"nonstream/${target}/rate-${rate}.rep${rep}.cpu.csv\"}"
+}
+
+run_stream() {
+  local target="$1" concurrency="$2" rep="$3"
+  local out_dir="$RUN_DIR/stream/$target"
+  local raw="$out_dir/c${concurrency}.rep${rep}.json"
+  local cpu="$out_dir/c${concurrency}.rep${rep}.cpu.csv"
+  mkdir -p "$out_dir"
+
+  ensure_alive "$target"
+  log "  measure ${DURATION_SECS}s: stream $target @ concurrency ${concurrency} (rep ${rep}/${REPEAT})"
+  start_sampler "$(server_pid "$target")" "$cpu"
+  if ! run_sse "$target" "$concurrency" "$DURATION_SECS" "$raw"; then
+    stop_sampler
+    die "sse-bench failed: stream $target @ concurrency ${concurrency}"
+  fi
+  stop_sampler
+  [[ -s "$raw" ]] || die "sse-bench produced no JSON: stream $target @ concurrency ${concurrency}"
+  ensure_alive "$target"
+
+  append_manifest "{\"kind\":\"stream\",\"target\":\"${target}\",\"concurrency\":${concurrency},\"repetition\":${rep},\"duration_secs\":${DURATION_SECS},\"raw\":\"stream/${target}/c${concurrency}.rep${rep}.json\",\"cpu\":\"stream/${target}/c${concurrency}.rep${rep}.cpu.csv\"}"
+}
+
+TARGETS=(direct lumewarp litellm)
+
+# Warn once if the fd limit forced fewer connections than "half a second of
+# requests in flight".
+for rate in "${RATE_LIST[@]}"; do
+  wanted=$(((rate + 1) / 2))
+  (( wanted < 64 )) && wanted=64
+  got="$(connections_for_rate "$rate")"
+  if (( got < wanted )); then
+    log "warning: connections for ${rate} rps capped at ${got} by open-file limit ${fd_limit}"
+  fi
+done
+
+# Rotate the target order per repetition so machine drift does not always
+# favour the first (direct) or last (litellm) measurement.
+rotated_targets() {
+  local offset="$1" i
+  for (( i = 0; i < ${#TARGETS[@]}; i++ )); do
+    printf '%s\n' "${TARGETS[$(((offset + i) % ${#TARGETS[@]}))]}"
+  done
+}
+
+for (( rep = 1; rep <= REPEAT; rep++ )); do
+  mapfile -t target_order < <(rotated_targets $((rep - 1)))
+  log "repetition ${rep}/${REPEAT} (target order: ${target_order[*]})"
+  log "non-stream: rates [${RATE_LIST[*]}] for ${DURATION_SECS}s each"
+  for rate in "${RATE_LIST[@]}"; do
+    for target in "${target_order[@]}"; do
+      run_nonstream "$target" "$rate" "$rep"
+    done
+  done
+  log "stream: concurrency [${STREAM_CONCURRENCY_LIST[*]}] for ${DURATION_SECS}s each"
+  for concurrency in "${STREAM_CONCURRENCY_LIST[@]}"; do
+    for target in "${target_order[@]}"; do
+      run_stream "$target" "$concurrency" "$rep"
+    done
+  done
+done
+
+# --------------------------------------------------------------------------- #
+# Metadata and aggregation
+# --------------------------------------------------------------------------- #
+
+CONNECTIONS_ARG=""
+for rate in "${RATE_LIST[@]}"; do
+  CONNECTIONS_ARG+="${rate}:$(connections_for_rate "$rate"),"
+done
+CONNECTIONS_ARG="${CONNECTIONS_ARG%,}"
+
+log "writing metadata"
+python3 -I "$SCRIPT_DIR/write_meta.py" \
+  --run-dir "$RUN_DIR" \
+  --run-id "$RUN_ID" \
+  --profile "$PROFILE" \
+  --started-at "$STARTED_AT" \
+  --repo-root "$REPO_ROOT" \
+  --mock-port "$MOCK_PORT" \
+  --lumewarp-port "$LUMEWARP_PORT" \
+  --litellm-port "$LITELLM_PORT" \
+  --mock-latency-ms "$MOCK_LATENCY_MS" \
+  --mock-stream-chunks "$MOCK_STREAM_CHUNKS" \
+  --mock-chunk-interval-ms "$MOCK_CHUNK_INTERVAL_MS" \
+  --litellm-version "$LITELLM_VERSION" \
+  --litellm-workers "$LITELLM_WORKERS" \
+  --duration-secs "$DURATION_SECS" \
+  --warmup-secs "$WARMUP_SECS" \
+  --repeat "$REPEAT" \
+  --rates "${RATE_LIST[*]}" \
+  --stream-concurrencies "${STREAM_CONCURRENCY_LIST[*]}" \
+  --connections "$CONNECTIONS_ARG" \
+  --request-body "$REQUEST_BODY" \
+  --mock-bin "$MOCK_BIN" \
+  --sse-bench-bin "$SSE_BENCH_BIN" \
+  --lumewarp-bin "$LUMEWARP_BIN"
+
+log "aggregating"
+python3 -I "$SCRIPT_DIR/aggregate.py" --run-dir "$RUN_DIR"
+
+log "done: $RUN_DIR/summary.md"

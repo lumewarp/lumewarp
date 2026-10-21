@@ -1,7 +1,31 @@
 # LiteLLM proxy config for the benchmark; points at the mock upstream.
+#
+# Pinned version: litellm[proxy]==1.106.2 (see LITELLM_VERSION in
+# bench/scripts/run.sh; update both together).
+#
+# Quiet + fair run:
+#   - no database (no DATABASE_URL is exported by run.sh, store_model_in_db off)
+#   - no spend/error logging, no background health checks, no retries
+#   - no message logging (prompts must never be logged)
+#   - no master key is required, matching Lumewarp's open bench config.
+#     LiteLLM 1.106+ refuses to boot without a key; the flag below is the
+#     documented local-only escape hatch. Never use it outside the bench.
 model_list:
   - model_name: mock
     litellm_params:
       model: openai/mock
       api_base: http://127.0.0.1:9000/v1
       api_key: sk-mock
+
+litellm_settings:
+  num_retries: 0
+  request_timeout: 600
+  turn_off_message_logging: true
+
+general_settings:
+  disable_spend_logs: true
+  disable_error_logs: true
+  store_model_in_db: false
+  background_health_checks: false
+  health_check_interval: 0
+  dangerously_permit_weak_or_unset_master_key: true

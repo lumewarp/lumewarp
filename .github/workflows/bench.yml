@@ -1,0 +1,126 @@
+name: bench
+
+on:
+  pull_request:
+    paths:
+      - "gateway/**"
+      - "bench/**"
+      - ".github/workflows/bench.yml"
+  push:
+    branches: [main]
+    paths:
+      - "gateway/**"
+      - "bench/**"
+      - ".github/workflows/bench.yml"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Bench profile"
+        type: choice
+        options: [quick, full]
+        default: quick
+      repeat:
+        description: "Repetitions per scenario"
+        type: string
+        default: "1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Must match the pin in bench/scripts/run.sh and bench/litellm/config.yaml.
+  LITELLM_VERSION: "1.106.2"
+  # GitHub-hosted runners have 4 vCPU.
+  LITELLM_WORKERS: "4"
+  # Resolved from workflow_dispatch; PR/push runs use quick with one repetition.
+  PROFILE: ${{ github.event.inputs.profile || 'quick' }}
+  REPEAT: ${{ github.event.inputs.repeat || '1' }}
+  # Deterministic run directory: bench/results/${RUN_ID}.
+  RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+  OHA_VERSION: "1.16.0"
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ github.event.inputs.profile == 'full' && 90 || 25 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            gateway
+            bench/mock-upstream
+
+      - name: Install oha 1.16 (prebuilt, sha256-verified)
+        run: |
+          # sha256 of the pinned oha-linux-amd64 release asset (v1.16.0).
+          OHA_SHA256="620bb9e16fb53eabc9a3fc45f88bdb41fefa3fee5c05e75892011ce320391716"
+          curl -fsSL -o /tmp/oha \
+            "https://github.com/hatoo/oha/releases/download/v${OHA_VERSION}/oha-linux-amd64"
+          echo "${OHA_SHA256}  /tmp/oha" | sha256sum -c -
+          chmod +x /tmp/oha
+          sudo mv /tmp/oha /usr/local/bin/oha
+          oha --version
+          test "$(oha --version)" = "oha ${OHA_VERSION}"
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+
+      - name: Cache uv (warm LiteLLM install)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-litellm-${{ env.LITELLM_VERSION }}
+          restore-keys: |
+            uv-${{ runner.os }}-litellm-
+
+      - name: Run benchmark
+        id: bench
+        run: |
+          # Each run step is a new shell, so raise the fd limit here: 10k RPS
+          # wants ~5000 connections.
+          ulimit -n 65536
+          echo "ulimit -n: $(ulimit -n)"
+          echo "profile: ${PROFILE}, REPEAT=${REPEAT}, LITELLM_WORKERS=${LITELLM_WORKERS}, RUN_ID=${RUN_ID}"
+          ./bench/scripts/run.sh "--${PROFILE}"
+
+      - name: Check results
+        if: always()
+        env:
+          RUN_OUTCOME: ${{ steps.bench.outcome }}
+        run: |
+          python3 -I bench/scripts/ci_check.py \
+            --results-dir "bench/results/${RUN_ID}" \
+            --run-outcome "${RUN_OUTCOME}" \
+            --cpus "$(nproc)"
+
+      - name: Publish summary
+        if: always()
+        run: |
+          run_dir="bench/results/${RUN_ID}"
+          {
+            echo "## Bench summary"
+            echo ""
+            if [[ -f "${run_dir}/summary.md" ]]; then
+              cat "${run_dir}/summary.md"
+            else
+              echo "No summary.md produced (the benchmark failed before aggregation)."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload bench results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ env.RUN_ID }}
+          path: bench/results/
+          if-no-files-found: warn
+          retention-days: 14
