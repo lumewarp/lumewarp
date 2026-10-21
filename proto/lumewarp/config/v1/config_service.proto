@@ -36,6 +36,10 @@ message Hello {
   repeated string supported_capabilities = 4;
   // Scope of the on-disk snapshot, empty if none.
   string scope = 5;
+  // ConfigUpdate.target_digest of the on-disk snapshot (empty if none). The
+  // control plane sends a delta only if this equals the digest it stored for
+  // have_version; otherwise (e.g. after a control-plane restore) a full.
+  bytes have_digest = 6;
 }
 
 message Ack {
@@ -68,6 +72,9 @@ message ConfigUpdate {
     Snapshot full = 1;
     Delta delta = 2;
   }
+  // Control plane's digest of the resulting snapshot version (opaque to the
+  // gateway: stored next to the snapshot and echoed in Hello.have_digest).
+  bytes target_digest = 3;
 }
 
 // Applies on top of base_version to produce version. A gateway whose current

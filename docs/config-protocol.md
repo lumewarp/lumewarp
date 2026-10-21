@@ -32,7 +32,8 @@ gateway                                   control plane
 
 - **At most one un-ACKed update per session.** If several versions are published while one is pending, the next update goes straight from the session's ACKed version to the current desired version (delta if the base is retained, otherwise full).
 - The base of a delta is always the session's ACKed version (or Hello.have_version before the first ACK) — never a global "last sent" version.
-- The first update after Hello is a delta only when `Hello.scope` matches, `have_version` is retained and `have_version <= desired`; otherwise full. `have_version > desired` (control plane restored from backup) → full.
+- The first update after Hello is a delta only when `Hello.scope` matches, `have_version` is retained, `have_version <= desired` and `Hello.have_digest` equals the stored digest of `have_version`; otherwise full. Until the first ACK after a full, the session has **no** delta base (a NACKed full is never followed by a delta).
+- Digest = `config_versions.digest` (sha256 of the control plane's serialized payload). It is sent as `ConfigUpdate.target_digest`; the gateway treats it as opaque, persists it with the snapshot and echoes it in `Hello.have_digest` (serialization is not byte-identical across languages, so the gateway never recomputes it). `have_version > desired` (control plane restored from backup) → full.
 - ACK/NACK must name the session's pending version; anything else is a protocol error and the control plane closes the stream.
 - NACK handling:
   - `BASE_MISMATCH` → send full(desired).

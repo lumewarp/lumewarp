@@ -32,18 +32,20 @@ class GatewayMessage(_message.Message):
     def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., ack: _Optional[_Union[Ack, _Mapping]] = ..., nack: _Optional[_Union[Nack, _Mapping]] = ...) -> None: ...
 
 class Hello(_message.Message):
-    __slots__ = ("gateway_id", "have_version", "gateway_version", "supported_capabilities", "scope")
+    __slots__ = ("gateway_id", "have_version", "gateway_version", "supported_capabilities", "scope", "have_digest")
     GATEWAY_ID_FIELD_NUMBER: _ClassVar[int]
     HAVE_VERSION_FIELD_NUMBER: _ClassVar[int]
     GATEWAY_VERSION_FIELD_NUMBER: _ClassVar[int]
     SUPPORTED_CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
     SCOPE_FIELD_NUMBER: _ClassVar[int]
+    HAVE_DIGEST_FIELD_NUMBER: _ClassVar[int]
     gateway_id: str
     have_version: int
     gateway_version: str
     supported_capabilities: _containers.RepeatedScalarFieldContainer[str]
     scope: str
-    def __init__(self, gateway_id: _Optional[str] = ..., have_version: _Optional[int] = ..., gateway_version: _Optional[str] = ..., supported_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ...) -> None: ...
+    have_digest: bytes
+    def __init__(self, gateway_id: _Optional[str] = ..., have_version: _Optional[int] = ..., gateway_version: _Optional[str] = ..., supported_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ..., have_digest: _Optional[bytes] = ...) -> None: ...
 
 class Ack(_message.Message):
     __slots__ = ("version",)
@@ -64,12 +66,14 @@ class Nack(_message.Message):
     def __init__(self, version: _Optional[int] = ..., reason: _Optional[str] = ..., have_version: _Optional[int] = ..., code: _Optional[_Union[NackCode, str]] = ...) -> None: ...
 
 class ConfigUpdate(_message.Message):
-    __slots__ = ("full", "delta")
+    __slots__ = ("full", "delta", "target_digest")
     FULL_FIELD_NUMBER: _ClassVar[int]
     DELTA_FIELD_NUMBER: _ClassVar[int]
+    TARGET_DIGEST_FIELD_NUMBER: _ClassVar[int]
     full: _snapshot_pb2.Snapshot
     delta: Delta
-    def __init__(self, full: _Optional[_Union[_snapshot_pb2.Snapshot, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ...) -> None: ...
+    target_digest: bytes
+    def __init__(self, full: _Optional[_Union[_snapshot_pb2.Snapshot, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., target_digest: _Optional[bytes] = ...) -> None: ...
 
 class Delta(_message.Message):
     __slots__ = ("base_version", "version", "upsert_upstreams", "remove_upstreams", "upsert_deployments", "remove_deployments", "upsert_routes", "remove_routes", "upsert_api_keys", "remove_api_keys", "upsert_teams", "remove_teams", "created_at_unix_ms", "required_capabilities")
