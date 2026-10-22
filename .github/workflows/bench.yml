@@ -46,7 +46,7 @@ env:
 jobs:
   bench:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ github.event.inputs.profile == 'full' && 90 || 25 }}
+    timeout-minutes: ${{ github.event.inputs.profile == 'full' && 100 || 35 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -101,6 +101,25 @@ jobs:
             --results-dir "bench/results/${RUN_ID}" \
             --run-outcome "${RUN_OUTCOME}" \
             --cpus "$(nproc)"
+
+      - name: Locust smoke (mixed workload, response checks)
+        id: locust
+        if: always() && steps.bench.outcome != 'cancelled'
+        env:
+          # Short step load on the 4-vCPU runner; the full suite is local-only.
+          QUICK_STEPS: "20 50"
+          QUICK_STEP_SECS: "15"
+          LOCUST_PROCESSES: "2"
+          BENCH_AUTH: "1"
+          LOCUST_KEYS: "4"
+        run: |
+          ulimit -n 65536
+          python3 -I bench/locust/locustfile.py --selftest
+          python3 -I bench/scripts/aggregate_locust.py --selftest
+          bash -n bench/scripts/run-locust.sh
+          ./bench/scripts/run-locust.sh --quick --no-build
+          python3 -I bench/scripts/aggregate_locust.py --ci-check \
+            --run-dir "bench/results/${RUN_ID}/locust"
 
       - name: Publish summary
         if: always()

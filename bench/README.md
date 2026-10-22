@@ -169,6 +169,94 @@ multi-repetition medians and an "all 404 must fail A6" case):
 python3 -I bench/scripts/aggregate.py --selftest
 ```
 
+## Locust suite
+
+`scripts/run-locust.sh` is an end-to-end load test on the same setup: the same
+mock upstream, the same templated Lumewarp/LiteLLM configs and the same
+`BENCH_AUTH` handling, comparing `direct` / `lumewarp` / `litellm`. Where `oha`
+and `sse-bench` measure one request shape each, Locust drives a mixed workload
+and checks every response.
+
+```sh
+bench/scripts/run-locust.sh --quick            # step load, ~2 min per target
+bench/scripts/run-locust.sh --full             # 300/1k/5k/10k RPS stages + soak, 3 reps
+BENCH_AUTH=1 bench/scripts/run-locust.sh --quick
+bench/scripts/run-locust.sh --help             # all overrides
+```
+
+- **Tooling**: `locust==2.32.4` (+ `geventhttpclient==2.6.1`) through `uvx`, no
+  global install. `FastHttpUser`, headless, `--processes LOCUST_PROCESSES`
+  (quick 8, full 12) so the generator is not the bottleneck.
+- **Ports** default to `MOCK_PORT=9100 LUMEWARP_PORT=4100 LITELLM_PORT=4101`;
+  9000, 5432, 8080 and 8081 are refused.
+- **Workload** (`LOCUST_WEIGHTS`, defaults): chat non-stream 55, chat stream 25
+  (half with `stream_options.include_usage`, `STREAM_USAGE_SHARE`), completions
+  5, embeddings 10 (two inputs), models 5, plus negative 2 on the gateways only:
+  unknown model and, with `BENCH_AUTH=1`, a bad key. Negatives are reported as
+  `neg_*` and pass on any 4xx; they never count as failures, but a negative the
+  gateway accepts is flagged.
+- **Keys**: with `BENCH_AUTH=1`, `LOCUST_KEYS` (8) random keys per run.
+  Lumewarp gets all their SHA-256s and users spread over them. LiteLLM without
+  a database only has `general_settings.master_key` (virtual keys need
+  Postgres), so it gets the first key and its users all send it. The direct
+  target stays open.
+- **Checks** on every response: status 200; JSON shape per endpoint
+  (`chat.completion`, `text_completion`, embedding list with one numeric vector
+  per input, model list containing `mock`); the model is echoed; SSE is
+  well-formed (each event is one `data: ` line holding a JSON
+  `chat.completion.chunk` or `[DONE]`, `[DONE]` is last); without
+  `include_usage` no chunk with a non-null `usage` reaches the client; with it,
+  exactly one, as the last chunk.
+- **Profiles**: each user runs `USER_RPS` (2) tasks/s (`constant_throughput`), so
+  offered load = users × 2. `--quick` steps 100→500 users (24 s each, offered
+  200→1000 RPS). `--full` runs constant-rate stages at the run.sh rates
+  (`RATES`, users = rate / `USER_RPS`, 5 s warmup excluded + 30 s) and a soak
+  stage (`SOAK_RATE=1000`, `SOAK_SECS=300`). `REPEAT` and the per-repetition
+  target rotation match run.sh.
+- **Metrics**: Locust's CSV percentiles are rounded to whole ms, too coarse for
+  sub-ms overhead, so each worker process dumps full-precision samples and
+  `scripts/aggregate_locust.py` computes per target: non-stream p50/p90/p99/max
+  (chat + completions + embeddings; `models` is only in the per-endpoint table
+  because Lumewarp answers it without the upstream), RPS vs offered, failure %,
+  overhead vs direct (p99 with min–max across repetitions), stream TTFT (first
+  content chunk) p99 and its overhead, total stream time p99, per-endpoint
+  p50/p99, negative status counts, server CPU/PSS (`proc_sampler.py`) and
+  generator CPU per process.
+- **Flags**: > 1% failures, < 90% of the offered rate, generator average CPU per
+  process > `GEN_CPU_LIMIT_PCT` (85) or Locust's own "CPU usage above 90%"
+  warning, or a negative not rejected. Overhead of a flagged row is marked
+  `n/c` (not comparable).
+- Locust is closed-loop (a slow target lowers the offered rate; no
+  coordinated-omission correction), and Python adds per-request cost to every
+  sample. Use it for correctness under load and relative comparisons; the
+  `oha` numbers from `run.sh` remain the A6 reference.
+
+Output, next to a run.sh run of the same `RUN_ID` (the section is also inserted
+into its `summary.md` between `<!-- locust:begin/end -->` markers):
+
+```
+bench/results/<RUN_ID>/locust/
+  meta.json  results.json  summary.md  scenarios.jsonl
+  configs/  logs/                       templated configs, server logs
+  <scenario>/<target>.rep<M>/           scenario = step | rate-<N> | soak
+    locust_stats.csv  locust_stats_history.csv  locust_failures.csv
+    locust_exceptions.csv  report.html  locust.log
+    samples/samples-<pid>.json          full-precision samples per process
+    server.cpu.csv  generator.cpu.csv   /proc samples (1 Hz, PSS)
+```
+
+Self-tests (no Locust needed):
+
+```sh
+python3 -I bench/locust/locustfile.py --selftest
+python3 -I bench/scripts/aggregate_locust.py --selftest
+```
+
+The `bench` workflow runs a short smoke after the benchmark (20→50 users,
+`BENCH_AUTH=1`, 4 keys) and `aggregate_locust.py --ci-check` fails the job when
+Lumewarp or direct has > 1% failed checks or Lumewarp accepts a negative
+request. Latency is not gated there.
+
 ## Notes
 
 - LiteLLM startup takes ~10–60 s with 20 workers (health check timeout is 180 s

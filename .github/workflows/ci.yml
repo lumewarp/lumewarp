@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # load-e2e only (it is skipped on push/pull_request).
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
 
 jobs:
   gateway:
@@ -145,3 +149,46 @@ jobs:
         env:
           E2E_PG_URL: postgresql://lumewarp:lumewarp@127.0.0.1:55432/lumewarp
         run: scripts/e2e-p1.sh
+
+  load-e2e:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: lumewarp
+          POSTGRES_PASSWORD: lumewarp
+          POSTGRES_DB: lumewarp
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U lumewarp -d lumewarp"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            gateway
+            bench/mock-upstream
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --project control-plane
+      - name: Load e2e (Locust against PG + control plane + gateway + mock upstream)
+        env:
+          E2E_PG_URL: postgresql://lumewarp:lumewarp@127.0.0.1:55432/lumewarp
+          LOAD_RESULTS_DIR: ${{ github.workspace }}/load-results
+          # Hosted runners have 4 vCPUs shared by every process: lighter load.
+          LOAD_USERS: "20"
+          LOAD_PROCESSES: "2"
+        run: scripts/load-e2e.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: load-e2e-results
+          path: load-results
+          if-no-files-found: ignore
