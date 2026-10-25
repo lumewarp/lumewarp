@@ -216,7 +216,9 @@ Later plugins win on conflicts. Notifier plugins get the channel's `config` mapp
   `INVALID_CONFIG`/`UNSUPPORTED_FEATURE` quarantines the version, `PERSIST_FAILED` retries.
   Rollback republishes an older version's **routing** only; keys and policies always come
   from current source state. Full rules: [config protocol](../docs/config-protocol.md).
-- `UsageService.Report` is all-or-nothing and idempotent by `request_id`; each new event
+- `UsageService.Report` validates per event (an invalid event is skipped and logged, the
+  rest of the batch is kept; `REJECTED` events may omit model/deployment) and is
+  idempotent by `request_id`; each new event
   adds cost to key, project, team and org totals for the UTC calendar month in the same
   transaction, then budget evaluation flips exhausted scopes to `BUDGET_EXCEEDED` and
   publishes a new version (eventual; in-flight streams are not cut). Soft-limit

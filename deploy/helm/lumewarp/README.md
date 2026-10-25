@@ -106,6 +106,10 @@ Readiness/liveness:
   the control-plane listener, but note that the gateway verifies with the WebPKI root
   store only; a private CA must be added to the gateway image. Inside a trusted cluster,
   plaintext plus NetworkPolicy is the simple option.
+- **Keep gRPC keepalive pings intact.** The gateway pings the config stream every 30 s.
+  If an L7 proxy or mesh sidecar (Envoy, ingress) sits between gateway and control plane,
+  allow pings without data at least every 10 s, or it will reset the stream with
+  `too_many_pings` (see `docs/config-protocol.md`).
 - **Budgets are eventual.** A key can exceed its budget briefly while usage batches are in
   flight; in-flight streams are not cut. Usage events are dropped when the gateway's
   bounded queue is full.

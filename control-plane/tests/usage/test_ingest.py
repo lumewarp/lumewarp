@@ -161,13 +161,17 @@ async def test_duplicate_batch_replay_counts_once(session_factory: SessionFactor
 
     changed = usage_pb2.UsageEvent.FromString(event.SerializeToString())
     changed.cost_nano_usd += 1
-    with pytest.raises(InvalidUsageBatch, match="different"):
-        async with session_factory() as session, session.begin():
-            await ingest(session, "gateway-a", [changed], scope_name=scope_name)
+    async with session_factory() as session, session.begin():
+        assert await ingest(session, "gateway-a", [changed], scope_name=scope_name) == 0
+    async with session_factory() as session:
+        stored = await session.scalar(
+            select(UsageEventRow).where(UsageEventRow.request_id == uuid.UUID(event.request_id))
+        )
+        assert stored is not None and stored.cost_nano_usd == event.cost_nano_usd
 
 
 @pytest.mark.asyncio
-async def test_conflicting_replay_rolls_back_other_batch_events(session_factory: SessionFactory):
+async def test_conflicting_replay_skips_only_that_event(session_factory: SessionFactory):
     scope_name, key = await _seed(session_factory)
     existing = _event(key, cost=10)
     async with session_factory() as session, session.begin():
@@ -176,9 +180,8 @@ async def test_conflicting_replay_rolls_back_other_batch_events(session_factory:
     changed = usage_pb2.UsageEvent.FromString(existing.SerializeToString())
     changed.model = "different-model"
     other = _event(key, cost=20)
-    with pytest.raises(InvalidUsageBatch, match="different stored event"):
-        async with session_factory() as session, session.begin():
-            await ingest(session, "gateway-a", [other, changed], scope_name=scope_name)
+    async with session_factory() as session, session.begin():
+        assert await ingest(session, "gateway-a", [other, changed], scope_name=scope_name) == 1
 
     async with session_factory() as session:
         assert (
@@ -187,8 +190,18 @@ async def test_conflicting_replay_rolls_back_other_batch_events(session_factory:
                 .select_from(UsageEventRow)
                 .where(UsageEventRow.request_id == uuid.UUID(other.request_id))
             )
-            == 0
+            == 1
         )
+        stored = await session.scalar(
+            select(UsageEventRow).where(UsageEventRow.request_id == uuid.UUID(existing.request_id))
+        )
+        assert stored is not None and stored.model == existing.model
+        total = await session.scalar(
+            select(UsageTotal).where(
+                UsageTotal.scope_type == ScopeType.KEY, UsageTotal.scope_id == key.id
+            )
+        )
+        assert total is not None and total.cost_nano_usd == 30
 
 
 @pytest.mark.asyncio
@@ -332,33 +345,79 @@ async def test_late_previous_month_event_uses_its_event_window(session_factory: 
 
 
 @pytest.mark.asyncio
-async def test_invalid_batch_is_all_or_nothing(session_factory: SessionFactory):
+async def test_invalid_events_do_not_cost_the_rest_of_the_batch(
+    session_factory: SessionFactory,
+):
     scope_name, key = await _seed(session_factory)
-    valid = _event(key)
-    invalid = _event(key)
-    invalid.org_id = str(uuid7())
+    valid = _event(key, cost=7)
+    wrong_org = _event(key, cost=100)
+    wrong_org.org_id = str(uuid7())
+    unknown_key = _event(key, cost=100)
+    unknown_key.key_id = str(uuid7())
+    bad_field = _event(key, cost=100)
+    bad_field.route = ""
+    reused = usage_pb2.UsageEvent.FromString(valid.SerializeToString())
+    reused.cost_nano_usd = 100
+    duplicate = usage_pb2.UsageEvent.FromString(valid.SerializeToString())
+    batch = [valid, wrong_org, unknown_key, bad_field, reused, duplicate]
 
-    with pytest.raises(InvalidUsageBatch, match="hierarchy"):
-        async with session_factory() as session, session.begin():
-            await ingest(session, "gateway-a", [valid, invalid], scope_name=scope_name)
+    async with session_factory() as session, session.begin():
+        # valid and its identical duplicate count; the four invalid events are skipped.
+        assert await ingest(session, "gateway-a", batch, scope_name=scope_name) == 2
 
     async with session_factory() as session:
-        assert (
-            await session.scalar(
-                select(func.count())
-                .select_from(UsageEventRow)
-                .where(UsageEventRow.request_id == uuid.UUID(valid.request_id))
-            )
-            == 0
+        rows = (
+            (await session.execute(select(UsageEventRow).where(UsageEventRow.key_id == key.id)))
+            .scalars()
+            .all()
         )
-        assert (
-            await session.scalar(
-                select(func.count())
-                .select_from(UsageTotal)
-                .where(UsageTotal.scope_id.in_((key.id, key.project_id, key.team_id, key.org_id)))
+        assert [row.request_id for row in rows] == [uuid.UUID(valid.request_id)]
+        assert rows[0].cost_nano_usd == 7
+        totals = (
+            await session.execute(
+                select(UsageTotal.scope_type, UsageTotal.cost_nano_usd).where(
+                    UsageTotal.scope_id.in_((key.id, key.project_id, key.team_id, key.org_id))
+                )
             )
-            == 0
-        )
+        ).all()
+        assert sorted(cost for _, cost in totals) == [7, 7, 7, 7]
+
+
+@pytest.mark.asyncio
+async def test_rejected_events_may_omit_model_and_deployment(session_factory: SessionFactory):
+    scope_name, key = await _seed(session_factory)
+    completed = _event(key, cost=5)
+    # Authentication rejects before the body is read: no model, no deployment.
+    unauthenticated = _event(key, cost=0, model="")
+    unauthenticated.deployment = ""
+    # Policy rejections (403/429) know the model but never chose a deployment.
+    rate_limited = _event(key, cost=0)
+    rate_limited.deployment = ""
+    for rejected in (unauthenticated, rate_limited):
+        rejected.status = 429
+        rejected.prompt_tokens = rejected.completion_tokens = 0
+        rejected.cost_known = False
+        rejected.usage_state = usage_pb2.USAGE_STATE_MISSING
+        rejected.outcome = usage_pb2.REQUEST_OUTCOME_REJECTED
+    # Anything that reached an upstream must still name both.
+    completed_without_model = _event(key, model="")
+
+    batch = [completed, unauthenticated, rate_limited, completed_without_model]
+    async with session_factory() as session, session.begin():
+        assert await ingest(session, "gateway-a", batch, scope_name=scope_name) == 3
+
+    async with session_factory() as session:
+        stored = {
+            row.request_id: (row.model, row.deployment)
+            for row in (
+                await session.execute(select(UsageEventRow).where(UsageEventRow.key_id == key.id))
+            ).scalars()
+        }
+    assert stored == {
+        uuid.UUID(completed.request_id): ("test-model", "test-deployment"),
+        uuid.UUID(unauthenticated.request_id): ("", ""),
+        uuid.UUID(rate_limited.request_id): ("test-model", ""),
+    }
 
 
 @pytest.mark.asyncio

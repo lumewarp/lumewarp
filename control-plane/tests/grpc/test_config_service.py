@@ -758,3 +758,50 @@ async def test_replaced_stream_is_closed_without_further_updates(session_factory
         old.cancel()
         await channel.close()
         await server.stop(0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("min_ping_interval_ms", "survives"),
+    # 300 s is gRPC core's default policy: it proves the probe reproduces "too_many_pings".
+    [(500, True), (300_000, False)],
+)
+async def test_keepalive_policy_accepts_idle_stream_pings(
+    session_factory: SessionFactory, monkeypatch, min_ping_interval_ms: int, survives: bool
+):
+    from grpc_health.v1 import health_pb2, health_pb2_grpc
+
+    from lumewarp_control_plane import grpc as grpc_module
+
+    # Scaled down from the gateway's 30 s pings against the 10 s production minimum.
+    monkeypatch.setattr(grpc_module, "_KEEPALIVE_MIN_PING_INTERVAL_MS", min_ping_interval_ms)
+    server = await serve(
+        Settings(
+            scope=f"ka-{min_ping_interval_ms}", grpc_bind="127.0.0.1:0", background_enabled=False
+        ),
+        session_factory,
+    )
+    channel = grpc.aio.insecure_channel(
+        f"127.0.0.1:{bound_port(server)}",
+        options=(
+            ("grpc.keepalive_time_ms", 1000),
+            ("grpc.keepalive_timeout_ms", 5000),
+            ("grpc.keepalive_permit_without_calls", 1),
+            ("grpc.http2.max_pings_without_data", 0),
+        ),
+    )
+    try:
+        # A server stream that stays open with no data, like an idle config stream.
+        call = health_pb2_grpc.HealthStub(channel).Watch(health_pb2.HealthCheckRequest(service=""))
+        assert (await call.read()).status == health_pb2.HealthCheckResponse.SERVING
+        if survives:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(call.read(), timeout=6)
+        else:
+            with pytest.raises(grpc.aio.AioRpcError) as exc:
+                await asyncio.wait_for(call.read(), timeout=15)
+            assert exc.value.code() == grpc.StatusCode.UNAVAILABLE
+        call.cancel()
+    finally:
+        await channel.close()
+        await server.stop(0)

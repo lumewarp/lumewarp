@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -107,9 +108,12 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
     org_id = _uuid(event.org_id, "org_id")
     team_id = _uuid(event.team_id, "team_id")
     project_id = _uuid(event.project_id, "project_id")
-    if not event.model or len(event.model) > 400:
+    # A rejected request may never reach routing: authentication runs before the body is
+    # read (no model) and policy rejections happen before a deployment is chosen.
+    rejected = event.outcome == usage_pb2.REQUEST_OUTCOME_REJECTED
+    if len(event.model) > 400 or not (event.model or rejected):
         raise InvalidUsageBatch("invalid model")
-    if not event.deployment or len(event.deployment) > 200:
+    if len(event.deployment) > 200 or not (event.deployment or rejected):
         raise InvalidUsageBatch("invalid deployment")
     if not event.route or len(event.route) > 64:
         raise InvalidUsageBatch("invalid route")
@@ -204,20 +208,22 @@ def _add_totals(
 
 async def _validate_key_hierarchy(
     session: AsyncSession, prepared: Sequence[_PreparedEvent]
-) -> dict[uuid.UUID, ApiKey]:
+) -> tuple[set[uuid.UUID], dict[uuid.UUID, ApiKey]]:
+    """Return the request ids whose key hierarchy does not match api_keys, and the keys."""
     key_ids = {item.values["key_id"] for item in prepared}
     if not key_ids:
-        return {}
+        return set(), {}
     keys = (await session.execute(select(ApiKey).where(ApiKey.id.in_(key_ids)))).scalars().all()
     by_id = {key.id: key for key in keys}
+    mismatched: set[uuid.UUID] = set()
     for item in prepared:
         values = item.values
         key = by_id.get(values["key_id"])  # type: ignore[arg-type]
         if key is None or any(
             getattr(key, name) != values[name] for name in ("org_id", "team_id", "project_id")
         ):
-            raise InvalidUsageBatch("usage key hierarchy does not match api_keys")
-    return by_id
+            mismatched.add(item.request_id)
+    return mismatched, by_id
 
 
 async def _upsert_totals(
@@ -396,6 +402,7 @@ async def _persist_events(
     keys: dict[uuid.UUID, ApiKey],
     accepted: int,
     scope_name: str | None,
+    rejected: Counter[str],
 ) -> int:
     # Insert in request_id order so overlapping batches take event row locks in one order.
     ordered = [by_id[request_id] for request_id in sorted(by_id)]
@@ -424,7 +431,9 @@ async def _persist_events(
             existing = existing_by_id.get(request_id)
             prepared = by_id[request_id]
             if existing is None or not _same_event(existing, prepared.values):
-                raise InvalidUsageBatch("request_id conflicts with a different stored event")
+                # Nothing was inserted for it (ON CONFLICT DO NOTHING); the stored row wins.
+                rejected["request_id conflicts with a different stored event"] += 1
+                accepted -= 1
 
     aggregates: dict[tuple[ScopeType, uuid.UUID, datetime], list[int]] = {}
     for request_id in inserted_ids:
@@ -452,11 +461,14 @@ async def ingest(
     scope_name: str | None = None,
     max_batch_events: int | None = None,
 ) -> int:
-    """Record a validated batch in the caller's transaction and return its accepted count.
+    """Record a batch in the caller's transaction and return its accepted count.
 
-    A duplicate request id with an identical payload is accepted without re-counting. Reusing
-    an id for different content is rejected. Unknown or hierarchy-mismatched keys reject the
-    entire batch. Event timestamps, not receipt time, select the UTC month.
+    Validation is per event: an invalid event (bad fields, unknown or hierarchy-mismatched
+    key, a request id reused for different content within the batch or against a stored
+    event) is skipped and logged, and never costs the rest of the batch. A duplicate request
+    id with an identical payload is accepted without re-counting. Only batch-level problems
+    (gateway identity, batch size) reject the whole batch. Event timestamps, not receipt
+    time, select the UTC month.
     """
     if not isinstance(gateway_id, str) or not gateway_id or len(gateway_id) > 200:
         raise InvalidUsageBatch("invalid gateway identity")
@@ -466,26 +478,54 @@ async def ingest(
     if len(events) > maximum:
         raise InvalidUsageBatch("usage batch exceeds configured maximum")
 
+    rejected: Counter[str] = Counter()
     by_id: dict[uuid.UUID, _PreparedEvent] = {}
+    duplicates: Counter[uuid.UUID] = Counter()
     for event in events:
-        prepared = _prepare_event(gateway_id, event)
+        try:
+            prepared = _prepare_event(gateway_id, event)
+        except InvalidUsageBatch as exc:
+            rejected[str(exc)] += 1
+            continue
         previous = by_id.get(prepared.request_id)
-        if previous is not None:
-            if any(previous.values[k] != prepared.values[k] for k in _USAGE_FIELDS):
-                raise InvalidUsageBatch("request_id reused with different event data")
-        else:
+        if previous is None:
             by_id[prepared.request_id] = prepared
+        elif any(previous.values[k] != prepared.values[k] for k in _USAGE_FIELDS):
+            # The first occurrence is kept; the conflicting copy is dropped.
+            rejected["request_id reused with different event data"] += 1
+        else:
+            duplicates[prepared.request_id] += 1
 
-    prepared_events = list(by_id.values())
-    keys = await _validate_key_hierarchy(session, prepared_events)
-    if not prepared_events:
-        return 0
+    mismatched, keys = await _validate_key_hierarchy(session, list(by_id.values()))
+    for request_id in mismatched:
+        # Identical in-batch copies of a rejected event are rejected with it.
+        rejected["usage key hierarchy does not match api_keys"] += 1 + duplicates[request_id]
+        del by_id[request_id]
 
-    # The savepoint makes validation failures (including concurrent request_id payload
-    # conflicts detected after ON CONFLICT) leave no partial usage writes if the caller catches
-    # the exception and continues its outer transaction.
-    async with session.begin_nested():
-        return await _persist_events(session, gateway_id, by_id, keys, len(events), scope_name)
+    try:
+        if not by_id:
+            return 0
+        # The savepoint keeps a failed persist from leaving partial usage writes if the
+        # caller catches the exception and continues its outer transaction.
+        async with session.begin_nested():
+            return await _persist_events(
+                session,
+                gateway_id,
+                by_id,
+                keys,
+                len(events) - rejected.total(),
+                scope_name,
+                rejected,
+            )
+    finally:
+        if rejected:
+            log.warning(
+                "usage report from gateway %s: skipped %d of %d events: %s",
+                gateway_id,
+                rejected.total(),
+                len(events),
+                dict(rejected),
+            )
 
 
 async def _rollover_once(settings: Settings, session_factory: SessionFactory) -> None:

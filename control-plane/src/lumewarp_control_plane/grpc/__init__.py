@@ -47,6 +47,13 @@ _UPDATE_CACHE_ENTRIES = 8
 _RETRY_INITIAL_SECONDS = 1.0
 _RETRY_MAX_SECONDS = 60.0
 _GRPC_HARD_MESSAGE_LIMIT = 64 * 1024 * 1024
+# The gateway pings its config stream every 30 s, idle or not (docs/config-protocol.md). gRPC
+# core's server default accepts a ping without data only every 5 min and answers repeats with
+# GOAWAY "too_many_pings", which reset the stream every few minutes; accept every 10 s.
+_KEEPALIVE_MIN_PING_INTERVAL_MS = 10_000
+# Our own pings notice a gateway that vanished without closing its stream.
+_KEEPALIVE_TIME_MS = 60_000
+_KEEPALIVE_TIMEOUT_MS = 20_000
 
 
 @dataclass(frozen=True)
@@ -739,6 +746,10 @@ async def serve(settings: Settings, session_factory: SessionFactory) -> grpc.aio
     options = (
         ("grpc.max_send_message_length", message_limit),
         ("grpc.max_receive_message_length", message_limit),
+        ("grpc.keepalive_permit_without_calls", 1),
+        ("grpc.http2.min_ping_interval_without_data_ms", _KEEPALIVE_MIN_PING_INTERVAL_MS),
+        ("grpc.keepalive_time_ms", _KEEPALIVE_TIME_MS),
+        ("grpc.keepalive_timeout_ms", _KEEPALIVE_TIMEOUT_MS),
     )
     registry = SessionRegistry(session_factory)
     server = grpc.aio.server(
