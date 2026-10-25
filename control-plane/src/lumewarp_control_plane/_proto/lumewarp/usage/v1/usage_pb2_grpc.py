@@ -55,9 +55,10 @@ class UsageServiceServicer:
     """
 
     def Report(self, request, context):
-        """All-or-nothing: success means every event is durably accounted (already
-        seen request_ids count as accepted, so accepted == len(events)). An
-        invalid batch fails with INVALID_ARGUMENT and nothing is recorded.
+        """Validated per event: an invalid event is skipped and logged, the rest are
+        durably accounted, and `accepted` counts what was kept (already seen
+        request_ids count as accepted). Only batch-level errors (gateway identity,
+        too many events) fail the call with INVALID_ARGUMENT, recording nothing.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

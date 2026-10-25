@@ -8,9 +8,10 @@ package lumewarp.usage.v1;
 // Authenticated with the same gateway token as ConfigService; the control
 // plane ignores ReportRequest.gateway_id in favour of the token's identity.
 service UsageService {
-  // All-or-nothing: success means every event is durably accounted (already
-  // seen request_ids count as accepted, so accepted == len(events)). An
-  // invalid batch fails with INVALID_ARGUMENT and nothing is recorded.
+  // Validated per event: an invalid event is skipped and logged, the rest are
+  // durably accounted, and `accepted` counts what was kept (already seen
+  // request_ids count as accepted). Only batch-level errors (gateway identity,
+  // too many events) fail the call with INVALID_ARGUMENT, recording nothing.
   rpc Report(ReportRequest) returns (ReportResponse);
 }
 
