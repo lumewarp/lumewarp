@@ -44,8 +44,10 @@ offered rate is users x USER_RPS. Scenarios repeat REPEAT times (quick 1,
 full 3) with the target order rotated per repetition, like run.sh.
 
 Environment overrides (defaults):
-  MOCK_PORT=9100 LUMEWARP_PORT=4100 LITELLM_PORT=4101
+  MOCK_PORT=19100 LUMEWARP_PORT=4100 LITELLM_PORT=4101
                               (9000, 5432, 8080 and 8081 are refused)
+                              Live service ports are also refused; the gateway
+                              admin listener uses an ephemeral local port.
   MOCK_LATENCY_MS=50 MOCK_STREAM_CHUNKS=20 MOCK_CHUNK_INTERVAL_MS=10
   MOCK_HEADERS_FIRST=0        as in run.sh
   BENCH_AUTH=0                1: generate LOCUST_KEYS keys; Lumewarp gets all of
@@ -56,18 +58,20 @@ Environment overrides (defaults):
   GEVENTHTTPCLIENT_VERSION=2.6.1
   LOCUST_PROCESSES            load generator processes (quick 8, full 12)
   LOCUST_MASTER_PORT          master<->worker port on 127.0.0.1 (default: a free
-                              port per run, so it never clashes with another
-                              locust on the default 5557)
+                              port picked before startup and reused across runs,
+                              avoiding locust's default 5557)
   USER_RPS=2                  tasks per second per user
   LOCUST_WEIGHTS              e.g. "chat=55,stream=25,completions=5,embeddings=10,models=5,negative=2"
   STREAM_USAGE_SHARE=0.5      share of streams asking for include_usage
+  LW_ACCEPT_MODELS=mock       comma-separated accepted response models
+  LW_MAX_TOKENS=16            maximum requested output tokens (model stays mock)
   QUICK_STEPS="100 200 300 400 500"  QUICK_STEP_SECS=24
   RATES="300 1000 5000 10000" STAGE_SECS=30 WARMUP_SECS=5   (full)
   SOAK_RATE=1000 SOAK_SECS=300 (full; SOAK_SECS=0 disables the soak)
   REPEAT=<profile>            repetitions (quick 1, full 3)
   GEN_CPU_LIMIT_PCT=85        flag a run when the generator's average CPU per
                               process is above this
-  LITELLM_VERSION=1.106.2 LITELLM_WORKERS=$(nproc)
+  LITELLM_VERSION=1.106.2 LITELLM_WORKERS=4
   SETTLE_SECS=10 HEALTH_TIMEOUT_SECS=180
   RESULTS_DIR=bench/results RUN_ID=<UTC timestamp>
   MOCK_BIN / LUMEWARP_BIN     override binary paths
@@ -94,7 +98,7 @@ done
 # Knobs
 # --------------------------------------------------------------------------- #
 
-MOCK_PORT="${MOCK_PORT:-9100}"
+MOCK_PORT="${MOCK_PORT:-19100}"
 LUMEWARP_PORT="${LUMEWARP_PORT:-4100}"
 LITELLM_PORT="${LITELLM_PORT:-4101}"
 MOCK_LATENCY_MS="${MOCK_LATENCY_MS:-50}"
@@ -106,13 +110,16 @@ LOCUST_KEYS="${LOCUST_KEYS:-8}"
 LOCUST_VERSION="${LOCUST_VERSION:-2.32.4}"
 GEVENTHTTPCLIENT_VERSION="${GEVENTHTTPCLIENT_VERSION:-2.6.1}"
 LITELLM_VERSION="${LITELLM_VERSION:-1.106.2}"
-LITELLM_WORKERS="${LITELLM_WORKERS:-$(nproc)}"
+LITELLM_WORKERS="${LITELLM_WORKERS:-4}"
 HEALTH_TIMEOUT_SECS="${HEALTH_TIMEOUT_SECS:-180}"
 SETTLE_SECS="${SETTLE_SECS:-10}"
 RESULTS_DIR="${RESULTS_DIR:-$BENCH_DIR/results}"
 USER_RPS="${USER_RPS:-2}"
 LOCUST_WEIGHTS="${LOCUST_WEIGHTS:-}"
 STREAM_USAGE_SHARE="${STREAM_USAGE_SHARE:-0.5}"
+LW_MODEL=mock
+LW_ACCEPT_MODELS="${LW_ACCEPT_MODELS:-$LW_MODEL}"
+LW_MAX_TOKENS="${LW_MAX_TOKENS:-16}"
 GEN_CPU_LIMIT_PCT="${GEN_CPU_LIMIT_PCT:-85}"
 
 MOCK_BIN="${MOCK_BIN:-$BENCH_DIR/mock-upstream/target/release/mock-upstream}"
@@ -141,14 +148,46 @@ is_pos() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
 for v in "${QUICK_STEP_LIST[@]}" "${RATE_LIST[@]}"; do
   is_pos "$v" || die "invalid step/rate: $v (positive integer required)"
 done
-for name in REPEAT LOCUST_PROCESSES QUICK_STEP_SECS STAGE_SECS SOAK_RATE LOCUST_KEYS; do
+for name in REPEAT LOCUST_PROCESSES QUICK_STEP_SECS STAGE_SECS SOAK_RATE LOCUST_KEYS LITELLM_WORKERS MOCK_STREAM_CHUNKS LW_MAX_TOKENS; do
   is_pos "${!name}" || die "$name must be a positive integer (got: ${!name})"
 done
-for name in WARMUP_SECS SOAK_SECS MOCK_LATENCY_MS GEN_CPU_LIMIT_PCT; do
+for name in WARMUP_SECS SOAK_SECS MOCK_LATENCY_MS GEN_CPU_LIMIT_PCT MOCK_CHUNK_INTERVAL_MS; do
   is_uint "${!name}" || die "$name must be a non-negative integer (got: ${!name})"
 done
 [[ "$USER_RPS" =~ ^[0-9]+([.][0-9]+)?$ ]] && [[ "$USER_RPS" != "0" ]] ||
   die "USER_RPS must be a positive number (got: $USER_RPS)"
+python3 -I - "$STREAM_USAGE_SHARE" "$LOCUST_WEIGHTS" "$MOCK_STREAM_CHUNKS" "$MOCK_CHUNK_INTERVAL_MS" "$USER_RPS" <<'PY' ||
+import math
+import sys
+
+try:
+    share = float(sys.argv[1])
+    if not 0 <= share <= 1:
+        raise ValueError("STREAM_USAGE_SHARE must be between 0 and 1")
+    weights = dict(chat=55, stream=25, completions=5, embeddings=10, models=5, negative=2)
+    for entry in sys.argv[2].split(","):
+        if not entry.strip():
+            continue
+        key, sep, raw = entry.partition("=")
+        key = key.strip()
+        if not sep or key not in weights:
+            raise ValueError(f"LOCUST_WEIGHTS: invalid entry {entry!r} (known: {', '.join(weights)})")
+        if int(raw) < 0:
+            raise ValueError(f"LOCUST_WEIGHTS: negative weight for {key}")
+        weights[key] = int(raw)
+    if not any(value > 0 for key, value in weights.items() if key != "negative"):
+        raise ValueError("LOCUST_WEIGHTS must enable at least one positive endpoint")
+    if int(sys.argv[3]) > 2**32 - 1:
+        raise ValueError("MOCK_STREAM_CHUNKS must fit in an unsigned 32-bit integer")
+    if int(sys.argv[4]) > 2**64 - 1:
+        raise ValueError("MOCK_CHUNK_INTERVAL_MS must fit in an unsigned 64-bit integer")
+    if not math.isfinite(float(sys.argv[5])) or float(sys.argv[5]) <= 0:
+        raise ValueError("USER_RPS must be a finite positive number")
+except ValueError as exc:
+    print(f"[locust] ERROR: {exc}", file=sys.stderr)
+    sys.exit(2)
+PY
+  die "invalid workload configuration"
 [[ "$MOCK_HEADERS_FIRST" == "0" || "$MOCK_HEADERS_FIRST" == "1" ]] ||
   die "MOCK_HEADERS_FIRST must be 0 or 1"
 case "$BENCH_AUTH" in
@@ -156,12 +195,38 @@ case "$BENCH_AUTH" in
   1) AUTH=1 AUTH_MODE=on ;;
   *) die "BENCH_AUTH must be 0 or 1 (got: $BENCH_AUTH)" ;;
 esac
-for port in "$MOCK_PORT" "$LUMEWARP_PORT" "$LITELLM_PORT"; do
+validate_port() {
+  local port="$1"
   is_pos "$port" || die "invalid port: $port"
+  if (( ${#port} > 5 )) || (( port > 65535 )); then
+    die "invalid port: $port"
+  fi
   case "$port" in
     9000 | 5432 | 8080 | 8081) die "port $port is reserved on bench machines (MinIO/Postgres/dev servers); pick another" ;;
+    4000 | 9464 | 8091 | 50051 | 9100 | 55432) die "port $port belongs to a live service; pick another" ;;
   esac
+}
+for port in "$MOCK_PORT" "$LUMEWARP_PORT" "$LITELLM_PORT"; do
+  validate_port "$port"
 done
+select_master_port() {
+  local port="${LOCUST_MASTER_PORT:-}"
+  if [[ -n "$port" ]]; then
+    validate_port "$port"
+    validate_port "$((port + 1))"
+    printf '%s\n' "$port"
+    return
+  fi
+  while true; do
+    port="$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')" ||
+      die "failed to pick a Locust master port"
+    if (validate_port "$port" && validate_port "$((port + 1))") 2>/dev/null; then
+      printf '%s\n' "$port"
+      return
+    fi
+  done
+}
+LOCUST_MASTER_PORT="$(select_master_port)"
 
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid RUN_ID: $RUN_ID"
@@ -217,7 +282,7 @@ kill_tree() {
 # Tooling and build
 # --------------------------------------------------------------------------- #
 
-for tool in curl python3 uvx nproc; do
+for tool in curl python3 uvx; do
   command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
 [[ -f "$LOCUSTFILE" ]] || die "locustfile not found: $LOCUSTFILE"
@@ -393,6 +458,7 @@ LUMEWARP_CONFIG="$OUT_DIR/configs/lumewarp.yaml"
 LUMEWARP_SED=(
   -e "s|127\.0\.0\.1:9000|127.0.0.1:${MOCK_PORT}|g"
   -e "s|127\.0\.0\.1:4000|127.0.0.1:${LUMEWARP_PORT}|g"
+  -e "/^  listen:/a\\  admin_listen: 127.0.0.1:0"
 )
 if (( AUTH )); then
   hash_list="$(printf '"%s", ' "${KEY_HASHES[@]}")"
@@ -522,14 +588,13 @@ run_locust() {
   (( AUTH )) && [[ "$target" != "direct" ]] && bad_key=1
 
   ensure_alive "$target"
-  local master_port="${LOCUST_MASTER_PORT:-}"
-  if [[ -z "$master_port" ]]; then
-    master_port="$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-  fi
   log "  $scenario: $target (stages ${stages}, rep ${rep}/${REPEAT})"
   start_sampler "$(server_pid "$target")" "$dir/server.cpu.csv"
   env \
     LW_TARGET="$target" \
+    LW_MODEL="$LW_MODEL" \
+    LW_ACCEPT_MODELS="$LW_ACCEPT_MODELS" \
+    LW_MAX_TOKENS="$LW_MAX_TOKENS" \
     LW_API_KEYS="$(keys_for "$target")" \
     LW_WEIGHTS="$LOCUST_WEIGHTS" \
     LW_STREAM_USAGE_SHARE="$STREAM_USAGE_SHARE" \
@@ -538,6 +603,7 @@ run_locust() {
     LW_USER_RPS="$USER_RPS" \
     LW_STAGES="$stages" \
     LW_MEASURE_AFTER_SECS="$measure_after" \
+    LW_SAMPLES_DIR="$dir/samples" \
     LW_DUMP_DIR="$dir/samples" \
     "${LOCUST_CMD[@]}" \
     -f "$LOCUSTFILE" \
@@ -545,9 +611,9 @@ run_locust() {
     --host "$(base_url "$target")" \
     --processes "$LOCUST_PROCESSES" \
     --master-bind-host 127.0.0.1 \
-    --master-bind-port "$master_port" \
+    --master-bind-port "$LOCUST_MASTER_PORT" \
     --master-host 127.0.0.1 \
-    --master-port "$master_port" \
+    --master-port "$LOCUST_MASTER_PORT" \
     --csv "$dir/locust" \
     --csv-full-history \
     --html "$dir/report.html" \
@@ -567,8 +633,18 @@ run_locust() {
     tail -n 40 "$dir/locust.log" >&2 || true
     die "locust failed (exit $status): $scenario $target rep $rep (see $dir/locust.log)"
   fi
-  compgen -G "$dir/samples/samples-*.json" >/dev/null ||
+  # The master can exit before its workers finish writing their dumps (a
+  # saturated target leaves requests in flight), so wait for one per process.
+  local dumps=0 deadline=$((SECONDS + 30))
+  while :; do
+    dumps="$({ compgen -G "$dir/samples/samples-*.json" || true; } | wc -l)"
+    (( dumps >= LOCUST_PROCESSES || SECONDS >= deadline )) && break
+    sleep 0.2
+  done
+  (( dumps > 0 )) ||
     die "locust wrote no sample dumps: $scenario $target rep $rep (see $dir/locust.log)"
+  (( dumps >= LOCUST_PROCESSES )) ||
+    die "locust wrote $dumps of $LOCUST_PROCESSES sample dumps: $scenario $target rep $rep (see $dir/locust.log)"
   ensure_alive "$target"
 
   append_manifest "{\"target\":\"${target}\",\"scenario\":\"${scenario}\",\"repetition\":${rep},\"stages\":\"${stages}\",\"measure_after_secs\":${measure_after},\"measured_secs\":${measured},\"offered_rps\":${offered},\"dir\":\"${rel}\"}"
@@ -624,7 +700,7 @@ done
 # Metadata and aggregation
 # --------------------------------------------------------------------------- #
 
-python3 -I - "$OUT_DIR/meta.json" <<EOF
+python3 -I - "$OUT_DIR/meta.json" "$LW_ACCEPT_MODELS" "${QUICK_STEP_LIST[*]}" "$STREAM_USAGE_SHARE" "$LOCUST_WEIGHTS" <<EOF
 import json, os, platform, subprocess, sys
 def run(*args):
     try:
@@ -647,7 +723,9 @@ meta = {
         "mock_latency_ms": $MOCK_LATENCY_MS, "mock_stream_chunks": $MOCK_STREAM_CHUNKS,
         "mock_chunk_interval_ms": $MOCK_CHUNK_INTERVAL_MS, "mock_headers_first": $MOCK_HEADERS_FIRST,
         "litellm_workers": $LITELLM_WORKERS, "locust_processes": $LOCUST_PROCESSES,
-        "user_rps": $USER_RPS, "weights": "$LOCUST_WEIGHTS", "stream_usage_share": $STREAM_USAGE_SHARE,
+        "model": "$LW_MODEL", "accept_models": sys.argv[2], "max_tokens": $LW_MAX_TOKENS,
+        "step_offered": [int(users) * float("$USER_RPS") for users in sys.argv[3].split()] if "$PROFILE" == "quick" else [],
+        "user_rps": $USER_RPS, "weights": sys.argv[5], "stream_usage_share": float(sys.argv[4]),
         "repetitions": $REPEAT, "gen_cpu_limit_pct": $GEN_CPU_LIMIT_PCT,
     },
 }

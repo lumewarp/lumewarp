@@ -93,7 +93,7 @@ for i in $(seq 1 "$repeat"); do
   echo "== load e2e run $i/$repeat (report: $results/summary.md)"
   # Own process group (setsid) so an interrupt can stop pytest and let it clean up first.
   setsid uv run --frozen --project control-plane pytest -c tests/load/pytest.ini \
-    --rootdir tests/load tests/load -q --durations=0 -p no:cacheprovider "$@" &
+    --rootdir tests/load tests/load/test_load.py -q --durations=0 -p no:cacheprovider "$@" &
   pytest_pid=$!
   wait "$pytest_pid"
   pytest_pid=

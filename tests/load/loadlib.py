@@ -6,10 +6,12 @@ like Locust's, usage accounting against Postgres, and the per-scenario report.
 import json
 import math
 import os
+import re
 import shutil
 import threading
 import time
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -30,6 +32,8 @@ USERS = env_int("LOAD_USERS", 40)
 USER_RPS = env_float("LOAD_USER_RPS", 10)
 PROCESSES = env_int("LOAD_PROCESSES", 4)
 STREAM_SHARE = env_float("LOAD_STREAM_SHARE", 0.3)
+SAT_P99_S = env_float("LOAD_SAT_P99_S", 0.1)
+SAT_STREAM_P99_S = env_float("LOAD_SAT_STREAM_P99_S", 0.25)
 RESULTS = Path(os.environ.get("LOAD_RESULTS_DIR", ROOT / "tests/load/results/local"))
 
 # nano-USD per million tokens; multiples of 1e6 so per-token cost is exact.
@@ -335,6 +339,9 @@ class LoadRun:
                 cols = line.split(",")
                 if cols[header.index("Name")] == "Aggregated":
                     count = int(cols[header.index("Request Count")])
+                    (keep / "record-count.json").write_text(
+                        json.dumps({"locust_requests": count, "records": len(records)}) + "\n"
+                    )
                     assert count == len(
                         records
                     ), f"locust counted {count} requests, records have {len(records)}"
@@ -369,6 +376,63 @@ def hard_errors(records: list[dict], allow_conn: tuple[float, float] | None = No
         if st == 0 or st >= 500 or st not in (200, 401, 403, 429) or r.get("p"):
             bad.append(r)
     return bad
+
+
+def load_window(
+    run: LoadRun, elapsed: float, reserve: float, records: list[dict], *, step_started: float
+) -> dict:
+    """A late orchestration step is diagnostic only with positive generator CPU evidence
+    and healthy gateway latency. Product latency and unclassified overruns still fail."""
+    late = elapsed >= run.seconds - reserve
+    step_ended = run.started + elapsed
+    generator_cpu_warning = False
+    warning_before_step_at = None
+    # Locust's default formatter uses local time, as does datetime.timestamp().
+    for match in re.finditer(
+        r"^\[([^\]]+)\] \S+/WARNING/[^\n]*CPU usage above 90%",
+        run.proc.text(),
+        re.MULTILINE | re.IGNORECASE,
+    ):
+        try:
+            timestamp = datetime.strptime(match[1], "%Y-%m-%d %H:%M:%S,%f").timestamp()
+        except ValueError:
+            continue
+        if timestamp < step_started:
+            if warning_before_step_at is None or timestamp > warning_before_step_at:
+                warning_before_step_at = timestamp
+        elif timestamp <= step_ended:
+            generator_cpu_warning = True
+    requests = [
+        r for r in records if not r.get("probe") and step_started <= r["t"] <= step_ended
+    ]
+    latency = pct([r["d"] for r in requests if r["st"] == 200 and not r["s"]], 99)
+    stream_latency = pct([r["d"] for r in requests if r["st"] == 200 and r["s"]], 99)
+    generator_saturation = (
+        elapsed <= run.seconds
+        and generator_cpu_warning
+        and latency is not None
+        and latency < SAT_P99_S
+        and stream_latency is not None
+        and stream_latency < SAT_STREAM_P99_S
+        and not hard_errors(requests)
+    )
+    return {
+        "step_started_at": step_started,
+        "step_ended_at": step_ended,
+        "step_elapsed_s": round(elapsed, 3),
+        "load_seconds": run.seconds,
+        "reserve_s": reserve,
+        "late": late,
+        "generator_cpu_warning": generator_cpu_warning,
+        "generator_cpu_warning_before_step": warning_before_step_at is not None,
+        "generator_cpu_warning_before_step_at": warning_before_step_at,
+        "gateway_p99_s": latency,
+        "gateway_stream_p99_s": stream_latency,
+        "p99_limit_s": SAT_P99_S,
+        "stream_p99_limit_s": SAT_STREAM_P99_S,
+        "diagnostic": "generator saturation" if late and generator_saturation else None,
+        "ok": elapsed <= run.seconds and (not late or generator_saturation),
+    }
 
 
 def usage_counts(stack: Stack) -> Counter:

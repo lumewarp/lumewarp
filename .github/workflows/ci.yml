@@ -4,13 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
-  # load-e2e only (it is skipped on push/pull_request).
+  # The nightly schedule and manual dispatch run only the load-e2e job.
   workflow_dispatch:
   schedule:
     - cron: "17 3 * * *"
 
 jobs:
   gateway:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -28,6 +29,7 @@ jobs:
       - run: cargo test
 
   bench-crate:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -51,6 +53,7 @@ jobs:
           python3 -I bench/scripts/ci_check.py --selftest
 
   control-plane:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -76,8 +79,18 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest
+      - name: Load helper unit tests
+        working-directory: .
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          E2E_GATEWAY_BIN: /nonexistent
+          E2E_MOCK_BIN: /nonexistent
+        run: |
+          uv run --frozen --project control-plane pytest -c tests/load/pytest.ini \
+            --rootdir tests/load tests/load/test_loadlib_unit.py -q -p no:cacheprovider
 
   ui:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -94,6 +107,7 @@ jobs:
       - run: pnpm build
 
   proto:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -120,6 +134,7 @@ jobs:
           fi
 
   e2e:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     services:
       postgres:

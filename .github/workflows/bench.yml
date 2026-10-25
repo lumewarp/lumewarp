@@ -34,6 +34,9 @@ concurrency:
 env:
   # Must match the pin in bench/scripts/run.sh and bench/litellm/config.yaml.
   LITELLM_VERSION: "1.106.2"
+  # Must match the defaults in bench/scripts/run-locust.sh.
+  LOCUST_VERSION: "2.32.4"
+  GEVENTHTTPCLIENT_VERSION: "2.6.1"
   # GitHub-hosted runners have 4 vCPU.
   LITELLM_WORKERS: "4"
   # Resolved from workflow_dispatch; PR/push runs use quick with one repetition.
@@ -115,6 +118,9 @@ jobs:
         run: |
           ulimit -n 65536
           python3 -I bench/locust/locustfile.py --selftest
+          uvx --from "locust==${LOCUST_VERSION}" \
+            --with "geventhttpclient==${GEVENTHTTPCLIENT_VERSION}" \
+            python -I bench/locust/locustfile.py --selftest-wiring
           python3 -I bench/scripts/aggregate_locust.py --selftest
           bash -n bench/scripts/run-locust.sh
           ./bench/scripts/run-locust.sh --quick --no-build

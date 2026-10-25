@@ -13,6 +13,22 @@ key — with no duplicates, and per-project cost must equal tokens × deployment
     LOAD_REPEAT=2 scripts/load-e2e.sh   # two consecutive full runs
     scripts/load-e2e.sh -k churn        # one scenario
 
+Pure helper tests need no binaries, Postgres, or Locust (CI runs this in the
+control-plane job):
+
+    PYTHONDONTWRITEBYTECODE=1 \
+      E2E_GATEWAY_BIN=/nonexistent E2E_MOCK_BIN=/nonexistent \
+      uv run --frozen --project control-plane pytest -c tests/load/pytest.ini \
+      --rootdir tests/load tests/load/test_loadlib_unit.py -q -p no:cacheprovider
+
+Elapsed-time guard rails remain failures unless a timestamped Locust CPU saturation warning
+falls within the orchestration step, with successful non-stream p99 below `LOAD_SAT_P99_S`
+and stream p99 below `LOAD_SAT_STREAM_P99_S` during that step, and no hard errors.
+Both request types must be observed. Steps ending after the total load duration always fail.
+Qualifying overruns are recorded in `load_window` as diagnostics; revoke/new-key/budget
+latency bounds, traffic assertions, and exact accounting still apply. The CP outage must
+show a positive queue depth or an increase in usage report retry events during the outage.
+
 | scenario | what it asserts |
 | --- | --- |
 | `test_steady_mixed_load` | 60 keys over 3 orgs × 2 teams × 2 projects, chat + stream mix: zero 5xx, zero connection errors, well-formed bodies/SSE (no leaked usage-only chunk), exact usage + cost accounting, no dropped events, config stream stays up. |
@@ -33,9 +49,11 @@ Environment (all optional):
 | `LOAD_USERS` / `LOAD_USER_RPS` | 40 / 10 | Locust users and requests per second per user (~400 RPS) |
 | `LOAD_PROCESSES` | 4 | Locust processes |
 | `LOAD_STREAM_SHARE` | 0.3 | share of streaming requests |
-| `LOAD_STEADY_SECS`, `LOAD_CHURN_SECS`, `LOAD_CP_SECS`, `LOAD_BUDGET_SECS`, `LOAD_GW_SECS` | 150, 110, 70, 50, 50 | scenario run times |
+| `LOAD_SAT_P99_S`, `LOAD_SAT_STREAM_P99_S` | 0.1, 0.25 | strict non-stream / stream p99 ceilings for generator saturation classification |
+| `LOAD_STEADY_SECS`, `LOAD_CHURN_SECS`, `LOAD_CP_SECS`, `LOAD_BUDGET_SECS`, `LOAD_GW_SECS` | 150, 110, 90, 50, 50 | scenario run times |
 | `LOAD_CP_OUTAGE_SECS` | 20 | control-plane downtime |
 | `LOAD_REVOKE_BOUND`, `LOAD_NEW_KEY_BOUND`, `LOAD_BUDGET_BOUND` | 2, 2, 5 | latency bounds (s) |
+| `LOAD_USAGE_DRAIN_BOUND` | 50 | after a CP restart, seconds for the gateway usage queue to drain (its retry backoff caps at 30 s) |
 | `LOAD_BUDGET_NANO_USD` | 10000000 | tiny project budget |
 | `LOAD_BURST`, `LOAD_BURST_GAP` | 40, 0.05 | version burst size and spacing (s) |
 | `LOAD_REPEAT`, `LOAD_RESULTS_DIR` | 1, timestamped | consecutive runs, report directory |

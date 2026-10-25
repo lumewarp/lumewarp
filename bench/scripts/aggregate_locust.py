@@ -27,8 +27,12 @@ Stdlib only; `python3 -I aggregate_locust.py --run-dir DIR` or `--selftest`.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import csv
+import io
 import json
 import math
+import random
 import statistics
 import sys
 import tempfile
@@ -84,7 +88,8 @@ def _median(values: list[Any], digits: int = 3) -> float | None:
 def load_samples(sample_dir: Path) -> dict[str, Any]:
     merged: dict[str, Any] = {
         "latency_ms": {},
-        "ttft_ms": {},
+        "ttft_any_ms": {},
+        "ttft_content_ms": {},
         "ok": Counter(),
         "fail": Counter(),
         "status": {},
@@ -96,8 +101,11 @@ def load_samples(sample_dir: Path) -> dict[str, Any]:
     for path in sorted(sample_dir.glob("samples-*.json")):
         doc = json.loads(path.read_text(encoding="utf-8"))
         merged["processes"] += 1
-        for key in ("latency_ms", "ttft_ms"):
-            for name, vals in (doc.get(key) or {}).items():
+        for key in ("latency_ms", "ttft_any_ms", "ttft_content_ms"):
+            # Missing new fields identify legacy dumps; an explicitly empty
+            # content field means a reasoning-only stream, not a legacy dump.
+            source = doc.get(key, doc.get("ttft_ms", {})) if key != "latency_ms" else doc.get(key)
+            for name, vals in (source or {}).items():
                 merged[key].setdefault(name, []).extend(float(v) for v in vals)
         merged["ok"].update(doc.get("ok") or {})
         merged["fail"].update(doc.get("fail") or {})
@@ -109,6 +117,88 @@ def load_samples(sample_dir: Path) -> dict[str, Any]:
             if value is not None:
                 merged[key] = value if merged[key] is None else pick(merged[key], value)
     return merged
+
+
+def step_rates(run_dir: Path, entry: dict[str, Any], meta: dict[str, Any]) -> list[dict[str, Any]]:
+    """Use cumulative history counts, including negatives, not sliding-window RPS."""
+    config = meta.get("config") or {}
+    offered = config.get("step_offered", meta.get("step_offered"))
+    if entry["scenario"] != "step" or not offered:
+        return []
+    stages = [(int(u), float(s)) for u, s in (stage.split(":") for stage in entry["stages"].split(","))]
+    if len(stages) != len(offered):
+        raise ValueError("step_offered must match the manifest stages")
+    history = run_dir / "locust_stats_history.csv"
+    points = []
+    if history.is_file():
+        with history.open(newline="", encoding="utf-8") as fh:
+            points = [
+                (float(row["Timestamp"]), float(row["Total Request Count"]), int(row["User Count"]))
+                for row in csv.DictReader(fh) if row["Name"] == "Aggregated"
+            ]
+    points.sort()
+
+    reports = [point for previous, point in zip(points, points[1:]) if point[1] > previous[1]]
+
+    # User counts are current, but cumulative counts arrive from workers every
+    # three seconds. Measure only after spawning and that reporting lead-in.
+    boundaries = []
+    cursor = 0
+    previous_users = 0
+    for users, secs in stages:
+        ramp = next((i for i in range(cursor, len(points)) if points[i][2] != previous_users), None)
+        reached = next(
+            (i for i in range(ramp, len(points)) if points[i][2] == users), None
+        ) if ramp is not None else None
+        boundaries.append((ramp, reached))
+        if reached is not None:
+            cursor = reached + 1
+            previous_users = users
+    out = []
+    stage_end = next((t for t, _, users in points if users), points[0][0] if points else 0.0)
+    for i, ((users, secs), rate) in enumerate(zip(stages, offered)):
+        stage_end += secs
+        ramp, reached = boundaries[i]
+        start = end = 0.0
+        leadin = None
+        interior = []
+        if reached is not None:
+            spawn = points[reached][0] - points[ramp][0]
+            leadin = max(3.0, spawn) + 1.0
+            start = points[reached][0] + leadin
+            end = points[reached][0] + secs
+            if i + 1 < len(boundaries) and boundaries[i + 1][0] is not None:
+                end = min(end, points[boundaries[i + 1][0]][0])
+            # Never interpolate a staircase counter: both endpoints must be
+            # worker report points strictly inside the measurement window.
+            interior = [point for point in reports if start < point[0] < end]
+            if interior:
+                # Staggered workers can update different phases each second.
+                # Compare equal phases, allowing half a second of timestamp rounding.
+                phase_start = interior[0][0]
+                interior = [
+                    point for point in interior
+                    if abs(math.remainder(point[0] - phase_start, 3.0)) <= 0.5
+                ]
+        observed = interior[-1][0] - interior[0][0] if len(interior) >= 2 else 0.0
+        complete = observed >= 6.0
+        achieved = (
+            round((interior[-1][1] - interior[0][1]) / observed, 1)
+            if complete else None
+        )
+        flags = []
+        if reached is None and points and points[-1][0] >= stage_end:
+            flags.append(f"step {i + 1}: users never reached")
+        if achieved is not None and achieved < MIN_RATE_RATIO * float(rate):
+            flags.append(f"step {i + 1}: rps {achieved:.0f} < 90% of offered {rate}")
+        out.append({
+            "step": i + 1, "users": users, "offered_rps": float(rate), "rps": achieved,
+            "observed_secs": observed, "leadin_secs": leadin, "flags": flags,
+            "report_start_ts": interior[0][0] if interior else None,
+            "report_end_ts": interior[-1][0] if interior else None,
+            "diagnostics": [] if complete else ["incomplete history"],
+        })
+    return out
 
 
 def count_cpu_warnings(log: Path) -> int:
@@ -128,7 +218,10 @@ def summarize_run(locust_dir: Path, entry: dict[str, Any], meta: dict[str, Any])
     lat = s["latency_ms"]
     nonstream_vals = [v for name in NONSTREAM for v in lat.get(name, [])]
     stream_vals = [v for name in STREAM for v in lat.get(name, [])]
-    ttft_vals = [v for name in STREAM for v in s["ttft_ms"].get(name, [])]
+    ttft = {
+        key: _dist([v for name in STREAM for v in s[key].get(name, [])])
+        for key in ("ttft_any_ms", "ttft_content_ms")
+    }
     ok = sum(s["ok"].get(n, 0) for n in POSITIVE)
     fail = sum(s["fail"].get(n, 0) for n in POSITIVE)
     total = ok + fail
@@ -139,7 +232,8 @@ def summarize_run(locust_dir: Path, entry: dict[str, Any], meta: dict[str, Any])
     # Wall-clock span of the samples, bounded by the configured window (the
     # last stream can finish during --stop-timeout).
     secs = min(x for x in (span, measured) if x) if (span or measured) else None
-    rps = round(total / secs, 1) if secs else None
+    all_requests = sum(s["ok"].values()) + sum(s["fail"].values())
+    rps = round(all_requests / secs, 1) if secs else None
     offered = float(entry.get("offered_rps") or 0) or None
 
     negatives = {
@@ -172,6 +266,8 @@ def summarize_run(locust_dir: Path, entry: dict[str, Any], meta: dict[str, Any])
     accepted = sum(v["fail"] for v in negatives.values())
     if accepted:
         flags.append(f"{accepted} negative requests not rejected with 4xx")
+    steps = step_rates(run_dir, entry, meta)
+    flags.extend(flag for step in steps for flag in step["flags"])
 
     return {
         "target": entry["target"],
@@ -179,13 +275,15 @@ def summarize_run(locust_dir: Path, entry: dict[str, Any], meta: dict[str, Any])
         "repetition": entry.get("repetition", 1),
         "nonstream_ms": _dist(nonstream_vals),
         "stream_total_ms": _dist(stream_vals),
-        "ttft_ms": _dist(ttft_vals),
+        **ttft,
+        "ttft_headline_ms": ttft["ttft_any_ms"],
         "per_endpoint_ms": {name: _dist(lat.get(name, [])) for name in POSITIVE if name in lat},
         "requests": total,
         "failures": fail,
         "error_rate": round(error_rate, 6),
         "rps": rps,
         "offered_rps": offered,
+        "steps": steps,
         "negatives": negatives,
         "checks": dict(s["checks"].most_common(10)),
         "cpu": server_cpu,
@@ -210,7 +308,7 @@ def _median_run(reps: list[dict[str, Any]]) -> dict[str, Any]:
         return _median(vals, digits)
 
     out: dict[str, Any] = {"repetitions": len(reps)}
-    for group in ("nonstream_ms", "stream_total_ms", "ttft_ms"):
+    for group in ("nonstream_ms", "stream_total_ms", "ttft_headline_ms", "ttft_any_ms", "ttft_content_ms"):
         out[group] = {k: med((group, k)) for k in ("p50", "p90", "p99", "max")}
     out["per_endpoint_ms"] = {
         name: {k: med(("per_endpoint_ms", name, k)) for k in ("p50", "p99")}
@@ -248,6 +346,23 @@ def _median_run(reps: list[dict[str, Any]]) -> dict[str, Any]:
     out["flagged_repetitions"] = len(flagged)
     out["generator_saturated"] = any(r["generator_saturated"] for r in reps)
     out["raw"] = [r["dir"] for r in reps]
+    out["steps"] = [
+        {
+            "step": step["step"],
+            "offered_rps": step["offered_rps"],
+            "rps": _median([r["steps"][i]["rps"] for r in reps]),
+            "observed_secs": _median([r["steps"][i]["observed_secs"] for r in reps]),
+            "flags": [
+                f"{flag} (rep{r['repetition']})"
+                for r in reps for flag in r["steps"][i]["flags"]
+            ],
+            "diagnostics": [
+                f"{diagnostic} (rep{r['repetition']})"
+                for r in reps for diagnostic in r["steps"][i]["diagnostics"]
+            ],
+        }
+        for i, step in enumerate(reps[0]["steps"])
+    ]
     return out
 
 
@@ -255,6 +370,23 @@ def _sub(a: Any, b: Any) -> float | None:
     if a is None or b is None:
         return None
     return round(float(a) - float(b), 3)
+
+
+def bootstrap_ci(values: list[float]) -> list[float | None]:
+    """Percentile 95% CI for the median of paired repetition overheads."""
+    if not values:
+        return [None, None]
+    rng = random.Random(0)
+    samples = [statistics.median(rng.choices(values, k=len(values))) for _ in range(1000)]
+    return [percentile(samples, 2.5), percentile(samples, 97.5)]
+
+
+def overhead_interval(values: list[float]) -> dict[str, Any]:
+    n = len(values)
+    bounds = bootstrap_ci(values) if n >= 5 else (
+        [min(values), max(values)] if values else [None, None]
+    )
+    return {"kind": "ci95" if n >= 5 else "range", "n": n, "bounds": bounds}
 
 
 def build_results(locust_dir: Path) -> dict[str, Any]:
@@ -281,29 +413,51 @@ def build_results(locust_dir: Path) -> dict[str, Any]:
         for target, s in group.items():
             if target == "direct" or not direct:
                 continue
-            s["overhead_ms"] = {
-                "nonstream_p50": _sub(s["nonstream_ms"]["p50"], direct["nonstream_ms"]["p50"]),
-                "nonstream_p99": _sub(s["nonstream_ms"]["p99"], direct["nonstream_ms"]["p99"]),
-                "ttft_p50": _sub(s["ttft_ms"]["p50"], direct["ttft_ms"]["p50"]),
-                "ttft_p99": _sub(s["ttft_ms"]["p99"], direct["ttft_ms"]["p99"]),
-            }
-            per_rep = [
-                _sub(r["nonstream_ms"]["p99"], direct_reps[r["repetition"]]["nonstream_ms"]["p99"])
+            pairs = [
+                (r, direct_reps[r["repetition"]])
                 for r in runs
                 if r["scenario"] == name and r["target"] == target and r["repetition"] in direct_reps
             ]
-            per_rep = [v for v in per_rep if v is not None]
-            s["overhead_nonstream_p99_min"] = min(per_rep) if per_rep else None
-            s["overhead_nonstream_p99_max"] = max(per_rep) if per_rep else None
-            s["overhead_comparable"] = not s["flags"] and not direct["flags"]
+            s["overhead_ms"] = {}
+            s["overhead_intervals_ms"] = {}
+            s["overhead_noise_floor_ms"] = {}
+            for label, metric in (("nonstream", "nonstream_ms"), ("ttft", "ttft_any_ms")):
+                for quantile in ("p50", "p99"):
+                    per_rep = [_sub(r[metric][quantile], d[metric][quantile]) for r, d in pairs]
+                    per_rep = [v for v in per_rep if v is not None]
+                    key = f"{label}_{quantile}"
+                    s["overhead_ms"][key] = _median(per_rep)
+                    s[f"overhead_{key}_min"] = min(per_rep) if per_rep else None
+                    s[f"overhead_{key}_max"] = max(per_rep) if per_rep else None
+                    s["overhead_intervals_ms"][key] = overhead_interval(per_rep)
+                    baseline = [
+                        d[metric][quantile] for d in direct_reps.values()
+                        if d[metric][quantile] is not None
+                    ]
+                    s["overhead_noise_floor_ms"][key] = (
+                        round(max(baseline) - min(baseline), 3) if len(baseline) >= 2 else None
+                    )
+            s["overhead_paired_repetitions"] = len(pairs)
+            s["overhead_comparable"] = (
+                not s["flags"] and not direct["flags"] and len(pairs) == s["repetitions"]
+            )
         scenarios[name] = group
     return {"meta": meta, "scenarios": scenarios, "runs": runs}
 
 
 def _range(median: Any, low: Any, high: Any) -> str:
     text = _fmt(median)
-    if low is not None and high is not None and low != high:
+    if low is not None and high is not None:
         text += f" [{_fmt(low)}–{_fmt(high)}]"
+    return text
+
+
+def _overhead(s: dict[str, Any], metric: str) -> str:
+    value = s["overhead_ms"][metric]
+    floor = s["overhead_noise_floor_ms"][metric]
+    text = _range(value, s[f"overhead_{metric}_min"], s[f"overhead_{metric}_max"])
+    if value is not None and floor is not None and abs(value) <= floor:
+        text += f" (within floor {_fmt(floor)})"
     return text
 
 
@@ -322,6 +476,12 @@ def render_section(results: dict[str, Any], heading: str = "##") -> str:
         f"{config.get('user_rps', '?')} tasks/s per user, "
         f"{config.get('repetitions', 1)} repetition(s) (medians shown)"
     )
+    add(
+        f"- LiteLLM workers: {config.get('litellm_workers', meta.get('litellm_workers', '?'))}; "
+        f"model: `{config.get('model', meta.get('model', '?'))}`; "
+        f"max_tokens: {config.get('max_tokens', meta.get('max_tokens', '?'))}"
+    )
+    add("- RPS and offered both include negative requests; failure % covers positive requests only.")
     keys = meta.get("client_keys") or 0
     if meta.get("auth") == "on":
         add(f"- client auth: on ({keys} keys on Lumewarp; LiteLLM master key; direct open)")
@@ -334,7 +494,19 @@ def render_section(results: dict[str, Any], heading: str = "##") -> str:
     )
     add("- non-stream = chat + completions + embeddings (`models` only in the per-endpoint table:")
     add("  Lumewarp serves it locally); stream total = whole SSE body;")
-    add("  overhead = target − direct for the same scenario. Locust is closed-loop (no")
+    add("  headline TTFT = first non-empty reasoning/reasoning_content/content delta (ttft_any);")
+    add("  ttft_content = first non-empty content delta. Legacy TTFT samples supply both.")
+    add("  overhead = target − direct within the same repetition, then median [min–max].")
+    add("  n < 5 paired repetitions: range (n=N), not a confidence interval.")
+    if any(
+        interval["kind"] == "ci95"
+        for group in results.get("scenarios", {}).values() for s in group.values()
+        for interval in s.get("overhead_intervals_ms", {}).values()
+    ):
+        add("  n ≥ 5: bootstrap 95% CI of the paired median (seed 0, 1000 resamples).")
+    add("  Noise floor = max–min of direct's same-metric percentile across repetitions;")
+    add("  overhead within that spread is annotated, never hidden; detail floor is n/a (1 rep) when unavailable.")
+    add("  Locust is closed-loop (no")
     add("  coordinated-omission correction), so the oha numbers in run.sh stay the A6 reference.")
     add("")
     for name, group in (results.get("scenarios") or {}).items():
@@ -342,26 +514,21 @@ def render_section(results: dict[str, Any], heading: str = "##") -> str:
         add("")
         add(
             "| target | p50 ms | p90 ms | p99 ms | max ms | rps | offered | fail % | "
-            "ovh p99 ms | ttft p99 ms | ttft ovh p99 | stream p99 ms | cpu avg/max % | "
+            "ovh p99 ms | ttft_any p99 ms | ttft_content p99 ms | ttft_any ovh p99 | stream p99 ms | cpu avg/max % | "
             "PSS max MiB | gen cpu/proc % | flags |"
         )
-        add("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+        add("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")
         for target in TARGETS:
             s = group.get(target)
             if not s:
                 continue
-            ns, ttft, st = s["nonstream_ms"], s["ttft_ms"], s["stream_total_ms"]
-            ovh = s.get("overhead_ms") or {}
+            ns, ttft, st = s["nonstream_ms"], s["ttft_headline_ms"], s["stream_total_ms"]
             cpu, gen = s["cpu"], s["generator_cpu"]
             if target == "direct":
                 ovh_p99, ttft_ovh = "baseline", "baseline"
             else:
-                ovh_p99 = _range(
-                    ovh.get("nonstream_p99"),
-                    s.get("overhead_nonstream_p99_min"),
-                    s.get("overhead_nonstream_p99_max"),
-                )
-                ttft_ovh = _fmt(ovh.get("ttft_p99"))
+                ovh_p99 = _overhead(s, "nonstream_p99") if s.get("overhead_ms") else "–"
+                ttft_ovh = _overhead(s, "ttft_p99") if s.get("overhead_ms") else "–"
                 if not s.get("overhead_comparable"):
                     ovh_p99 += " (n/c)"
             flags = "; ".join(s["flags"]) if s["flags"] else "–"
@@ -369,10 +536,45 @@ def render_section(results: dict[str, Any], heading: str = "##") -> str:
                 f"| {target} | {_fmt(ns['p50'])} | {_fmt(ns['p90'])} | {_fmt(ns['p99'])} | "
                 f"{_fmt(ns['max'])} | {_fmt(s['rps'], 0)} | {_fmt(s['offered_rps'], 0)} | "
                 f"{_fmt((s['error_rate'] or 0) * 100, 2)} | {ovh_p99} | {_fmt(ttft['p99'])} | "
-                f"{ttft_ovh} | {_fmt(st['p99'])} | {_fmt(cpu['avg_pct'], 1)}/{_fmt(cpu['max_pct'], 1)} | "
+                f"{_fmt(s['ttft_content_ms']['p99'])} | {ttft_ovh} | {_fmt(st['p99'])} | "
+                f"{_fmt(cpu['avg_pct'], 1)}/{_fmt(cpu['max_pct'], 1)} | "
                 f"{_fmt(cpu['max_mem_mb'], 1)} | {_fmt(gen['per_process_avg_pct'], 1)} | {flags} |"
             )
         add("")
+        add("| target | overhead metric | median [min–max] ms | uncertainty ms | noise floor ms |")
+        add("|---|---|---:|---:|---:|")
+        for target, s in group.items():
+            for metric in s.get("overhead_ms") or {}:
+                interval = s["overhead_intervals_ms"][metric]
+                low, high = interval["bounds"]
+                label = "95% CI" if interval["kind"] == "ci95" else "range"
+                floor = s["overhead_noise_floor_ms"][metric]
+                add(
+                    f"| {target} | {metric} | "
+                    f"{_overhead(s, metric)} | {label} (n={interval['n']}) "
+                    f"[{_fmt(low)}, {_fmt(high)}] | "
+                    f"{_fmt(floor) if floor is not None else 'n/a (1 rep)'} |"
+                )
+        add("")
+        if any(s.get("steps") for s in group.values()):
+            add("Step boundaries follow the first history row reaching each user count.")
+            add("Interior rates skip max(3 s worker reporting, observed spawn time) + 1 s.")
+            add("Rates use the first changed-count report and the latest same-phase report inside the window.")
+            add("Same phase means a span that is a multiple of 3 s (tolerance ±0.5 s).")
+            add("Report spans <6 s are incomplete history, not CI failures.")
+            add("")
+            add("| target | step | achieved rps | offered rps | interior s | flags | diagnostics |")
+            add("|---|---:|---:|---:|---:|---|---|")
+            for target, s in group.items():
+                for step in s["steps"]:
+                    flags = "; ".join(step["flags"]) or "–"
+                    diagnostics = "; ".join(step["diagnostics"]) or "–"
+                    add(
+                        f"| {target} | {step['step']} | {_fmt(step['rps'], 1)} | "
+                        f"{_fmt(step['offered_rps'], 1)} | {_fmt(step['observed_secs'], 1)} | "
+                        f"{flags} | {diagnostics} |"
+                    )
+            add("")
         add("| target | " + " | ".join(f"{n} p50/p99" for n in POSITIVE) + " | negatives (status: count) |")
         add("|---|" + "---:|" * len(POSITIVE) + "---|")
         for target in TARGETS:
@@ -436,6 +638,7 @@ def insert_section(summary: Path, section: str) -> None:
 
 
 def write_outputs(locust_dir: Path, results: dict[str, Any]) -> None:
+    locust_dir.mkdir(parents=True, exist_ok=True)
     (locust_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
     (locust_dir / "summary.md").write_text(render_summary(results), encoding="utf-8")
     parent = locust_dir.parent / "summary.md"
@@ -473,7 +676,8 @@ def selftest() -> int:
         run = root / "locust"
         run.mkdir()
         meta = {"run_id": "t", "profile": "quick", "auth": "on", "client_keys": 4,
-                "config": {"locust_processes": 2, "gen_cpu_limit_pct": 85, "repetitions": 2}}
+                "config": {"locust_processes": 2, "gen_cpu_limit_pct": 85, "repetitions": 2,
+                           "litellm_workers": 4, "max_tokens": 16, "model": "mock"}}
         (run / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
         manifest = []
         base = [50.0 + i / 100 for i in range(100)]  # p99 = 50.9801
@@ -511,7 +715,7 @@ def selftest() -> int:
         assert lw["overhead_ms"]["ttft_p99"] == 0.3
         assert lw["overhead_comparable"] is True and not lw["flags"], lw["flags"]
         assert lw["negatives"]["neg_unknown_model"]["status"] == {"404": 6}
-        assert lw["rps"] == 10.1 and lw["cpu"]["max_mem_mb"] == 2.0
+        assert lw["rps"] == 10.4 and lw["cpu"]["max_mem_mb"] == 2.0
         ll = step["litellm"]
         assert ll["failures"] == 10 and ll["error_rate"] == round(5 / 106, 6)
         assert ll["generator_saturated"] is True and ll["overhead_comparable"] is False
@@ -530,6 +734,250 @@ def selftest() -> int:
         lw["error_rate"] = 0.5
         assert len(ci_check(results)) == 2, ci_check(results)
         assert percentile([1.0, 2.0, 3.0, 4.0], 50) == 2.5 and percentile([], 50) is None
+
+        # A single bad repetition must fail the real CLI gate despite a clean
+        # scenario median, for either gated target (LiteLLM stays informational).
+        for target in ("direct", "lumewarp"):
+            for bad in ("error_rate", "flags"):
+                gated = {
+                    "scenarios": {"step": {
+                        t: {"error_rate": 0, "requests": 400, "flags": []}
+                        for t in ("direct", "lumewarp")
+                    }},
+                    "runs": [
+                        {"scenario": "step", "target": t, "repetition": rep,
+                         "error_rate": 0.02 if bad == "error_rate" and t == target and rep == 4 else 0,
+                         "requests": 100,
+                         "flags": ["generator saturated"] if bad == "flags" and t == target and rep == 4 else []}
+                        for t in ("direct", "lumewarp") for rep in range(1, 5)
+                    ],
+                }
+                (run / "results.json").write_text(json.dumps(gated), encoding="utf-8")
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    assert main(["--run-dir", str(run), "--ci-check"]) == 1
+                assert f"{target} rep4" in output.getvalue()
+                assert len(ci_check(gated)) == 1
+        for n in (0, 1, 3, 4, 5):
+            values = [float(i) for i in range(1, n + 1)]
+            interval = overhead_interval(values)
+            assert interval["n"] == n
+            assert interval["kind"] == ("ci95" if n >= 5 else "range")
+            assert interval["bounds"] == ([1.0, float(n)] if n else [None, None])
+            assert interval == overhead_interval(values)
+
+        # Legacy dumps supply both TTFTs. Explicit new fields take precedence,
+        # including an empty content distribution for reasoning-only streams.
+        sample_dir = run / manifest[0]["dir"] / "samples"
+        samples = load_samples(sample_dir)
+        assert samples["ttft_any_ms"] == samples["ttft_content_ms"] == {"chat_stream": [55.0]}
+        path = sample_dir / "samples-1.json"
+        raw = json.loads(path.read_text())
+        raw.update(ttft_any_ms={"chat_stream": [3.0]}, ttft_content_ms={})
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        samples = load_samples(sample_dir)
+        assert samples["ttft_any_ms"] == {"chat_stream": [3.0]}
+        assert samples["ttft_content_ms"] == {}
+        raw["ttft_content_ms"] = {"chat_stream": [8.0]}
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        summarized = summarize_run(run, manifest[0], meta)
+        assert summarized["ttft_any_ms"]["p99"] == 3.0
+        assert summarized["ttft_content_ms"]["p99"] == 8.0
+        assert summarized["ttft_headline_ms"] == summarized["ttft_any_ms"]
+        assert "ttft_ms" not in summarized and "ttft_ms" not in samples
+
+        # Trimmed Aggregated rows from w1-driver-smoke's direct history:
+        # users start at zero and worker counters update every three seconds.
+        meta["config"]["step_offered"] = [20, 40]
+        entry = {**manifest[0], "stages": "10:5,20:5"}
+        history = run / entry["dir"] / "locust_stats_history.csv"
+        history.write_text(
+            "Timestamp,User Count,Name,Total Request Count\n"
+            "1792874996,0,Aggregated,0\n1792874997,0,Aggregated,0\n"
+            "1792874998,10,Aggregated,0\n1792874999,10,Aggregated,0\n"
+            "1792875000,10,Aggregated,46\n1792875001,10,Aggregated,46\n"
+            "1792875002,10,Aggregated,46\n1792875003,20,Aggregated,113\n"
+            "1792875004,20,Aggregated,113\n1792875005,20,Aggregated,113\n"
+            "1792875006,20,Aggregated,231\n",
+            encoding="utf-8",
+        )
+        steps = step_rates(history.parent, entry, meta)
+        assert [s["observed_secs"] for s in steps] == [0.0, 0.0]
+        assert all(not s["flags"] and s["diagnostics"] and s["rps"] is None for s in steps)
+        step_run = summarize_run(run, entry, meta)
+        step_summary = _median_run([step_run])
+        assert not step_summary["flags"] and all(s["diagnostics"] for s in step_summary["steps"])
+        assert ci_check({
+            "scenarios": {"step": {"direct": step_summary, "lumewarp": step_summary}},
+            "runs": [step_run, {**step_run, "target": "lumewarp"}],
+        }) == []
+        rendered = render_summary({"meta": meta, "scenarios": {"step": {"direct": step_summary}}})
+        columns = None
+        for line in rendered.splitlines():
+            if line.startswith("|"):
+                if columns is None:
+                    columns = line.count("|")
+                assert line.count("|") == columns
+            else:
+                columns = None
+        # One-second history rows with single-phase and staggered worker counters.
+        # CI/default quick interiors are 11/20 s (both L mod 3 = 2).
+        for stage_users, duration in (((20, 50), 15), ((100, 200, 300, 400, 500), 24)):
+            entry["stages"] = ",".join(f"{users}:{duration}" for users in stage_users)
+            meta["config"]["step_offered"] = [users * 2 for users in stage_users]
+            for share in (0.97, 0.80):
+                for phases in ((0,), (1,), (2,), (0, 1), (0, 2), (1, 2), (0, 1, 2)):
+                    for startup in (1, 2):
+                        for tail in (1, 2):
+                            rows = ["Timestamp,User Count,Name,Total Request Count"]
+                            counts = [0.0] * len(phases)
+                            reported = [0] * len(phases)
+                            weight = sum(range(1, len(phases) + 1))
+                            for elapsed in range(startup + duration * len(stage_users) - tail + 1):
+                                users = stage_users[(elapsed - startup) // duration] if elapsed >= startup else 0
+                                for worker, phase in enumerate(phases):
+                                    counts[worker] += users * 2 * share * (worker + 1) / weight
+                                    if elapsed % 3 == phase:
+                                        reported[worker] = round(counts[worker])
+                                rows.append(f"{1000 + elapsed},{users},Aggregated,{sum(reported)}")
+                            history.write_text("\n".join(rows) + "\n", encoding="utf-8")
+                            steps = step_rates(history.parent, entry, meta)
+                            for step in steps:
+                                assert not step["diagnostics"], (duration, share, phases, startup, tail, step)
+                                assert step["observed_secs"] >= 6 and step["observed_secs"] % 3 == 0
+                                assert (step["report_start_ts"] - 1000) % 3 in phases
+                                assert (step["report_end_ts"] - 1000) % 3 in phases
+                                # Each worker rounds its integer counter; delta
+                                # error is bounded by one request per worker.
+                                assert abs(step["rps"] - step["offered_rps"] * share) <= (
+                                    len(phases) / step["observed_secs"] + 0.05
+                                )
+                                assert bool(step["flags"]) == (share < 0.9)
+                            assert bool(summarize_run(run, entry, meta)["flags"]) == (share < 0.9)
+
+        # Trimmed direct history from w1-gate-ci-shape, relative timestamps.
+        # 22->30 mixes worker phases; 22->28 is 602/6 = 100.3 RPS.
+        meta["config"]["step_offered"] = [40, 100]
+        entry["stages"] = "20:15,50:15"
+        history.write_text(
+            "Timestamp,User Count,Name,Total Request Count\n"
+            "0,0,Aggregated,0\n2,20,Aggregated,0\n16,20,Aggregated,560\n"
+            "17,50,Aggregated,560\n18,50,Aggregated,650\n19,50,Aggregated,806\n"
+            "21,50,Aggregated,920\n22,50,Aggregated,1106\n24,50,Aggregated,1220\n"
+            "25,50,Aggregated,1410\n27,50,Aggregated,1524\n28,50,Aggregated,1708\n"
+            "30,50,Aggregated,1822\n",
+            encoding="utf-8",
+        )
+        actual = step_rates(history.parent, entry, meta)[1]
+        assert not actual["flags"] and not actual["diagnostics"]
+        assert actual["report_start_ts"] == 22 and actual["report_end_ts"] == 28
+        assert actual["observed_secs"] == 6 and abs(actual["rps"] - 100.2) < 1
+
+        meta["config"]["step_offered"] = [20, 40]
+        entry["stages"] = "10:15,20:15"
+        # One report interval is insufficient; exactly two is measurable.
+        for last in (1011, 1014):
+            history.write_text(
+                "Timestamp,User Count,Name,Total Request Count\n"
+                "1000,0,Aggregated,0\n1002,10,Aggregated,0\n"
+                + "".join(f"{ts},10,Aggregated,{(ts - 1002) * 20}\n" for ts in range(1005, last + 1, 3)),
+                encoding="utf-8",
+            )
+            first = step_rates(history.parent, entry, meta)[0]
+            assert first["observed_secs"] == last - 1008
+            assert first["rps"] == (20.0 if last == 1014 else None)
+            assert bool(first["diagnostics"]) == (last == 1011) and not first["flags"]
+
+        # Half-second phase tolerance is inclusive; just outside it is not a pair.
+        for last in (1014.5, 1014.501):
+            history.write_text(
+                "Timestamp,User Count,Name,Total Request Count\n"
+                "1000,0,Aggregated,0\n1002,10,Aggregated,0\n"
+                f"1008,10,Aggregated,120\n1011,10,Aggregated,180\n{last},10,Aggregated,250\n",
+                encoding="utf-8",
+            )
+            first = step_rates(history.parent, entry, meta)[0]
+            assert first["rps"] == (20.0 if last == 1014.5 else None)
+            assert bool(first["diagnostics"]) == (last != 1014.5) and not first["flags"]
+
+        # Missing users are a failure only after history covers the stage.
+        for last in (1031, 1032):
+            history.write_text(
+                "Timestamp,User Count,Name,Total Request Count\n"
+                "1000,0,Aggregated,0\n1002,10,Aggregated,0\n"
+                + "".join(f"{ts},10,Aggregated,{(ts - 1002) * 20}\n" for ts in range(1005, last + 1)),
+                encoding="utf-8",
+            )
+            missing = step_rates(history.parent, entry, meta)[1]
+            assert missing["rps"] is None and missing["diagnostics"]
+            assert missing["flags"] == (["step 2: users never reached"] if last == 1032 else [])
+            assert bool(summarize_run(run, entry, meta)["flags"]) == (last == 1032)
+        # Slow spawning extends the reporting lead-in beyond four seconds.
+        entry["stages"] = "10:20,20:20"
+        history.write_text(
+            "Timestamp,User Count,Name,Total Request Count\n"
+            "1000,0,Aggregated,0\n1001,1,Aggregated,0\n1008,10,Aggregated,0\n"
+            "1016,10,Aggregated,160\n1019,10,Aggregated,220\n"
+            "1022,10,Aggregated,280\n1025,10,Aggregated,340\n1028,10,Aggregated,400\n",
+            encoding="utf-8",
+        )
+        slow_spawn = step_rates(history.parent, entry, meta)
+        assert slow_spawn[0]["leadin_secs"] == 8.0 and slow_spawn[0]["rps"] == 20.0
+        assert slow_spawn[1]["rps"] is None and slow_spawn[1]["diagnostics"]
+        history.unlink()
+        assert all(
+            not s["flags"] and s["diagnostics"] and s["rps"] is None
+            for s in step_rates(history.parent, entry, meta)
+        )
+
+        # Different baseline latencies expose subtraction-of-medians bugs.
+        meta["config"].pop("step_offered")
+        manifest = []
+        for rep, baseline, overhead in ((1, 0.0, 1.0), (2, 100.0, 2.0), (3, 10.0, 30.0)):
+            for target, offset in (("direct", baseline), ("lumewarp", baseline + overhead)):
+                rel = f"paired/{target}.rep{rep}"
+                _write_dump(run / rel / "samples/samples-1.json",
+                            {"chat": [50 + offset]}, {"chat_stream": [55 + offset]})
+                manifest.append({"target": target, "scenario": "paired", "repetition": rep,
+                                 "measured_secs": 10, "dir": rel})
+        # Direct drifts 60/80/100 ms, but a paired 30 ms regression is real.
+        for rep, baseline in enumerate((60.0, 80.0, 100.0), 1):
+            for target, overhead in (("direct", 0.0), ("lumewarp", 30.0)):
+                rel = f"regression/{target}.rep{rep}"
+                _write_dump(run / rel / "samples/samples-1.json",
+                            {"chat": [baseline + overhead]}, {"chat_stream": [baseline + overhead]})
+                manifest.append({"target": target, "scenario": "regression", "repetition": rep,
+                                 "measured_secs": 10, "dir": rel})
+        (run / "scenarios.jsonl").write_text("\n".join(json.dumps(m) for m in manifest) + "\n")
+        results = build_results(run)
+        paired = results["scenarios"]["paired"]["lumewarp"]
+        assert all(v == 2.0 for v in paired["overhead_ms"].values())
+        assert paired["overhead_nonstream_p50_min"] == 1.0
+        assert paired["overhead_ttft_p99_max"] == 30.0
+        assert all(
+            interval == {"kind": "range", "n": 3, "bounds": [1.0, 30.0]}
+            for interval in paired["overhead_intervals_ms"].values()
+        )
+        assert all(floor == 100.0 for floor in paired["overhead_noise_floor_ms"].values())
+        regression = results["scenarios"]["regression"]["lumewarp"]
+        assert all(v == 30.0 for v in regression["overhead_ms"].values())
+        assert all(floor == 40.0 for floor in regression["overhead_noise_floor_ms"].values())
+        for name, expected in (("paired", "2.00 [1.00–30.00]"), ("regression", "30.00 [30.00–30.00]")):
+            section = render_section({"scenarios": {name: results["scenarios"][name]}})
+            row = next(line for line in section.splitlines() if line.startswith("| lumewarp |"))
+            assert row.split("|")[9].strip().startswith(expected), row
+        for group in results["scenarios"].values():
+            for s in group.values():
+                assert "ttft_ms" not in s and s["ttft_headline_ms"] == s["ttft_any_ms"]
+        assert all("ttft_ms" not in r for r in results["runs"])
+        assert results == build_results(run)
+        # The CLI can re-aggregate read-only inputs into an isolated output dir.
+        scratch = root / "scratch/locust"
+        original_results = (run / "results.json").read_bytes()
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert main(["--run-dir", str(run), "--output-dir", str(scratch)]) == 0
+        assert json.loads((scratch / "results.json").read_text()) == results
+        assert (run / "results.json").read_bytes() == original_results
     print("aggregate_locust selftest: ok")
     return 0
 
@@ -549,6 +997,22 @@ def ci_check(results: dict[str, Any]) -> list[str]:
                 problems.append(f"{name}: {target} failures {s['error_rate'] * 100:.2f}% > 1%")
             if not s.get("requests"):
                 problems.append(f"{name}: {target} served no requests")
+            reps = [
+                r for r in results.get("runs", [])
+                if r["scenario"] == name and r["target"] == target
+            ]
+            for r in reps:
+                reasons = list(r.get("flags") or [])
+                if r.get("error_rate", 0) > MAX_ERROR_RATE:
+                    reasons.append(f"failures {r['error_rate'] * 100:.2f}% > 1%")
+                if not r.get("requests"):
+                    reasons.append("served no requests")
+                if reasons:
+                    problems.append(
+                        f"{name}: {target} rep{r['repetition']}: " + "; ".join(dict.fromkeys(reasons))
+                    )
+            if not reps and s.get("flags"):
+                problems.append(f"{name}: {target}: " + "; ".join(s["flags"]))
         lw = group.get("lumewarp") or {}
         for neg, v in (lw.get("negatives") or {}).items():
             if v.get("fail"):
@@ -559,6 +1023,7 @@ def ci_check(results: dict[str, Any]) -> list[str]:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, help="<results>/<RUN_ID>/locust")
+    parser.add_argument("--output-dir", type=Path, help="write reports here instead of --run-dir")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument(
         "--ci-check", action="store_true", help="exit 1 on Lumewarp/direct failures or accepted negatives"
@@ -569,7 +1034,7 @@ def main(argv: list[str]) -> int:
     if not args.run_dir:
         parser.error("--run-dir is required")
     if args.ci_check:
-        results = json.loads((args.run_dir / "results.json").read_text(encoding="utf-8"))
+        results = json.loads(((args.output_dir or args.run_dir) / "results.json").read_text(encoding="utf-8"))
         problems = ci_check(results)
         for problem in problems:
             print(f"::error::locust: {problem}")
@@ -577,8 +1042,9 @@ def main(argv: list[str]) -> int:
             print("locust ci check: ok")
         return 1 if problems else 0
     results = build_results(args.run_dir)
-    write_outputs(args.run_dir, results)
-    print(f"wrote {args.run_dir / 'summary.md'}")
+    output_dir = args.output_dir or args.run_dir
+    write_outputs(output_dir, results)
+    print(f"wrote {output_dir / 'summary.md'}")
     return 0
 
 

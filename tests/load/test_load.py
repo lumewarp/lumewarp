@@ -24,6 +24,7 @@ from loadlib import (
     env_int,
     gateway_counter,
     hard_errors,
+    load_window,
     settle_usage,
     stream_resets,
     summarize,
@@ -33,7 +34,8 @@ from loadlib import (
 
 STEADY_SECS = env_int("LOAD_STEADY_SECS", 150)
 CHURN_SECS = env_int("LOAD_CHURN_SECS", 110)
-CP_SECS = env_int("LOAD_CP_SECS", 70)
+# Long enough for the outage (15 s in + CP_OUTAGE_SECS) plus USAGE_DRAIN_BOUND.
+CP_SECS = env_int("LOAD_CP_SECS", 90)
 CP_OUTAGE_SECS = env_float("LOAD_CP_OUTAGE_SECS", 20)
 BUDGET_SECS = env_int("LOAD_BUDGET_SECS", 50)
 GW_SECS = env_int("LOAD_GW_SECS", 50)
@@ -43,6 +45,9 @@ BURST_GAP = env_float("LOAD_BURST_GAP", 0.05)
 REVOKE_BOUND = env_float("LOAD_REVOKE_BOUND", 2.0)
 NEW_KEY_BOUND = env_float("LOAD_NEW_KEY_BOUND", 2.0)
 BUDGET_BOUND = env_float("LOAD_BUDGET_BOUND", 5.0)
+# The gateway's usage retry backoff caps at 30 s (gateway/.../usage.rs RETRY_MAX), so the
+# first report after the CP is back can come up to 30 s later; then the backlog drains.
+USAGE_DRAIN_BOUND = env_float("LOAD_USAGE_DRAIN_BOUND", 30 + 20)
 # ~16_000 nano-USD per mock request at mock-a prices.
 BUDGET = env_int("LOAD_BUDGET_NANO_USD", 10_000_000)
 DROPPED = "lumewarp_usage_events_dropped_total"
@@ -119,6 +124,7 @@ def test_churn_under_load(stack):
     timeline: dict = {}
     try:
         run.sleep_until(8)
+        step_started = time.time()
         # --- revoke keys under load: measured per key from the API call to the first 401.
         revoke_latency = []
         for key in revoked:
@@ -192,7 +198,7 @@ def test_churn_under_load(stack):
             "acked_latest_after_secs": round(converge_secs, 2),
         }
         assert burst["versions_published"] >= BURST // 4, f"burst was coalesced: {burst}"
-        assert run.elapsed() < CHURN_SECS - 2, "churn outlasted the load; raise LOAD_CHURN_SECS"
+        step_elapsed = run.elapsed()
     except BaseException:
         run.proc.kill()
         raise
@@ -232,6 +238,7 @@ def test_churn_under_load(stack):
     rl_429 = [r for r in records if r["st"] == 429]
     report = {
         "load": summarize(records, CHURN_SECS),
+        "load_window": load_window(run, step_elapsed, 2, records, step_started=step_started),
         "revoke_latency_s": dist([x for x in revoke_latency if x is not None], 1, 3),
         "revoke_latency_raw": [None if x is None else round(x, 3) for x in revoke_latency],
         "new_key_latency_s": dist([x for x in new_latency if x is not None], 1, 3),
@@ -254,6 +261,7 @@ def test_churn_under_load(stack):
     }
     write_report("2-churn", report)
 
+    assert report["load_window"]["ok"], report["load_window"]
     assert hard_errors(records) == [], hard_errors(records)[:10]
     # Revokes.
     assert (
@@ -290,6 +298,8 @@ def test_churn_under_load(stack):
             assert r.get("ra") and int(r["ra"]) >= 1, f"429 without Retry-After: {r}"
     # Versions: strictly increasing, gateway on the latest, nothing quarantined.
     revisions = [v["source_revision"] for v in versions]
+    # compiler/publish.py:_publish_locked skips latest[1] >= revision under the scope
+    # advisory lock. This scenario only compiles mutations (no rollback publications).
     assert revisions == sorted(set(revisions)), "source_revision not strictly increasing"
     created = [v["created_at"] for v in versions]
     assert created == sorted(created), "config_versions created_at not monotonic"
@@ -308,6 +318,7 @@ def test_control_plane_restart_under_load(stack):
     run.start()
     try:
         run.sleep_until(15)
+        failed_before = gateway_counter(gw, "lumewarp_usage_events_failed_total")
         t_stop = time.time()
         stack.stop_cp()
         wait_for(
@@ -318,17 +329,18 @@ def test_control_plane_restart_under_load(stack):
             peak_queue = max(peak_queue, gateway_counter(gw, "lumewarp_usage_queue_depth"))
             time.sleep(0.5)
         t_start = time.time()
+        failed_during = gateway_counter(gw, "lumewarp_usage_events_failed_total") - failed_before
         stack.start_cp()
         t_cp_ready = time.time()
         wait_acked(stack, 30)
         t_acked = time.time()
         wait_for(
             lambda: gateway_counter(gw, "lumewarp_usage_queue_depth") < 1000,
-            30,
+            USAGE_DRAIN_BOUND,
             "usage queue drained after the CP came back",
         )
         t_drained = time.time()
-        assert run.elapsed() < CP_SECS - 2, "outage outlasted the load; raise LOAD_CP_SECS"
+        step_elapsed = run.elapsed()
     except BaseException:
         run.proc.kill()
         raise
@@ -337,6 +349,7 @@ def test_control_plane_restart_under_load(stack):
     during = [r for r in records if t_stop <= r["t"] <= t_cp_ready]
     report = {
         "load": summarize(records, CP_SECS),
+        "load_window": load_window(run, step_elapsed, 2, records, step_started=t_stop),
         "outage_s": round(t_start - t_stop, 2),
         "cp_boot_s": round(t_cp_ready - t_start, 2),
         "reconnect_ack_after_cp_ready_s": round(t_acked - t_cp_ready, 2),
@@ -345,6 +358,7 @@ def test_control_plane_restart_under_load(stack):
         "ok_during_outage": sum(1 for r in during if r["st"] == 200),
         "peak_usage_queue_depth": peak_queue,
         "usage_report_failed_events": gateway_counter(gw, "lumewarp_usage_events_failed_total"),
+        "usage_report_failed_events_during_outage": failed_during,
         "usage": accounting(stack, records),
         "cost": cost_check(stack),
         "usage_dropped": gateway_counter(gw, DROPPED),
@@ -352,9 +366,13 @@ def test_control_plane_restart_under_load(stack):
         "config_stream_resets": stream_resets(gw),
     }
     write_report("3-cp-restart", report)
+    assert report["load_window"]["ok"], report["load_window"]
     assert hard_errors(records) == [], hard_errors(records)[:10]
     assert set(report["load"]["statuses"]) == {"200"}, report["load"]["statuses"]
-    assert report["ok_during_outage"] > 0 and report["peak_usage_queue_depth"] > 0, report
+    # usage.rs:Reporter::send records usage_batch(0, n) on retry, then samples queue.len()
+    # (lines 909-911). Either signal proves outage buffering, including an in-flight batch.
+    assert report["ok_during_outage"] > 0, report
+    assert peak_queue > 0 or failed_during > 0, report
     assert report["usage_dropped"] == 0, "queue overflowed; counts cannot match"
     assert_accounting(report)
 
@@ -378,9 +396,10 @@ def test_budget_under_load(stack):
         return rows[0]["exceeded_at"] if rows else None
 
     try:
+        step_started = time.time()
         exceeded_at = wait_for(exceeded, BUDGET_SECS - 15, "project budget exceeded", interval=0.2)
         t_exceeded = exceeded_at.timestamp()
-        assert run.elapsed() < BUDGET_SECS - 10, "budget hit too late; raise LOAD_BUDGET_SECS"
+        step_elapsed = run.elapsed()
     except BaseException:
         run.proc.kill()
         raise
@@ -403,6 +422,7 @@ def test_budget_under_load(stack):
     after = [r for r in records if r["k"] in budget_keys and r["st"] == 200 and r["t"] > t_exceeded]
     report = {
         "load": summarize(records, BUDGET_SECS),
+        "load_window": load_window(run, step_elapsed, 10, records, step_started=step_started),
         "budget_nano_usd": BUDGET,
         "spent_nano_usd": spent,
         "overshoot_nano_usd": spent - BUDGET,
@@ -415,6 +435,7 @@ def test_budget_under_load(stack):
         "config_stream_resets": stream_resets(gw),
     }
     write_report("4-budget", report)
+    assert report["load_window"]["ok"], report["load_window"]
     assert hard_errors(records) == [], hard_errors(records)[:10]
     for r in records:
         if r["st"] == 429:
@@ -450,7 +471,7 @@ def test_gateway_restart_under_load(stack):
         t_ready = time.time()
         acked = wait_acked(stack, 20)
         t_acked = time.time()
-        assert run.elapsed() < GW_SECS - 5, "restart outlasted the load; raise LOAD_GW_SECS"
+        step_elapsed = run.elapsed()
     except BaseException:
         run.proc.kill()
         raise
@@ -464,6 +485,7 @@ def test_gateway_restart_under_load(stack):
             by_status[str(r["st"])] += 1
     report = {
         "load": summarize(records, GW_SECS),
+        "load_window": load_window(run, step_elapsed, 5, records, step_started=t_stop),
         "drain_s": round(t_stopped - t_stop, 2),
         "down_s": round(t_listening - t_stopped, 2),
         "ready_after_start_s": round(t_ready - t_stopped, 2),
@@ -479,6 +501,7 @@ def test_gateway_restart_under_load(stack):
         "config_stream_resets": stream_resets(gw),
     }
     write_report("5-gw-restart", report)
+    assert report["load_window"]["ok"], report["load_window"]
     assert gw.proc.text().count("booting from cached snapshot") == log_before + 1, "not from disk"
     assert boot_version is not None and boot_version >= version, report
     assert acked >= version

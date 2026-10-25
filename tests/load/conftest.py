@@ -21,7 +21,7 @@ def pytest_runtest_makereport(item, call):
     return report
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="session")
 def binaries() -> None:
     for binary in (GATEWAY_BIN, MOCK_BIN):
         if not binary.exists():
@@ -31,7 +31,7 @@ def binaries() -> None:
 
 
 @pytest.fixture
-def stack(request):
+def stack(request, binaries):
     s = Stack()
     if wrapper := os.environ.get("LOAD_CP_WRAPPER"):
         # Run the control plane through a script (profiler, coverage, a local patch); it

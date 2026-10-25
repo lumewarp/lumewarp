@@ -379,6 +379,7 @@ LUMEWARP_CONFIG="$RUN_DIR/configs/lumewarp.yaml"
 LUMEWARP_SED=(
   -e "s|127\.0\.0\.1:9000|127.0.0.1:${MOCK_PORT}|g"
   -e "s|127\.0\.0\.1:4000|127.0.0.1:${LUMEWARP_PORT}|g"
+  -e "/^  listen:/a\\  admin_listen: 127.0.0.1:0"
 )
 if (( AUTH )); then
   LUMEWARP_SED+=(
