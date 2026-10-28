@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -6,6 +7,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 from stack import GATEWAY_BIN, MOCK_BIN, Stack  # noqa: E402
+
+collect_ignore = [] if os.environ.get("E2E_P2") == "1" else ["test_p2_exit_gate.py"]
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)

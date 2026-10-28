@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, type Key, type Schemas } from "../api";
-import { fmtDate, KeyBadge, PageHeader, SecretOnce } from "../components/Bits";
+import { fmtDate, KeyBadge, PageHeader, SecretOnce, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { Dialog } from "../components/Dialog";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
@@ -93,7 +93,7 @@ export function Keys() {
           { key: "name", header: "Name", sort: (a, b) => a.name.localeCompare(b.name), cell: (key) => <><strong>{key.name}</strong> <code className="muted">{key.display_prefix}…</code></> },
           { key: "owner", header: "Owner", cell: () => me.data?.email ?? "—" },
           { key: "team", header: "Team", cell: (key) => me.data?.teams.find((team) => team.team_id === key.team_id)?.team_name ?? key.team_id.slice(0, 8) },
-          { key: "lifecycle", header: "Lifecycle", cell: (key) => <><KeyBadge k={key} />{key.suspended_reason && <span className="muted"> {key.suspended_reason}</span>}</> },
+          { key: "lifecycle", header: "Lifecycle", cell: (key) => <><KeyBadge k={key} /><SuspendedReason reason={key.suspended_reason} /></> },
           { key: "expires", header: "Expires", cell: (key) => fmtDate(key.expires_at) },
           { key: "created", header: "Created", cell: (key) => fmtDate(key.created_at) },
           {
@@ -101,6 +101,7 @@ export function Keys() {
             header: "",
             cell: (key) => {
               const allowed = perms.canManageKey(key);
+              const ownerInactive = key.owner_kind === "user" && key.owner_active === false;
               return (
                 <RowActions
                   canEdit={allowed && key.lifecycle !== "revoked"}
@@ -112,9 +113,10 @@ export function Keys() {
                         className="btn btn-sm"
                         disabled={
                           key.lifecycle === "suspended"
-                            ? !perms.canResumeKey(key)
+                            ? ownerInactive || !perms.canResumeKey(key)
                             : !allowed
                         }
+                        title={key.lifecycle === "suspended" && ownerInactive ? "Cannot resume because the owner is inactive" : undefined}
                         onClick={() => void setLifecycle({ key, lifecycle: key.lifecycle === "suspended" ? "active" : "suspended" })}
                       >
                         {key.lifecycle === "suspended" ? "Resume" : "Suspend"}

@@ -1,11 +1,13 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import { clearToken } from "../auth";
+import { api } from "../api";
+import { clearCsrfToken, clearToken, getToken } from "../auth";
 import type { Me } from "../api";
 import { useCan, useMe } from "../hooks";
 import { useTheme } from "../theme";
 import { Badge } from "./Bits";
+import { useToast } from "./Toast";
 
 const NAV = [
   { to: "/", label: "Overview" },
@@ -36,10 +38,18 @@ export function Layout() {
   const { theme, cycle } = useTheme();
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const toast = useToast();
   const [navOpen, setNavOpen] = useState(false);
 
-  const logout = () => {
+  const logout = async () => {
+    try {
+      if (!getToken()) await api.logoutSession();
+    } catch (error) {
+      toast("error", error instanceof Error ? error.message : "Unable to sign out");
+      return;
+    }
     clearToken();
+    clearCsrfToken();
     qc.clear();
     void navigate({ to: "/login" });
   };
@@ -72,12 +82,12 @@ export function Layout() {
             Theme: {THEME_LABEL[theme]}
           </button>
           {me.data && (
-            <span className="principal">
-              <span>{me.data.display_name}</span>
+            <span className="principal" title={me.data.email ?? undefined}>
+              <span>{me.data.display_name || me.data.email || "Bootstrap admin"}</span>
               <Badge tone="info">{roleLabel(me.data)}</Badge>
             </span>
           )}
-          <button className="btn btn-sm" onClick={logout}>
+          <button className="btn btn-sm" onClick={() => void logout()}>
             Sign out
           </button>
         </header>

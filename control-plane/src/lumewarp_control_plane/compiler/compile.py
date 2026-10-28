@@ -344,7 +344,7 @@ async def compile_scope(
         owner_gone = False
         if k.owner_kind is KeyOwnerKind.USER:
             owner = members.get((k.team_id, k.user_id))
-            # W3: key reconciler suspends keys whose external membership was revoked.
+            # keys/reconciler.py suspends keys whose external membership was revoked.
             owner_gone = k.user_id not in active_users or (
                 require_local_membership and owner is None
             )

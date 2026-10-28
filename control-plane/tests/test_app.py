@@ -56,8 +56,14 @@ def test_unknown_route_error_shape() -> None:
 
 
 @pytest.mark.parametrize("backend", ["builtin", "external"])
-async def test_background_compiler_receives_backend_membership_mode(monkeypatch, backend) -> None:
+@pytest.mark.parametrize("reconcile_enabled", [True, False])
+async def test_background_compiler_receives_backend_membership_mode(
+    monkeypatch,
+    backend,
+    reconcile_enabled,
+) -> None:
     compiler_started = asyncio.Event()
+    reconciler_started = asyncio.Event()
     grpc_stopped = asyncio.Event()
 
     class Server:
@@ -78,6 +84,14 @@ async def test_background_compiler_receives_backend_membership_mode(monkeypatch,
     async def notifier_loop(app, stop):
         await stop.wait()
 
+    async def reconcile_loop(factory, authorizer, stop, *, poll_seconds, full_seconds, settings):
+        assert factory is None
+        assert authorizer is app.state.authorizer
+        assert poll_seconds == settings.key_reconcile_poll_seconds
+        assert full_seconds == settings.key_reconcile_full_seconds
+        reconciler_started.set()
+        await stop.wait()
+
     async def rollover(*args):
         await asyncio.Event().wait()
 
@@ -86,11 +100,12 @@ async def test_background_compiler_receives_backend_membership_mode(monkeypatch,
     monkeypatch.setattr(app_module.grpc_services, "registry_for", lambda server: None)
     monkeypatch.setattr(app_module.compiler, "run_compiler_loop", compiler_loop)
     monkeypatch.setattr(app_module, "_notifier_loop", notifier_loop)
+    monkeypatch.setattr(app_module, "run_key_reconciler", reconcile_loop)
     monkeypatch.setattr(app_module.usage, "rollover_scheduler", rollover)
     failures = []
     app = SimpleNamespace(
         state=SimpleNamespace(
-            settings=Settings(authz_backend=backend),
+            settings=Settings(authz_backend=backend, key_reconcile_enabled=reconcile_enabled),
             authorizer=SimpleNamespace(manages_grants=backend == "builtin"),
             session_factory=None,
             fatal_handler=failures.append,
@@ -99,7 +114,25 @@ async def test_background_compiler_receives_backend_membership_mode(monkeypatch,
     runtime = await app_module.start_background(app)
     try:
         await asyncio.wait_for(compiler_started.wait(), 5)
+        if reconcile_enabled:
+            await asyncio.wait_for(reconciler_started.wait(), 5)
+        assert ("key_reconciler" in runtime.tasks) is reconcile_enabled
     finally:
         await app_module.stop_background(runtime)
     assert runtime.failures == {}
     assert failures == []
+
+
+async def test_lifespan_closes_authorizer_backend_with_background_disabled(monkeypatch):
+    closed = []
+
+    class Backend:
+        async def aclose(self):
+            closed.append(True)
+
+    app = create_app(Settings(background_enabled=False))
+    app.state.authorizer = SimpleNamespace(backend=Backend())
+    async with app_module.lifespan(app):
+        assert app.state.runtime.tasks == {}
+        assert closed == []
+    assert closed == [True]
