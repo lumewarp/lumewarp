@@ -337,7 +337,14 @@ class Stack:
         assert r.status_code in (200, 201), (method, path, r.status_code, r.text)
         return r.json()
 
-    def seed(self, *, priced: bool = True, project_budget: int | None = None) -> "Seeded":
+    def seed(
+        self,
+        *,
+        priced: bool = True,
+        team_budget: int | None = None,
+        owner_budget: int | None = None,
+        owner_kind: str = "service_account",
+    ) -> "Seeded":
         up = self.ok(
             "POST",
             "/upstreams",
@@ -355,33 +362,48 @@ class Stack:
             }
         dep = self.ok("POST", "/deployments", json=dep)
         self.ok("POST", "/routes", json={"model": "mock", "deployment_ids": [dep["id"]]})
-        org = self.ok("POST", "/orgs", json={"name": "acme", "model_access": "all"})
-        team = self.ok("POST", f"/orgs/{org['id']}/teams", json={"name": "ml"})
-        body = {"name": "chat"}
-        if project_budget is not None:
-            body["budget_nano_usd"] = project_budget
-        project = self.ok("POST", f"/teams/{team['id']}/projects", json=body)
+        body = {"name": "ml", "model_access": "all"}
+        if team_budget is not None:
+            body["budget_nano_usd"] = team_budget
+        team = self.ok("POST", "/teams", json=body)
+        body = {}
+        if owner_budget is not None:
+            body["budget_nano_usd"] = owner_budget
+        token = ADMIN_TOKEN
+        if owner_kind == "user":
+            token = self.create_pat("owner@e2e.test", team["id"], "member")
+            owner_id = self.ok("GET", "/users/me", token)["user_id"]
+            self.ok("PATCH", f"/teams/{team['id']}/members/{owner_id}", json=body)
+            key_body = {}
+        else:
+            assert owner_kind == "service_account"
+            owner_id = self.ok(
+                "POST", f"/teams/{team['id']}/service-accounts", json={"name": "chat", **body}
+            )["id"]
+            key_body = {"service_account_id": owner_id}
         keys = {}
         for name in ("a", "b"):
             created = self.ok(
                 "POST",
-                f"/projects/{project['id']}/keys",
-                json={"name": f"key-{name}", "model_access": "all"},
+                f"/teams/{team['id']}/keys",
+                token,
+                json={"name": f"key-{name}", **key_body},
             )
+            assert created["key"]["owner_kind"] == owner_kind
             keys[name] = Key(created["key"]["id"], created["secret"])
         self.wait_key_count(2)
-        return Seeded(org["id"], team["id"], project["id"], keys["a"], keys["b"])
+        return Seeded(team["id"], owner_id, keys["a"], keys["b"])
 
-    def create_pat(self, email: str, org_id: str, team_id: str | None, role: str) -> str:
+    def create_pat(self, email: str, team_id: str, role: str) -> str:
         """User + membership via REST; the PAT row is inserted directly (the bootstrap
         principal cannot own tokens)."""
         from lumewarp_control_plane.security import SecretKind, generate_secret
 
         user = self.ok("POST", "/users", json={"email": email})
         self.ok(
-            "POST",
-            "/memberships",
-            json={"user_id": user["id"], "org_id": org_id, "team_id": team_id, "role": role},
+            "PUT",
+            f"/teams/{team_id}/members/{user['id']}",
+            json={"role": role},
         )
         new = generate_secret(SecretKind.PAT)
         pg(
@@ -426,11 +448,5 @@ class Key:
 
 
 class Seeded:
-    def __init__(self, org_id, team_id, project_id, a: Key, b: Key) -> None:
-        self.org_id, self.team_id, self.project_id, self.a, self.b = (
-            org_id,
-            team_id,
-            project_id,
-            a,
-            b,
-        )
+    def __init__(self, team_id: str, owner_id: str, a: Key, b: Key) -> None:
+        self.team_id, self.owner_id, self.a, self.b = team_id, owner_id, a, b

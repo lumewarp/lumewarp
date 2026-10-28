@@ -10,8 +10,7 @@ per key, status and stream flag.
 import time
 from collections import Counter, defaultdict
 
-from stack import SCOPE, pg, wait_for
-
+import pytest
 from loadlib import (
     Fleet,
     LoadRun,
@@ -31,6 +30,7 @@ from loadlib import (
     wait_acked,
     write_report,
 )
+from stack import SCOPE, pg, wait_for
 
 STEADY_SECS = env_int("LOAD_STEADY_SECS", 150)
 CHURN_SECS = env_int("LOAD_CHURN_SECS", 110)
@@ -75,7 +75,7 @@ def assert_accounting(report: dict) -> None:
     assert not acc["mismatches"], f"usage rows != client requests: {acc['mismatches'][:20]}"
     costs = report["cost"]
     assert costs["rows_with_wrong_cost"] == 0, costs
-    assert not costs["projects_mismatched"], costs
+    assert not costs["scopes_mismatched"], costs
 
 
 def test_steady_mixed_load(stack):
@@ -89,7 +89,8 @@ def test_steady_mixed_load(stack):
     report = {
         "load": summarize(records, STEADY_SECS),
         "keys": len(fleet.keys),
-        "projects": len(fleet.projects),
+        "teams": len(fleet.teams),
+        "owners": len(fleet.owners),
         "usage": accounting(stack, records),
         "cost": cost_check(stack),
         "usage_dropped": gateway_counter(gw, DROPPED),
@@ -112,10 +113,10 @@ def test_churn_under_load(stack):
     probes = Records()
     probe = Probe(gw, probes)
     rl_index = 1
-    rl_keys = fleet.project_keys(rl_index)
+    rl_keys = fleet.owner_keys(rl_index)
     rl_ids = {k["id"] for k in rl_keys}
-    # One key per project (except the rate-limited one) is revoked under load.
-    revoked = [fleet.project_keys(i)[0] for i in range(len(fleet.projects)) if i != rl_index][:6]
+    # One key per owner (except the rate-limited one) is revoked under load.
+    revoked = [fleet.owner_keys(i)[0] for i in range(len(fleet.owners)) if i != rl_index][:6]
     burst_key = fleet.keys[-1]  # PATCHed many times; kept out of the pool
     pool = [k for k in fleet.keys if k is not burst_key]
     run = LoadRun(stack, gw, "churn", pool, CHURN_SECS)
@@ -137,11 +138,11 @@ def test_churn_under_load(stack):
 
         # --- create keys under load: accepted within a bound, then added to the pool.
         new_latency = []
-        others = [i for i in range(len(fleet.projects)) if i != rl_index]
+        others = [i for i in range(len(fleet.owners)) if i != rl_index]
         for i in range(6):
-            project_id = fleet.projects[others[i % len(others)]]["id"]
+            owner_id = fleet.owners[others[i % len(others)]]["id"]
             t0 = time.time()
-            key = fleet.create_key(project_id)
+            key = fleet.create_key(owner_id)
             fleet.keys.append(key)
             seen = probe.until(key, ok200, 5)
             new_latency.append(None if seen is None else seen - t0)
@@ -167,15 +168,15 @@ def test_churn_under_load(stack):
         timeline["a_only"] = wait_acked(stack)
         time.sleep(4)
 
-        # --- lower a rate limit: 429 + Retry-After for that project only, never 5xx.
-        rl_project = fleet.projects[rl_index]["id"]
+        # --- lower an owner rate limit: 429 + Retry-After only for its keys, never 5xx.
+        rl_owner = fleet.owners[rl_index]["policy_path"]
         t_rl_api = time.time()
-        stack.ok("PATCH", f"/projects/{rl_project}", json={"rpm_limit": 60})
+        stack.ok("PATCH", rl_owner, json={"rpm_limit": 60})
         wait_acked(stack)
         t_rl = time.time()
         time.sleep(8)
         t_rl_off_api = time.time()
-        stack.ok("PATCH", f"/projects/{rl_project}", json={"rpm_limit": None})
+        stack.ok("PATCH", rl_owner, json={"rpm_limit": None})
         wait_acked(stack)
         t_rl_off = time.time()
         assert probe.until(rl_keys[0], ok200, 3) is not None, "rate limit cleared but still 429"
@@ -184,7 +185,11 @@ def test_churn_under_load(stack):
         burst_start_version = stack.current_version()
         t0 = time.time()
         for i in range(BURST):
-            stack.ok("PATCH", f"/keys/{burst_key['id']}", json={"rpm_limit": 100_000 + i})
+            stack.ok(
+                "PATCH",
+                next(o["policy_path"] for o in fleet.owners if o["id"] == burst_key["owner_id"]),
+                json={"rpm_limit": 100_000 + i},
+            )
             time.sleep(BURST_GAP)
         api_secs = time.time() - t0
         latest = wait_acked(stack, 30)
@@ -246,7 +251,7 @@ def test_churn_under_load(stack):
         "traffic_by_phase": {k: dict(v) for k, v in phases.items()},
         "rate_limit": {
             "requests_429": len(rl_429),
-            "rate_limited_project_requests_while_limited": sum(
+            "rate_limited_owner_requests_while_limited": sum(
                 1 for r in locust_records if r["k"] in rl_ids and t_rl <= r["t"] <= t_rl_off_api
             ),
             "publish_to_ack_s": round(t_rl - t_rl_api, 3),
@@ -264,9 +269,9 @@ def test_churn_under_load(stack):
     assert report["load_window"]["ok"], report["load_window"]
     assert hard_errors(records) == [], hard_errors(records)[:10]
     # Revokes.
-    assert (
-        None not in revoke_latency
-    ), f"a revoked key was still accepted after 5 s: {revoke_latency}"
+    assert None not in revoke_latency, (
+        f"a revoked key was still accepted after 5 s: {revoke_latency}"
+    )
     assert max(revoke_latency) < REVOKE_BOUND, revoke_latency
     for key in revoked:
         late = [
@@ -285,13 +290,13 @@ def test_churn_under_load(stack):
     assert 0.3 < ab["mock-b"] / (ab["mock-a"] + ab["mock-b"]) < 0.7, phases
     assert set(phases["b_only"]) == {"mock-b"}, phases
     assert set(phases["a_only_after"]) == {"mock-a"}, phases
-    # Rate limit: only the limited project, only while limited, always with Retry-After.
+    # Rate limit: only the limited owner, only while limited, always with Retry-After.
     while_limited = [
         r for r in locust_records if r["k"] in rl_ids and t_rl <= r["t"] <= t_rl_off_api
     ]
-    assert any(r["st"] == 429 for r in while_limited), "no 429 while the project was limited"
+    assert any(r["st"] == 429 for r in while_limited), "no 429 while the owner was limited"
     for r in rl_429:
-        assert r["k"] in rl_ids, f"429 on a key outside the limited project: {r}"
+        assert r["k"] in rl_ids, f"429 on a key outside the limited owner: {r}"
         assert r.get("c") == "rate_limit_exceeded", r
         assert t_rl_api <= r["t"] <= t_rl_off, f"429 outside the limited window: {r}"
         if not r.get("probe"):
@@ -377,27 +382,39 @@ def test_control_plane_restart_under_load(stack):
     assert_accounting(report)
 
 
-def test_budget_under_load(stack):
-    fleet = Fleet(stack, budgets={0: BUDGET})
+@pytest.mark.parametrize("scope", ["service_account", "member", "team"])
+def test_budget_under_load(stack, scope):
+    owner_index = 1 if scope == "member" else 0
+    fleet = Fleet(
+        stack,
+        budgets={owner_index: BUDGET} if scope != "team" else None,
+        team_budgets={0: BUDGET} if scope == "team" else None,
+    )
     gw = stack.start_gateway()
     wait_acked(stack)
-    budget_keys = {k["id"] for k in fleet.project_keys(0)}
-    project_id = fleet.projects[0]["id"]
-    run = LoadRun(stack, gw, "budget", fleet.keys, BUDGET_SECS)
+    owner = fleet.owners[owner_index]
+    scope_id = fleet.teams[0]["id"] if scope == "team" else owner["scope_id"]
+    budget_keys = {
+        k["id"]
+        for k in fleet.keys
+        if (k["team_id"] == scope_id if scope == "team" else k["owner_id"] == owner["id"])
+    }
+    run = LoadRun(stack, gw, f"budget-{scope}", fleet.keys, BUDGET_SECS)
     run.start()
 
     def exceeded():
         rows = pg(
             stack.dsn,
-            "SELECT exceeded_at FROM usage_totals WHERE scope_type = 'project'"
-            " AND scope_id = $1::uuid AND exceeded_at IS NOT NULL",
-            project_id,
+            "SELECT exceeded_at FROM usage_totals WHERE scope_type = $1"
+            " AND scope_id = $2::uuid AND exceeded_at IS NOT NULL",
+            scope,
+            scope_id,
         )
         return rows[0]["exceeded_at"] if rows else None
 
     try:
         step_started = time.time()
-        exceeded_at = wait_for(exceeded, BUDGET_SECS - 15, "project budget exceeded", interval=0.2)
+        exceeded_at = wait_for(exceeded, BUDGET_SECS - 15, "owner budget exceeded", interval=0.2)
         t_exceeded = exceeded_at.timestamp()
         step_elapsed = run.elapsed()
     except BaseException:
@@ -415,15 +432,17 @@ def test_budget_under_load(stack):
         assert not late, f"budget key {key} accepted after it flipped: {late[:3]}"
     spent = pg(
         stack.dsn,
-        "SELECT cost_nano_usd FROM usage_totals WHERE scope_type = 'project'"
-        " AND scope_id = $1::uuid",
-        project_id,
+        "SELECT cost_nano_usd FROM usage_totals WHERE scope_type = $1 AND scope_id = $2::uuid",
+        scope,
+        scope_id,
     )[0]["cost_nano_usd"]
     after = [r for r in records if r["k"] in budget_keys and r["st"] == 200 and r["t"] > t_exceeded]
     report = {
         "load": summarize(records, BUDGET_SECS),
         "load_window": load_window(run, step_elapsed, 10, records, step_started=step_started),
         "budget_nano_usd": BUDGET,
+        "budget_scope": scope,
+        "budget_scope_id": scope_id,
         "spent_nano_usd": spent,
         "overshoot_nano_usd": spent - BUDGET,
         "overshoot_pct": round(100 * (spent - BUDGET) / BUDGET, 1),
@@ -434,7 +453,7 @@ def test_budget_under_load(stack):
         "usage_dropped": gateway_counter(gw, DROPPED),
         "config_stream_resets": stream_resets(gw),
     }
-    write_report("4-budget", report)
+    write_report(f"4-budget-{scope}", report)
     assert report["load_window"]["ok"], report["load_window"]
     assert hard_errors(records) == [], hard_errors(records)[:10]
     for r in records:
@@ -447,6 +466,69 @@ def test_budget_under_load(stack):
     assert_accounting(report)
     assert report["usage_dropped"] == 0
     assert report["config_stream_resets"] == 0, "config stream dropped under steady CP"
+
+
+def test_rate_limit_under_load(stack):
+    fleet = Fleet(stack)
+    gw = stack.start_gateway()
+    wait_acked(stack)
+    probes = Records()
+    probe = Probe(gw, probes)
+    limited = fleet.owners[:2]
+    limited_ids = {k["id"] for i in range(2) for k in fleet.owner_keys(i)}
+    run = LoadRun(stack, gw, "rate-limit", fleet.keys, env_int("LOAD_RATE_LIMIT_SECS", 20))
+    try:
+        for owner in limited:
+            stack.ok("PATCH", owner["policy_path"], json={"rpm_limit": 1})
+        wait_acked(stack)
+        # Different keys share the owner's limiter, for both member and SA scopes.
+        for i in range(2):
+            keys = fleet.owner_keys(i)
+            assert probe.chat(keys[0]) == (200, None)
+            assert probe.chat(keys[1]) == (429, "rate_limit_exceeded")
+        run.start()
+        records = run.wait()
+        for owner in limited:
+            stack.ok("PATCH", owner["policy_path"], json={"rpm_limit": None})
+        wait_acked(stack)
+        for i in range(2):
+            assert probe.chat(fleet.owner_keys(i)[1]) == (200, None)
+    except BaseException:
+        run.proc.kill()
+        raise
+    finally:
+        probe.close()
+    records += probes.items
+    settle_usage(stack, sum(r["st"] == 200 for r in records))
+    report = {
+        "load": summarize(records, run.seconds),
+        "limited_owner_kinds": [o["owner_kind"] for o in limited],
+        "limited_requests": {
+            owner["owner_kind"]: sum(
+                r["st"] == 429 for r in records if r["k"] in {k["id"] for k in fleet.owner_keys(i)}
+            )
+            for i, owner in enumerate(limited)
+        },
+        "usage": accounting(stack, records),
+        "cost": cost_check(stack),
+        "usage_dropped": gateway_counter(gw, DROPPED),
+        "config_stream_resets": stream_resets(gw),
+    }
+    write_report("6-rate-limit", report)
+    assert hard_errors(records) == []
+    for i in range(2):
+        ids = {k["id"] for k in fleet.owner_keys(i)}
+        assert any(r["st"] == 429 and r["k"] in ids for r in records if not r.get("probe"))
+    for r in records:
+        if r["st"] == 429:
+            assert r["k"] in limited_ids and r.get("c") == "rate_limit_exceeded", r
+            if not r.get("probe"):
+                assert r.get("ra") and int(r["ra"]) >= 1, r
+        else:
+            assert r["st"] == 200, r
+    assert_accounting(report)
+    assert report["usage_dropped"] == 0
+    assert report["config_stream_resets"] == 0
 
 
 def test_gateway_restart_under_load(stack):
