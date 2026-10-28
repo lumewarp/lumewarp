@@ -36,6 +36,39 @@ class Settings(BaseSettings):
     bootstrap_token: SecretStr | None = None
     # Authorization backend: "builtin" or a `lumewarp.authz` entry point name (authz/).
     authz_backend: str = "builtin"
+    # Every authorization backend call is bounded; a timeout is Decision.ERROR (503).
+    authz_timeout_seconds: float = Field(default=2.0, gt=0)
+    # `openfga` backend (authz/openfga.py). dev: scripts/dev-idp.sh up prints these.
+    openfga_url: str | None = None
+    openfga_store_id: str | None = None
+    openfga_model_id: str | None = None
+    openfga_api_token: SecretStr | None = None
+    # `http` backend (authz/http.py): POST {user_id, relation, resource} -> {decision}.
+    authz_http_url: str | None = None
+    authz_http_token: SecretStr | None = None
+
+    # Key reconciler (keys/reconciler.py): suspends keys whose owner lost team membership.
+    # Polls the backend's changes() this often when it has one; otherwise rescans every
+    # key each full interval. A full rescan also runs every full interval as a safety net.
+    key_reconcile_poll_seconds: float = Field(default=2.0, gt=0)
+    key_reconcile_full_seconds: float = Field(default=300.0, gt=0)
+    key_reconcile_enabled: bool = True
+
+    # Admin UI login with OIDC (authorization code + PKCE, auth/oidc.py). Unset issuer =
+    # SSO disabled (bootstrap token and PATs only).
+    oidc_issuer: str | None = None
+    oidc_client_id: str | None = None
+    oidc_client_secret: SecretStr | None = None
+    oidc_scopes: str = "openid email profile"
+    # Externally visible base URL of the control plane, used to build the OIDC redirect
+    # URI (<public_url>/api/v1/session/oidc/callback). Unset = derived from the request.
+    public_url: str | None = None
+    # Create a user with no grants on first SSO login. Off = only pre-created users
+    # (matched by verified email on first login) may sign in.
+    oidc_jit_users: bool = True
+    session_ttl_seconds: int = Field(default=12 * 3600, ge=60)
+    # `Secure` on the session cookie. Turn off only for plain-http dev on a non-localhost.
+    session_cookie_secure: bool = True
     # Config scope this control plane publishes (Snapshot.scope).
     scope: str = "default"
 
