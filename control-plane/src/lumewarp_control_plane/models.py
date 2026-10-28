@@ -146,6 +146,16 @@ class RoutingStrategy(enum.StrEnum):
     WEIGHTED = "weighted"
     LEAST_IN_FLIGHT = "least_in_flight"
     LOWEST_LATENCY = "lowest_latency"
+    VLLM_LOAD = "vllm_load"
+
+
+class StickyBy(enum.StrEnum):
+    """What a traffic split hashes to keep a caller on one split (proto StickyBy)."""
+
+    NONE = "none"
+    HEADER = "header"
+    TEAM = "team"
+    KEY = "key"
 
 
 class ConfigVersionKind(enum.StrEnum):
@@ -488,6 +498,36 @@ class Upstream(TimestampMixin, Base):
             name="api_key_ref_env_name",
         ),
         CheckConstraint("timeout_ms >= 0", name="timeout_nonneg"),
+        # Health check: interval/timeout NULL = no active probing; the other settings
+        # only exist together with them.
+        CheckConstraint(
+            "(health_check_interval_ms IS NULL) = (health_check_timeout_ms IS NULL)"
+            " AND (health_check_interval_ms IS NOT NULL OR (health_check_path IS NULL"
+            " AND health_check_unhealthy_threshold IS NULL"
+            " AND health_check_healthy_threshold IS NULL))",
+            name="health_check_shape",
+        ),
+        CheckConstraint(
+            "health_check_interval_ms IS NULL OR (health_check_interval_ms >= 1000"
+            " AND health_check_timeout_ms > 0"
+            " AND health_check_timeout_ms < health_check_interval_ms)",
+            name="health_check_bounds",
+        ),
+        CheckConstraint(
+            "(health_check_unhealthy_threshold IS NULL OR health_check_unhealthy_threshold > 0)"
+            " AND (health_check_healthy_threshold IS NULL OR health_check_healthy_threshold > 0)",
+            name="health_check_thresholds",
+        ),
+        CheckConstraint(
+            "circuit_breaker_enabled OR (circuit_failure_threshold IS NULL"
+            " AND circuit_open_ms IS NULL)",
+            name="circuit_breaker_shape",
+        ),
+        CheckConstraint(
+            "(circuit_failure_threshold IS NULL OR circuit_failure_threshold > 0)"
+            " AND (circuit_open_ms IS NULL OR circuit_open_ms > 0)",
+            name="circuit_breaker_positive",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
@@ -504,6 +544,22 @@ class Upstream(TimestampMixin, Base):
         default=StreamUsageMode.INCLUDE_USAGE,
         server_default=StreamUsageMode.INCLUDE_USAGE.value,
     )
+    # Active health probe (proto HealthCheck). NULL interval = not probed. Path NULL =
+    # gateway default "/models"; thresholds NULL = gateway defaults (3 / 1).
+    health_check_path: Mapped[str | None] = mapped_column(String(400))
+    health_check_interval_ms: Mapped[int | None] = mapped_column(Integer)
+    health_check_timeout_ms: Mapped[int | None] = mapped_column(Integer)
+    health_check_unhealthy_threshold: Mapped[int | None] = mapped_column(Integer)
+    health_check_healthy_threshold: Mapped[int | None] = mapped_column(Integer)
+    # Per-deployment circuit breaker (proto CircuitBreaker); NULL settings = gateway
+    # defaults (5 failures / 30000 ms).
+    circuit_breaker_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    circuit_failure_threshold: Mapped[int | None] = mapped_column(Integer)
+    circuit_open_ms: Mapped[int | None] = mapped_column(Integer)
+    # Prometheus endpoint for ROUTING_STRATEGY_VLLM_LOAD; NULL = derived from base_url.
+    metrics_url: Mapped[str | None] = mapped_column(Text)
 
 
 class Deployment(TimestampMixin, Base):
@@ -535,9 +591,34 @@ class Deployment(TimestampMixin, Base):
 
 
 class Route(TimestampMixin, Base):
-    """Public model alias -> ordered deployments (`route_deployments`)."""
+    """Public model alias -> ordered deployments (`route_deployments`).
+
+    Resilience (P2): an optional retry policy (scalar columns, `retry_enabled` = policy
+    present), ordered fallback routes (`route_fallbacks`) and an optional traffic split
+    (`route_splits` + `route_split_deployments`, sticky by header/team/key). With a
+    traffic split the gateway ignores the route's own deployment list.
+    """
 
     __tablename__ = "routes"
+    __table_args__ = (
+        CheckConstraint(
+            "retry_max_attempts IS NULL OR retry_max_attempts BETWEEN 1 AND 5",
+            name="retry_max_attempts_range",
+        ),
+        CheckConstraint(
+            "400 <= ALL (retry_on_status) AND 599 >= ALL (retry_on_status)",
+            name="retry_status_range",
+        ),
+        CheckConstraint("retry_total_timeout_ms >= 0", name="retry_timeout_nonneg"),
+        CheckConstraint(
+            "retry_enabled OR (retry_max_attempts IS NULL"
+            " AND cardinality(retry_on_status) = 0 AND retry_total_timeout_ms = 0)",
+            name="retry_shape",
+        ),
+        CheckConstraint(
+            "(sticky = 'header') = (sticky_header IS NOT NULL)", name="sticky_header_iff"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     model: Mapped[str] = mapped_column(String(400), nullable=False, unique=True)
@@ -547,6 +628,27 @@ class Route(TimestampMixin, Base):
         default=RoutingStrategy.WEIGHTED,
         server_default=RoutingStrategy.WEIGHTED.value,
     )
+    # Retry policy (proto RetryPolicy). max_attempts NULL = gateway default (2, emitted
+    # as 0); empty retry_on_status = gateway default (429, 502, 503, 504); timeout 0 =
+    # no bound beyond each upstream's timeout_ms.
+    retry_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    retry_max_attempts: Mapped[int | None] = mapped_column(SmallInteger)
+    retry_on_status: Mapped[list[int]] = mapped_column(
+        ARRAY(SmallInteger), nullable=False, default=list, server_default=text("'{}'")
+    )
+    retry_total_timeout_ms: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    sticky: Mapped[StickyBy] = mapped_column(
+        _enum(StickyBy, "sticky_by"),
+        nullable=False,
+        default=StickyBy.NONE,
+        server_default=StickyBy.NONE.value,
+    )
+    # Request header hashed when sticky = header (lower-case HTTP token).
+    sticky_header: Mapped[str | None] = mapped_column(String(200))
 
 
 class RouteDeployment(Base):
@@ -559,6 +661,65 @@ class RouteDeployment(Base):
 
     route_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("routes.id", ondelete="CASCADE"), nullable=False
+    )
+    deployment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("deployments.id", ondelete="RESTRICT"), nullable=False
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class RouteFallback(Base):
+    """Ordered fallback routes of a route. A route referenced as a fallback cannot be
+    deleted (RESTRICT; the API answers 409). The API also rejects cycles.
+    """
+
+    __tablename__ = "route_fallbacks"
+    __table_args__ = (
+        PrimaryKeyConstraint("route_id", "fallback_route_id"),
+        UniqueConstraint("route_id", "position"),
+        Index(None, "fallback_route_id"),
+        CheckConstraint("route_id <> fallback_route_id", name="no_self"),
+    )
+
+    route_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("routes.id", ondelete="CASCADE"), nullable=False
+    )
+    fallback_route_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("routes.id", ondelete="RESTRICT"), nullable=False
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class RouteSplit(Base):
+    """One traffic split (canary group) of a route; `name` is a bounded metric label."""
+
+    __tablename__ = "route_splits"
+    __table_args__ = (
+        UniqueConstraint("route_id", "name"),
+        UniqueConstraint("route_id", "position"),
+        CheckConstraint("name ~ '^[A-Za-z0-9_.-]{1,32}$'", name="name_charset"),
+        CheckConstraint("weight >= 0", name="weight_nonneg"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    route_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("routes.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(32), nullable=False)
+    weight: Mapped[int] = mapped_column(Integer, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class RouteSplitDeployment(Base):
+    __tablename__ = "route_split_deployments"
+    __table_args__ = (
+        PrimaryKeyConstraint("split_id", "deployment_id"),
+        UniqueConstraint("split_id", "position"),
+        Index(None, "deployment_id"),
+    )
+
+    split_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("route_splits.id", ondelete="CASCADE"), nullable=False
     )
     deployment_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("deployments.id", ondelete="RESTRICT"), nullable=False

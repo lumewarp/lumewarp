@@ -151,7 +151,7 @@ def test_routing_validation(client) -> None:
 
     route_body = {
         "model": f"alias-{suffix()}",
-        "strategy": "lowest_latency",
+        "strategy": "no_such_strategy",
         "deployment_ids": [dep["id"]],
     }
     resp = client.post("/api/v1/routes", json=route_body, headers=BOOTSTRAP_AUTH)
