@@ -1,5 +1,5 @@
 import createClient from "openapi-fetch";
-import { getToken, handleUnauthorized } from "../auth";
+import { getCsrfToken, getToken, handleUnauthorized, setCsrfToken } from "../auth";
 import { ApiError, fieldOf } from "./errors";
 import type { components, paths } from "./schema";
 
@@ -18,12 +18,21 @@ export type Me = Schemas["MeOut"];
 export type ModelAccess = Schemas["ModelAccess"];
 export type PolicyOut = Pick<Team, "model_access" | "allowed_models" | "rpm_limit" | "tpm_limit" | "max_parallel" | "budget_nano_usd" | "soft_budget_nano_usd">;
 
-export const client = createClient<paths>({ baseUrl: "" });
+export const client = createClient<paths>({ baseUrl: "", credentials: "same-origin" });
 
 client.use({
   onRequest({ request }) {
     const token = getToken();
-    if (token) request.headers.set("Authorization", `Bearer ${token}`);
+    if (token) {
+      request.headers.set("Authorization", `Bearer ${token}`);
+      request.headers.delete("X-Lumewarp-CSRF");
+    } else {
+      request.headers.delete("Authorization");
+      if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method.toUpperCase())) {
+        const csrfToken = getCsrfToken();
+        if (csrfToken) request.headers.set("X-Lumewarp-CSRF", csrfToken);
+      }
+    }
     return request;
   },
 });
@@ -36,6 +45,9 @@ export async function unwrap<T>(p: Promise<Result<T>>): Promise<T> {
   if (response.ok) return data as T;
   if (response.status === 401) handleUnauthorized();
   const env = (error as { error?: { code?: string; message?: string } } | undefined)?.error;
+  if (response.status === 403 && env?.code === "csrf_failed") {
+    await api.session().catch(() => undefined);
+  }
   const message = env?.message ?? `HTTP ${response.status}`;
   throw new ApiError(response.status, message, env?.code, response.status === 422 ? fieldOf(message) : undefined);
 }
@@ -60,6 +72,13 @@ export async function listAll<T>(fetchPage: (cursor: string | undefined) => Prom
 const q = (cursor: string | undefined) => ({ limit: 200, cursor });
 
 export const api = {
+  session: async () => {
+    const session = await unwrap(client.GET("/api/v1/session"));
+    setCsrfToken(session.authenticated ? (session.csrf_token ?? null) : null);
+    return session;
+  },
+  logoutSession: () => unwrap(client.POST("/api/v1/session/logout")),
+
   me: () => unwrap(client.GET("/api/v1/users/me")),
 
   teams: () => listAll((c) => unwrap(client.GET("/api/v1/teams", { params: { query: q(c) } }))),
@@ -69,6 +88,8 @@ export const api = {
   deleteTeam: (id: string) => unwrap(client.DELETE("/api/v1/teams/{team_id}", { params: { path: { team_id: id } } })),
 
   members: (teamId: string) => listAll((c) => unwrap(client.GET("/api/v1/teams/{team_id}/members", { params: { path: { team_id: teamId }, query: q(c) } }))),
+  createMember: (teamId: string, body: Schemas["MemberCreate"]) =>
+    unwrap(client.POST("/api/v1/teams/{team_id}/members", { params: { path: { team_id: teamId } }, body })),
   putMember: (teamId: string, userId: string, body: Schemas["MemberUpsert"]) =>
     unwrap(client.PUT("/api/v1/teams/{team_id}/members/{user_id}", { params: { path: { team_id: teamId, user_id: userId } }, body })),
   updateMember: (teamId: string, userId: string, body: Schemas["MemberUpdate"]) =>

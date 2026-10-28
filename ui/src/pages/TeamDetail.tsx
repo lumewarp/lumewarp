@@ -2,7 +2,7 @@ import { useParams } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, ApiError, type Key, type Member, type Schemas, type ServiceAccount, type Team } from "../api";
-import { Badge, fmtDate, fmtUsd, KeyBadge, PageHeader, SecretOnce } from "../components/Bits";
+import { Badge, fmtDate, fmtUsd, KeyBadge, PageHeader, SecretOnce, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { Dialog } from "../components/Dialog";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
@@ -72,11 +72,23 @@ export function TeamDetail() {
   );
 }
 
-type MemberValues = PolicyValues & { user_id: string; role: Schemas["TeamRole"] };
-const blankMember: MemberValues = { user_id: "", role: "member", ...blankPolicy() };
+type MemberValues = PolicyValues & { user_id: string; email: string; role: Schemas["TeamRole"] };
+const blankMember: MemberValues = { user_id: "", email: "", role: "member", ...blankPolicy() };
 
 function isManagedConflict(error: unknown) {
   return error instanceof ApiError && error.status === 409 && error.code === "managed_externally";
+}
+
+/** createMember lookup failures (404 user_not_found, 409 conflict) rendered on the email field. */
+function memberLookupError(error: unknown) {
+  if (!(error instanceof ApiError)) return undefined;
+  if (error.status === 404 && error.code === "user_not_found") return "No user with this email address exists.";
+  if (error.status === 409 && error.code === "conflict") {
+    if (/not active/i.test(error.message)) return "This user is inactive and cannot be added.";
+    if (/already a member/i.test(error.message)) return "This user is already a member of this team.";
+    return error.message;
+  }
+  return undefined;
 }
 
 function MembersPanel({
@@ -102,14 +114,13 @@ function MembersPanel({
   });
   const [editing, setEditing] = useState<Member | "new" | null>(null);
   const [deleting, setDeleting] = useState<Member | null>(null);
-  const [userSearch, setUserSearch] = useState("");
-  const form = useForm<MemberValues>(blankMember, { user_id: required("User") });
+  const form = useForm<MemberValues>(blankMember, { email: required("Email") });
   const existingUserIds = new Set((list.data ?? []).map((member) => member.user_id));
   const matchingUsers = (userDirectory.data ?? []).filter(
     (user) =>
       user.is_active &&
       !existingUserIds.has(user.id) &&
-      user.email.toLowerCase().includes(userSearch.trim().toLowerCase()),
+      user.email.toLowerCase().includes(form.values.email.trim().toLowerCase()),
   );
 
   const save = useMut(async ({ member, values }: { member: Member | null; values: MemberValues }) => {
@@ -117,7 +128,11 @@ function MembersPanel({
       if (member) {
         return await api.updateMember(team.id, member.user_id, { role: values.role, ...policyBody(values) });
       }
-      return await api.putMember(team.id, values.user_id.trim(), { role: values.role, ...policyBody(values) });
+      return await api.createMember(team.id, {
+        ...(values.user_id ? { user_id: values.user_id.trim() } : { email: values.email.trim() }),
+        role: values.role,
+        ...policyBody(values),
+      });
     } catch (error) {
       if (isManagedConflict(error)) onManagedExternally();
       throw error;
@@ -136,19 +151,27 @@ function MembersPanel({
     form.reset(
       member === "new"
         ? blankMember
-        : { user_id: member.user_id, role: member.role, ...policyFrom(member) },
+        : { user_id: member.user_id, email: member.email, role: member.role, ...policyFrom(member) },
     );
-    setUserSearch("");
     setEditing(member);
   };
   const submit = async () => {
     if (memberWritesDisabled || !form.validate()) return false;
-    return form.run(() =>
-      save.mutateAsync({
-        member: editing === "new" ? null : (editing as Member),
-        values: form.values,
-      }),
-    );
+    try {
+      return await form.run(() =>
+        save.mutateAsync({
+          member: editing === "new" ? null : (editing as Member),
+          values: form.values,
+        }),
+        POLICY_ALIAS,
+      );
+    } catch (error) {
+      // Lookup failures belong to the email field: keep the dialog open and say why inline.
+      const message = editing === "new" ? memberLookupError(error) : undefined;
+      if (!message) throw error;
+      form.setError("email", message);
+      return false;
+    }
   };
 
   return (
@@ -159,7 +182,7 @@ function MembersPanel({
       </div>
       {memberWritesDisabled && (
         <p className="form-warn" role="status">
-          Membership is managed by an external authorization system. Member changes are disabled.
+          Membership is managed by your identity provider / IAM.
         </p>
       )}
       <DataTable
@@ -170,7 +193,7 @@ function MembersPanel({
         rowKey={(member) => member.user_id}
         empty="No members yet."
         columns={[
-          { key: "email", header: "Email", sort: (a, b) => a.email.localeCompare(b.email), cell: (member) => <strong>{member.email}</strong> },
+          { key: "email", header: "Email", sort: (a, b) => a.email.localeCompare(b.email), cell: (member) => <><strong>{member.email}</strong>{!member.user_active && <> <Badge tone="danger">Inactive</Badge></>}</> },
           { key: "name", header: "Name", cell: (member) => member.display_name || "—" },
           { key: "role", header: "Role", cell: (member) => <Badge tone="info">{member.role}</Badge> },
           { key: "policy", header: "Policy", cell: (member) => <PolicySummary p={member} /> },
@@ -196,50 +219,52 @@ function MembersPanel({
         onSubmit={submit}
         submitDisabled={memberWritesDisabled}
       >
-        {memberWritesDisabled && <p className="form-warn">Member changes are managed externally.</p>}
+        {memberWritesDisabled && <p className="form-warn">Membership is managed by your identity provider / IAM.</p>}
         <fieldset className="form-fieldset" disabled={memberWritesDisabled}>
-          {editing === "new" && perms.isSuper ? (
+          {editing === "new" ? (
             <>
               <TextField
-                label="Search users by email"
-                value={userSearch}
+                label="Email"
+                value={form.values.email}
                 onChange={(value) => {
-                  setUserSearch(value);
+                  form.set("email", value);
                   form.set("user_id", "");
                 }}
-                hint="Only active users who are not already on this team are shown."
+                error={form.errors.email}
+                hint={
+                  perms.isSuper
+                    ? "Enter an existing user's email address, or pick a matching user below."
+                    : "Enter the email address of an existing user."
+                }
                 autoFocus
               />
-              <SelectField
-                label="User"
-                value={form.values.user_id}
-                onChange={(value) => form.set("user_id", value)}
-                error={form.errors.user_id}
-                options={[
-                  {
-                    value: "",
-                    label: userDirectory.isPending
-                      ? "Loading users…"
-                      : matchingUsers.length
-                        ? "Select a user"
-                        : "No matching users",
-                  },
-                  ...matchingUsers.map((user) => ({
-                    value: user.id,
-                    label: user.email,
-                  })),
-                ]}
-              />
+              {perms.isSuper && (
+                <SelectField
+                  label="User"
+                  value={form.values.user_id}
+                  onChange={(value) => {
+                    form.set("user_id", value);
+                    const user = matchingUsers.find((candidate) => candidate.id === value);
+                    if (user) form.set("email", user.email);
+                  }}
+                  hint="Only active users who are not already on this team are shown."
+                  options={[
+                    {
+                      value: "",
+                      label: userDirectory.isPending
+                        ? "Loading users…"
+                        : matchingUsers.length
+                          ? "Select a user (optional)"
+                          : "No matching users",
+                    },
+                    ...matchingUsers.map((user) => ({
+                      value: user.id,
+                      label: user.email,
+                    })),
+                  ]}
+                />
+              )}
             </>
-          ) : editing === "new" ? (
-            <TextField
-              label="User ID"
-              value={form.values.user_id}
-              onChange={(value) => form.set("user_id", value)}
-              error={form.errors.user_id}
-              hint="Team admins cannot search installation users; enter an existing user’s UUID."
-              autoFocus
-            />
           ) : editing ? (
             <TextField label="Email" value={(editing as Member).email} onChange={() => {}} />
           ) : null}
@@ -473,7 +498,7 @@ function KeysPanel({ team }: { team: Team }) {
         columns={[
           { key: "name", header: "Name", sort: (a, b) => a.name.localeCompare(b.name), cell: (key) => <><strong>{key.name}</strong> <code className="muted">{key.display_prefix}…</code></> },
           { key: "owner", header: "Owner", cell: (key) => <>{key.owner_kind === "service_account" ? "Service account: " : ""}{ownerName(key)}</> },
-          { key: "lifecycle", header: "Lifecycle", cell: (key) => <><KeyBadge k={key} />{key.suspended_reason && <span className="muted"> {key.suspended_reason}</span>}</> },
+          { key: "lifecycle", header: "Lifecycle", cell: (key) => <><KeyBadge k={key} /><SuspendedReason reason={key.suspended_reason} /></> },
           { key: "expires", header: "Expires", cell: (key) => fmtDate(key.expires_at) },
           { key: "created", header: "Created", cell: (key) => fmtDate(key.created_at) },
           {
@@ -481,6 +506,7 @@ function KeysPanel({ team }: { team: Team }) {
             header: "",
             cell: (key) => {
               const allowed = perms.canManageKey(key);
+              const ownerInactive = key.owner_kind === "user" && key.owner_active === false;
               return (
                 <RowActions
                   canEdit={allowed && key.lifecycle !== "revoked"}
@@ -492,9 +518,10 @@ function KeysPanel({ team }: { team: Team }) {
                         className="btn btn-sm"
                         disabled={
                           key.lifecycle === "suspended"
-                            ? !canResume(key)
+                            ? ownerInactive || !canResume(key)
                             : !allowed
                         }
+                        title={key.lifecycle === "suspended" && ownerInactive ? "Cannot resume because the owner is inactive" : undefined}
                         onClick={() => void setLifecycle({ key, lifecycle: key.lifecycle === "suspended" ? "active" : "suspended" })}
                       >
                         {key.lifecycle === "suspended" ? "Resume" : "Suspend"}
