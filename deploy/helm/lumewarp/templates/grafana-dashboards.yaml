@@ -1,0 +1,11 @@
+{{- if .Values.grafanaDashboards.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lumewarp.fullname" . }}-dashboards
+  labels:
+    {{- include "lumewarp.labels" . | nindent 4 }}
+    {{ .Values.grafanaDashboards.sidecarLabel | quote }}: {{ .Values.grafanaDashboards.sidecarLabelValue | quote }}
+data:
+  {{- (.Files.Glob "files/dashboards/*.json").AsConfig | nindent 2 }}
+{{- end }}

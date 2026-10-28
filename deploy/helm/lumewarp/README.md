@@ -152,6 +152,70 @@ global `imagePullSecrets`, `nameOverride`, `fullnameOverride` and `commonLabels`
 
 ## Verify a release
 
+### Optional alert rules and Grafana dashboards
+
+Enable the bundled observability resources independently:
+
+```sh
+helm template lumewarp deploy/helm/lumewarp -n lumewarp \
+  --set serviceMonitor.enabled=true \
+  --set prometheusRule.enabled=true \
+  --set prometheusRule.labels.release=kube-prometheus-stack \
+  --set grafanaDashboards.enabled=true
+```
+
+`prometheusRule.enabled` defaults to `false` and requires Prometheus Operator
+CRDs. `prometheusRule.labels` must match your Prometheus `ruleSelector`.
+`grafanaDashboards.enabled` defaults to `false` and creates a ConfigMap containing
+four dashboards. The sidecar label defaults to `grafana_dashboard: "1"`; override
+`grafanaDashboards.sidecarLabel` / `sidecarLabelValue` to match your Grafana
+sidecar, which must watch the release namespace. Select a Prometheus datasource
+using the dashboard's `datasource` variable.
+
+The chart bundles `files/prometheus/rules.yaml` and `files/dashboards/*.json`.
+Their sources of truth are `deploy/prometheus/rules.yaml` and
+`deploy/grafana/dashboards/*.json`. Helm cannot read files outside a packaged chart,
+so update the bundled copies whenever sources change; the CI observability job
+checks byte equality and validates all dashboard expressions with promtool.
+
+Operational defaults and response steps are documented beside each alert in
+`rules.yaml`. The defaults include 5% 5xx at >=1 request/s, overhead p99 >10 ms
+for 10 minutes, TTFT p99 >5 s for 10 minutes, and queue >80,000 of the fixed
+100,000-event capacity. Tune TTFT, vLLM queue depth and backlog limits against
+production baselines. Overhead's alert threshold is not the benchmark target.
+
+Preserve the `namespace`, `job` and `instance` scrape labels. Version comparison
+assumes one control-plane installation per namespace (no cross-installation joins).
+The gateway-down alert selects `up{job=~".*lumewarp.*gateway.*"}`, matching chart
+gateway Service names; custom scrape jobs must follow that naming or adjust the
+selector. Missing targets are not detected by `up == 0`; configure scrape target
+discovery separately. Standalone YAML gateways are excluded from config-stream
+and version-mismatch alerts via `lumewarp_config_info{source="yaml"}`.
+
+The existing ServiceMonitor scrapes only the gateway. Configure a separate scrape
+for the control plane's HTTP `/metrics` when that endpoint is implemented; future
+CP and routing panels remain empty until their exporters are deployed. Missing
+metrics do not trigger these threshold alerts. The reconciler's exporter must
+emit a zero timestamp before its first success to detect never-successful runs.
+
+Dashboard filters apply only where metric labels exist: tokens support team and
+model, while spend supports team only. Spend panels explicitly cover all models;
+model-level cost cannot be derived from the current metrics contract. Latency
+histograms have no team label, and global pipeline and deployment gauges are not
+filtered by team. Gauge observations of the same vLLM upstream are aggregated
+with max/min, not summed across gateways.
+
+Validate rules locally (pinned CI image):
+
+```sh
+docker run --rm -v "$PWD/deploy/prometheus:/w" -w /w \
+  --entrypoint promtool prom/prometheus:v3.5.0 check rules rules.yaml
+docker run --rm -v "$PWD/deploy/prometheus:/w" -w /w \
+  --entrypoint promtool prom/prometheus:v3.5.0 test rules rules.test.yaml
+```
+
+### Chart checks
+
 ```sh
 helm lint deploy/helm/lumewarp
 helm template lumewarp deploy/helm/lumewarp -n lumewarp \

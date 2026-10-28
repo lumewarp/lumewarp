@@ -1,0 +1,208 @@
+# Lumewarp operational defaults. Tune thresholds to measured production baselines.
+# Preserve namespace on scrapes; one control-plane installation per namespace.
+# No API-key or user labels. Config alerts exclude standalone YAML gateways.
+groups:
+  - name: lumewarp.recording
+    interval: 1m
+    rules:
+      - record: lumewarp:model_requests:rate5m
+        expr: "sum by (namespace, model) (rate(lumewarp_requests_total{route=~\"chat_completions|completions|embeddings|models\"}[5m]))"
+      - record: lumewarp:model_errors:ratio5m
+        expr: "sum by (namespace, model) (rate(lumewarp_requests_total{status=~\"5..\",route=~\"chat_completions|completions|embeddings|models\"}[5m])) / lumewarp:model_requests:rate5m"
+      - record: lumewarp:gateway_overhead:p99_5m
+        expr: "histogram_quantile(0.99, sum by (namespace, route, le) (rate(lumewarp_gateway_overhead_seconds_bucket[5m])))"
+      - record: lumewarp:ttft:p99_5m
+        expr: "histogram_quantile(0.99, sum by (namespace, model, le) (rate(lumewarp_ttft_seconds_bucket[5m])))"
+  - name: lumewarp.alerts
+    interval: 1m
+    rules:
+      # 5% at >=1 request/s avoids paging on isolated failures or local admin traffic.
+      - alert: LumewarpGatewayHigh5xxRatio
+        expr: "lumewarp:model_errors:ratio5m > 0.05 and on (namespace, model) lumewarp:model_requests:rate5m >= 1"
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Gateway 5xx ratio is high"
+          description: "Model {{ $labels.model }} exceeds 5% 5xx responses for 5 minutes at >=1 request/s."
+          runbook: "Check upstream errors and routing dashboard; restore a healthy deployment or roll back routing."
+      # 10 ms is an operational page budget, not the tighter benchmark target.
+      - alert: LumewarpGatewayOverheadHigh
+        expr: "lumewarp:gateway_overhead:p99_5m > 0.01"
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway p99 overhead exceeds budget"
+          description: "Route {{ $labels.route }} has p99 processing overhead above 10 ms for 10 minutes."
+          runbook: "Check gateway CPU throttling, saturation and recent gateway releases; compare the benchmark baseline."
+      # Absolute 5 s regression guard; calibrate for model size and prefill workload.
+      - alert: LumewarpTTFTHigh
+        expr: "lumewarp:ttft:p99_5m > 5"
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Stream p99 TTFT is high"
+          description: "Model {{ $labels.model }} has p99 TTFT above 5 seconds for 10 minutes."
+          runbook: "Inspect vLLM queue and KV cache, upstream latency and request sizes; tune this baseline per model."
+      # State 2 is open; brief trips and half-open probes do not alert.
+      - alert: LumewarpUpstreamCircuitOpen
+        expr: "lumewarp_upstream_circuit_state == 2"
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Upstream circuit remains open"
+          description: "Deployment {{ $labels.deployment }} circuit has remained open for 2 minutes."
+          runbook: "Inspect attempts by outcome, upstream logs and health; repair the upstream before closing the circuit."
+      # Two minutes tolerates transient health-check failures.
+      - alert: LumewarpUpstreamUnhealthy
+        expr: "lumewarp_upstream_healthy == 0"
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Upstream health checks are failing"
+          description: "Upstream {{ $labels.upstream }} has been unhealthy for 2 minutes."
+          runbook: "Check upstream health endpoint, credentials and network reachability; route away if needed."
+      # Any sustained exhaustion deserves investigation; five-minute counter window tolerates scrape jitter.
+      - alert: LumewarpRetryBudgetExhausted
+        expr: "sum by (namespace, model) (increase(lumewarp_retries_budget_exhausted_total[5m])) > 0"
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Upstream retry budget is exhausted"
+          description: "Model {{ $labels.model }} is exhausting its retry budget."
+          runbook: "Inspect attempts, fallback availability and upstream capacity; do not increase retries during overload."
+      # Exclude standalone YAML gateways, whose stream gauge is always zero.
+      - alert: LumewarpConfigStreamDisconnected
+        expr: "(lumewarp_config_stream_connected == 0) unless on (namespace, job, instance) lumewarp_config_info{source=\"yaml\"}"
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway config stream is disconnected"
+          description: "Gateway {{ $labels.instance }} has not connected to the control plane for 5 minutes."
+          runbook: "Check control-plane gRPC service, gateway token, TLS and network; cached config still serves traffic."
+      # One CP installation per namespace; five minutes allows normal propagation.
+      - alert: LumewarpConfigVersionMismatch
+        expr: "(lumewarp_config_version != on (namespace) group_left max by (namespace) (lumewarp_cp_config_version)) unless on (namespace, job, instance) lumewarp_config_info{source=\"yaml\"}"
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway config version differs from control plane"
+          description: "Gateway {{ $labels.instance }} has not converged to the control-plane config version for 5 minutes."
+          runbook: "Inspect stream status, NACK codes and CP compilation; verify scope and intended canary version."
+      # Any apply failure sustained over two minutes may prevent config convergence.
+      - alert: LumewarpConfigApplyFailures
+        expr: "increase(lumewarp_config_apply_failures_total[5m]) > 0"
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway cannot apply config"
+          description: "Gateway {{ $labels.instance }} is rejecting config with code {{ $labels.code }}."
+          runbook: "Inspect NACK code, snapshot validation and state volume permissions or free space; restore the last good config."
+      # Any loss affects accounting and pages without an additional hold.
+      - alert: LumewarpUsageEventsDropped
+        expr: "increase(lumewarp_usage_events_dropped_total[5m]) > 0"
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Usage events are being lost"
+          description: "Gateway {{ $labels.instance }} dropped usage events in the last 5 minutes."
+          runbook: "Restore usage reporting and CP database availability; dropped events are not recoverable from the memory queue."
+      # Sustained failed attempts warn before the bounded queue fills.
+      - alert: LumewarpUsageEventsFailed
+        expr: "increase(lumewarp_usage_events_failed_total[5m]) > 0"
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Usage reporting is failing"
+          description: "Gateway {{ $labels.instance }} has failed usage report attempts for 5 minutes."
+          runbook: "Inspect UsageService, gateway credentials and database health; failed attempts retry and are not confirmed data loss."
+      # 80% of the fixed 100,000-event queue leaves recovery headroom.
+      - alert: LumewarpUsageQueueNearCapacity
+        expr: "lumewarp_usage_queue_depth > 80000"
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Usage queue is near capacity"
+          description: "Gateway {{ $labels.instance }} usage queue exceeds 80,000 events for 5 minutes."
+          runbook: "Check CP ingestion throughput and connectivity; recover before the 100,000-event queue drops new events."
+      # Any compile failure over two minutes blocks configuration changes.
+      - alert: LumewarpCPCompileFailures
+        expr: "increase(lumewarp_cp_compile_failures_total[5m]) > 0"
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Control-plane config compilation is failing"
+          description: "Control plane {{ $labels.instance }} has repeated config compile failures."
+          runbook: "Inspect compiler errors, plugin output and invalid routes; correct the source config and confirm a new version publishes."
+      # 100 entries for ten minutes filters ordinary short publication bursts.
+      - alert: LumewarpCPOutboxBacklog
+        expr: "lumewarp_cp_outbox_pending > 100"
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Control-plane outbox is backed up"
+          description: "Control plane {{ $labels.instance }} has more than 100 pending outbox entries for 10 minutes."
+          runbook: "Check compiler and notifier loops, database locks and delivery endpoints; restore draining before adding load."
+      # Exclude deny decisions from errors; require six checks/minute to reduce low-traffic noise.
+      - alert: LumewarpCPAuthzErrorRatioHigh
+        expr: "sum by (namespace, backend) (rate(lumewarp_cp_authz_checks_total{decision=\"error\"}[5m])) / sum by (namespace, backend) (rate(lumewarp_cp_authz_checks_total[5m])) > 0.05 and on (namespace, backend) sum by (namespace, backend) (rate(lumewarp_cp_authz_checks_total[5m])) >= 0.1"
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Control-plane authorization backend is failing"
+          description: "Backend {{ $labels.backend }} exceeds 5% authorization errors at >=0.1 checks/s for 5 minutes."
+          runbook: "Check authorization backend health, timeout and network; error decisions return 503 rather than deny."
+      # 15-minute freshness budget plus five-minute hold; zero timestamp also detects never-successful startup.
+      - alert: LumewarpKeyReconcilerStale
+        expr: "time() - lumewarp_cp_key_reconcile_last_success_timestamp_seconds > 900"
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Key reconciler has no recent success"
+          description: "Control plane {{ $labels.instance }} last reconciled keys more than 15 minutes ago."
+          runbook: "Inspect reconciler task, DB and identity provider connectivity; confirm suspended keys and a successful reconciliation."
+      # 100 queued requests is a starting threshold; calibrate to deployment concurrency.
+      - alert: LumewarpVLLMQueueHigh
+        expr: "lumewarp_vllm_queue_depth > 100"
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "vLLM request queue is growing"
+          description: "Deployment {{ $labels.deployment }} has over 100 queued requests for 10 minutes."
+          runbook: "Inspect GPU utilization and prefill load; add capacity or reduce admission and shift routing weights."
+      # Usage is a 0..1 ratio, not a percentage; sustained 90% leaves little headroom.
+      - alert: LumewarpVLLMKVCacheSaturated
+        expr: "lumewarp_vllm_kv_cache_usage > 0.9"
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "vLLM KV cache is saturated"
+          description: "Deployment {{ $labels.deployment }} KV cache exceeds 90% for 10 minutes."
+          runbook: "Inspect context lengths, concurrency and GPU memory; reduce admission or add capacity."
+      # Job selector matches chart gateway Service names; relabel custom scrape jobs to include lumewarp and gateway.
+      - alert: LumewarpGatewayDown
+        expr: "up{job=~\".*lumewarp.*gateway.*\"} == 0"
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Gateway scrape target is down"
+          description: "Gateway {{ $labels.instance }} cannot be scraped for 2 minutes."
+          runbook: "Check pod readiness, admin listener, ServiceMonitor selection and network policy; distinguish scrape failure from serving failure."
