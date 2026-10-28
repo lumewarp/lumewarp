@@ -30,9 +30,15 @@ from lumewarp_control_plane.api.policy import (
     policy_of,
     team_effective,
 )
-from lumewarp_control_plane.api.schemas import MemberOut, MemberUpdate, MemberUpsert, Page
+from lumewarp_control_plane.api.schemas import (
+    MemberCreate,
+    MemberOut,
+    MemberUpdate,
+    MemberUpsert,
+    Page,
+)
 from lumewarp_control_plane.authz import Action, Authz
-from lumewarp_control_plane.errors import not_found
+from lumewarp_control_plane.errors import ApiError, not_found
 from lumewarp_control_plane.models import (
     ModelAccess,
     Team,
@@ -51,6 +57,7 @@ def _out(member: TeamMember, user: User) -> MemberOut:
         user_id=member.user_id,
         email=user.email,
         display_name=user.display_name,
+        user_active=user.is_active,
         role=member.role,
         member_scope_id=member_scope_id(member.team_id, member.user_id),
         created_at=member.created_at,
@@ -131,18 +138,74 @@ async def put_member(
     session: SessionDep,
     settings: SettingsDep,
 ) -> MemberOut:
+    return await _save_member(team_id, user_id, body, request, response, authz, session, settings)
+
+
+@router.post(
+    "/teams/{team_id}/members",
+    response_model=MemberOut,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="createMember",
+)
+async def create_member(
+    team_id: uuid.UUID,
+    body: MemberCreate,
+    request: Request,
+    response: Response,
+    authz: Authz,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> MemberOut:
+    return await _save_member(
+        team_id,
+        body.user_id,
+        body,
+        request,
+        response,
+        authz,
+        session,
+        settings,
+        email=body.email,
+        create_only=True,
+    )
+
+
+async def _save_member(
+    team_id: uuid.UUID,
+    user_id: uuid.UUID | None,
+    body: MemberUpsert,
+    request: Request,
+    response: Response,
+    authz: Authz,
+    session: AsyncSession,
+    settings: SettingsDep,
+    *,
+    email: str | None = None,
+    create_only: bool = False,
+) -> MemberOut:
     async with mutation(session):
         await lock_scope(session, settings)
         team = await get_team_or_404(session, authz, team_id)
         await authz.require(Action.TEAM_MEMBERS_MANAGE, team.id)
         ensure_grants_managed(request)
-        user = await session.get(User, user_id)
+        user = (
+            await session.scalar(select(User).where(func.lower(User.email) == func.lower(email)))
+            if email is not None
+            else await session.get(User, user_id)
+        )
         if user is None:
+            if create_only:
+                raise ApiError(404, "user_not_found", "user not found")
             raise validation_error("user_id", "unknown user")
+        if not user.is_active:
+            raise conflict("user is not active")
+        user_id = user.id
         policy = policy_from_fields(body, default_mode=ModelAccess.INHERIT)
         check_narrowing(team_effective(team), policy)
         row = await session.get(TeamMember, (team.id, user_id), with_for_update=True)
         created = row is None
+        if create_only and not created:
+            raise conflict("user is already a member of this team")
         if row is None:
             row = TeamMember(team_id=team.id, user_id=user_id, role=body.role)
             session.add(row)
