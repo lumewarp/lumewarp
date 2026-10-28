@@ -159,6 +159,9 @@ Removing a member suspends that member's user-owned keys in the team
 (`owner_deactivated`). Revoked keys are kept for usage history. A key or a service
 account prevents team deletion.
 
+An active owner who regains team membership may resume their own `owner_removed`
+key. An `admin` suspension still requires team-admin permission to resume.
+
 Usage is attributed to the key's team and owner: the event's `team_id` must match the
 key, and the owner (member or service account) is read from the key. A member's
 usage/rate-limit scope id is `member_scope_id = uuid5(team_id, user_id)`; it is derived, so
@@ -167,6 +170,18 @@ its own id. Rate-limit scopes are `team:<team_id>`, `member:<member_scope_id>` a
 `sa:<service_account_id>`.
 
 ### Authorization
+
+OpenFGA Check and BatchCheck always request `HIGHER_CONSISTENCY`, including
+checks made by the key reconciler, so suspension decisions do not use cached
+permission results.
+
+With an external authorization backend, `GET /api/v1/teams/{id}/members` still
+lists local `team_members` rows, not the external directory. An externally
+managed team with no local rows returns `{"items": [], "next_cursor": null}`;
+membership writes remain disabled. Session discovery and `/users/me` resolve
+superuser status through the configured backend. On backend ERROR, session
+discovery falls back to the local flag for display only; `/users/me` and
+privileged API operations continue to fail closed with HTTP 503.
 
 Authorization has two layers. The action matrix below stays in Lumewarp; a backend only
 answers relation questions. A superuser passes every check, and an admin has every member
@@ -225,6 +240,71 @@ The backend conformance suite is importable from
 setting `LUMEWARP_AUTHZ_BACKEND`; it covers the implied relations, inactive and unknown
 users, batch ordering, `list_teams` consistency and `ERROR` handling.
 
+Two external backends ship with the control plane:
+
+- `openfga`: `LUMEWARP_OPENFGA_URL`, `LUMEWARP_OPENFGA_STORE_ID`,
+  `LUMEWARP_OPENFGA_MODEL_ID`, optional `LUMEWARP_OPENFGA_API_TOKEN`. Users are
+  `user:<lumewarp user uuid>`, resources `installation:default` and `team:<uuid>`; the
+  model is `deploy/openfga/model.fga`. Implements `batch_check`, `list_teams`
+  (ListObjects) and `changes` (ReadChanges). `scripts/dev-idp.sh up` starts a local
+  OpenFGA, writes the model and prints these variables.
+- `http`: `LUMEWARP_AUTHZ_HTTP_URL` (+ optional `LUMEWARP_AUTHZ_HTTP_TOKEN`).
+  `check` becomes `POST {"user_id", "relation", "resource": {"type", "id"}}` answered by
+  `{"decision": "allow" | "deny"}`; anything else (non-2xx, timeout, bad body) is `ERROR`.
+
+Every backend call is bounded by `LUMEWARP_AUTHZ_TIMEOUT_SECONDS` (default 2 s); a
+timeout is `ERROR`.
+
+### Key reconciler
+
+A user-owned key stays active only while its owner is a `member` of the key's team. The
+`key_reconciler` background loop enforces this for external backends (the built-in
+backend already suspends keys in the same transaction that removes the member):
+
+- With `changes()` (OpenFGA) it polls every `LUMEWARP_KEY_RECONCILE_POLL_SECONDS`
+  (default 2 s) and rechecks only the users that changed, so a removed member's keys are
+  rejected by the gateway within about 5 s.
+- Every `LUMEWARP_KEY_RECONCILE_FULL_SECONDS` (default 300 s), and whenever the change
+  cursor is reset, it rechecks every active user-owned key (in slices).
+- An explicit `DENY` suspends that owner's keys in that team with
+  `suspended_reason=owner_removed`, audited with the system actor `key_reconciler`, and
+  publishes a new snapshot. `ERROR` or a timeout never suspends anything.
+- Restoring membership does not resume keys automatically; the owner or a team admin
+  resumes them. Service-account keys are never touched: rotate them when people leave.
+- `LUMEWARP_KEY_RECONCILE_ENABLED=false` turns the loop off.
+
+## SSO login (OIDC)
+
+The admin UI can sign in through any OIDC provider (Keycloak in dev). The control plane
+runs the authorization code flow with PKCE itself (Authlib) and issues a server-side
+session cookie; the IdP only authenticates, it never grants permissions (no groups or
+role claims are read).
+
+| Setting | Meaning |
+| --- | --- |
+| `LUMEWARP_OIDC_ISSUER` | Issuer URL; unset disables SSO. |
+| `LUMEWARP_OIDC_CLIENT_ID`, `LUMEWARP_OIDC_CLIENT_SECRET` | Client credentials (secret optional for a public PKCE client). |
+| `LUMEWARP_OIDC_SCOPES` | Default `openid email profile`. |
+| `LUMEWARP_PUBLIC_URL` | External base URL; the redirect URI is `<public_url>/api/v1/session/oidc/callback`. |
+| `LUMEWARP_OIDC_JIT_USERS` | Create a user with no grants on first login (default true). |
+| `LUMEWARP_SESSION_TTL_SECONDS` | Absolute session lifetime (default 12 h). |
+| `LUMEWARP_SESSION_COOKIE_SECURE` | `Secure` cookie flag (default true; turn off only for plain-http dev). |
+
+- Users are identified by the token's `iss` + `sub`. On a first login with a verified
+  email, the identity links to an existing non-superuser account with that email that
+  has no identity from this issuer yet; otherwise a new user is created (JIT, only with a
+  verified email). Superusers cannot be linked by email; they keep using the bootstrap
+  token or a PAT.
+- Inactive users cannot log in, and their existing sessions stop working immediately.
+- The cookie `lumewarp_session` is httpOnly and `SameSite=Lax`. Cookie-authenticated
+  writes need the `X-Lumewarp-CSRF` header with the `csrf_token` from
+  `GET /api/v1/session`. Bearer callers (bootstrap token, PATs) never need it; if both a
+  bearer and a cookie are sent, the bearer wins.
+- `POST /api/v1/session/logout` ends the Lumewarp session (not the IdP session).
+- IdP and authorization backend are kept in sync by the deployer: disabling a person in
+  the IdP stops new logins, while revoking their team grants (OpenFGA) or removing them
+  (built-in) is what suspends their keys.
+
 ## Admin UI
 
 The UI is a Vite SPA compiled to static files, not a Node runtime:
@@ -256,7 +336,7 @@ install -e ./your-plugin`) and restart `serve`:
 | --- | --- | --- |
 | `lumewarp.router` | Adjust deployment weights at compile time (GPU cost, time of day, ...). | Called by the compiler. |
 | `lumewarp.notifier` | Deliver budget notifications for channels whose `kind` is the entry-point name. | Called by the notifier outbox loop. |
-| `lumewarp.auth` | Map an external identity (OIDC, LDAP, ...) to a user. | Protocol only; not called in P1 (P2 SSO). |
+| `lumewarp.auth` | Map an external identity (OIDC, LDAP, ...) to a user's email and display name. | Called on a first SSO login; the first plugin (by entry-point name) wins. |
 
 Every plugin declares `api_version = 1`; other versions are skipped with a warning, as are
 plugins that fail to import. Entry points may name an instance, a class or a zero-argument

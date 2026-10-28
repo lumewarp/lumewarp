@@ -28,6 +28,7 @@ from lumewarp_control_plane.api import router as api_router
 from lumewarp_control_plane.authz import load_authorizer
 from lumewarp_control_plane.db import create_engine, create_session_factory
 from lumewarp_control_plane.errors import error_body, install_handlers
+from lumewarp_control_plane.keys.reconciler import run_key_reconciler
 from lumewarp_control_plane.settings import Settings, get_settings
 
 log = logging.getLogger(__name__)
@@ -121,6 +122,20 @@ async def start_background(app: FastAPI) -> Runtime:
     runtime.tasks["rollover"] = _supervise(
         app, runtime, "rollover", usage.rollover_scheduler(settings, factory)
     )
+    if settings.key_reconcile_enabled:
+        runtime.tasks["key_reconciler"] = _supervise(
+            app,
+            runtime,
+            "key_reconciler",
+            run_key_reconciler(
+                factory,
+                app.state.authorizer,
+                runtime.stop,
+                poll_seconds=settings.key_reconcile_poll_seconds,
+                full_seconds=settings.key_reconcile_full_seconds,
+                settings=settings,
+            ),
+        )
     runtime.tasks["notifier"] = _supervise(
         app, runtime, "notifier", _notifier_loop(app, runtime.stop)
     )
@@ -156,7 +171,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await stop_background(runtime)
-        await app.state.engine.dispose()
+        try:
+            if (close := getattr(app.state.authorizer.backend, "aclose", None)) is not None:
+                await close()
+        finally:
+            await app.state.engine.dispose()
 
 
 def _static_module():

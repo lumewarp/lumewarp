@@ -26,6 +26,20 @@ export function clearToken() {
   }
 }
 
+let csrfToken: string | null = null;
+
+export function setCsrfToken(token: string | null) {
+  csrfToken = token;
+}
+
+export function getCsrfToken() {
+  return csrfToken;
+}
+
+export function clearCsrfToken() {
+  csrfToken = null;
+}
+
 let onUnauthorized: () => void = () => {};
 
 export function setUnauthorizedHandler(fn: () => void) {
@@ -35,6 +49,7 @@ export function setUnauthorizedHandler(fn: () => void) {
 /** Called by API clients on a 401: drop the token and send the user back to login. */
 export function handleUnauthorized(): never {
   clearToken();
+  clearCsrfToken();
   onUnauthorized();
   throw new ApiError(401, "Session expired");
 }

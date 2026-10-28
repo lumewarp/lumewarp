@@ -164,6 +164,19 @@ class MemberUpsert(PolicyFields):
     role: TeamRole
 
 
+class MemberCreate(MemberUpsert):
+    user_id: uuid.UUID | None = None
+    email: str | None = Field(default=None, min_length=1, max_length=320)
+
+    @model_validator(mode="after")
+    def _one_user(self) -> MemberCreate:
+        if (self.user_id is None) == (self.email is None):
+            raise ValueError("provide exactly one of user_id or email")
+        if self.email is not None and not self.email.strip():
+            raise ValueError("email must not be blank")
+        return self
+
+
 class MemberUpdate(PolicyFields):
     role: TeamRole | None = None
 
@@ -173,6 +186,7 @@ class MemberOut(PolicyOut):
     user_id: uuid.UUID
     email: str
     display_name: str
+    user_active: bool
     role: TeamRole
     member_scope_id: uuid.UUID
     created_at: datetime

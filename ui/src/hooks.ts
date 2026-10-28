@@ -30,7 +30,9 @@ export function can(me: Me | undefined) {
       (isSuper ||
         teamRole(key.team_id) === "admin" ||
         key.suspended_reason === null ||
-        key.suspended_reason === "owner"),
+        key.suspended_reason === "owner" ||
+        // An owner who is back on the team may resume keys suspended by their removal.
+        key.suspended_reason === "owner_removed"),
   };
 }
 

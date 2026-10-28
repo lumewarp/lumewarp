@@ -3,12 +3,13 @@
 import uuid
 
 import pytest
+from sqlalchemy import event
 
 from lumewarp_control_plane.authz import Authorizer, Decision, Relation
 from lumewarp_control_plane.models import ApiKey, KeyLifecycle, TeamRole
 from lumewarp_control_plane.security import hash_secret
 from tests.api.helpers import BOOTSTRAP_AUTH, auth, user_with_token
-from tests.factories import make_key, make_member, make_service_account, make_team
+from tests.factories import make_key, make_member, make_service_account, make_team, make_user
 
 
 async def test_member_creates_and_manages_only_own_key(client, committed) -> None:
@@ -33,6 +34,7 @@ async def test_member_creates_and_manages_only_own_key(client, committed) -> Non
         None,
     )
     assert key["created_by_user_id"] == str(user.id)
+    assert key["owner_active"] is True
     assert not {"secret", "key_hash", "allowed_models", "rpm_limit"} & key.keys()
     assert (
         client.post(
@@ -61,6 +63,7 @@ async def test_member_creates_and_manages_only_own_key(client, committed) -> Non
         assert denied.status_code == 403
     read = client.get(f"/api/v1/keys/{key['id']}", headers=auth(token))
     assert read.status_code == 200
+    assert read.json()["owner_active"] is True
     assert "secret" not in read.text and "key_hash" not in read.text
     assert (
         client.patch(
@@ -103,6 +106,7 @@ async def test_admin_creates_sa_keys_and_checks_team(client, committed, role) ->
     )
     assert response.status_code == 201, response.text
     key = response.json()["key"]
+    assert key["owner_active"] is None
     assert (key["owner_kind"], key["service_account_id"], key["user_id"]) == (
         "service_account",
         str(account.id),
@@ -144,6 +148,7 @@ async def test_rotate_replaces_hash_in_same_row(client, committed, lifecycle) ->
     assert rotated.status_code == 200, rotated.text
     assert rotated.json()["key"]["id"] == created["key"]["id"]
     assert rotated.json()["key"]["lifecycle"] == lifecycle
+    assert rotated.json()["key"]["owner_active"] is True
     assert rotated.json()["secret"] != created["secret"]
     row = await committed.get(ApiKey, uuid.UUID(created["key"]["id"]))
     assert row.key_hash == hash_secret(rotated.json()["secret"])
@@ -277,6 +282,41 @@ async def test_member_can_reactivate_self_suspended_key(client, committed) -> No
     assert restored.json()["suspended_reason"] is None
 
 
+@pytest.mark.parametrize("external", [True, False])
+async def test_returned_member_can_resume_own_owner_removed_key(
+    client, committed, monkeypatch, external
+):
+    team = await make_team(committed)
+    owner, token = await user_with_token(committed)
+    key = await make_key(
+        committed,
+        team,
+        owner,
+        lifecycle=KeyLifecycle.SUSPENDED,
+        suspended_reason="owner_removed",
+    )
+    if external:
+
+        async def check(user_id, relation, resource):
+            return (
+                Decision.ALLOW
+                if user_id == str(owner.id)
+                and relation is Relation.MEMBER
+                and resource.id == str(team.id)
+                else Decision.DENY
+            )
+
+        monkeypatch.setattr(client.app.state, "authorizer", Authorizer(check, "external"))
+    else:
+        await make_member(committed, team, owner)
+    await committed.commit()
+    restored = client.patch(
+        f"/api/v1/keys/{key.id}", json={"lifecycle": "active"}, headers=auth(token)
+    )
+    assert restored.status_code == 200, restored.text
+    assert (restored.json()["lifecycle"], restored.json()["suspended_reason"]) == ("active", None)
+
+
 @pytest.mark.parametrize("role", ["admin", "superuser"])
 async def test_privileged_owner_suspends_as_admin(client, committed, role) -> None:
     team = await make_team(committed)
@@ -293,13 +333,14 @@ async def test_privileged_owner_suspends_as_admin(client, committed, role) -> No
 
 @pytest.mark.parametrize("operation", ["create", "reactivate"])
 @pytest.mark.parametrize("decision", [Decision.ERROR, Decision.DENY])
+@pytest.mark.parametrize("reason", ["owner", "owner_removed"])
 async def test_external_membership_error_is_unavailable_not_a_denial(
-    client, committed, monkeypatch, operation, decision
+    client, committed, monkeypatch, operation, decision, reason
 ) -> None:
     team = await make_team(committed)
     owner, token = await user_with_token(committed, superuser=True)
     key = await make_key(
-        committed, team, owner, lifecycle=KeyLifecycle.SUSPENDED, suspended_reason="owner"
+        committed, team, owner, lifecycle=KeyLifecycle.SUSPENDED, suspended_reason=reason
     )
     await committed.commit()
     membership_checks = []
@@ -325,7 +366,7 @@ async def test_external_membership_error_is_unavailable_not_a_denial(
         assert response.json()["error"]["code"] == "authz_unavailable"
     assert membership_checks == [(str(owner.id), str(team.id))]
     stored = client.get(f"/api/v1/keys/{key.id}", headers=BOOTSTRAP_AUTH).json()
-    assert (stored["lifecycle"], stored["suspended_reason"]) == ("suspended", "owner")
+    assert (stored["lifecycle"], stored["suspended_reason"]) == ("suspended", reason)
     keys = client.get(f"/api/v1/teams/{team.id}/keys", headers=BOOTSTRAP_AUTH).json()["items"]
     assert [row["id"] for row in keys] == [str(key.id)]
 
@@ -354,6 +395,7 @@ async def test_inactive_owner_key_cannot_be_reactivated(client, committed, calle
     stored = client.get(path, headers=BOOTSTRAP_AUTH).json()
     assert stored["name"] == "unchanged"
     assert (stored["lifecycle"], stored["suspended_reason"]) == ("suspended", "owner_deactivated")
+    assert stored["owner_active"] is False
     assert (
         client.patch(
             f"/api/v1/users/{owner.id}", json={"is_active": True}, headers=BOOTSTRAP_AUTH
@@ -363,3 +405,67 @@ async def test_inactive_owner_key_cannot_be_reactivated(client, committed, calle
     restored = client.patch(path, json={"lifecycle": "active"}, headers=headers)
     assert restored.status_code == 200, restored.text
     assert restored.json()["suspended_reason"] is None
+    assert restored.json()["owner_active"] is True
+
+
+async def test_key_list_owner_status_is_joined_and_paginated(client, committed) -> None:
+    team = await make_team(committed)
+    admin, token = await user_with_token(committed)
+    await make_member(committed, team, admin, role=TeamRole.ADMIN)
+    active = await make_user(committed)
+    inactive = await make_user(committed, is_active=False)
+    account = await make_service_account(committed, team)
+    expected = {}
+    for owner, status in ((active, True), (inactive, False), (account, None)):
+        key = await make_key(committed, team, owner)
+        expected[str(key.id)] = status
+    await committed.commit()
+    statements = []
+
+    def record_sql(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    engine = client.app.state.engine.sync_engine
+    event.listen(engine, "before_cursor_execute", record_sql)
+    try:
+        # Bootstrap avoids credential and authorization queries, leaving only the
+        # team lookup and one joined page query, independent of page size.
+        path = f"/api/v1/teams/{team.id}/keys"
+        for limit in (1, 50):
+            statements.clear()
+            response = client.get(path, params={"limit": limit}, headers=BOOTSTRAP_AUTH)
+            assert response.status_code == 200, response.text
+            assert len(statements) == 2
+            assert "JOIN users" in statements[-1]
+    finally:
+        event.remove(engine, "before_cursor_execute", record_sql)
+
+    assert {row["id"]: row["owner_active"] for row in response.json()["items"]} == expected
+    page = client.get(path, params={"limit": 1}, headers=auth(token)).json()
+    items = list(page["items"])
+    while page["next_cursor"] is not None:
+        page = client.get(
+            path,
+            params={"limit": 1, "cursor": page["next_cursor"]},
+            headers=auth(token),
+        ).json()
+        items.extend(page["items"])
+    assert [row["id"] for row in items] == sorted(expected)
+    assert {row["id"]: row["owner_active"] for row in items} == expected
+    filtered = client.get(path, params={"user_id": str(inactive.id)}, headers=auth(token))
+    assert filtered.status_code == 200, filtered.text
+    assert [row["owner_active"] for row in filtered.json()["items"]] == [False]
+    assert client.get(path, params={"cursor": "invalid"}, headers=auth(token)).status_code == 422
+
+
+async def test_own_key_list_includes_active_owner_status(client, committed) -> None:
+    team = await make_team(committed)
+    owner, token = await user_with_token(committed)
+    await make_member(committed, team, owner)
+    key = await make_key(committed, team, owner)
+    await committed.commit()
+    response = client.get("/api/v1/users/me/keys", headers=auth(token))
+    assert response.status_code == 200, response.text
+    assert [(row["id"], row["owner_active"]) for row in response.json()["items"]] == [
+        (str(key.id), True)
+    ]

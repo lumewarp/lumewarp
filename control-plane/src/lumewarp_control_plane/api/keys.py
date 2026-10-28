@@ -11,7 +11,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, status
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import audit
@@ -26,16 +26,16 @@ from lumewarp_control_plane.api.common import (
     get_team_or_404,
     lock_scope,
     mutation,
-    uuid_page,
+    parse_uuid_cursor,
     validation_error,
 )
 from lumewarp_control_plane.api.schemas import (
     KeyCreate,
-    KeyCreated,
-    KeyOut,
     KeyUpdate,
     Page,
 )
+from lumewarp_control_plane.api.schemas import KeyCreated as KeyCreatedBase
+from lumewarp_control_plane.api.schemas import KeyOut as KeyOutBase
 from lumewarp_control_plane.authz import (
     Action,
     Authz,
@@ -57,6 +57,40 @@ from lumewarp_control_plane.models import (
 from lumewarp_control_plane.security import SecretKind, generate_secret
 
 router = APIRouter(tags=["keys"])
+
+
+class KeyOut(KeyOutBase):
+    owner_active: bool | None
+
+
+class KeyCreated(KeyCreatedBase):
+    key: KeyOut
+
+
+async def _out(session: AsyncSession, key: ApiKey) -> KeyOut:
+    active = (
+        await session.scalar(select(User.is_active).where(User.id == key.user_id))
+        if key.owner_kind is KeyOwnerKind.USER
+        else None
+    )
+    return KeyOut(**KeyOutBase.model_validate(key).model_dump(), owner_active=active)
+
+
+async def _page(
+    session: AsyncSession, stmt: Select[tuple[ApiKey]], limit: int, cursor: str | None
+) -> Page[KeyOut]:
+    stmt = stmt.add_columns(User.is_active).outerjoin(User, User.id == ApiKey.user_id)
+    if cursor is not None:
+        stmt = stmt.where(ApiKey.id > parse_uuid_cursor(cursor))
+    rows = (await session.execute(stmt.limit(limit + 1))).all()
+    next_cursor = str(rows[limit - 1][0].id) if len(rows) > limit else None
+    return Page[KeyOut](
+        items=[
+            KeyOut(**KeyOutBase.model_validate(key).model_dump(), owner_active=active)
+            for key, active in rows[:limit]
+        ],
+        next_cursor=next_cursor,
+    )
 
 
 async def _is_member(
@@ -120,8 +154,7 @@ async def list_team_keys(
         stmt = stmt.where(ApiKey.service_account_id == service_account_id)
     if lifecycle is not None:
         stmt = stmt.where(ApiKey.lifecycle == lifecycle)
-    rows, next_cursor = await uuid_page(session, stmt, ApiKey.id, limit, cursor)
-    return Page[KeyOut](items=[KeyOut.model_validate(row) for row in rows], next_cursor=next_cursor)
+    return await _page(session, stmt, limit, cursor)
 
 
 @router.post(
@@ -183,7 +216,7 @@ async def create_key(
             },
         )
         await enqueue_recompile(session, settings, "api.key.create")
-    return KeyCreated(key=KeyOut.model_validate(row), secret=new.secret)
+    return KeyCreated(key=await _out(session, row), secret=new.secret)
 
 
 @router.get("/keys/{key_id}", response_model=KeyOut, operation_id="getKey")
@@ -192,7 +225,7 @@ async def get_key(key_id: uuid.UUID, authz: Authz, session: SessionDep) -> KeyOu
     if row is None:
         raise not_found("key not found")
     await ensure_key_read(authz, row)
-    return KeyOut.model_validate(row)
+    return await _out(session, row)
 
 
 @router.patch("/keys/{key_id}", response_model=KeyOut, operation_id="updateKey")
@@ -231,7 +264,12 @@ async def update_key(
                     raise conflict("the key's owner is not active")
                 if not await _is_member(session, authz, row.team_id, row.user_id):
                     raise conflict("the key's owner is no longer a member of the team")
-            if row.suspended_reason not in (None, "owner"):
+            owner_resume = (
+                row.suspended_reason == "owner_removed"
+                and row.owner_kind is KeyOwnerKind.USER
+                and row.user_id == authz.user_id
+            )
+            if row.suspended_reason not in (None, "owner") and not owner_resume:
                 await authz.require(admin_action, row.team_id)
             row.lifecycle = KeyLifecycle.ACTIVE
             row.suspended_reason = None
@@ -256,7 +294,7 @@ async def update_key(
             },
         )
         await enqueue_recompile(session, settings, "api.key.update")
-    return KeyOut.model_validate(row)
+    return await _out(session, row)
 
 
 @router.post("/keys/{key_id}/revoke", response_model=KeyOut, operation_id="revokeKey")
@@ -286,7 +324,7 @@ async def revoke_key(
                 details={"name": row.name},
             )
             await enqueue_recompile(session, settings, "api.key.revoke")
-    return KeyOut.model_validate(row)
+    return await _out(session, row)
 
 
 @router.post("/keys/{key_id}/rotate", response_model=KeyCreated, operation_id="rotateKey")
@@ -318,7 +356,7 @@ async def rotate_key(
             details={"name": row.name},
         )
         await enqueue_recompile(session, settings, "api.key.rotate")
-    return KeyCreated(key=KeyOut.model_validate(row), secret=new.secret)
+    return KeyCreated(key=await _out(session, row), secret=new.secret)
 
 
 @router.get("/users/me/keys", response_model=Page[KeyOut], operation_id="listOwnKeys")
@@ -335,5 +373,4 @@ async def list_own_keys(
         .where(ApiKey.owner_kind == KeyOwnerKind.USER, ApiKey.user_id == authz.user_id)
         .order_by(ApiKey.id)
     )
-    rows, next_cursor = await uuid_page(session, stmt, ApiKey.id, limit, cursor)
-    return Page[KeyOut](items=[KeyOut.model_validate(row) for row in rows], next_cursor=next_cursor)
+    return await _page(session, stmt, limit, cursor)

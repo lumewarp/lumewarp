@@ -12,6 +12,19 @@ export function Badge({ children, tone = "muted" }: { children: ReactNode; tone?
   return <span className={`badge badge-${tone}`}>{children}</span>;
 }
 
+const SUSPENDED_REASONS: Record<string, string> = {
+  owner_removed: "owner removed from team",
+  owner_deactivated: "owner deactivated",
+  admin: "suspended by admin",
+  owner: "suspended by owner",
+};
+
+/** Human-readable `suspended_reason` shown next to a key's lifecycle badge. */
+export function SuspendedReason({ reason }: { reason: string | null }) {
+  if (!reason) return null;
+  return <span className="muted"> {SUSPENDED_REASONS[reason] ?? reason.replaceAll("_", " ")}</span>;
+}
+
 /** Money is stored as integer nano-USD (1 USD = 1e9). */
 export const NANO = 1_000_000_000;
 export const nanoToUsd = (n: number | null | undefined) => (n === null || n === undefined ? null : n / NANO);

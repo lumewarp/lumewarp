@@ -1,5 +1,6 @@
 import { createRootRoute, createRoute, createRouter, Outlet, redirect } from "@tanstack/react-router";
-import { getToken } from "./auth";
+import { api } from "./api";
+import { getCsrfToken, getToken } from "./auth";
 import { Layout } from "./components/Layout";
 import { Audit } from "./pages/Audit";
 import { Config } from "./pages/Config";
@@ -21,17 +22,19 @@ const rootRoute = createRootRoute({ component: Outlet });
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login",
-  beforeLoad: () => {
-    if (getToken()) throw redirect({ to: "/" });
-  },
   component: Login,
 });
 
 const appRoute = createRoute({
   getParentRoute: () => rootRoute,
   id: "app",
-  beforeLoad: () => {
-    if (!getToken()) throw redirect({ to: "/login" });
+  beforeLoad: async ({ location }) => {
+    // Bearer token, or a cookie session already discovered in this page load (its CSRF token is in memory).
+    if (getToken() || getCsrfToken()) return;
+    const session = await api.session();
+    if (!session.authenticated) {
+      throw redirect({ to: "/login", search: { next: location.href } });
+    }
   },
   component: Layout,
 });

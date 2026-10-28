@@ -14,16 +14,23 @@ installation `superuser` implies `admin` of every team. `Decision.ERROR` (backen
 timed out) is never treated as a deny: the admin API answers 503 and background jobs skip
 the round. The gateway never calls a backend (it only sees compiled snapshots).
 
-Backends are selected by `LUMEWARP_AUTHZ_BACKEND`: "builtin" (default, `builtin.py`) or the
-name of a `lumewarp.authz` entry point. The entry point may be the async `check` function
-itself, an object with a `check` method, or a class / zero-argument factory returning one.
+Backends are selected by `LUMEWARP_AUTHZ_BACKEND`: "builtin" (default, `builtin.py`),
+"openfga" (`openfga.py`), "http" (`http.py`) or the name of a `lumewarp.authz` entry point.
+The entry point may be the async `check` function itself, an object with a `check` method,
+or a class / zero-argument factory returning one.
 Everything besides `check` is optional and filled in by `Authorizer`:
 
 - `batch_check(items)`: default runs `check` concurrently (bounded).
 - `list_teams(user_id, relation, candidates)`: default filters `candidates` with
   `batch_check`.
+- `changes(cursor)`: a stream of users whose relations may have changed (`ChangeBatch`),
+  used by the key reconciler to react within seconds. Without it the reconciler only
+  rescans periodically.
 - `manages_grants`: default False, i.e. memberships live in the external system and the
   admin API's member endpoints are read-only.
+
+Every backend call is bounded by `LUMEWARP_AUTHZ_TIMEOUT_SECONDS`; a timeout or exception is
+`Decision.ERROR`.
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import math
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -51,6 +59,8 @@ log = logging.getLogger(__name__)
 
 ENTRY_POINT_GROUP = "lumewarp.authz"
 BUILTIN = "builtin"
+OPENFGA = "openfga"
+HTTP = "http"
 # Concurrent `check` calls per default `batch_check`.
 BATCH_CONCURRENCY = 16
 
@@ -85,6 +95,19 @@ CheckFn = Callable[[str, Relation, Resource], Awaitable[Decision]]
 CheckItem = tuple[str, Relation, Resource]
 
 
+@dataclass(frozen=True)
+class ChangeBatch:
+    """Result of `changes(cursor)`."""
+
+    # Lumewarp user ids whose relations may have changed since `cursor`.
+    user_ids: frozenset[str]
+    # Opaque position to pass to the next `changes` call.
+    cursor: str
+    # The cursor was None, unknown or expired: changes may have been missed, so the
+    # caller must rescan everything. `user_ids` may then be empty.
+    reset: bool = False
+
+
 class Backend(Protocol):
     """The minimum a backend implements. See the module docstring for optional methods."""
 
@@ -107,32 +130,41 @@ class _FunctionBackend:
 class Authorizer:
     """A backend with the optional capabilities filled in from `check`."""
 
-    def __init__(self, backend: Any, name: str = BUILTIN) -> None:
+    def __init__(self, backend: Any, name: str = BUILTIN, timeout: float = 2.0) -> None:
         if inspect.iscoroutinefunction(backend):
             backend = _FunctionBackend(backend)
         if not callable(getattr(backend, "check", None)):
             raise TypeError(f"authz backend {name!r} has no check()")
         self.backend = backend
         self.name = name
+        self.timeout = timeout
         self.manages_grants: bool = bool(getattr(backend, "manages_grants", False))
+
+    @property
+    def has_changes(self) -> bool:
+        return getattr(self.backend, "changes", None) is not None
 
     async def check(self, user_id: str, relation: Relation, resource: Resource) -> Decision:
         try:
-            decision = await self.backend.check(user_id, relation, resource)
+            async with asyncio.timeout(self.timeout):
+                decision = await self.backend.check(user_id, relation, resource)
+            return Decision(decision)
         except Exception:
             log.exception("authz backend %s: check failed", self.name)
             return Decision.ERROR
-        return Decision(decision)
 
     async def batch_check(self, items: Sequence[CheckItem]) -> list[Decision]:
         native = getattr(self.backend, "batch_check", None)
         if native is not None:
             try:
-                decisions = await native(list(items))
+                async with asyncio.timeout(self.timeout * (math.ceil(len(items) / 50) + 1)):
+                    decisions = await native(list(items))
+                if len(decisions) != len(items):
+                    raise ValueError("batch_check returned a different number of decisions")
+                return [Decision(d) for d in decisions]
             except Exception:
                 log.exception("authz backend %s: batch_check failed", self.name)
                 return [Decision.ERROR] * len(items)
-            return [Decision(d) for d in decisions]
         limit = asyncio.Semaphore(BATCH_CONCURRENCY)
 
         async def one(item: CheckItem) -> Decision:
@@ -149,9 +181,9 @@ class Authorizer:
         candidates = list(candidates)
         if native is not None:
             try:
-                return {uuid.UUID(str(t)) for t in await native(user_id, relation)} & set(
-                    candidates
-                )
+                async with asyncio.timeout(self.timeout):
+                    teams = await native(user_id, relation)
+                return {uuid.UUID(str(t)) for t in teams} & set(candidates)
             except Exception:
                 log.exception("authz backend %s: list_teams failed", self.name)
                 return None
@@ -162,13 +194,39 @@ class Authorizer:
             return None
         return {t for t, d in zip(candidates, decisions, strict=True) if d is Decision.ALLOW}
 
+    async def changes(self, cursor: str | None) -> ChangeBatch | None:
+        """The backend's change stream since `cursor`; None on error or when the backend
+        has no `changes` (check `has_changes`).
+        """
+        native = getattr(self.backend, "changes", None)
+        if native is None:
+            return None
+        try:
+            async with asyncio.timeout(self.timeout):
+                batch = await native(cursor)
+            if not isinstance(batch, ChangeBatch):
+                raise TypeError(f"changes() returned {type(batch).__name__}")
+            return batch
+        except Exception:
+            log.exception("authz backend %s: changes failed", self.name)
+            return None
+
 
 def load_authorizer(settings: Settings, session_factory: SessionFactory) -> Authorizer:
     name = settings.authz_backend
+    timeout = settings.authz_timeout_seconds
     if name == BUILTIN:
         from lumewarp_control_plane.authz.builtin import BuiltinBackend
 
-        return Authorizer(BuiltinBackend(session_factory), BUILTIN)
+        return Authorizer(BuiltinBackend(session_factory), BUILTIN, timeout)
+    if name == OPENFGA:
+        from lumewarp_control_plane.authz.openfga import OpenFGABackend
+
+        return Authorizer(OpenFGABackend(settings), OPENFGA, timeout)
+    if name == HTTP:
+        from lumewarp_control_plane.authz.http import HttpBackend
+
+        return Authorizer(HttpBackend(settings), HTTP, timeout)
     matches = [ep for ep in entry_points(group=ENTRY_POINT_GROUP) if ep.name == name]
     if not matches:
         raise RuntimeError(f"unknown authz backend {name!r} (no {ENTRY_POINT_GROUP} entry point)")
@@ -177,7 +235,7 @@ def load_authorizer(settings: Settings, session_factory: SessionFactory) -> Auth
         callable(obj) and not inspect.iscoroutinefunction(obj) and not hasattr(obj, "check")
     ):
         obj = obj()
-    return Authorizer(obj, name)
+    return Authorizer(obj, name, timeout)
 
 
 # --------------------------------------------------------------------------- actions

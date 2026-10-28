@@ -12,9 +12,185 @@ async function login(page: Page, token: string) {
 
 const dialog = (page: Page) => page.getByRole("dialog");
 
+test("SSO availability and login errors follow session discovery", async ({ page }) => {
+  let oidcEnabled = false;
+  await page.route("**/api/v1/session", (route) =>
+    route.fulfill({ json: { oidc_enabled: oidcEnabled, authenticated: false } }),
+  );
+  const sessionLoaded = () => page.waitForResponse((r) => new URL(r.url()).pathname === "/api/v1/session");
+
+  let discovered = sessionLoaded();
+  await page.goto("/login");
+  await discovered;
+  await expect(page.getByLabel("Access token")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Sign in with SSO" })).toHaveCount(0);
+  await page.evaluate(() => sessionStorage.setItem("lumewarp.token", "stale-token"));
+
+  oidcEnabled = true;
+  for (const [code, message] of [
+    ["invalid_state", /SSO sign-in expired/i],
+    ["access_denied", /not granted access/i],
+    ["oidc_error", /Single sign-on failed/i],
+  ] as const) {
+    discovered = sessionLoaded();
+    await page.goto(`/login?error=${code}&next=%2Fteams%2Freturn-here`);
+    await discovered;
+    await expect(page.getByRole("button", { name: "Sign in with SSO" })).toBeVisible();
+    await expect(page.getByRole("alert")).toContainText(message);
+  }
+  // The token form stays available as the secondary option.
+  await expect(page.getByLabel("Access token")).toBeVisible();
+
+  await page.route("**/api/v1/session/oidc/login**", (route) =>
+    route.fulfill({ status: 200, body: "Authorization request intercepted." }),
+  );
+  const loginRequest = page.waitForRequest(
+    (request) => new URL(request.url()).pathname === "/api/v1/session/oidc/login",
+  );
+  await page.getByRole("button", { name: "Sign in with SSO" }).click();
+  const request = await loginRequest;
+  expect(new URL(request.url()).searchParams.get("next")).toBe("/teams/return-here");
+  expect(await page.evaluate(() => sessionStorage.getItem("lumewarp.token"))).toBeNull();
+});
+
+test("cookie session: CSRF on writes, inline member errors, key owner state, logout", async ({ page }) => {
+  const teamId = "00000000-0000-4000-8000-000000000001";
+  const userId = "00000000-0000-4000-8000-000000000002";
+  const inactiveId = "00000000-0000-4000-8000-000000000003";
+  const email = "cookie-admin@e2e.test";
+  const csrfToken = "cookie-session-csrf-token";
+  let signedIn = true;
+  await page.route("**/api/v1/session", (route) =>
+    route.fulfill({
+      json: signedIn
+        ? {
+            oidc_enabled: true,
+            authenticated: true,
+            user: { id: userId, email, display_name: "Cookie Admin", is_superuser: false },
+            csrf_token: csrfToken,
+          }
+        : { oidc_enabled: true, authenticated: false },
+    }),
+  );
+  await page.route("**/api/v1/users/me", (route) =>
+    route.fulfill({
+      json: {
+        kind: "session",
+        user_id: userId,
+        email,
+        display_name: "Cookie Admin",
+        is_superuser: false,
+        manages_grants: true,
+        teams: [{ team_id: teamId, team_name: "Cookie Team", role: "admin" }],
+      },
+    }),
+  );
+  await page.route(`**/api/v1/teams/${teamId}`, (route) =>
+    route.fulfill({ json: { id: teamId, name: "Cookie Team" } }),
+  );
+  const inactiveMember = {
+    team_id: teamId,
+    user_id: inactiveId,
+    email: "gone@e2e.test",
+    display_name: "Gone",
+    role: "member",
+    user_active: false,
+    model_access: "inherit",
+    allowed_models: [],
+    rpm_limit: null,
+    tpm_limit: null,
+    max_parallel: null,
+    budget_nano_usd: null,
+    soft_budget_nano_usd: null,
+  };
+  const memberPosts: { csrf?: string; authorization?: string }[] = [];
+  await page.route(new RegExp(`/api/v1/teams/${teamId}/members(?:\\?.*)?$`), async (route) => {
+    if (route.request().method() === "POST") {
+      const headers = route.request().headers();
+      memberPosts.push({ csrf: headers["x-lumewarp-csrf"], authorization: headers.authorization });
+      if (memberPosts.length === 1) {
+        await route.fulfill({ status: 404, json: { error: { code: "user_not_found", message: "user not found" } } });
+      } else if (memberPosts.length === 2) {
+        await route.fulfill({ status: 409, json: { error: { code: "conflict", message: "user is already a member of this team" } } });
+      } else {
+        await route.fulfill({ status: 201, json: { ...inactiveMember, user_active: true } });
+      }
+      return;
+    }
+    await route.fulfill({ json: { items: [inactiveMember], next_cursor: null } });
+  });
+  await page.route(new RegExp(`/api/v1/teams/${teamId}/service-accounts(?:\\?.*)?$`), (route) =>
+    route.fulfill({ json: { items: [], next_cursor: null } }),
+  );
+  await page.route(new RegExp(`/api/v1/teams/${teamId}/keys(?:\\?.*)?$`), (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          {
+            id: "00000000-0000-4000-8000-000000000010",
+            team_id: teamId,
+            owner_kind: "user",
+            user_id: inactiveId,
+            service_account_id: null,
+            name: "orphaned-key",
+            display_prefix: "lwk-orph",
+            lifecycle: "suspended",
+            suspended_reason: "owner_removed",
+            expires_at: null,
+            revoked_at: null,
+            created_by_user_id: inactiveId,
+            created_at: "2026-10-01T00:00:00Z",
+            updated_at: "2026-10-02T00:00:00Z",
+            owner_active: false,
+          },
+        ],
+        next_cursor: null,
+      },
+    }),
+  );
+
+  await page.goto(`/teams/${teamId}`);
+  await expect(page.getByRole("heading", { name: "Cookie Team" })).toBeVisible();
+  await expect(page.locator(".principal")).toContainText("Cookie Admin");
+  await expect(page.locator("tr", { hasText: "gone@e2e.test" }).getByText("Inactive")).toBeVisible();
+
+  await page.getByRole("button", { name: "Add member" }).click();
+  await dialog(page).getByLabel("Email").fill("missing@e2e.test");
+  await dialog(page).getByRole("button", { name: "Add member" }).click();
+  await expect(dialog(page).getByRole("alert")).toHaveText("No user with this email address exists.");
+  await dialog(page).getByLabel("Email").fill("gone@e2e.test");
+  await dialog(page).getByRole("button", { name: "Add member" }).click();
+  await expect(dialog(page).getByRole("alert")).toHaveText("This user is already a member of this team.");
+  await dialog(page).getByLabel("Email").fill("new-member@e2e.test");
+  await dialog(page).getByRole("button", { name: "Add member" }).click();
+  await expect(dialog(page)).toHaveCount(0);
+  expect(memberPosts).toHaveLength(3);
+  for (const headers of memberPosts) {
+    expect(headers.csrf).toBe(csrfToken);
+    expect(headers.authorization).toBeUndefined();
+  }
+
+  await page.getByRole("tab", { name: "Keys" }).click();
+  const keyRow = page.locator("tr", { hasText: "orphaned-key" });
+  await expect(keyRow).toContainText("owner removed from team");
+  await expect(keyRow.getByRole("button", { name: "Resume" })).toBeDisabled();
+  await expect(keyRow.getByRole("button", { name: "Resume" })).toHaveAttribute("title", /owner is inactive/i);
+
+  let logoutCsrf: string | undefined;
+  await page.route("**/api/v1/session/logout", async (route) => {
+    logoutCsrf = route.request().headers()["x-lumewarp-csrf"];
+    signedIn = false;
+    await route.fulfill({ status: 204 });
+  });
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page).toHaveURL(/\/login$/);
+  expect(logoutCsrf).toBe(csrfToken);
+  await expect(page.getByRole("button", { name: "Sign in with SSO" })).toBeVisible();
+});
+
 test("team, member, service-account, and key flows", async ({ page, browser, request }) => {
   await page.goto("/keys");
-  await expect(page).toHaveURL(/\/login$/);
+  await expect(page).toHaveURL(/\/login\?next=%2Fkeys$/);
   await login(page, "not-a-token");
   await expect(page.getByRole("alert")).toBeVisible();
 
@@ -83,11 +259,11 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await login(managedPage, BOOTSTRAP);
   await managedPage.goto(`/teams/${team.id}`);
   await expect(managedPage.getByRole("button", { name: "Add member" })).toBeDisabled();
-  await expect(managedPage.getByText(/membership is managed by an external authorization system/i)).toBeVisible();
+  await expect(managedPage.getByRole("status").filter({ hasText: /managed by your identity provider \/ IAM/i })).toBeVisible();
   await managedContext.close();
 
   await page.getByRole("button", { name: "Add member" }).click();
-  await dialog(page).getByLabel("Search users by email").fill("viewer@e2e.test");
+  await dialog(page).getByLabel("Email", { exact: true }).fill("viewer@e2e.test");
   await dialog(page).getByLabel("User", { exact: true }).selectOption(viewer.id);
   await dialog(page).getByRole("button", { name: "Add member" }).click();
   await expect(page.getByRole("cell", { name: "viewer@e2e.test" })).toBeVisible();
@@ -106,7 +282,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   });
   await page.getByRole("button", { name: "Edit" }).click();
   await dialog(page).getByRole("button", { name: "Save" }).click();
-  await expect(page.getByText(/managed by an external authorization system/i)).toBeVisible();
+  await expect(dialog(page).getByText(/managed by your identity provider \/ IAM/i)).toBeVisible();
   await dialog(page).getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByRole("button", { name: "Add member" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Edit" })).toBeDisabled();
@@ -267,5 +443,5 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page).toHaveURL(/\/login$/);
   await page.goto("/keys");
-  await expect(page).toHaveURL(/\/login$/);
+  await expect(page).toHaveURL(/\/login\?next=%2Fkeys$/);
 });
