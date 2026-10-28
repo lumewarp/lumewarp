@@ -23,15 +23,15 @@ export function Settings() {
           <dd>{me.data?.display_name ?? "…"}</dd>
           <dt>Email</dt>
           <dd>{me.data?.email ?? "—"}</dd>
-          <dt>Access</dt>
+          <dt>Teams and roles</dt>
           <dd>
             {me.data?.is_superuser && <Badge tone="info">superuser</Badge>}
-            {me.data?.grants.map((g) => (
-              <Badge key={`${g.org_id}${g.team_id}`} tone="info">
-                {g.role}
-                {g.team_id ? " (team)" : " (org)"}
+            {me.data?.teams.map((team) => (
+              <Badge key={team.team_id} tone="info">
+                {team.team_name} · {team.role}
               </Badge>
             ))}
+            {me.data && !me.data.is_superuser && me.data.teams.length === 0 && <span className="muted">No team memberships.</span>}
           </dd>
         </dl>
       </section>

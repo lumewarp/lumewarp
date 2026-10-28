@@ -9,7 +9,7 @@ const dest = join(root, "..", "control-plane", "src", "lumewarp_control_plane", 
 
 if (!existsSync(join(src, "index.html"))) throw new Error("ui/dist is missing; run `pnpm build` first");
 mkdirSync(dest, { recursive: true });
-for (const name of readdirSync(dest)) if (name !== ".gitkeep") rmSync(join(dest, name), { recursive: true, force: true });
+for (const name of readdirSync(dest)) if (name !== ".gitkeep" && name !== ".gitignore") rmSync(join(dest, name), { recursive: true, force: true });
 cpSync(src, dest, { recursive: true });
 writeFileSync(join(dest, ".gitkeep"), "");
 console.log(`copied ${src} -> ${dest}`);

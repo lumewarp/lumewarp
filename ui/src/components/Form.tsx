@@ -135,6 +135,7 @@ interface FormDialogProps {
   open: boolean;
   title: string;
   submitLabel?: string;
+  submitDisabled?: boolean;
   onClose: () => void;
   /** Return false to keep the dialog open (validation failed). Throw to show a server error. */
   onSubmit: () => Promise<boolean | void> | boolean | void;
@@ -142,7 +143,7 @@ interface FormDialogProps {
   variant?: "dialog" | "drawer";
 }
 
-export function FormDialog({ open, title, submitLabel = "Save", onClose, onSubmit, children, variant }: FormDialogProps) {
+export function FormDialog({ open, title, submitLabel = "Save", submitDisabled = false, onClose, onSubmit, children, variant }: FormDialogProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const submit = async (e: FormEvent) => {
@@ -169,7 +170,7 @@ export function FormDialog({ open, title, submitLabel = "Save", onClose, onSubmi
           <button type="button" className="btn" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" form={formId} className="btn btn-primary" disabled={busy}>
+          <button type="submit" form={formId} className="btn btn-primary" disabled={busy || submitDisabled}>
             {busy ? "Saving…" : submitLabel}
           </button>
         </>

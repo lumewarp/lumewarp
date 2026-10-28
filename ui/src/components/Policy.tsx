@@ -2,7 +2,7 @@ import type { ModelAccess, PolicyOut } from "../api";
 import { nanoToUsd, usdToNano, fmtUsd } from "./Bits";
 import { ListField, NumberField, SelectField } from "./Form";
 
-/** Policy form state shared by orgs, teams, projects and keys; budgets are edited in USD. */
+/** Policy form state shared by teams and key owners; budgets are edited in USD. */
 export interface PolicyValues {
   model_access: ModelAccess;
   allowed_models: string[];
@@ -13,8 +13,8 @@ export interface PolicyValues {
   soft_budget_usd: number | null;
 }
 
-export const blankPolicy = (isOrg = false): PolicyValues => ({
-  model_access: isOrg ? "all" : "inherit",
+export const blankPolicy = (isTeam = false): PolicyValues => ({
+  model_access: isTeam ? "all" : "inherit",
   allowed_models: [],
   rpm_limit: null,
   tpm_limit: null,
@@ -57,13 +57,13 @@ interface Props {
   values: PolicyValues;
   errors: Partial<Record<keyof PolicyValues, string>>;
   set<K extends keyof PolicyValues>(k: K, v: PolicyValues[K]): void;
-  /** Orgs have no parent to inherit from. */
-  isOrg?: boolean;
+  /** Teams have no parent to inherit from. */
+  isTeam?: boolean;
   models?: string[];
 }
 
-export function PolicyFields({ values, errors, set, isOrg, models }: Props) {
-  const options = [...(isOrg ? [] : [{ value: "inherit", label: "Inherit from parent" }]), { value: "all", label: "All models" }, { value: "list", label: "Specific models" }];
+export function PolicyFields({ values, errors, set, isTeam, models }: Props) {
+  const options = [...(isTeam ? [] : [{ value: "inherit", label: "Inherit from team" }]), { value: "all", label: "All models" }, { value: "list", label: "Specific models" }];
   return (
     <>
       <SelectField label="Model access" value={values.model_access} onChange={(v) => set("model_access", v as ModelAccess)} options={options} error={errors.model_access} hint={ACCESS_HINT[values.model_access]} />
