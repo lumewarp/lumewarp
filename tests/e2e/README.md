@@ -11,6 +11,13 @@ control-plane mode. No separate project: the tests run in the control-plane's uv
 Environment: `E2E_PG_URL` (server DSN, default dev Postgres 127.0.0.1:55432), `E2E_PROFILE`
 (`debug`|`release` gateway), `E2E_GATEWAY_BIN`, `E2E_MOCK_BIN`. Failing tests print every process log.
 
+`test_p2_routing.py` (collected by `scripts/e2e-p1.sh` and `scripts/e2e-p2.sh`; no IdP) configures
+P2 routing over the admin API against a second mock started with `--fail-every 1` (always 503)
+and a closed port: retry to a second deployment with exactly one usage event for the final
+deployment; fallback routes (503 and connect error, streaming too) answering with the client's
+model name; a circuit breaker reaching `lumewarp_upstream_circuit_state=2` after N failures, after
+which the failing deployment gets no attempts (`outcome="circuit_open"` only).
+
 ## P2: real OIDC and authorization exit gate
 
     scripts/e2e-p2.sh

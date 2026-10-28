@@ -199,6 +199,19 @@ class Gateway:
         self.proc.stop()
         self.http.close()
 
+    def drain_usage(self) -> None:
+        """Join producers and the reporter via graceful shutdown before reconciling DB.
+
+        main.rs stops HTTP first, then awaits ReporterHandle::shutdown, which flushes
+        queued batches and waits for ingestion ACKs. Process exit is the completion
+        signal: unlike a queue gauge, it also covers a batch already in flight.
+        """
+        self.stop()
+        assert self.proc.popen.returncode == 0, self.proc.text()
+        log = self.proc.text()
+        assert "usage events not reported before shutdown" not in log, log
+        assert "usage reporter did not stop before the deadline" not in log, log
+
 
 class Stack:
     """One database, control plane, mock upstream; gateways are started by the tests."""
@@ -210,6 +223,7 @@ class Stack:
         self.grpc_port = free_port()
         self.mock_port = free_port()
         self.gateways: list[Gateway] = []
+        self.extra_mocks: list[Proc] = []
         self.api_url = f"http://127.0.0.1:{self.http_port}/api/v1"
         base, _, _ = PG_DSN.rpartition("/")
         self.dsn = f"{base}/{self.db_name}"
@@ -286,6 +300,24 @@ class Stack:
 
         wait_for(up, 30, "control plane /readyz")
 
+    def start_mock(self, tag: str, *args: str) -> int:
+        """Start another mock upstream (e.g. with fault injection); returns its port."""
+        port = free_port()
+        proc = Proc(
+            tag,
+            [str(MOCK_BIN), "--listen", f"127.0.0.1:{port}", "--latency-ms", "5", *args],
+            self.base_env,
+            self.dir,
+        )
+        self.extra_mocks.append(proc)
+        proc.start()
+        wait_for(
+            lambda: httpx.get(f"http://127.0.0.1:{port}/health", timeout=1).status_code == 200,
+            10,
+            f"mock upstream {tag}",
+        )
+        return port
+
     def stop_cp(self) -> None:
         self.cp.stop()
 
@@ -305,6 +337,8 @@ class Stack:
             gw.stop()
         self.cp.stop()
         self.mock.stop()
+        for proc in self.extra_mocks:
+            proc.stop()
         self.admin.close()
         try:
             pg(PG_DSN, f'DROP DATABASE IF EXISTS "{self.db_name}" WITH (FORCE)')
