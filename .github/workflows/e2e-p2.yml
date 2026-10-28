@@ -1,0 +1,38 @@
+name: P2 nightly exit gate
+
+on:
+  schedule:
+    - cron: "47 3 * * *"
+
+jobs:
+  e2e-p2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: lumewarp
+          POSTGRES_PASSWORD: lumewarp
+          POSTGRES_DB: lumewarp
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U lumewarp -d lumewarp"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            gateway
+            bench/mock-upstream
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --project control-plane
+      - name: P2 exit gate (builtin and OpenFGA)
+        env:
+          E2E_PG_URL: postgresql://lumewarp:lumewarp@127.0.0.1:55432/lumewarp
+        run: scripts/e2e-p2.sh
