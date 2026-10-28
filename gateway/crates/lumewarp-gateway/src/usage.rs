@@ -649,6 +649,12 @@ impl PendingCapture {
     pub fn take(mut self) -> UsageCapture {
         self.0.take().expect("capture taken once")
     }
+
+    /// Drops the capture without accounting: for requests that turn out to
+    /// be invalid before any upstream attempt (no usage event, no metric).
+    pub fn discard(mut self) {
+        self.0.take();
+    }
 }
 
 impl Drop for PendingCapture {
@@ -1270,6 +1276,40 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
             ..Default::default()
         });
         assert_eq!(rx.try_recv().unwrap().key_id, "k");
+    }
+
+    #[test]
+    fn discarded_capture_records_nothing_but_dropped_one_is_cancelled() {
+        let (sink, mut rx) = UsageSink::for_test();
+        let runtime = Runtime::with_usage(Arc::new(Metrics::new()), sink);
+        let capture = || UsageCapture {
+            runtime: runtime.clone(),
+            caller: Caller::Anonymous,
+            request: RequestCtx::new(Instant::now()),
+            handles: runtime.metrics.handles("m", "d", 0, ""),
+            deployment: None,
+            config_version: 1,
+            endpoint: 0,
+            stream: false,
+            status: 499,
+        };
+        let captured = || {
+            runtime
+                .encode_metrics()
+                .unwrap()
+                .lines()
+                .filter(|l| l.starts_with("lumewarp_usage_capture_total{"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let before = captured();
+        PendingCapture::new(capture()).discard();
+        assert!(rx.try_recv().is_err(), "no usage event");
+        assert_eq!(captured(), before, "no usage metric");
+        drop(PendingCapture::new(capture()));
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.status, 499);
+        assert_eq!(event.outcome, RequestOutcome::ClientCancelled as i32);
     }
 
     #[test]

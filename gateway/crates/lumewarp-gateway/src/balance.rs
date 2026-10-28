@@ -153,11 +153,28 @@ pub struct Scrape {
     pub failures: Counter,
 }
 
+impl Scrape {
+    /// Same metrics URL, credentials and deployments fed. `load` and
+    /// `failures` are shared by name, so a kept task keeps feeding them.
+    fn same_target(&self, other: &Scrape) -> bool {
+        self.upstream == other.upstream
+            && self.uri == other.uri
+            && self.authorization == other.authorization
+            && self.targets.len() == other.targets.len()
+            && self
+                .targets
+                .iter()
+                .zip(&other.targets)
+                .all(|((a, la), (b, lb))| a == b && Arc::ptr_eq(la, lb))
+    }
+}
+
 #[derive(Default)]
 pub struct Registry {
     latency: Mutex<HashMap<String, Arc<Latency>>>,
     load: Mutex<HashMap<String, Arc<VllmLoad>>>,
-    tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// Running scrape tasks with the target each one was started for.
+    tasks: Mutex<Vec<(Scrape, JoinHandle<()>)>>,
 }
 
 impl Registry {
@@ -193,41 +210,57 @@ impl Registry {
             .collect()
     }
 
-    /// Replaces every scrape task. Called only after a snapshot is accepted.
-    pub fn configure(&self, scrapes: &[Scrape], client: &UpstreamClient) {
+    /// Called only after a snapshot is accepted. Diffs by target: an
+    /// unchanged scrape keeps its task; only removed or changed ones are
+    /// aborted and only new or changed ones spawned. Returns the spawn count.
+    pub fn configure(&self, scrapes: &[Scrape], client: &UpstreamClient) -> usize {
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        for task in tasks.drain(..) {
+        let mut old = std::mem::take(&mut *tasks);
+        let mut spawned = 0;
+        for scrape in scrapes {
+            match old
+                .iter()
+                .position(|(running, _)| running.same_target(scrape))
+            {
+                Some(i) => tasks.push(old.swap_remove(i)),
+                None => {
+                    spawned += 1;
+                    tasks.push((scrape.clone(), spawn_scrape(scrape.clone(), client.clone())));
+                }
+            }
+        }
+        for (_, task) in old {
             task.abort();
         }
-        for scrape in scrapes {
-            let scrape = scrape.clone();
-            let client = client.clone();
-            tasks.push(tokio::spawn(async move {
-                let mut interval = tokio::time::interval(SCRAPE_INTERVAL);
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    interval.tick().await;
-                    let text = tokio::time::timeout(SCRAPE_TIMEOUT, fetch(&client, &scrape))
-                        .await
-                        .ok()
-                        .flatten();
-                    let ok = text.is_some_and(|text| apply(&scrape, &text, clock::mono_ms()));
-                    if !ok {
-                        scrape.failures.inc();
-                        for (_, load) in &scrape.targets {
-                            load.fail();
-                        }
-                        tracing::debug!(upstream = %scrape.upstream, "vllm metrics scrape failed");
-                    }
-                }
-            }));
-        }
+        spawned
     }
+}
+
+fn spawn_scrape(scrape: Scrape, client: UpstreamClient) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(SCRAPE_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let text = tokio::time::timeout(SCRAPE_TIMEOUT, fetch(&client, &scrape))
+                .await
+                .ok()
+                .flatten();
+            let ok = text.is_some_and(|text| apply(&scrape, &text, clock::mono_ms()));
+            if !ok {
+                scrape.failures.inc();
+                for (_, load) in &scrape.targets {
+                    load.fail();
+                }
+                tracing::debug!(upstream = %scrape.upstream, "vllm metrics scrape failed");
+            }
+        }
+    })
 }
 
 impl Drop for Registry {
     fn drop(&mut self) {
-        for task in self
+        for (_, task) in self
             .tasks
             .get_mut()
             .unwrap_or_else(|e| e.into_inner())

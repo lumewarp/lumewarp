@@ -21,7 +21,7 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use lumewarp_proto::{
-    config::v1::StreamUsageMode,
+    config::v1::{CircuitBreaker, StreamUsageMode},
     usage::v1::{RequestOutcome, UsageState},
 };
 use serde::Deserialize;
@@ -31,10 +31,11 @@ use tracing::Instrument;
 use crate::{
     auth::{self, Caller},
     error,
+    health::Breaker,
     metrics::{Observation, RequestMetrics, UpstreamError, ATTEMPT_OUTCOMES},
     ratelimit::clock,
     ratelimit::Permit,
-    router::{Deployment, InFlight, Router},
+    router::{Deployment, InFlight, Router, Skipped},
     telemetry,
     usage::{Captured, PendingCapture, RequestCtx, SseFilter, Tee, UsageCapture},
 };
@@ -379,9 +380,14 @@ pub async fn forward(
             return error::rate_limited(limited.retry_after_secs);
         }
     };
-    router.runtime.retry_budget.request();
+    // Only requests that may retry fund the global retry budget; routes
+    // without a retry policy never touch its shared state.
+    if route.retry.is_some() {
+        router.runtime.retry_budget.request();
+    }
+    let mut skipped = Skipped::default();
     let Some((mut guard, initial_fallback, split)) =
-        router.acquire_initial(route, endpoint, &caller, &parts.headers)
+        router.acquire_initial(route, endpoint, &caller, &parts.headers, &mut skipped)
     else {
         let handles = router.rejected_model(&caller, &model, endpoint);
         observation.routed(handles.clone(), stream);
@@ -418,6 +424,18 @@ pub async fn forward(
     // Preserve headers only for retry-enabled routes. The ordinary single-send
     // path moves the original map and adds no replay allocation.
     let replay = (max_attempts > 1).then(|| parts.clone());
+    // Resolved before a usage capture exists: an unusable request URI is a
+    // client error, never a cancelled (499) usage event.
+    let mut first_uri = match upstream_uri(&guard.deployment, &parts.uri) {
+        Ok(uri) => Some(uri),
+        Err(_) => {
+            return error::json(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Invalid request URI",
+            )
+        }
+    };
     let original_uri = parts.uri.clone();
     let mut next_parts = Some(parts);
     let deadline = route
@@ -437,7 +455,9 @@ pub async fn forward(
         status: 499,
     });
     let mut tried = [0; 5];
-    let mut last_response = None;
+    // The latest upstream response kept while a later attempt runs, with the
+    // reservation (deployment, metrics handles, in-flight slot) it belongs to.
+    let mut last_response: Option<(Response<Incoming>, bool, bool, InFlight)> = None;
     let mut used_fallback = initial_fallback.is_some();
     let mut current_fallback = initial_fallback;
     let mut attempt = 0usize;
@@ -456,14 +476,19 @@ pub async fn forward(
         let mut parts = next_parts
             .take()
             .unwrap_or_else(|| replay.as_ref().expect("retry template").clone());
-        parts.uri = match upstream_uri(deployment, &original_uri) {
+        let uri = match first_uri.take() {
+            Some(uri) => Ok(uri),
+            None => upstream_uri(deployment, &original_uri),
+        };
+        parts.uri = match uri {
             Ok(uri) => uri,
             Err(_) => {
+                pending.discard();
                 return error::json(
                     StatusCode::BAD_REQUEST,
                     "invalid_request",
                     "Invalid request URI",
-                )
+                );
             }
         };
         if let Some(value) = &deployment.authorization {
@@ -481,11 +506,19 @@ pub async fn forward(
             telemetry::inject(&mut parts.headers);
         }
         let upstream_request = Request::from_parts(parts, Full::new(rewritten));
-        let timeout = deadline.map_or(deployment.timeout, |end| {
-            deployment
-                .timeout
-                .min(end.saturating_duration_since(tokio::time::Instant::now()))
-        });
+        // `capped`: the route's total_timeout, not the deployment's own
+        // timeout, bounds this attempt.
+        let (timeout, capped) = match deadline {
+            Some(end) => {
+                let left = end.saturating_duration_since(tokio::time::Instant::now());
+                if left < deployment.timeout {
+                    (left, true)
+                } else {
+                    (deployment.timeout, false)
+                }
+            }
+            None => (deployment.timeout, false),
+        };
         observation
             .upstream_started
             .get_or_insert_with(Instant::now);
@@ -506,9 +539,8 @@ pub async fn forward(
                         .and_then(|v| retry_after(v, SystemTime::now()))
                     {
                         guard.deployment.breaker.retry_after.fetch_max(
-                            clock::mono_ms().saturating_add(
-                                u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                            ),
+                            clock::mono_ms()
+                                .saturating_add(cooldown_ms(delay, guard.deployment.circuit)),
                             std::sync::atomic::Ordering::Relaxed,
                         );
                     }
@@ -542,12 +574,16 @@ pub async fn forward(
         };
         guard.metrics.attempts[outcome].inc();
         span.record("outcome", ATTEMPT_OUTCOMES[outcome]);
+        // An attempt cut short by the route's total_timeout says nothing
+        // about the deployment: no breaker verdict, no latency sample (it
+        // still counts as outcome="timeout" in the attempts metric).
+        let cut_short = outcome == 3 && capped;
         let failed = matches!(outcome, 2 | 3)
             || (outcome == 1
                 && response
                     .as_ref()
                     .is_some_and(|r| r.status().is_server_error() || r.status().as_u16() == 429));
-        if let Some(started) = attempt_started {
+        if let Some(started) = attempt_started.filter(|_| !cut_short) {
             // Successes feed the EWMA; breaker-worthy failures add a penalty;
             // client errors (4xx other than 429) say nothing about latency.
             if outcome == 0 {
@@ -556,15 +592,24 @@ pub async fn forward(
                 guard.deployment.latency.failure(started.elapsed());
             }
         }
-        guard.complete(failed);
+        // Left unfinished, a cut-short half-open trial is abandoned on drop.
+        if !cut_short {
+            guard.complete(failed);
+        }
         if retryable
             && attempt < max_attempts as usize
             && deadline.is_none_or(|end| tokio::time::Instant::now() < end)
         {
             let headers = &replay.as_ref().expect("retries keep a template").headers;
-            if let Some((next, fallback)) =
-                router.retry(route, endpoint, &caller, headers, &tried[..attempt], split)
-            {
+            if let Some((next, fallback)) = router.retry(
+                route,
+                endpoint,
+                &caller,
+                headers,
+                &tried[..attempt],
+                split,
+                &mut skipped,
+            ) {
                 if router.runtime.retry_budget.take() {
                     if let Some(counter) = fallback {
                         if !current_fallback.is_some_and(|previous| std::ptr::eq(previous, counter))
@@ -573,11 +618,18 @@ pub async fn forward(
                         }
                     }
                     current_fallback = fallback;
-                    if let Some(response) = response {
-                        last_response = Some((response, used_fallback, inject));
+                    let previous = std::mem::replace(&mut guard, next);
+                    match response {
+                        // Keep the response with its own reservation: it may
+                        // still be the final answer. Replacing an older kept
+                        // response releases that one's slot.
+                        Some(response) => {
+                            last_response = Some((response, used_fallback, inject, previous))
+                        }
+                        // Releases the abandoned attempt's in-flight slot.
+                        None => drop(previous),
                     }
                     used_fallback = fallback.is_some();
-                    guard = next; // Releases the abandoned attempt's in-flight slot.
                     observation.routed(guard.metrics.clone(), stream);
                     let mut capture = pending.take();
                     capture.handles = guard.metrics.clone();
@@ -588,11 +640,21 @@ pub async fn forward(
                 route.budget_exhausted.inc();
             }
         }
-        match response
-            .map(|response| (response, used_fallback, inject))
-            .or(last_response)
-        {
-            Some(response) => break response,
+        if let Some(response) = response {
+            break (response, used_fallback, inject);
+        }
+        match last_response.take() {
+            Some((response, fallback, inject, kept)) => {
+                // The earlier attempt's response is the answer: account it to
+                // that attempt's deployment and release this failed one.
+                guard = kept;
+                observation.routed(guard.metrics.clone(), stream);
+                let mut capture = pending.take();
+                capture.handles = guard.metrics.clone();
+                capture.deployment = Some(guard.deployment.clone());
+                pending = PendingCapture::new(capture);
+                break (response, fallback, inject);
+            }
             None => {
                 let mut capture = pending.take();
                 capture.status = error_status.as_u16();
@@ -652,6 +714,18 @@ fn retry_status(policy: Option<&lumewarp_proto::config::v1::RetryPolicy>, status
         Some(p) if !p.retry_on_status.is_empty() => p.retry_on_status.contains(&u32::from(status)),
         _ => matches!(status, 429 | 502 | 503 | 504),
     }
+}
+
+/// Longest `Retry-After` cooldown honoured.
+const MAX_COOLDOWN_MS: u64 = 60_000;
+
+/// A deployment's `Retry-After` cooldown in ms: at most 60 s, and never
+/// longer than its breaker's open interval when one is configured.
+fn cooldown_ms(delay: Duration, circuit: Option<CircuitBreaker>) -> u64 {
+    let ms = u64::try_from(delay.as_millis())
+        .unwrap_or(u64::MAX)
+        .min(MAX_COOLDOWN_MS);
+    circuit.map_or(ms, |config| ms.min(Breaker::open_ms(&config)))
 }
 
 fn retry_after(value: &str, now: SystemTime) -> Option<Duration> {
@@ -716,10 +790,47 @@ mod resilience_tests {
         alias
             .pending
             .extend_from_slice(b"data: \"backup\"}\r\n\r\n");
+        let event = alias.flush(false);
+        assert_eq!(
+            event,
+            b"data: {\"model\":\ndata: \"public\"}\n\n".as_slice()
+        );
+        // Valid SSE: one event, every line a `data:` field, and the joined
+        // field values are the rewritten JSON.
+        let text = std::str::from_utf8(&event).unwrap();
+        let body = text.strip_suffix("\n\n").expect("event terminator");
+        let data: Vec<&str> = body
+            .split('\n')
+            .map(|line| line.strip_prefix("data: ").expect("data field"))
+            .collect();
+        let value: serde_json::Value = serde_json::from_str(&data.join("\n")).unwrap();
+        assert_eq!(value["model"], "public");
+        // Comments and other fields are kept; a single-line payload is unchanged.
+        alias
+            .pending
+            .extend_from_slice(b": keep\nevent: chunk\ndata: {\"model\":\"backup\"}\n\n");
         assert_eq!(
             alias.flush(false),
-            b"data: {\"model\":\n\"public\"}\n\n".as_slice()
+            b": keep\nevent: chunk\ndata: {\"model\":\"public\"}\n\n".as_slice()
         );
+    }
+
+    #[test]
+    fn retry_after_cooldown_is_clamped() {
+        let s = Duration::from_secs;
+        assert_eq!(cooldown_ms(s(10), None), 10_000);
+        assert_eq!(cooldown_ms(s(3600), None), MAX_COOLDOWN_MS);
+        assert_eq!(cooldown_ms(Duration::MAX, None), MAX_COOLDOWN_MS);
+        let breaker = |open_ms| {
+            Some(CircuitBreaker {
+                failure_threshold: 1,
+                open_ms,
+            })
+        };
+        assert_eq!(cooldown_ms(s(120), breaker(5_000)), 5_000);
+        assert_eq!(cooldown_ms(s(2), breaker(5_000)), 2_000);
+        // open_ms 0 is the 30 s default.
+        assert_eq!(cooldown_ms(s(120), breaker(0)), 30_000);
     }
 }
 
@@ -784,9 +895,13 @@ impl AliasBody {
             }
             output.extend_from_slice(&metadata);
             if !data.is_empty() {
-                output.extend_from_slice(b"data: ");
-                output.extend_from_slice(&self.rewrite(&data));
-                output.push(b'\n');
+                // Every line of the (possibly multiline) payload is its own
+                // `data:` field, so the client reassembles the same value.
+                for line in self.rewrite(&data).split(|b| *b == b'\n') {
+                    output.extend_from_slice(b"data: ");
+                    output.extend_from_slice(line);
+                    output.push(b'\n');
+                }
             }
             output.push(b'\n');
         }

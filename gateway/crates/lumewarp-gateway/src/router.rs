@@ -80,7 +80,6 @@ struct Pool {
     deployments: Vec<Arc<Deployment>>,
     cumulative_weights: Vec<u64>,
     total_weight: u64,
-    attempts: Vec<[Counter; 6]>,
 }
 
 pub struct Route {
@@ -99,6 +98,30 @@ pub struct Route {
     pub retry: Option<RetryPolicy>,
     pub fallbacks: Vec<(String, Counter)>,
     pub budget_exhausted: Counter,
+    /// `lumewarp_upstream_attempts_total{outcome="circuit_open"}` labelled
+    /// with this (client-facing) model, for every breaker-guarded deployment
+    /// of this route and of its fallbacks.
+    circuit_open: Vec<(LabelId, Counter)>,
+}
+
+/// Deployments already counted as `circuit_open` for one request, so each
+/// skipped candidate is counted at most once however often selection runs.
+/// Fixed capacity: no allocation; beyond it, further skips go uncounted.
+#[derive(Default)]
+pub struct Skipped {
+    seen: [LabelId; 16],
+    len: usize,
+}
+
+impl Skipped {
+    fn first(&mut self, label: LabelId) -> bool {
+        if self.seen[..self.len].contains(&label) || self.len == self.seen.len() {
+            return false;
+        }
+        self.seen[self.len] = label;
+        self.len += 1;
+        true
+    }
 }
 
 impl Route {
@@ -147,9 +170,14 @@ impl Pool {
             let d = &self.deployments[i];
             !excluded.is_some_and(|tried| tried.contains(&d.label))
                 && (excluded.is_none() || d.breaker.retry_after.load(Ordering::Relaxed) <= now)
-                && (!strict
-                    || (d.healthy.load(Ordering::Acquire)
-                        && (d.circuit.is_none() || d.breaker.available(now))))
+                && if strict {
+                    d.healthy.load(Ordering::Acquire)
+                        && (d.circuit.is_none() || d.breaker.available(now))
+                } else {
+                    // Failing open never piles onto a half-open trial: the
+                    // pick could not be admitted, while another candidate can.
+                    d.circuit.is_none() || !d.breaker.trial_in_progress()
+                }
         };
         let in_flight = |i: usize| self.deployments[i].in_flight.load(Ordering::Relaxed);
         match strategy {
@@ -302,6 +330,9 @@ pub struct Router {
     probes: Vec<Probe>,
     unprobed: Vec<(Arc<AtomicBool>, Gauge)>,
     scrapes: Vec<Scrape>,
+    /// Breakers of deployments whose upstream has no `circuit_breaker`
+    /// (any more): reset to closed when this snapshot is activated.
+    unbroken: Vec<Arc<Breaker>>,
 }
 
 fn invalid(reason: String) -> ApplyError {
@@ -547,15 +578,30 @@ impl Router {
                 }
                 split_total += u64::from(split_weight);
                 split_cumulative.push(split_total);
+                // Pre-register the attempt series at zero.
+                for name in names {
+                    drop(metrics.attempt_handles(&r.model, name));
+                }
                 pools.push(Pool {
                     deployments: resolved,
                     cumulative_weights,
                     total_weight,
-                    attempts: names
-                        .iter()
-                        .map(|d| metrics.attempt_handles(&r.model, d))
-                        .collect(),
                 });
+            }
+            let mut circuit_open: Vec<(LabelId, Counter)> = Vec::new();
+            let fallback_names = r.fallbacks.iter().flat_map(|f| {
+                snapshot
+                    .routes
+                    .iter()
+                    .filter(move |x| &x.model == f)
+                    .flat_map(route_deployment_names)
+            });
+            for name in route_deployment_names(r).chain(fallback_names) {
+                let d = &deployments[name].0;
+                if d.circuit.is_some() && !circuit_open.iter().any(|(l, _)| *l == d.label) {
+                    let [_, _, _, _, open, _] = metrics.attempt_handles(&r.model, name);
+                    circuit_open.push((d.label, open));
+                }
             }
             let sticky = StickyBy::try_from(r.sticky).expect("validated sticky");
             routes.insert(
@@ -584,6 +630,7 @@ impl Router {
                         .map(|f| (f.clone(), metrics.fallback_handle(&r.model, f)))
                         .collect(),
                     budget_exhausted: metrics.budget_handle(&r.model),
+                    circuit_open,
                 },
             );
         }
@@ -654,6 +701,11 @@ impl Router {
             probes,
             unprobed,
             scrapes,
+            unbroken: deployments
+                .values()
+                .filter(|(d, _)| d.circuit.is_none())
+                .map(|(d, _)| d.breaker.clone())
+                .collect(),
         })
     }
 
@@ -711,9 +763,15 @@ impl Router {
     /// Picks a deployment and reserves an in-flight slot on it.
     #[cfg(test)]
     pub fn acquire(&self, route: &Route, endpoint: usize, caller: &Caller) -> InFlight {
-        self.acquire_initial(route, endpoint, caller, &HeaderMap::new())
-            .expect("test route has an available deployment")
-            .0
+        self.acquire_initial(
+            route,
+            endpoint,
+            caller,
+            &HeaderMap::new(),
+            &mut Skipped::default(),
+        )
+        .expect("test route has an available deployment")
+        .0
     }
 
     /// Chooses the request's split (counted once), then its own split, the
@@ -725,30 +783,34 @@ impl Router {
         endpoint: usize,
         caller: &Caller,
         headers: &HeaderMap,
+        skipped: &mut Skipped,
     ) -> Option<(InFlight, Option<&'a Counter>, usize)> {
         let split = route.split_for(headers, caller);
         if let Some(counter) = route.split_requests.get(split) {
             counter.inc();
         }
-        if let Some(guard) = self.acquire_from(route, route, split, endpoint, caller, None, false) {
+        if let Some(guard) =
+            self.acquire_from(route, route, split, endpoint, caller, None, false, skipped)
+        {
             return Some((guard, None, split));
         }
         for (name, counter) in &route.fallbacks {
             let fallback = &self.routes[name];
             let first = fallback.split_for(headers, caller);
-            if let Some(guard) =
-                self.acquire_from(route, fallback, first, endpoint, caller, None, false)
-            {
+            if let Some(guard) = self.acquire_from(
+                route, fallback, first, endpoint, caller, None, false, skipped,
+            ) {
                 return Some((guard, Some(counter), split));
             }
         }
-        self.acquire_from(route, route, split, endpoint, caller, None, true)
+        self.acquire_from(route, route, split, endpoint, caller, None, true, skipped)
             .map(|guard| (guard, None, split))
     }
 
     /// First exhaust untried deployments (the chosen split, then the other
     /// splits), then fallbacks in declaration order. Only when every eligible
     /// candidate is unhealthy/open do we fail open.
+    #[allow(clippy::too_many_arguments)]
     pub fn retry<'a>(
         &'a self,
         root: &'a Route,
@@ -757,12 +819,20 @@ impl Router {
         headers: &HeaderMap,
         tried: &[LabelId],
         split: usize,
+        skipped: &mut Skipped,
     ) -> Option<(InFlight, Option<&'a Counter>)> {
         for strict in [true, false] {
             for excluded in [tried, &[][..]] {
-                if let Some(guard) =
-                    self.acquire_from(root, root, split, endpoint, caller, Some(excluded), !strict)
-                {
+                if let Some(guard) = self.acquire_from(
+                    root,
+                    root,
+                    split,
+                    endpoint,
+                    caller,
+                    Some(excluded),
+                    !strict,
+                    skipped,
+                ) {
                     return Some((guard, None));
                 }
                 for (name, counter) in &root.fallbacks {
@@ -775,6 +845,7 @@ impl Router {
                         caller,
                         Some(excluded),
                         !strict,
+                        skipped,
                     ) {
                         return Some((guard, Some(counter)));
                     }
@@ -794,12 +865,13 @@ impl Router {
         caller: &Caller,
         excluded: Option<&[LabelId]>,
         fail_open: bool,
+        skipped: &mut Skipped,
     ) -> Option<InFlight> {
         let now = clock::mono_ms();
-        for pool in &route.pools {
-            for (i, d) in pool.deployments.iter().enumerate() {
-                if d.circuit.is_some() && !d.breaker.available(now) {
-                    pool.attempts[i][4].inc();
+        for d in route.pools.iter().flat_map(|pool| &pool.deployments) {
+            if d.circuit.is_some() && !d.breaker.available(now) && skipped.first(d.label) {
+                if let Some((_, counter)) = root.circuit_open.iter().find(|(l, _)| *l == d.label) {
+                    counter.inc();
                 }
             }
         }
@@ -836,7 +908,11 @@ impl Router {
         })
     }
 
-    pub fn activate_health(&self) {
+    /// Returns how many probe and scrape tasks were (re)started.
+    pub fn activate_health(&self) -> usize {
+        for breaker in &self.unbroken {
+            breaker.reset();
+        }
         for (healthy, gauge) in &self.unprobed {
             healthy.store(true, Ordering::Release);
             gauge.set(1);
@@ -846,13 +922,16 @@ impl Router {
                 .gauge
                 .set(i64::from(probe.healthy.load(Ordering::Acquire)));
         }
-        self.runtime
+        let probes = self
+            .runtime
             .health
             .configure(&self.probes, &self.runtime.client);
         // vLLM load scrapers follow the same accepted-snapshot lifecycle.
-        self.runtime
-            .balance
-            .configure(&self.scrapes, &self.runtime.client);
+        probes
+            + self
+                .runtime
+                .balance
+                .configure(&self.scrapes, &self.runtime.client)
     }
 
     /// `/v1/models` body: every alias, or only those the caller's key allows.
@@ -1074,7 +1153,8 @@ mod tests {
                 &next.routes["public"],
                 0,
                 &Caller::Anonymous,
-                &HeaderMap::new()
+                &HeaderMap::new(),
+                &mut Skipped::default()
             )
             .is_some());
     }
@@ -1303,7 +1383,13 @@ mod tests {
         let mut canary = 0;
         for _ in 0..10_000 {
             let (guard, _, split) = router
-                .acquire_initial(route, 0, &Caller::Anonymous, &HeaderMap::new())
+                .acquire_initial(
+                    route,
+                    0,
+                    &Caller::Anonymous,
+                    &HeaderMap::new(),
+                    &mut Skipped::default(),
+                )
                 .unwrap();
             assert_eq!(split == 1, guard.deployment.name != "a");
             canary += usize::from(split == 1);
@@ -1385,7 +1471,9 @@ mod tests {
             .map(|i| headers(&format!("u{i}")))
             .find(|h| route.split_for(h, &anonymous) == 1)
             .unwrap();
-        let (first, _, split) = router.acquire_initial(route, 0, &anonymous, &h).unwrap();
+        let (first, _, split) = router
+            .acquire_initial(route, 0, &anonymous, &h, &mut Skipped::default())
+            .unwrap();
         assert_eq!(split, 1);
         let label = |name: &str| router.runtime.metrics.label_id(name);
         let other = if first.deployment.name == "b" {
@@ -1397,14 +1485,30 @@ mod tests {
         let tried = [first.deployment.label];
         for _ in 0..50 {
             let (next, fallback) = router
-                .retry(route, 0, &anonymous, &h, &tried, split)
+                .retry(
+                    route,
+                    0,
+                    &anonymous,
+                    &h,
+                    &tried,
+                    split,
+                    &mut Skipped::default(),
+                )
                 .unwrap();
             assert!(fallback.is_none());
             assert_eq!(next.deployment.name, other, "stays inside the canary split");
         }
         let tried = [label("b"), label("c")];
         let (next, _) = router
-            .retry(route, 0, &anonymous, &h, &tried, split)
+            .retry(
+                route,
+                0,
+                &anonymous,
+                &h,
+                &tried,
+                split,
+                &mut Skipped::default(),
+            )
             .unwrap();
         assert_eq!(next.deployment.name, "a", "then the other split");
     }
@@ -1551,17 +1655,213 @@ mod tests {
             }
             // Warm every handle the picks below can reach.
             for _ in 0..200 {
-                drop(router.acquire_initial(route, 0, &Caller::Anonymous, &h));
+                drop(router.acquire_initial(
+                    route,
+                    0,
+                    &Caller::Anonymous,
+                    &h,
+                    &mut Skipped::default(),
+                ));
                 drop(router.acquire(route, 0, &Caller::Anonymous));
             }
-            let (warm, guard) = count(|| router.acquire_initial(route, 0, &Caller::Anonymous, &h));
+            let (warm, guard) = count(|| {
+                router.acquire_initial(route, 0, &Caller::Anonymous, &h, &mut Skipped::default())
+            });
             drop(guard);
             assert_eq!(warm, (0, 0), "{sticky:?} {strategy:?}");
             let tried = [route.pools[1].deployments[0].label];
-            let (retry, guard) =
-                count(|| router.retry(route, 0, &Caller::Anonymous, &h, &tried, 1));
+            let (retry, guard) = count(|| {
+                router.retry(
+                    route,
+                    0,
+                    &Caller::Anonymous,
+                    &h,
+                    &tried,
+                    1,
+                    &mut Skipped::default(),
+                )
+            });
             drop(guard);
             assert_eq!(retry, (0, 0), "retry {sticky:?} {strategy:?}");
         }
+    }
+
+    /// Two breaker-guarded deployments on upstream `u` (threshold 1).
+    fn guarded(open_ms: u32) -> Snapshot {
+        let mut s = snapshot(RoutingStrategy::Weighted);
+        s.required_capabilities = vec!["circuit_breaker".into()];
+        s.upstreams[0].circuit_breaker = Some(CircuitBreaker {
+            failure_threshold: 1,
+            open_ms,
+        });
+        s
+    }
+
+    fn open(d: &Deployment, now: u64) {
+        d.breaker.finish(d.circuit.unwrap(), false, true, now);
+    }
+
+    #[test]
+    fn fail_open_skips_a_deployment_whose_trial_is_running() {
+        let router = compile(&guarded(30_000));
+        let route = &router.routes["public"];
+        let (a, b) = (
+            &route.pools[0].deployments[0],
+            &route.pools[0].deployments[1],
+        );
+        // a: open since t=0, its single half-open trial now in progress.
+        open(a, 0);
+        assert_eq!(a.breaker.reserve(30_002), Some(true));
+        // b: freshly open. Neither is eligible for strict selection.
+        open(b, clock::mono_ms());
+        for _ in 0..200 {
+            let (guard, fallback, _) = router
+                .acquire_initial(
+                    route,
+                    0,
+                    &Caller::Anonymous,
+                    &HeaderMap::new(),
+                    &mut Skipped::default(),
+                )
+                .expect("fails open onto the deployment without a running trial");
+            assert!(fallback.is_none());
+            assert_eq!(guard.deployment.name, "b");
+        }
+        assert!(a.breaker.trial_in_progress(), "the trial is left alone");
+    }
+
+    #[test]
+    fn circuit_open_is_counted_once_per_request_under_the_root_model() {
+        let runtime = Runtime::new();
+        let mut s = guarded(30_000);
+        s.required_capabilities
+            .extend(["retry".into(), "fallbacks".into()]);
+        s.routes = vec![route("public", &["a"]), route("backup", &["b"])];
+        s.routes[0].fallbacks = vec!["backup".into()];
+        s.routes[0].retry = Some(RetryPolicy::default());
+        let router = Router::compile(&s, AuthMode::Open, &runtime).unwrap();
+        let route = &router.routes["public"];
+        let now = clock::mono_ms();
+        open(&route.pools[0].deployments[0], now);
+        open(&router.routes["backup"].pools[0].deployments[0], now);
+        let count = |model: &str, deployment: &str| {
+            let series = format!(
+                "lumewarp_upstream_attempts_total{{model=\"{model}\",deployment=\"{deployment}\",outcome=\"circuit_open\"}} "
+            );
+            let text = runtime.encode_metrics().unwrap();
+            text.lines()
+                .find_map(|line| line.strip_prefix(series.as_str()))
+                .map_or(0, |v| v.parse::<u64>().unwrap())
+        };
+        let anonymous = Caller::Anonymous;
+        let h = HeaderMap::new();
+        for request in 1..=2u64 {
+            let mut skipped = Skipped::default();
+            // Strict selection fails everywhere (fallback included), then
+            // fails open; retries consider the same open candidates again.
+            let (guard, _, split) = router
+                .acquire_initial(route, 0, &anonymous, &h, &mut skipped)
+                .unwrap();
+            let tried = [guard.deployment.label];
+            for _ in 0..3 {
+                drop(router.retry(route, 0, &anonymous, &h, &tried, split, &mut skipped));
+            }
+            drop(guard);
+            assert_eq!(count("public", "a"), request);
+            assert_eq!(count("public", "b"), request, "fallback deployments too");
+            assert_eq!(count("backup", "b"), 0, "labelled with the client model");
+        }
+    }
+
+    #[test]
+    fn removed_breaker_config_resets_breaker_on_activation() {
+        let runtime = Runtime::new();
+        let s = guarded(30_000);
+        let router = Router::compile(&s, AuthMode::Open, &runtime).unwrap();
+        let a = router.routes["public"].pools[0].deployments[0].clone();
+        open(&a, clock::mono_ms());
+        let gauge = |runtime: &Arc<Runtime>| {
+            runtime
+                .encode_metrics()
+                .unwrap()
+                .lines()
+                .find_map(|l| {
+                    l.strip_prefix("lumewarp_upstream_circuit_state{deployment=\"a\"} ")
+                        .map(str::to_owned)
+                })
+                .unwrap()
+        };
+        assert_eq!(gauge(&runtime), "2");
+        let mut next = s.clone();
+        next.version = 2;
+        next.upstreams[0].circuit_breaker = None;
+        next.required_capabilities.clear();
+        let swapped = Router::compile(&next, AuthMode::Open, &runtime).unwrap();
+        // Compiling (which may still be NACKed) changes nothing.
+        assert!(!a.breaker.available(clock::mono_ms()));
+        assert_eq!(swapped.activate_health(), 0);
+        assert!(a.breaker.available(clock::mono_ms()));
+        assert_eq!(gauge(&runtime), "0");
+    }
+
+    #[tokio::test]
+    async fn key_only_deltas_keep_probe_state() {
+        // A port nothing listens on: every probe fails at once.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let runtime = Runtime::new();
+        let mut s = base();
+        s.required_capabilities = vec!["health_check".into()];
+        s.upstreams[0].base_url = format!("http://127.0.0.1:{port}/v1");
+        s.upstreams[0].health_check = Some(pb::HealthCheck {
+            interval_ms: 1000,
+            timeout_ms: 100,
+            unhealthy_threshold: 3,
+            ..Default::default()
+        });
+        let router = Router::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
+        assert_eq!(router.activate_health(), 1);
+        let healthy = runtime.health.upstream(&s.upstreams[0].name);
+        // Key-only deltas every 250 ms. Restarting the probe on each would
+        // reset its failure count (and probe at once), so the upstream would
+        // never reach three consecutive failures.
+        let started = std::time::Instant::now();
+        let mut version = s.version;
+        while healthy.load(Ordering::Acquire) {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "upstream never became unhealthy"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            version += 1;
+            s.version = version;
+            s.api_keys.push(key(
+                &format!("delta-{version}"),
+                &format!("secret-{version}"),
+                "t1",
+                &[],
+            ));
+            let next = Router::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
+            assert_eq!(next.activate_health(), 0, "unchanged probe kept running");
+        }
+        assert!(version >= 3, "several deltas were applied while probing");
+        // A changed probe is restarted; a removed one is stopped.
+        s.upstreams[0]
+            .health_check
+            .as_mut()
+            .unwrap()
+            .unhealthy_threshold = 4;
+        let changed = Router::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
+        assert_eq!(changed.activate_health(), 1);
+        s.upstreams[0].health_check = None;
+        let removed = Router::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
+        assert_eq!(removed.activate_health(), 0);
+        assert!(
+            healthy.load(Ordering::Acquire),
+            "unprobed upstreams count as up"
+        );
     }
 }

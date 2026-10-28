@@ -162,6 +162,14 @@ impl Gateway {
         .await;
     }
     async fn post(&self, stream: bool, headers: &[(&str, &str)]) -> Response<Incoming> {
+        self.post_model("public", stream, headers).await
+    }
+    async fn post_model(
+        &self,
+        model: &str,
+        stream: bool,
+        headers: &[(&str, &str)],
+    ) -> Response<Incoming> {
         let mut request = Request::builder()
             .method("POST")
             .uri(format!("http://{}/v1/chat/completions", self.addr));
@@ -169,7 +177,7 @@ impl Gateway {
             request = request.header(name, value);
         }
         bounded(self.client.request(request.body(Full::new(Bytes::from(
-            format!(r#"{{"model":"public","stream":{stream},"stream_options":{{"include_usage":true}}}}"#),
+            format!(r#"{{"model":"{model}","stream":{stream},"stream_options":{{"include_usage":true}}}}"#),
         ))).unwrap())).await.unwrap()
     }
     async fn metrics(&self) -> Prometheus {
@@ -409,14 +417,126 @@ async fn returns_last_upstream_response_when_later_connection_fails() {
     let metrics = gateway.metrics().await;
     assert_eq!(attempts(&metrics, "retryable_status"), 1.);
     assert_eq!(attempts(&metrics, "connect_error"), 1.);
+    // The 503 came from a: the request sample belongs to a, not to the
+    // later attempt on b that failed to connect.
     assert_eq!(
         metrics.sum(
             "lumewarp_requests_total",
-            &[("deployment", "b"), ("status", "503")]
+            &[("deployment", "a"), ("status", "503")]
         ),
         1.
     );
+    assert_eq!(
+        metrics.sum("lumewarp_requests_total", &[("deployment", "b")]),
+        0.
+    );
     assert_eq!(metrics.sum("lumewarp_usage_capture_total", &[]), 1.);
+    assert_eq!(metrics.sum("lumewarp_in_flight_requests", &[]), 0.);
+}
+
+#[tokio::test]
+async fn kept_response_is_accounted_to_its_deployment_after_a_later_timeout() {
+    // a answers 503 at once; the retry on b hangs until total_timeout.
+    let bad = Backend::start(&["--fail-every", "1"]).await;
+    let hung = Mock::start(Behavior::Hang).await;
+    let routes = "  - {model: public, deployments: [a], retry: {max_attempts: 2, total_timeout_ms: 80}, fallbacks: [backup]}\n  - {model: backup, deployments: [b]}";
+    let gateway = Gateway::start(config(bad.addr, hung.addr, "", routes)).await;
+    let response = gateway.post(false, &[]).await;
+    assert_eq!(response.status(), 503);
+    bytes(response).await;
+    let metrics = gateway.metrics().await;
+    assert_eq!(attempts(&metrics, "retryable_status"), 1.);
+    assert_eq!(attempts(&metrics, "timeout"), 1.);
+    assert_eq!(
+        metrics.sum(
+            "lumewarp_requests_total",
+            &[("deployment", "a"), ("status", "503")]
+        ),
+        1.
+    );
+    assert_eq!(
+        metrics.sum("lumewarp_requests_total", &[("deployment", "b")]),
+        0.
+    );
+    assert_eq!(metrics.sum("lumewarp_usage_capture_total", &[]), 1.);
+    // Both reservations were released: the kept one at the body's end, the
+    // timed-out one when the kept response was restored.
+    assert_eq!(metrics.sum("lumewarp_in_flight_requests", &[]), 0.);
+}
+
+#[tokio::test]
+async fn routes_without_retry_do_not_fund_the_budget() {
+    let bad = Backend::start(&["--fail-every", "1"]).await;
+    let routes = "  - {model: public, deployments: [a], retry: {max_attempts: 5}}\n  - {model: plain, deployments: [a]}";
+    let gateway = Gateway::start(config(bad.addr, bad.addr, "", routes)).await;
+    // Spend the initial three-retry burst.
+    bytes(gateway.post(false, &[]).await).await;
+    assert_eq!(attempts(&gateway.metrics().await, "retryable_status"), 4.);
+    // Ten requests on a route without a retry policy: 20% each would buy
+    // two retries if they funded the budget.
+    for _ in 0..10 {
+        let response = gateway.post_model("plain", false, &[]).await;
+        assert_eq!(response.status(), 503);
+        bytes(response).await;
+    }
+    bytes(gateway.post(false, &[]).await).await;
+    let metrics = gateway.metrics().await;
+    assert_eq!(
+        attempts(&metrics, "retryable_status"),
+        5.,
+        "no retry funded"
+    );
+    assert_eq!(
+        metrics.sum(
+            "lumewarp_retries_budget_exhausted_total",
+            &[("model", "public")]
+        ),
+        2.
+    );
+}
+
+#[tokio::test]
+async fn total_timeout_cut_is_not_a_deployment_failure() {
+    let hung = Mock::start(Behavior::Hang).await;
+    let breaker = "circuit_breaker: {failure_threshold: 1, open_ms: 30000}";
+    // The route's 20 ms total_timeout cuts the attempt before the
+    // deployment's own 100 ms timeout: no breaker failure, no latency penalty.
+    let routes = "  - {model: public, deployments: [a], strategy: lowest_latency, retry: {max_attempts: 2, total_timeout_ms: 20}}";
+    let gateway = Gateway::start(config(hung.addr, hung.addr, breaker, routes)).await;
+    let response = gateway.post(false, &[]).await;
+    assert_eq!(response.status(), 504);
+    bytes(response).await;
+    let metrics = gateway.metrics().await;
+    assert_eq!(attempts(&metrics, "timeout"), 1.);
+    assert_eq!(
+        metrics.value("lumewarp_upstream_circuit_state", &[("deployment", "a")]),
+        0.
+    );
+    assert_eq!(
+        metrics.sum(
+            "lumewarp_upstream_latency_ewma_seconds",
+            &[("deployment", "a")]
+        ),
+        0.
+    );
+    // The deployment's own timeout is a failure and opens the breaker.
+    let routes = "  - {model: public, deployments: [a], strategy: lowest_latency, retry: {max_attempts: 2, total_timeout_ms: 1000}}";
+    let gateway = Gateway::start(config(hung.addr, hung.addr, breaker, routes)).await;
+    let response = gateway.post(false, &[]).await;
+    assert_eq!(response.status(), 504);
+    bytes(response).await;
+    let metrics = gateway.metrics().await;
+    assert_eq!(
+        metrics.value("lumewarp_upstream_circuit_state", &[("deployment", "a")]),
+        2.
+    );
+    assert!(
+        metrics.sum(
+            "lumewarp_upstream_latency_ewma_seconds",
+            &[("deployment", "a")]
+        ) >= 1.,
+        "timeout penalty"
+    );
 }
 
 #[tokio::test]

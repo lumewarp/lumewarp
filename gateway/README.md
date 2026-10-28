@@ -191,7 +191,7 @@ YAML strings is not implemented. P0 files load unchanged.
 | `server.shutdown_grace_ms` | `25000` | Maximum connection drain time after shutdown begins; must be greater than zero. |
 | `server.header_read_timeout_ms` | `30000` | HTTP request-header read timeout on both listeners; must be greater than zero. |
 | `server.body_read_timeout_ms` | `30000` | Total time allowed to collect a proxied request body, not an idle timeout; must be greater than zero. |
-| `server.retry_budget_percent` | `20` | Process-wide retry allowance, `0..=20`; `0` disables retries. Each client request funds this percentage of one retry. The token bucket holds at most three retries and restores that minimum after ten idle seconds. |
+| `server.retry_budget_percent` | `20` | Process-wide retry allowance, `0..=20`; `0` disables retries. Each client request on a route **with a `retry` policy** funds this percentage of one retry, so retries stay at about this share of the traffic that may retry; routes without a retry policy neither fund nor touch the budget (no shared atomic on their request path). The token bucket holds about three retries (the cap is approximate under concurrent deposits) and restores that minimum after ten idle seconds. |
 
 **Auth mode.** If neither `server.api_keys` nor `keys` configures any key, the
 gateway is open: every `/v1/*` request is anonymous and `Authorization` is
@@ -240,7 +240,7 @@ the gateway.
 | `upstreams[].timeout_ms` | `600000` | Unsigned 32-bit millisecond timeout from issuing the upstream request through receipt of response headers, including connection establishment. Does not limit response-body or stream lifetime. (A snapshot value of 0 also means the default.) |
 | `upstreams[].stream_usage_mode` | `include_usage` | `include_usage` (the gateway may force `stream_options.include_usage` upstream for metering and strips the extra chunk if the client did not ask) or `passthrough` (upstream does not support it; no injection). |
 | `upstreams[].health_check` | Absent | Active GET probe: `{path, interval_ms, timeout_ms, unhealthy_threshold, healthy_threshold}`. `path` defaults to `/models`, appended to `base_url`. Interval must be at least 1000 ms; timeout must be positive and less than interval. Thresholds of zero mean 3 failures / 1 success. Uses the existing upstream client and credentials. |
-| `upstreams[].circuit_breaker` | Absent | Per-deployment `{failure_threshold, open_ms}`; zero values mean 5 consecutive retryable failures and 30000 ms open. One half-open trial is allowed after the open interval. |
+| `upstreams[].circuit_breaker` | Absent | Per-deployment `{failure_threshold, open_ms}`; zero values mean 5 consecutive retryable failures and 30000 ms open. One half-open trial is allowed after the open interval. Only that trial's result closes or re-opens a half-open breaker; late results of requests admitted while closed never move an open/half-open breaker or extend its deadline. Removing `circuit_breaker` from an upstream resets its deployments' breakers to closed (gauge 0) when the snapshot is activated. |
 | `upstreams[].metrics_url` | Empty | Prometheus endpoint scraped every second by `vllm_load` routes. Empty means `base_url` with a trailing `/v1` removed plus `/metrics` (`http://vllm:8000/v1` -> `http://vllm:8000/metrics`). Must be absolute http(s) without userinfo. The upstream bearer token is sent only when the metrics URL has the same host and port as `base_url`. Setting it requires capability `vllm_load`. |
 
 All upstreams are compiled at startup. A configured `api_key_env` must exist,
@@ -292,19 +292,35 @@ An attempt prefers an untried, healthy deployment with a closed (or available
 half-open) circuit, using the route's strategy. It then tries fallbacks in order
 with their own strategies. Already-tried deployments are reused only after the
 untried candidates are exhausted. `Retry-After` on 429/503 accepts integer seconds
-or an HTTP date and cools down that deployment across requests. Retries skip
+or an HTTP date and cools down that deployment across requests, for at most 60 s
+and never longer than its breaker's `open_ms` when one is configured. Retries skip
 cooling deployments rather than sleeping, including when the cooldown exceeds
 the remaining total timeout. A new client request may still make its first
 attempt there if necessary. If later transport attempts fail, the last received
-upstream response is returned; metrics and usage still name the final attempt.
+upstream response is returned, and the request sample, usage capture and
+in-flight reservation belong to the attempt that produced it (the later failed
+attempt's reservation is released).
+
+An attempt cut short by the route's `total_timeout_ms` (the deadline, not the
+upstream's own `timeout_ms`, ended it) is not a deployment failure: it records no
+breaker failure (an interrupted half-open trial is abandoned, not failed) and no
+latency penalty. It still counts as `outcome="timeout"` in
+`lumewarp_upstream_attempts_total` and `kind="timeout"` in
+`lumewarp_upstream_errors_total`, and the client gets 504.
 
 Breaker state is keyed by deployment name and survives snapshot swaps. Healthy
 fallbacks can be selected immediately when every primary is unhealthy/open.
 If **every** candidate is unhealthy/open, routing deliberately fails open and
 tries a deployment anyway; it does not turn a total backend outage into a
-permanent local rejection. An already-running half-open trial is never duplicated
-(503 if no other candidate is available). Active probes are restarted on accepted
-snapshot swaps and never increment request/attempt/usage metrics.
+permanent local rejection. An already-running half-open trial is never duplicated:
+fail-open selection skips that deployment and uses another candidate (503 if
+there is none). `outcome="circuit_open"` counts each open/half-open candidate at
+most once per client request, labelled with the client's model (also for
+fallback deployments). Active probes are diffed on accepted snapshot swaps by
+upstream, URL, settings and credentials: unchanged probes keep running with
+their consecutive failure/success counts and schedule (key-only deltas do not
+reset or re-probe them); only removed or changed probes are stopped and only new
+or changed ones started. Probes never increment request/attempt/usage metrics.
 
 ### Load-aware routing and traffic splits
 
@@ -328,8 +344,8 @@ snapshot swaps and never increment request/attempt/usage metrics.
   either candidate's last scrape failed or is older than 3 s, the two are
   compared on in-flight requests only. A failed scrape counts in
   `lumewarp_vllm_scrape_failures_total` and invalidates the values at once.
-  Scraping never happens on the request path; scrapers restart on accepted
-  snapshot swaps, like health probes.
+  Scraping never happens on the request path; on accepted snapshot swaps
+  scrapers are diffed like health probes (unchanged ones keep running).
 - `traffic_split`: the split is chosen once per request (counted in
   `lumewarp_split_requests_total`). With `sticky`, the input is hashed with a
   fixed-seed 64-bit hash (FNV-1a + SplitMix64 finalizer) and mapped onto the
@@ -350,9 +366,16 @@ computed when `/metrics` is scraped, not per request.
 
 Each client request records one request sample and one usage capture, attributed
 to its final deployment. Abandoned attempts release their in-flight reservations.
-Fallback JSON/SSE responses restore the original public model alias; alias
-rewriting buffers one JSON response or SSE event, capped at 32 MiB. Exceeding that
-limit terminates the response rather than exposing the fallback model.
+Response `model` values: a response from a deployment of the requested route
+(primary, including its retries) is forwarded unchanged and carries the
+upstream model, as in P1. Only a successful response from a **fallback** route's
+deployment is rewritten: its top-level JSON `model` (or, for SSE, each event's
+`data` JSON `model`) becomes the public alias the client requested, so clients
+do not observe which fallback served them. Error responses are never rewritten.
+Alias rewriting buffers one JSON response or SSE event, capped at 32 MiB;
+exceeding that limit terminates the response rather than exposing the fallback
+model. A multiline SSE `data` payload is re-emitted with one `data:` field per
+line; comments and other fields are kept.
 
 ### Teams
 
@@ -431,7 +454,7 @@ event is the usage-only chunk the gateway itself requested, and only when the
 client did not ask for it. SSE works without waiting for the final event. HTTP
 framing/chunk boundaries are managed by hyper; they are not a byte-for-byte
 wire-format guarantee. Response JSON `model` values remain the upstream model,
-not the public alias.
+not the public alias, except for successful fallback responses (see "Load-aware routing and traffic splits" above).
 
 ### Headers
 
