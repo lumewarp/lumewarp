@@ -96,11 +96,11 @@ export function TextField({ label, value, onChange, error, hint, type = "text", 
 }
 
 /** Number input where an empty string means "no limit" (null). */
-export function NumberField({ label, value, onChange, error, hint, min = 0, step }: { label: string; value: number | null; onChange: (v: number | null) => void; error?: string; hint?: string; min?: number; step?: number | "any" }) {
+export function NumberField({ label, value, onChange, error, hint, min = 0, step, placeholder = "unlimited" }: { label: string; value: number | null; onChange: (v: number | null) => void; error?: string; hint?: string; min?: number; step?: number | "any"; placeholder?: string }) {
   return (
     <Field label={label} error={error} hint={hint}>
       {(p) => (
-        <input {...p} className="input" type="number" min={min} step={step} value={value ?? ""} placeholder="unlimited" onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))} />
+        <input {...p} className="input" type="number" min={min} step={step} value={value ?? ""} placeholder={placeholder} onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))} />
       )}
     </Field>
   );
@@ -119,6 +119,19 @@ export function SelectField({ label, value, onChange, options, error, hint }: { 
         </select>
       )}
     </Field>
+  );
+}
+
+/** A labelled checkbox (switches an optional settings group on or off). */
+export function CheckField({ label, checked, onChange, hint }: { label: string; checked: boolean; onChange: (v: boolean) => void; hint?: string }) {
+  return (
+    <div className="field">
+      <label className="check-row">
+        <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+        <span>{label}</span>
+      </label>
+      {hint && <p className="field-hint">{hint}</p>}
+    </div>
   );
 }
 

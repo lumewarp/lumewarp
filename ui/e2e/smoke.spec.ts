@@ -445,3 +445,97 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await page.goto("/keys");
   await expect(page).toHaveURL(/\/login\?next=%2Fkeys$/);
 });
+
+test("route edit: retry, ordered fallback and a traffic split shown as percentages", async ({ page, request }) => {
+  const post = async (path: string, data: object) => {
+    const r = await request.post(`/api/v1${path}`, { headers: admin, data });
+    expect(r.status(), await r.text()).toBe(201);
+    return (await r.json()) as { id: string };
+  };
+  const upstream = await post("/upstreams", { name: "smoke-up", kind: "vllm", base_url: "http://127.0.0.1:9/v1" });
+  const deps: Record<string, string> = {};
+  for (const name of ["smoke-stable", "smoke-canary", "smoke-backup-dep"]) {
+    deps[name] = (await post("/deployments", { name, upstream_id: upstream.id, upstream_model: "m" })).id;
+  }
+  const backup = await post("/routes", { model: "smoke-backup", deployment_ids: [deps["smoke-backup-dep"]] });
+  const main = await post("/routes", { model: "smoke-main", deployment_ids: [deps["smoke-stable"]] });
+
+  await login(page, BOOTSTRAP);
+  await page.getByRole("link", { name: "Models / Routes", exact: true }).click();
+  const row = page.getByRole("row").filter({ has: page.getByRole("cell", { name: "smoke-main", exact: true }) });
+  await row.getByRole("button", { name: "Edit" }).click();
+  const d = dialog(page);
+  await d.getByLabel("Strategy").selectOption("vllm_load");
+  await d.getByLabel("Retry failed attempts").check();
+  await d.getByLabel("Max attempts").fill("3");
+  await d.getByLabel("Retry on status").fill("503, 502");
+  await d.getByLabel("Add fallback route").selectOption({ label: "smoke-backup" });
+  await expect(d.locator(".order-row")).toHaveText([/1\. smoke-backup/]);
+
+  await d.getByRole("button", { name: "Add split" }).click();
+  await d.getByRole("button", { name: "Add split" }).click();
+  const first = d.getByRole("group", { name: "Split 1" });
+  const second = d.getByRole("group", { name: "Split 2" });
+  await first.getByLabel("Weight", { exact: true }).fill("90");
+  await first.getByRole("group", { name: "Deployments of split 1" }).getByLabel(/smoke-stable/).check();
+  await second.getByLabel("Split name").fill("canary");
+  await second.getByLabel("Weight", { exact: true }).fill("10");
+  await second.getByRole("group", { name: "Deployments of split 2" }).getByLabel(/smoke-canary/).check();
+  await expect(first.getByLabel("Share of split 1")).toHaveText("90%");
+  await expect(second.getByLabel("Share of split 2")).toHaveText("10%");
+  await second.getByLabel("Weight", { exact: true }).fill("30");
+  await expect(first.getByLabel("Share of split 1")).toHaveText("75%");
+  await expect(second.getByLabel("Share of split 2")).toHaveText("25%");
+  await d.getByLabel("Sticky", { exact: true }).selectOption("header");
+  await d.getByLabel("Sticky header").fill("X-Session-Id");
+  await page.screenshot({ path: "/tmp/lumewarp-route-edit.png", fullPage: true });
+  await d.getByRole("button", { name: "Save" }).click();
+  await expect(d).toBeHidden();
+
+  await expect(row).toContainText("stable 75%");
+  await expect(row).toContainText("canary 25%");
+  await expect(row).toContainText("retry ×3");
+  await expect(row).toContainText("→ smoke-backup");
+  const stored = await (await request.get(`/api/v1/routes/${main.id}`, { headers: admin })).json();
+  expect(stored.strategy).toBe("vllm_load");
+  expect(stored.retry).toEqual({ max_attempts: 3, retry_on_status: [502, 503], total_timeout_ms: 0 });
+  expect(stored.fallback_route_ids).toEqual([backup.id]);
+  expect(stored.traffic_split).toEqual([
+    { name: "stable", weight: 90, deployment_ids: [deps["smoke-stable"]] },
+    { name: "canary", weight: 30, deployment_ids: [deps["smoke-canary"]] },
+  ]);
+  expect([stored.sticky, stored.sticky_header]).toEqual(["header", "x-session-id"]);
+
+  // The fallback target cannot be deleted while referenced: the API error is shown.
+  await page
+    .getByRole("row")
+    .filter({ has: page.getByRole("cell", { name: "smoke-backup", exact: true }) })
+    .getByRole("button", { name: "Delete" })
+    .click();
+  await dialog(page).getByRole("button", { name: "Delete" }).click();
+  await expect(page.getByText(/fallback of route 'smoke-main'/)).toBeVisible();
+
+  // Upstream health check and circuit breaker.
+  await page.getByRole("link", { name: "Upstreams", exact: true }).click();
+  await page
+    .getByRole("row")
+    .filter({ has: page.getByRole("cell", { name: "smoke-up", exact: true }) })
+    .getByRole("button", { name: "Edit" })
+    .click();
+  const u = dialog(page);
+  await u.getByLabel("Probe this upstream").check();
+  await u.getByLabel("Probe path").fill("/health");
+  await u.getByLabel("Probe interval (ms)").fill("5000");
+  await u.getByLabel("Probe timeout (ms)").fill("5000");
+  await u.getByRole("button", { name: "Save" }).click();
+  await expect(u.getByText("Must be above 0 and below the interval")).toBeVisible();
+  await u.getByLabel("Probe timeout (ms)").fill("1000");
+  await u.getByLabel("Open the circuit after repeated failures").check();
+  await u.getByLabel("Consecutive failures").fill("3");
+  await u.getByRole("button", { name: "Save" }).click();
+  await expect(u).toBeHidden();
+  const up = await (await request.get(`/api/v1/upstreams/${upstream.id}`, { headers: admin })).json();
+  expect(up.health_check).toEqual({ path: "/health", interval_ms: 5000, timeout_ms: 1000, unhealthy_threshold: null, healthy_threshold: null });
+  expect(up.circuit_breaker).toEqual({ failure_threshold: 3, open_ms: null });
+  await expect(page.getByRole("row").filter({ hasText: "smoke-up" })).toContainText("breaker 3×");
+});

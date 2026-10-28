@@ -145,6 +145,16 @@ a { color: var(--accent); }
 .targets { display: flex; flex-direction: column; gap: 6px; }
 .target-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--surface-2); border-radius: 6px; }
 .target-row > span { flex: 1; }
+.form-section { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin: 0; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.form-section > legend { font-weight: 600; padding: 0 4px; }
+.check-row { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.split-card { border: 1px solid var(--border); border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.split-head { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.split-head > .field { flex: 1 1 140px; min-width: 0; }
+.split-share { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 56px; text-align: right; padding-bottom: 8px; }
+.order-row { display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: var(--surface-2); border-radius: 6px; }
+.order-row > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 
 /* cards, tables */
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
