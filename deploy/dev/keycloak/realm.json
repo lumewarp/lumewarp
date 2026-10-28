@@ -1,0 +1,85 @@
+{
+  "realm": "lumewarp",
+  "enabled": true,
+  "displayName": "Lumewarp dev",
+  "sslRequired": "none",
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "clients": [
+    {
+      "clientId": "lumewarp-cp",
+      "name": "Lumewarp control plane",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "lumewarp-dev-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8080/auth/callback",
+        "http://127.0.0.1:8080/auth/callback"
+      ],
+      "webOrigins": [
+        "http://localhost:8080",
+        "http://127.0.0.1:8080"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8080/*##http://127.0.0.1:8080/*"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "alice@example.com",
+      "email": "alice@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Alice",
+      "lastName": "Dev",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "lumewarp",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "bob@example.com",
+      "email": "bob@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Bob",
+      "lastName": "Dev",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "lumewarp",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "carol@example.com",
+      "email": "carol@example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Carol",
+      "lastName": "Dev",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "lumewarp",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}
