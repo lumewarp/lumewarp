@@ -69,9 +69,10 @@ flowchart TB
 ### SSO（Keycloak / OIDC）
 
 - control plane 是標準 OIDC RP；Keycloak 是預設但非必要。SAML 交給 Keycloak brokering。
-- 管理端登入：Authorization Code + PKCE；groups claim 對應 team 與角色；之後加 SCIM。
-- gateway 憑證：虛擬 API key（只存 hash）、IdP 簽發的 JWT（JWKS 本地驗證）、mTLS / workload identity。
-- 停權時推撤銷 delta，所有 gateway 秒級內拒絕。
+- 管理端登入：Authorization Code + PKCE 由 control plane 後端完成（Authlib），之後發伺服器端 session（httpOnly、`SameSite=Lax` cookie，寫入需 `X-Lumewarp-CSRF`）；以 `iss`+`sub` 認人，首次登入可 JIT 建立零權限使用者（只接受已驗證 email）。bootstrap token 與 PAT 照舊。
+- IdP 只負責認證，不讀 groups 或任何權限 claim；權限一律在授權後端（見下節）。IdP 與 IAM 的人員狀態同步由部署方負責。
+- gateway 憑證只有 admin 發出的虛擬 API key（只存 hash）；JWT／mTLS 呼叫 gateway 延後。
+- 停權時推撤銷 delta，所有 gateway 秒級內拒絕：內建後端在移除成員的同一交易停用 key；外部 IAM 由 key reconciler 讀變更串流，約 5 秒內停用；IAM 錯誤或逾時絕不停用 key。
 
 ### Team / Member / Service Account
 
@@ -79,17 +80,17 @@ flowchart TB
 - API key 屬於一個 team，owner 是該 team 的成員或 service account；key 本身不帶 policy，owner 身分也不進快照，compiler 只把展開後的有效策略寫進 key。
 - team 與 key owner（member、service account）各自可設模型清單、限流、預算；owner 只能收窄 team，compiler 預先展開成每個 key 的有效策略。
 - 授權：installation superuser、team admin、team member。member 可讀 team、建立與管理自己的 key；admin 另可改 team 設定、管理成員、service account 與 team 內所有 key；superuser 可建立／刪除 team 與管理安裝層設定。
-- 授權後端可換：內建讀 `users.is_superuser` 與 `team_members`；也可用 `lumewarp.authz` entry point 接外部系統（例如 OpenFGA）。後端只回答關係（superuser／admin／member），單一 async 函式 `check(user_id, relation, resource) -> Decision`；`admin` 隱含 `member`、`superuser` 隱含所有 team 的 `admin`，由後端保證。`ERROR`（後端不可用或逾時）不是 deny：管理 API 回 503。
+- 授權後端可換：內建讀 `users.is_superuser` 與 `team_members`；內附 `openfga` 與 `http` 後端，也可用 `lumewarp.authz` entry point 接外部系統。後端只回答關係（superuser／admin／member），單一 async 函式 `check(user_id, relation, resource) -> Decision`；`admin` 隱含 `member`、`superuser` 隱含所有 team 的 `admin`，由後端保證。`ERROR`（後端不可用或逾時）不是 deny：管理 API 回 503。
 - 用量與限流按 team 與 key owner 歸屬：member 的 scope id 是 `uuid5(team_id, user_id)`，service account 用其 id；限流 scope 為 `team:<id>`、`member:<id>`、`sa:<id>`。
 - 預算：依 token 與單價計費，軟上限通知、硬上限拒絕。
 
 ### Router
 
 - 模型別名 → 路由 → 多個 deployment（上游 + 模型 + 憑證）。
-- 策略：加權、最低延遲（EWMA）、最少進行中請求、vLLM 負載感知；依 team、header、輸入 token 數條件分流。
-- 彈性：fallback 鏈、有上限的重試、circuit breaker、主動健康檢查、尊重 Retry-After。
-- cache 親和：相同 session 或 prompt 前綴黏在同一 deployment。
-- 變更即設定版本，可百分比切流與回滾。
+- 策略：加權、最低延遲（EWMA）、最少進行中請求、vLLM 負載感知（P2 已實作）；依 team、header、輸入 token 數條件分流（延後）。
+- 彈性：fallback 鏈、有上限的重試、circuit breaker、主動健康檢查、尊重 Retry-After（P2 已實作）。
+- cache 親和：相同 session 或 prompt 前綴黏在同一 deployment（延後）。
+- 變更即設定版本，可回滾；路由層百分比切流（traffic split，可依 header／team／key sticky）已實作，設定版本 canary 延後。
 
 ### MCP / A2A gateway
 
@@ -152,7 +153,7 @@ gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control 
 
 P0 當時 gateway 提供 `lumewarp_requests_total`、`lumewarp_request_duration_seconds`、`lumewarp_gateway_overhead_seconds`、`lumewarp_request_body_read_seconds`、`lumewarp_ttft_seconds`、`lumewarp_upstream_errors_total`、`lumewarp_in_flight_requests`、`lumewarp_config_version`（YAML 為 0）與 `lumewarp_config_info`，由獨立 admin listener 的 `/metrics` 輸出；當時尚無 `team` 標籤、token／TPOT／spend 計量或 OTLP metrics，OTLP traces 為選用。P1 新增的指標見下節。非串流與串流的 overhead 均為「body 讀完 → upstream request 送出」加「upstream headers 收到 → handler 返回」；串流再加第一個 frame 已 ready 到轉交的本地處理時間，不含等待 upstream headers、prefill、後續 body 生成或 client socket flush／ACK。未路由的請求以 body 讀完到 handler 返回近似，未讀 body 則從 request start 計；取消中的 upload 只進 body-read duration，不算 overhead。此為內部處理時間近似，不同於 bench 的 gateway／direct 端到端延遲差值。完整操作、TTFT／body-read 與標籤定義見 [gateway README](../gateway/README.md)。
 
-API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可選 ServiceMonitor（gateway admin port 與 control plane metrics port）；Prometheus rules 與 Grafana dashboard 規劃中（維運）；control plane 內建預算告警，經 webhook / Slack / Email / PagerDuty（業務），可用 notifier plugin 擴充。每個請求一條 OTel trace，接續 W3C `traceparent`。log 預設不記 prompt/response。
+API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可選 ServiceMonitor（gateway admin port 與 control plane metrics port）；Prometheus 告警規則（`deploy/prometheus/rules.yaml`，附 promtool 測試）與四張 Grafana dashboard（`deploy/grafana/dashboards/`，Helm 可選安裝）；control plane 內建預算告警，經 webhook / Slack / Email / PagerDuty（業務），可用 notifier plugin 擴充。每個請求一條 OTel trace，接續 W3C `traceparent`。log 預設不記 prompt/response。
 
 ## P1 已實作
 
@@ -183,16 +184,27 @@ P1 的 control plane、設定串流、Team 模型與 Admin UI 第一版已實作
 
 **尚未包含（延後）**
 
-- OIDC／SSO、JWT／mTLS 用戶端認證、SCIM、auth plugin 執行（P2）。
+- JWT／mTLS 用戶端認證、SCIM（OIDC／SSO 與 auth plugin 已於 P2 實作）。
 - 跨 gateway 的共享限流（Redis 對帳）、ClickHouse、control plane 的 OTLP metrics／traces（Prometheus `lumewarp_cp_*` 已於 P2 加入）；gateway 只有選用的 OTLP traces，沒有 metrics exporter。
 - 預算為 eventual；佇列滿或 gateway 重啟會遺失用量事件，進行中的串流不會因超額被切斷；月窗口固定為 UTC 日曆月。
 - MCP／A2A 代理與其稽核、工具權限。
 - `gateway/Dockerfile`、`control-plane/Dockerfile` 可建置映像，但尚未有發佈映像的 CI；Helm chart 需自行指定 repository/tag。
 
-## P2 W5 gateway 路由韌性
+## P2 已實作
 
-- 快照與 standalone YAML 支援 `retry`、`fallbacks`、`health_check`、
-  `circuit_breaker` capability；W6 策略與切流欄位仍拒絕套用。
+P2 把權限模型縮成 team → member／service account，加上 SSO、可抽換的授權後端、路由韌性與可觀測性。以下只列現況，設計內容以上文為準。
+
+**權限與 SSO（control plane）**
+
+- 模型：installation superuser → team → member（admin／member）與 service account → API key；org 與 project 已移除（新的 Alembic baseline，不相容 P1 資料）。
+- 授權：`Authorizer.check(user_id, relation, resource)`；內建 `builtin`、`openfga`（Check／BatchCheck／ListObjects／ReadChanges，`HIGHER_CONSISTENCY`）、`http`，或 `lumewarp.authz` entry point。每次呼叫有逾時（`LUMEWARP_AUTHZ_TIMEOUT_SECONDS`），逾時即 `ERROR` → 管理 API 503。共用情境測試 `authz/contract_tests.py`。
+- key reconciler：有 `changes()` 時每 2 秒輪詢、只重算變動的使用者，另每 5 分鐘全掃；明確 deny → `SUSPENDED`（`owner_removed`）並推新版本。恢復權限不自動復原；service account 的 key 不受影響。
+- OIDC 登入、伺服器端 session 與 CSRF 見上文 SSO 一節；superuser 不能以 email 自動連結，只能用 bootstrap token 或 PAT。
+- 成員可用 email 加入；成員與 key 顯示擁有者是否仍啟用。
+
+**路由（gateway + control plane）**
+
+- 快照與 standalone YAML 支援 `retry`、`fallbacks`、`health_check`、`circuit_breaker`、`traffic_split`、`lowest_latency`、`vllm_load` capability；control plane 只在欄位有用到時列出對應 capability，驗證規則與 gateway 一致（含 URI 文法）。fallback 需要至少 2 次 attempt 的 retry policy，且不能成環。
 - 重試僅限回應送出前，串流僅限收到上游 headers 前；最多五次，
   共用原路由 timeout 與全域重試額度（預設 20%，低流量允許三次 burst；
   只有設定 `retry` 的路由請求會存入額度）。`Retry-After` 使用 deployment
@@ -205,6 +217,30 @@ P1 的 control plane、設定串流、Team 模型與 Admin UI 第一版已實作
 - 每次 attempt 有獨立 OTel 子 span；請求指標與用量只記一次，歸屬實際產生
   回應的 attempt。primary 回應維持上游模型名（同 P1）；只有成功的 fallback
   JSON／SSE 回應改寫為原公開模型名。
+- `LOWEST_LATENCY`：每個 deployment 的回應標頭時間 EWMA，power of two choices。`VLLM_LOAD`：每秒背景抓取 vLLM `/metrics`（`num_requests_waiting`、KV cache 使用率），power of two choices；抓取失敗或超過 3 秒未更新就退回 in-flight 比較。
+- traffic split：依權重選 split，再在 split 內依策略選 deployment；sticky 依 header／team／key 的固定種子雜湊。重試先留在同一 split，再換其他 split，最後才走 fallback。
+- Bench A6（quick ×3，1000 RPS，含認證）：非串流 overhead p99 −0.07 ms（雜訊範圍），串流 TTFT overhead p99 3.3 ms；LiteLLM 同機飽和。
+  P2 收尾在 main 跑 full ×3（含認證）：1000 RPS 非串流 overhead p99 0.20 ms
+  （A6 通過），300 RPS 0.28 ms；10000 RPS 時 lumewarp 與 direct 都達到目標速率。
+  串流 TTFT overhead p99：並行 100 為 −1.9 ms（雜訊），並行 1000 為 14.5 ms。
+  LiteLLM 在 1000 RPS 以上達不到目標速率。
+
+**可觀測性**
+
+- gateway 新指標見上表；control plane 在獨立 listener 輸出 `lumewarp_cp_*`。
+- 19 條告警規則與 promtool 測試、四張 dashboard、Helm 可選 PrometheusRule／dashboard ConfigMap／兩個 ServiceMonitor。
+
+**驗收**
+
+- `scripts/e2e-p2.sh`：builtin 與 openfga 各跑一次 OIDC 登入、建 key、呼叫、用量對帳、撤權（實測 builtin 0.2 s、openfga 1.1 s 內回 401）、IAM 故障不誤停；另含路由 e2e（重試、fallback、熔斷、URI 契約）。
+- `scripts/e2e-p1.sh`（含路由 e2e）、`scripts/load-e2e.sh` 8/8。
+
+**尚未包含（延後）**
+
+- JWT／mTLS 呼叫 gateway、讀 IdP groups／claims 做授權、SCIM、IdP→IAM 人員同步、更細的角色、key 層級限制。
+- 跨 gateway 共享限流（Redis）、設定版本 canary、cache 親和、依 header／token 數條件分流、逐請求外部 hook、LoRA 自動探索。
+- control plane 的 OTLP traces／metrics。
+- MCP／A2A（P3）。
 
 ## 效能目標（尚未實測）
 
@@ -224,6 +260,6 @@ P1 的 control plane、設定串流、Team 模型與 Admin UI 第一版已實作
 | --- | --- | --- |
 | **P0** gateway 骨架 + benchmark | Rust gateway 以 YAML 啟動；OpenAI 相容端點，上游 vLLM 與 OpenAI，含 SSE；mock 上游 + 對 LiteLLM 的 benchmark 進 CI；基本 Prometheus 指標 | 同機額外延遲 p99 明顯低於 LiteLLM |
 | **P1** control plane + Team | Python control plane + Postgres + gRPC 設定串流與本地快照；plugin 介面；team／member／service account、虛擬 key、預算限流；React Admin UI 第一版 | control plane 停機時 gateway 照常服務、可重啟 |
-| **P2** SSO + 路由 | Keycloak/OIDC、groups 對應、JWT 呼叫 gateway；vLLM 負載感知路由、fallback、canary、router plugin；OTel trace、告警規則與 dashboard | SSO → 發 key → 呼叫 → 計費 端到端跑通 |
+| **P2** SSO + 路由（已完成） | 權限模型縮成 team／member／service account；Keycloak/OIDC 登入、可抽換授權後端（builtin／OpenFGA／HTTP）與 key 同步；vLLM 負載感知與最低延遲路由、重試、fallback、熔斷、健康檢查、百分比切流；告警規則、dashboard、control plane metrics | SSO → 發 key → 呼叫 → 計費 → 撤權 端到端跑通（`scripts/e2e-p2.sh`） |
 | **P3** MCP / A2A | MCP 註冊聚合、工具權限、OAuth 代管；A2A 代理；三種流量共用稽核與 tracing | |
 

@@ -6,12 +6,15 @@ Lumewarp has a Rust data plane (the gateway) and a Python control plane
 immutable in-memory config snapshot; it never touches Postgres or Python. Config
 updates and usage events are asynchronous.
 
-P1 is implemented: the control plane with Postgres, the versioned gRPC config
-stream with on-disk snapshot boot, Org/Team/Project and virtual keys, budgets and
-rate limits, usage accounting, plugins, and the first Admin UI. See the
-[architecture document](docs/architecture.md) for the design and its “P1 已實作”
-status; deferred work includes SSO/OIDC, advanced routing, MCP/A2A and an HA
-control plane.
+P2 is implemented: the control plane with Postgres, the versioned gRPC config
+stream with on-disk snapshot boot, teams with members and service accounts owning
+virtual keys, budgets and rate limits, usage accounting, plugins and the Admin UI
+(P1); plus OIDC login for the Admin UI, pluggable authorization (built-in, OpenFGA
+or HTTP) with automatic key suspension, retries/fallbacks/circuit breaking/health
+checks, latency- and vLLM-load-aware routing, traffic splits, alert rules and
+dashboards (P2). See the [architecture document](docs/architecture.md) for the
+design and its “P1 已實作” / “P2 已實作” status; deferred work includes JWT/mTLS
+client auth, MCP/A2A and an HA control plane.
 
 | Directory | What |
 | --- | --- |
@@ -108,8 +111,8 @@ then create:
 - an upstream for `http://127.0.0.1:9100/v1` (kind `openai_compatible`),
 - a deployment using upstream model `mock`,
 - a route with the public alias `demo`,
-- an organization/team/project and a project API key (the `lw-...` secret is shown
-  once).
+- a team and an API key for a service account of that team (the `lw-...` secret is
+  shown once).
 
 Creating those resources publishes a snapshot; the gateway becomes ready and
 accepts the key:
@@ -122,7 +125,7 @@ curl -sS -H "Authorization: Bearer lw-..." -H 'Content-Type: application/json' \
 
 Usage lands in the UI after the next report batch (about one second); budgets are
 enforced eventually. See the [control-plane README](control-plane/README.md) for
-settings, credentials/RBAC, plugins and operations, and
+settings, SSO, authorization backends, plugins and operations, and
 [`docs/config-protocol.md`](docs/config-protocol.md) for the stream contract.
 
 ## Container images

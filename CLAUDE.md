@@ -22,9 +22,18 @@ The owner, Andy, writes in Traditional Chinese — reply to him in Traditional C
 5. **Observability is a feature, not an afterthought.** Every new gateway path gets Prometheus metrics (`lumewarp_*`, see the table in `docs/architecture.md`) and OTel spans. No API-key-level labels on metrics. Never log prompts/responses by default.
 6. **Performance claims need numbers.** Any change on the gateway request path must run the `bench/` suite; don't regress p99 overhead.
 
-## Current phase: P0
+## Current phase: P2 done, P3 not started
 
-Rust gateway that boots from YAML, serves the OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`) with SSE streaming, proxies to vLLM/OpenAI upstreams, exposes basic Prometheus metrics, plus the `bench/` harness run in CI against LiteLLM. Exit gate: gateway overhead p99 clearly below LiteLLM on the same machine.
+P0 (Rust gateway + bench vs LiteLLM), P1 (control plane, gRPC config stream, usage/budgets, Admin UI) and P2 are implemented; `docs/architecture.md` ("P1 已實作", "P2 已實作") lists what exists and what is deferred. P2 delivered:
+
+- Tenancy: installation superuser → team → members (admin/member) and service accounts → API keys. No org/project.
+- Admin login via OIDC (cookie sessions + CSRF); the IdP only authenticates. Authorization is pluggable (`builtin`, `openfga`, `http`, or a `lumewarp.authz` entry point) behind `check(user_id, relation, resource)`; backend errors are never denies. A key reconciler suspends keys of members removed in an external IAM.
+- Gateway routing: retries (before any response byte, budgeted), fallbacks, circuit breaker, active health checks, LOWEST_LATENCY, VLLM_LOAD, traffic split with sticky hashing — each gated by a snapshot capability the control plane emits only when used.
+- Observability: Prometheus alert rules (promtool-tested), Grafana dashboards, control-plane `/metrics` on its own listener.
+
+Acceptance suites: `scripts/e2e-p1.sh`, `scripts/e2e-p2.sh` (needs `scripts/dev-idp.sh up`), `scripts/load-e2e.sh`, and `bench/` A6 for request-path changes.
+
+Next: P3 (MCP / A2A), not planned yet.
 
 Decided: license Apache-2.0; MVP usage data in Postgres (ClickHouse later).
 

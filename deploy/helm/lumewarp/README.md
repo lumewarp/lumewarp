@@ -85,6 +85,37 @@ Readiness/liveness:
   healthy during a control-plane outage so Kubernetes does not restart a gateway that is
   correctly serving its cached config.
 
+## SSO and authorization backend
+
+The control plane reads every setting from `LUMEWARP_*` environment variables (see the
+[control-plane README](../../../control-plane/README.md)); pass SSO and authorization
+settings through `controlPlane.extraEnv`, secrets through `secretKeyRef`:
+
+```yaml
+controlPlane:
+  extraEnv:
+    - name: LUMEWARP_PUBLIC_URL
+      value: https://lumewarp.example.com
+    - name: LUMEWARP_OIDC_ISSUER
+      value: https://keycloak.example.com/realms/lumewarp
+    - name: LUMEWARP_OIDC_CLIENT_ID
+      value: lumewarp-cp
+    - name: LUMEWARP_OIDC_CLIENT_SECRET
+      valueFrom: {secretKeyRef: {name: lumewarp-oidc, key: client-secret}}
+    # Optional: grants in OpenFGA instead of the built-in membership table.
+    - name: LUMEWARP_AUTHZ_BACKEND
+      value: openfga
+    - name: LUMEWARP_OPENFGA_URL
+      value: http://openfga.openfga:8080
+    - name: LUMEWARP_OPENFGA_STORE_ID
+      value: 01H...
+    - name: LUMEWARP_OPENFGA_MODEL_ID
+      value: 01H...
+```
+
+The IdP must allow the redirect URI `<LUMEWARP_PUBLIC_URL>/api/v1/session/oidc/callback`.
+Write the OpenFGA model from `deploy/openfga/model.fga` before switching the backend.
+
 ## Important P1 limits
 
 - **Control plane replicas must stay at 1.** The compiler, rollover scheduler and
