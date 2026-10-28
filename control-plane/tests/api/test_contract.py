@@ -13,19 +13,16 @@ EXPECTED_OPERATION_IDS = {
     "createDeployment",
     "createGatewayToken",
     "createKey",
-    "createMembership",
-    "createOrg",
+    "createServiceAccount",
     "createOwnToken",
-    "createProject",
     "createRoute",
     "createTeam",
     "createUpstream",
     "createUser",
     "createUserToken",
     "deleteDeployment",
-    "deleteMembership",
-    "deleteOrg",
-    "deleteProject",
+    "deleteMember",
+    "deleteServiceAccount",
     "deleteRoute",
     "deleteTeam",
     "deleteUpstream",
@@ -33,8 +30,7 @@ EXPECTED_OPERATION_IDS = {
     "getCurrentUser",
     "getDeployment",
     "getKey",
-    "getOrg",
-    "getProject",
+    "getServiceAccount",
     "getRoute",
     "getTeam",
     "getUpstream",
@@ -44,24 +40,25 @@ EXPECTED_OPERATION_IDS = {
     "listConfigVersions",
     "listDeployments",
     "listGateways",
-    "listKeys",
-    "listMemberships",
-    "listOrgs",
+    "listTeamKeys",
+    "listMembers",
+    "listServiceAccounts",
+    "listOwnKeys",
     "listOwnTokens",
-    "listProjects",
     "listRoutes",
     "listTeams",
     "listUpstreams",
     "listUsers",
     "revokeGatewayToken",
     "revokeKey",
+    "rotateKey",
+    "putMember",
     "revokeOwnToken",
     "rollbackConfig",
     "updateDeployment",
     "updateKey",
-    "updateMembership",
-    "updateOrg",
-    "updateProject",
+    "updateMember",
+    "updateServiceAccount",
     "updateRoute",
     "updateTeam",
     "updateUpstream",
@@ -84,7 +81,6 @@ def test_openapi_operation_ids_are_stable_and_unique() -> None:
             ids.append(operation["operationId"])
     assert len(ids) == len(set(ids))
     assert set(ids) == EXPECTED_OPERATION_IDS
-    assert len(ids) == 56
 
 
 async def test_mutation_writes_audit_and_outbox_in_one_transaction(
@@ -95,23 +91,25 @@ async def test_mutation_writes_audit_and_outbox_in_one_transaction(
         outbox_before = await session.scalar(select(func.count()).select_from(ConfigOutbox))
 
     name = f"txn-{suffix()}"
-    resp = client.post("/api/v1/orgs", json={"name": name}, headers=BOOTSTRAP_AUTH)
+    resp = client.post("/api/v1/teams", json={"name": name}, headers=BOOTSTRAP_AUTH)
     assert resp.status_code == 201, resp.text
-    org_id = resp.json()["id"]
+    team_id = resp.json()["id"]
 
     async with type(committed)(committed.bind) as session:
         audit_after = await session.scalar(select(func.count()).select_from(AuditLog))
         outbox_after = await session.scalar(select(func.count()).select_from(ConfigOutbox))
         row = await session.scalar(
-            select(AuditLog).where(AuditLog.action == "org.create", AuditLog.resource_id == org_id)
+            select(AuditLog).where(
+                AuditLog.action == "team.create", AuditLog.resource_id == team_id
+            )
         )
         assert row is not None
-        assert row.org_id is not None and str(row.org_id) == org_id
+        assert str(row.team_id) == team_id
     assert audit_after == audit_before + 1
     assert outbox_after == outbox_before + 1
 
     # A rejected mutation rolls back the row, audit and outbox together.
-    duplicate = client.post("/api/v1/orgs", json={"name": name}, headers=BOOTSTRAP_AUTH)
+    duplicate = client.post("/api/v1/teams", json={"name": name}, headers=BOOTSTRAP_AUTH)
     assert duplicate.status_code == 409
     async with type(committed)(committed.bind) as session:
         assert await session.scalar(select(func.count()).select_from(AuditLog)) == audit_after

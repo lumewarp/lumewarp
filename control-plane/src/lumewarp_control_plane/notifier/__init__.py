@@ -40,7 +40,7 @@ class BudgetEvent:
     kind: Literal["soft", "hard"]
     scope_type: ScopeType
     scope_id: uuid.UUID
-    org_id: uuid.UUID
+    team_id: uuid.UUID
     window_start: datetime
     spent_nano_usd: int
     budget_nano_usd: int
@@ -50,7 +50,7 @@ class BudgetEvent:
             "kind": self.kind,
             "scope_type": self.scope_type.value,
             "scope_id": str(self.scope_id),
-            "org_id": str(self.org_id),
+            "team_id": str(self.team_id),
             "window_start": self.window_start.astimezone(UTC).isoformat(),
             "spent_nano_usd": self.spent_nano_usd,
             "budget_nano_usd": self.budget_nano_usd,
@@ -97,7 +97,7 @@ async def enqueue_budget_event(session, event: BudgetEvent) -> int:
             await session.execute(
                 select(NotifierChannel).where(
                     NotifierChannel.enabled.is_(True),
-                    (NotifierChannel.org_id.is_(None) | (NotifierChannel.org_id == event.org_id)),
+                    NotifierChannel.team_id.is_(None) | (NotifierChannel.team_id == event.team_id),
                 )
             )
         )
@@ -134,7 +134,7 @@ def _event_from_payload(payload: dict) -> BudgetEvent:
             kind=kind,
             scope_type=ScopeType(payload["scope_type"]),
             scope_id=uuid.UUID(payload["scope_id"]),
-            org_id=uuid.UUID(payload["org_id"]),
+            team_id=uuid.UUID(payload["team_id"]),
             window_start=window_start.astimezone(UTC),
             spent_nano_usd=int(payload["spent_nano_usd"]),
             budget_nano_usd=int(payload["budget_nano_usd"]),

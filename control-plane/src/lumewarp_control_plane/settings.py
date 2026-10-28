@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     # Installation-level superuser credential (see security.py). Unset = no
     # bootstrap access; PATs only.
     bootstrap_token: SecretStr | None = None
+    # Authorization backend: "builtin" or a `lumewarp.authz` entry point name (authz/).
+    authz_backend: str = "builtin"
     # Config scope this control plane publishes (Snapshot.scope).
     scope: str = "default"
 

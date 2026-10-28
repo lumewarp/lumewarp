@@ -137,7 +137,7 @@ async def test_end_to_end(cp: ControlPlane) -> None:
     assert r.status_code == 200, r.text
     assert set(r.json()["checks"]) >= {"grpc", "compiler", "rollover", "notifier"}
 
-    # Routing, hierarchy and two keys via REST.
+    # Routing, a team, a service account and two keys via REST.
     up = await cp.post("/upstreams", {"name": "vllm", "kind": "vllm", "base_url": "http://v/v1"})
     dep = await cp.post(
         "/deployments",
@@ -150,13 +150,20 @@ async def test_end_to_end(cp: ControlPlane) -> None:
         },
     )
     await cp.post("/routes", {"model": "llama", "deployment_ids": [dep["id"]]})
-    org = await cp.post("/orgs", {"name": "acme"})
-    team = await cp.post(f"/orgs/{org['id']}/teams", {"name": "ml"})
-    project = await cp.post(
-        f"/teams/{team['id']}/projects", {"name": "chat", "budget_nano_usd": 1_000}
+    team = await cp.post("/teams", {"name": "ml"})
+    account = await cp.post(
+        f"/teams/{team['id']}/service-accounts", {"name": "chat", "budget_nano_usd": 1_000}
     )
-    k1 = (await cp.post(f"/projects/{project['id']}/keys", {"name": "k1"}))["key"]
-    k2 = (await cp.post(f"/projects/{project['id']}/keys", {"name": "k2"}))["key"]
+    k1 = (
+        await cp.post(
+            f"/teams/{team['id']}/keys", {"name": "k1", "service_account_id": account["id"]}
+        )
+    )["key"]
+    k2 = (
+        await cp.post(
+            f"/teams/{team['id']}/keys", {"name": "k2", "service_account_id": account["id"]}
+        )
+    )["key"]
     tok_a = (await cp.post("/gateways", {"gateway_id": "gw-a"}))["secret"]
     tok_b = (await cp.post("/gateways", {"gateway_id": "gw-b"}))["secret"]
 
@@ -189,16 +196,14 @@ async def test_end_to_end(cp: ControlPlane) -> None:
         assert update.delta.base_version == before_revoke
         assert b.snapshot == a.snapshot
 
-        # Usage over the project budget flips k2 to BUDGET_EXCEEDED on both gateways.
+        # Usage over the owner budget flips k2 to BUDGET_EXCEEDED on both gateways.
         now_ms = int(time.time() * 1000)
         event = usage_pb2.UsageEvent(
             request_id=str(uuid.uuid4()),
             timestamp_unix_ms=now_ms,
             started_at_unix_ms=now_ms - 100,
             key_id=k2["id"],
-            org_id=org["id"],
             team_id=team["id"],
-            project_id=project["id"],
             model="llama",
             deployment="llama-a",
             route="chat_completions",
@@ -226,8 +231,8 @@ async def test_end_to_end(cp: ControlPlane) -> None:
         async with cp.app.state.session_factory() as s:
             spent = await s.scalar(
                 select(UsageTotal.cost_nano_usd).where(
-                    UsageTotal.scope_type == ScopeType.PROJECT,
-                    UsageTotal.scope_id == uuid.UUID(project["id"]),
+                    UsageTotal.scope_type == ScopeType.SERVICE_ACCOUNT,
+                    UsageTotal.scope_id == uuid.UUID(account["id"]),
                 )
             )
         assert spent == 2_000
@@ -247,11 +252,16 @@ async def test_end_to_end(cp: ControlPlane) -> None:
 
 async def test_grpc_crash_fails_readiness_and_requests_exit(cp: ControlPlane) -> None:
     runtime = cp.app.state.runtime
+    failed = asyncio.Event()
+
+    def fatal_handler(name):
+        cp.fatal.append(name)
+        failed.set()
+
+    cp.app.state.fatal_handler = fatal_handler
     await runtime.grpc_server.stop(0)
     async with asyncio.timeout(5):
-        while not runtime.tasks["grpc"].done():
-            await asyncio.sleep(0.02)
-    await asyncio.sleep(0)
+        await failed.wait()
     r = await cp.http.get("/readyz")
     assert r.status_code == 503
     assert r.json()["checks"]["grpc"] != "ok"

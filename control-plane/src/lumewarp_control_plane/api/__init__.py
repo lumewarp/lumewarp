@@ -1,7 +1,8 @@
 """Admin REST API, mounted at /api/v1 (owner: C2).
 
 Conventions (frozen, see .omh/runs/p1/plan.md):
-- Auth: `security.CurrentPrincipal`; authorization via `rbac.require` / `rbac.authorize`.
+- Auth: handlers take `authz.Authz` (caller in `authz.principal`) and ask it
+  `require` / `allowed`; unreadable resources answer 404, readable-but-denied answer 403.
 - Lists return `{items, next_cursor}` and accept `?limit=&cursor=`.
 - Errors are `{error: {code, message}}`: raise `errors.ApiError` (handlers in errors.py).
 - Every mutation writes `audit.record(...)` and, if it changes compiled state,
@@ -19,10 +20,9 @@ from lumewarp_control_plane.api import (
     config,
     gateways,
     keys,
-    memberships,
-    orgs,
-    projects,
+    members,
     routing,
+    service_accounts,
     teams,
     usage,
     users,
@@ -43,13 +43,12 @@ _ERROR_RESPONSES: dict[int | str, dict] = {
 }
 
 router = APIRouter(prefix="/api/v1", responses=_ERROR_RESPONSES)
-router.include_router(orgs.router)
 router.include_router(teams.router)
-router.include_router(projects.router)
+router.include_router(members.router)
+router.include_router(service_accounts.router)
 router.include_router(keys.router)
 router.include_router(routing.router)
 router.include_router(users.router)
-router.include_router(memberships.router)
 router.include_router(usage.router)
 router.include_router(audit.router)
 router.include_router(gateways.router)

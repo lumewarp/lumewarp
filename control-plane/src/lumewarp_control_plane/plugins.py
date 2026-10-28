@@ -115,19 +115,17 @@ class NotifierPlugin(Protocol):
 
 @dataclass(frozen=True)
 class IdentityMapping:
-    """Declarative result of an auth plugin: who the user is and which grants they get."""
+    """Declarative result of an auth plugin: who the user is. Team roles and the superuser
+    flag are answered by the authz backend, not by this mapping."""
 
     email: str
     display_name: str = ""
-    # (org name, team name or None, role) tuples, applied by the control plane.
-    grants: tuple[tuple[str, str | None, str], ...] = ()
-    is_superuser: bool = False
 
 
 @runtime_checkable
 class AuthPlugin(Protocol):
-    """P2: maps an external identity (OIDC claims, LDAP entry, ...) to a Lumewarp user and
-    memberships. Runs in the control plane at login only. Protocol only in P1.
+    """P2: maps an external identity (OIDC claims, LDAP entry, ...) to a Lumewarp user.
+    Runs in the control plane at login only. Protocol only in P1.
     """
 
     api_version: int

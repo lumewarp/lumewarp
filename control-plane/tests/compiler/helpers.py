@@ -13,17 +13,17 @@ from lumewarp_control_plane.models import (
     ApiKey,
     ConfigVersion,
     Deployment,
-    Org,
-    Project,
     Route,
     RouteDeployment,
     RoutingStrategy,
     Scope,
+    ServiceAccount,
     Team,
     Upstream,
     UpstreamKind,
+    User,
 )
-from lumewarp_control_plane.security import SecretKind, generate_secret
+from tests import factories
 
 SCOPE = "default"
 OCT = datetime(2026, 10, 15, tzinfo=UTC)
@@ -41,35 +41,19 @@ async def touch(factory: SessionFactory, reason: str = "test") -> int:
 
 
 async def add_hierarchy(
-    s: AsyncSession, *, org: dict | None = None, team: dict | None = None,
-    project: dict | None = None, name: str = "acme",
-) -> tuple[Org, Team, Project]:  # fmt: skip
-    o = Org(name=name, **(org or {}))
-    s.add(o)
-    await s.flush()
-    t = Team(org_id=o.id, name=f"{name}-team", **(team or {}))
-    s.add(t)
-    await s.flush()
-    p = Project(org_id=o.id, team_id=t.id, name=f"{name}-project", **(project or {}))
-    s.add(p)
-    await s.flush()
-    return o, t, p
+    s: AsyncSession, *, team: dict | None = None, member: dict | None = None, name: str = "acme"
+) -> tuple[Team, User]:
+    """A team with one member-role user; returns both."""
+    t = await factories.make_team(s, f"{name}-team", **(team or {}))
+    user = await factories.make_user(s, f"{name}@example.com")
+    await factories.make_member(s, t, user, **(member or {}))
+    return t, user
 
 
-async def add_key(s: AsyncSession, project: Project, name: str = "k", **kw) -> ApiKey:
-    new = generate_secret(SecretKind.API_KEY)
-    k = ApiKey(
-        org_id=project.org_id,
-        team_id=project.team_id,
-        project_id=project.id,
-        name=name,
-        key_hash=new.hash,
-        display_prefix=new.display_prefix,
-        **kw,
-    )
-    s.add(k)
-    await s.flush()
-    return k
+async def add_key(
+    s: AsyncSession, team: Team, owner: User | ServiceAccount, name: str = "k", **kw
+) -> ApiKey:
+    return await factories.make_key(s, team, owner, name=name, **kw)
 
 
 async def add_route(

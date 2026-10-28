@@ -157,6 +157,7 @@ async def _publish_locked(
     scope: str,
     now: datetime | None,
     router_plugins: Sequence[plugin_api.LoadedPlugin] | None,
+    require_local_membership: bool,
 ) -> int | None:
     pending = await session.scalar(
         select(func.count()).where(
@@ -175,7 +176,13 @@ async def _publish_locked(
         return None
     version = (latest[0] if latest else 0) + 1
     try:
-        compiled = await compile_scope(session, scope, now=now, router_plugins=router_plugins)
+        compiled = await compile_scope(
+            session,
+            scope,
+            now=now,
+            router_plugins=router_plugins,
+            require_local_membership=require_local_membership,
+        )
         if latest is not None:
             previous = await session.get(ConfigVersion, (scope, latest[0]))
             if previous.payload is not None:
@@ -210,6 +217,7 @@ async def publish_pending(
     *,
     now: datetime | None = None,
     router_plugins: Sequence[plugin_api.LoadedPlugin] | None = None,
+    require_local_membership: bool,
 ) -> int | None:
     """One step of the compiler loop for `scope` (default settings.scope).
 
@@ -231,7 +239,9 @@ async def publish_pending(
                 try:
                     async with AsyncSession(bind=conn, expire_on_commit=False) as session:
                         async with session.begin():
-                            return await _publish_locked(session, scope, now, router_plugins)
+                            return await _publish_locked(
+                                session, scope, now, router_plugins, require_local_membership
+                            )
                 except DBAPIError as exc:
                     if not _serialization_failure(exc) or attempt == SERIALIZATION_ATTEMPTS - 1:
                         raise
@@ -316,6 +326,7 @@ async def rollback_routing(
     *,
     now: datetime | None = None,
     router_plugins: Sequence[plugin_api.LoadedPlugin] | None = None,
+    require_local_membership: bool,
 ) -> int:
     """Publish a new version whose routing content (upstreams, deployments, routes) comes
     from `to_version` while keys, teams, policies and statuses come from current source
@@ -344,7 +355,13 @@ async def rollback_routing(
 
     await _restore_routing(session, old)
     revision = await outbox.enqueue_recompile(session, scope, f"rollback to {to_version}")
-    compiled = await compile_scope(session, scope, now=now, router_plugins=router_plugins or [])
+    compiled = await compile_scope(
+        session,
+        scope,
+        now=now,
+        router_plugins=router_plugins or [],
+        require_local_membership=require_local_membership,
+    )
     snap = compiled.snapshot
     for field in ("upstreams", "deployments", "routes"):
         del getattr(snap, field)[:]
@@ -424,6 +441,7 @@ async def run_compiler_loop(
     scope: str | None = None,
     interval_seconds: float = 0.2,
     on_published: Callable[[str, int], None] | None = None,
+    require_local_membership: bool,
 ) -> None:
     """Poll the outbox every `interval_seconds` and publish until `stop_event` is set.
 
@@ -436,7 +454,12 @@ async def run_compiler_loop(
     backoff = interval_seconds
     while not stop_event.is_set():
         try:
-            version = await publish_pending(session_factory, scope, router_plugins=router_plugins)
+            version = await publish_pending(
+                session_factory,
+                scope,
+                router_plugins=router_plugins,
+                require_local_membership=require_local_membership,
+            )
             if version is not None:
                 log.info("published config version %d for scope %s", version, scope)
                 if on_published is not None:

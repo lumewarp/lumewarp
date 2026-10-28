@@ -51,7 +51,6 @@ def record(
     principal: Principal | None = None,
     actor_type: ActorType | None = None,
     actor_id: str | None = None,
-    org_id: uuid.UUID | None = None,
     team_id: uuid.UUID | None = None,
     details: Mapping[str, Any] | None = None,
 ) -> AuditLog:
@@ -70,7 +69,6 @@ def record(
         action=action,
         resource_type=resource_type,
         resource_id=str(resource_id) if resource_id is not None else None,
-        org_id=org_id,
         team_id=team_id,
         details=redact(dict(details or {})),
     )

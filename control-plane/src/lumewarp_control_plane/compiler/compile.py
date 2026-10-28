@@ -21,19 +21,21 @@ from lumewarp_control_plane.models import (
     ApiKey,
     Deployment,
     KeyLifecycle,
+    KeyOwnerKind,
     ModelAccess,
-    Org,
-    Project,
     Route,
     RouteDeployment,
     RoutingStrategy,
     Scope,
     ScopeType,
+    ServiceAccount,
     StreamUsageMode,
     Team,
+    TeamMember,
     Upstream,
     UpstreamKind,
     UsageTotal,
+    User,
 )
 from lumewarp_control_plane.settings import get_settings
 from lumewarp_control_plane.windows import month_window
@@ -87,7 +89,7 @@ ModelSet = frozenset[str] | None
 
 def narrow(parent: ModelSet, mode: ModelAccess, allowed: Sequence[str]) -> ModelSet:
     """One level of allowlist inheritance. INHERIT and ALL keep the parent's set (ALL on
-    an org is the universal set); LIST intersects. An empty LIST is deny-all.
+    a team is the universal set); LIST intersects. An empty LIST is deny-all.
     """
     if mode is not ModelAccess.LIST:
         return parent
@@ -95,11 +97,20 @@ def narrow(parent: ModelSet, mode: ModelAccess, allowed: Sequence[str]) -> Model
     return own if parent is None else parent & own
 
 
-def rate_limit_scope(level: ScopeType, entity) -> pb.RateLimitScope | None:
+# Rate-limit scope id prefix per level (the wire ids are "team:<id>", "member:<id>",
+# "sa:<id>").
+SCOPE_PREFIX = {
+    ScopeType.TEAM: "team",
+    ScopeType.MEMBER: "member",
+    ScopeType.SERVICE_ACCOUNT: "sa",
+}
+
+
+def rate_limit_scope(level: ScopeType, scope_id: uuid.UUID, entity) -> pb.RateLimitScope | None:
     if entity.rpm_limit is None and entity.tpm_limit is None and entity.max_parallel is None:
         return None
     return pb.RateLimitScope(
-        id=f"{level.value}:{entity.id}",
+        id=f"{SCOPE_PREFIX[level]}:{scope_id}",
         limit=pb.RateLimit(
             requests_per_minute=entity.rpm_limit or 0,
             tokens_per_minute=entity.tpm_limit or 0,
@@ -135,6 +146,7 @@ async def compile_scope(
     router_plugins: Sequence[plugin_api.LoadedPlugin] | None = None,
     max_snapshot_bytes: int | None = None,
     max_snapshot_keys: int | None = None,
+    require_local_membership: bool,
 ) -> CompiledSnapshot:
     """Compile the current source state of `scope` into a snapshot.
 
@@ -144,18 +156,21 @@ async def compile_scope(
     is `scopes.source_revision` as seen there.
 
     Contract:
-    - Expands org -> team -> project -> key inheritance into each key's EffectivePolicy.
-      Model access: resolve INHERIT first (a level with INHERIT takes its parent's
-      effective set unchanged; orgs are never INHERIT), then intersect: ALL is the
+    - Expands team -> owner (member or service account) policy into each key's
+      EffectivePolicy. Model access: resolve INHERIT first (the owner takes the team's
+      effective set unchanged; teams are never INHERIT), then intersect: ALL is the
       universal set, LIST is exactly `allowed_models`. `allow_all_models` is true iff the
-      resulting effective set is still universal, e.g. ALL -> INHERIT -> INHERIT -> INHERIT
-      (the defaults) allows every model. A LIST with an empty list anywhere on the path is
-      deny-all (`allow_all_models=false`, `allowed_models=[]`), never "all".
-      Rate limits: one RateLimitScope per level that sets a limit (id "<level>:<uuid>").
-      Status: SUSPENDED from lifecycle; else BUDGET_EXCEEDED if any of key/project/team/
-      org has a budget and its `usage_totals` for the UTC month of `now` is >= it; else
-      ACTIVE. Revoked keys are left out (the gateway answers 401 for them either way), so
-      revocation is a key removal in deltas. Expiry is passed through as
+      resulting effective set is still universal, e.g. ALL -> INHERIT (the defaults)
+      allows every model. A LIST with an empty list on either level is deny-all
+      (`allow_all_models=false`, `allowed_models=[]`), never "all".
+      Rate limits: one RateLimitScope per level that sets a limit ("team:<id>",
+      "member:<member_scope_id>", "sa:<id>").
+      Status: SUSPENDED from lifecycle, or for a user-owned key whose owner is no longer
+      a member of the key's team (builtin only) or is deactivated; external owners without
+      a local policy row inherit the team policy. Else BUDGET_EXCEEDED if the team or
+      the owner has a budget and its `usage_totals` for the UTC month of `now` is >= it;
+      else ACTIVE. Revoked keys are left out (the gateway answers 401 for them either
+      way), so revocation is a key removal in deltas. Expiry is passed through as
       `expires_at_unix_ms` and enforced by the gateway.
     - Source rows the gateway would reject are left out and reported in `warnings`:
       upstreams with an invalid base URL (and their deployments), deployments with an
@@ -293,10 +308,11 @@ async def compile_scope(
             )
         snap.deployments.append(dep)
 
-    # Hierarchy and keys.
-    orgs = {o.id: o for o in await session.scalars(select(Org))}
+    # Teams, key owners and keys.
     teams = {t.id: t for t in await session.scalars(select(Team))}
-    projects = {p.id: p for p in await session.scalars(select(Project))}
+    members = {(m.team_id, m.user_id): m for m in await session.scalars(select(TeamMember))}
+    service_accounts = {a.id: a for a in await session.scalars(select(ServiceAccount))}
+    active_users = set(await session.scalars(select(User.id).where(User.is_active.is_(True))))
     keys = (
         await session.scalars(
             select(ApiKey).where(ApiKey.lifecycle != KeyLifecycle.REVOKED).order_by(ApiKey.id)
@@ -315,33 +331,42 @@ async def compile_scope(
         )
     }
 
-    def over_budget(level: ScopeType, entity) -> bool:
+    def over_budget(level: ScopeType, scope_id: uuid.UUID, entity) -> bool:
         budget = entity.budget_nano_usd
-        return budget is not None and spent.get((level, entity.id), 0) >= budget
+        return budget is not None and spent.get((level, scope_id), 0) >= budget
 
     for t in sorted(teams.values(), key=lambda t: str(t.id)):
-        snap.teams.append(
-            pb.Team(id=str(t.id), name=t.name, org_id=str(t.org_id), org_name=orgs[t.org_id].name)
-        )
+        snap.teams.append(pb.Team(id=str(t.id), name=t.name))
 
     for k in sorted(keys, key=lambda k: str(k.id)):
-        org, team, project = orgs[k.org_id], teams[k.team_id], projects[k.project_id]
-        levels = ((ScopeType.ORG, org), (ScopeType.TEAM, team), (ScopeType.PROJECT, project))
-        levels += ((ScopeType.KEY, k),)
+        team = teams[k.team_id]
+        owner_level, owner_scope_id = k.owner_scope
+        owner_gone = False
+        if k.owner_kind is KeyOwnerKind.USER:
+            owner = members.get((k.team_id, k.user_id))
+            # W3: key reconciler suspends keys whose external membership was revoked.
+            owner_gone = k.user_id not in active_users or (
+                require_local_membership and owner is None
+            )
+        else:
+            owner = service_accounts[k.service_account_id]
+        levels = [(ScopeType.TEAM, team.id, team)]
+        if owner is not None:
+            levels.append((owner_level, owner_scope_id, owner))
         models: ModelSet = None
-        for _, entity in levels:
+        for _, _, entity in levels:
             models = narrow(models, entity.model_access, entity.allowed_models)
         policy = pb.EffectivePolicy(
             allow_all_models=models is None,
             allowed_models=sorted(models or ()),
         )
-        for level, entity in levels:
-            if (rl := rate_limit_scope(level, entity)) is not None:
+        for level, scope_id, entity in levels:
+            if (rl := rate_limit_scope(level, scope_id, entity)) is not None:
                 policy.rate_limit_scopes.append(rl)
 
-        if k.lifecycle is KeyLifecycle.SUSPENDED:
+        if k.lifecycle is KeyLifecycle.SUSPENDED or owner_gone:
             status = pb.KEY_STATUS_SUSPENDED
-        elif any(over_budget(level, entity) for level, entity in levels):
+        elif any(over_budget(level, scope_id, entity) for level, scope_id, entity in levels):
             status = pb.KEY_STATUS_BUDGET_EXCEEDED
             policy.budget_window_end_unix_ms = _ms(window_end)
         else:
@@ -351,9 +376,7 @@ async def compile_scope(
             pb.ApiKey(
                 key_id=str(k.id),
                 key_hash=k.key_hash,
-                org_id=str(k.org_id),
                 team_id=str(k.team_id),
-                project_id=str(k.project_id),
                 status=status,
                 expires_at_unix_ms=expiry_ms(k.expires_at),
                 policy=policy,

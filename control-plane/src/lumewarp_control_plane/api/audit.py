@@ -1,8 +1,8 @@
 """Scoped audit log reads.
 
-Audit rows carry `org_id` and an optional `team_id`. Org owners/admins may read the whole
-org; team admins may read their own team; members/viewers cannot read audit at all.
-Installation-wide rows (org_id NULL) are superuser-only.
+Audit rows carry an optional `team_id`. Superusers read everything (including
+installation-wide rows with no team); everyone else reads the rows of the teams they are
+a member of.
 """
 
 from __future__ import annotations
@@ -12,21 +12,21 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Query
-from sqlalchemy import or_, select
+from sqlalchemy import select
 
-from lumewarp_control_plane import rbac
 from lumewarp_control_plane.api.common import (
     LimitDep,
     SessionDep,
     aware,
     ensure_range,
+    ensure_team_read,
     parse_int_cursor,
     validation_error,
 )
 from lumewarp_control_plane.api.schemas import AuditOut, Page
-from lumewarp_control_plane.errors import forbidden, not_found
-from lumewarp_control_plane.models import AuditLog, Org, Team
-from lumewarp_control_plane.security import CurrentPrincipal
+from lumewarp_control_plane.authz import Authz
+from lumewarp_control_plane.errors import not_found
+from lumewarp_control_plane.models import AuditLog, Team
 
 FromQuery = Annotated[datetime | None, Query(alias="from")]
 ToQuery = Annotated[datetime | None, Query(alias="to")]
@@ -34,22 +34,10 @@ ToQuery = Annotated[datetime | None, Query(alias="to")]
 router = APIRouter(tags=["audit"])
 
 
-def _audit_scope(principal: CurrentPrincipal) -> tuple[set[uuid.UUID], set[uuid.UUID]]:
-    org_admins: set[uuid.UUID] = set()
-    team_admins: set[uuid.UUID] = set()
-    for grant in principal.grants:
-        if grant.team_id is None and grant.role in {"owner", "admin"}:
-            org_admins.add(grant.org_id)
-        elif grant.team_id is not None and grant.role == "admin":
-            team_admins.add(grant.team_id)
-    return org_admins, team_admins
-
-
 @router.get("/audit", response_model=Page[AuditOut], operation_id="listAudit")
 async def list_audit(
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
-    org_id: uuid.UUID | None = None,
     team_id: uuid.UUID | None = None,
     actor_id: str | None = None,
     action: str | None = None,
@@ -62,46 +50,20 @@ async def list_audit(
 ) -> Page[AuditOut]:
     start = aware(from_, "from")
     end = aware(to_, "to")
-    org_admins, team_admins = _audit_scope(principal)
-
-    if team_id is not None:
-        team = await session.get(Team, team_id)
-        if team is None or not rbac.authorize(
-            principal, rbac.Action.READ, rbac.ResourceScope(team.org_id, team.id)
-        ):
-            raise not_found("team not found")
-        if org_id is not None and org_id != team.org_id:
-            raise not_found("team_id does not match org_id")
-        org_id = team.org_id
-        if not principal.is_superuser and not rbac.authorize(
-            principal, rbac.Action.AUDIT_READ, rbac.ResourceScope(team.org_id, team.id)
-        ):
-            raise forbidden("audit.read not allowed")
-    elif org_id is not None:
-        org = await session.get(Org, org_id)
-        if org is None or not rbac.authorize(
-            principal, rbac.Action.ORG_READ, rbac.ResourceScope(org.id)
-        ):
-            raise not_found("org not found")
-        if not principal.is_superuser and not rbac.authorize(
-            principal, rbac.Action.AUDIT_READ, rbac.ResourceScope(org.id)
-        ):
-            raise forbidden("audit.read not allowed")
 
     stmt = select(AuditLog).order_by(AuditLog.id.desc())
-    if not principal.is_superuser:
-        if not org_admins and not team_admins:
-            raise forbidden("audit.read not allowed")
-        clauses = []
-        if org_admins:
-            clauses.append(AuditLog.org_id.in_(org_admins))
-        if team_admins:
-            clauses.append(AuditLog.team_id.in_(team_admins))
-        stmt = stmt.where(or_(*clauses))
-    if org_id is not None:
-        stmt = stmt.where(AuditLog.org_id == org_id)
     if team_id is not None:
+        if await session.get(Team, team_id) is None:
+            # A deleted team's rows stay readable to superusers only.
+            if not await authz.is_superuser():
+                raise not_found("team not found")
+        else:
+            await ensure_team_read(authz, team_id)
         stmt = stmt.where(AuditLog.team_id == team_id)
+    else:
+        readable = await authz.readable_teams(set(await session.scalars(select(Team.id))))
+        if readable is not None:
+            stmt = stmt.where(AuditLog.team_id.in_(readable))
     if actor_id is not None:
         stmt = stmt.where(AuditLog.actor_id == actor_id)
     if action is not None:

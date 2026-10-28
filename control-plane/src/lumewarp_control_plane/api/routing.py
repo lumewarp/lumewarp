@@ -8,7 +8,7 @@ from fastapi import APIRouter, Response, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumewarp_control_plane import audit, rbac
+from lumewarp_control_plane import audit
 from lumewarp_control_plane.api.common import (
     LimitDep,
     SessionDep,
@@ -33,6 +33,7 @@ from lumewarp_control_plane.api.schemas import (
     UpstreamOut,
     UpstreamUpdate,
 )
+from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import (
     Deployment,
@@ -41,7 +42,6 @@ from lumewarp_control_plane.models import (
     RoutingStrategy,
     Upstream,
 )
-from lumewarp_control_plane.security import CurrentPrincipal
 
 router = APIRouter(tags=["routing"])
 
@@ -116,12 +116,12 @@ async def _route_out(session: AsyncSession, row: Route) -> RouteOut:
 
 @router.get("/upstreams", response_model=Page[UpstreamOut], operation_id="listUpstreams")
 async def list_upstreams(
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[UpstreamOut]:
-    rbac.require(principal, rbac.Action.ROUTING_READ, rbac.ResourceScope())
+    await authz.require(Action.ROUTING_READ)
     stmt = select(Upstream).order_by(Upstream.id)
     rows, next_cursor = await uuid_page(session, stmt, Upstream.id, limit, cursor)
     return Page[UpstreamOut](
@@ -137,11 +137,11 @@ async def list_upstreams(
 )
 async def create_upstream(
     body: UpstreamCreate,
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
 ) -> UpstreamOut:
-    rbac.require(principal, rbac.Action.ROUTING_MANAGE, rbac.ResourceScope())
+    await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         row = Upstream(
             name=body.name,
@@ -159,7 +159,7 @@ async def create_upstream(
             action="upstream.create",
             resource_type="upstream",
             resource_id=row.id,
-            principal=principal,
+            principal=authz.principal,
             details={"name": row.name, "base_url": row.base_url},
         )
         await enqueue_recompile(session, settings, "api.upstream.create")
@@ -167,10 +167,8 @@ async def create_upstream(
 
 
 @router.get("/upstreams/{upstream_id}", response_model=UpstreamOut, operation_id="getUpstream")
-async def get_upstream(
-    upstream_id: uuid.UUID, principal: CurrentPrincipal, session: SessionDep
-) -> UpstreamOut:
-    rbac.require(principal, rbac.Action.ROUTING_READ, rbac.ResourceScope())
+async def get_upstream(upstream_id: uuid.UUID, authz: Authz, session: SessionDep) -> UpstreamOut:
+    await authz.require(Action.ROUTING_READ)
     row = await session.get(Upstream, upstream_id)
     if row is None:
         raise not_found("upstream not found")
@@ -181,11 +179,11 @@ async def get_upstream(
 async def update_upstream(
     upstream_id: uuid.UUID,
     body: UpstreamUpdate,
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
 ) -> UpstreamOut:
-    rbac.require(principal, rbac.Action.ROUTING_MANAGE, rbac.ResourceScope())
+    await authz.require(Action.ROUTING_MANAGE)
     _non_null(body, "name", "kind", "base_url", "timeout_ms", "stream_usage_mode")
     async with mutation(session):
         row = await session.get(Upstream, upstream_id)
@@ -203,7 +201,7 @@ async def update_upstream(
             action="upstream.update",
             resource_type="upstream",
             resource_id=row.id,
-            principal=principal,
+            principal=authz.principal,
             details={"name": row.name, "changes": body.model_dump(exclude_unset=True, mode="json")},
         )
         await enqueue_recompile(session, settings, "api.upstream.update")
@@ -218,11 +216,11 @@ async def update_upstream(
 )
 async def delete_upstream(
     upstream_id: uuid.UUID,
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
 ) -> Response:
-    rbac.require(principal, rbac.Action.ROUTING_MANAGE, rbac.ResourceScope())
+    await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         row = await session.get(Upstream, upstream_id)
         if row is None:
@@ -238,7 +236,7 @@ async def delete_upstream(
             action="upstream.delete",
             resource_type="upstream",
             resource_id=row.id,
-            principal=principal,
+            principal=authz.principal,
             details={"name": row.name},
         )
         await enqueue_recompile(session, settings, "api.upstream.delete")
@@ -250,12 +248,12 @@ async def delete_upstream(
 
 @router.get("/deployments", response_model=Page[DeploymentOut], operation_id="listDeployments")
 async def list_deployments(
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[DeploymentOut]:
-    rbac.require(principal, rbac.Action.ROUTING_READ, rbac.ResourceScope())
+    await authz.require(Action.ROUTING_READ)
     stmt = select(Deployment).order_by(Deployment.id)
     rows, next_cursor = await uuid_page(session, stmt, Deployment.id, limit, cursor)
     return Page[DeploymentOut](
@@ -272,11 +270,11 @@ async def list_deployments(
 )
 async def create_deployment(
     body: DeploymentCreate,
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
 ) -> DeploymentOut:
-    rbac.require(principal, rbac.Action.ROUTING_MANAGE, rbac.ResourceScope())
+    await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         upstream = await session.get(Upstream, body.upstream_id)
         if upstream is None:
@@ -297,7 +295,7 @@ async def create_deployment(
             action="deployment.create",
             resource_type="deployment",
             resource_id=row.id,
-            principal=principal,
+            principal=authz.principal,
             details={"name": row.name, "upstream": upstream.name},
         )
         await enqueue_recompile(session, settings, "api.deployment.create")
@@ -310,9 +308,9 @@ async def create_deployment(
     operation_id="getDeployment",
 )
 async def get_deployment(
-    deployment_id: uuid.UUID, principal: CurrentPrincipal, session: SessionDep
+    deployment_id: uuid.UUID, authz: Authz, session: SessionDep
 ) -> DeploymentOut:
-    rbac.require(principal, rbac.Action.ROUTING_READ, rbac.ResourceScope())
+    await authz.require(Action.ROUTING_READ)
     row = await session.get(Deployment, deployment_id)
     if row is None:
         raise not_found("deployment not found")
@@ -327,11 +325,11 @@ async def get_deployment(
 async def update_deployment(
     deployment_id: uuid.UUID,
     body: DeploymentUpdate,
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
 ) -> DeploymentOut:
-    rbac.require(principal, rbac.Action.ROUTING_MANAGE, rbac.ResourceScope())
+    await authz.require(Action.ROUTING_MANAGE)
     _non_null(body, "name", "upstream_id", "upstream_model", "weight")
     async with mutation(session):
         row = await session.get(Deployment, deployment_id)
@@ -390,7 +388,7 @@ async def update_deployment(
             action="deployment.update",
             resource_type="deployment",
             resource_id=row.id,
-            principal=principal,
+            principal=authz.principal,
             details={"name": row.name, "changes": body.model_dump(exclude_unset=True, mode="json")},
         )
         await enqueue_recompile(session, settings, "api.deployment.update")
@@ -405,11 +403,11 @@ async def update_deployment(
 )
 async def delete_deployment(
     deployment_id: uuid.UUID,
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
 ) -> Response:
-    rbac.require(principal, rbac.Action.ROUTING_MANAGE, rbac.ResourceScope())
+    await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         row = await session.get(Deployment, deployment_id)
         if row is None:
@@ -425,7 +423,7 @@ async def delete_deployment(
             action="deployment.delete",
             resource_type="deployment",
             resource_id=row.id,
-            principal=principal,
+            principal=authz.principal,
             details={"name": row.name},
         )
         await enqueue_recompile(session, settings, "api.deployment.delete")
@@ -437,12 +435,12 @@ async def delete_deployment(
 
 @router.get("/routes", response_model=Page[RouteOut], operation_id="listRoutes")
 async def list_routes(
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[RouteOut]:
-    rbac.require(principal, rbac.Action.ROUTING_READ, rbac.ResourceScope())
+    await authz.require(Action.ROUTING_READ)
     stmt = select(Route).order_by(Route.id)
     rows, next_cursor = await uuid_page(session, stmt, Route.id, limit, cursor)
     return Page[RouteOut](items=await _routes_out(session, rows), next_cursor=next_cursor)
@@ -456,11 +454,11 @@ async def list_routes(
 )
 async def create_route(
     body: RouteCreate,
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
 ) -> RouteOut:
-    rbac.require(principal, rbac.Action.ROUTING_MANAGE, rbac.ResourceScope())
+    await authz.require(Action.ROUTING_MANAGE)
     _check_strategy(body.strategy)
     async with mutation(session):
         ids = await _deployment_ids(session, body.deployment_ids)
@@ -479,7 +477,7 @@ async def create_route(
             action="route.create",
             resource_type="route",
             resource_id=row.id,
-            principal=principal,
+            principal=authz.principal,
             details={"model": row.model, "deployments": [str(i) for i in ids]},
         )
         await enqueue_recompile(session, settings, "api.route.create")
@@ -487,10 +485,8 @@ async def create_route(
 
 
 @router.get("/routes/{route_id}", response_model=RouteOut, operation_id="getRoute")
-async def get_route(
-    route_id: uuid.UUID, principal: CurrentPrincipal, session: SessionDep
-) -> RouteOut:
-    rbac.require(principal, rbac.Action.ROUTING_READ, rbac.ResourceScope())
+async def get_route(route_id: uuid.UUID, authz: Authz, session: SessionDep) -> RouteOut:
+    await authz.require(Action.ROUTING_READ)
     row = await session.get(Route, route_id)
     if row is None:
         raise not_found("route not found")
@@ -501,11 +497,11 @@ async def get_route(
 async def update_route(
     route_id: uuid.UUID,
     body: RouteUpdate,
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
 ) -> RouteOut:
-    rbac.require(principal, rbac.Action.ROUTING_MANAGE, rbac.ResourceScope())
+    await authz.require(Action.ROUTING_MANAGE)
     _non_null(body, "model", "strategy", "deployment_ids")
     if body.strategy is not None:
         _check_strategy(body.strategy)
@@ -546,7 +542,7 @@ async def update_route(
             action="route.update",
             resource_type="route",
             resource_id=row.id,
-            principal=principal,
+            principal=authz.principal,
             details={
                 "model": row.model,
                 "changes": body.model_dump(exclude_unset=True, mode="json"),
@@ -564,11 +560,11 @@ async def update_route(
 )
 async def delete_route(
     route_id: uuid.UUID,
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
 ) -> Response:
-    rbac.require(principal, rbac.Action.ROUTING_MANAGE, rbac.ResourceScope())
+    await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         row = await session.get(Route, route_id)
         if row is None:
@@ -579,7 +575,7 @@ async def delete_route(
             action="route.delete",
             resource_type="route",
             resource_id=row.id,
-            principal=principal,
+            principal=authz.principal,
             details={"model": row.model},
         )
         await enqueue_recompile(session, settings, "api.route.delete")

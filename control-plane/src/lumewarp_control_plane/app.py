@@ -25,6 +25,7 @@ from sqlalchemy import text
 from lumewarp_control_plane import __version__, compiler, migrate, notifier, usage
 from lumewarp_control_plane import grpc as grpc_services
 from lumewarp_control_plane.api import router as api_router
+from lumewarp_control_plane.authz import load_authorizer
 from lumewarp_control_plane.db import create_engine, create_session_factory
 from lumewarp_control_plane.errors import error_body, install_handlers
 from lumewarp_control_plane.settings import Settings, get_settings
@@ -110,7 +111,11 @@ async def start_background(app: FastAPI) -> Runtime:
         runtime,
         "compiler",
         compiler.run_compiler_loop(
-            factory, runtime.stop, scope=settings.scope, on_published=on_published
+            factory,
+            runtime.stop,
+            scope=settings.scope,
+            on_published=on_published,
+            require_local_membership=app.state.authorizer.manages_grants,
         ),
     )
     runtime.tasks["rollover"] = _supervise(
@@ -173,6 +178,7 @@ def create_app(
     app.state.settings = settings
     app.state.engine = create_engine(settings)
     app.state.session_factory = create_session_factory(app.state.engine)
+    app.state.authorizer = load_authorizer(settings, app.state.session_factory)
     app.state.runtime = Runtime()
     app.state.tasks = {}
     app.state.fatal_handler = fatal_handler or _terminate_process

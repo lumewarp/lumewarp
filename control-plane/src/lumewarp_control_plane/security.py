@@ -11,15 +11,16 @@ force is infeasible regardless of hash speed, and the gateway must hash the pres
 every request in microseconds. sha256 is also what the gateway snapshot carries
 (`ApiKey.key_hash`), so CP and gateway agree on one function.
 
-The bootstrap token (`LUMEWARP_BOOTSTRAP_TOKEN`) is an installation-level superuser, not an
-org Owner. It is compared in constant time and never stored.
+The bootstrap token (`LUMEWARP_BOOTSTRAP_TOKEN`) is an installation-level superuser that
+bypasses the authorization backend. It is compared in constant time and never stored.
+Authentication only establishes who the caller is; what they may do is `authz`'s job.
 """
 
 import hashlib
 import hmac
 import secrets
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Annotated
@@ -29,7 +30,7 @@ from sqlalchemy import select, update
 
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.errors import unauthorized
-from lumewarp_control_plane.models import Membership, PersonalAccessToken, User
+from lumewarp_control_plane.models import PersonalAccessToken, User
 from lumewarp_control_plane.settings import Settings
 
 
@@ -96,17 +97,8 @@ def matches_bootstrap(token: str, settings: Settings) -> bool:
 
 
 class PrincipalKind(StrEnum):
-    SUPERUSER = "superuser"
+    BOOTSTRAP = "bootstrap"
     USER = "user"
-
-
-@dataclass(frozen=True)
-class Grant:
-    """One membership. team_id None = org-level role (owner/admin)."""
-
-    org_id: uuid.UUID
-    team_id: uuid.UUID | None
-    role: str
 
 
 @dataclass(frozen=True)
@@ -115,15 +107,14 @@ class Principal:
     # None for the bootstrap token.
     user_id: uuid.UUID | None = None
     token_id: uuid.UUID | None = None
-    grants: tuple[Grant, ...] = field(default=())
 
     @property
-    def is_superuser(self) -> bool:
-        return self.kind is PrincipalKind.SUPERUSER
+    def is_bootstrap(self) -> bool:
+        return self.kind is PrincipalKind.BOOTSTRAP
 
     @classmethod
     def bootstrap(cls) -> "Principal":
-        return cls(kind=PrincipalKind.SUPERUSER)
+        return cls(kind=PrincipalKind.BOOTSTRAP)
 
 
 async def authenticate(
@@ -155,25 +146,13 @@ async def authenticate(
             return None
         if pat.expires_at is not None and pat.expires_at <= now:
             return None
-        grants = (
-            await session.execute(
-                select(Membership.org_id, Membership.team_id, Membership.role).where(
-                    Membership.user_id == user.id
-                )
-            )
-        ).all()
         if pat.last_used_at is None or now - pat.last_used_at > LAST_USED_GRANULARITY:
             await session.execute(
                 update(PersonalAccessToken)
                 .where(PersonalAccessToken.id == pat.id)
                 .values(last_used_at=now)
             )
-    return Principal(
-        kind=PrincipalKind.SUPERUSER if user.is_superuser else PrincipalKind.USER,
-        user_id=user.id,
-        token_id=pat.id,
-        grants=tuple(Grant(org_id=g.org_id, team_id=g.team_id, role=g.role) for g in grants),
-    )
+    return Principal(kind=PrincipalKind.USER, user_id=user.id, token_id=pat.id)
 
 
 async def current_principal(request: Request) -> Principal:
