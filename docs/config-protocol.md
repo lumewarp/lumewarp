@@ -61,7 +61,11 @@ receive → apply to a private copy → validate (capabilities, references, hash
   upstream health, the gateway retry budget, rate-limit buckets (by
   `RateLimitScope.id`) and the metrics registry are process-lifetime. Active
   probes are reconfigured only after an accepted snapshot, not during validation
-  or compilation of a candidate that might fail persistence.
+  or compilation of a candidate that might fail persistence, and are diffed by
+  (upstream, URL, `HealthCheck`, credentials): a delta that leaves an upstream's
+  probe unchanged (e.g. key-only) keeps that probe running with its failure
+  counts. Removing `Upstream.circuit_breaker` resets the breakers of its
+  deployments to closed on activation.
 
 ### Routing capabilities
 
@@ -86,7 +90,20 @@ capabilities. Retry attempts are capped at five; statuses must be 400..599;
 fallback references must exist and cannot name the original route. Health
 intervals must be at least 1000 ms with a positive timeout below the interval.
 Fallbacks do not recurse. If all candidates are unhealthy/open, routing tries one
-anyway, except that a half-open trial already in progress is never duplicated.
+anyway, except that a half-open trial already in progress is never duplicated
+(another candidate is used instead).
+
+Response `model` contract: responses from the requested route's own
+deployments (`ModelRoute.deployments` / splits, including retries) are
+forwarded unchanged and carry `Deployment.upstream_model`. Successful responses
+served by a deployment of a `ModelRoute.fallbacks` route have their top-level
+`model` (JSON body, or each SSE event's `data` JSON) rewritten to the public
+`ModelRoute.model` the client requested. Error responses are not rewritten.
+
+The retry budget (`retry_budget_percent`, gateway-local) is funded only by
+requests on routes with `ModelRoute.retry` set. A `Retry-After` cooldown is
+capped at 60 s and at the upstream's `CircuitBreaker.open_ms`. An attempt cut
+short by `RetryPolicy.total_timeout_ms` is not a breaker failure.
 
 Traffic split validation (`INVALID_CONFIG` otherwise): at most 16 splits; names
 unique and 1..=32 characters of `[A-Za-z0-9_.-]` (they are a metric label); each
@@ -98,7 +115,7 @@ nonempty `Upstream.metrics_url` must be an absolute http(s) URL without
 userinfo. Sticky assignment uses a fixed-seed hash, so every gateway replica
 puts the same header value / team / key in the same split for the same weights.
 Latency EWMAs and scraped vLLM load are keyed by deployment name and survive
-swaps; scrapers, like probes, restart only after a snapshot is accepted.
+swaps; scrapers, like probes, are diffed only after a snapshot is accepted.
 
 ## Gateway: boot
 

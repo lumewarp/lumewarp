@@ -189,13 +189,17 @@ P1 的 control plane、設定串流、Team 模型與 Admin UI 第一版已實作
 - 快照與 standalone YAML 支援 `retry`、`fallbacks`、`health_check`、
   `circuit_breaker` capability；W6 策略與切流欄位仍拒絕套用。
 - 重試僅限回應送出前，串流僅限收到上游 headers 前；最多五次，
-  共用原路由 timeout 與全域重試額度（預設 20%，低流量允許三次 burst）。
-  `Retry-After` 使用 deployment cooldown，重試跳過冷卻中的 deployment。
+  共用原路由 timeout 與全域重試額度（預設 20%，低流量允許三次 burst；
+  只有設定 `retry` 的路由請求會存入額度）。`Retry-After` 使用 deployment
+  cooldown（上限 60 秒與 breaker `open_ms`），重試跳過冷卻中的 deployment。
+  被路由 `total_timeout_ms` 截斷的 attempt 不算 deployment 失敗。
 - 部署熔斷狀態以名稱保存在 Runtime，跨快照保留；主動健康探測在背景執行，
-  接受新快照才重啟。所有候選都異常或開路時仍嘗試一個，避免 fail closed；
-  已進行中的 half-open trial 不重複。
-- 每次 attempt 有獨立 OTel 子 span；請求指標與用量只記最終 attempt。
-  fallback 的 JSON／SSE 回應保留原公開模型名。
+  接受新快照後依 (upstream, URL, 設定, 憑證) 比對，只重啟有變動的探測。
+  所有候選都異常或開路時仍嘗試一個，避免 fail closed；已進行中的
+  half-open trial 不重複，改用其他候選。
+- 每次 attempt 有獨立 OTel 子 span；請求指標與用量只記一次，歸屬實際產生
+  回應的 attempt。primary 回應維持上游模型名（同 P1）；只有成功的 fallback
+  JSON／SSE 回應改寫為原公開模型名。
 
 ## 效能目標（尚未實測）
 
