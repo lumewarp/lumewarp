@@ -1,23 +1,23 @@
-"""Policy inheritance and hierarchy narrowing (O1 M1/M5).
+"""Policy inheritance and narrowing (O1 M1/M5).
 
-The API is the enforcement point that keeps source state valid: a child may only narrow
-its parent. The compiler also intersects allowlists defensively, but accepting a
-non-subset in the source would make the UI misleading and could turn an explicit deny-all
-into an accidental grant after a later edit.
+Two levels: a team, and the owners of keys under it (team members, service accounts). The
+API is the enforcement point that keeps source state valid: an owner may only narrow its
+team. The compiler also intersects allowlists defensively, but accepting a non-subset in
+the source would make the UI misleading and could turn an explicit deny-all into an
+accidental grant after a later edit.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from sqlalchemy import Select, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane.errors import ApiError
-from lumewarp_control_plane.models import ApiKey, KeyLifecycle, ModelAccess, Org, Project, Team
+from lumewarp_control_plane.models import ModelAccess, ServiceAccount, Team, TeamMember
 
 if TYPE_CHECKING:
     from lumewarp_control_plane.api.schemas import PolicyFields
@@ -56,7 +56,7 @@ class Effective:
     soft_budget_nano_usd: int | None = None
 
 
-def policy_of(row: Org | Team | Project | ApiKey) -> Policy:
+def policy_of(row: Team | TeamMember | ServiceAccount) -> Policy:
     return Policy(
         model_access=row.model_access,
         allowed_models=tuple(row.allowed_models),
@@ -68,7 +68,7 @@ def policy_of(row: Org | Team | Project | ApiKey) -> Policy:
     )
 
 
-def apply_policy(row: Org | Team | Project | ApiKey, policy: Policy) -> None:
+def apply_policy(row: Team | TeamMember | ServiceAccount, policy: Policy) -> None:
     row.model_access = policy.model_access
     row.allowed_models = list(policy.allowed_models)
     row.rpm_limit = policy.rpm_limit
@@ -120,13 +120,14 @@ def policy_from_fields(
     """Build a proposed policy from a create/update payload.
 
     On create (`base is None`) omitted fields take `default_mode`/no limit. On update,
-    omitted fields keep `base`; an explicit null clears a limit or budget.
+    omitted fields keep `base`; an explicit null clears a limit or budget. Teams pass
+    `default_mode=ALL` and cannot inherit; members and service accounts pass INHERIT.
     """
     supplied = fields.model_fields_set
     if base is None:
         mode = fields.model_access if "model_access" in supplied else default_mode
         if mode is ModelAccess.INHERIT and default_mode is ModelAccess.ALL:
-            raise violation("model_access", "orgs cannot inherit")
+            raise violation("model_access", "teams cannot inherit")
         if fields.allowed_models and mode is not ModelAccess.LIST:
             raise violation("allowed_models", "only allowed when model_access is 'list'")
         allowed = tuple(fields.allowed_models or ()) if mode is ModelAccess.LIST else ()
@@ -144,7 +145,7 @@ def policy_from_fields(
 
     mode = fields.model_access if "model_access" in supplied else base.model_access
     if mode is ModelAccess.INHERIT and default_mode is ModelAccess.ALL:
-        raise violation("model_access", "orgs cannot inherit")
+        raise violation("model_access", "teams cannot inherit")
     if "allowed_models" in supplied:
         if mode is not ModelAccess.LIST and fields.allowed_models:
             raise violation("allowed_models", "only allowed when model_access is 'list'")
@@ -212,118 +213,31 @@ def check_narrowing(parent: Effective, policy: Policy, prefix: str = "") -> None
             )
 
 
-async def org_effective(session: AsyncSession, org: Org) -> Effective:
-    return effective(None, policy_of(org))
+def team_effective(team: Team) -> Effective:
+    return effective(None, policy_of(team))
 
 
-async def team_effective(session: AsyncSession, team: Team) -> Effective:
-    org = await session.get(Org, team.org_id)
-    if org is None:  # schema FK should make this impossible
-        raise violation("team", "org not found")
-    return effective(await org_effective(session, org), policy_of(team))
-
-
-async def project_effective(session: AsyncSession, project: Project) -> Effective:
-    team = await session.get(Team, project.team_id)
-    if team is None:
-        raise violation("project", "team not found")
-    return effective(await team_effective(session, team), policy_of(project))
-
-
-async def key_effective(session: AsyncSession, key: ApiKey) -> Effective:
-    project = await session.get(Project, key.project_id)
-    if project is None:
-        raise violation("key", "project not found")
-    return effective(await project_effective(session, project), policy_of(key))
-
-
-async def parent_effective_for_org(session: AsyncSession, org: Org) -> Effective:
-    return await org_effective(session, org)
-
-
-async def parent_effective_for_team(session: AsyncSession, team: Team) -> Effective:
-    return await team_effective(session, team)
-
-
-async def parent_effective_for_project(session: AsyncSession, project: Project) -> Effective:
-    return await project_effective(session, project)
-
-
-def _live_keys(*conditions: Any) -> Select[tuple[ApiKey]]:
-    """Keys that still compile into a usable grant; revoked keys never constrain parents."""
-    return (
-        select(ApiKey)
-        .where(ApiKey.lifecycle != KeyLifecycle.REVOKED, *conditions)
-        .order_by(ApiKey.id)
-    )
-
-
-def _group[T](rows: Sequence[T], key: Callable[[T], uuid.UUID]) -> dict[uuid.UUID, list[T]]:
-    grouped: dict[uuid.UUID, list[T]] = {}
-    for row in rows:
-        grouped.setdefault(key(row), []).append(row)
-    return grouped
-
-
-def _check_keys(parent: Effective, keys: Sequence[ApiKey], prefix: str) -> None:
-    for key in keys:
-        path = f"{prefix}.keys.{key.id}" if prefix else f"keys.{key.id}"
-        check_narrowing(parent, policy_of(key), path)
-
-
-def _check_projects(
-    parent: Effective,
-    projects: Sequence[Project],
-    keys: dict[uuid.UUID, list[ApiKey]],
+async def validate_owners_after_team_update(
+    session: AsyncSession, team: Team, proposed: Policy
 ) -> None:
-    for project in projects:
-        prefix = f"projects.{project.id}"
-        policy = policy_of(project)
-        check_narrowing(parent, policy, prefix)
-        _check_keys(effective(parent, policy), keys.get(project.id, ()), prefix)
-
-
-async def validate_descendants_after_org_update(
-    session: AsyncSession, org: Org, proposed: Policy
-) -> None:
-    """Three queries for the whole subtree (teams, projects, live keys), then in memory."""
-    org_eff = effective(None, proposed)
-    teams = (
-        await session.scalars(select(Team).where(Team.org_id == org.id).order_by(Team.id))
-    ).all()
-    projects = (
-        await session.scalars(select(Project).where(Project.org_id == org.id).order_by(Project.id))
-    ).all()
-    keys = _group(
-        (await session.scalars(_live_keys(ApiKey.org_id == org.id))).all(), lambda k: k.project_id
-    )
-    by_team = _group(projects, lambda p: p.team_id)
-    for team in teams:
-        policy = policy_of(team)
-        check_narrowing(org_eff, policy, f"teams.{team.id}")
-        _check_projects(effective(org_eff, policy), by_team.get(team.id, ()), keys)
-
-
-async def validate_descendants_after_team_update(
-    session: AsyncSession, team: Team, parent: Effective, proposed: Policy
-) -> None:
-    team_eff = effective(parent, proposed)
-    projects = (
+    """Every member and service account must still narrow the proposed team policy."""
+    team_eff = effective(None, proposed)
+    members = (
         await session.scalars(
-            select(Project).where(Project.team_id == team.id).order_by(Project.id)
+            select(TeamMember).where(TeamMember.team_id == team.id).order_by(TeamMember.user_id)
         )
     ).all()
-    keys = _group(
-        (await session.scalars(_live_keys(ApiKey.team_id == team.id))).all(), lambda k: k.project_id
-    )
-    _check_projects(team_eff, projects, keys)
-
-
-async def validate_descendants_after_project_update(
-    session: AsyncSession, project: Project, parent: Effective, proposed: Policy
-) -> None:
-    keys = (await session.scalars(_live_keys(ApiKey.project_id == project.id))).all()
-    _check_keys(effective(parent, proposed), keys, "")
+    for member in members:
+        check_narrowing(team_eff, policy_of(member), f"members.{member.user_id}")
+    accounts = (
+        await session.scalars(
+            select(ServiceAccount)
+            .where(ServiceAccount.team_id == team.id)
+            .order_by(ServiceAccount.id)
+        )
+    ).all()
+    for account in accounts:
+        check_narrowing(team_eff, policy_of(account), f"service_accounts.{account.id}")
 
 
 def ensure_unique_ids(ids: list[uuid.UUID], field: str = "deployment_ids") -> None:

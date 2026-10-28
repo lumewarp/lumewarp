@@ -1,13 +1,15 @@
 """Analysis helpers without processes, binaries, or live database connections."""
 
+import json
+import uuid
 from collections import Counter
 from datetime import datetime
 from types import SimpleNamespace
 
-import pytest
-
 import loadlib
+import pytest
 from loadlib import (
+    LoadRun,
     accounting,
     cost,
     cost_check,
@@ -118,22 +120,18 @@ def test_unit_load_window(
     started = datetime(2026, 10, 24, 12).timestamp()
     log = ""
     if warning_offset is not None:
-        stamp = datetime.fromtimestamp(started + warning_offset).strftime(
-            "%Y-%m-%d %H:%M:%S,%f"
-        )[:-3]
+        stamp = datetime.fromtimestamp(started + warning_offset).strftime("%Y-%m-%d %H:%M:%S,%f")[
+            :-3
+        ]
         log = f"[{stamp}] host/WARNING/locust.runners: CPU usage above 90%!"
-    run = SimpleNamespace(
-        started=started, seconds=10, proc=SimpleNamespace(text=lambda: log)
-    )
+    run = SimpleNamespace(started=started, seconds=10, proc=SimpleNamespace(text=lambda: log))
     records = [
         record(status, t=started + 3, d=duration),
         record(status, t=started + 4, d=stream_duration, stream=True),
     ]
     result = load_window(run, elapsed, 2, records, step_started=started + 2)
     assert result["ok"] is expected
-    assert result["diagnostic"] == (
-        "generator saturation" if expected and elapsed >= 8 else None
-    )
+    assert result["diagnostic"] == ("generator saturation" if expected and elapsed >= 8 else None)
     assert result["late"] is (elapsed >= 8)
     assert result["generator_cpu_warning"] is (
         warning_offset is not None and 2 <= warning_offset <= elapsed
@@ -154,9 +152,7 @@ def test_unit_load_window_earlier_warning_is_diagnostic(monkeypatch, offsets, in
     started = datetime(2026, 10, 24, 12).timestamp()
     lines = []
     for offset in offsets:
-        stamp = datetime.fromtimestamp(started + offset).strftime(
-            "%Y-%m-%d %H:%M:%S,%f"
-        )[:-3]
+        stamp = datetime.fromtimestamp(started + offset).strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
         lines.append(f"[{stamp}] host/WARNING/locust.runners: CPU usage above 90%!")
     run = SimpleNamespace(
         started=started, seconds=10, proc=SimpleNamespace(text=lambda: "\n".join(lines))
@@ -180,9 +176,7 @@ def test_unit_load_window_earlier_warning_is_diagnostic(monkeypatch, offsets, in
 )
 def test_unit_load_window_requires_timestamped_warning(warning):
     started = datetime(2026, 10, 24, 12).timestamp()
-    run = SimpleNamespace(
-        started=started, seconds=10, proc=SimpleNamespace(text=lambda: warning)
-    )
+    run = SimpleNamespace(started=started, seconds=10, proc=SimpleNamespace(text=lambda: warning))
     records = [record(t=started + 3), record(t=started + 4, stream=True)]
     result = load_window(run, 9, 2, records, step_started=started + 2)
     assert result["ok"] is False
@@ -192,12 +186,8 @@ def test_unit_load_window_requires_timestamped_warning(warning):
 @pytest.mark.parametrize("stream", [False, True])
 def test_unit_load_window_requires_both_request_types(stream):
     started = datetime(2026, 10, 24, 12).timestamp()
-    warning = (
-        "[2026-10-24 12:00:04,000] host/WARNING/locust.runners: CPU usage above 90%!"
-    )
-    run = SimpleNamespace(
-        started=started, seconds=10, proc=SimpleNamespace(text=lambda: warning)
-    )
+    warning = "[2026-10-24 12:00:04,000] host/WARNING/locust.runners: CPU usage above 90%!"
+    run = SimpleNamespace(started=started, seconds=10, proc=SimpleNamespace(text=lambda: warning))
     result = load_window(
         run, 9, 2, [record(t=started + 3, stream=stream)], step_started=started + 2
     )
@@ -208,12 +198,8 @@ def test_unit_load_window_uses_step_latency(monkeypatch):
     monkeypatch.setattr(loadlib, "SAT_P99_S", 0.1)
     monkeypatch.setattr(loadlib, "SAT_STREAM_P99_S", 0.25)
     started = datetime(2026, 10, 24, 12).timestamp()
-    warning = (
-        "[2026-10-24 12:00:04,000] host/WARNING/locust.runners: CPU usage above 90%!"
-    )
-    run = SimpleNamespace(
-        started=started, seconds=10, proc=SimpleNamespace(text=lambda: warning)
-    )
+    warning = "[2026-10-24 12:00:04,000] host/WARNING/locust.runners: CPU usage above 90%!"
+    run = SimpleNamespace(started=started, seconds=10, proc=SimpleNamespace(text=lambda: warning))
     records = [record(t=started + 1)] * 1000 + [
         record(t=started + 3, d=0.5),
         record(t=started + 4, stream=True),
@@ -274,8 +260,7 @@ def test_unit_accounting_detects_missing_extra_and_duplicate(monkeypatch):
     result = accounting(SimpleNamespace(dsn="unused"), [record(), record(401)])
     assert result["duplicate_request_ids"] == 1
     assert {
-        (r["key"], r["status"], r["stream"], r["client"], r["db"])
-        for r in result["mismatches"]
+        (r["key"], r["status"], r["stream"], r["client"], r["db"]) for r in result["mismatches"]
     } == {
         ("key", 200, False, 1, 0),
         ("key", 200, True, 0, 1),
@@ -288,7 +273,9 @@ def test_unit_accounting_detects_missing_extra_and_duplicate(monkeypatch):
 def test_unit_cost_check(monkeypatch, broken):
     rows = [
         {
-            "p": "p1",
+            "team": "00000000-0000-0000-0000-000000000001",
+            "owner_kind": "user",
+            "owner": "user-1",
             "deployment": "mock-a",
             "prompt_tokens": 10,
             "completion_tokens": 3,
@@ -296,7 +283,9 @@ def test_unit_cost_check(monkeypatch, broken):
             "cost_known": not broken,
         },
         {
-            "p": "p1",
+            "team": "00000000-0000-0000-0000-000000000001",
+            "owner_kind": "user",
+            "owner": "user-1",
             "deployment": "mock-b",
             "prompt_tokens": 10,
             "completion_tokens": 3,
@@ -304,11 +293,18 @@ def test_unit_cost_check(monkeypatch, broken):
             "cost_known": True,
         },
     ]
-    totals = [{"p": "p1", "c": 58000}]
+    team = rows[0]["team"]
+    member = str(uuid.uuid5(uuid.UUID(team), "user-1"))
+    totals = [
+        {"scope_type": "team", "id": team, "c": 58000},
+        {"scope_type": "member", "id": member, "c": 58000},
+    ]
     if broken:
         rows.append(
             {
-                "p": "p2",
+                "team": "team-2",
+                "owner_kind": "service_account",
+                "owner": "sa-2",
                 "deployment": "mock-a",
                 "prompt_tokens": 0,
                 "completion_tokens": 1,
@@ -316,22 +312,88 @@ def test_unit_cost_check(monkeypatch, broken):
                 "cost_known": True,
             }
         )
-        totals.append({"p": "orphan", "c": 1})
+        totals.append({"scope_type": "service_account", "id": "orphan", "c": 1})
     answers = iter([rows, totals])
     monkeypatch.setattr(loadlib, "pg", lambda *_: next(answers))
     result = cost_check(SimpleNamespace(dsn="unused"))
     assert result["rows_with_wrong_cost"] == (3 if broken else 0)
     assert result["total_nano_usd"] == (60000 if broken else 58000)
-    assert {r["project"] for r in result["projects_mismatched"]} == (
-        {"p1", "p2", "orphan"} if broken else set()
+    assert {(r["scope_type"], r["scope_id"]) for r in result["scopes_mismatched"]} == (
+        {
+            ("team", team),
+            ("member", member),
+            ("team", "team-2"),
+            ("service_account", "sa-2"),
+            ("service_account", "orphan"),
+        }
+        if broken
+        else set()
     )
 
 
 def test_unit_cost_check_empty(monkeypatch):
     monkeypatch.setattr(loadlib, "pg", lambda *_: [])
     assert cost_check(SimpleNamespace(dsn="unused")) == {
-        "projects": 0,
+        "scopes": 0,
         "rows_with_wrong_cost": 0,
-        "projects_mismatched": [],
+        "scopes_mismatched": [],
         "total_nano_usd": 0,
     }
+
+
+def test_unit_cost_check_member_scopes_are_team_specific(monkeypatch):
+    user = str(uuid.UUID(int=3))
+    teams = [str(uuid.UUID(int=i)) for i in (1, 2)]
+    rows = [
+        {
+            "team": team,
+            "owner_kind": "user",
+            "owner": user,
+            "deployment": "mock-a",
+            "prompt_tokens": 10,
+            "completion_tokens": 3,
+            "cost_nano_usd": 16000,
+            "cost_known": True,
+        }
+        for team in teams
+    ]
+    totals = [
+        {"scope_type": kind, "id": scope_id, "c": 16000}
+        for team in teams
+        for kind, scope_id in (
+            ("team", team),
+            ("member", str(uuid.uuid5(uuid.UUID(team), user))),
+        )
+    ]
+    answers = iter([rows, totals])
+    monkeypatch.setattr(loadlib, "pg", lambda *_: next(answers))
+    result = cost_check(SimpleNamespace(dsn="unused"))
+    assert result["scopes"] == 4
+    assert result["total_nano_usd"] == 32000
+    assert result["rows_with_wrong_cost"] == 0
+    assert result["scopes_mismatched"] == []
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_unit_load_run_checks_final_count_not_periodic_csv(tmp_path, monkeypatch, count):
+    monkeypatch.setattr(loadlib, "RESULTS", tmp_path / "results")
+    run_dir = tmp_path / "locust-steady"
+    run_dir.mkdir()
+    (run_dir / "requests-1.jsonl").write_text(json.dumps(record()) + "\n")
+    (run_dir / "stats_stats.csv").write_text("Name,Request Count\nAggregated,0\n")
+    (run_dir / "final-stats.json").write_text(json.dumps({"requests": count}))
+    log = tmp_path / "locust.log"
+    log.write_text("")
+    run = LoadRun.__new__(LoadRun)
+    run.dir = run_dir
+    run.seconds = 1
+    run.proc = SimpleNamespace(
+        popen=SimpleNamespace(wait=lambda _: None, returncode=0),
+        log=log,
+        text=lambda: "",
+    )
+    if count == 1:
+        assert run.wait() == [record()]
+    else:
+        with pytest.raises(AssertionError, match="locust counted 2 requests, records have 1"):
+            run.wait()

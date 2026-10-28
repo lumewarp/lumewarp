@@ -24,21 +24,21 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!lumewarp/config/v1/snapshot.proto\x12\x12lumewarp.config.v1\"\xd2\x02\n\x08Snapshot\x12\x0f\n\x07version\x18\x01 \x01(\x04\x12/\n\tupstreams\x18\x02 \x03(\x0b\x32\x1c.lumewarp.config.v1.Upstream\x12\x33\n\x0b\x64\x65ployments\x18\x03 \x03(\x0b\x32\x1e.lumewarp.config.v1.Deployment\x12.\n\x06routes\x18\x04 \x03(\x0b\x32\x1e.lumewarp.config.v1.ModelRoute\x12,\n\x08\x61pi_keys\x18\x05 \x03(\x0b\x32\x1a.lumewarp.config.v1.ApiKey\x12\'\n\x05teams\x18\x06 \x03(\x0b\x32\x18.lumewarp.config.v1.Team\x12\x1a\n\x12\x63reated_at_unix_ms\x18\x07 \x01(\x03\x12\x1d\n\x15required_capabilities\x18\x08 \x03(\t\x12\r\n\x05scope\x18\t \x01(\t\"\xc3\x01\n\x08Upstream\x12\x0c\n\x04name\x18\x01 \x01(\t\x12.\n\x04kind\x18\x02 \x01(\x0e\x32 .lumewarp.config.v1.UpstreamKind\x12\x10\n\x08\x62\x61se_url\x18\x03 \x01(\t\x12\x13\n\x0b\x61pi_key_ref\x18\x04 \x01(\t\x12\x12\n\ntimeout_ms\x18\x05 \x01(\r\x12>\n\x11stream_usage_mode\x18\x06 \x01(\x0e\x32#.lumewarp.config.v1.StreamUsageMode\"~\n\nDeployment\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x10\n\x08upstream\x18\x02 \x01(\t\x12\x16\n\x0eupstream_model\x18\x03 \x01(\t\x12\x0e\n\x06weight\x18\x04 \x01(\r\x12(\n\x05price\x18\x05 \x01(\x0b\x32\x19.lumewarp.config.v1.Price\"J\n\x05Price\x12\x1f\n\x17input_nano_usd_per_mtok\x18\x01 \x01(\x04\x12 \n\x18output_nano_usd_per_mtok\x18\x02 \x01(\x04\"g\n\nModelRoute\x12\r\n\x05model\x18\x01 \x01(\t\x12\x13\n\x0b\x64\x65ployments\x18\x02 \x03(\t\x12\x35\n\x08strategy\x18\x03 \x01(\x0e\x32#.lumewarp.config.v1.RoutingStrategy\"B\n\x04Team\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\x0e\n\x06org_id\x18\x03 \x01(\t\x12\x10\n\x08org_name\x18\x04 \x01(\t\"\xdf\x01\n\x06\x41piKey\x12\x0e\n\x06key_id\x18\x01 \x01(\t\x12\x10\n\x08key_hash\x18\x02 \x01(\x0c\x12\x0e\n\x06org_id\x18\x03 \x01(\t\x12\x0f\n\x07team_id\x18\x04 \x01(\t\x12\x12\n\nproject_id\x18\x05 \x01(\t\x12-\n\x06status\x18\x06 \x01(\x0e\x32\x1d.lumewarp.config.v1.KeyStatus\x12\x1a\n\x12\x65xpires_at_unix_ms\x18\x07 \x01(\x03\x12\x33\n\x06policy\x18\x08 \x01(\x0b\x32#.lumewarp.config.v1.EffectivePolicy\"\xa5\x01\n\x0f\x45\x66\x66\x65\x63tivePolicy\x12\x18\n\x10\x61llow_all_models\x18\x01 \x01(\x08\x12\x16\n\x0e\x61llowed_models\x18\x02 \x03(\t\x12=\n\x11rate_limit_scopes\x18\x03 \x03(\x0b\x32\".lumewarp.config.v1.RateLimitScope\x12!\n\x19\x62udget_window_end_unix_ms\x18\x04 \x01(\x03\"J\n\x0eRateLimitScope\x12\n\n\x02id\x18\x01 \x01(\t\x12,\n\x05limit\x18\x02 \x01(\x0b\x32\x1d.lumewarp.config.v1.RateLimit\"b\n\tRateLimit\x12\x1b\n\x13requests_per_minute\x18\x01 \x01(\r\x12\x19\n\x11tokens_per_minute\x18\x02 \x01(\x04\x12\x1d\n\x15max_parallel_requests\x18\x03 \x01(\r*|\n\x0fStreamUsageMode\x12!\n\x1dSTREAM_USAGE_MODE_UNSPECIFIED\x10\x00\x12#\n\x1fSTREAM_USAGE_MODE_INCLUDE_USAGE\x10\x01\x12!\n\x1dSTREAM_USAGE_MODE_PASSTHROUGH\x10\x02*\x84\x01\n\x0cUpstreamKind\x12\x1d\n\x19UPSTREAM_KIND_UNSPECIFIED\x10\x00\x12\x18\n\x14UPSTREAM_KIND_OPENAI\x10\x01\x12\x16\n\x12UPSTREAM_KIND_VLLM\x10\x02\x12#\n\x1fUPSTREAM_KIND_OPENAI_COMPATIBLE\x10\x03*\x9d\x01\n\x0fRoutingStrategy\x12 \n\x1cROUTING_STRATEGY_UNSPECIFIED\x10\x00\x12\x1d\n\x19ROUTING_STRATEGY_WEIGHTED\x10\x01\x12$\n ROUTING_STRATEGY_LEAST_IN_FLIGHT\x10\x02\x12#\n\x1fROUTING_STRATEGY_LOWEST_LATENCY\x10\x03*\x90\x01\n\tKeyStatus\x12\x1a\n\x16KEY_STATUS_UNSPECIFIED\x10\x00\x12\x15\n\x11KEY_STATUS_ACTIVE\x10\x01\x12\x16\n\x12KEY_STATUS_REVOKED\x10\x02\x12\x1e\n\x1aKEY_STATUS_BUDGET_EXCEEDED\x10\x03\x12\x18\n\x14KEY_STATUS_SUSPENDED\x10\x04\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!lumewarp/config/v1/snapshot.proto\x12\x12lumewarp.config.v1\"\xd2\x02\n\x08Snapshot\x12\x0f\n\x07version\x18\x01 \x01(\x04\x12/\n\tupstreams\x18\x02 \x03(\x0b\x32\x1c.lumewarp.config.v1.Upstream\x12\x33\n\x0b\x64\x65ployments\x18\x03 \x03(\x0b\x32\x1e.lumewarp.config.v1.Deployment\x12.\n\x06routes\x18\x04 \x03(\x0b\x32\x1e.lumewarp.config.v1.ModelRoute\x12,\n\x08\x61pi_keys\x18\x05 \x03(\x0b\x32\x1a.lumewarp.config.v1.ApiKey\x12\'\n\x05teams\x18\x06 \x03(\x0b\x32\x18.lumewarp.config.v1.Team\x12\x1a\n\x12\x63reated_at_unix_ms\x18\x07 \x01(\x03\x12\x1d\n\x15required_capabilities\x18\x08 \x03(\t\x12\r\n\x05scope\x18\t \x01(\t\"\xc3\x01\n\x08Upstream\x12\x0c\n\x04name\x18\x01 \x01(\t\x12.\n\x04kind\x18\x02 \x01(\x0e\x32 .lumewarp.config.v1.UpstreamKind\x12\x10\n\x08\x62\x61se_url\x18\x03 \x01(\t\x12\x13\n\x0b\x61pi_key_ref\x18\x04 \x01(\t\x12\x12\n\ntimeout_ms\x18\x05 \x01(\r\x12>\n\x11stream_usage_mode\x18\x06 \x01(\x0e\x32#.lumewarp.config.v1.StreamUsageMode\"~\n\nDeployment\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x10\n\x08upstream\x18\x02 \x01(\t\x12\x16\n\x0eupstream_model\x18\x03 \x01(\t\x12\x0e\n\x06weight\x18\x04 \x01(\r\x12(\n\x05price\x18\x05 \x01(\x0b\x32\x19.lumewarp.config.v1.Price\"J\n\x05Price\x12\x1f\n\x17input_nano_usd_per_mtok\x18\x01 \x01(\x04\x12 \n\x18output_nano_usd_per_mtok\x18\x02 \x01(\x04\"g\n\nModelRoute\x12\r\n\x05model\x18\x01 \x01(\t\x12\x13\n\x0b\x64\x65ployments\x18\x02 \x03(\t\x12\x35\n\x08strategy\x18\x03 \x01(\x0e\x32#.lumewarp.config.v1.RoutingStrategy\">\n\x04Team\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0c\n\x04name\x18\x02 \x01(\tJ\x04\x08\x03\x10\x04J\x04\x08\x04\x10\x05R\x06org_idR\x08org_name\"\xdb\x01\n\x06\x41piKey\x12\x0e\n\x06key_id\x18\x01 \x01(\t\x12\x10\n\x08key_hash\x18\x02 \x01(\x0c\x12\x0f\n\x07team_id\x18\x04 \x01(\t\x12-\n\x06status\x18\x06 \x01(\x0e\x32\x1d.lumewarp.config.v1.KeyStatus\x12\x1a\n\x12\x65xpires_at_unix_ms\x18\x07 \x01(\x03\x12\x33\n\x06policy\x18\x08 \x01(\x0b\x32#.lumewarp.config.v1.EffectivePolicyJ\x04\x08\x03\x10\x04J\x04\x08\x05\x10\x06R\x06org_idR\nproject_id\"\xa5\x01\n\x0f\x45\x66\x66\x65\x63tivePolicy\x12\x18\n\x10\x61llow_all_models\x18\x01 \x01(\x08\x12\x16\n\x0e\x61llowed_models\x18\x02 \x03(\t\x12=\n\x11rate_limit_scopes\x18\x03 \x03(\x0b\x32\".lumewarp.config.v1.RateLimitScope\x12!\n\x19\x62udget_window_end_unix_ms\x18\x04 \x01(\x03\"J\n\x0eRateLimitScope\x12\n\n\x02id\x18\x01 \x01(\t\x12,\n\x05limit\x18\x02 \x01(\x0b\x32\x1d.lumewarp.config.v1.RateLimit\"b\n\tRateLimit\x12\x1b\n\x13requests_per_minute\x18\x01 \x01(\r\x12\x19\n\x11tokens_per_minute\x18\x02 \x01(\x04\x12\x1d\n\x15max_parallel_requests\x18\x03 \x01(\r*|\n\x0fStreamUsageMode\x12!\n\x1dSTREAM_USAGE_MODE_UNSPECIFIED\x10\x00\x12#\n\x1fSTREAM_USAGE_MODE_INCLUDE_USAGE\x10\x01\x12!\n\x1dSTREAM_USAGE_MODE_PASSTHROUGH\x10\x02*\x84\x01\n\x0cUpstreamKind\x12\x1d\n\x19UPSTREAM_KIND_UNSPECIFIED\x10\x00\x12\x18\n\x14UPSTREAM_KIND_OPENAI\x10\x01\x12\x16\n\x12UPSTREAM_KIND_VLLM\x10\x02\x12#\n\x1fUPSTREAM_KIND_OPENAI_COMPATIBLE\x10\x03*\x9d\x01\n\x0fRoutingStrategy\x12 \n\x1cROUTING_STRATEGY_UNSPECIFIED\x10\x00\x12\x1d\n\x19ROUTING_STRATEGY_WEIGHTED\x10\x01\x12$\n ROUTING_STRATEGY_LEAST_IN_FLIGHT\x10\x02\x12#\n\x1fROUTING_STRATEGY_LOWEST_LATENCY\x10\x03*\x90\x01\n\tKeyStatus\x12\x1a\n\x16KEY_STATUS_UNSPECIFIED\x10\x00\x12\x15\n\x11KEY_STATUS_ACTIVE\x10\x01\x12\x16\n\x12KEY_STATUS_REVOKED\x10\x02\x12\x1e\n\x1aKEY_STATUS_BUDGET_EXCEEDED\x10\x03\x12\x18\n\x14KEY_STATUS_SUSPENDED\x10\x04\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'lumewarp.config.v1.snapshot_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_STREAMUSAGEMODE']._serialized_start=1543
-  _globals['_STREAMUSAGEMODE']._serialized_end=1667
-  _globals['_UPSTREAMKIND']._serialized_start=1670
-  _globals['_UPSTREAMKIND']._serialized_end=1802
-  _globals['_ROUTINGSTRATEGY']._serialized_start=1805
-  _globals['_ROUTINGSTRATEGY']._serialized_end=1962
-  _globals['_KEYSTATUS']._serialized_start=1965
-  _globals['_KEYSTATUS']._serialized_end=2109
+  _globals['_STREAMUSAGEMODE']._serialized_start=1535
+  _globals['_STREAMUSAGEMODE']._serialized_end=1659
+  _globals['_UPSTREAMKIND']._serialized_start=1662
+  _globals['_UPSTREAMKIND']._serialized_end=1794
+  _globals['_ROUTINGSTRATEGY']._serialized_start=1797
+  _globals['_ROUTINGSTRATEGY']._serialized_end=1954
+  _globals['_KEYSTATUS']._serialized_start=1957
+  _globals['_KEYSTATUS']._serialized_end=2101
   _globals['_SNAPSHOT']._serialized_start=58
   _globals['_SNAPSHOT']._serialized_end=396
   _globals['_UPSTREAM']._serialized_start=399
@@ -50,13 +50,13 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_MODELROUTE']._serialized_start=800
   _globals['_MODELROUTE']._serialized_end=903
   _globals['_TEAM']._serialized_start=905
-  _globals['_TEAM']._serialized_end=971
-  _globals['_APIKEY']._serialized_start=974
-  _globals['_APIKEY']._serialized_end=1197
-  _globals['_EFFECTIVEPOLICY']._serialized_start=1200
-  _globals['_EFFECTIVEPOLICY']._serialized_end=1365
-  _globals['_RATELIMITSCOPE']._serialized_start=1367
-  _globals['_RATELIMITSCOPE']._serialized_end=1441
-  _globals['_RATELIMIT']._serialized_start=1443
-  _globals['_RATELIMIT']._serialized_end=1541
+  _globals['_TEAM']._serialized_end=967
+  _globals['_APIKEY']._serialized_start=970
+  _globals['_APIKEY']._serialized_end=1189
+  _globals['_EFFECTIVEPOLICY']._serialized_start=1192
+  _globals['_EFFECTIVEPOLICY']._serialized_end=1357
+  _globals['_RATELIMITSCOPE']._serialized_start=1359
+  _globals['_RATELIMITSCOPE']._serialized_end=1433
+  _globals['_RATELIMIT']._serialized_start=1435
+  _globals['_RATELIMIT']._serialized_end=1533
 # @@protoc_insertion_point(module_scope)

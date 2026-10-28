@@ -248,9 +248,7 @@ fn rejected_event(
         timestamp_unix_ms: request.started_at_unix_ms
             + request.started.elapsed().as_millis() as i64,
         key_id: key.key_id.to_string(),
-        org_id: key.org_id.to_string(),
         team_id: key.team_id.to_string(),
-        project_id: key.project_id.to_string(),
         // The body is not read before authentication.
         model: String::new(),
         deployment: String::new(),
@@ -461,12 +459,12 @@ mod tests {
     async fn known_key_rejections_emit_usage_events() {
         let key = |id: &str, extra: &str| {
             format!(
-                "  - {{key_id: {id}, key_sha256: '{}', team_id: t1, project_id: p1, allow_all_models: true{extra}}}\n",
+                "  - {{key_id: {id}, key_sha256: '{}', team_id: t1, allow_all_models: true{extra}}}\n",
                 sha256(id)
             )
         };
         let yaml = format!(
-            "routes: []\nupstreams: []\nteams: [{{id: t1, org_id: o1}}]\nkeys:\n{}{}{}{}",
+            "routes: []\nupstreams: []\nteams: [{{id: t1}}]\nkeys:\n{}{}{}{}",
             key("ok", ""),
             key("revoked", ", status: revoked"),
             key("expired", ", expires_at_unix_ms: 1000"),
@@ -508,9 +506,7 @@ mod tests {
             assert_eq!(event.outcome, RequestOutcome::Rejected as i32);
             assert_eq!(event.usage_state, UsageState::Missing as i32);
             assert_eq!(event.key_id, secret);
-            assert_eq!(event.org_id, "o1");
             assert_eq!(event.team_id, "t1");
-            assert_eq!(event.project_id, "p1");
             assert_eq!(event.model, "");
             assert_eq!(event.route, "models");
             assert_eq!(event.config_version, version);

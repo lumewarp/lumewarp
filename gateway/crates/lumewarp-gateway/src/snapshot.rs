@@ -200,19 +200,11 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
                 "key {id:?} has a negative expiry"
             )));
         }
-        if !key.team_id.is_empty() {
-            let team = teams.get(key.team_id.as_str()).ok_or_else(|| {
-                ApplyError::invalid(format!(
-                    "key {id:?} references unknown team {:?}",
-                    key.team_id
-                ))
-            })?;
-            if team.org_id != key.org_id {
-                return Err(ApplyError::invalid(format!(
-                    "key {id:?} org does not match team {:?}",
-                    key.team_id
-                )));
-            }
+        if !key.team_id.is_empty() && !teams.contains_key(key.team_id.as_str()) {
+            return Err(ApplyError::invalid(format!(
+                "key {id:?} references unknown team {:?}",
+                key.team_id
+            )));
         }
         let policy = key
             .policy
@@ -503,8 +495,6 @@ pub(crate) mod tests {
         pb::Team {
             id: id.into(),
             name: id.into(),
-            org_id: "o".into(),
-            org_name: "O".into(),
         }
     }
 
@@ -512,9 +502,7 @@ pub(crate) mod tests {
         pb::ApiKey {
             key_id: id.into(),
             key_hash: Sha256::digest(secret.as_bytes()).to_vec(),
-            org_id: if team.is_empty() { "" } else { "o" }.into(),
             team_id: team.into(),
-            project_id: "p".into(),
             status: pb::KeyStatus::Active as i32,
             expires_at_unix_ms: 0,
             policy: Some(pb::EffectivePolicy {
@@ -745,7 +733,6 @@ pub(crate) mod tests {
         invalid(|s| s.routes[0].deployments = vec!["nope".into()]);
         invalid(|s| s.routes[0].deployments.clear());
         invalid(|s| s.api_keys[0].team_id = "nope".into());
-        invalid(|s| s.api_keys[0].org_id = "other-org".into());
         invalid(|s| s.routes[0].model = "unknown".into());
         invalid(|s| s.deployments[0].upstream_model.clear());
     }

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, ApiError, type Me, type Org, type Project, type Team } from "./api";
+import { api, type Key, type Me, type Team } from "./api";
 import { useToast } from "./components/Toast";
 
 export function useMe() {
@@ -7,21 +7,30 @@ export function useMe() {
 }
 
 /**
- * What the signed-in principal may do, mirroring the server's RBAC matrix so the UI can hide or
+ * What the signed-in principal may do, mirroring the server's authorization matrix so the UI can hide or
  * disable actions. Purely cosmetic: the server enforces every request.
  */
 export function can(me: Me | undefined) {
-  const grants = me?.grants ?? [];
   const isSuper = !!me?.is_superuser;
-  const orgAdmin = (orgId: string) => isSuper || grants.some((g) => g.org_id === orgId && g.team_id === null && (g.role === "owner" || g.role === "admin"));
-  const teamRole = (teamId: string) => grants.find((g) => g.team_id === teamId)?.role;
+  const teamRole = (teamId: string) => me?.teams.find((t) => t.team_id === teamId)?.role;
+  const canManageKey = (key: Key) =>
+    isSuper ||
+    teamRole(key.team_id) === "admin" ||
+    (teamRole(key.team_id) !== undefined && key.owner_kind === "user" && key.user_id === me?.user_id);
   return {
     isSuper,
-    orgAdmin,
-    anyOrgAdmin: isSuper || grants.some((g) => g.team_id === null && (g.role === "owner" || g.role === "admin")),
-    teamAdmin: (t: { id: string; org_id: string }) => orgAdmin(t.org_id) || teamRole(t.id) === "admin",
-    keyWrite: (t: { id: string; org_id: string }) => orgAdmin(t.org_id) || ["admin", "member"].includes(teamRole(t.id) ?? ""),
-    anyKeyWrite: isSuper || grants.some((g) => g.role !== "viewer"),
+    teamRole,
+    teamRead: (teamId: string) => isSuper || teamRole(teamId) !== undefined,
+    teamAdmin: (teamId: string) => isSuper || teamRole(teamId) === "admin",
+    teamMember: (teamId: string) => teamRole(teamId) !== undefined,
+    canCreateOwnKey: (teamId: string) => teamRole(teamId) !== undefined,
+    canManageKey,
+    canResumeKey: (key: Key) =>
+      canManageKey(key) &&
+      (isSuper ||
+        teamRole(key.team_id) === "admin" ||
+        key.suspended_reason === null ||
+        key.suspended_reason === "owner"),
   };
 }
 
@@ -45,45 +54,46 @@ export function useMut<A, R>(fn: (arg: A) => Promise<R>, success?: string | ((r:
 }
 
 /** For actions that are not in a form dialog: toast the failure. */
-export function useAction<A, R>(fn: (arg: A) => Promise<R>, success: string) {
+export function useAction<A, R>(
+  fn: (arg: A) => Promise<R>,
+  success: string | ((r: R) => void),
+) {
   const toast = useToast();
   const m = useMut(fn, success);
   return (arg: A) => m.mutateAsync(arg).catch((e: Error) => toast("error", e.message));
 }
 
-export interface Tree {
-  orgs: Org[];
-  teams: Team[];
-  projects: Project[];
-}
-
-async function ignoreDenied<T>(p: Promise<T[]>): Promise<T[]> {
-  try {
-    return await p;
-  } catch (e) {
-    if (e instanceof ApiError && (e.status === 403 || e.status === 404)) return [];
-    throw e;
-  }
-}
-
-/** Orgs, their teams and their projects: the hierarchy is only listable parent by parent. */
-export function useTree() {
+export function useTeams() {
   return useQuery({
-    queryKey: ["tree"],
-    queryFn: async (): Promise<Tree> => {
-      const orgs = await api.orgs();
-      const teams = (await Promise.all(orgs.map((o) => ignoreDenied(api.teams(o.id))))).flat();
-      const projects = (await Promise.all(teams.map((t) => ignoreDenied(api.projects(t.id))))).flat();
-      return { orgs, teams, projects };
-    },
+    queryKey: ["teams"],
+    queryFn: () => api.teams(),
   });
 }
 
-export function useAllKeys(projects: Project[] | undefined) {
+export function useAllTeamKeys(teams: Team[] | undefined) {
   return useQuery({
-    queryKey: ["keys", projects?.map((p) => p.id)],
-    enabled: !!projects,
-    queryFn: async () => (await Promise.all(projects!.map((p) => ignoreDenied(api.keys(p.id))))).flat(),
+    queryKey: ["team-keys", teams?.map((t) => t.id)],
+    enabled: !!teams,
+    queryFn: async () => (await Promise.all(teams!.map((t) => api.teamKeys(t.id)))).flat(),
+  });
+}
+
+export function useTeamDirectory(teams: Team[] | undefined) {
+  return useQuery({
+    queryKey: ["team-directory", teams?.map((t) => t.id)],
+    enabled: !!teams,
+    queryFn: async () => {
+      const directory = await Promise.all(
+        teams!.map(async (team) => ({
+          members: await api.members(team.id),
+          serviceAccounts: await api.serviceAccounts(team.id),
+        })),
+      );
+      return {
+        members: directory.flatMap((team) => team.members),
+        serviceAccounts: directory.flatMap((team) => team.serviceAccounts),
+      };
+    },
   });
 }
 

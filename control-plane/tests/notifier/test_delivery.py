@@ -11,9 +11,9 @@ from lumewarp_control_plane.ids import uuid7
 from lumewarp_control_plane.models import (
     NotifierChannel,
     NotifierOutbox,
-    Org,
     OutboxStatus,
     ScopeType,
+    Team,
 )
 from lumewarp_control_plane.notifier import BudgetEvent, deliver_pending
 
@@ -65,21 +65,21 @@ async def _webhook_server():
 @pytest.mark.asyncio
 async def test_webhook_outbox_retries_and_marks_delivered(session_factory: SessionFactory):
     server, url, state = await _webhook_server()
-    org_id = uuid7()
+    team_id = uuid7()
     event = BudgetEvent(
         kind="soft",
-        scope_type=ScopeType.ORG,
-        scope_id=org_id,
-        org_id=org_id,
+        scope_type=ScopeType.TEAM,
+        scope_id=team_id,
+        team_id=team_id,
         window_start=datetime(2026, 10, 1, tzinfo=UTC),
         spent_nano_usd=80,
         budget_nano_usd=100,
     )
     async with session_factory() as session, session.begin():
-        session.add(Org(id=org_id, name=f"notifier-org-{uuid7().hex}"))
+        session.add(Team(id=team_id, name=f"notifier-team-{uuid7().hex}"))
         await session.flush()
         channel = NotifierChannel(
-            name=f"webhook-{uuid7().hex}", kind="webhook", org_id=org_id, config={"url": url}
+            name=f"webhook-{uuid7().hex}", kind="webhook", team_id=team_id, config={"url": url}
         )
         session.add(channel)
         await session.flush()
@@ -118,7 +118,7 @@ async def test_webhook_outbox_retries_and_marks_delivered(session_factory: Sessi
             assert row.delivered_at is not None
             assert row.attempts == 1
         assert state["requests"] == 2
-        assert b'"scope_type":"org"' in state["bodies"][1]
+        assert b'"scope_type":"team"' in state["bodies"][1]
     finally:
         server.close()
         await server.wait_closed()
@@ -143,23 +143,23 @@ async def test_notifier_plugin_is_invoked(session_factory: SessionFactory, monke
     monkeypatch.setattr(
         plugins, "load", lambda group: [Loaded()] if group == plugins.NOTIFIER else []
     )
-    org_id = uuid7()
+    team_id = uuid7()
     event = BudgetEvent(
         kind="hard",
-        scope_type=ScopeType.KEY,
+        scope_type=ScopeType.SERVICE_ACCOUNT,
         scope_id=uuid7(),
-        org_id=org_id,
+        team_id=team_id,
         window_start=datetime(2026, 10, 1, tzinfo=UTC),
         spent_nano_usd=100,
         budget_nano_usd=100,
     )
     async with session_factory() as session, session.begin():
-        session.add(Org(id=org_id, name=f"plugin-org-{uuid7().hex}"))
+        session.add(Team(id=team_id, name=f"plugin-team-{uuid7().hex}"))
         await session.flush()
         channel = NotifierChannel(
             name=f"plugin-{uuid7().hex}",
             kind="test-notifier",
-            org_id=org_id,
+            team_id=team_id,
             config={"target": "test"},
         )
         session.add(channel)
@@ -198,13 +198,13 @@ def _plugin(monkeypatch, send):
 
 
 async def _plugin_rows(factory: SessionFactory, count: int, **row_values) -> list[int]:
-    org_id = uuid7()
+    team_id = uuid7()
     ids = []
     async with factory() as session, session.begin():
-        session.add(Org(id=org_id, name=f"plugin-org-{uuid7().hex}"))
+        session.add(Team(id=team_id, name=f"plugin-team-{uuid7().hex}"))
         await session.flush()
         channel = NotifierChannel(
-            name=f"plugin-{uuid7().hex}", kind="test-notifier", org_id=org_id, config={}
+            name=f"plugin-{uuid7().hex}", kind="test-notifier", team_id=team_id, config={}
         )
         session.add(channel)
         await session.flush()
@@ -212,9 +212,9 @@ async def _plugin_rows(factory: SessionFactory, count: int, **row_values) -> lis
         for i in range(count):
             event = BudgetEvent(
                 kind="soft",
-                scope_type=ScopeType.ORG,
-                scope_id=org_id,
-                org_id=org_id,
+                scope_type=ScopeType.TEAM,
+                scope_id=team_id,
+                team_id=team_id,
                 window_start=datetime(2026, 10, 1, tzinfo=UTC),
                 spent_nano_usd=i,
                 budget_nano_usd=100,
@@ -327,9 +327,9 @@ async def test_webhook_total_timeout_bounds_slow_drip_server():
     port = server.sockets[0].getsockname()[1]
     event = BudgetEvent(
         kind="soft",
-        scope_type=ScopeType.ORG,
+        scope_type=ScopeType.TEAM,
         scope_id=uuid7(),
-        org_id=uuid7(),
+        team_id=uuid7(),
         window_start=datetime(2026, 10, 1, tzinfo=UTC),
         spent_nano_usd=1,
         budget_nano_usd=1,

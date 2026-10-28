@@ -17,13 +17,14 @@ from lumewarp_control_plane.models import (
     ConfigVersionKind,
     Deployment,
     KeyLifecycle,
-    Membership,
+    KeyOwnerKind,
     ModelAccess,
-    Org,
     RequestOutcome,
     Scope,
     ScopeType,
     Team,
+    TeamMember,
+    TeamRole,
     Upstream,
     UpstreamKind,
     UsageEvent,
@@ -42,15 +43,15 @@ async def _fails(session: AsyncSession, *rows: object) -> None:
 
 
 def _event(request_id: uuid.UUID, ids, cost: int = 100) -> dict:
-    org, team, project = ids
+    team, owner = ids
     return dict(
         request_id=request_id,
         gateway_id="gw-1",
         ts=datetime(2026, 10, 22, tzinfo=UTC),
         key_id=uuid.uuid4(),
-        org_id=org.id,
         team_id=team.id,
-        project_id=project.id,
+        owner_kind=KeyOwnerKind.USER,
+        owner_id=owner.id,
         model="m",
         deployment="d",
         route="chat_completions",
@@ -71,7 +72,7 @@ def _event(request_id: uuid.UUID, ids, cost: int = 100) -> dict:
 
 
 async def test_usage_events_dedupe_on_request_id(session: AsyncSession) -> None:
-    ids = await factories.hierarchy(session)
+    ids = (await factories.make_team(session), await factories.make_user(session))
     rid = uuid.uuid4()
     stmt = (
         insert(UsageEvent)
@@ -90,7 +91,7 @@ async def test_usage_events_dedupe_on_request_id(session: AsyncSession) -> None:
 
 
 async def test_usage_events_reject_negative(session: AsyncSession) -> None:
-    ids = await factories.hierarchy(session)
+    ids = (await factories.make_team(session), await factories.make_user(session))
     await _fails(session, UsageEvent(**_event(uuid.uuid4(), ids, cost=-1)))
 
 
@@ -113,7 +114,7 @@ async def test_usage_totals_primary_key_and_upsert(session: AsyncSession) -> Non
     assert (row.cost_nano_usd, row.request_count) == (20, 2)
 
     # Same scope id at another level or window is a separate row.
-    session.add(UsageTotal(**{**key, "scope_type": ScopeType.ORG}))
+    session.add(UsageTotal(**{**key, "scope_type": ScopeType.MEMBER}))
     session.add(UsageTotal(**{**key, "window_start": datetime(2026, 11, 1, tzinfo=UTC)}))
     await session.flush()
 
@@ -125,75 +126,87 @@ async def test_usage_totals_primary_key_and_upsert(session: AsyncSession) -> Non
 # --------------------------------------------------------------------------- hierarchy
 
 
-async def test_org_cannot_inherit(session: AsyncSession) -> None:
-    await _fails(session, Org(name="o-inherit", model_access=ModelAccess.INHERIT))
+async def test_team_cannot_inherit(session: AsyncSession) -> None:
+    await _fails(session, Team(name="t-inherit", model_access=ModelAccess.INHERIT))
 
 
 async def test_allowlist_modes(session: AsyncSession) -> None:
-    org, team, project = await factories.hierarchy(session)
     # Explicit empty list = deny-all is representable and distinct from inherit/all.
-    t = Team(org_id=org.id, name="deny", model_access=ModelAccess.LIST, allowed_models=[])
+    t = Team(name="deny", model_access=ModelAccess.LIST, allowed_models=[])
     session.add(t)
     await session.flush()
     assert (t.model_access, t.allowed_models) == (ModelAccess.LIST, [])
-    inherit = Team(org_id=org.id, name="inherit")
-    session.add(inherit)
-    await session.flush()
-    await session.refresh(inherit)
+    team = await factories.make_team(session)
+    assert team.model_access is ModelAccess.ALL
+    inherit = await factories.make_member(session, team)
     assert inherit.model_access is ModelAccess.INHERIT
+    account = await factories.make_service_account(session, team)
+    assert account.model_access is ModelAccess.INHERIT
 
-    await _fails(
-        session, Team(org_id=org.id, name="bad", model_access=ModelAccess.ALL, allowed_models=["m"])
-    )
+    await _fails(session, Team(name="bad", model_access=ModelAccess.ALL, allowed_models=["m"]))
 
 
 async def test_budget_and_limit_checks(session: AsyncSession) -> None:
-    org, _, _ = await factories.hierarchy(session)
-    await _fails(
-        session, Team(org_id=org.id, name="t1", budget_nano_usd=10, soft_budget_nano_usd=11)
-    )
-    await _fails(session, Team(org_id=org.id, name="t2", rpm_limit=0))
-    await _fails(session, Team(org_id=org.id, name="t3", budget_nano_usd=-1))
+    await _fails(session, Team(name="t1", budget_nano_usd=10, soft_budget_nano_usd=11))
+    await _fails(session, Team(name="t2", rpm_limit=0))
+    await _fails(session, Team(name="t3", budget_nano_usd=-1))
 
 
-async def test_key_must_match_hierarchy(session: AsyncSession) -> None:
-    _, _, project = await factories.hierarchy(session)
-    _, other_team, _ = await factories.hierarchy(session)
-    key = factories.api_key(project)
+async def test_service_account_key_must_match_team(session: AsyncSession) -> None:
+    team = await factories.make_team(session)
+    owner = await factories.make_service_account(session, team)
+    other_team = await factories.make_team(session)
+    key = factories.new_key(team, owner)
     key.team_id = other_team.id
     await _fails(session, key)
 
 
 async def test_key_hash_and_lifecycle_checks(session: AsyncSession) -> None:
-    _, _, project = await factories.hierarchy(session)
-    await _fails(session, factories.api_key(project, key_hash=b"\x00" * 31))
-    await _fails(session, factories.api_key(project, lifecycle=KeyLifecycle.REVOKED))
+    team = await factories.make_team(session)
+    owner = await factories.make_user(session)
+    await _fails(session, factories.new_key(team, owner, key_hash=b"\x00" * 31))
+    await _fails(session, factories.new_key(team, owner, lifecycle=KeyLifecycle.REVOKED))
+    await _fails(session, factories.new_key(team, owner, suspended_reason="owner_removed"))
     same = hashlib.sha256(b"x").digest()
-    session.add(factories.api_key(project, key_hash=same))
+    session.add(factories.new_key(team, owner, key_hash=same))
     await session.flush()
-    await _fails(session, factories.api_key(project, key_hash=same))
+    await _fails(session, factories.new_key(team, owner, key_hash=same))
 
 
-async def test_membership_role_levels(session: AsyncSession, engine) -> None:
-    from lumewarp_control_plane.models import User
+async def test_member_roles_and_primary_key(session: AsyncSession) -> None:
+    team = await factories.make_team(session)
+    user = await factories.make_user(session)
+    await factories.make_member(session, team, user, role=TeamRole.ADMIN)
+    await _fails(session, TeamMember(user_id=user.id, team_id=team.id, role=TeamRole.MEMBER))
+    other = await factories.make_user(session)
+    await factories.make_member(session, team, other, role=TeamRole.MEMBER)
+    invalid = await factories.make_user(session)
+    for role in ("owner", "viewer"):
+        # Bypass ORM enum validation to exercise the database CHECK itself.
+        with pytest.raises(IntegrityError, match="ck_team_members_team_role"):
+            async with session.begin_nested():
+                await session.execute(
+                    text(
+                        "INSERT INTO team_members (team_id, user_id, role)"
+                        " VALUES (:team_id, :user_id, :role)"
+                    ),
+                    {"team_id": team.id, "user_id": invalid.id, "role": role},
+                )
 
-    org, team, _ = await factories.hierarchy(session)
-    user = User(email=f"{uuid.uuid4().hex}@example.com")
-    session.add(user)
-    await session.flush()
-    session.add(Membership(user_id=user.id, org_id=org.id, role="owner"))
-    session.add(Membership(user_id=user.id, org_id=org.id, team_id=team.id, role="member"))
-    await session.flush()
 
-    await _fails(session, Membership(user_id=user.id, org_id=org.id, team_id=team.id, role="owner"))
-    await _fails(session, Membership(user_id=user.id, org_id=org.id, role="viewer"))
-    # One org-level grant per user and org.
-    await _fails(session, Membership(user_id=user.id, org_id=org.id, role="admin"))
-    # Team must belong to the org.
-    other_org, _, _ = await factories.hierarchy(session)
-    await _fails(
-        session, Membership(user_id=user.id, org_id=other_org.id, team_id=team.id, role="viewer")
-    )
+async def test_key_owner_matches_kind(session: AsyncSession) -> None:
+    team = await factories.make_team(session)
+    user = await factories.make_user(session)
+    account = await factories.make_service_account(session, team)
+    for values in (
+        {"user_id": None},
+        {"service_account_id": account.id},
+        {"owner_kind": KeyOwnerKind.SERVICE_ACCOUNT},
+    ):
+        key = factories.new_key(team, user)
+        for field, value in values.items():
+            setattr(key, field, value)
+        await _fails(session, key)
 
 
 async def test_user_email_case_insensitive_unique(session: AsyncSession) -> None:
@@ -268,12 +281,12 @@ async def test_config_versions_immutable(session: AsyncSession) -> None:
 
 async def test_enqueue_recompile(session: AsyncSession) -> None:
     await factories.scope(session)
-    r1 = await outbox.enqueue_recompile(session, "default", "org.create")
+    r1 = await outbox.enqueue_recompile(session, "default", "team.create")
     r2 = await outbox.enqueue_recompile(session, "default", "key.revoke")
     assert r2 == r1 + 1
     rows = (await session.execute(select(ConfigOutbox).order_by(ConfigOutbox.id))).scalars().all()
     assert [(r.reason, r.source_revision, r.status.value) for r in rows] == [
-        ("org.create", r1, "pending"),
+        ("team.create", r1, "pending"),
         ("key.revoke", r2, "pending"),
     ]
     assert (await session.get(Scope, "default")).source_revision == r2

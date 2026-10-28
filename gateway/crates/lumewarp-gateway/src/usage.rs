@@ -580,9 +580,9 @@ impl UsageCapture {
         if outcome != RequestOutcome::Rejected {
             metrics.usage_captured(state);
         }
-        let (team, project) = match &self.caller {
-            Caller::Key(key) => (&*key.team_id, &*key.project_id),
-            Caller::Anonymous => ("", ""),
+        let team = match &self.caller {
+            Caller::Key(key) => &*key.team_id,
+            Caller::Anonymous => "",
         };
         if let Some(tokens) = tokens {
             self.handles.record_tokens(tokens.prompt, tokens.completion);
@@ -591,16 +591,16 @@ impl UsageCapture {
                 tokens.prompt.saturating_add(tokens.completion),
             );
             if let Some(nano_usd) = cost.filter(|&nano_usd| nano_usd > 0) {
-                metrics.spend(team, project, nano_usd);
+                metrics.spend(team, nano_usd);
             }
         }
         if !self.runtime.usage.enabled() {
             return;
         }
         let elapsed = self.request.started.elapsed();
-        let (key_id, org_id) = match &self.caller {
-            Caller::Key(key) => (key.key_id.to_string(), key.org_id.to_string()),
-            Caller::Anonymous => (String::new(), String::new()),
+        let key_id = match &self.caller {
+            Caller::Key(key) => key.key_id.to_string(),
+            Caller::Anonymous => String::new(),
         };
         let tokens = tokens.unwrap_or_default();
         self.runtime.usage.try_record(UsageEvent {
@@ -610,9 +610,7 @@ impl UsageCapture {
                 .started_at_unix_ms
                 .saturating_add(i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)),
             key_id,
-            org_id,
             team_id: team.into(),
-            project_id: project.into(),
             model: self.handles.model.clone(),
             deployment: self
                 .deployment

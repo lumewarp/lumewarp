@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from sqlalchemy import select
 
-from lumewarp_control_plane import audit, rbac
+from lumewarp_control_plane import audit
 from lumewarp_control_plane.api.common import (
     LimitDep,
     SessionDep,
@@ -20,9 +20,9 @@ from lumewarp_control_plane.api.schemas import (
     RollbackCreate,
     RollbackOut,
 )
+from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import ConfigVersion
-from lumewarp_control_plane.security import CurrentPrincipal
 
 router = APIRouter(tags=["config"])
 
@@ -48,13 +48,13 @@ def _out(row: ConfigVersion) -> ConfigVersionOut:
     operation_id="listConfigVersions",
 )
 async def list_config_versions(
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[ConfigVersionOut]:
-    rbac.require(principal, rbac.Action.CONFIG_READ, rbac.ResourceScope())
+    await authz.require(Action.CONFIG_READ)
     stmt = (
         select(ConfigVersion)
         .where(ConfigVersion.scope == settings.scope)
@@ -72,16 +72,21 @@ async def list_config_versions(
 @router.post("/config/rollback", response_model=RollbackOut, operation_id="rollbackConfig")
 async def rollback_config(
     body: RollbackCreate,
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
 ) -> RollbackOut:
-    rbac.require(principal, rbac.Action.CONFIG_ROLLBACK, rbac.ResourceScope())
+    await authz.require(Action.CONFIG_ROLLBACK)
     from lumewarp_control_plane import compiler
 
     async with mutation(session):
         try:
-            version = await compiler.rollback_routing(session, settings.scope, body.version)
+            version = await compiler.rollback_routing(
+                session,
+                settings.scope,
+                body.version,
+                require_local_membership=authz.authorizer.manages_grants,
+            )
         except LookupError as exc:
             raise not_found("config version not found") from exc
         except compiler.CompileError as exc:
@@ -91,7 +96,7 @@ async def rollback_config(
             action="config.rollback",
             resource_type="config_version",
             resource_id=version,
-            principal=principal,
+            principal=authz.principal,
             details={"to_version": body.version},
         )
     return RollbackOut(version=version)

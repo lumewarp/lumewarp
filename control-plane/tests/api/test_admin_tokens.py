@@ -6,9 +6,10 @@ import uuid
 import pytest
 from sqlalchemy import func, select
 
-from lumewarp_control_plane.models import ActorType, AuditLog, PersonalAccessToken
+from lumewarp_control_plane.models import ActorType, AuditLog, PersonalAccessToken, TeamRole
 from lumewarp_control_plane.security import hash_secret
-from tests.api.helpers import BOOTSTRAP_AUTH, auth, grant, org_tree, user_with_token
+from tests.api.helpers import BOOTSTRAP_AUTH, auth, user_with_token
+from tests.factories import make_member, make_team
 
 
 @pytest.mark.parametrize("issuer", ["bootstrap", "superuser"])
@@ -70,15 +71,13 @@ async def test_superuser_issues_pat_for_another_user(client, committed, issuer) 
     assert client.get("/api/v1/users/me", headers=auth(secret)).status_code == 401
 
 
-@pytest.mark.parametrize("role", ["owner", "org_admin", "team_admin", "member", "viewer", "none"])
+@pytest.mark.parametrize("role", ["admin", "member", "none"])
 async def test_non_superusers_cannot_issue_for_self_or_others(client, committed, role) -> None:
-    org, team, _ = await org_tree(committed)
+    team = await make_team(committed)
     user, secret = await user_with_token(committed)
     target, _ = await user_with_token(committed)
-    if role in ("owner", "org_admin"):
-        await grant(committed, user, org, role="owner" if role == "owner" else "admin")
-    elif role != "none":
-        await grant(committed, user, org, team=team, role="admin" if role == "team_admin" else role)
+    if role != "none":
+        await make_member(committed, team, user, role=TeamRole(role))
     await committed.commit()
     before = await committed.scalar(select(func.count()).select_from(PersonalAccessToken))
     for user_id in (target.id, user.id, uuid.uuid4()):

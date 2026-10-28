@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumewarp_control_plane import audit
 from lumewarp_control_plane.app import create_app
 from lumewarp_control_plane.db import get_session
-from lumewarp_control_plane.models import Membership, PersonalAccessToken, User
+from lumewarp_control_plane.models import PersonalAccessToken, User
 from lumewarp_control_plane.security import (
     CurrentPrincipal,
     PrincipalKind,
@@ -70,7 +70,6 @@ def _whoami_app(settings: Settings) -> FastAPI:
         return {
             "kind": p.kind.value,
             "user_id": str(p.user_id) if p.user_id else None,
-            "grants": [[str(g.org_id), str(g.team_id), g.role] for g in p.grants],
         }
 
     return app
@@ -114,9 +113,9 @@ async def committed(engine):
 
 
 async def test_current_principal(settings: Settings, committed: AsyncSession) -> None:
-    org, team, _ = await factories.hierarchy(committed)
+    team = await factories.make_team(committed)
     user, pat = await _user_with_pat(committed)
-    committed.add(Membership(user_id=user.id, org_id=org.id, team_id=team.id, role="member"))
+    await factories.make_member(committed, team, user)
     _, su_pat = await _user_with_pat(committed, superuser=True)
     _, inactive = await _user_with_pat(committed, active=False)
     _, expired = await _user_with_pat(committed, expires_at=datetime.now(UTC) - timedelta(1))
@@ -134,11 +133,10 @@ async def test_current_principal(settings: Settings, committed: AsyncSession) ->
         assert r.json() == {
             "kind": "user",
             "user_id": str(user.id),
-            "grants": [[str(org.id), str(team.id), "member"]],
         }
-        assert call(su_pat).json()["kind"] == PrincipalKind.SUPERUSER.value
+        assert call(su_pat).json()["kind"] == PrincipalKind.USER.value
         boot = call("test-bootstrap-token").json()
-        assert boot == {"kind": "superuser", "user_id": None, "grants": []}
+        assert boot == {"kind": "bootstrap", "user_id": None}
 
         for bad in (None, inactive, expired, revoked, "lwp-unknown", "test-bootstrap-tokenx"):
             r = call(bad)

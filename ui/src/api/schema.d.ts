@@ -4,44 +4,7 @@
  */
 
 export interface paths {
-    "/api/v1/orgs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List Orgs */
-        get: operations["listOrgs"];
-        put?: never;
-        /** Create Org */
-        post: operations["createOrg"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/orgs/{org_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Org */
-        get: operations["getOrg"];
-        put?: never;
-        post?: never;
-        /** Delete Org */
-        delete: operations["deleteOrg"];
-        options?: never;
-        head?: never;
-        /** Update Org */
-        patch: operations["updateOrg"];
-        trace?: never;
-    };
-    "/api/v1/orgs/{org_id}/teams": {
+    "/api/v1/teams": {
         parameters: {
             query?: never;
             header?: never;
@@ -78,52 +41,88 @@ export interface paths {
         patch: operations["updateTeam"];
         trace?: never;
     };
-    "/api/v1/teams/{team_id}/projects": {
+    "/api/v1/teams/{team_id}/members": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List Projects */
-        get: operations["listProjects"];
+        /** List Members */
+        get: operations["listMembers"];
         put?: never;
-        /** Create Project */
-        post: operations["createProject"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/projects/{project_id}": {
+    "/api/v1/teams/{team_id}/members/{user_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Get Project */
-        get: operations["getProject"];
-        put?: never;
+        get?: never;
+        /** Put Member */
+        put: operations["putMember"];
         post?: never;
-        /** Delete Project */
-        delete: operations["deleteProject"];
+        /** Delete Member */
+        delete: operations["deleteMember"];
         options?: never;
         head?: never;
-        /** Update Project */
-        patch: operations["updateProject"];
+        /** Update Member */
+        patch: operations["updateMember"];
         trace?: never;
     };
-    "/api/v1/projects/{project_id}/keys": {
+    "/api/v1/teams/{team_id}/service-accounts": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List Keys */
-        get: operations["listKeys"];
+        /** List Service Accounts */
+        get: operations["listServiceAccounts"];
+        put?: never;
+        /** Create Service Account */
+        post: operations["createServiceAccount"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/service-accounts/{account_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Service Account */
+        get: operations["getServiceAccount"];
+        put?: never;
+        post?: never;
+        /** Delete Service Account */
+        delete: operations["deleteServiceAccount"];
+        options?: never;
+        head?: never;
+        /** Update Service Account */
+        patch: operations["updateServiceAccount"];
+        trace?: never;
+    };
+    "/api/v1/teams/{team_id}/keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Team Keys */
+        get: operations["listTeamKeys"];
         put?: never;
         /** Create Key */
         post: operations["createKey"];
@@ -162,6 +161,43 @@ export interface paths {
         put?: never;
         /** Revoke Key */
         post: operations["revokeKey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/keys/{key_id}/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotate Key
+         * @description Replace the secret in place: same key_id, so usage history continues.
+         */
+        post: operations["rotateKey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/me/keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Own Keys */
+        get: operations["listOwnKeys"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -388,42 +424,6 @@ export interface paths {
         patch: operations["updateUser"];
         trace?: never;
     };
-    "/api/v1/memberships": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List Memberships */
-        get: operations["listMemberships"];
-        put?: never;
-        /** Create Membership */
-        post: operations["createMembership"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/memberships/{membership_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /** Delete Membership */
-        delete: operations["deleteMembership"];
-        options?: never;
-        head?: never;
-        /** Update Membership */
-        patch: operations["updateMembership"];
-        trace?: never;
-    };
     "/api/v1/usage": {
         parameters: {
             query?: never;
@@ -591,8 +591,6 @@ export interface components {
             resource_type: string;
             /** Resource Id */
             resource_id: string | null;
-            /** Org Id */
-            org_id: string | null;
             /** Team Id */
             team_id: string | null;
             /** Details */
@@ -779,43 +777,14 @@ export interface components {
             /** Revoked At */
             revoked_at: string | null;
         };
-        /** GrantOut */
-        GrantOut: {
-            /**
-             * Org Id
-             * Format: uuid
-             */
-            org_id: string;
-            /** Team Id */
-            team_id: string | null;
-            /** Role */
-            role: string;
-        };
         /** KeyCreate */
         KeyCreate: {
-            model_access?: components["schemas"]["ModelAccess"] | null;
-            /** Allowed Models */
-            allowed_models?: string[] | null;
-            /** Rpm Limit */
-            rpm_limit?: number | null;
-            /** Tpm Limit */
-            tpm_limit?: number | null;
-            /** Max Parallel */
-            max_parallel?: number | null;
-            /** Budget Nano Usd */
-            budget_nano_usd?: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd?: number | null;
             /** Name */
             name: string;
             /** Expires At */
             expires_at?: string | null;
-            /** Org Id */
-            org_id?: string | null;
-            /** Team Id */
-            team_id?: string | null;
-            /** Project Id */
-            project_id?: string | null;
+            /** Service Account Id */
+            service_account_id?: string | null;
         };
         /** KeyCreated */
         KeyCreated: {
@@ -832,44 +801,28 @@ export interface components {
         KeyLifecycle: "active" | "suspended" | "revoked";
         /** KeyOut */
         KeyOut: {
-            model_access: components["schemas"]["ModelAccess"];
-            /** Allowed Models */
-            allowed_models: string[];
-            /** Rpm Limit */
-            rpm_limit: number | null;
-            /** Tpm Limit */
-            tpm_limit: number | null;
-            /** Max Parallel */
-            max_parallel: number | null;
-            /** Budget Nano Usd */
-            budget_nano_usd: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd: number | null;
             /**
              * Id
              * Format: uuid
              */
             id: string;
             /**
-             * Org Id
-             * Format: uuid
-             */
-            org_id: string;
-            /**
              * Team Id
              * Format: uuid
              */
             team_id: string;
-            /**
-             * Project Id
-             * Format: uuid
-             */
-            project_id: string;
+            owner_kind: components["schemas"]["KeyOwnerKind"];
+            /** User Id */
+            user_id: string | null;
+            /** Service Account Id */
+            service_account_id: string | null;
             /** Name */
             name: string;
             /** Display Prefix */
             display_prefix: string;
             lifecycle: components["schemas"]["KeyLifecycle"];
+            /** Suspended Reason */
+            suspended_reason: string | null;
             /** Expires At */
             expires_at: string | null;
             /** Revoked At */
@@ -887,32 +840,18 @@ export interface components {
              */
             updated_at: string;
         };
+        /**
+         * KeyOwnerKind
+         * @enum {string}
+         */
+        KeyOwnerKind: "user" | "service_account";
         /** KeyUpdate */
         KeyUpdate: {
-            model_access?: components["schemas"]["ModelAccess"] | null;
-            /** Allowed Models */
-            allowed_models?: string[] | null;
-            /** Rpm Limit */
-            rpm_limit?: number | null;
-            /** Tpm Limit */
-            tpm_limit?: number | null;
-            /** Max Parallel */
-            max_parallel?: number | null;
-            /** Budget Nano Usd */
-            budget_nano_usd?: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd?: number | null;
             /** Name */
             name?: string | null;
             /** Expires At */
             expires_at?: string | null;
             lifecycle?: components["schemas"]["KeyLifecycle"] | null;
-            /** Org Id */
-            org_id?: string | null;
-            /** Team Id */
-            team_id?: string | null;
-            /** Project Id */
-            project_id?: string | null;
         };
         /** MeOut */
         MeOut: {
@@ -926,95 +865,24 @@ export interface components {
             display_name: string;
             /** Is Superuser */
             is_superuser: boolean;
-            /** Grants */
-            grants: components["schemas"]["GrantOut"][];
+            /** Manages Grants */
+            manages_grants: boolean;
+            /** Teams */
+            teams: components["schemas"]["MeTeamOut"][];
         };
-        /** MembershipCreate */
-        MembershipCreate: {
+        /** MeTeamOut */
+        MeTeamOut: {
             /**
-             * User Id
+             * Team Id
              * Format: uuid
              */
-            user_id: string;
-            /**
-             * Org Id
-             * Format: uuid
-             */
-            org_id: string;
-            /** Team Id */
-            team_id?: string | null;
-            /** Role */
-            role: string;
+            team_id: string;
+            /** Team Name */
+            team_name: string;
+            role: components["schemas"]["TeamRole"];
         };
-        /** MembershipOut */
-        MembershipOut: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            id: string;
-            /**
-             * User Id
-             * Format: uuid
-             */
-            user_id: string;
-            /**
-             * Org Id
-             * Format: uuid
-             */
-            org_id: string;
-            /** Team Id */
-            team_id: string | null;
-            /** Role */
-            role: string;
-            /**
-             * Created At
-             * Format: date-time
-             */
-            created_at: string;
-            /**
-             * Updated At
-             * Format: date-time
-             */
-            updated_at: string;
-        };
-        /** MembershipUpdate */
-        MembershipUpdate: {
-            /** Role */
-            role: string;
-        };
-        /**
-         * ModelAccess
-         * @description Per-level model allowlist mode (O1 M1).
-         *
-         *     INHERIT: take the parent's effective set unchanged (not allowed on orgs).
-         *     ALL: no restriction at this level (effective set = parent's; universal on an org).
-         *     LIST: exactly `allowed_models`, intersected with the parent; an empty list is deny-all.
-         *     Resolve INHERIT first; a key whose effective set is still universal gets
-         *     allow_all_models (see compiler.compile_scope).
-         * @enum {string}
-         */
-        ModelAccess: "inherit" | "all" | "list";
-        /** OrgCreate */
-        OrgCreate: {
-            model_access?: components["schemas"]["ModelAccess"] | null;
-            /** Allowed Models */
-            allowed_models?: string[] | null;
-            /** Rpm Limit */
-            rpm_limit?: number | null;
-            /** Tpm Limit */
-            tpm_limit?: number | null;
-            /** Max Parallel */
-            max_parallel?: number | null;
-            /** Budget Nano Usd */
-            budget_nano_usd?: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd?: number | null;
-            /** Name */
-            name: string;
-        };
-        /** OrgOut */
-        OrgOut: {
+        /** MemberOut */
+        MemberOut: {
             model_access: components["schemas"]["ModelAccess"];
             /** Allowed Models */
             allowed_models: string[];
@@ -1029,12 +897,25 @@ export interface components {
             /** Soft Budget Nano Usd */
             soft_budget_nano_usd: number | null;
             /**
-             * Id
+             * Team Id
              * Format: uuid
              */
-            id: string;
-            /** Name */
-            name: string;
+            team_id: string;
+            /**
+             * User Id
+             * Format: uuid
+             */
+            user_id: string;
+            /** Email */
+            email: string;
+            /** Display Name */
+            display_name: string;
+            role: components["schemas"]["TeamRole"];
+            /**
+             * Member Scope Id
+             * Format: uuid
+             */
+            member_scope_id: string;
             /**
              * Created At
              * Format: date-time
@@ -1046,8 +927,8 @@ export interface components {
              */
             updated_at: string;
         };
-        /** OrgUpdate */
-        OrgUpdate: {
+        /** MemberUpdate */
+        MemberUpdate: {
             model_access?: components["schemas"]["ModelAccess"] | null;
             /** Allowed Models */
             allowed_models?: string[] | null;
@@ -1061,9 +942,37 @@ export interface components {
             budget_nano_usd?: number | null;
             /** Soft Budget Nano Usd */
             soft_budget_nano_usd?: number | null;
-            /** Name */
-            name?: string | null;
+            role?: components["schemas"]["TeamRole"] | null;
         };
+        /** MemberUpsert */
+        MemberUpsert: {
+            model_access?: components["schemas"]["ModelAccess"] | null;
+            /** Allowed Models */
+            allowed_models?: string[] | null;
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Max Parallel */
+            max_parallel?: number | null;
+            /** Budget Nano Usd */
+            budget_nano_usd?: number | null;
+            /** Soft Budget Nano Usd */
+            soft_budget_nano_usd?: number | null;
+            role: components["schemas"]["TeamRole"];
+        };
+        /**
+         * ModelAccess
+         * @description Per-level model allowlist mode (O1 M1).
+         *
+         *     INHERIT: take the team's effective set unchanged (not allowed on teams).
+         *     ALL: no restriction at this level (effective set = the team's; universal on a team).
+         *     LIST: exactly `allowed_models`, intersected with the parent; an empty list is deny-all.
+         *     Resolve INHERIT first; a key whose effective set is still universal gets
+         *     allow_all_models (see compiler.compile_scope).
+         * @enum {string}
+         */
+        ModelAccess: "inherit" | "all" | "list";
         /** Page[AuditOut] */
         Page_AuditOut_: {
             /** Items */
@@ -1099,24 +1008,10 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
-        /** Page[MembershipOut] */
-        Page_MembershipOut_: {
+        /** Page[MemberOut] */
+        Page_MemberOut_: {
             /** Items */
-            items: components["schemas"]["MembershipOut"][];
-            /** Next Cursor */
-            next_cursor?: string | null;
-        };
-        /** Page[OrgOut] */
-        Page_OrgOut_: {
-            /** Items */
-            items: components["schemas"]["OrgOut"][];
-            /** Next Cursor */
-            next_cursor?: string | null;
-        };
-        /** Page[ProjectOut] */
-        Page_ProjectOut_: {
-            /** Items */
-            items: components["schemas"]["ProjectOut"][];
+            items: components["schemas"]["MemberOut"][];
             /** Next Cursor */
             next_cursor?: string | null;
         };
@@ -1124,6 +1019,13 @@ export interface components {
         Page_RouteOut_: {
             /** Items */
             items: components["schemas"]["RouteOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
+        /** Page[ServiceAccountOut] */
+        Page_ServiceAccountOut_: {
+            /** Items */
+            items: components["schemas"]["ServiceAccountOut"][];
             /** Next Cursor */
             next_cursor?: string | null;
         };
@@ -1161,93 +1063,6 @@ export interface components {
             items: components["schemas"]["UserOut"][];
             /** Next Cursor */
             next_cursor?: string | null;
-        };
-        /** ProjectCreate */
-        ProjectCreate: {
-            model_access?: components["schemas"]["ModelAccess"] | null;
-            /** Allowed Models */
-            allowed_models?: string[] | null;
-            /** Rpm Limit */
-            rpm_limit?: number | null;
-            /** Tpm Limit */
-            tpm_limit?: number | null;
-            /** Max Parallel */
-            max_parallel?: number | null;
-            /** Budget Nano Usd */
-            budget_nano_usd?: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd?: number | null;
-            /** Name */
-            name: string;
-            /** Org Id */
-            org_id?: string | null;
-            /** Team Id */
-            team_id?: string | null;
-        };
-        /** ProjectOut */
-        ProjectOut: {
-            model_access: components["schemas"]["ModelAccess"];
-            /** Allowed Models */
-            allowed_models: string[];
-            /** Rpm Limit */
-            rpm_limit: number | null;
-            /** Tpm Limit */
-            tpm_limit: number | null;
-            /** Max Parallel */
-            max_parallel: number | null;
-            /** Budget Nano Usd */
-            budget_nano_usd: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd: number | null;
-            /**
-             * Id
-             * Format: uuid
-             */
-            id: string;
-            /**
-             * Org Id
-             * Format: uuid
-             */
-            org_id: string;
-            /**
-             * Team Id
-             * Format: uuid
-             */
-            team_id: string;
-            /** Name */
-            name: string;
-            /**
-             * Created At
-             * Format: date-time
-             */
-            created_at: string;
-            /**
-             * Updated At
-             * Format: date-time
-             */
-            updated_at: string;
-        };
-        /** ProjectUpdate */
-        ProjectUpdate: {
-            model_access?: components["schemas"]["ModelAccess"] | null;
-            /** Allowed Models */
-            allowed_models?: string[] | null;
-            /** Rpm Limit */
-            rpm_limit?: number | null;
-            /** Tpm Limit */
-            tpm_limit?: number | null;
-            /** Max Parallel */
-            max_parallel?: number | null;
-            /** Budget Nano Usd */
-            budget_nano_usd?: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd?: number | null;
-            /** Name */
-            name?: string | null;
-            /** Org Id */
-            org_id?: string | null;
-            /** Team Id */
-            team_id?: string | null;
         };
         /** RollbackCreate */
         RollbackCreate: {
@@ -1314,6 +1129,91 @@ export interface components {
          * @enum {string}
          */
         RoutingStrategy: "weighted" | "least_in_flight" | "lowest_latency";
+        /** ServiceAccountCreate */
+        ServiceAccountCreate: {
+            model_access?: components["schemas"]["ModelAccess"] | null;
+            /** Allowed Models */
+            allowed_models?: string[] | null;
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Max Parallel */
+            max_parallel?: number | null;
+            /** Budget Nano Usd */
+            budget_nano_usd?: number | null;
+            /** Soft Budget Nano Usd */
+            soft_budget_nano_usd?: number | null;
+            /** Name */
+            name: string;
+            /**
+             * Description
+             * @default
+             */
+            description: string;
+        };
+        /** ServiceAccountOut */
+        ServiceAccountOut: {
+            model_access: components["schemas"]["ModelAccess"];
+            /** Allowed Models */
+            allowed_models: string[];
+            /** Rpm Limit */
+            rpm_limit: number | null;
+            /** Tpm Limit */
+            tpm_limit: number | null;
+            /** Max Parallel */
+            max_parallel: number | null;
+            /** Budget Nano Usd */
+            budget_nano_usd: number | null;
+            /** Soft Budget Nano Usd */
+            soft_budget_nano_usd: number | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Team Id
+             * Format: uuid
+             */
+            team_id: string;
+            /** Name */
+            name: string;
+            /** Description */
+            description: string;
+            /** Created By User Id */
+            created_by_user_id: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** ServiceAccountUpdate */
+        ServiceAccountUpdate: {
+            model_access?: components["schemas"]["ModelAccess"] | null;
+            /** Allowed Models */
+            allowed_models?: string[] | null;
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Max Parallel */
+            max_parallel?: number | null;
+            /** Budget Nano Usd */
+            budget_nano_usd?: number | null;
+            /** Soft Budget Nano Usd */
+            soft_budget_nano_usd?: number | null;
+            /** Name */
+            name?: string | null;
+            /** Description */
+            description?: string | null;
+        };
         /**
          * StreamUsageMode
          * @enum {string}
@@ -1336,8 +1236,6 @@ export interface components {
             soft_budget_nano_usd?: number | null;
             /** Name */
             name: string;
-            /** Org Id */
-            org_id?: string | null;
         };
         /** TeamOut */
         TeamOut: {
@@ -1359,11 +1257,6 @@ export interface components {
              * Format: uuid
              */
             id: string;
-            /**
-             * Org Id
-             * Format: uuid
-             */
-            org_id: string;
             /** Name */
             name: string;
             /**
@@ -1377,6 +1270,11 @@ export interface components {
              */
             updated_at: string;
         };
+        /**
+         * TeamRole
+         * @enum {string}
+         */
+        TeamRole: "admin" | "member";
         /** TeamUpdate */
         TeamUpdate: {
             model_access?: components["schemas"]["ModelAccess"] | null;
@@ -1394,8 +1292,6 @@ export interface components {
             soft_budget_nano_usd?: number | null;
             /** Name */
             name?: string | null;
-            /** Org Id */
-            org_id?: string | null;
         };
         /** TokenCreate */
         TokenCreate: {
@@ -1502,12 +1398,11 @@ export interface components {
             date?: string | null;
             /** Model */
             model?: string | null;
-            /** Org Id */
-            org_id?: string | null;
             /** Team Id */
             team_id?: string | null;
-            /** Project Id */
-            project_id?: string | null;
+            owner_kind?: components["schemas"]["KeyOwnerKind"] | null;
+            /** Owner Id */
+            owner_id?: string | null;
             /** Key Id */
             key_id?: string | null;
             /** Requests */
@@ -1589,346 +1484,6 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    listOrgs: {
-        parameters: {
-            query?: {
-                limit?: number;
-                cursor?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Page_OrgOut_"];
-                };
-            };
-            /** @description Missing or invalid credentials */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not allowed */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    createOrg: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["OrgCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OrgOut"];
-                };
-            };
-            /** @description Missing or invalid credentials */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not allowed */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    getOrg: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                org_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OrgOut"];
-                };
-            };
-            /** @description Missing or invalid credentials */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not allowed */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    deleteOrg: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                org_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Missing or invalid credentials */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not allowed */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    updateOrg: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                org_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["OrgUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OrgOut"];
-                };
-            };
-            /** @description Missing or invalid credentials */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not allowed */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
     listTeams: {
         parameters: {
             query?: {
@@ -1936,9 +1491,7 @@ export interface operations {
                 cursor?: string | null;
             };
             header?: never;
-            path: {
-                org_id: string;
-            };
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
@@ -2003,9 +1556,7 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path: {
-                org_id: string;
-            };
+            path?: never;
             cookie?: never;
         };
         requestBody: {
@@ -2273,7 +1824,7 @@ export interface operations {
             };
         };
     };
-    listProjects: {
+    listMembers: {
         parameters: {
             query?: {
                 limit?: number;
@@ -2293,7 +1844,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Page_ProjectOut_"];
+                    "application/json": components["schemas"]["Page_MemberOut_"];
                 };
             };
             /** @description Missing or invalid credentials */
@@ -2343,87 +1894,21 @@ export interface operations {
             };
         };
     };
-    createProject: {
+    putMember: {
         parameters: {
             query?: never;
             header?: never;
             path: {
                 team_id: string;
+                user_id: string;
             };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ProjectCreate"];
+                "application/json": components["schemas"]["MemberUpsert"];
             };
         };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProjectOut"];
-                };
-            };
-            /** @description Missing or invalid credentials */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not allowed */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    getProject: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                project_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -2431,7 +1916,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProjectOut"];
+                    "application/json": components["schemas"]["MemberOut"];
+                };
+            };
+            /** @description Member created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemberOut"];
                 };
             };
             /** @description Missing or invalid credentials */
@@ -2481,12 +1975,13 @@ export interface operations {
             };
         };
     };
-    deleteProject: {
+    deleteMember: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                project_id: string;
+                team_id: string;
+                user_id: string;
             };
             cookie?: never;
         };
@@ -2546,18 +2041,19 @@ export interface operations {
             };
         };
     };
-    updateProject: {
+    updateMember: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                project_id: string;
+                team_id: string;
+                user_id: string;
             };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ProjectUpdate"];
+                "application/json": components["schemas"]["MemberUpdate"];
             };
         };
         responses: {
@@ -2567,7 +2063,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ProjectOut"];
+                    "application/json": components["schemas"]["MemberOut"];
                 };
             };
             /** @description Missing or invalid credentials */
@@ -2617,7 +2113,7 @@ export interface operations {
             };
         };
     };
-    listKeys: {
+    listServiceAccounts: {
         parameters: {
             query?: {
                 limit?: number;
@@ -2625,7 +2121,355 @@ export interface operations {
             };
             header?: never;
             path: {
-                project_id: string;
+                team_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_ServiceAccountOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    createServiceAccount: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                team_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ServiceAccountCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServiceAccountOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getServiceAccount: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServiceAccountOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    deleteServiceAccount: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    updateServiceAccount: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ServiceAccountUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServiceAccountOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listTeamKeys: {
+        parameters: {
+            query?: {
+                owner_kind?: components["schemas"]["KeyOwnerKind"] | null;
+                user_id?: string | null;
+                service_account_id?: string | null;
+                lifecycle?: components["schemas"]["KeyLifecycle"] | null;
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path: {
+                team_id: string;
             };
             cookie?: never;
         };
@@ -2692,7 +2536,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                project_id: string;
+                team_id: string;
             };
             cookie?: never;
         };
@@ -2914,6 +2758,141 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["KeyOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    rotateKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                key_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KeyCreated"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listOwnKeys: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_KeyOut_"];
                 };
             };
             /** @description Missing or invalid credentials */
@@ -4663,291 +4642,15 @@ export interface operations {
             };
         };
     };
-    listMemberships: {
-        parameters: {
-            query?: {
-                org_id?: string | null;
-                team_id?: string | null;
-                user_id?: string | null;
-                limit?: number;
-                cursor?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Page_MembershipOut_"];
-                };
-            };
-            /** @description Missing or invalid credentials */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not allowed */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    createMembership: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["MembershipCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MembershipOut"];
-                };
-            };
-            /** @description Missing or invalid credentials */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not allowed */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    deleteMembership: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                membership_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Missing or invalid credentials */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not allowed */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    updateMembership: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                membership_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["MembershipUpdate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MembershipOut"];
-                };
-            };
-            /** @description Missing or invalid credentials */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not allowed */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
     getUsage: {
         parameters: {
             query?: {
                 from?: string | null;
                 to?: string | null;
                 group_by?: string | null;
-                org_id?: string | null;
                 team_id?: string | null;
-                project_id?: string | null;
+                user_id?: string | null;
+                service_account_id?: string | null;
                 key_id?: string | null;
                 model?: string | null;
                 limit?: number;
@@ -5018,7 +4721,6 @@ export interface operations {
     listAudit: {
         parameters: {
             query?: {
-                org_id?: string | null;
                 team_id?: string | null;
                 actor_id?: string | null;
                 action?: string | null;

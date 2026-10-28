@@ -9,9 +9,8 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent / "e2e"))
 sys.path.insert(0, str(HERE))
 
-from stack import GATEWAY_BIN, MOCK_BIN, Proc, Stack  # noqa: E402
-
 from loadlib import RESULTS  # noqa: E402
+from stack import GATEWAY_BIN, MOCK_BIN, Proc, Stack  # noqa: E402
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)

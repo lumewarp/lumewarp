@@ -412,9 +412,7 @@ mod tests {
     fn caller(scopes: &[(&str, RateLimit)]) -> Caller {
         Caller::Key(Arc::new(KeyContext {
             key_id: "k".into(),
-            org_id: "".into(),
             team_id: "".into(),
-            project_id: "".into(),
             status: KeyStatus::Active,
             expires_at_ms: 0,
             allow_all_models: true,

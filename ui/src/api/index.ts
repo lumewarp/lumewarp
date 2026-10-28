@@ -6,18 +6,17 @@ import type { components, paths } from "./schema";
 export { ApiError } from "./errors";
 
 export type Schemas = components["schemas"];
-export type Org = Schemas["OrgOut"];
 export type Team = Schemas["TeamOut"];
-export type Project = Schemas["ProjectOut"];
 export type Key = Schemas["KeyOut"];
+export type Member = Schemas["MemberOut"];
+export type ServiceAccount = Schemas["ServiceAccountOut"];
 export type Upstream = Schemas["UpstreamOut"];
 export type Deployment = Schemas["DeploymentOut"];
 export type Route = Schemas["RouteOut"];
 export type User = Schemas["UserOut"];
-export type Membership = Schemas["MembershipOut"];
 export type Me = Schemas["MeOut"];
 export type ModelAccess = Schemas["ModelAccess"];
-export type PolicyOut = Pick<Org, "model_access" | "allowed_models" | "rpm_limit" | "tpm_limit" | "max_parallel" | "budget_nano_usd" | "soft_budget_nano_usd">;
+export type PolicyOut = Pick<Team, "model_access" | "allowed_models" | "rpm_limit" | "tpm_limit" | "max_parallel" | "budget_nano_usd" | "soft_budget_nano_usd">;
 
 export const client = createClient<paths>({ baseUrl: "" });
 
@@ -63,25 +62,35 @@ const q = (cursor: string | undefined) => ({ limit: 200, cursor });
 export const api = {
   me: () => unwrap(client.GET("/api/v1/users/me")),
 
-  orgs: () => listAll((c) => unwrap(client.GET("/api/v1/orgs", { params: { query: q(c) } }))),
-  createOrg: (body: Schemas["OrgCreate"]) => unwrap(client.POST("/api/v1/orgs", { body })),
-  updateOrg: (id: string, body: Schemas["OrgUpdate"]) => unwrap(client.PATCH("/api/v1/orgs/{org_id}", { params: { path: { org_id: id } }, body })),
-  deleteOrg: (id: string) => unwrap(client.DELETE("/api/v1/orgs/{org_id}", { params: { path: { org_id: id } } })),
-
-  teams: (orgId: string) => listAll((c) => unwrap(client.GET("/api/v1/orgs/{org_id}/teams", { params: { path: { org_id: orgId }, query: q(c) } }))),
-  createTeam: (orgId: string, body: Schemas["TeamCreate"]) => unwrap(client.POST("/api/v1/orgs/{org_id}/teams", { params: { path: { org_id: orgId } }, body })),
+  teams: () => listAll((c) => unwrap(client.GET("/api/v1/teams", { params: { query: q(c) } }))),
+  team: (id: string) => unwrap(client.GET("/api/v1/teams/{team_id}", { params: { path: { team_id: id } } })),
+  createTeam: (body: Schemas["TeamCreate"]) => unwrap(client.POST("/api/v1/teams", { body })),
   updateTeam: (id: string, body: Schemas["TeamUpdate"]) => unwrap(client.PATCH("/api/v1/teams/{team_id}", { params: { path: { team_id: id } }, body })),
   deleteTeam: (id: string) => unwrap(client.DELETE("/api/v1/teams/{team_id}", { params: { path: { team_id: id } } })),
 
-  projects: (teamId: string) => listAll((c) => unwrap(client.GET("/api/v1/teams/{team_id}/projects", { params: { path: { team_id: teamId }, query: q(c) } }))),
-  createProject: (teamId: string, body: Schemas["ProjectCreate"]) => unwrap(client.POST("/api/v1/teams/{team_id}/projects", { params: { path: { team_id: teamId } }, body })),
-  updateProject: (id: string, body: Schemas["ProjectUpdate"]) => unwrap(client.PATCH("/api/v1/projects/{project_id}", { params: { path: { project_id: id } }, body })),
-  deleteProject: (id: string) => unwrap(client.DELETE("/api/v1/projects/{project_id}", { params: { path: { project_id: id } } })),
+  members: (teamId: string) => listAll((c) => unwrap(client.GET("/api/v1/teams/{team_id}/members", { params: { path: { team_id: teamId }, query: q(c) } }))),
+  putMember: (teamId: string, userId: string, body: Schemas["MemberUpsert"]) =>
+    unwrap(client.PUT("/api/v1/teams/{team_id}/members/{user_id}", { params: { path: { team_id: teamId, user_id: userId } }, body })),
+  updateMember: (teamId: string, userId: string, body: Schemas["MemberUpdate"]) =>
+    unwrap(client.PATCH("/api/v1/teams/{team_id}/members/{user_id}", { params: { path: { team_id: teamId, user_id: userId } }, body })),
+  deleteMember: (teamId: string, userId: string) =>
+    unwrap(client.DELETE("/api/v1/teams/{team_id}/members/{user_id}", { params: { path: { team_id: teamId, user_id: userId } } })),
 
-  keys: (projectId: string) => listAll((c) => unwrap(client.GET("/api/v1/projects/{project_id}/keys", { params: { path: { project_id: projectId }, query: q(c) } }))),
-  createKey: (projectId: string, body: Schemas["KeyCreate"]) => unwrap(client.POST("/api/v1/projects/{project_id}/keys", { params: { path: { project_id: projectId } }, body })),
+  serviceAccounts: (teamId: string) => listAll((c) => unwrap(client.GET("/api/v1/teams/{team_id}/service-accounts", { params: { path: { team_id: teamId }, query: q(c) } }))),
+  createServiceAccount: (teamId: string, body: Schemas["ServiceAccountCreate"]) =>
+    unwrap(client.POST("/api/v1/teams/{team_id}/service-accounts", { params: { path: { team_id: teamId } }, body })),
+  updateServiceAccount: (id: string, body: Schemas["ServiceAccountUpdate"]) =>
+    unwrap(client.PATCH("/api/v1/service-accounts/{account_id}", { params: { path: { account_id: id } }, body })),
+  deleteServiceAccount: (id: string) =>
+    unwrap(client.DELETE("/api/v1/service-accounts/{account_id}", { params: { path: { account_id: id } } })),
+
+  teamKeys: (teamId: string) => listAll((c) => unwrap(client.GET("/api/v1/teams/{team_id}/keys", { params: { path: { team_id: teamId }, query: q(c) } }))),
+  createKey: (teamId: string, body: Schemas["KeyCreate"]) =>
+    unwrap(client.POST("/api/v1/teams/{team_id}/keys", { params: { path: { team_id: teamId } }, body })),
+  ownKeys: () => listAll((c) => unwrap(client.GET("/api/v1/users/me/keys", { params: { query: q(c) } }))),
   updateKey: (id: string, body: Schemas["KeyUpdate"]) => unwrap(client.PATCH("/api/v1/keys/{key_id}", { params: { path: { key_id: id } }, body })),
   revokeKey: (id: string) => unwrap(client.POST("/api/v1/keys/{key_id}/revoke", { params: { path: { key_id: id } } })),
+  rotateKey: (id: string) => unwrap(client.POST("/api/v1/keys/{key_id}/rotate", { params: { path: { key_id: id } } })),
 
   upstreams: () => listAll((c) => unwrap(client.GET("/api/v1/upstreams", { params: { query: q(c) } }))),
   createUpstream: (body: Schemas["UpstreamCreate"]) => unwrap(client.POST("/api/v1/upstreams", { body })),
@@ -99,22 +108,19 @@ export const api = {
   deleteRoute: (id: string) => unwrap(client.DELETE("/api/v1/routes/{route_id}", { params: { path: { route_id: id } } })),
 
   users: () => listAll((c) => unwrap(client.GET("/api/v1/users", { params: { query: q(c) } }))),
+  usersPage: (cursor?: string) =>
+    unwrap(client.GET("/api/v1/users", { params: { query: { limit: 50, cursor } } })),
   createUser: (body: Schemas["UserCreate"]) => unwrap(client.POST("/api/v1/users", { body })),
   updateUser: (id: string, body: Schemas["UserUpdate"]) => unwrap(client.PATCH("/api/v1/users/{user_id}", { params: { path: { user_id: id } }, body })),
   deleteUser: (id: string) => unwrap(client.DELETE("/api/v1/users/{user_id}", { params: { path: { user_id: id } } })),
-
-  memberships: () => listAll((c) => unwrap(client.GET("/api/v1/memberships", { params: { query: q(c) } }))),
-  createMembership: (body: Schemas["MembershipCreate"]) => unwrap(client.POST("/api/v1/memberships", { body })),
-  updateMembership: (id: string, role: string) => unwrap(client.PATCH("/api/v1/memberships/{membership_id}", { params: { path: { membership_id: id } }, body: { role } })),
-  deleteMembership: (id: string) => unwrap(client.DELETE("/api/v1/memberships/{membership_id}", { params: { path: { membership_id: id } } })),
 
   tokens: () => listAll((c) => unwrap(client.GET("/api/v1/users/me/tokens", { params: { query: q(c) } }))),
   createToken: (body: Schemas["TokenCreate"]) => unwrap(client.POST("/api/v1/users/me/tokens", { body })),
   revokeToken: (id: string) => unwrap(client.POST("/api/v1/users/me/tokens/{token_id}/revoke", { params: { path: { token_id: id } } })),
 
-  usage: (query: { from?: string; to?: string; group_by?: string; org_id?: string; team_id?: string; project_id?: string; key_id?: string; model?: string }) =>
+  usage: (query: { from?: string; to?: string; group_by?: string; team_id?: string; user_id?: string; service_account_id?: string; key_id?: string; model?: string }) =>
     listAll((c) => unwrap(client.GET("/api/v1/usage", { params: { query: { ...query, ...q(c) } } }))),
-  audit: (query: { org_id?: string; team_id?: string; action?: string; resource_type?: string; from?: string; to?: string } = {}) =>
+  audit: (query: { team_id?: string; actor_id?: string; action?: string; resource_type?: string; resource_id?: string; from?: string; to?: string } = {}) =>
     listAll((c) => unwrap(client.GET("/api/v1/audit", { params: { query: { ...query, ...q(c) } } }))),
 
   gateways: () => listAll((c) => unwrap(client.GET("/api/v1/gateways", { params: { query: q(c) } }))),

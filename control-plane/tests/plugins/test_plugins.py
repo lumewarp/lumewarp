@@ -58,7 +58,9 @@ async def test_example_router_applied_in_compile(example_installed, factory) -> 
         )
     async with factory() as s:
         # router_plugins=None -> discovered via entry points.
-        c = await compile_scope(s, SCOPE, now=datetime(2026, 10, 1, tzinfo=UTC))
+        c = await compile_scope(
+            s, SCOPE, now=datetime(2026, 10, 1, tzinfo=UTC), require_local_membership=True
+        )
     weights = {d.name: d.weight for d in c.snapshot.deployments}
     assert weights == {"llama-cheap": 100, "llama-pricey": 1, "llama-free?": 1}
 
@@ -69,7 +71,7 @@ async def test_example_notifier_send(example_installed) -> None:
         kind="soft",
         scope_type=ScopeType.TEAM,
         scope_id=uuid.uuid4(),
-        org_id=uuid.uuid4(),
+        team_id=uuid.uuid4(),
         window_start=datetime(2026, 10, 1, tzinfo=UTC),
         spent_nano_usd=80,
         budget_nano_usd=100,

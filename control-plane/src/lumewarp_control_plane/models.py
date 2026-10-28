@@ -6,8 +6,10 @@ Conventions:
 - Enums are stored as VARCHAR with a CHECK constraint (easy to extend in a migration).
 - Secrets are never stored: API keys, PATs and gateway tokens are kept as sha256 digests
   (32 bytes) plus a short non-secret display prefix. See security.py for why sha256.
-- The installation serves one config scope (`scopes` row); source tables (orgs, routing,
+- The installation serves one config scope (`scopes` row); source tables (teams, routing,
   users, ...) are installation-wide and compile into that scope's snapshots.
+- Hierarchy: team -> members (users) and service accounts -> keys. Every key belongs to
+  one team and is owned by a member of it or by one of its service accounts.
 """
 
 import enum
@@ -87,8 +89,8 @@ class TimestampMixin:
 class ModelAccess(enum.StrEnum):
     """Per-level model allowlist mode (O1 M1).
 
-    INHERIT: take the parent's effective set unchanged (not allowed on orgs).
-    ALL: no restriction at this level (effective set = parent's; universal on an org).
+    INHERIT: take the team's effective set unchanged (not allowed on teams).
+    ALL: no restriction at this level (effective set = the team's; universal on a team).
     LIST: exactly `allowed_models`, intersected with the parent; an empty list is deny-all.
     Resolve INHERIT first; a key whose effective set is still universal gets
     allow_all_models (see compiler.compile_scope).
@@ -109,24 +111,24 @@ class KeyLifecycle(enum.StrEnum):
     REVOKED = "revoked"
 
 
-class OrgRole(enum.StrEnum):
-    OWNER = "owner"
-    ADMIN = "admin"
-
-
 class TeamRole(enum.StrEnum):
     ADMIN = "admin"
     MEMBER = "member"
-    VIEWER = "viewer"
+
+
+class KeyOwnerKind(enum.StrEnum):
+    USER = "user"
+    SERVICE_ACCOUNT = "service_account"
 
 
 class ScopeType(enum.StrEnum):
-    """Hierarchy level a budget/total/limit belongs to."""
+    """Level a budget/total/limit belongs to: the team, or the owner of a key (a team
+    member, see `member_scope_id`, or a service account).
+    """
 
-    ORG = "org"
     TEAM = "team"
-    PROJECT = "project"
-    KEY = "key"
+    MEMBER = "member"
+    SERVICE_ACCOUNT = "service_account"
 
 
 class UpstreamKind(enum.StrEnum):
@@ -184,14 +186,15 @@ class ActorType(enum.StrEnum):
 
 
 class PolicyMixin:
-    """Per-level policy carried by orgs, teams, projects and keys.
+    """Policy carried by teams and by key owners (team members, service accounts).
 
-    Children may only narrow parents (enforced by the API, 422 otherwise):
-    allowlist subset of parent, limits <= parent, budgets <= parent.
+    Two levels only; an owner may only narrow its team (enforced by the API, 422
+    otherwise): allowlist subset of the team's, limits <= the team's, budget <= the team's.
+    Keys carry no policy of their own.
 
     - Model access: see `ModelAccess`; `allowed_models` must be empty unless mode is LIST.
     - Rate limits: NULL = no limit at this level. Each set level becomes one shared
-      `RateLimitScope` ("<level>:<id>") in the compiled snapshot.
+      `RateLimitScope` ("team:<id>", "member:<scope id>", "sa:<id>") in the snapshot.
     - Budget: monthly (UTC calendar) hard limit and soft (notify) threshold in nano-USD,
       NULL = none. Spend lives in `usage_totals`, never on the entity row.
     """
@@ -199,7 +202,7 @@ class PolicyMixin:
     @declared_attr
     @classmethod
     def model_access(cls) -> Mapped[ModelAccess]:
-        default = ModelAccess.ALL if cls.__name__ == "Org" else ModelAccess.INHERIT
+        default = ModelAccess.ALL if cls.__name__ == "Team" else ModelAccess.INHERIT
         return mapped_column(
             _enum(ModelAccess, "model_access"),
             nullable=False,
@@ -289,8 +292,16 @@ class PersonalAccessToken(Base):
 # --------------------------------------------------------------------------- hierarchy
 
 
-class Org(PolicyMixin, TimestampMixin, Base):
-    __tablename__ = "orgs"
+def member_scope_id(team_id: uuid.UUID, user_id: uuid.UUID) -> uuid.UUID:
+    """Stable id of one user's membership in one team, for `usage_totals` and the
+    "member:<id>" rate-limit scope. Derived rather than stored so that removing and
+    re-adding a member keeps the same spend and limiter.
+    """
+    return uuid.uuid5(team_id, str(user_id))
+
+
+class Team(PolicyMixin, TimestampMixin, Base):
+    __tablename__ = "teams"
     __table_args__ = (
         *PolicyMixin.policy_constraints(),
         CheckConstraint("model_access <> 'inherit'", name="no_inherit"),
@@ -300,69 +311,94 @@ class Org(PolicyMixin, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
 
 
-class Team(PolicyMixin, TimestampMixin, Base):
-    __tablename__ = "teams"
+class TeamMember(PolicyMixin, TimestampMixin, Base):
+    """A user in a team, with a role and the member's own (narrowing) policy. The
+    superuser flag lives on `users` (installation-level, not team-level).
+    """
+
+    __tablename__ = "team_members"
     __table_args__ = (
         *PolicyMixin.policy_constraints(),
-        UniqueConstraint("org_id", "name"),
-        # Target for composite FKs that pin children to the same org.
-        UniqueConstraint("id", "org_id"),
+        PrimaryKeyConstraint("team_id", "user_id"),
+        Index(None, "user_id"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    org_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("orgs.id", ondelete="RESTRICT"), nullable=False
+    team_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
     )
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[TeamRole] = mapped_column(_enum(TeamRole, "team_role"), nullable=False)
 
 
-class Project(PolicyMixin, TimestampMixin, Base):
-    __tablename__ = "projects"
+class ServiceAccount(PolicyMixin, TimestampMixin, Base):
+    """A non-human key owner that belongs to a team; managed by the team's admins and
+    unaffected by people joining or leaving.
+    """
+
+    __tablename__ = "service_accounts"
     __table_args__ = (
         *PolicyMixin.policy_constraints(),
-        ForeignKeyConstraint(
-            ["team_id", "org_id"], ["teams.id", "teams.org_id"], ondelete="RESTRICT"
-        ),
         UniqueConstraint("team_id", "name"),
-        UniqueConstraint("id", "team_id", "org_id"),
-        Index(None, "org_id"),
+        # Target for the composite FK that pins a key to its owner's team.
+        UniqueConstraint("id", "team_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    org_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
-    team_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    team_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("teams.id", ondelete="RESTRICT"), nullable=False
+    )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
 
 
-class ApiKey(PolicyMixin, TimestampMixin, Base):
+class ApiKey(TimestampMixin, Base):
     """Virtual API key (`lw-...`). `id` is the public key_id used in snapshots and usage.
 
-    Effective gateway status = REVOKED/SUSPENDED from `lifecycle`, else expired, else
-    BUDGET_EXCEEDED if any of key/project/team/org is over budget in the current window,
-    else ACTIVE. Keys are revoked, not deleted, so usage history keeps resolving.
+    Owned by a user (who must be a member of `team_id`) or by a service account of
+    `team_id`. Effective gateway status = REVOKED/SUSPENDED from `lifecycle`, else
+    expired, else BUDGET_EXCEEDED if the team or the owner is over budget in the current
+    window, else ACTIVE. Keys are revoked, not deleted, so usage history keeps resolving.
     """
 
     __tablename__ = "api_keys"
     __table_args__ = (
-        *PolicyMixin.policy_constraints(),
         _hash32("key_hash"),
         ForeignKeyConstraint(
-            ["project_id", "team_id", "org_id"],
-            ["projects.id", "projects.team_id", "projects.org_id"],
+            ["service_account_id", "team_id"],
+            ["service_accounts.id", "service_accounts.team_id"],
             ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "(owner_kind = 'user' AND user_id IS NOT NULL AND service_account_id IS NULL)"
+            " OR (owner_kind = 'service_account' AND service_account_id IS NOT NULL"
+            " AND user_id IS NULL)",
+            name="owner_matches_kind",
         ),
         CheckConstraint(
             "(lifecycle = 'revoked') = (revoked_at IS NOT NULL)", name="revoked_at_matches"
         ),
-        Index(None, "project_id"),
+        CheckConstraint(
+            "suspended_reason IS NULL OR lifecycle = 'suspended'", name="reason_when_suspended"
+        ),
         Index(None, "team_id"),
-        Index(None, "org_id"),
+        Index(None, "user_id"),
+        Index(None, "service_account_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    org_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
-    team_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
-    project_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    team_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("teams.id", ondelete="RESTRICT"), nullable=False
+    )
+    owner_kind: Mapped[KeyOwnerKind] = mapped_column(
+        _enum(KeyOwnerKind, "key_owner_kind"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    service_account_id: Mapped[uuid.UUID | None] = mapped_column()
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     key_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
     display_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -372,57 +408,29 @@ class ApiKey(PolicyMixin, TimestampMixin, Base):
         default=KeyLifecycle.ACTIVE,
         server_default=KeyLifecycle.ACTIVE.value,
     )
+    # Why a key was suspended automatically (e.g. "owner_removed"); NULL when a person
+    # suspended it.
+    suspended_reason: Mapped[str | None] = mapped_column(String(64))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
 
+    @property
+    def owner_id(self) -> uuid.UUID:
+        owner = self.user_id if self.owner_kind is KeyOwnerKind.USER else self.service_account_id
+        assert owner is not None
+        return owner
 
-class Membership(TimestampMixin, Base):
-    """Role grant. Org-level (team_id NULL): owner/admin. Team-level: admin/member/viewer.
-
-    The superuser flag lives on `users`, not here (installation-level, not org-level).
-    """
-
-    __tablename__ = "memberships"
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ["team_id", "org_id"], ["teams.id", "teams.org_id"], ondelete="CASCADE"
-        ),
-        CheckConstraint(
-            "(team_id IS NULL AND role IN ('owner', 'admin'))"
-            " OR (team_id IS NOT NULL AND role IN ('admin', 'member', 'viewer'))",
-            name="role_level",
-        ),
-        Index(
-            "uq_memberships_org_role",
-            "user_id",
-            "org_id",
-            unique=True,
-            postgresql_where=text("team_id IS NULL"),
-        ),
-        Index(
-            "uq_memberships_team_role",
-            "user_id",
-            "team_id",
-            unique=True,
-            postgresql_where=text("team_id IS NOT NULL"),
-        ),
-        Index(None, "org_id"),
-        Index(None, "team_id"),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
-    org_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
-    )
-    team_id: Mapped[uuid.UUID | None] = mapped_column()
-    # OrgRole or TeamRole value; the CHECK above ties it to the level.
-    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    @property
+    def owner_scope(self) -> tuple[ScopeType, uuid.UUID]:
+        """The owner's `usage_totals` / rate-limit level and id."""
+        if self.owner_kind is KeyOwnerKind.USER:
+            assert self.user_id is not None
+            return ScopeType.MEMBER, member_scope_id(self.team_id, self.user_id)
+        assert self.service_account_id is not None
+        return ScopeType.SERVICE_ACCOUNT, self.service_account_id
 
 
 # --------------------------------------------------------------------------- routing
@@ -655,9 +663,8 @@ class UsageEvent(Base):
             name="nonneg",
         ),
         Index(None, "ts"),
-        Index("ix_usage_events_org_ts", "org_id", "ts"),
         Index("ix_usage_events_team_ts", "team_id", "ts"),
-        Index("ix_usage_events_project_ts", "project_id", "ts"),
+        Index("ix_usage_events_owner_ts", "owner_id", "ts"),
         Index("ix_usage_events_key_ts", "key_id", "ts"),
     )
 
@@ -670,9 +677,12 @@ class UsageEvent(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     received_at: Mapped[datetime] = _now()
     key_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
-    org_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     team_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
-    project_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    # The key's owner at ingest time (user or service account id).
+    owner_kind: Mapped[KeyOwnerKind] = mapped_column(
+        _enum(KeyOwnerKind, "key_owner_kind"), nullable=False
+    )
+    owner_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     model: Mapped[str] = mapped_column(String(400), nullable=False)
     deployment: Mapped[str] = mapped_column(String(200), nullable=False)
     route: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -693,9 +703,10 @@ class UsageEvent(Base):
 
 
 class UsageTotal(Base):
-    """Aggregated spend per hierarchy level per UTC month (`windows.month_window`).
+    """Aggregated spend per level per UTC month (`windows.month_window`).
 
-    Each new event adds its cost once to the key, project, team and org rows. Blocking is
+    Each new event adds its cost once to the team row and once to the key owner's row
+    (member or service account). Blocking is
     derived (cost_nano_usd >= the level's current budget_nano_usd); `exceeded_at` and
     `soft_notified_at` record when that was first seen, for notifications and audit.
     """
@@ -735,7 +746,6 @@ class AuditLog(Base):
     __tablename__ = "audit_log"
     __table_args__ = (
         Index(None, "ts"),
-        Index("ix_audit_log_org_ts", "org_id", "ts"),
         Index("ix_audit_log_team_ts", "team_id", "ts"),
     )
 
@@ -747,8 +757,7 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String(100), nullable=False)
     resource_type: Mapped[str] = mapped_column(String(64), nullable=False)
     resource_id: Mapped[str | None] = mapped_column(String(200))
-    # Hierarchy the resource belongs to, for scoped reads.
-    org_id: Mapped[uuid.UUID | None] = mapped_column()
+    # Team the resource belongs to, for scoped reads (NULL = installation-wide).
     team_id: Mapped[uuid.UUID | None] = mapped_column()
     details: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
@@ -757,16 +766,16 @@ class AuditLog(Base):
 
 class NotifierChannel(TimestampMixin, Base):
     """A configured notification target. `kind` is "webhook" (built-in) or the entry-point
-    name of a `lumewarp.notifier` plugin. org_id NULL = installation-wide.
+    name of a `lumewarp.notifier` plugin. team_id NULL = installation-wide.
     """
 
     __tablename__ = "notifier_channels"
-    __table_args__ = (Index(None, "org_id"),)
+    __table_args__ = (Index(None, "team_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
     kind: Mapped[str] = mapped_column(String(100), nullable=False)
-    org_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"))
+    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"))
     config: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )

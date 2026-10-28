@@ -1,21 +1,20 @@
 import { createRootRoute, createRoute, createRouter, Outlet, redirect } from "@tanstack/react-router";
 import { getToken } from "./auth";
 import { Layout } from "./components/Layout";
-import { Access } from "./pages/Access";
 import { Audit } from "./pages/Audit";
 import { Config } from "./pages/Config";
 import { Deployments } from "./pages/Deployments";
 import { Gateways } from "./pages/Gateways";
 import { Keys } from "./pages/Keys";
 import { Login } from "./pages/Login";
-import { Orgs } from "./pages/Orgs";
 import { Overview } from "./pages/Overview";
-import { Projects } from "./pages/Projects";
 import { Routes } from "./pages/Routes";
 import { Settings } from "./pages/Settings";
+import { TeamDetail } from "./pages/TeamDetail";
 import { Teams } from "./pages/Teams";
 import { Upstreams } from "./pages/Upstreams";
 import { Usage } from "./pages/Usage";
+import { Users } from "./pages/Users";
 
 const rootRoute = createRootRoute({ component: Outlet });
 
@@ -38,21 +37,25 @@ const appRoute = createRoute({
 });
 
 const page = <P extends string>(path: P, component: () => React.ReactNode) => createRoute({ getParentRoute: () => appRoute, path, component });
+const teamDetailRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/teams/$teamId",
+  component: TeamDetail,
+});
 
 const routeTree = rootRoute.addChildren([
   loginRoute,
   appRoute.addChildren([
     page("/", Overview),
-    page("/orgs", Orgs),
     page("/teams", Teams),
-    page("/projects", Projects),
+    teamDetailRoute,
+    page("/users", Users),
     page("/keys", Keys),
     page("/routes", Routes),
     page("/deployments", Deployments),
     page("/upstreams", Upstreams),
     page("/usage", Usage),
     page("/audit", Audit),
-    page("/access", Access),
     page("/gateways", Gateways),
     page("/config", Config),
     page("/settings", Settings),

@@ -2,13 +2,14 @@ import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from lumewarp_control_plane import migrate
 from lumewarp_control_plane.models import Base
+from tests import conftest as fixtures
 from tests.conftest import (
     SERVER_URL,
-    TEST_DB_PREFIX,
     create_database,
     drop_database,
     migrated_database,
@@ -71,37 +72,48 @@ async def test_enum_check_constraints_exist(engine) -> None:
         "ck_api_keys_key_lifecycle",
         "ck_audit_log_actor_type",
         "ck_usage_events_usage_state",
-        "ck_orgs_model_access",
-        "ck_orgs_no_inherit",
+        "ck_teams_model_access",
+        "ck_teams_no_inherit",
+        "ck_team_members_team_role",
+        "ck_service_accounts_model_access",
+        "ck_api_keys_owner_matches_kind",
         "ck_config_versions_compaction",
     ):
         assert name in names
 
 
-async def _test_databases() -> set[str]:
+async def _database_exists(url: str) -> bool:
     engine = create_async_engine(SERVER_URL)
     try:
         async with engine.connect() as conn:
             rows = await conn.execute(
-                text("SELECT datname FROM pg_database WHERE datname LIKE :p"),
-                {"p": f"{TEST_DB_PREFIX}%"},
+                text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                {"name": make_url(url).database},
             )
-            return {r[0] for r in rows}
+            return rows.first() is not None
     finally:
         await engine.dispose()
 
 
 async def test_fixture_drops_database_when_migration_fails(monkeypatch) -> None:
-    before = await _test_databases()
+    created = []
+
+    async def capture_database() -> str:
+        url = await create_database()
+        created.append(url)
+        return url
 
     async def boom(*_args, **_kwargs) -> None:
+        assert await _database_exists(created[0])
         raise RuntimeError("migration failed")
 
+    monkeypatch.setattr(fixtures, "create_database", capture_database)
     monkeypatch.setattr(migrate, "upgrade", boom)
     with pytest.raises(RuntimeError, match="migration failed"):
         async with migrated_database():
             pass
-    assert await _test_databases() == before
+    assert len(created) == 1
+    assert not await _database_exists(created[0])
 
 
 async def test_drop_database_refuses_non_test_names() -> None:

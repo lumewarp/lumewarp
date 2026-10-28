@@ -276,7 +276,6 @@ rustls with WebPKI roots.
 | --- | --- | --- |
 | `teams[].id` | Required | Unique, stable team id. It is the `team` metric label value, so keep the number of teams bounded. |
 | `teams[].name` | `id` | Display name. |
-| `teams[].org_id` / `teams[].org_name` | `""` | Owning organization; copied to the team's keys. |
 | `teams[].rate_limits` | Absent | Limits shared by **all** keys of the team (scope `team:<id>`); see rate limits below. |
 
 ### Keys
@@ -286,7 +285,6 @@ rustls with WebPKI roots.
 | `keys[].key_id` | Required | Unique, public, non-secret id (appears in usage events, never in metrics). |
 | `keys[].key_sha256` | Required | SHA-256 of the full secret key, 64 lowercase hex characters; unique across all keys including `server.api_keys`. |
 | `keys[].team_id` | `""` | Existing team id, or empty for no team (`team=""` in metrics). |
-| `keys[].project_id` | `""` | Free-form project id for usage attribution. |
 | `keys[].status` | `active` | `active`, `revoked`, `suspended` (401) or `budget_exceeded` (429 `insufficient_quota`). |
 | `keys[].expires_at_unix_ms` | `0` | Expiry in Unix milliseconds; `0` never expires. Expired keys get 401. |
 | `keys[].allow_all_models` | `false` | Allow every route alias, present and future. |
@@ -428,7 +426,7 @@ the whole process, so counters are never reset by a config change.
 | `lumewarp_usage_queue_depth` | Gauge | None; events waiting to be reported. |
 | `lumewarp_usage_capture_total` | Counter | `state` (`unspecified`, `reported`, `missing`, `partial`, `invalid`); metering gaps. |
 | `lumewarp_tokens_total` | Counter | `model`, `team`, `direction` (`input`/`output`) |
-| `lumewarp_spend_total` | Counter | `team`, `project`; USD. |
+| `lumewarp_spend_total` | Counter | `team`; USD. |
 
 The config-stream series move in control-plane mode; `lumewarp_config_info` is
 set only in standalone mode. Usage event counters and queue depth move in

@@ -2,31 +2,30 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { clearToken } from "../auth";
+import type { Me } from "../api";
 import { useCan, useMe } from "../hooks";
 import { useTheme } from "../theme";
 import { Badge } from "./Bits";
 
 const NAV = [
   { to: "/", label: "Overview" },
-  { to: "/orgs", label: "Organizations" },
   { to: "/teams", label: "Teams" },
-  { to: "/projects", label: "Projects" },
-  { to: "/keys", label: "API keys" },
+  { to: "/users", label: "Users", superOnly: true },
+  { to: "/keys", label: "My keys" },
   { to: "/routes", label: "Models / Routes" },
   { to: "/deployments", label: "Deployments" },
   { to: "/upstreams", label: "Upstreams" },
   { to: "/usage", label: "Usage" },
   { to: "/audit", label: "Audit log" },
-  { to: "/access", label: "Users & access", superOnly: true },
   { to: "/gateways", label: "Gateways", superOnly: true },
   { to: "/config", label: "Config versions", superOnly: true },
   { to: "/settings", label: "Settings" },
 ] as const;
 
-const ROLE_RANK = ["owner", "admin", "member", "viewer"];
-function roleLabel(me: { is_superuser: boolean; grants: { role: string }[] }) {
+function roleLabel(me: Me) {
   if (me.is_superuser) return "superuser";
-  return [...me.grants].sort((a, b) => ROLE_RANK.indexOf(a.role) - ROLE_RANK.indexOf(b.role))[0]?.role ?? "no access";
+  if (me.teams.some((team) => team.role === "admin")) return "team admin";
+  return me.teams.length ? "member" : "no team access";
 }
 
 const THEME_LABEL = { system: "Auto", light: "Light", dark: "Dark" } as const;
@@ -64,7 +63,7 @@ export function Layout() {
         </nav>
       </aside>
       <div className="main-col">
-        <header className="topbar">
+        <header className={`topbar ${navOpen ? "nav-open" : ""}`}>
           <button className="btn btn-sm menu-btn" aria-label="Toggle navigation" aria-expanded={navOpen} onClick={() => setNavOpen((o) => !o)}>
             ☰
           </button>

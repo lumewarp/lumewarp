@@ -24,14 +24,15 @@ from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.models import (
     ActorType,
     ApiKey,
-    Org,
-    Project,
     RequestOutcome,
     ScopeType,
+    ServiceAccount,
     Team,
+    TeamMember,
     UsageEvent,
     UsageState,
     UsageTotal,
+    member_scope_id,
 )
 from lumewarp_control_plane.settings import Settings, get_settings
 from lumewarp_control_plane.windows import month_window
@@ -41,15 +42,14 @@ _MAX_BIGINT = 2**63 - 1
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 # asyncpg caps one statement at 32767 bind parameters; 21 columns per event row.
 _INSERT_CHUNK_EVENTS = 1000
-_USAGE_FIELDS = (
+# Fields taken from the wire; the key owner is added from api_keys after validation.
+_EVENT_FIELDS = (
     "request_id",
     "gateway_id",
     "ts",
     "started_at",
     "key_id",
-    "org_id",
     "team_id",
-    "project_id",
     "model",
     "deployment",
     "route",
@@ -64,6 +64,7 @@ _USAGE_FIELDS = (
     "usage_state",
     "outcome",
 )
+_USAGE_FIELDS = (*_EVENT_FIELDS, "owner_kind", "owner_id")
 
 
 class InvalidUsageBatch(ValueError):
@@ -105,9 +106,7 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
         raise InvalidUsageBatch("request_id is required")
     request_id = _uuid(event.request_id, "request_id")
     key_id = _uuid(event.key_id, "key_id")
-    org_id = _uuid(event.org_id, "org_id")
     team_id = _uuid(event.team_id, "team_id")
-    project_id = _uuid(event.project_id, "project_id")
     # A rejected request may never reach routing: authentication runs before the body is
     # read (no model) and policy rejections happen before a deployment is chosen.
     rejected = event.outcome == usage_pb2.REQUEST_OUTCOME_REJECTED
@@ -156,9 +155,7 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
         "ts": _timestamp(event.timestamp_unix_ms, "timestamp_unix_ms"),
         "started_at": _timestamp(event.started_at_unix_ms, "started_at_unix_ms", optional=True),
         "key_id": key_id,
-        "org_id": org_id,
         "team_id": team_id,
-        "project_id": project_id,
         "model": event.model,
         "deployment": event.deployment,
         "route": event.route,
@@ -183,6 +180,7 @@ def _same_event(existing: UsageEvent, values: dict[str, object]) -> bool:
 def _add_totals(
     totals: dict[tuple[ScopeType, uuid.UUID, datetime], list[int]],
     values: dict[str, object],
+    key: ApiKey,
 ) -> None:
     start, _ = month_window(values["ts"])  # type: ignore[arg-type]
     amounts = (
@@ -192,14 +190,8 @@ def _add_totals(
         1,
         int(not bool(values["cost_known"])),
     )
-    for kind, field in (
-        (ScopeType.KEY, "key_id"),
-        (ScopeType.PROJECT, "project_id"),
-        (ScopeType.TEAM, "team_id"),
-        (ScopeType.ORG, "org_id"),
-    ):
-        key = (kind, values[field], start)  # type: ignore[arg-type]
-        bucket = totals.setdefault(key, [0, 0, 0, 0, 0])
+    for kind, scope_id in ((ScopeType.TEAM, key.team_id), key.owner_scope):
+        bucket = totals.setdefault((kind, scope_id, start), [0, 0, 0, 0, 0])
         for i, amount in enumerate(amounts):
             bucket[i] += amount
             if bucket[i] > _MAX_BIGINT:
@@ -209,7 +201,9 @@ def _add_totals(
 async def _validate_key_hierarchy(
     session: AsyncSession, prepared: Sequence[_PreparedEvent]
 ) -> tuple[set[uuid.UUID], dict[uuid.UUID, ApiKey]]:
-    """Return the request ids whose key hierarchy does not match api_keys, and the keys."""
+    """Return the request ids whose key is unknown or in another team, and the keys.
+    Valid events get the key's owner added to their values.
+    """
     key_ids = {item.values["key_id"] for item in prepared}
     if not key_ids:
         return set(), {}
@@ -219,10 +213,11 @@ async def _validate_key_hierarchy(
     for item in prepared:
         values = item.values
         key = by_id.get(values["key_id"])  # type: ignore[arg-type]
-        if key is None or any(
-            getattr(key, name) != values[name] for name in ("org_id", "team_id", "project_id")
-        ):
+        if key is None or key.team_id != values["team_id"]:
             mismatched.add(item.request_id)
+            continue
+        values["owner_kind"] = key.owner_kind
+        values["owner_id"] = key.owner_id
     return mismatched, by_id
 
 
@@ -284,26 +279,38 @@ async def _budget_policy(
     keys: dict[uuid.UUID, ApiKey],
     aggregates: dict[tuple[ScopeType, uuid.UUID, datetime], list[int]],
 ):
-    project_ids = {key.project_id for key in keys.values()}
+    """(hard, soft, team_id) per aggregated scope. A member removed while their events were
+    in flight has no budget left to evaluate; the team's still applies.
+    """
     team_ids = {key.team_id for key in keys.values()}
-    org_ids = {key.org_id for key in keys.values()}
     policies: dict[tuple[ScopeType, uuid.UUID], tuple[int | None, int | None, uuid.UUID]] = {}
-    for model, kind, ids in (
-        (ApiKey, ScopeType.KEY, set(keys)),
-        (Project, ScopeType.PROJECT, project_ids),
-        (Team, ScopeType.TEAM, team_ids),
-        (Org, ScopeType.ORG, org_ids),
-    ):
-        if not ids:
-            continue
-        org_column = model.id if model is Org else model.org_id
-        result = await session.execute(
-            select(model.id, org_column, model.budget_nano_usd, model.soft_budget_nano_usd).where(
-                model.id.in_(ids)
-            )
+    for entity_id, hard, soft in await session.execute(
+        select(Team.id, Team.budget_nano_usd, Team.soft_budget_nano_usd).where(
+            Team.id.in_(team_ids)
         )
-        for entity_id, org_id, hard, soft in result:
-            policies[(kind, entity_id)] = (hard, soft, org_id)
+    ):
+        policies[(ScopeType.TEAM, entity_id)] = (hard, soft, entity_id)
+    for member in await session.scalars(select(TeamMember).where(TeamMember.team_id.in_(team_ids))):
+        policies[(ScopeType.MEMBER, member_scope_id(member.team_id, member.user_id))] = (
+            member.budget_nano_usd,
+            member.soft_budget_nano_usd,
+            member.team_id,
+        )
+    account_ids = {k.service_account_id for k in keys.values() if k.service_account_id}
+    if account_ids:
+        for entity_id, team_id, hard, soft in await session.execute(
+            select(
+                ServiceAccount.id,
+                ServiceAccount.team_id,
+                ServiceAccount.budget_nano_usd,
+                ServiceAccount.soft_budget_nano_usd,
+            ).where(ServiceAccount.id.in_(account_ids))
+        ):
+            policies[(ScopeType.SERVICE_ACCOUNT, entity_id)] = (hard, soft, team_id)
+    for key in keys.values():
+        level, scope_id = key.owner_scope
+        if level is ScopeType.MEMBER:
+            policies.setdefault((level, scope_id), (None, None, key.team_id))
     # Make missing rows a consistency failure rather than silently dropping an aggregate.
     for kind, scope_id, _ in aggregates:
         if (kind, scope_id) not in policies:
@@ -327,7 +334,7 @@ async def _evaluate_budgets(
     current_window = month_window(now)[0]
     hard_current_month_exceeded = False
     for total in aggregate_rows:
-        hard, soft, org_id = policies[(total.scope_type, total.scope_id)]
+        hard, soft, team_id = policies[(total.scope_type, total.scope_id)]
         window_start = total.window_start
         previous_cost = previous_costs[(total.scope_type, total.scope_id, window_start)]
         hard_crossed = (
@@ -355,7 +362,7 @@ async def _evaluate_budgets(
                 action="budget.hard_exceeded",
                 resource_type=total.scope_type.value,
                 resource_id=total.scope_id,
-                org_id=org_id,
+                team_id=team_id,
                 details={
                     "window_start": window_start.isoformat(),
                     "spent_nano_usd": total.cost_nano_usd,
@@ -371,7 +378,7 @@ async def _evaluate_budgets(
                         kind="hard",
                         scope_type=total.scope_type,
                         scope_id=total.scope_id,
-                        org_id=org_id,
+                        team_id=team_id,
                         window_start=window_start,
                         spent_nano_usd=total.cost_nano_usd,
                         budget_nano_usd=hard,
@@ -386,7 +393,7 @@ async def _evaluate_budgets(
                         kind="soft",
                         scope_type=total.scope_type,
                         scope_id=total.scope_id,
-                        org_id=org_id,
+                        team_id=team_id,
                         window_start=window_start,
                         spent_nano_usd=total.cost_nano_usd,
                         budget_nano_usd=soft,
@@ -437,7 +444,8 @@ async def _persist_events(
 
     aggregates: dict[tuple[ScopeType, uuid.UUID, datetime], list[int]] = {}
     for request_id in inserted_ids:
-        _add_totals(aggregates, by_id[request_id].values)
+        values = by_id[request_id].values
+        _add_totals(aggregates, values, keys[values["key_id"]])  # type: ignore[index]
     if not aggregates:
         return accepted
 
@@ -490,7 +498,7 @@ async def ingest(
         previous = by_id.get(prepared.request_id)
         if previous is None:
             by_id[prepared.request_id] = prepared
-        elif any(previous.values[k] != prepared.values[k] for k in _USAGE_FIELDS):
+        elif any(previous.values[k] != prepared.values[k] for k in _EVENT_FIELDS):
             # The first occurrence is kept; the conflicting copy is dropped.
             rejected["request_id reused with different event data"] += 1
         else:
@@ -499,7 +507,7 @@ async def ingest(
     mismatched, keys = await _validate_key_hierarchy(session, list(by_id.values()))
     for request_id in mismatched:
         # Identical in-batch copies of a rejected event are rejected with it.
-        rejected["usage key hierarchy does not match api_keys"] += 1 + duplicates[request_id]
+        rejected["usage key unknown or not in the event's team"] += 1 + duplicates[request_id]
         del by_id[request_id]
 
     try:

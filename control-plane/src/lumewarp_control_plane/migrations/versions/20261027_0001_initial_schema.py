@@ -1,8 +1,8 @@
-"""p1 initial schema
+"""initial schema
 
 Revision ID: 0001
 Revises:
-Create Date: 2026-10-22 01:02:44.185470
+Create Date: 2026-10-27 21:27:59.535164
 """
 
 from collections.abc import Sequence
@@ -69,7 +69,6 @@ def upgrade() -> None:
         sa.Column("action", sa.String(length=100), nullable=False),
         sa.Column("resource_type", sa.String(length=64), nullable=False),
         sa.Column("resource_id", sa.String(length=200), nullable=True),
-        sa.Column("org_id", sa.Uuid(), nullable=True),
         sa.Column("team_id", sa.Uuid(), nullable=True),
         sa.Column(
             "details",
@@ -79,74 +78,8 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_audit_log")),
     )
-    op.create_index("ix_audit_log_org_ts", "audit_log", ["org_id", "ts"], unique=False)
     op.create_index("ix_audit_log_team_ts", "audit_log", ["team_id", "ts"], unique=False)
     op.create_index(op.f("ix_audit_log_ts"), "audit_log", ["ts"], unique=False)
-    op.create_table(
-        "orgs",
-        sa.Column("id", sa.Uuid(), nullable=False),
-        sa.Column("name", sa.String(length=200), nullable=False),
-        sa.Column(
-            "allowed_models",
-            postgresql.ARRAY(sa.Text()),
-            server_default=sa.text("'{}'"),
-            nullable=False,
-        ),
-        sa.Column("rpm_limit", sa.Integer(), nullable=True),
-        sa.Column("tpm_limit", sa.BigInteger(), nullable=True),
-        sa.Column("max_parallel", sa.Integer(), nullable=True),
-        sa.Column("budget_nano_usd", sa.BigInteger(), nullable=True),
-        sa.Column("soft_budget_nano_usd", sa.BigInteger(), nullable=True),
-        sa.Column(
-            "model_access",
-            sa.Enum(
-                "inherit",
-                "all",
-                "list",
-                name="model_access",
-                native_enum=False,
-                create_constraint=True,
-                length=32,
-            ),
-            server_default="all",
-            nullable=False,
-        ),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.CheckConstraint("model_access <> 'inherit'", name=op.f("ck_orgs_no_inherit")),
-        sa.CheckConstraint(
-            "model_access = 'list' OR cardinality(allowed_models) = 0",
-            name=op.f("ck_orgs_allowlist_mode"),
-        ),
-        sa.CheckConstraint(
-            "budget_nano_usd IS NULL OR budget_nano_usd >= 0", name=op.f("ck_orgs_budget_nonneg")
-        ),
-        sa.CheckConstraint(
-            "max_parallel IS NULL OR max_parallel > 0", name=op.f("ck_orgs_parallel_positive")
-        ),
-        sa.CheckConstraint("rpm_limit IS NULL OR rpm_limit > 0", name=op.f("ck_orgs_rpm_positive")),
-        sa.CheckConstraint(
-            "soft_budget_nano_usd IS NULL OR budget_nano_usd IS NULL OR soft_budget_nano_usd <= budget_nano_usd",
-            name=op.f("ck_orgs_soft_le_hard"),
-        ),
-        sa.CheckConstraint(
-            "soft_budget_nano_usd IS NULL OR soft_budget_nano_usd >= 0",
-            name=op.f("ck_orgs_soft_nonneg"),
-        ),
-        sa.CheckConstraint("tpm_limit IS NULL OR tpm_limit > 0", name=op.f("ck_orgs_tpm_positive")),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_orgs")),
-        sa.UniqueConstraint("name", name=op.f("uq_orgs_name")),
-    )
     op.create_table(
         "routes",
         sa.Column("id", sa.Uuid(), nullable=False),
@@ -191,6 +124,75 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.PrimaryKeyConstraint("name", name=op.f("pk_scopes")),
+    )
+    op.create_table(
+        "teams",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("name", sa.String(length=200), nullable=False),
+        sa.Column(
+            "allowed_models",
+            postgresql.ARRAY(sa.Text()),
+            server_default=sa.text("'{}'"),
+            nullable=False,
+        ),
+        sa.Column("rpm_limit", sa.Integer(), nullable=True),
+        sa.Column("tpm_limit", sa.BigInteger(), nullable=True),
+        sa.Column("max_parallel", sa.Integer(), nullable=True),
+        sa.Column("budget_nano_usd", sa.BigInteger(), nullable=True),
+        sa.Column("soft_budget_nano_usd", sa.BigInteger(), nullable=True),
+        sa.Column(
+            "model_access",
+            sa.Enum(
+                "inherit",
+                "all",
+                "list",
+                name="model_access",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            server_default="all",
+            nullable=False,
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint("model_access <> 'inherit'", name=op.f("ck_teams_no_inherit")),
+        sa.CheckConstraint(
+            "model_access = 'list' OR cardinality(allowed_models) = 0",
+            name=op.f("ck_teams_allowlist_mode"),
+        ),
+        sa.CheckConstraint(
+            "budget_nano_usd IS NULL OR budget_nano_usd >= 0", name=op.f("ck_teams_budget_nonneg")
+        ),
+        sa.CheckConstraint(
+            "max_parallel IS NULL OR max_parallel > 0", name=op.f("ck_teams_parallel_positive")
+        ),
+        sa.CheckConstraint(
+            "rpm_limit IS NULL OR rpm_limit > 0", name=op.f("ck_teams_rpm_positive")
+        ),
+        sa.CheckConstraint(
+            "soft_budget_nano_usd IS NULL OR budget_nano_usd IS NULL OR soft_budget_nano_usd <= budget_nano_usd",
+            name=op.f("ck_teams_soft_le_hard"),
+        ),
+        sa.CheckConstraint(
+            "soft_budget_nano_usd IS NULL OR soft_budget_nano_usd >= 0",
+            name=op.f("ck_teams_soft_nonneg"),
+        ),
+        sa.CheckConstraint(
+            "tpm_limit IS NULL OR tpm_limit > 0", name=op.f("ck_teams_tpm_positive")
+        ),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_teams")),
+        sa.UniqueConstraint("name", name=op.f("uq_teams_name")),
     )
     op.create_table(
         "upstreams",
@@ -259,9 +261,20 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("key_id", sa.Uuid(), nullable=False),
-        sa.Column("org_id", sa.Uuid(), nullable=False),
         sa.Column("team_id", sa.Uuid(), nullable=False),
-        sa.Column("project_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "owner_kind",
+            sa.Enum(
+                "user",
+                "service_account",
+                name="key_owner_kind",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            nullable=False,
+        ),
+        sa.Column("owner_id", sa.Uuid(), nullable=False),
         sa.Column("model", sa.String(length=400), nullable=False),
         sa.Column("deployment", sa.String(length=200), nullable=False),
         sa.Column("route", sa.String(length=64), nullable=False),
@@ -311,10 +324,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("request_id", name=op.f("uq_usage_events_request_id")),
     )
     op.create_index("ix_usage_events_key_ts", "usage_events", ["key_id", "ts"], unique=False)
-    op.create_index("ix_usage_events_org_ts", "usage_events", ["org_id", "ts"], unique=False)
-    op.create_index(
-        "ix_usage_events_project_ts", "usage_events", ["project_id", "ts"], unique=False
-    )
+    op.create_index("ix_usage_events_owner_ts", "usage_events", ["owner_id", "ts"], unique=False)
     op.create_index("ix_usage_events_team_ts", "usage_events", ["team_id", "ts"], unique=False)
     op.create_index(op.f("ix_usage_events_ts"), "usage_events", ["ts"], unique=False)
     op.create_table(
@@ -322,10 +332,9 @@ def upgrade() -> None:
         sa.Column(
             "scope_type",
             sa.Enum(
-                "org",
                 "team",
-                "project",
-                "key",
+                "member",
+                "service_account",
                 name="scope_type",
                 native_enum=False,
                 create_constraint=True,
@@ -589,7 +598,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("name", sa.String(length=200), nullable=False),
         sa.Column("kind", sa.String(length=100), nullable=False),
-        sa.Column("org_id", sa.Uuid(), nullable=True),
+        sa.Column("team_id", sa.Uuid(), nullable=True),
         sa.Column(
             "config",
             postgresql.JSONB(astext_type=sa.Text()),
@@ -610,16 +619,16 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
-            ["org_id"],
-            ["orgs.id"],
-            name=op.f("fk_notifier_channels_org_id_orgs"),
+            ["team_id"],
+            ["teams.id"],
+            name=op.f("fk_notifier_channels_team_id_teams"),
             ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_notifier_channels")),
         sa.UniqueConstraint("name", name=op.f("uq_notifier_channels_name")),
     )
     op.create_index(
-        op.f("ix_notifier_channels_org_id"), "notifier_channels", ["org_id"], unique=False
+        op.f("ix_notifier_channels_team_id"), "notifier_channels", ["team_id"], unique=False
     )
     op.create_table(
         "personal_access_tokens",
@@ -656,10 +665,12 @@ def upgrade() -> None:
         unique=False,
     )
     op.create_table(
-        "teams",
+        "service_accounts",
         sa.Column("id", sa.Uuid(), nullable=False),
-        sa.Column("org_id", sa.Uuid(), nullable=False),
+        sa.Column("team_id", sa.Uuid(), nullable=False),
         sa.Column("name", sa.String(length=200), nullable=False),
+        sa.Column("description", sa.Text(), server_default="", nullable=False),
+        sa.Column("created_by_user_id", sa.Uuid(), nullable=True),
         sa.Column(
             "allowed_models",
             postgresql.ARRAY(sa.Text()),
@@ -699,42 +710,87 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "model_access = 'list' OR cardinality(allowed_models) = 0",
-            name=op.f("ck_teams_allowlist_mode"),
+            name=op.f("ck_service_accounts_allowlist_mode"),
         ),
         sa.CheckConstraint(
-            "budget_nano_usd IS NULL OR budget_nano_usd >= 0", name=op.f("ck_teams_budget_nonneg")
+            "budget_nano_usd IS NULL OR budget_nano_usd >= 0",
+            name=op.f("ck_service_accounts_budget_nonneg"),
         ),
         sa.CheckConstraint(
-            "max_parallel IS NULL OR max_parallel > 0", name=op.f("ck_teams_parallel_positive")
+            "max_parallel IS NULL OR max_parallel > 0",
+            name=op.f("ck_service_accounts_parallel_positive"),
         ),
         sa.CheckConstraint(
-            "rpm_limit IS NULL OR rpm_limit > 0", name=op.f("ck_teams_rpm_positive")
+            "rpm_limit IS NULL OR rpm_limit > 0", name=op.f("ck_service_accounts_rpm_positive")
         ),
         sa.CheckConstraint(
             "soft_budget_nano_usd IS NULL OR budget_nano_usd IS NULL OR soft_budget_nano_usd <= budget_nano_usd",
-            name=op.f("ck_teams_soft_le_hard"),
+            name=op.f("ck_service_accounts_soft_le_hard"),
         ),
         sa.CheckConstraint(
             "soft_budget_nano_usd IS NULL OR soft_budget_nano_usd >= 0",
-            name=op.f("ck_teams_soft_nonneg"),
+            name=op.f("ck_service_accounts_soft_nonneg"),
         ),
         sa.CheckConstraint(
-            "tpm_limit IS NULL OR tpm_limit > 0", name=op.f("ck_teams_tpm_positive")
+            "tpm_limit IS NULL OR tpm_limit > 0", name=op.f("ck_service_accounts_tpm_positive")
         ),
         sa.ForeignKeyConstraint(
-            ["org_id"], ["orgs.id"], name=op.f("fk_teams_org_id_orgs"), ondelete="RESTRICT"
+            ["created_by_user_id"],
+            ["users.id"],
+            name=op.f("fk_service_accounts_created_by_user_id_users"),
+            ondelete="SET NULL",
         ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_teams")),
-        sa.UniqueConstraint("id", "org_id", name=op.f("uq_teams_id_org_id")),
-        sa.UniqueConstraint("org_id", "name", name=op.f("uq_teams_org_id_name")),
+        sa.ForeignKeyConstraint(
+            ["team_id"],
+            ["teams.id"],
+            name=op.f("fk_service_accounts_team_id_teams"),
+            ondelete="RESTRICT",
+        ),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_service_accounts")),
+        sa.UniqueConstraint("id", "team_id", name=op.f("uq_service_accounts_id_team_id")),
+        sa.UniqueConstraint("team_id", "name", name=op.f("uq_service_accounts_team_id_name")),
     )
     op.create_table(
-        "memberships",
-        sa.Column("id", sa.Uuid(), nullable=False),
+        "team_members",
+        sa.Column("team_id", sa.Uuid(), nullable=False),
         sa.Column("user_id", sa.Uuid(), nullable=False),
-        sa.Column("org_id", sa.Uuid(), nullable=False),
-        sa.Column("team_id", sa.Uuid(), nullable=True),
-        sa.Column("role", sa.String(length=16), nullable=False),
+        sa.Column(
+            "role",
+            sa.Enum(
+                "admin",
+                "member",
+                name="team_role",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            nullable=False,
+        ),
+        sa.Column(
+            "allowed_models",
+            postgresql.ARRAY(sa.Text()),
+            server_default=sa.text("'{}'"),
+            nullable=False,
+        ),
+        sa.Column("rpm_limit", sa.Integer(), nullable=True),
+        sa.Column("tpm_limit", sa.BigInteger(), nullable=True),
+        sa.Column("max_parallel", sa.Integer(), nullable=True),
+        sa.Column("budget_nano_usd", sa.BigInteger(), nullable=True),
+        sa.Column("soft_budget_nano_usd", sa.BigInteger(), nullable=True),
+        sa.Column(
+            "model_access",
+            sa.Enum(
+                "inherit",
+                "all",
+                "list",
+                name="model_access",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            server_default="inherit",
+            nullable=False,
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -748,39 +804,136 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.CheckConstraint(
-            "(team_id IS NULL AND role IN ('owner', 'admin')) OR (team_id IS NOT NULL AND role IN ('admin', 'member', 'viewer'))",
-            name=op.f("ck_memberships_role_level"),
+            "model_access = 'list' OR cardinality(allowed_models) = 0",
+            name=op.f("ck_team_members_allowlist_mode"),
+        ),
+        sa.CheckConstraint(
+            "budget_nano_usd IS NULL OR budget_nano_usd >= 0",
+            name=op.f("ck_team_members_budget_nonneg"),
+        ),
+        sa.CheckConstraint(
+            "max_parallel IS NULL OR max_parallel > 0",
+            name=op.f("ck_team_members_parallel_positive"),
+        ),
+        sa.CheckConstraint(
+            "rpm_limit IS NULL OR rpm_limit > 0", name=op.f("ck_team_members_rpm_positive")
+        ),
+        sa.CheckConstraint(
+            "soft_budget_nano_usd IS NULL OR budget_nano_usd IS NULL OR soft_budget_nano_usd <= budget_nano_usd",
+            name=op.f("ck_team_members_soft_le_hard"),
+        ),
+        sa.CheckConstraint(
+            "soft_budget_nano_usd IS NULL OR soft_budget_nano_usd >= 0",
+            name=op.f("ck_team_members_soft_nonneg"),
+        ),
+        sa.CheckConstraint(
+            "tpm_limit IS NULL OR tpm_limit > 0", name=op.f("ck_team_members_tpm_positive")
         ),
         sa.ForeignKeyConstraint(
-            ["org_id"], ["orgs.id"], name=op.f("fk_memberships_org_id_orgs"), ondelete="CASCADE"
-        ),
-        sa.ForeignKeyConstraint(
-            ["team_id", "org_id"],
-            ["teams.id", "teams.org_id"],
-            name=op.f("fk_memberships_team_id_org_id_teams"),
+            ["team_id"],
+            ["teams.id"],
+            name=op.f("fk_team_members_team_id_teams"),
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
-            ["user_id"], ["users.id"], name=op.f("fk_memberships_user_id_users"), ondelete="CASCADE"
+            ["user_id"],
+            ["users.id"],
+            name=op.f("fk_team_members_user_id_users"),
+            ondelete="CASCADE",
         ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_memberships")),
+        sa.PrimaryKeyConstraint("team_id", "user_id", name=op.f("pk_team_members")),
     )
-    op.create_index(op.f("ix_memberships_org_id"), "memberships", ["org_id"], unique=False)
-    op.create_index(op.f("ix_memberships_team_id"), "memberships", ["team_id"], unique=False)
+    op.create_index(op.f("ix_team_members_user_id"), "team_members", ["user_id"], unique=False)
+    op.create_table(
+        "api_keys",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("team_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "owner_kind",
+            sa.Enum(
+                "user",
+                "service_account",
+                name="key_owner_kind",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            nullable=False,
+        ),
+        sa.Column("user_id", sa.Uuid(), nullable=True),
+        sa.Column("service_account_id", sa.Uuid(), nullable=True),
+        sa.Column("name", sa.String(length=200), nullable=False),
+        sa.Column("key_hash", sa.LargeBinary(), nullable=False),
+        sa.Column("display_prefix", sa.String(length=32), nullable=False),
+        sa.Column(
+            "lifecycle",
+            sa.Enum(
+                "active",
+                "suspended",
+                "revoked",
+                name="key_lifecycle",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            server_default="active",
+            nullable=False,
+        ),
+        sa.Column("suspended_reason", sa.String(length=64), nullable=True),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_by_user_id", sa.Uuid(), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "(lifecycle = 'revoked') = (revoked_at IS NOT NULL)",
+            name=op.f("ck_api_keys_revoked_at_matches"),
+        ),
+        sa.CheckConstraint(
+            "(owner_kind = 'user' AND user_id IS NOT NULL AND service_account_id IS NULL) OR (owner_kind = 'service_account' AND service_account_id IS NOT NULL AND user_id IS NULL)",
+            name=op.f("ck_api_keys_owner_matches_kind"),
+        ),
+        sa.CheckConstraint(
+            "suspended_reason IS NULL OR lifecycle = 'suspended'",
+            name=op.f("ck_api_keys_reason_when_suspended"),
+        ),
+        sa.CheckConstraint("octet_length(key_hash) = 32", name=op.f("ck_api_keys_key_hash_len")),
+        sa.ForeignKeyConstraint(
+            ["created_by_user_id"],
+            ["users.id"],
+            name=op.f("fk_api_keys_created_by_user_id_users"),
+            ondelete="SET NULL",
+        ),
+        sa.ForeignKeyConstraint(
+            ["service_account_id", "team_id"],
+            ["service_accounts.id", "service_accounts.team_id"],
+            name=op.f("fk_api_keys_service_account_id_team_id_service_accounts"),
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["team_id"], ["teams.id"], name=op.f("fk_api_keys_team_id_teams"), ondelete="RESTRICT"
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"], ["users.id"], name=op.f("fk_api_keys_user_id_users"), ondelete="RESTRICT"
+        ),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_api_keys")),
+        sa.UniqueConstraint("key_hash", name=op.f("uq_api_keys_key_hash")),
+    )
     op.create_index(
-        "uq_memberships_org_role",
-        "memberships",
-        ["user_id", "org_id"],
-        unique=True,
-        postgresql_where=sa.text("team_id IS NULL"),
+        op.f("ix_api_keys_service_account_id"), "api_keys", ["service_account_id"], unique=False
     )
-    op.create_index(
-        "uq_memberships_team_role",
-        "memberships",
-        ["user_id", "team_id"],
-        unique=True,
-        postgresql_where=sa.text("team_id IS NOT NULL"),
-    )
+    op.create_index(op.f("ix_api_keys_team_id"), "api_keys", ["team_id"], unique=False)
+    op.create_index(op.f("ix_api_keys_user_id"), "api_keys", ["user_id"], unique=False)
     op.create_table(
         "notifier_outbox",
         sa.Column("id", sa.BigInteger(), sa.Identity(always=False), nullable=False),
@@ -835,85 +988,6 @@ def upgrade() -> None:
         postgresql_where=sa.text("status = 'pending'"),
     )
     op.create_table(
-        "projects",
-        sa.Column("id", sa.Uuid(), nullable=False),
-        sa.Column("org_id", sa.Uuid(), nullable=False),
-        sa.Column("team_id", sa.Uuid(), nullable=False),
-        sa.Column("name", sa.String(length=200), nullable=False),
-        sa.Column(
-            "allowed_models",
-            postgresql.ARRAY(sa.Text()),
-            server_default=sa.text("'{}'"),
-            nullable=False,
-        ),
-        sa.Column("rpm_limit", sa.Integer(), nullable=True),
-        sa.Column("tpm_limit", sa.BigInteger(), nullable=True),
-        sa.Column("max_parallel", sa.Integer(), nullable=True),
-        sa.Column("budget_nano_usd", sa.BigInteger(), nullable=True),
-        sa.Column("soft_budget_nano_usd", sa.BigInteger(), nullable=True),
-        sa.Column(
-            "model_access",
-            sa.Enum(
-                "inherit",
-                "all",
-                "list",
-                name="model_access",
-                native_enum=False,
-                create_constraint=True,
-                length=32,
-            ),
-            server_default="inherit",
-            nullable=False,
-        ),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.CheckConstraint(
-            "model_access = 'list' OR cardinality(allowed_models) = 0",
-            name=op.f("ck_projects_allowlist_mode"),
-        ),
-        sa.CheckConstraint(
-            "budget_nano_usd IS NULL OR budget_nano_usd >= 0",
-            name=op.f("ck_projects_budget_nonneg"),
-        ),
-        sa.CheckConstraint(
-            "max_parallel IS NULL OR max_parallel > 0", name=op.f("ck_projects_parallel_positive")
-        ),
-        sa.CheckConstraint(
-            "rpm_limit IS NULL OR rpm_limit > 0", name=op.f("ck_projects_rpm_positive")
-        ),
-        sa.CheckConstraint(
-            "soft_budget_nano_usd IS NULL OR budget_nano_usd IS NULL OR soft_budget_nano_usd <= budget_nano_usd",
-            name=op.f("ck_projects_soft_le_hard"),
-        ),
-        sa.CheckConstraint(
-            "soft_budget_nano_usd IS NULL OR soft_budget_nano_usd >= 0",
-            name=op.f("ck_projects_soft_nonneg"),
-        ),
-        sa.CheckConstraint(
-            "tpm_limit IS NULL OR tpm_limit > 0", name=op.f("ck_projects_tpm_positive")
-        ),
-        sa.ForeignKeyConstraint(
-            ["team_id", "org_id"],
-            ["teams.id", "teams.org_id"],
-            name=op.f("fk_projects_team_id_org_id_teams"),
-            ondelete="RESTRICT",
-        ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_projects")),
-        sa.UniqueConstraint("id", "team_id", "org_id", name=op.f("uq_projects_id_team_id_org_id")),
-        sa.UniqueConstraint("team_id", "name", name=op.f("uq_projects_team_id_name")),
-    )
-    op.create_index(op.f("ix_projects_org_id"), "projects", ["org_id"], unique=False)
-    op.create_table(
         "route_deployments",
         sa.Column("route_id", sa.Uuid(), nullable=False),
         sa.Column("deployment_id", sa.Uuid(), nullable=False),
@@ -941,117 +1015,6 @@ def upgrade() -> None:
         ["deployment_id"],
         unique=False,
     )
-    op.create_table(
-        "api_keys",
-        sa.Column("id", sa.Uuid(), nullable=False),
-        sa.Column("org_id", sa.Uuid(), nullable=False),
-        sa.Column("team_id", sa.Uuid(), nullable=False),
-        sa.Column("project_id", sa.Uuid(), nullable=False),
-        sa.Column("name", sa.String(length=200), nullable=False),
-        sa.Column("key_hash", sa.LargeBinary(), nullable=False),
-        sa.Column("display_prefix", sa.String(length=32), nullable=False),
-        sa.Column(
-            "lifecycle",
-            sa.Enum(
-                "active",
-                "suspended",
-                "revoked",
-                name="key_lifecycle",
-                native_enum=False,
-                create_constraint=True,
-                length=32,
-            ),
-            server_default="active",
-            nullable=False,
-        ),
-        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("created_by_user_id", sa.Uuid(), nullable=True),
-        sa.Column(
-            "allowed_models",
-            postgresql.ARRAY(sa.Text()),
-            server_default=sa.text("'{}'"),
-            nullable=False,
-        ),
-        sa.Column("rpm_limit", sa.Integer(), nullable=True),
-        sa.Column("tpm_limit", sa.BigInteger(), nullable=True),
-        sa.Column("max_parallel", sa.Integer(), nullable=True),
-        sa.Column("budget_nano_usd", sa.BigInteger(), nullable=True),
-        sa.Column("soft_budget_nano_usd", sa.BigInteger(), nullable=True),
-        sa.Column(
-            "model_access",
-            sa.Enum(
-                "inherit",
-                "all",
-                "list",
-                name="model_access",
-                native_enum=False,
-                create_constraint=True,
-                length=32,
-            ),
-            server_default="inherit",
-            nullable=False,
-        ),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.CheckConstraint(
-            "(lifecycle = 'revoked') = (revoked_at IS NOT NULL)",
-            name=op.f("ck_api_keys_revoked_at_matches"),
-        ),
-        sa.CheckConstraint(
-            "model_access = 'list' OR cardinality(allowed_models) = 0",
-            name=op.f("ck_api_keys_allowlist_mode"),
-        ),
-        sa.CheckConstraint(
-            "budget_nano_usd IS NULL OR budget_nano_usd >= 0",
-            name=op.f("ck_api_keys_budget_nonneg"),
-        ),
-        sa.CheckConstraint(
-            "max_parallel IS NULL OR max_parallel > 0", name=op.f("ck_api_keys_parallel_positive")
-        ),
-        sa.CheckConstraint("octet_length(key_hash) = 32", name=op.f("ck_api_keys_key_hash_len")),
-        sa.CheckConstraint(
-            "rpm_limit IS NULL OR rpm_limit > 0", name=op.f("ck_api_keys_rpm_positive")
-        ),
-        sa.CheckConstraint(
-            "soft_budget_nano_usd IS NULL OR budget_nano_usd IS NULL OR soft_budget_nano_usd <= budget_nano_usd",
-            name=op.f("ck_api_keys_soft_le_hard"),
-        ),
-        sa.CheckConstraint(
-            "soft_budget_nano_usd IS NULL OR soft_budget_nano_usd >= 0",
-            name=op.f("ck_api_keys_soft_nonneg"),
-        ),
-        sa.CheckConstraint(
-            "tpm_limit IS NULL OR tpm_limit > 0", name=op.f("ck_api_keys_tpm_positive")
-        ),
-        sa.ForeignKeyConstraint(
-            ["created_by_user_id"],
-            ["users.id"],
-            name=op.f("fk_api_keys_created_by_user_id_users"),
-            ondelete="SET NULL",
-        ),
-        sa.ForeignKeyConstraint(
-            ["project_id", "team_id", "org_id"],
-            ["projects.id", "projects.team_id", "projects.org_id"],
-            name=op.f("fk_api_keys_project_id_team_id_org_id_projects"),
-            ondelete="RESTRICT",
-        ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_api_keys")),
-        sa.UniqueConstraint("key_hash", name=op.f("uq_api_keys_key_hash")),
-    )
-    op.create_index(op.f("ix_api_keys_org_id"), "api_keys", ["org_id"], unique=False)
-    op.create_index(op.f("ix_api_keys_project_id"), "api_keys", ["project_id"], unique=False)
-    op.create_index(op.f("ix_api_keys_team_id"), "api_keys", ["team_id"], unique=False)
     op.execute(CONFIG_VERSIONS_IMMUTABLE)
     op.execute(
         "CREATE TRIGGER config_versions_immutable BEFORE UPDATE ON config_versions"
@@ -1062,37 +1025,24 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("DROP TRIGGER IF EXISTS config_versions_immutable ON config_versions")
     op.execute("DROP FUNCTION IF EXISTS lumewarp_config_versions_immutable()")
-    op.drop_index(op.f("ix_api_keys_team_id"), table_name="api_keys")
-    op.drop_index(op.f("ix_api_keys_project_id"), table_name="api_keys")
-    op.drop_index(op.f("ix_api_keys_org_id"), table_name="api_keys")
-    op.drop_table("api_keys")
     op.drop_index(op.f("ix_route_deployments_deployment_id"), table_name="route_deployments")
     op.drop_table("route_deployments")
-    op.drop_index(op.f("ix_projects_org_id"), table_name="projects")
-    op.drop_table("projects")
     op.drop_index(
         "ix_notifier_outbox_due",
         table_name="notifier_outbox",
         postgresql_where=sa.text("status = 'pending'"),
     )
     op.drop_table("notifier_outbox")
-    op.drop_index(
-        "uq_memberships_team_role",
-        table_name="memberships",
-        postgresql_where=sa.text("team_id IS NOT NULL"),
-    )
-    op.drop_index(
-        "uq_memberships_org_role",
-        table_name="memberships",
-        postgresql_where=sa.text("team_id IS NULL"),
-    )
-    op.drop_index(op.f("ix_memberships_team_id"), table_name="memberships")
-    op.drop_index(op.f("ix_memberships_org_id"), table_name="memberships")
-    op.drop_table("memberships")
-    op.drop_table("teams")
+    op.drop_index(op.f("ix_api_keys_user_id"), table_name="api_keys")
+    op.drop_index(op.f("ix_api_keys_team_id"), table_name="api_keys")
+    op.drop_index(op.f("ix_api_keys_service_account_id"), table_name="api_keys")
+    op.drop_table("api_keys")
+    op.drop_index(op.f("ix_team_members_user_id"), table_name="team_members")
+    op.drop_table("team_members")
+    op.drop_table("service_accounts")
     op.drop_index(op.f("ix_personal_access_tokens_user_id"), table_name="personal_access_tokens")
     op.drop_table("personal_access_tokens")
-    op.drop_index(op.f("ix_notifier_channels_org_id"), table_name="notifier_channels")
+    op.drop_index(op.f("ix_notifier_channels_team_id"), table_name="notifier_channels")
     op.drop_table("notifier_channels")
     op.drop_index(op.f("ix_gateway_tokens_scope"), table_name="gateway_tokens")
     op.drop_table("gateway_tokens")
@@ -1112,15 +1062,13 @@ def downgrade() -> None:
     op.drop_table("usage_totals")
     op.drop_index(op.f("ix_usage_events_ts"), table_name="usage_events")
     op.drop_index("ix_usage_events_team_ts", table_name="usage_events")
-    op.drop_index("ix_usage_events_project_ts", table_name="usage_events")
-    op.drop_index("ix_usage_events_org_ts", table_name="usage_events")
+    op.drop_index("ix_usage_events_owner_ts", table_name="usage_events")
     op.drop_index("ix_usage_events_key_ts", table_name="usage_events")
     op.drop_table("usage_events")
     op.drop_table("upstreams")
+    op.drop_table("teams")
     op.drop_table("scopes")
     op.drop_table("routes")
-    op.drop_table("orgs")
     op.drop_index(op.f("ix_audit_log_ts"), table_name="audit_log")
     op.drop_index("ix_audit_log_team_ts", table_name="audit_log")
-    op.drop_index("ix_audit_log_org_ts", table_name="audit_log")
     op.drop_table("audit_log")

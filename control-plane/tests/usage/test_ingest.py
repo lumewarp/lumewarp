@@ -15,10 +15,9 @@ from lumewarp_control_plane.ids import uuid7
 from lumewarp_control_plane.models import (
     ApiKey,
     ConfigOutbox,
+    KeyOwnerKind,
     NotifierChannel,
     NotifierOutbox,
-    Org,
-    Project,
     Scope,
     ScopeType,
     Team,
@@ -27,9 +26,9 @@ from lumewarp_control_plane.models import (
 from lumewarp_control_plane.models import (
     UsageEvent as UsageEventRow,
 )
-from lumewarp_control_plane.security import SecretKind, generate_secret
 from lumewarp_control_plane.usage import InvalidUsageBatch, ingest, rollover_scheduler
 from lumewarp_control_plane.windows import month_window
+from tests import factories
 
 
 def _event(
@@ -45,9 +44,7 @@ def _event(
         request_id=str(request_id or uuid7()),
         timestamp_unix_ms=int(timestamp.timestamp() * 1000),
         key_id=str(key.id),
-        org_id=str(key.org_id),
         team_id=str(key.team_id),
-        project_id=str(key.project_id),
         model=model,
         deployment="test-deployment",
         route="chat_completions",
@@ -69,43 +66,31 @@ async def _seed(
     hard_budget: int | None = None,
     soft_budget: int | None = None,
     webhook_url: str | None = None,
+    owner_kind: KeyOwnerKind = KeyOwnerKind.USER,
 ) -> tuple[str, ApiKey]:
     scope_name = f"usage-{uuid7().hex}"
     suffix = uuid7().hex[-12:]
     async with factory() as session, session.begin():
         session.add(Scope(name=scope_name))
-        org = Org(
-            name=f"usage-org-{suffix}",
+        team = await factories.make_team(
+            session,
+            name=f"usage-team-{suffix}",
             budget_nano_usd=hard_budget,
             soft_budget_nano_usd=soft_budget,
         )
-        session.add(org)
-        await session.flush()
-        team = Team(org_id=org.id, name=f"usage-team-{suffix}")
-        session.add(team)
-        await session.flush()
-        project = Project(org_id=org.id, team_id=team.id, name=f"usage-project-{suffix}")
-        session.add(project)
-        await session.flush()
-        secret = generate_secret(SecretKind.API_KEY)
-        key = ApiKey(
-            id=uuid7(),
-            org_id=org.id,
-            team_id=team.id,
-            project_id=project.id,
-            name="usage-key",
-            key_hash=secret.hash,
-            display_prefix=secret.display_prefix,
-        )
-        session.add(key)
-        await session.flush()
+        if owner_kind is KeyOwnerKind.USER:
+            owner = await factories.make_user(session)
+            await factories.make_member(session, team, owner)
+        else:
+            owner = await factories.make_service_account(session, team)
+        key = await factories.make_key(session, team, owner)
         key_id = key.id
         if webhook_url is not None:
             session.add(
                 NotifierChannel(
                     name=f"usage-webhook-{suffix}",
                     kind="webhook",
-                    org_id=org.id,
+                    team_id=team.id,
                     config={"url": webhook_url},
                 )
             )
@@ -144,8 +129,8 @@ async def test_duplicate_batch_replay_counts_once(session_factory: SessionFactor
     async with session_factory() as session:
         total = await session.scalar(
             select(UsageTotal).where(
-                UsageTotal.scope_type == ScopeType.KEY,
-                UsageTotal.scope_id == key.id,
+                UsageTotal.scope_type == key.owner_scope[0],
+                UsageTotal.scope_id == key.owner_scope[1],
             )
         )
         assert total is not None
@@ -198,7 +183,8 @@ async def test_conflicting_replay_skips_only_that_event(session_factory: Session
         assert stored is not None and stored.model == existing.model
         total = await session.scalar(
             select(UsageTotal).where(
-                UsageTotal.scope_type == ScopeType.KEY, UsageTotal.scope_id == key.id
+                UsageTotal.scope_type == key.owner_scope[0],
+                UsageTotal.scope_id == key.owner_scope[1],
             )
         )
         assert total is not None and total.cost_nano_usd == 30
@@ -222,8 +208,8 @@ async def test_concurrent_reports_flip_budget_once(session_factory: SessionFacto
     async with session_factory() as session:
         total = await session.scalar(
             select(UsageTotal).where(
-                UsageTotal.scope_type == ScopeType.ORG,
-                UsageTotal.scope_id == key.org_id,
+                UsageTotal.scope_type == ScopeType.TEAM,
+                UsageTotal.scope_id == key.team_id,
             )
         )
         assert total is not None
@@ -247,7 +233,7 @@ async def test_concurrent_reports_flip_budget_once(session_factory: SessionFacto
                 .select_from(NotifierOutbox)
                 .where(
                     NotifierOutbox.event_type.in_(("budget.soft", "budget.hard")),
-                    NotifierOutbox.payload["org_id"].astext == str(key.org_id),
+                    NotifierOutbox.payload["team_id"].astext == str(key.team_id),
                 )
             )
             == 2
@@ -262,9 +248,9 @@ async def test_budget_raise_crossing_recompiles_again(session_factory: SessionFa
         await ingest(session, "gateway-a", [first], scope_name=scope_name)
 
     async with session_factory() as session, session.begin():
-        org = await session.get(Org, key.org_id)
-        assert org is not None
-        org.budget_nano_usd = 200
+        team = await session.get(Team, key.team_id)
+        assert team is not None
+        team.budget_nano_usd = 200
         await outbox.enqueue_recompile(session, scope_name, "api.budget.update")
 
     second = _event(key, cost=100)
@@ -304,8 +290,8 @@ async def test_late_previous_month_event_uses_its_event_window(session_factory: 
     async with session_factory() as session:
         total = await session.scalar(
             select(UsageTotal).where(
-                UsageTotal.scope_type == ScopeType.ORG,
-                UsageTotal.scope_id == key.org_id,
+                UsageTotal.scope_type == ScopeType.TEAM,
+                UsageTotal.scope_id == key.team_id,
                 UsageTotal.window_start == previous_window,
             )
         )
@@ -314,8 +300,8 @@ async def test_late_previous_month_event_uses_its_event_window(session_factory: 
         assert (
             await session.scalar(
                 select(UsageTotal).where(
-                    UsageTotal.scope_type == ScopeType.ORG,
-                    UsageTotal.scope_id == key.org_id,
+                    UsageTotal.scope_type == ScopeType.TEAM,
+                    UsageTotal.scope_id == key.team_id,
                     UsageTotal.window_start == current_start,
                 )
             )
@@ -338,7 +324,7 @@ async def test_late_previous_month_event_uses_its_event_window(session_factory: 
             await session.scalar(
                 select(func.count())
                 .select_from(NotifierOutbox)
-                .where(NotifierOutbox.payload["org_id"].astext == str(key.org_id))
+                .where(NotifierOutbox.payload["team_id"].astext == str(key.team_id))
             )
             == 0
         )
@@ -350,8 +336,8 @@ async def test_invalid_events_do_not_cost_the_rest_of_the_batch(
 ):
     scope_name, key = await _seed(session_factory)
     valid = _event(key, cost=7)
-    wrong_org = _event(key, cost=100)
-    wrong_org.org_id = str(uuid7())
+    wrong_team = _event(key, cost=100)
+    wrong_team.team_id = str(uuid7())
     unknown_key = _event(key, cost=100)
     unknown_key.key_id = str(uuid7())
     bad_field = _event(key, cost=100)
@@ -359,7 +345,7 @@ async def test_invalid_events_do_not_cost_the_rest_of_the_batch(
     reused = usage_pb2.UsageEvent.FromString(valid.SerializeToString())
     reused.cost_nano_usd = 100
     duplicate = usage_pb2.UsageEvent.FromString(valid.SerializeToString())
-    batch = [valid, wrong_org, unknown_key, bad_field, reused, duplicate]
+    batch = [valid, wrong_team, unknown_key, bad_field, reused, duplicate]
 
     async with session_factory() as session, session.begin():
         # valid and its identical duplicate count; the four invalid events are skipped.
@@ -376,11 +362,11 @@ async def test_invalid_events_do_not_cost_the_rest_of_the_batch(
         totals = (
             await session.execute(
                 select(UsageTotal.scope_type, UsageTotal.cost_nano_usd).where(
-                    UsageTotal.scope_id.in_((key.id, key.project_id, key.team_id, key.org_id))
+                    UsageTotal.scope_id.in_((key.owner_scope[1], key.team_id))
                 )
             )
         ).all()
-        assert sorted(cost for _, cost in totals) == [7, 7, 7, 7]
+        assert sorted(cost for _, cost in totals) == [7, 7]
 
 
 @pytest.mark.asyncio
@@ -421,32 +407,74 @@ async def test_rejected_events_may_omit_model_and_deployment(session_factory: Se
 
 
 @pytest.mark.asyncio
-async def test_monthly_rollover_runs_on_startup(session_factory: SessionFactory):
+async def test_monthly_rollover_runs_on_startup(session_factory: SessionFactory, monkeypatch):
+    from lumewarp_control_plane import usage
+
     scope_name = f"rollover-{uuid7().hex}"
     async with session_factory() as session, session.begin():
         session.add(Scope(name=scope_name))
     from lumewarp_control_plane.settings import Settings
 
+    rolled_over = asyncio.Event()
+    original = usage._rollover_once
+
+    async def rollover(*args):
+        await original(*args)
+        rolled_over.set()
+
+    monkeypatch.setattr(usage, "_rollover_once", rollover)
     task = asyncio.create_task(rollover_scheduler(Settings(scope=scope_name), session_factory))
     try:
-        for _ in range(50):
-            await asyncio.sleep(0.02)
-            async with session_factory() as session:
-                count = await session.scalar(
-                    select(func.count())
-                    .select_from(ConfigOutbox)
-                    .where(
-                        ConfigOutbox.scope == scope_name,
-                        ConfigOutbox.reason == "monthly budget rollover",
-                    )
+        async with asyncio.timeout(2):
+            await rolled_over.wait()
+        async with session_factory() as session:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(ConfigOutbox)
+                .where(
+                    ConfigOutbox.scope == scope_name,
+                    ConfigOutbox.reason == "monthly budget rollover",
                 )
-            if count:
-                break
+            )
         assert count == 1
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.parametrize("owner_kind", list(KeyOwnerKind))
+async def test_key_supplies_owner_and_exactly_two_totals(session_factory, owner_kind):
+    scope_name, key = await _seed(session_factory, owner_kind=owner_kind)
+    event = _event(key, cost=17)
+    async with session_factory() as session, session.begin():
+        assert await ingest(session, "gateway-owner", [event], scope_name=scope_name) == 1
+    async with session_factory() as session:
+        stored = await session.scalar(
+            select(UsageEventRow).where(UsageEventRow.request_id == uuid.UUID(event.request_id))
+        )
+        assert (stored.owner_kind, stored.owner_id) == (key.owner_kind, key.owner_id)
+        assert stored.gateway_id == "gateway-owner"
+        totals = list(
+            await session.scalars(
+                select(UsageTotal).where(UsageTotal.scope_id.in_([key.team_id, key.owner_scope[1]]))
+            )
+        )
+        assert {(t.scope_type, t.scope_id) for t in totals} == {
+            (ScopeType.TEAM, key.team_id),
+            key.owner_scope,
+        }
+        assert all(
+            (
+                t.cost_nano_usd,
+                t.prompt_tokens,
+                t.completion_tokens,
+                t.request_count,
+                t.unknown_cost_count,
+            )
+            == (17, 10, 5, 1, 0)
+            for t in totals
+        )
 
 
 @pytest.mark.asyncio
@@ -468,7 +496,8 @@ async def test_batch_at_configured_maximum_is_ingested(session_factory: SessionF
     async with session_factory() as session:
         total = await session.scalar(
             select(UsageTotal).where(
-                UsageTotal.scope_type == ScopeType.KEY, UsageTotal.scope_id == key.id
+                UsageTotal.scope_type == key.owner_scope[0],
+                UsageTotal.scope_id == key.owner_scope[1],
             )
         )
         assert total is not None

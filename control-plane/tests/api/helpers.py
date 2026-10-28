@@ -10,19 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumewarp_control_plane.ids import uuid7
 from lumewarp_control_plane.models import (
     ApiKey,
-    Membership,
-    Org,
     PersonalAccessToken,
-    Project,
     RequestOutcome,
     ScopeType,
-    Team,
     UsageEvent,
     UsageState,
     UsageTotal,
     User,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
+from tests.factories import make_user
 
 
 def auth(secret: str) -> dict[str, str]:
@@ -43,14 +40,13 @@ async def user_with_token(
     email: str | None = None,
     active: bool = True,
 ) -> tuple[User, str]:
-    user = User(
-        email=email or f"user-{suffix()}@example.com",
+    user = await make_user(
+        session,
+        email=email,
         display_name="test user",
         is_superuser=superuser,
         is_active=active,
     )
-    session.add(user)
-    await session.flush()
     new = generate_secret(SecretKind.PAT)
     session.add(
         PersonalAccessToken(
@@ -62,57 +58,6 @@ async def user_with_token(
     )
     await session.flush()
     return user, new.secret
-
-
-async def org_tree(session: AsyncSession, *, prefix: str = "api") -> tuple[Org, Team, Project]:
-    mark = f"{prefix}-{suffix()}"
-    org = Org(name=f"org-{mark}")
-    session.add(org)
-    await session.flush()
-    team = Team(org_id=org.id, name=f"team-{mark}")
-    session.add(team)
-    await session.flush()
-    project = Project(org_id=org.id, team_id=team.id, name=f"proj-{mark}")
-    session.add(project)
-    await session.flush()
-    return org, team, project
-
-
-async def grant(
-    session: AsyncSession,
-    user: User,
-    org: Org,
-    *,
-    team: Team | None = None,
-    role: str,
-) -> Membership:
-    row = Membership(
-        user_id=user.id,
-        org_id=org.id,
-        team_id=team.id if team is not None else None,
-        role=role,
-    )
-    session.add(row)
-    await session.flush()
-    return row
-
-
-async def key_row(
-    session: AsyncSession, project: Project, *, name: str = "key", **kwargs
-) -> ApiKey:
-    new = generate_secret(SecretKind.API_KEY)
-    row = ApiKey(
-        org_id=project.org_id,
-        team_id=project.team_id,
-        project_id=project.id,
-        name=name,
-        key_hash=new.hash,
-        display_prefix=new.display_prefix,
-        **kwargs,
-    )
-    session.add(row)
-    await session.flush()
-    return row
 
 
 def usage_event(
@@ -131,9 +76,9 @@ def usage_event(
         gateway_id="gw-test",
         ts=ts,
         key_id=key.id,
-        org_id=key.org_id,
         team_id=key.team_id,
-        project_id=key.project_id,
+        owner_kind=key.owner_kind,
+        owner_id=key.owner_id,
         model=model,
         deployment="dep",
         route=model,

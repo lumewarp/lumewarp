@@ -426,9 +426,7 @@ fn key(id: &str, secret: &str, models: &[&str], scopes: Vec<RateLimitScope>) -> 
     ApiKey {
         key_id: id.into(),
         key_hash: Sha256::digest(secret.as_bytes()).to_vec(),
-        org_id: "o1".into(),
         team_id: "t1".into(),
-        project_id: "p1".into(),
         status: KeyStatus::Active as i32,
         expires_at_unix_ms: 0,
         policy: Some(EffectivePolicy {
@@ -502,8 +500,6 @@ fn snapshot(upstream: SocketAddr) -> Snapshot {
         teams: vec![Team {
             id: "t1".into(),
             name: "Team one".into(),
-            org_id: "o1".into(),
-            org_name: "Org one".into(),
         }],
         created_at_unix_ms: 1,
         required_capabilities: Vec::new(),
@@ -682,13 +678,8 @@ async fn injected_usage_is_stripped_from_the_stream_and_reported() {
     // 11 * $1/Mtok + 7 * $2/Mtok = 25_000 nano-USD.
     assert_eq!((event.cost_nano_usd, event.cost_known), (25_000, true));
     assert_eq!(
-        (
-            event.key_id.as_str(),
-            event.org_id.as_str(),
-            event.team_id.as_str(),
-            event.project_id.as_str()
-        ),
-        ("k1", "o1", "t1", "p1")
+        (event.key_id.as_str(), event.team_id.as_str()),
+        ("k1", "t1")
     );
     assert_eq!(
         (
@@ -750,10 +741,7 @@ async fn injected_usage_is_stripped_from_the_stream_and_reported() {
     };
     assert_eq!(tokens("input"), 22.0);
     assert_eq!(tokens("output"), 14.0);
-    assert!(
-        (metrics.value("lumewarp_spend_total", &[("team", "t1"), ("project", "p1")]) - 50e-6).abs()
-            < 1e-12
-    );
+    assert!((metrics.value("lumewarp_spend_total", &[("team", "t1")]) - 50e-6).abs() < 1e-12);
     assert_eq!(
         metrics.value("lumewarp_usage_capture_total", &[("state", "reported")]),
         2.0

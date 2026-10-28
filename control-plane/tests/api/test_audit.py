@@ -1,105 +1,76 @@
-"""Audit reads are scoped and never expose secrets."""
-
-from __future__ import annotations
+"""Members can read their teams' audit rows, without installation rows or secrets."""
 
 import json
+import uuid
 
-from tests.api.helpers import (
-    BOOTSTRAP_AUTH,
-    auth,
-    grant,
-    key_row,
-    org_tree,
-    suffix,
-    user_with_token,
-)
+from tests.api.helpers import BOOTSTRAP_AUTH, auth, suffix, user_with_token
+from tests.factories import make_member, make_team
 
 
-async def test_audit_scope_and_redaction(client, committed) -> None:
-    org, team, project = await org_tree(committed, prefix="audit")
-    key = await key_row(committed, project, name="audit-key")
-    admin, admin_secret = await user_with_token(committed)
-    team_admin, team_admin_secret = await user_with_token(committed)
-    member, member_secret = await user_with_token(committed)
-    await grant(committed, admin, org, role="admin")
-    await grant(committed, team_admin, org, team=team, role="admin")
-    await grant(committed, member, org, team=team, role="member")
+async def test_audit_visibility_filters_pagination_and_redaction(client, committed) -> None:
+    team = await make_team(committed)
+    other = await make_team(committed)
+    user, token = await user_with_token(committed)
+    await make_member(committed, team, user)
     await committed.commit()
-
-    # Mutations through the API write audit rows in the same transaction.
-    resp = client.patch(
-        f"/api/v1/teams/{team.id}",
-        json={"name": f"team-{suffix()}"},
-        headers=BOOTSTRAP_AUTH,
+    created = client.post(
+        f"/api/v1/teams/{team.id}/keys", json={"name": "audited"}, headers=auth(token)
     )
-    assert resp.status_code == 200, resp.text
-    created_key = client.post(
-        f"/api/v1/projects/{project.id}/keys",
-        json={"name": "audited-key"},
-        headers=BOOTSTRAP_AUTH,
-    )
-    assert created_key.status_code == 201, created_key.text
-    secret = created_key.json()["secret"]
-    assert secret.startswith("lw-")
-
-    # Org admins read the whole org; team admins their team; members nothing.
-    org_rows = client.get(f"/api/v1/audit?org_id={org.id}", headers=auth(admin_secret))
-    assert org_rows.status_code == 200, org_rows.text
-    assert any(row["action"] == "team.update" for row in org_rows.json()["items"])
-    team_rows = client.get(
-        f"/api/v1/audit?org_id={org.id}&team_id={team.id}",
-        headers=auth(team_admin_secret),
-    )
-    assert team_rows.status_code == 200
-    assert any(row["action"] == "team.update" for row in team_rows.json()["items"])
+    assert created.status_code == 201, created.text
+    key_id = created.json()["key"]["id"]
+    secret = created.json()["secret"]
     assert (
-        client.get(f"/api/v1/audit?org_id={org.id}", headers=auth(team_admin_secret)).status_code
-        == 403
-    )
-    assert (
-        client.get(f"/api/v1/audit?org_id={org.id}", headers=auth(member_secret)).status_code == 403
-    )
-    assert (
-        client.get(
-            f"/api/v1/audit?org_id={org.id}&team_id={team.id}",
-            headers=auth(member_secret),
+        client.patch(
+            f"/api/v1/keys/{key_id}", json={"name": "renamed"}, headers=auth(token)
         ).status_code
-        == 403
+        == 200
     )
-
-    key_rows = client.get(
-        f"/api/v1/audit?org_id={org.id}&resource_type=key&action=key.create",
-        headers=BOOTSTRAP_AUTH,
+    assert (
+        client.patch(
+            f"/api/v1/teams/{other.id}", json={"name": f"other-{suffix()}"}, headers=BOOTSTRAP_AUTH
+        ).status_code
+        == 200
     )
-    assert key_rows.status_code == 200
-    key_audit = next(
-        row
-        for row in key_rows.json()["items"]
-        if row["resource_id"] == str(created_key.json()["key"]["id"])
+    assert (
+        client.post(
+            "/api/v1/users", json={"email": f"audit-{suffix()}@example.com"}, headers=BOOTSTRAP_AUTH
+        ).status_code
+        == 201
     )
-    encoded = json.dumps(key_audit["details"])
-    assert secret not in encoded
-    assert "key_hash" not in encoded
-    assert key.display_prefix not in encoded
-
-    # Pagination is newest-first and stable.
-    first = client.get(f"/api/v1/audit?org_id={org.id}&limit=1", headers=BOOTSTRAP_AUTH)
-    assert first.status_code == 200
-    assert len(first.json()["items"]) == 1
-    cursor = first.json()["next_cursor"]
-    assert cursor
+    rows = client.get("/api/v1/audit?limit=500", headers=auth(token))
+    assert rows.status_code == 200
+    assert {r["team_id"] for r in rows.json()["items"]} == {str(team.id)}
+    assert {r["action"] for r in rows.json()["items"]} == {"key.create", "key.update"}
+    assert secret not in rows.text and "key_hash" not in rows.text
+    filters = {
+        "team_id": str(team.id),
+        "actor_id": str(user.id),
+        "action": "key.create",
+        "resource_type": "key",
+        "resource_id": key_id,
+    }
+    filtered = client.get("/api/v1/audit", params=filters, headers=auth(token))
+    assert filtered.status_code == 200
+    assert len(filtered.json()["items"]) == 1
+    assert "org_id" not in filtered.json()["items"][0]
+    assert secret not in json.dumps(filtered.json()["items"][0]["details"])
+    first = client.get(
+        "/api/v1/audit", params={"team_id": str(team.id), "limit": 1}, headers=auth(token)
+    ).json()
     second = client.get(
-        f"/api/v1/audit?org_id={org.id}&limit=1&cursor={cursor}",
-        headers=BOOTSTRAP_AUTH,
-    )
-    assert second.status_code == 200
-    assert second.json()["items"][0]["id"] != first.json()["items"][0]["id"]
-
-    # Installation-wide rows are superuser-only; an explicit org filter must exist.
-    assert client.get("/api/v1/audit", headers=auth(admin_secret)).status_code == 200
-    assert (
-        client.get(
-            "/api/v1/audit?org_id=00000000-0000-0000-0000-000000000000", headers=BOOTSTRAP_AUTH
-        ).status_code
-        == 404
-    )
+        "/api/v1/audit",
+        params={"team_id": str(team.id), "limit": 1, "cursor": first["next_cursor"]},
+        headers=auth(token),
+    ).json()
+    assert first["items"][0]["id"] > second["items"][0]["id"]
+    for team_id in (other.id, uuid.uuid4()):
+        assert (
+            client.get(
+                "/api/v1/audit", params={"team_id": str(team_id)}, headers=auth(token)
+            ).status_code
+            == 404
+        )
+    all_rows = client.get("/api/v1/audit?limit=500", headers=BOOTSTRAP_AUTH).json()["items"]
+    assert any(r["team_id"] is None for r in all_rows)
+    assert any(r["team_id"] == str(other.id) for r in all_rows)
+    assert client.get("/api/v1/audit?cursor=nope", headers=auth(token)).status_code == 422

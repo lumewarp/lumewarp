@@ -88,15 +88,22 @@ async def _revoke(factory, key) -> None:
 async def test_zero_weight_plugin_does_not_block_revocation(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
-        _, _, p = await add_hierarchy(s)
-        key = await add_key(s, p)
+        t, u = await add_hierarchy(s)
+        key = await add_key(s, t, u)
         await add_route(s, "m", [("d", None)])
     await touch(factory)
-    assert await publish_pending(factory, SCOPE, router_plugins=[]) == 1
+    assert (
+        await publish_pending(factory, SCOPE, router_plugins=[], require_local_membership=True) == 1
+    )
 
     await _revoke(factory, key)
     await touch(factory)
-    assert await publish_pending(factory, SCOPE, router_plugins=[lp(Fixed(0))]) == 2
+    assert (
+        await publish_pending(
+            factory, SCOPE, router_plugins=[lp(Fixed(0))], require_local_membership=True
+        )
+        == 2
+    )
     snap = await load_version(factory, 2)
     assert [d.weight for d in snap.deployments] == [1]  # plugin output discarded
     assert [r.model for r in snap.routes] == ["m"]
@@ -107,8 +114,8 @@ async def test_zero_weight_plugin_does_not_block_revocation(factory) -> None:
 async def test_source_zero_weight_weighted_route_is_left_out(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
-        _, _, p = await add_hierarchy(s)
-        key = await add_key(s, p)
+        t, u = await add_hierarchy(s)
+        key = await add_key(s, t, u)
         await add_route(s, "zero", [("z1", None), ("z2", None)])
         await add_route(s, "fine", [("ok", None)])
         await add_route(s, "lif", [("z1", None)], strategy=RoutingStrategy.LEAST_IN_FLIGHT)
@@ -117,13 +124,15 @@ async def test_source_zero_weight_weighted_route_is_left_out(factory) -> None:
         )
     await _revoke(factory, key)
     await touch(factory)
-    assert await publish_pending(factory, SCOPE, router_plugins=[]) == 1
+    assert (
+        await publish_pending(factory, SCOPE, router_plugins=[], require_local_membership=True) == 1
+    )
     snap = await load_version(factory, 1)
     # least_in_flight ignores weights, so only the weighted route is dropped.
     assert [r.model for r in snap.routes] == ["fine", "lif"]
     assert list(snap.api_keys) == []
     async with factory() as s:
-        c = await compile_scope(s, SCOPE, now=OCT, router_plugins=[])
+        c = await compile_scope(s, SCOPE, now=OCT, router_plugins=[], require_local_membership=True)
     assert any("zero total weight" in w for w in c.warnings)
 
 
@@ -176,7 +185,7 @@ async def test_invalid_upstream_url_left_out_with_its_routes(factory) -> None:
         )
         await add_route(s, "good", [("fine-d", None)])
     async with factory() as s:
-        c = await compile_scope(s, SCOPE, now=OCT, router_plugins=[])
+        c = await compile_scope(s, SCOPE, now=OCT, router_plugins=[], require_local_membership=True)
     snap = c.snapshot
     assert [u.name for u in snap.upstreams] == ["vllm"]
     assert [d.name for d in snap.deployments] == ["fine-d"]
@@ -190,12 +199,11 @@ def _valid_snapshot() -> pb.Snapshot:
         upstreams=[pb.Upstream(name="u", kind=pb.UPSTREAM_KIND_VLLM, base_url="http://u/v1")],
         deployments=[pb.Deployment(name="d", upstream="u", upstream_model="m", weight=1)],
         routes=[pb.ModelRoute(model="a", deployments=["d"], strategy=pb.ROUTING_STRATEGY_WEIGHTED)],
-        teams=[pb.Team(id="t", org_id="o")],
+        teams=[pb.Team(id="t")],
         api_keys=[
             pb.ApiKey(
                 key_id="k",
                 key_hash=b"\x01" * 32,
-                org_id="o",
                 team_id="t",
                 status=pb.KEY_STATUS_ACTIVE,
                 policy=pb.EffectivePolicy(
@@ -238,7 +246,6 @@ def _mutations():
         "status 0": lambda s: setattr(k(s), "status", 0),
         "negative expiry": lambda s: setattr(k(s), "expires_at_unix_ms", -1),
         "unknown team": lambda s: setattr(k(s), "team_id", "x"),
-        "org mismatch": lambda s: setattr(k(s), "org_id", "x"),
         "no policy": lambda s: k(s).ClearField("policy"),
         "empty allowed model": lambda s: k(s).policy.allowed_models.append(""),
         "scope without limit": lambda s: k(s).policy.rate_limit_scopes[0].ClearField("limit"),
@@ -304,11 +311,11 @@ def test_expiry_ms(expires_at, wire) -> None:
 async def test_epoch_expiry_is_not_never(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
-        _, _, p = await add_hierarchy(s)
-        epoch = await add_key(s, p, name="epoch", expires_at=datetime(1970, 1, 1, tzinfo=UTC))
-        old = await add_key(s, p, name="old", expires_at=datetime(1900, 1, 1, tzinfo=UTC))
+        t, u = await add_hierarchy(s)
+        epoch = await add_key(s, t, u, name="epoch", expires_at=datetime(1970, 1, 1, tzinfo=UTC))
+        old = await add_key(s, t, u, name="old", expires_at=datetime(1900, 1, 1, tzinfo=UTC))
     async with factory() as s:
-        c = await compile_scope(s, SCOPE, now=OCT, router_plugins=[])
+        c = await compile_scope(s, SCOPE, now=OCT, router_plugins=[], require_local_membership=True)
     wire = {k.key_id: k.expires_at_unix_ms for k in c.snapshot.api_keys}
     assert wire == {str(epoch.id): 1, str(old.id): 1}
 
@@ -417,10 +424,15 @@ async def test_max_plugin_weight_round_trips_through_rollback(factory) -> None:
     async with factory() as s, s.begin():
         await add_route(s, "m", [("d", None)])
     await touch(factory)
-    assert await publish_pending(factory, SCOPE, router_plugins=[lp(Fixed(MAX_WEIGHT))]) == 1
+    assert (
+        await publish_pending(
+            factory, SCOPE, router_plugins=[lp(Fixed(MAX_WEIGHT))], require_local_membership=True
+        )
+        == 1
+    )
     assert (await load_version(factory, 1)).deployments[0].weight == MAX_WEIGHT
     async with factory() as s, s.begin():
-        assert await rollback_routing(s, SCOPE, 1) == 2
+        assert await rollback_routing(s, SCOPE, 1, require_local_membership=True) == 2
     async with factory() as s:
         assert await s.scalar(select(Deployment.weight)) == MAX_WEIGHT
 
@@ -439,7 +451,7 @@ async def test_rollback_to_overweight_version_is_a_compile_error(factory) -> Non
         await store_version(s, SCOPE, snap, version=1, source_revision=0)
     async with factory() as s, s.begin():
         with pytest.raises(CompileError, match="cannot be restored"):
-            await rollback_routing(s, SCOPE, 1)
+            await rollback_routing(s, SCOPE, 1, require_local_membership=True)
 
 
 # --------------------------------------------------------------------------- 5

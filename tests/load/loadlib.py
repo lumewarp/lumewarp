@@ -1,4 +1,4 @@
-"""Load-e2e helpers on top of the P1 e2e harness (tests/e2e/stack.py): a multi-org fleet of
+"""Load-e2e helpers on top of the P1 e2e harness (tests/e2e/stack.py): a multi-team fleet of
 keys, a Locust run driven from a key-pool file, a probe client whose requests are recorded
 like Locust's, usage accounting against Postgres, and the per-scenario report.
 """
@@ -10,12 +10,13 @@ import re
 import shutil
 import threading
 import time
+import uuid
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
 import httpx
-from stack import ROOT, SCOPE, Gateway, Proc, Stack, free_port, pg, wait_for
+from stack import ADMIN_TOKEN, ROOT, SCOPE, Gateway, Proc, Stack, free_port, pg, wait_for
 
 
 def env_int(name: str, default: int) -> int:
@@ -69,17 +70,17 @@ def dist(values: list[float], scale: float = 1.0, digits: int = 1) -> dict:
 
 
 class Fleet:
-    """Orgs x teams x projects x keys behind one priced route `mock` -> deployment mock-a."""
+    """Teams x mixed service-account/member owners x keys behind one priced mock route."""
 
     def __init__(
         self,
         stack: Stack,
         *,
-        orgs: int = 3,
-        teams: int = 2,
-        projects: int = 2,
-        keys_per_project: int = 5,
+        teams: int = 6,
+        owners_per_team: int = 2,
+        keys_per_owner: int = 5,
         budgets: dict[int, int] | None = None,
+        team_budgets: dict[int, int] | None = None,
     ) -> None:
         self.stack = stack
         self.upstream_id = stack.ok(
@@ -97,23 +98,49 @@ class Fleet:
             "/routes",
             json={"model": "mock", "deployment_ids": [self.deployments["mock-a"]]},
         )["id"]
-        self.projects: list[dict] = []
+        self.teams: list[dict] = []
+        self.owners: list[dict] = []
         self.keys: list[dict] = []
         budgets = budgets or {}
-        for o in range(orgs):
-            org = stack.ok("POST", "/orgs", json={"name": f"org-{o}", "model_access": "all"})
-            for t in range(teams):
-                team = stack.ok("POST", f"/orgs/{org['id']}/teams", json={"name": f"team-{o}-{t}"})
-                for p in range(projects):
-                    body = {"name": f"project-{o}-{t}-{p}"}
-                    if (index := len(self.projects)) in budgets:
-                        body["budget_nano_usd"] = budgets[index]
-                    project = stack.ok("POST", f"/teams/{team['id']}/projects", json=body)
-                    self.projects.append(
-                        {"id": project["id"], "team_id": team["id"], "org_id": org["id"]}
+        team_budgets = team_budgets or {}
+        for t in range(teams):
+            body = {"name": f"team-{t}"}
+            if t in team_budgets:
+                body["budget_nano_usd"] = team_budgets[t]
+            team = stack.ok("POST", "/teams", json=body)
+            self.teams.append(team)
+            for owner_index in range(owners_per_team):
+                body = {}
+                if (index := len(self.owners)) in budgets:
+                    body["budget_nano_usd"] = budgets[index]
+                if owner_index % 2:
+                    token = stack.create_pat(f"owner-{index}@load.test", team["id"], "member")
+                    user_id = stack.ok("GET", "/users/me", token)["user_id"]
+                    owner = stack.ok("PATCH", f"/teams/{team['id']}/members/{user_id}", json=body)
+                    owner |= {
+                        "id": user_id,
+                        "owner_kind": "user",
+                        "token": token,
+                        "policy_path": f"/teams/{team['id']}/members/{user_id}",
+                        "scope_type": "member",
+                        "scope_id": str(uuid.uuid5(uuid.UUID(team["id"]), user_id)),
+                    }
+                else:
+                    owner = stack.ok(
+                        "POST",
+                        f"/teams/{team['id']}/service-accounts",
+                        json={"name": f"owner-{owner_index}", **body},
                     )
-                    for _ in range(keys_per_project):
-                        self.keys.append(self.create_key(project["id"]))
+                    owner |= {
+                        "owner_kind": "service_account",
+                        "token": ADMIN_TOKEN,
+                        "policy_path": f"/service-accounts/{owner['id']}",
+                        "scope_type": "service_account",
+                        "scope_id": owner["id"],
+                    }
+                self.owners.append(owner)
+                for _ in range(keys_per_owner):
+                    self.keys.append(self.create_key(owner["id"]))
         self.wait_published()
 
     def create_deployment(self, name: str, weight: int = 1) -> str:
@@ -131,20 +158,32 @@ class Fleet:
             },
         )["id"]
 
-    def create_key(self, project_id: str) -> dict:
+    def create_key(self, owner_id: str) -> dict:
+        owner = next(o for o in self.owners if o["id"] == owner_id)
+        body = {"name": f"key-{len(self.keys)}"}
+        if owner["owner_kind"] == "service_account":
+            body["service_account_id"] = owner_id
         created = self.stack.ok(
             "POST",
-            f"/projects/{project_id}/keys",
-            json={"name": f"key-{len(self.keys)}", "model_access": "all"},
+            f"/teams/{owner['team_id']}/keys",
+            owner["token"],
+            json=body,
         )
-        return {"id": created["key"]["id"], "secret": created["secret"], "project_id": project_id}
+        assert created["key"]["owner_kind"] == owner["owner_kind"]
+        return {
+            "id": created["key"]["id"],
+            "secret": created["secret"],
+            "owner_id": owner_id,
+            "owner_kind": owner["owner_kind"],
+            "team_id": owner["team_id"],
+        }
 
     def wait_published(self) -> None:
         self.stack.wait_key_count(len(self.keys))
 
-    def project_keys(self, index: int) -> list[dict]:
-        pid = self.projects[index]["id"]
-        return [k for k in self.keys if k["project_id"] == pid]
+    def owner_keys(self, index: int) -> list[dict]:
+        owner_id = self.owners[index]["id"]
+        return [k for k in self.keys if k["owner_id"] == owner_id]
 
 
 def wait_acked(stack: Stack, timeout: float = 15) -> int:
@@ -154,12 +193,14 @@ def wait_acked(stack: Stack, timeout: float = 15) -> int:
         "source_revision"
     ]
     wait_for(
-        lambda: not pg(
-            stack.dsn,
-            "SELECT 1 FROM config_outbox WHERE scope = $1 AND status = 'pending'"
-            " AND source_revision <= $2 LIMIT 1",
-            SCOPE,
-            revision,
+        lambda: (
+            not pg(
+                stack.dsn,
+                "SELECT 1 FROM config_outbox WHERE scope = $1 AND status = 'pending'"
+                " AND source_revision <= $2 LIMIT 1",
+                SCOPE,
+                revision,
+            )
         ),
         timeout,
         f"source revision {revision} compiled",
@@ -322,7 +363,11 @@ class LoadRun:
             raise
         keep = RESULTS / self.dir.name
         keep.mkdir(parents=True, exist_ok=True)
-        for path in [*self.dir.glob("stats_*.csv"), self.proc.log]:
+        for path in [
+            *self.dir.glob("stats_*.csv"),
+            self.dir / "final-stats.json",
+            self.proc.log,
+        ]:
             if path.exists():
                 shutil.copy(path, keep / path.name)
         records = []
@@ -330,21 +375,15 @@ class LoadRun:
             for line in path.read_text().splitlines():
                 if line:
                     records.append(json.loads(line))
-        # Locust's own count must match ours, or the record pipeline lost lines.
-        stats = self.dir / "stats_stats.csv"
-        if stats.exists():
-            lines = stats.read_text().splitlines()
-            header = lines[0].split(",")
-            for line in lines[1:]:
-                cols = line.split(",")
-                if cols[header.index("Name")] == "Aggregated":
-                    count = int(cols[header.index("Request Count")])
-                    (keep / "record-count.json").write_text(
-                        json.dumps({"locust_requests": count, "records": len(records)}) + "\n"
-                    )
-                    assert count == len(
-                        records
-                    ), f"locust counted {count} requests, records have {len(records)}"
+        assert self.proc.popen.returncode == 0, self.proc.text()
+        # The quit event writes this after all users and workers have drained.
+        count = json.loads((self.dir / "final-stats.json").read_text())["requests"]
+        (keep / "record-count.json").write_text(
+            json.dumps({"locust_requests": count, "records": len(records)}) + "\n"
+        )
+        assert count == len(records), (
+            f"locust counted {count} requests, records have {len(records)}"
+        )
         return records
 
 
@@ -402,9 +441,7 @@ def load_window(
                 warning_before_step_at = timestamp
         elif timestamp <= step_ended:
             generator_cpu_warning = True
-    requests = [
-        r for r in records if not r.get("probe") and step_started <= r["t"] <= step_ended
-    ]
+    requests = [r for r in records if not r.get("probe") and step_started <= r["t"] <= step_ended]
     latency = pct([r["d"] for r in requests if r["st"] == 200 and not r["s"]], 99)
     stream_latency = pct([r["d"] for r in requests if r["st"] == 200 and r["s"]], 99)
     generator_saturation = (
@@ -492,10 +529,11 @@ def accounting(stack: Stack, records: list[dict]) -> dict:
 
 
 def cost_check(stack: Stack) -> dict:
-    """Per project: event costs == tokens x deployment price, and usage_totals == events."""
+    """Per team and owner: token costs == event costs == usage totals."""
     rows = pg(
         stack.dsn,
-        "SELECT project_id::text AS p, deployment, prompt_tokens, completion_tokens,"
+        "SELECT team_id::text AS team, owner_kind, owner_id::text AS owner,"
+        " deployment, prompt_tokens, completion_tokens,"
         " cost_nano_usd, cost_known FROM usage_events WHERE status = 200",
     )
     expected: Counter = Counter()
@@ -505,30 +543,40 @@ def cost_check(stack: Stack) -> dict:
         want = cost(r["deployment"], r["prompt_tokens"], r["completion_tokens"])
         if not r["cost_known"] or r["cost_nano_usd"] != want or r["prompt_tokens"] <= 0:
             bad_rows += 1
-        expected[r["p"]] += want
-        recorded[r["p"]] += r["cost_nano_usd"]
+        owner_scope = (
+            str(uuid.uuid5(uuid.UUID(r["team"]), r["owner"]))
+            if r["owner_kind"] == "user"
+            else r["owner"]
+        )
+        for scope in (
+            ("team", r["team"]),
+            ("member" if r["owner_kind"] == "user" else "service_account", owner_scope),
+        ):
+            expected[scope] += want
+            recorded[scope] += r["cost_nano_usd"]
     totals = pg(
         stack.dsn,
-        "SELECT scope_id::text AS p, sum(cost_nano_usd) AS c FROM usage_totals"
-        " WHERE scope_type = 'project' GROUP BY 1",
+        "SELECT scope_type, scope_id::text AS id, sum(cost_nano_usd) AS c FROM usage_totals"
+        " GROUP BY 1, 2",
     )
-    totals_map = {t["p"]: int(t["c"]) for t in totals}
-    projects = sorted(set(expected) | set(totals_map))
+    totals_map = {(t["scope_type"], t["id"]): int(t["c"]) for t in totals}
+    scopes = sorted(set(expected) | set(totals_map))
     wrong = [
         {
-            "project": p,
+            "scope_type": p[0],
+            "scope_id": p[1],
             "tokens_x_price": expected[p],
             "events": recorded[p],
             "totals": totals_map.get(p, 0),
         }
-        for p in projects
+        for p in scopes
         if not (expected[p] == recorded[p] == totals_map.get(p, 0))
     ]
     return {
-        "projects": len(projects),
+        "scopes": len(scopes),
         "rows_with_wrong_cost": bad_rows,
-        "projects_mismatched": wrong,
-        "total_nano_usd": sum(expected.values()),
+        "scopes_mismatched": wrong,
+        "total_nano_usd": sum(v for (kind, _), v in expected.items() if kind == "team"),
     }
 
 

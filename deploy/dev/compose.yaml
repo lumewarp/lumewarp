@@ -20,5 +20,37 @@ services:
       timeout: 3s
       retries: 30
 
+  # Dev-only OIDC IdP for SSO login testing. Only started with the `idp` profile,
+  # so `scripts/dev-db.sh up` keeps starting Postgres alone.
+  keycloak:
+    profiles: ["idp"]
+    image: quay.io/keycloak/keycloak:26.8.1
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: lumewarp
+      # Fixed issuer so discovery and `LUMEWARP_OIDC_ISSUER` always agree.
+      KC_HOSTNAME: http://127.0.0.1:18080
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - ./keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+
+  # Dev-only OpenFGA. Uses its in-memory datastore: tuples and models are gone
+  # after a restart, and `scripts/dev-idp.sh up` seeds the model again.
+  openfga:
+    profiles: ["idp"]
+    image: openfga/openfga:v1.22.0
+    command:
+      - run
+      - --http-addr=0.0.0.0:8080
+      - --grpc-addr=0.0.0.0:8081
+      - --datastore-engine=memory
+      - --playground-enabled=false
+      - --metrics-enabled=false
+    ports:
+      - "127.0.0.1:18081:8080"
+
 volumes:
   lumewarp-pg:

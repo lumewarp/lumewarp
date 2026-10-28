@@ -25,7 +25,7 @@ def test_generated_protos_import() -> None:
 
 
 @pytest.mark.parametrize(
-    "module", ["api", "compiler", "grpc", "usage", "notifier", "outbox", "audit", "rbac"]
+    "module", ["api", "compiler", "grpc", "usage", "notifier", "outbox", "audit", "authz"]
 )
 def test_skeleton_modules_import(module: str) -> None:
     importlib.import_module(f"lumewarp_control_plane.{module}")

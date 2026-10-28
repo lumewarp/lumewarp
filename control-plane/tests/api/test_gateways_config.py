@@ -107,7 +107,8 @@ async def test_config_versions_and_rollback(client, committed, api_scope, monkey
     await committed.commit()
     assert client.get("/api/v1/config/versions", headers=auth(secret)).status_code == 403
 
-    async def fake_rollback(session, scope, version):
+    async def fake_rollback(session, scope, version, *, require_local_membership):
+        assert require_local_membership is True
         if version == 404:
             raise LookupError("missing")
         session.add(

@@ -24,6 +24,7 @@ from lumewarp_control_plane.models import (
     KeyLifecycle,
     OutboxStatus,
     Route,
+    Team,
 )
 from tests.compiler.helpers import (
     SCOPE,
@@ -35,9 +36,11 @@ from tests.compiler.helpers import (
     seed_scope,
     touch,
 )
+from tests.factories import make_key, make_team, make_user
 
 
 async def publish(factory, **kw):
+    kw.setdefault("require_local_membership", True)
     return await publish_pending(factory, SCOPE, router_plugins=[], **kw)
 
 
@@ -61,8 +64,8 @@ async def test_publish_basic(factory) -> None:
     assert await publish(factory) is None  # nothing pending
 
     async with factory() as s, s.begin():
-        _, _, p = await add_hierarchy(s)
-        await add_key(s, p)
+        t, u = await add_hierarchy(s)
+        await add_key(s, t, u)
     r1 = await touch(factory, "key.create")
     assert await publish(factory) == 1
     assert await publish(factory) is None
@@ -76,7 +79,7 @@ async def test_publish_basic(factory) -> None:
 
     r2 = await touch(factory)
     async with factory() as s, s.begin():
-        await s.execute(update(ApiKey).values(rpm_limit=17))
+        await s.execute(update(Team).values(rpm_limit=17))
     r3 = await touch(factory)
     assert await publish(factory) == 2
     assert [r[:2] for r in await outbox_rows(factory)] == [
@@ -150,8 +153,8 @@ async def test_stale_compile_is_not_published(factory) -> None:
 async def test_compile_failure_keeps_previous_version(factory, monkeypatch) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
-        _, _, p = await add_hierarchy(s)
-        await add_key(s, p, name="k1")
+        t, u = await add_hierarchy(s)
+        await add_key(s, t, u, name="k1")
     await touch(factory)
     assert await publish(factory) == 1
 
@@ -159,8 +162,8 @@ async def test_compile_failure_keeps_previous_version(factory, monkeypatch) -> N
 
     monkeypatch.setattr(get_settings(), "max_snapshot_keys", 1)
     async with factory() as s, s.begin():
-        _, _, p = await add_hierarchy(s, name="second")
-        await add_key(s, p, name="k2")
+        t, u = await add_hierarchy(s, name="second")
+        await add_key(s, t, u, name="k2")
     await touch(factory)
     assert await publish(factory) is None
     rows = await outbox_rows(factory)
@@ -182,8 +185,8 @@ async def test_compile_failure_keeps_previous_version(factory, monkeypatch) -> N
 async def test_rollback_restores_routing_not_security(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
-        _, _, p = await add_hierarchy(s)
-        k1 = await add_key(s, p, name="k1")
+        t, u = await add_hierarchy(s)
+        k1 = await add_key(s, t, u, name="k1")
         await add_route(s, "llama", [("llama-a", 1)])
     await touch(factory)
     assert await publish(factory) == 1
@@ -201,7 +204,7 @@ async def test_rollback_restores_routing_not_security(factory) -> None:
     assert await publish(factory) == 2
 
     async with factory() as s, s.begin():
-        v3 = await rollback_routing(s, SCOPE, 1)
+        v3 = await rollback_routing(s, SCOPE, 1, require_local_membership=True)
     assert v3 == 3
     v1, s3 = await load_version(factory, 1), await load_version(factory, 3)
     for field in ("upstreams", "deployments", "routes"):
@@ -213,8 +216,8 @@ async def test_rollback_restores_routing_not_security(factory) -> None:
 
     # Source routing now matches v1, so later mutations keep the rolled-back routing.
     async with factory() as s, s.begin():
-        _, _, p2 = await add_hierarchy(s, name="later")
-        k2 = await add_key(s, p2)
+        t2, u2 = await add_hierarchy(s, name="later")
+        k2 = await add_key(s, t2, u2)
         assert await s.scalar(select(Route.model).where(Route.model == "qwen")) is None
     await touch(factory)
     assert await publish(factory) == 4
@@ -231,12 +234,12 @@ async def test_rollback_unknown_or_compacted(factory) -> None:
     await publish(factory)
     async with factory() as s, s.begin():
         with pytest.raises(LookupError):
-            await rollback_routing(s, SCOPE, 9)
+            await rollback_routing(s, SCOPE, 9, require_local_membership=True)
     async with factory() as s, s.begin():
         await s.execute(update(ConfigVersion).values(payload=None, compacted_at=datetime.now(UTC)))
     async with factory() as s, s.begin():
         with pytest.raises(LookupError):
-            await rollback_routing(s, SCOPE, 1)
+            await rollback_routing(s, SCOPE, 1, require_local_membership=True)
 
 
 # --------------------------------------------------------------------------- diff
@@ -245,9 +248,9 @@ async def test_rollback_unknown_or_compacted(factory) -> None:
 async def test_diff_roundtrip_over_published_versions(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
-        o, t, p = await add_hierarchy(s)
-        k1 = await add_key(s, p, name="k1")
-        k2 = await add_key(s, p, name="k2")
+        t, u = await add_hierarchy(s)
+        k1 = await add_key(s, t, u, name="k1")
+        k2 = await add_key(s, t, u, name="k2")
         await add_route(s, "llama", [("llama-a", 1), ("llama-b", 2)])
     await touch(factory)
     await publish(factory)
@@ -257,10 +260,10 @@ async def test_diff_roundtrip_over_published_versions(factory) -> None:
             .where(ApiKey.id == k1.id)
             .values(lifecycle=KeyLifecycle.REVOKED, revoked_at=datetime.now(UTC))
         )
-        await s.execute(update(ApiKey).where(ApiKey.id == k2.id).values(rpm_limit=5))
+        await s.execute(update(Team).where(Team.id == t.id).values(rpm_limit=5))
         await add_route(s, "qwen", [("qwen-a", None)], upstream="openai")
-        _, _, p2 = await add_hierarchy(s, name="beta")
-        await add_key(s, p2)
+        t2, u2 = await add_hierarchy(s, name="beta")
+        await add_key(s, t2, u2)
     await touch(factory)
     await publish(factory)
 
@@ -370,32 +373,44 @@ async def test_compaction_releases_disconnected_or_removed_gateway(factory, remo
 # --------------------------------------------------------------------------- loop
 
 
-async def test_compiler_loop(factory) -> None:
+@pytest.mark.parametrize("require_local_membership", [True, False])
+async def test_compiler_loop(factory, require_local_membership) -> None:
     await seed_scope(factory)
     stop = asyncio.Event()
     seen: list[tuple[str, int]] = []
+    published = asyncio.Queue()
+    async with factory() as s, s.begin():
+        team = await make_team(s)
+        user = await make_user(s)
+        key = await make_key(s, team, user)
+
+    def on_published(scope, version):
+        seen.append((scope, version))
+        published.put_nowait((scope, version))
+
     task = asyncio.create_task(
         run_compiler_loop(
             factory,
             stop,
             scope=SCOPE,
             interval_seconds=0.05,
-            on_published=lambda sc, v: seen.append((sc, v)),
+            on_published=on_published,
+            require_local_membership=require_local_membership,
         )  # fmt: skip
     )
     try:
         await touch(factory)
-        async with asyncio.timeout(5):
-            while not seen:
-                await asyncio.sleep(0.02)
+        assert await asyncio.wait_for(published.get(), 5) == (SCOPE, 1)
         async with factory() as s, s.begin():
             await add_route(s, "m", [("d", None)])
         await touch(factory)
-        async with asyncio.timeout(5):
-            while len(seen) < 2:
-                await asyncio.sleep(0.02)
+        assert await asyncio.wait_for(published.get(), 5) == (SCOPE, 2)
     finally:
         stop.set()
         await asyncio.wait_for(task, 5)
     assert seen == [(SCOPE, 1), (SCOPE, 2)]
     assert all(status == OutboxStatus.DONE.value for _, status, _ in await outbox_rows(factory))
+    wire = next(k for k in (await load_version(factory, 2)).api_keys if k.key_id == str(key.id))
+    assert wire.status == (
+        pb.KEY_STATUS_SUSPENDED if require_local_membership else pb.KEY_STATUS_ACTIVE
+    )

@@ -15,6 +15,7 @@ import random
 import time
 
 from locust import FastHttpUser, constant_throughput, events, task
+from locust.runners import WorkerRunner
 
 POOL = os.environ["LOAD_POOL"]
 OUT = os.environ["LOAD_OUT"]
@@ -76,6 +77,19 @@ log = _Log()
 @events.quitting.add_listener
 def _flush(**_kwargs) -> None:
     log.close()
+
+
+@events.init.add_listener
+def _final_stats(environment, **_kwargs) -> None:
+    if isinstance(environment.runner, WorkerRunner):
+        return
+
+    @environment.events.quit.add_listener
+    def save(exit_code, **_kwargs) -> None:
+        # quit fires after runner.quit drains users and collects the workers' last stats.
+        # Periodic CSV snapshots can omit the final requests, especially in short runs.
+        with open(os.path.join(OUT, "final-stats.json"), "w") as out:
+            json.dump({"requests": environment.stats.total.num_requests}, out)
 
 
 def _sse_problem(text: str) -> str | None:

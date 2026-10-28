@@ -1,9 +1,10 @@
 """Usage aggregation: monthly `usage_totals` fast path plus recent `usage_events`.
 
 `from`/`to` are a half-open UTC range. `group_by` is a comma-separated subset of
-`day,model,org,team,project,key`; the default is `day,model`. A single scope dimension over
-whole UTC months is served from the pre-aggregated `usage_totals` table (superuser only);
-everything else is aggregated from `usage_events`.
+`day,model,team,owner,key`; the default is `day,model`. `owner` groups by the key owner
+(`owner_kind`, `owner_id`: a user or a service account). A superuser's single `team`
+dimension over whole UTC months is served from the pre-aggregated `usage_totals` table;
+everything else is aggregated from `usage_events`, limited to the caller's readable teams.
 """
 
 from __future__ import annotations
@@ -15,43 +16,43 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
-from sqlalchemy import case, func, or_, select, tuple_
+from sqlalchemy import case, func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumewarp_control_plane import rbac
 from lumewarp_control_plane.api.common import (
     LimitDep,
     SessionDep,
     aware,
     ensure_key_read,
-    ensure_project_read,
     ensure_range,
     ensure_team_read,
     month_start,
     validation_error,
 )
 from lumewarp_control_plane.api.schemas import Page, UsageRowOut
-from lumewarp_control_plane.errors import forbidden, not_found
+from lumewarp_control_plane.authz import Authz
+from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import (
     ApiKey,
-    Org,
-    Project,
+    KeyOwnerKind,
     ScopeType,
     Team,
     UsageEvent,
     UsageTotal,
 )
-from lumewarp_control_plane.security import CurrentPrincipal
 
 router = APIRouter(tags=["usage"])
 
-DIMENSIONS = ("day", "model", "org", "team", "project", "key")
-SCOPE_TYPES = {
-    "org": ScopeType.ORG,
-    "team": ScopeType.TEAM,
-    "project": ScopeType.PROJECT,
-    "key": ScopeType.KEY,
+DIMENSIONS = ("day", "model", "team", "owner", "key")
+# Output columns behind each dimension, in cursor order.
+COLUMNS = {
+    "day": ("day",),
+    "model": ("model",),
+    "team": ("team",),
+    "owner": ("owner_kind", "owner_id"),
+    "key": ("key",),
 }
+UUID_COLUMNS = {"team", "owner_id", "key"}
 
 FromQuery = Annotated[datetime | None, Query(alias="from")]
 ToQuery = Annotated[datetime | None, Query(alias="to")]
@@ -77,17 +78,17 @@ def _encode_cursor(values: list[Any]) -> str:
     return base64.urlsafe_b64encode(encoded).decode()
 
 
-def _decode_cursor(cursor: str, groups: list[str]) -> list[Any]:
+def _decode_cursor(cursor: str, columns: list[str]) -> list[Any]:
     try:
         raw = base64.urlsafe_b64decode(cursor.encode())
         values = json.loads(raw)
     except (ValueError, json.JSONDecodeError) as exc:
         raise validation_error("cursor", "invalid cursor") from exc
-    if not isinstance(values, list) or len(values) != len(groups):
+    if not isinstance(values, list) or len(values) != len(columns):
         raise validation_error("cursor", "invalid cursor")
     converted: list[Any] = []
-    for name, value in zip(groups, values, strict=True):
-        if name in ("org", "team", "project", "key"):
+    for name, value in zip(columns, values, strict=True):
+        if name in UUID_COLUMNS:
             try:
                 converted.append(uuid.UUID(value))
             except (ValueError, TypeError) as exc:
@@ -100,82 +101,48 @@ def _decode_cursor(cursor: str, groups: list[str]) -> list[Any]:
             if parsed.tzinfo is not None:
                 parsed = parsed.astimezone(UTC).replace(tzinfo=None)
             converted.append(parsed)
+        elif name == "owner_kind":
+            if value not in {kind.value for kind in KeyOwnerKind}:
+                raise validation_error("cursor", "invalid cursor")
+            converted.append(value)
         else:
             converted.append(value)
     return converted
 
 
-def _scope_admin_condition(principal: CurrentPrincipal) -> Any:
-    org_admins: set[uuid.UUID] = set()
-    teams: set[uuid.UUID] = set()
-    for grant in principal.grants:
-        if grant.team_id is None and grant.role in {"owner", "admin"}:
-            org_admins.add(grant.org_id)
-        elif grant.team_id is not None:
-            teams.add(grant.team_id)
-    clauses = []
-    if org_admins:
-        clauses.append(UsageEvent.org_id.in_(org_admins))
-    if teams:
-        clauses.append(UsageEvent.team_id.in_(teams))
-    return or_(*clauses) if clauses else None
-
-
 async def _check_scope_filters(
     session: AsyncSession,
-    principal: CurrentPrincipal,
-    org_id: uuid.UUID | None,
+    authz: Authz,
     team_id: uuid.UUID | None,
-    project_id: uuid.UUID | None,
+    user_id: uuid.UUID | None,
+    service_account_id: uuid.UUID | None,
     key_id: uuid.UUID | None,
-) -> None:
-    """Resolve parent mismatches (404) before authorizing the narrowest scope."""
+) -> uuid.UUID | None:
+    """Resolve parent mismatches (404) before authorizing; returns the narrowest team."""
+    if (user_id is not None or service_account_id is not None) and team_id is None:
+        raise validation_error("team_id", "required with user_id or service_account_id")
+    if user_id is not None and service_account_id is not None:
+        raise validation_error("service_account_id", "cannot be combined with user_id")
     if key_id is not None:
         key = await session.get(ApiKey, key_id)
         if key is None:
             raise not_found("key not found")
-        if org_id is not None and org_id != key.org_id:
-            raise not_found("key_id does not match org_id")
         if team_id is not None and team_id != key.team_id:
             raise not_found("key_id does not match team_id")
-        if project_id is not None and project_id != key.project_id:
-            raise not_found("key_id does not match project_id")
-        ensure_key_read(principal, key)
-        return
-    if project_id is not None:
-        project = await session.get(Project, project_id)
-        if project is None:
-            raise not_found("project not found")
-        if org_id is not None and org_id != project.org_id:
-            raise not_found("project_id does not match org_id")
-        if team_id is not None and team_id != project.team_id:
-            raise not_found("project_id does not match team_id")
-        ensure_project_read(principal, project)
-        return
+        await ensure_key_read(authz, key)
+        return key.team_id
     if team_id is not None:
-        team = await session.get(Team, team_id)
-        if team is None:
+        if await session.get(Team, team_id) is None:
             raise not_found("team not found")
-        if org_id is not None and org_id != team.org_id:
-            raise not_found("team_id does not match org_id")
-        ensure_team_read(principal, team)
-        return
-    if org_id is not None:
-        org = await session.get(Org, org_id)
-        if org is None or not rbac.authorize(
-            principal, rbac.Action.ORG_READ, rbac.ResourceScope(org.id)
-        ):
-            raise not_found("org not found")
-        if not rbac.authorize(principal, rbac.Action.READ, rbac.ResourceScope(org.id)):
-            raise forbidden("read not allowed for the whole org; filter by team_id")
+        await ensure_team_read(authz, team_id)
+    return team_id
 
 
 async def _totals_page(
     session: AsyncSession,
-    dimension: str,
     from_: datetime,
     to_: datetime,
-    filters: dict[str, uuid.UUID],
+    team_id: uuid.UUID | None,
     limit: int,
     cursor: str | None,
 ) -> Page[UsageRowOut]:
@@ -190,15 +157,15 @@ async def _totals_page(
             func.coalesce(func.sum(UsageTotal.unknown_cost_count), 0),
         )
         .where(
-            UsageTotal.scope_type == SCOPE_TYPES[dimension],
+            UsageTotal.scope_type == ScopeType.TEAM,
             UsageTotal.window_start >= from_,
             UsageTotal.window_start < to_,
         )
         .group_by(group_column)
         .order_by(group_column)
     )
-    if dimension in filters:
-        stmt = stmt.where(group_column == filters[dimension])
+    if team_id is not None:
+        stmt = stmt.where(group_column == team_id)
     if cursor is not None:
         try:
             stmt = stmt.where(group_column > uuid.UUID(cursor))
@@ -208,7 +175,7 @@ async def _totals_page(
     next_cursor = str(rows[limit - 1][0]) if len(rows) > limit else None
     items = [
         UsageRowOut(
-            **{dimension + "_id": row[0]},
+            team_id=row[0],
             requests=int(row[1]),
             prompt_tokens=int(row[2]),
             completion_tokens=int(row[3]),
@@ -224,23 +191,23 @@ async def _totals_page(
 async def _events_page(
     session: AsyncSession,
     groups: list[str],
-    principal: CurrentPrincipal,
+    readable: set[uuid.UUID] | None,
     from_: datetime,
     to_: datetime,
-    filters: dict[str, Any],
-    model: str | None,
+    filters: list[Any],
     limit: int,
     cursor: str | None,
 ) -> Page[UsageRowOut]:
     fields = {
         "day": func.date_trunc("day", func.timezone("UTC", UsageEvent.ts)),
         "model": UsageEvent.model,
-        "org": UsageEvent.org_id,
         "team": UsageEvent.team_id,
-        "project": UsageEvent.project_id,
+        "owner_kind": UsageEvent.owner_kind,
+        "owner_id": UsageEvent.owner_id,
         "key": UsageEvent.key_id,
     }
-    group_columns = [fields[name] for name in groups]
+    names = [column for group in groups for column in COLUMNS[group]]
+    group_columns = [fields[name] for name in names]
     aggregates = [
         func.count().label("requests"),
         func.coalesce(func.sum(UsageEvent.prompt_tokens), 0).label("prompt_tokens"),
@@ -251,55 +218,48 @@ async def _events_page(
         ),
     ]
     stmt = select(*group_columns, *aggregates).where(UsageEvent.ts >= from_, UsageEvent.ts < to_)
-    if model is not None:
-        stmt = stmt.where(UsageEvent.model == model)
-    column_filters = {
-        "org": UsageEvent.org_id,
-        "team": UsageEvent.team_id,
-        "project": UsageEvent.project_id,
-        "key": UsageEvent.key_id,
-    }
-    for name, value in filters.items():
-        if name in column_filters:
-            stmt = stmt.where(column_filters[name] == value)
-    if not principal.is_superuser:
-        allowed = _scope_admin_condition(principal)
-        if allowed is None:
+    for condition in filters:
+        stmt = stmt.where(condition)
+    if readable is not None:
+        if not readable:
             return Page[UsageRowOut](items=[], next_cursor=None)
-        stmt = stmt.where(allowed)
-    if groups:
+        stmt = stmt.where(UsageEvent.team_id.in_(readable))
+    if names:
         stmt = stmt.group_by(*group_columns).order_by(*group_columns)
         if cursor is not None:
-            values = _decode_cursor(cursor, groups)
+            values = _decode_cursor(cursor, names)
             stmt = stmt.where(tuple_(*group_columns) > tuple_(*values))
     rows = (await session.execute(stmt.limit(limit + 1))).all()
-    if groups and len(rows) > limit:
+    if names and len(rows) > limit:
         last = rows[limit - 1]
         next_cursor = _encode_cursor(
             [
-                last[index].isoformat() if groups[index] == "day" else str(last[index])
-                for index in range(len(groups))
+                last[index].isoformat()
+                if name == "day"
+                else getattr(last[index], "value", None) or str(last[index])
+                for index, name in enumerate(names)
             ]
         )
     else:
         next_cursor = None
+    n = len(names)
     items: list[UsageRowOut] = []
     for row in rows[:limit]:
-        values = {name: row[index] for index, name in enumerate(groups)}
+        values = {name: row[index] for index, name in enumerate(names)}
         items.append(
             UsageRowOut(
                 date=values["day"].date() if "day" in values else None,
                 model=values.get("model"),
-                org_id=values.get("org"),
                 team_id=values.get("team"),
-                project_id=values.get("project"),
+                owner_kind=values.get("owner_kind"),
+                owner_id=values.get("owner_id"),
                 key_id=values.get("key"),
-                requests=int(row[len(groups)]),
-                prompt_tokens=int(row[len(groups) + 1]),
-                completion_tokens=int(row[len(groups) + 2]),
-                total_tokens=int(row[len(groups) + 1]) + int(row[len(groups) + 2]),
-                cost_nano_usd=int(row[len(groups) + 3]),
-                unknown_cost_count=int(row[len(groups) + 4]),
+                requests=int(row[n]),
+                prompt_tokens=int(row[n + 1]),
+                completion_tokens=int(row[n + 2]),
+                total_tokens=int(row[n + 1]) + int(row[n + 2]),
+                cost_nano_usd=int(row[n + 3]),
+                unknown_cost_count=int(row[n + 4]),
             )
         )
     return Page[UsageRowOut](items=items, next_cursor=next_cursor)
@@ -317,14 +277,14 @@ def _month_aligned(from_: datetime, to_: datetime) -> bool:
 
 @router.get("/usage", response_model=Page[UsageRowOut], operation_id="getUsage")
 async def get_usage(
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     from_: FromQuery = None,
     to_: ToQuery = None,
     group_by: str | None = None,
-    org_id: uuid.UUID | None = None,
     team_id: uuid.UUID | None = None,
-    project_id: uuid.UUID | None = None,
+    user_id: uuid.UUID | None = None,
+    service_account_id: uuid.UUID | None = None,
     key_id: uuid.UUID | None = None,
     model: str | None = None,
     limit: LimitDep = 50,
@@ -336,26 +296,39 @@ async def get_usage(
     if end <= start:
         raise validation_error("to", "must be after from")
     groups = _parse_group_by(group_by)
-    await _check_scope_filters(session, principal, org_id, team_id, project_id, key_id)
-    filters = {
-        name: value
-        for name, value in (
-            ("org", org_id),
-            ("team", team_id),
-            ("project", project_id),
-            ("key", key_id),
-        )
-        if value is not None
-    }
+    scoped_team = await _check_scope_filters(
+        session, authz, team_id, user_id, service_account_id, key_id
+    )
+    superuser = await authz.is_superuser()
+    # A narrowing filter already proved TEAM_READ; otherwise limit to the readable teams.
+    readable = (
+        None
+        if superuser or scoped_team is not None
+        else await authz.readable_teams(set(await session.scalars(select(Team.id))))
+    )
     use_totals = (
-        principal.is_superuser
-        and len(groups) == 1
-        and groups[0] in SCOPE_TYPES
+        superuser
+        and groups == ["team"]
         and model is None
-        and set(filters) <= set(groups)
+        and user_id is None
+        and service_account_id is None
+        and key_id is None
         and _month_aligned(start, end)
     )
     if use_totals:
-        return await _totals_page(session, groups[0], start, end, filters, limit, cursor)
+        return await _totals_page(session, start, end, team_id, limit, cursor)
     ensure_range(start, end)
-    return await _events_page(session, groups, principal, start, end, filters, model, limit, cursor)
+    filters: list[Any] = []
+    if model is not None:
+        filters.append(UsageEvent.model == model)
+    if scoped_team is not None:
+        filters.append(UsageEvent.team_id == scoped_team)
+    if user_id is not None:
+        filters.append(UsageEvent.owner_kind == KeyOwnerKind.USER)
+        filters.append(UsageEvent.owner_id == user_id)
+    if service_account_id is not None:
+        filters.append(UsageEvent.owner_kind == KeyOwnerKind.SERVICE_ACCOUNT)
+        filters.append(UsageEvent.owner_id == service_account_id)
+    if key_id is not None:
+        filters.append(UsageEvent.key_id == key_id)
+    return await _events_page(session, groups, readable, start, end, filters, limit, cursor)

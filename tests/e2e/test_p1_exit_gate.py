@@ -1,9 +1,11 @@
 """P1 exit gate: Postgres + control plane + gateway + mock upstream as real processes."""
 
 import time
+import uuid
 
 import httpx
-from stack import GATEWAY_ID, wait_for
+import pytest
+from stack import GATEWAY_ID, pg, wait_for
 
 
 def sse_ok(resp: httpx.Response) -> bool:
@@ -18,8 +20,9 @@ def error_code(resp: httpx.Response) -> str:
     return resp.json()["error"]["code"]
 
 
-def test_two_keys_serve_and_usage_lands(stack):
-    seeded = stack.seed(priced=True)
+@pytest.mark.parametrize("owner_kind", ["service_account", "user"])
+def test_two_keys_serve_and_usage_lands(stack, owner_kind):
+    seeded = stack.seed(priced=True, owner_kind=owner_kind)
     gw = stack.start_gateway()
 
     for key in (seeded.a, seeded.b):
@@ -38,13 +41,18 @@ def test_two_keys_serve_and_usage_lands(stack):
         assert len(mine) == 2, "one stream and one non-stream per key"
         assert {r["stream"] for r in mine} == {True, False}
         for r in mine:
-            assert str(r["project_id"]) == seeded.project_id
             assert str(r["team_id"]) == seeded.team_id
-            assert str(r["org_id"]) == seeded.org_id
+            assert r["owner_kind"] == owner_kind
+            assert str(r["owner_id"]) == seeded.owner_id
             assert (r["status"], r["model"], r["deployment"]) == (200, "mock", "mock-a")
             assert r["cost_known"] and r["prompt_tokens"] > 0 and r["completion_tokens"] > 0
             # price: 1000 / 2000 nano-USD per token
             assert r["cost_nano_usd"] == r["prompt_tokens"] * 1000 + r["completion_tokens"] * 2000
+    spend = [line for line in gw.metrics().splitlines() if line.startswith("lumewarp_spend_total{")]
+    assert len(spend) == 1
+    labels, value = spend[0].removeprefix("lumewarp_spend_total{").split("} ")
+    assert labels == f'team="{seeded.team_id}"'
+    assert float(value) == pytest.approx(sum(r["cost_nano_usd"] for r in rows) / 1e9)
 
     # The control plane reports the gateway on the current version.
     wait_for(
@@ -52,6 +60,27 @@ def test_two_keys_serve_and_usage_lands(stack):
         10,
         "ACKed version == current version",
     )
+
+
+def test_removing_member_suspends_keys_within_two_seconds(stack):
+    seeded = stack.seed(owner_kind="user")
+    gw = stack.start_gateway()
+    for key in (seeded.a, seeded.b):
+        assert gw.chat(key.secret).status_code == 200
+
+    started = time.monotonic()
+    response = stack.api("DELETE", f"/teams/{seeded.team_id}/members/{seeded.owner_id}")
+    assert response.status_code == 204, response.text
+    for key in (seeded.a, seeded.b):
+        wait_for(
+            lambda key=key: gw.chat(key.secret).status_code == 401,
+            max(0, 2.0 - (time.monotonic() - started)),
+            "removed member key rejected",
+        )
+        assert error_code(gw.chat(key.secret)) == "invalid_api_key"
+        stored = stack.ok("GET", f"/keys/{key.id}")
+        assert (stored["lifecycle"], stored["suspended_reason"]) == ("suspended", "owner_removed")
+    assert time.monotonic() - started < 2.0
 
 
 def test_revoke_key_takes_effect_within_two_seconds(stack):
@@ -130,15 +159,29 @@ def test_cold_boot_without_cache_and_control_plane_down_is_never_ready(stack):
     assert not list(gw.state_dir.glob("snapshot.pb"))
 
 
-def test_budget_exhaustion_blocks_key_within_five_seconds(stack):
-    # Each mock request costs ~16_000 nano-USD; the project may spend 50_000.
-    seeded = stack.seed(priced=True, project_budget=50_000)
+@pytest.mark.parametrize("scope", ["team", "owner"])
+@pytest.mark.parametrize("owner_kind", ["service_account", "user"])
+def test_budget_exhaustion_blocks_key_within_five_seconds(stack, scope, owner_kind):
+    # Each mock request costs ~16_000 nano-USD; the scope may spend 50_000.
+    seeded = stack.seed(priced=True, owner_kind=owner_kind, **{f"{scope}_budget": 50_000})
     gw = stack.start_gateway()
 
     for _ in range(6):
         assert gw.chat(seeded.a.secret).status_code == 200
     spent = lambda: sum(r["cost_nano_usd"] for r in stack.usage_rows())  # noqa: E731
     wait_for(lambda: spent() > 50_000, 10, "usage over budget ingested")
+    owner_scope = (
+        uuid.uuid5(uuid.UUID(seeded.team_id), seeded.owner_id)
+        if owner_kind == "user"
+        else uuid.UUID(seeded.owner_id)
+    )
+    totals = pg(
+        stack.dsn,
+        "SELECT cost_nano_usd FROM usage_totals WHERE scope_type = $1 AND scope_id = $2",
+        "member" if owner_kind == "user" else "service_account",
+        owner_scope,
+    )
+    assert len(totals) == 1 and totals[0]["cost_nano_usd"] == spent()
     ingested = time.monotonic()
 
     def blocked() -> bool:
@@ -150,29 +193,29 @@ def test_budget_exhaustion_blocks_key_within_five_seconds(stack):
 
     wait_for(blocked, 5.0, "key rejected with 429 insufficient_quota", interval=0.1)
     print(f"budget block {time.monotonic() - ingested:.2f}s after ingestion")
-    assert gw.chat(seeded.b.secret).status_code == 429, "same project, same budget"
+    assert gw.chat(seeded.b.secret).status_code == 429, "same owner and team, same budget"
 
 
-def test_rbac_denials(stack):
+def test_authz_denials(stack):
     seeded = stack.seed()
-    viewer = stack.create_pat("viewer@e2e.test", seeded.org_id, seeded.team_id, "viewer")
-    member = stack.create_pat("member@e2e.test", seeded.org_id, seeded.team_id, "member")
-    # Viewers cannot create keys; members may (RBAC matrix), but neither manages gateways.
-    r = stack.api("POST", f"/projects/{seeded.project_id}/keys", viewer, json={"name": "nope"})
+    admin = stack.create_pat("admin@e2e.test", seeded.team_id, "admin")
+    member = stack.create_pat("member@e2e.test", seeded.team_id, "member")
+    # Members cannot manage service accounts; neither team role manages gateways.
+    r = stack.api(
+        "POST", f"/teams/{seeded.team_id}/service-accounts", member, json={"name": "nope"}
+    )
     assert r.status_code == 403, (r.status_code, r.text)
     fake = "00000000-0000-0000-0000-000000000000"
-    for pat in (viewer, member):
+    for pat in (admin, member):
         assert stack.api("POST", "/gateways", pat, json={"gateway_id": "evil"}).status_code == 403
         r = stack.api("POST", f"/gateways/{GATEWAY_ID}/tokens/{fake}/revoke", pat)
         assert r.status_code == 403, (r.status_code, r.text)
-        assert stack.api("POST", "/orgs", pat, json={"name": "evil"}).status_code == 403
+        assert stack.api("POST", "/teams", pat, json={"name": "evil"}).status_code == 403
     assert (
-        stack.api(
-            "POST", f"/projects/{seeded.project_id}/keys", member, json={"name": "ok"}
-        ).status_code
+        stack.api("POST", f"/teams/{seeded.team_id}/keys", member, json={"name": "ok"}).status_code
         == 201
     )
-    assert stack.api("GET", "/users/me", viewer).status_code == 200
+    assert stack.api("GET", "/users/me", admin).status_code == 200
     assert stack.api("POST", "/gateways", "lwp-garbage").status_code == 401
 
     # A key limited to other models cannot use "mock" through the gateway.
@@ -183,11 +226,17 @@ def test_rbac_denials(stack):
         json={"name": "mock-b", "upstream_id": up["id"], "upstream_model": "mock"},
     )
     stack.ok("POST", "/routes", json={"model": "other-model", "deployment_ids": [dep["id"]]})
-    other = stack.ok("POST", f"/teams/{seeded.team_id}/projects", json={"name": "other"})
+    other = stack.ok(
+        "POST",
+        f"/teams/{seeded.team_id}/service-accounts",
+        admin,
+        json={"name": "other", "model_access": "list", "allowed_models": ["other-model"]},
+    )
     limited = stack.ok(
         "POST",
-        f"/projects/{other['id']}/keys",
-        json={"name": "limited", "model_access": "list", "allowed_models": ["other-model"]},
+        f"/teams/{seeded.team_id}/keys",
+        admin,
+        json={"name": "limited", "service_account_id": other["id"]},
     )["secret"]
     stack.wait_key_count(4)  # a, b, member's key, limited
     gw = stack.start_gateway()

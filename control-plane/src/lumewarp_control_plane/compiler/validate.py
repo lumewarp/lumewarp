@@ -127,7 +127,7 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
             raise SnapshotInvalid(f"route {r.model!r} has zero total weight")
 
     _unique([t.id for t in snap.teams], "team")
-    team_org = {t.id: t.org_id for t in snap.teams}
+    teams = {t.id for t in snap.teams}
     _unique([k.key_id for k in snap.api_keys], "key id")
     hashes: set[bytes] = set()
     limits: dict[str, pb.RateLimit] = {}
@@ -141,11 +141,8 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
             raise SnapshotInvalid(f"key {k.key_id!r} has status {k.status}")
         if k.expires_at_unix_ms < 0:
             raise SnapshotInvalid(f"key {k.key_id!r} has a negative expiry")
-        if k.team_id:
-            if k.team_id not in team_org:
-                raise SnapshotInvalid(f"key {k.key_id!r} references an unknown team")
-            if team_org[k.team_id] != k.org_id:
-                raise SnapshotInvalid(f"key {k.key_id!r} org does not match its team")
+        if k.team_id and k.team_id not in teams:
+            raise SnapshotInvalid(f"key {k.key_id!r} references an unknown team")
         if not k.HasField("policy"):
             raise SnapshotInvalid(f"key {k.key_id!r} has no policy")
         if any(not m for m in k.policy.allowed_models):

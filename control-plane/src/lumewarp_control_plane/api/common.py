@@ -13,10 +13,11 @@ from sqlalchemy import Select, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumewarp_control_plane import outbox, rbac
+from lumewarp_control_plane import audit, outbox
+from lumewarp_control_plane.authz import Action, RequestAuthz
 from lumewarp_control_plane.db import get_session
 from lumewarp_control_plane.errors import ApiError, not_found
-from lumewarp_control_plane.models import ApiKey, Org, Project, Scope, Team
+from lumewarp_control_plane.models import ApiKey, KeyLifecycle, KeyOwnerKind, Scope, Team
 from lumewarp_control_plane.security import Principal
 from lumewarp_control_plane.settings import Settings
 
@@ -113,40 +114,63 @@ async def uuid_page(
     return rows[:limit], next_cursor
 
 
-def org_scope(org: Org) -> rbac.ResourceScope:
-    return rbac.ResourceScope(org.id)
-
-
-def team_scope(team: Team) -> rbac.ResourceScope:
-    return rbac.ResourceScope(team.org_id, team.id)
-
-
-def project_scope(project: Project) -> rbac.ResourceScope:
-    return rbac.ResourceScope(project.org_id, project.team_id)
-
-
-def key_scope(key: ApiKey) -> rbac.ResourceScope:
-    return rbac.ResourceScope(key.org_id, key.team_id)
-
-
-def ensure_org_read(principal: Principal, org: Org) -> None:
-    if not rbac.authorize(principal, rbac.Action.ORG_READ, org_scope(org)):
-        raise not_found("org not found")
-
-
-def ensure_team_read(principal: Principal, team: Team) -> None:
-    if not rbac.authorize(principal, rbac.Action.READ, team_scope(team)):
+async def ensure_team_read(authz: RequestAuthz, team_id: uuid.UUID) -> None:
+    """404 unless the caller may read the team (so unreadable and unknown look the same)."""
+    if not await authz.allowed(Action.TEAM_READ, team_id):
         raise not_found("team not found")
 
 
-def ensure_project_read(principal: Principal, project: Project) -> None:
-    if not rbac.authorize(principal, rbac.Action.READ, project_scope(project)):
-        raise not_found("project not found")
-
-
-def ensure_key_read(principal: Principal, key: ApiKey) -> None:
-    if not rbac.authorize(principal, rbac.Action.READ, key_scope(key)):
+async def ensure_key_read(authz: RequestAuthz, key: ApiKey) -> None:
+    if not await authz.allowed(Action.TEAM_READ, key.team_id):
         raise not_found("key not found")
+
+
+async def get_team_or_404(session: AsyncSession, authz: RequestAuthz, team_id: uuid.UUID) -> Team:
+    team = await session.get(Team, team_id)
+    if team is None:
+        raise not_found("team not found")
+    await ensure_team_read(authz, team.id)
+    return team
+
+
+def ensure_grants_managed(request: Request) -> None:
+    """Member writes are read-only when an external system owns the memberships."""
+    if not request.app.state.authorizer.manages_grants:
+        raise ApiError(409, "managed_externally", "memberships are managed by the authz backend")
+
+
+async def suspend_user_keys(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    user_id: uuid.UUID,
+    team_id: uuid.UUID | None,
+    reason: str,
+) -> int:
+    """Suspend every non-revoked key a user owns (in one team, or everywhere) and audit each
+    one. Returns the number of keys changed; the caller enqueues the recompile.
+    """
+    stmt = select(ApiKey).where(
+        ApiKey.owner_kind == KeyOwnerKind.USER,
+        ApiKey.user_id == user_id,
+        ApiKey.lifecycle != KeyLifecycle.REVOKED,
+    )
+    if team_id is not None:
+        stmt = stmt.where(ApiKey.team_id == team_id)
+    keys = (await session.scalars(stmt.order_by(ApiKey.id))).all()
+    for key in keys:
+        key.lifecycle = KeyLifecycle.SUSPENDED
+        key.suspended_reason = reason
+        audit.record(
+            session,
+            action="key.suspend",
+            resource_type="key",
+            resource_id=key.id,
+            principal=principal,
+            team_id=key.team_id,
+            details={"name": key.name, "user_id": user_id, "reason": reason},
+        )
+    return len(keys)
 
 
 def ensure_parent_matches(provided: uuid.UUID | None, actual: uuid.UUID, field: str) -> None:

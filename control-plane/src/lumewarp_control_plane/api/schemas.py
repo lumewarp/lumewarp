@@ -24,10 +24,12 @@ from pydantic import (
 
 from lumewarp_control_plane.models import (
     KeyLifecycle,
+    KeyOwnerKind,
     ModelAccess,
     RequestOutcome,
     RoutingStrategy,
     StreamUsageMode,
+    TeamRole,
     UpstreamKind,
     UsageState,
 )
@@ -98,7 +100,7 @@ class Page[T](ReadModel):
 
 
 class PolicyFields(ApiModel):
-    """Writable policy columns shared by org/team/project/key.
+    """Writable policy columns shared by teams, team members and service accounts.
 
     `model_access`/`allowed_models` cannot be null; limits and budgets can be set to null
     to clear them. On update, omitted fields keep their current value.
@@ -143,67 +145,65 @@ class PolicyOut(ReadModel):
     soft_budget_nano_usd: int | None
 
 
-class OrgCreate(PolicyFields):
-    name: Name
-
-
-class OrgUpdate(PolicyFields):
-    name: Name | None = None
-
-
-class OrgOut(PolicyOut):
-    id: uuid.UUID
-    name: str
-    created_at: datetime
-    updated_at: datetime
-
-
 class TeamCreate(PolicyFields):
     name: Name
-    # Accepted only so the client can prove which parent it meant; must match the URL.
-    org_id: uuid.UUID | None = None
 
 
 class TeamUpdate(PolicyFields):
     name: Name | None = None
-    org_id: uuid.UUID | None = None
 
 
 class TeamOut(PolicyOut):
     id: uuid.UUID
-    org_id: uuid.UUID
     name: str
     created_at: datetime
     updated_at: datetime
 
 
-class ProjectCreate(PolicyFields):
+class MemberUpsert(PolicyFields):
+    role: TeamRole
+
+
+class MemberUpdate(PolicyFields):
+    role: TeamRole | None = None
+
+
+class MemberOut(PolicyOut):
+    team_id: uuid.UUID
+    user_id: uuid.UUID
+    email: str
+    display_name: str
+    role: TeamRole
+    member_scope_id: uuid.UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class ServiceAccountCreate(PolicyFields):
     name: Name
-    org_id: uuid.UUID | None = None
-    team_id: uuid.UUID | None = None
+    description: str = Field(default="", max_length=2000)
 
 
-class ProjectUpdate(PolicyFields):
+class ServiceAccountUpdate(PolicyFields):
     name: Name | None = None
-    org_id: uuid.UUID | None = None
-    team_id: uuid.UUID | None = None
+    description: str | None = Field(default=None, max_length=2000)
 
 
-class ProjectOut(PolicyOut):
+class ServiceAccountOut(PolicyOut):
     id: uuid.UUID
-    org_id: uuid.UUID
     team_id: uuid.UUID
     name: str
+    description: str
+    created_by_user_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
 
 
-class KeyCreate(PolicyFields):
+class KeyCreate(ApiModel):
     name: Name
     expires_at: datetime | None = None
-    org_id: uuid.UUID | None = None
-    team_id: uuid.UUID | None = None
-    project_id: uuid.UUID | None = None
+    # Omit to create a key owned by the caller.
+    service_account_id: uuid.UUID | None = None
 
     @field_validator("expires_at")
     @classmethod
@@ -213,13 +213,10 @@ class KeyCreate(PolicyFields):
         return _future(value)
 
 
-class KeyUpdate(PolicyFields):
+class KeyUpdate(ApiModel):
     name: Name | None = None
     expires_at: datetime | None = None
     lifecycle: KeyLifecycle | None = None
-    org_id: uuid.UUID | None = None
-    team_id: uuid.UUID | None = None
-    project_id: uuid.UUID | None = None
 
     @field_validator("expires_at")
     @classmethod
@@ -229,14 +226,16 @@ class KeyUpdate(PolicyFields):
         return value
 
 
-class KeyOut(PolicyOut):
+class KeyOut(ReadModel):
     id: uuid.UUID
-    org_id: uuid.UUID
     team_id: uuid.UUID
-    project_id: uuid.UUID
+    owner_kind: KeyOwnerKind
+    user_id: uuid.UUID | None
+    service_account_id: uuid.UUID | None
     name: str
     display_prefix: str
     lifecycle: KeyLifecycle
+    suspended_reason: str | None
     expires_at: datetime | None
     revoked_at: datetime | None
     created_by_user_id: uuid.UUID | None
@@ -407,10 +406,10 @@ class UserOut(ReadModel):
     updated_at: datetime
 
 
-class GrantOut(ReadModel):
-    org_id: uuid.UUID
-    team_id: uuid.UUID | None
-    role: str
+class MeTeamOut(ApiModel):
+    team_id: uuid.UUID
+    team_name: str
+    role: TeamRole
 
 
 class MeOut(ApiModel):
@@ -419,7 +418,8 @@ class MeOut(ApiModel):
     email: str | None
     display_name: str
     is_superuser: bool
-    grants: list[GrantOut]
+    manages_grants: bool
+    teams: list[MeTeamOut]
 
 
 class TokenCreate(ApiModel):
@@ -449,39 +449,15 @@ class TokenCreated(ApiModel):
     secret: str
 
 
-# --------------------------------------------------------------------------- memberships
-
-
-class MembershipCreate(ApiModel):
-    user_id: uuid.UUID
-    org_id: uuid.UUID
-    team_id: uuid.UUID | None = None
-    role: str = Field(min_length=1, max_length=16)
-
-
-class MembershipUpdate(ApiModel):
-    role: str = Field(min_length=1, max_length=16)
-
-
-class MembershipOut(ReadModel):
-    id: uuid.UUID
-    user_id: uuid.UUID
-    org_id: uuid.UUID
-    team_id: uuid.UUID | None
-    role: str
-    created_at: datetime
-    updated_at: datetime
-
-
 # --------------------------------------------------------------------------- usage
 
 
 class UsageRowOut(ApiModel):
     date: date_type | None = None
     model: str | None = None
-    org_id: uuid.UUID | None = None
     team_id: uuid.UUID | None = None
-    project_id: uuid.UUID | None = None
+    owner_kind: KeyOwnerKind | None = None
+    owner_id: uuid.UUID | None = None
     key_id: uuid.UUID | None = None
     requests: int
     prompt_tokens: int
@@ -497,9 +473,9 @@ class UsageEventOut(ReadModel):
     request_id: uuid.UUID
     ts: datetime
     key_id: uuid.UUID
-    org_id: uuid.UUID
     team_id: uuid.UUID
-    project_id: uuid.UUID
+    owner_kind: KeyOwnerKind
+    owner_id: uuid.UUID
     model: str
     deployment: str
     route: str
@@ -523,7 +499,6 @@ class AuditOut(ReadModel):
     action: str
     resource_type: str
     resource_id: str | None
-    org_id: uuid.UUID | None
     team_id: uuid.UUID | None
     details: dict[str, Any]
 

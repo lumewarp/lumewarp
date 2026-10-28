@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Request, status
 from sqlalchemy import select, union
 
-from lumewarp_control_plane import audit, rbac
+from lumewarp_control_plane import audit
 from lumewarp_control_plane import grpc as grpc_services
 from lumewarp_control_plane.api.common import (
     LimitDep,
@@ -24,22 +24,23 @@ from lumewarp_control_plane.api.schemas import (
     GatewayTokenOut,
     Page,
 )
+from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import GatewaySession, GatewayToken, Scope
-from lumewarp_control_plane.security import CurrentPrincipal, SecretKind, generate_secret
+from lumewarp_control_plane.security import SecretKind, generate_secret
 
 router = APIRouter(tags=["gateways"])
 
 
 @router.get("/gateways", response_model=Page[GatewayOut], operation_id="listGateways")
 async def list_gateways(
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[GatewayOut]:
-    rbac.require(principal, rbac.Action.GATEWAY_READ, rbac.ResourceScope())
+    await authz.require(Action.GATEWAY_READ)
     scope = settings.scope
     ids = union(
         select(GatewaySession.gateway_id).where(GatewaySession.scope == scope),
@@ -104,11 +105,11 @@ async def list_gateways(
 )
 async def create_gateway_token(
     body: GatewayTokenCreate,
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
 ) -> GatewayTokenCreated:
-    rbac.require(principal, rbac.Action.GATEWAY_TOKEN_MANAGE, rbac.ResourceScope())
+    await authz.require(Action.GATEWAY_TOKEN_MANAGE)
     new = generate_secret(SecretKind.GATEWAY_TOKEN)
     async with mutation(session):
         scope = await session.get(Scope, settings.scope)
@@ -129,7 +130,7 @@ async def create_gateway_token(
             action="gateway_token.create",
             resource_type="gateway_token",
             resource_id=row.id,
-            principal=principal,
+            principal=authz.principal,
             details={"gateway_id": row.gateway_id, "name": row.name},
         )
     return GatewayTokenCreated(token=GatewayTokenOut.model_validate(row), secret=new.secret)
@@ -144,11 +145,11 @@ async def revoke_gateway_token(
     gateway_id: str,
     token_id: uuid.UUID,
     request: Request,
-    principal: CurrentPrincipal,
+    authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
 ) -> GatewayTokenOut:
-    rbac.require(principal, rbac.Action.GATEWAY_TOKEN_MANAGE, rbac.ResourceScope())
+    await authz.require(Action.GATEWAY_TOKEN_MANAGE)
     async with mutation(session):
         row = await session.get(GatewayToken, token_id)
         if row is None or row.gateway_id != gateway_id or row.scope != settings.scope:
@@ -162,7 +163,7 @@ async def revoke_gateway_token(
                 action="gateway_token.revoke",
                 resource_type="gateway_token",
                 resource_id=row.id,
-                principal=principal,
+                principal=authz.principal,
                 details={"gateway_id": row.gateway_id, "name": row.name},
             )
     # Streams also re-check their token periodically; this makes revocation immediate.

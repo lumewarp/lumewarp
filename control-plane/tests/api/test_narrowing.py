@@ -1,164 +1,134 @@
-"""Children may narrow their parents; widening is a 422 with a field path."""
+"""Members and service accounts can only narrow their team's policy."""
 
-from __future__ import annotations
+import pytest
 
-from tests.api.helpers import BOOTSTRAP_AUTH, suffix
-
-
-def _org(client, **body):
-    body = {"name": f"org-{suffix()}", **body}
-    resp = client.post("/api/v1/orgs", json=body, headers=BOOTSTRAP_AUTH)
-    assert resp.status_code == 201, resp.text
-    return resp.json()
+from tests.api.helpers import BOOTSTRAP_AUTH
+from tests.factories import make_member, make_service_account, make_team, make_user
 
 
-def _team(client, org_id, **body):
-    body = {"name": f"team-{suffix()}", **body}
-    resp = client.post(f"/api/v1/orgs/{org_id}/teams", json=body, headers=BOOTSTRAP_AUTH)
-    return resp
-
-
-def _project(client, team_id, **body):
-    body = {"name": f"proj-{suffix()}", **body}
-    resp = client.post(f"/api/v1/teams/{team_id}/projects", json=body, headers=BOOTSTRAP_AUTH)
-    return resp
-
-
-def _key(client, project_id, **body):
-    body = {"name": f"key-{suffix()}", **body}
-    resp = client.post(f"/api/v1/projects/{project_id}/keys", json=body, headers=BOOTSTRAP_AUTH)
-    return resp
-
-
-def test_allowlist_subset_and_deny_all(client) -> None:
-    org = _org(client, model_access="list", allowed_models=["a", "b"])
-    assert _team(client, org["id"], model_access="list", allowed_models=["a"]).status_code == 201
-    bad = _team(client, org["id"], model_access="list", allowed_models=["c"])
-    assert bad.status_code == 422
-    assert "allowed_models" in bad.json()["error"]["message"]
-    assert "c" in bad.json()["error"]["message"]
-
-    team = _team(client, org["id"], model_access="list", allowed_models=["a", "b"]).json()
-    empty = _project(client, team["id"], model_access="list", allowed_models=[])
-    assert empty.status_code == 201
-    assert empty.json()["allowed_models"] == []
-    assert empty.json()["model_access"] == "list"
-
-    bad_all = _project(client, team["id"], model_access="all")
-    assert bad_all.status_code == 422
-    assert "model_access" in bad_all.json()["error"]["message"]
-
-
-def test_inherit_chain_is_narrowed_by_the_root(client) -> None:
-    org = _org(client, model_access="all")
-    team = _team(client, org["id"], model_access="inherit").json()
-    project = _project(client, team["id"], model_access="list", allowed_models=["a"]).json()
-    assert project["allowed_models"] == ["a"]
-    key = _key(client, project["id"], model_access="inherit")
-    assert key.status_code == 201
-    assert key.json()["key"]["allowed_models"] == []
-
-
-def test_limits_and_budgets_must_not_exceed_parent(client) -> None:
-    org = _org(client, rpm_limit=100, tpm_limit=1000, max_parallel=10, budget_nano_usd=1000)
-    bad = _team(client, org["id"], rpm_limit=101)
-    assert bad.status_code == 422
-    assert "rpm_limit" in bad.json()["error"]["message"]
-    bad = _team(client, org["id"], tpm_limit=1001)
-    assert bad.status_code == 422
-    assert "tpm_limit" in bad.json()["error"]["message"]
-    bad = _team(client, org["id"], max_parallel=11)
-    assert bad.status_code == 422
-    assert "max_parallel" in bad.json()["error"]["message"]
-    bad = _team(client, org["id"], budget_nano_usd=1001)
-    assert bad.status_code == 422
-    assert "budget_nano_usd" in bad.json()["error"]["message"]
-
-    team = _team(client, org["id"], rpm_limit=50, budget_nano_usd=500).json()
-    bad = _project(client, team["id"], rpm_limit=51)
-    assert bad.status_code == 422
-    bad = _project(client, team["id"], budget_nano_usd=501)
-    assert bad.status_code == 422
-    project = _project(client, team["id"], rpm_limit=50, budget_nano_usd=500).json()
-    bad = _key(client, project["id"], rpm_limit=51)
-    assert bad.status_code == 422
-    assert _key(client, project["id"], rpm_limit=1).status_code == 201
-
-
-def test_soft_budget_cannot_exceed_hard_budget(client) -> None:
-    resp = client.post(
-        "/api/v1/orgs",
-        json={
-            "name": f"org-{suffix()}",
-            "budget_nano_usd": 100,
-            "soft_budget_nano_usd": 101,
-        },
-        headers=BOOTSTRAP_AUTH,
+@pytest.mark.parametrize("owner", ["member", "service_account"])
+@pytest.mark.parametrize(
+    "policy, field",
+    [
+        ({"model_access": "list", "allowed_models": ["c"]}, "allowed_models"),
+        ({"model_access": "all"}, "model_access"),
+        ({"rpm_limit": 101}, "rpm_limit"),
+        ({"tpm_limit": 1001}, "tpm_limit"),
+        ({"max_parallel": 11}, "max_parallel"),
+        ({"budget_nano_usd": 1001}, "budget_nano_usd"),
+        ({"soft_budget_nano_usd": 501}, "soft_budget_nano_usd"),
+    ],
+)
+async def test_owner_cannot_widen_team(client, committed, owner, policy, field) -> None:
+    team = await make_team(
+        committed,
+        model_access="list",
+        allowed_models=["a", "b"],
+        rpm_limit=100,
+        tpm_limit=1000,
+        max_parallel=10,
+        budget_nano_usd=1000,
+        soft_budget_nano_usd=500,
     )
-    assert resp.status_code == 422
-    assert "soft_budget_nano_usd" in resp.json()["error"]["message"]
-
-
-def test_org_cannot_inherit(client) -> None:
-    resp = client.post(
-        "/api/v1/orgs",
-        json={"name": f"org-{suffix()}", "model_access": "inherit"},
-        headers=BOOTSTRAP_AUTH,
+    user = await make_user(committed)
+    await committed.commit()
+    if owner == "member":
+        path = f"/api/v1/teams/{team.id}/members/{user.id}"
+        bad = client.put(path, json={"role": "member", **policy}, headers=BOOTSTRAP_AUTH)
+        assert client.put(path, json={"role": "member"}, headers=BOOTSTRAP_AUTH).status_code == 201
+    else:
+        path = f"/api/v1/teams/{team.id}/service-accounts"
+        bad = client.post(path, json={"name": "bad", **policy}, headers=BOOTSTRAP_AUTH)
+        created = client.post(path, json={"name": "good"}, headers=BOOTSTRAP_AUTH)
+        assert created.status_code == 201
+        path = f"/api/v1/service-accounts/{created.json()['id']}"
+    assert bad.status_code == 422, bad.text
+    assert field in bad.json()["error"]["message"]
+    updated = client.patch(path, json=policy, headers=BOOTSTRAP_AUTH)
+    assert updated.status_code == 422, updated.text
+    assert field in updated.json()["error"]["message"]
+    deny_all = client.patch(
+        path, json={"model_access": "list", "allowed_models": []}, headers=BOOTSTRAP_AUTH
     )
-    assert resp.status_code == 422
-    assert "model_access" in resp.json()["error"]["message"]
+    assert deny_all.status_code == 200
+    assert deny_all.json()["model_access"] == "list"
+    assert deny_all.json()["allowed_models"] == []
 
 
-def test_parent_update_cannot_strand_children(client) -> None:
-    # org ALL -> team [a,b] -> project [b]. Narrowing the org to [a] must fail.
-    org = _org(client, model_access="all")
-    team = _team(client, org["id"], model_access="list", allowed_models=["a", "b"]).json()
-    project = _project(client, team["id"], model_access="list", allowed_models=["b"]).json()
-    _key(client, project["id"], model_access="list", allowed_models=["b"])
+@pytest.mark.parametrize("owner", ["member", "service_account"])
+@pytest.mark.parametrize(
+    "owner_policy, team_update, field",
+    [
+        ({"rpm_limit": 50}, {"rpm_limit": 40}, "rpm_limit"),
+        (
+            {"model_access": "list", "allowed_models": ["b"]},
+            {"model_access": "list", "allowed_models": ["a"]},
+            "allowed_models",
+        ),
+    ],
+)
+async def test_team_narrowing_names_conflicting_owner(
+    client, committed, owner, owner_policy, team_update, field
+) -> None:
+    team = await make_team(committed, rpm_limit=100)
+    if owner == "member":
+        row = await make_member(committed, team, **owner_policy)
+        prefix = f"members.{row.user_id}"
+    else:
+        row = await make_service_account(committed, team, **owner_policy)
+        prefix = f"service_accounts.{row.id}"
+    await committed.commit()
+    path = f"/api/v1/teams/{team.id}"
+    response = client.patch(path, json=team_update, headers=BOOTSTRAP_AUTH)
+    assert response.status_code == 422, response.text
+    assert f"{prefix}.{field}" in response.json()["error"]["message"]
+    unchanged = client.get(path, headers=BOOTSTRAP_AUTH).json()
+    assert unchanged["rpm_limit"] == 100
+    assert unchanged["model_access"] == "all"
 
-    resp = client.patch(
-        f"/api/v1/orgs/{org['id']}",
-        json={"model_access": "list", "allowed_models": ["a"]},
-        headers=BOOTSTRAP_AUTH,
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"model_access": "inherit"},
+        {"budget_nano_usd": 100, "soft_budget_nano_usd": 101},
+        {"model_access": None},
+        {"allowed_models": None},
+        {"allowed_models": ["a"]},
+    ],
+)
+def test_team_policy_validation(client, body) -> None:
+    from tests.api.helpers import suffix
+
+    response = client.post(
+        "/api/v1/teams", json={"name": f"policy-{suffix()}", **body}, headers=BOOTSTRAP_AUTH
     )
-    assert resp.status_code == 422
-    message = resp.json()["error"]["message"]
-    assert f"teams.{team['id']}" in message
-    assert "allowed_models" in message
+    assert response.status_code == 422, response.text
 
 
-def test_parent_limit_update_cannot_strand_children(client) -> None:
-    org = _org(client, rpm_limit=100)
-    team = _team(client, org["id"], rpm_limit=50).json()
-    resp = client.patch(f"/api/v1/orgs/{org['id']}", json={"rpm_limit": 40}, headers=BOOTSTRAP_AUTH)
-    assert resp.status_code == 422
-    message = resp.json()["error"]["message"]
-    assert f"teams.{team['id']}" in message
-    assert "rpm_limit" in message
+async def test_team_locks_scope_before_validating_owners(client, committed, monkeypatch) -> None:
+    from lumewarp_control_plane.api import teams
 
+    team = await make_team(committed, rpm_limit=100)
+    await make_member(committed, team, rpm_limit=90)
+    await committed.commit()
+    original_lock = teams.lock_scope
+    original_validate = teams.validate_owners_after_team_update
+    calls = []
 
-def test_inherit_intermediate_still_validates_grandchildren(client) -> None:
-    org = _org(client, model_access="all")
-    team = _team(client, org["id"], model_access="inherit").json()
-    project = _project(client, team["id"], model_access="list", allowed_models=["a"]).json()
-    resp = client.patch(
-        f"/api/v1/orgs/{org['id']}",
-        json={"model_access": "list", "allowed_models": ["b"]},
-        headers=BOOTSTRAP_AUTH,
+    async def lock(session, settings):
+        await original_lock(session, settings)
+        calls.append("locked")
+
+    async def validate(session, row, proposed):
+        assert calls == ["locked"]
+        calls.append("validate")
+        await original_validate(session, row, proposed)
+
+    monkeypatch.setattr(teams, "lock_scope", lock)
+    monkeypatch.setattr(teams, "validate_owners_after_team_update", validate)
+    response = client.patch(
+        f"/api/v1/teams/{team.id}", json={"rpm_limit": 10}, headers=BOOTSTRAP_AUTH
     )
-    assert resp.status_code == 422
-    message = resp.json()["error"]["message"]
-    assert f"projects.{project['id']}" in message
-    assert "allowed_models" in message
-
-
-def test_team_update_cannot_widen_parent(client) -> None:
-    org = _org(client, model_access="list", allowed_models=["a"])
-    team = _team(client, org["id"], model_access="list", allowed_models=["a"]).json()
-    resp = client.patch(
-        f"/api/v1/teams/{team['id']}",
-        json={"allowed_models": ["a", "b"]},
-        headers=BOOTSTRAP_AUTH,
-    )
-    assert resp.status_code == 422
-    assert "allowed_models" in resp.json()["error"]["message"]
+    assert response.status_code == 422
+    assert calls == ["locked", "validate"]
