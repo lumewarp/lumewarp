@@ -14,8 +14,8 @@ fn hash(secret: &str) -> String {
 fn keys_yaml() -> String {
     format!(
         r#"teams:
-  - {{id: team-a, org_id: org-1}}
-  - {{id: team-b, org_id: org-1}}
+  - {{id: team-a}}
+  - {{id: team-b}}
 keys:
   - {{key_id: limited, key_sha256: '{}', team_id: team-a, allowed_models: [public]}}
   - {{key_id: all, key_sha256: '{}', team_id: team-b, allow_all_models: true}}

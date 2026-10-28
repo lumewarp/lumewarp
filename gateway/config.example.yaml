@@ -41,8 +41,6 @@ routes:
 teams:
   - id: team-research
     name: Research
-    org_id: org-acme
-    org_name: Acme
     rate_limits: { requests_per_minute: 600, max_parallel_requests: 32 }
 
 # Virtual keys. Uncomment to require keys; any configured key turns auth on.
@@ -50,7 +48,6 @@ teams:
 #   - key_id: key-alice
 #     key_sha256: "2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b"
 #     team_id: team-research
-#     project_id: proj-chatbot
 #     status: active            # active | revoked | suspended | budget_exceeded
 #     expires_at_unix_ms: 0     # 0 = never
 #     allowed_models: [llama-3.1-8b]

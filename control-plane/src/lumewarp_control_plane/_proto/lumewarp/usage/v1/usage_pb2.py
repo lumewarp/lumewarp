@@ -24,23 +24,23 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1dlumewarp/usage/v1/usage.proto\x12\x11lumewarp.usage.v1\"R\n\rReportRequest\x12\x12\n\ngateway_id\x18\x01 \x01(\t\x12-\n\x06\x65vents\x18\x02 \x03(\x0b\x32\x1d.lumewarp.usage.v1.UsageEvent\"\"\n\x0eReportResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\r\"\xf0\x03\n\nUsageEvent\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x19\n\x11timestamp_unix_ms\x18\x02 \x01(\x03\x12\x0e\n\x06key_id\x18\x03 \x01(\t\x12\x0e\n\x06org_id\x18\x04 \x01(\t\x12\x0f\n\x07team_id\x18\x05 \x01(\t\x12\x12\n\nproject_id\x18\x06 \x01(\t\x12\r\n\x05model\x18\x07 \x01(\t\x12\x12\n\ndeployment\x18\x08 \x01(\t\x12\r\n\x05route\x18\t \x01(\t\x12\x0e\n\x06status\x18\n \x01(\r\x12\x0e\n\x06stream\x18\x0b \x01(\x08\x12\x15\n\rprompt_tokens\x18\x0c \x01(\x04\x12\x19\n\x11\x63ompletion_tokens\x18\r \x01(\x04\x12\x13\n\x0b\x64uration_ms\x18\x0f \x01(\r\x12\x16\n\x0e\x63onfig_version\x18\x10 \x01(\x04\x12\x32\n\x0busage_state\x18\x11 \x01(\x0e\x32\x1d.lumewarp.usage.v1.UsageState\x12\x32\n\x07outcome\x18\x12 \x01(\x0e\x32!.lumewarp.usage.v1.RequestOutcome\x12\x1a\n\x12started_at_unix_ms\x18\x13 \x01(\x03\x12\x15\n\rcost_nano_usd\x18\x14 \x01(\x04\x12\x12\n\ncost_known\x18\x15 \x01(\x08J\x04\x08\x0e\x10\x0fR\x08\x63ost_usd*\x8e\x01\n\nUsageState\x12\x1b\n\x17USAGE_STATE_UNSPECIFIED\x10\x00\x12\x18\n\x14USAGE_STATE_REPORTED\x10\x01\x12\x17\n\x13USAGE_STATE_MISSING\x10\x02\x12\x17\n\x13USAGE_STATE_PARTIAL\x10\x03\x12\x17\n\x13USAGE_STATE_INVALID\x10\x04*\xb8\x01\n\x0eRequestOutcome\x12\x1f\n\x1bREQUEST_OUTCOME_UNSPECIFIED\x10\x00\x12\x1d\n\x19REQUEST_OUTCOME_COMPLETED\x10\x01\x12$\n REQUEST_OUTCOME_CLIENT_CANCELLED\x10\x02\x12\"\n\x1eREQUEST_OUTCOME_UPSTREAM_ERROR\x10\x03\x12\x1c\n\x18REQUEST_OUTCOME_REJECTED\x10\x04\x32]\n\x0cUsageService\x12M\n\x06Report\x12 .lumewarp.usage.v1.ReportRequest\x1a!.lumewarp.usage.v1.ReportResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1dlumewarp/usage/v1/usage.proto\x12\x11lumewarp.usage.v1\"R\n\rReportRequest\x12\x12\n\ngateway_id\x18\x01 \x01(\t\x12-\n\x06\x65vents\x18\x02 \x03(\x0b\x32\x1d.lumewarp.usage.v1.UsageEvent\"\"\n\x0eReportResponse\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\r\"\xec\x03\n\nUsageEvent\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x19\n\x11timestamp_unix_ms\x18\x02 \x01(\x03\x12\x0e\n\x06key_id\x18\x03 \x01(\t\x12\x0f\n\x07team_id\x18\x05 \x01(\t\x12\r\n\x05model\x18\x07 \x01(\t\x12\x12\n\ndeployment\x18\x08 \x01(\t\x12\r\n\x05route\x18\t \x01(\t\x12\x0e\n\x06status\x18\n \x01(\r\x12\x0e\n\x06stream\x18\x0b \x01(\x08\x12\x15\n\rprompt_tokens\x18\x0c \x01(\x04\x12\x19\n\x11\x63ompletion_tokens\x18\r \x01(\x04\x12\x13\n\x0b\x64uration_ms\x18\x0f \x01(\r\x12\x16\n\x0e\x63onfig_version\x18\x10 \x01(\x04\x12\x32\n\x0busage_state\x18\x11 \x01(\x0e\x32\x1d.lumewarp.usage.v1.UsageState\x12\x32\n\x07outcome\x18\x12 \x01(\x0e\x32!.lumewarp.usage.v1.RequestOutcome\x12\x1a\n\x12started_at_unix_ms\x18\x13 \x01(\x03\x12\x15\n\rcost_nano_usd\x18\x14 \x01(\x04\x12\x12\n\ncost_known\x18\x15 \x01(\x08J\x04\x08\x04\x10\x05J\x04\x08\x06\x10\x07J\x04\x08\x0e\x10\x0fR\x06org_idR\nproject_idR\x08\x63ost_usd*\x8e\x01\n\nUsageState\x12\x1b\n\x17USAGE_STATE_UNSPECIFIED\x10\x00\x12\x18\n\x14USAGE_STATE_REPORTED\x10\x01\x12\x17\n\x13USAGE_STATE_MISSING\x10\x02\x12\x17\n\x13USAGE_STATE_PARTIAL\x10\x03\x12\x17\n\x13USAGE_STATE_INVALID\x10\x04*\xb8\x01\n\x0eRequestOutcome\x12\x1f\n\x1bREQUEST_OUTCOME_UNSPECIFIED\x10\x00\x12\x1d\n\x19REQUEST_OUTCOME_COMPLETED\x10\x01\x12$\n REQUEST_OUTCOME_CLIENT_CANCELLED\x10\x02\x12\"\n\x1eREQUEST_OUTCOME_UPSTREAM_ERROR\x10\x03\x12\x1c\n\x18REQUEST_OUTCOME_REJECTED\x10\x04\x32]\n\x0cUsageService\x12M\n\x06Report\x12 .lumewarp.usage.v1.ReportRequest\x1a!.lumewarp.usage.v1.ReportResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'lumewarp.usage.v1.usage_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_USAGESTATE']._serialized_start=672
-  _globals['_USAGESTATE']._serialized_end=814
-  _globals['_REQUESTOUTCOME']._serialized_start=817
-  _globals['_REQUESTOUTCOME']._serialized_end=1001
+  _globals['_USAGESTATE']._serialized_start=668
+  _globals['_USAGESTATE']._serialized_end=810
+  _globals['_REQUESTOUTCOME']._serialized_start=813
+  _globals['_REQUESTOUTCOME']._serialized_end=997
   _globals['_REPORTREQUEST']._serialized_start=52
   _globals['_REPORTREQUEST']._serialized_end=134
   _globals['_REPORTRESPONSE']._serialized_start=136
   _globals['_REPORTRESPONSE']._serialized_end=170
   _globals['_USAGEEVENT']._serialized_start=173
-  _globals['_USAGEEVENT']._serialized_end=669
-  _globals['_USAGESERVICE']._serialized_start=1003
-  _globals['_USAGESERVICE']._serialized_end=1096
+  _globals['_USAGEEVENT']._serialized_end=665
+  _globals['_USAGESERVICE']._serialized_start=999
+  _globals['_USAGESERVICE']._serialized_end=1092
 # @@protoc_insertion_point(module_scope)

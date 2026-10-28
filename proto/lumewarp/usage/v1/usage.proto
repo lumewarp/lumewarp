@@ -31,10 +31,12 @@ message UsageEvent {
   string request_id = 1;
   // Completion time; budget windows are attributed by this timestamp (UTC).
   int64 timestamp_unix_ms = 2;
+  // The control plane derives the key's owner (member or service account)
+  // from key_id.
   string key_id = 3;
-  string org_id = 4;
+  reserved 4, 6;
+  reserved "org_id", "project_id";
   string team_id = 5;
-  string project_id = 6;
   // Public alias.
   string model = 7;
   string deployment = 8;

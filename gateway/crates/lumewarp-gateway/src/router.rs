@@ -48,9 +48,7 @@ pub struct Deployment {
 // Ids and scopes are read by usage reporting and rate limiting (W2).
 pub struct KeyContext {
     pub key_id: Arc<str>,
-    pub org_id: Arc<str>,
     pub team_id: Arc<str>,
-    pub project_id: Arc<str>,
     pub status: KeyStatus,
     /// 0 = never expires.
     pub expires_at_ms: i64,
@@ -300,9 +298,7 @@ impl Router {
                 hash,
                 Arc::new(KeyContext {
                     key_id: key.key_id.as_str().into(),
-                    org_id: intern(&key.org_id),
                     team_id,
-                    project_id: intern(&key.project_id),
                     status: KeyStatus::try_from(key.status).expect("validated status"),
                     expires_at_ms: key.expires_at_unix_ms,
                     allow_all_models: policy.allow_all_models,
@@ -585,7 +581,6 @@ mod tests {
         let k1 = router.keys[&hash("s1")].clone();
         assert_eq!(&*k1.team_id, "t1");
         assert_ne!(k1.team_label, 0);
-        assert_eq!(&*k1.org_id, "o");
         let k2 = router.keys[&hash("s2")].clone();
         assert_eq!(k2.team_label, 0);
         let ids = |body: Bytes| -> Vec<String> {

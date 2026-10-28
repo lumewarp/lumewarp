@@ -219,10 +219,6 @@ pub struct Team {
     pub id: String,
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
-    pub org_id: String,
-    #[serde(default)]
-    pub org_name: String,
     /// Shared by every key of the team (limiter scope `team:<id>`).
     #[serde(default)]
     pub rate_limits: Option<RateLimits>,
@@ -246,8 +242,6 @@ pub struct Key {
     pub key_sha256: String,
     #[serde(default)]
     pub team_id: String,
-    #[serde(default)]
-    pub project_id: String,
     #[serde(default)]
     pub status: KeyStatus,
     /// 0 = never expires.
@@ -428,8 +422,6 @@ impl Config {
             .map(|t| pb::Team {
                 id: t.id.clone(),
                 name: t.name.clone().unwrap_or_else(|| t.id.clone()),
-                org_id: t.org_id.clone(),
-                org_name: t.org_name.clone(),
             })
             .collect();
         let mut api_keys = Vec::new();
@@ -471,9 +463,7 @@ impl Config {
             api_keys.push(pb::ApiKey {
                 key_id: key.key_id.clone(),
                 key_hash: parse_hash(&key.key_sha256, "keys[].key_sha256")?,
-                org_id: team.map(|t| t.org_id.clone()).unwrap_or_default(),
                 team_id: key.team_id.clone(),
-                project_id: key.project_id.clone(),
                 status: match key.status {
                     KeyStatus::Active => pb::KeyStatus::Active,
                     KeyStatus::Revoked => pb::KeyStatus::Revoked,
@@ -537,7 +527,7 @@ mod tests {
         let (_, example) = Config::parse(&uncommented).unwrap();
         assert_eq!(AuthMode::standalone(&example), AuthMode::RequireKey);
         assert_eq!(example.api_keys.len(), 2);
-        assert_eq!(example.api_keys[0].org_id, "org-acme");
+        assert_eq!(example.api_keys[0].team_id, "team-research");
     }
 
     #[test]
@@ -624,13 +614,12 @@ deployments:
 server:
   api_keys: ['{a}', '{a}']
 teams:
-  - {{ id: t1, org_id: o1, org_name: Org, rate_limits: {{ requests_per_minute: 60 }} }}
+  - {{ id: t1, rate_limits: {{ requests_per_minute: 60 }} }}
   - {{ id: t2, name: Two }}
 keys:
   - key_id: k1
     key_sha256: '{b}'
     team_id: t1
-    project_id: p1
     status: revoked
     expires_at_unix_ms: 5
     allowed_models: [m1]
@@ -648,8 +637,7 @@ keys:
         assert_eq!(shorthand.key_id, format!("api_keys:{a}"));
         assert!(shorthand.policy.as_ref().unwrap().allow_all_models);
         let k1 = &s.api_keys[1];
-        assert_eq!(k1.org_id, "o1");
-        assert_eq!(k1.project_id, "p1");
+        assert_eq!(k1.team_id, "t1");
         assert_eq!(k1.status, pb::KeyStatus::Revoked as i32);
         assert_eq!(k1.expires_at_unix_ms, 5);
         let policy = k1.policy.as_ref().unwrap();

@@ -135,7 +135,6 @@ struct TokenLabels {
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct SpendLabels {
     team: String,
-    project: String,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct UsageStateLabels {
@@ -239,9 +238,9 @@ pub struct Metrics {
     usage_capture: [Counter; USAGE_STATES.len()],
     tokens: Family<TokenLabels, Counter>,
     spend: Family<SpendLabels, SpendCounter>,
-    /// team -> project -> spend series, so recording spend is lock- and
-    /// allocation-free after the first request of a (team, project).
-    spend_cache: papaya::HashMap<Box<str>, papaya::HashMap<Box<str>, SpendCounter>>,
+    /// team -> spend series, so recording spend is lock- and allocation-free
+    /// after the first request of a team.
+    spend_cache: papaya::HashMap<Box<str>, SpendCounter>,
 }
 
 impl Metrics {
@@ -434,23 +433,15 @@ impl Metrics {
         }
     }
 
-    /// `team` / `project` are ids (`""` anonymous). Allocates only the first
-    /// time a (team, project) pair is seen.
-    pub fn spend(&self, team: &str, project: &str, nano_usd: u64) {
+    /// `team` is an id (`""` anonymous). Allocates only the first time a team
+    /// is seen.
+    pub fn spend(&self, team: &str, nano_usd: u64) {
         let teams = self.spend_cache.pin();
-        let projects = match teams.get(team) {
-            Some(projects) => projects,
-            None => teams.get_or_insert_with(team.into(), papaya::HashMap::new),
-        };
-        let projects = projects.pin();
-        let counter = match projects.get(project) {
+        let counter = match teams.get(team) {
             Some(counter) => counter,
-            None => projects.get_or_insert_with(project.into(), || {
+            None => teams.get_or_insert_with(team.into(), || {
                 self.spend
-                    .get_or_create(&SpendLabels {
-                        team: team.into(),
-                        project: project.into(),
-                    })
+                    .get_or_create(&SpendLabels { team: team.into() })
                     .clone()
             }),
         };
@@ -941,7 +932,7 @@ routes:
         let handles = metrics.handles("public", "d", 0, "t1");
         let record = || {
             handles.record_tokens(3, 4);
-            metrics.spend("t1", "p1", 1);
+            metrics.spend("t1", 1);
             metrics.usage_captured(UsageState::Reported);
         };
         record();
@@ -969,9 +960,9 @@ routes:
         metrics.usage_captured(UsageState::Partial);
         let handles = metrics.handles("public", "d", 0, "t1");
         handles.record_tokens(10, 4);
-        metrics.spend("t1", "p1", 1_000_000_000);
-        metrics.spend("t1", "p1", 500_000_000);
-        metrics.spend("t1", "p2", 1);
+        metrics.spend("t1", 1_000_000_000);
+        metrics.spend("t1", 500_000_000);
+        metrics.spend("t2", 1);
         let text = metrics.encode(&inflight).unwrap();
         for line in [
             "lumewarp_config_version 42",
@@ -987,7 +978,7 @@ routes:
             "lumewarp_usage_events_failed_total 3",
             "lumewarp_tokens_total{model=\"public\",team=\"t1\",direction=\"input\"} 10",
             "lumewarp_tokens_total{model=\"public\",team=\"t1\",direction=\"output\"} 4",
-            "lumewarp_spend_total{team=\"t1\",project=\"p1\"} 1.5",
+            "lumewarp_spend_total{team=\"t1\"} 1.5",
         ] {
             assert!(text.contains(line), "missing {line}:\n{text}");
         }

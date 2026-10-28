@@ -92,23 +92,27 @@ enum RoutingStrategy {
 message Team {
   string id = 1;
   string name = 2;
-  string org_id = 3;
-  string org_name = 4;
+  reserved 3, 4;
+  reserved "org_id", "org_name";
 }
 
-// A virtual key. The gateway only ever sees the hash.
+// A virtual key. The gateway only ever sees the hash. Every key belongs to one
+// team and is owned by a member of that team or by one of its service
+// accounts; the owner only matters to the control plane (budgets, rate-limit
+// scopes and usage attribution are compiled into `policy`).
 message ApiKey {
   // Public, non-secret identifier (e.g. "key_01J…"); delta removals use it.
   string key_id = 1;
   // sha256 of the full secret key, 32 bytes.
   bytes key_hash = 2;
-  string org_id = 3;
+  reserved 3, 5;
+  reserved "org_id", "project_id";
   string team_id = 4;
-  string project_id = 5;
   KeyStatus status = 6;
   // 0 = never expires.
   int64 expires_at_unix_ms = 7;
-  // Already narrowed through org -> team -> project -> key by the compiler.
+  // Team policy narrowed by the owner's (member or service account) policy,
+  // resolved by the compiler.
   EffectivePolicy policy = 8;
 }
 
@@ -116,7 +120,7 @@ enum KeyStatus {
   KEY_STATUS_UNSPECIFIED = 0;
   KEY_STATUS_ACTIVE = 1;
   KEY_STATUS_REVOKED = 2;
-  // Hard budget reached somewhere up the hierarchy; decided by the control
+  // Hard budget of the team or of the key's owner reached; decided by the control
   // plane from usage events and pushed as a delta.
   KEY_STATUS_BUDGET_EXCEEDED = 3;
   KEY_STATUS_SUSPENDED = 4;
@@ -128,9 +132,10 @@ message EffectivePolicy {
   // Public model aliases this key may call when allow_all_models is false.
   // Empty with allow_all_models=false means deny-all.
   repeated string allowed_models = 2;
-  // One entry per hierarchy level that sets a limit (org, team, project,
-  // key), already resolved by the compiler. Each scope id names one shared
-  // limiter: every key under the same team draws from the same team bucket.
+  // One entry per level that sets a limit (team, then the key's owner),
+  // already resolved by the compiler. Each scope id names one shared limiter:
+  // every key under the same team draws from the same team bucket, and every
+  // key of the same owner from the same owner bucket.
   repeated RateLimitScope rate_limit_scopes = 3;
   // End of the budget window that produced KEY_STATUS_BUDGET_EXCEEDED, for
   // diagnostics only; the gateway never unblocks a key on its own.
@@ -138,7 +143,8 @@ message EffectivePolicy {
 }
 
 message RateLimitScope {
-  // Stable id, e.g. "team:<uuid>". Limiter state survives snapshot swaps
+  // Stable id: "team:<uuid>", "member:<uuid>" (one per team member, see the
+  // control plane) or "sa:<uuid>". Limiter state survives snapshot swaps
   // keyed by this id.
   string id = 1;
   RateLimit limit = 2;

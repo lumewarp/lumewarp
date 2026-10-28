@@ -122,36 +122,28 @@ class ModelRoute(_message.Message):
     def __init__(self, model: _Optional[str] = ..., deployments: _Optional[_Iterable[str]] = ..., strategy: _Optional[_Union[RoutingStrategy, str]] = ...) -> None: ...
 
 class Team(_message.Message):
-    __slots__ = ("id", "name", "org_id", "org_name")
+    __slots__ = ("id", "name")
     ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
-    ORG_ID_FIELD_NUMBER: _ClassVar[int]
-    ORG_NAME_FIELD_NUMBER: _ClassVar[int]
     id: str
     name: str
-    org_id: str
-    org_name: str
-    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., org_id: _Optional[str] = ..., org_name: _Optional[str] = ...) -> None: ...
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ...) -> None: ...
 
 class ApiKey(_message.Message):
-    __slots__ = ("key_id", "key_hash", "org_id", "team_id", "project_id", "status", "expires_at_unix_ms", "policy")
+    __slots__ = ("key_id", "key_hash", "team_id", "status", "expires_at_unix_ms", "policy")
     KEY_ID_FIELD_NUMBER: _ClassVar[int]
     KEY_HASH_FIELD_NUMBER: _ClassVar[int]
-    ORG_ID_FIELD_NUMBER: _ClassVar[int]
     TEAM_ID_FIELD_NUMBER: _ClassVar[int]
-    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
     EXPIRES_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
     POLICY_FIELD_NUMBER: _ClassVar[int]
     key_id: str
     key_hash: bytes
-    org_id: str
     team_id: str
-    project_id: str
     status: KeyStatus
     expires_at_unix_ms: int
     policy: EffectivePolicy
-    def __init__(self, key_id: _Optional[str] = ..., key_hash: _Optional[bytes] = ..., org_id: _Optional[str] = ..., team_id: _Optional[str] = ..., project_id: _Optional[str] = ..., status: _Optional[_Union[KeyStatus, str]] = ..., expires_at_unix_ms: _Optional[int] = ..., policy: _Optional[_Union[EffectivePolicy, _Mapping]] = ...) -> None: ...
+    def __init__(self, key_id: _Optional[str] = ..., key_hash: _Optional[bytes] = ..., team_id: _Optional[str] = ..., status: _Optional[_Union[KeyStatus, str]] = ..., expires_at_unix_ms: _Optional[int] = ..., policy: _Optional[_Union[EffectivePolicy, _Mapping]] = ...) -> None: ...
 
 class EffectivePolicy(_message.Message):
     __slots__ = ("allow_all_models", "allowed_models", "rate_limit_scopes", "budget_window_end_unix_ms")

@@ -32,9 +32,7 @@ fn key(id: &str, secret: &str) -> ApiKey {
     ApiKey {
         key_id: id.into(),
         key_hash: Sha256::digest(secret.as_bytes()).to_vec(),
-        org_id: "o".into(),
         team_id: String::new(),
-        project_id: "p".into(),
         status: KeyStatus::Active as i32,
         expires_at_unix_ms: 0,
         policy: Some(EffectivePolicy {
