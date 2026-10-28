@@ -805,3 +805,53 @@ async def test_keepalive_policy_accepts_idle_stream_pings(
     finally:
         await channel.close()
         await server.stop(0)
+
+
+@pytest.mark.asyncio
+async def test_session_and_ack_metrics(session_factory: SessionFactory):
+    from lumewarp_control_plane.metrics import Metrics
+
+    metrics = Metrics()
+    scope, tokens = await _seed(session_factory)
+    server = await serve(
+        Settings(scope=scope, grpc_bind="127.0.0.1:0", background_enabled=False),
+        session_factory,
+        metrics,
+    )
+    channel = grpc.aio.insecure_channel(f"127.0.0.1:{bound_port(server)}")
+    stub = cpb_grpc.ConfigServiceStub(channel)
+
+    def value(name, **labels):
+        return metrics.value(name, labels)
+
+    try:
+        assert value("lumewarp_cp_gateway_sessions") == 0
+        call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+        first = await call.read()
+        assert first.full.version == 1
+        assert value("lumewarp_cp_gateway_sessions") == 1
+        await call.write(
+            cpb.GatewayMessage(
+                nack=cpb.Nack(version=1, have_version=0, code=cpb.NACK_CODE_BASE_MISMATCH)
+            )
+        )
+        retry = await asyncio.wait_for(call.read(), 2)
+        assert retry.full.version == 1
+        assert value("lumewarp_cp_gateway_acks_total", result="nack") == 1
+        assert value("lumewarp_cp_gateway_acks_total", result="ack") == 0
+        await call.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
+        async with asyncio.timeout(2):
+            while value("lumewarp_cp_gateway_acks_total", result="ack") != 1:
+                await asyncio.sleep(0.01)
+        # An invalid reply (no pending update) is a protocol error, not an ACK.
+        await call.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
+        with pytest.raises(grpc.aio.AioRpcError):
+            await asyncio.wait_for(call.read(), 2)
+        async with asyncio.timeout(2):
+            while value("lumewarp_cp_gateway_sessions") != 0:
+                await asyncio.sleep(0.01)
+        assert value("lumewarp_cp_gateway_acks_total", result="ack") == 1
+        assert value("lumewarp_cp_gateway_acks_total", result="nack") == 1
+    finally:
+        await channel.close()
+        await server.stop(0)

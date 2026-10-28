@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumewarp_control_plane import audit
 from lumewarp_control_plane.api.common import (
     LimitDep,
+    MetricsDep,
     SessionDep,
     SettingsDep,
     conflict,
@@ -297,6 +298,7 @@ async def delete_member(
     authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
+    metrics: MetricsDep,
 ) -> Response:
     async with mutation(session):
         await lock_scope(session, settings)
@@ -324,4 +326,5 @@ async def delete_member(
             details={"user_id": user_id, "suspended_keys": suspended},
         )
         await enqueue_recompile(session, settings, "api.member.delete")
+    metrics.count_committed_suspensions(session)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

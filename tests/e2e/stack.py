@@ -208,6 +208,7 @@ class Stack:
         self.db_name = DB_PREFIX + uuid.uuid4().hex[:12]
         self.http_port = free_port()
         self.grpc_port = free_port()
+        self.metrics_port = free_port()
         self.mock_port = free_port()
         self.gateways: list[Gateway] = []
         self.api_url = f"http://127.0.0.1:{self.http_port}/api/v1"
@@ -224,6 +225,7 @@ class Stack:
             "LUMEWARP_SCOPE": SCOPE,
             "LUMEWARP_HTTP_BIND": f"127.0.0.1:{self.http_port}",
             "LUMEWARP_GRPC_BIND": f"127.0.0.1:{self.grpc_port}",
+            "LUMEWARP_METRICS_BIND": f"127.0.0.1:{self.metrics_port}",
         }
         cp = [sys.executable, "-m", "lumewarp_control_plane"]
         self.cp_cmd = cp

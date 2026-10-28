@@ -13,6 +13,7 @@ dependencies = [
     "grpcio>=1.84",
     "grpcio-health-checking>=1.84",
     "httpx>=0.28",
+    "prometheus-client>=0.26.0",
     "protobuf>=7.35.1",
     "pydantic-settings>=2.6",
     "sqlalchemy[asyncio]>=2.0.36",

@@ -70,12 +70,12 @@ pods start.
 | Object | Notes |
 | --- | --- |
 | Control-plane Deployment | One replica. Runs the HTTP API + UI, gRPC ConfigService/UsageService, compiler loop, monthly rollover and notifier loop. `strategy: Recreate`. |
-| Control-plane Service | `http` (8091) and `grpc` (50051) ports. |
+| Control-plane Service | `http` (8091), `grpc` (50051) and `metrics` (9465, Prometheus `/metrics`; only with `controlPlane.metrics.enabled`) ports. |
 | Migration Job | Helm `pre-install,pre-upgrade` hook running `python -m lumewarp_control_plane migrate` with the database Secret. |
 | Gateway Deployment | One replica. The token is bound to `gateway.gatewayId`; boots from its state volume, then follows the config stream; `/readyz` stays 503 until a snapshot is loaded. |
 | Gateway Service | `http` (4000) and `admin` (9464, `/metrics` + `/readyz`) ports. |
 | Gateway state PVC | Only when `gateway.stateDir.persistence.enabled=true`; otherwise an `emptyDir` per pod. |
-| ServiceMonitor | Optional, gateway admin port only. Requires the Prometheus Operator CRDs. |
+| ServiceMonitors | Optional: one for the gateway admin port, one for the control-plane `metrics` port. Requires the Prometheus Operator CRDs. |
 
 Readiness/liveness:
 
@@ -113,8 +113,6 @@ Readiness/liveness:
 - **Budgets are eventual.** A key can exceed its budget briefly while usage batches are in
   flight; in-flight streams are not cut. Usage events are dropped when the gateway's
   bounded queue is full.
-- **The control plane has no Prometheus endpoint in P1.** `serviceMonitor` scrapes only
-  the gateway.
 
 ## Values
 
@@ -129,6 +127,8 @@ Common values (see [`values.yaml`](values.yaml) for the complete list):
 | `controlPlane.bootstrapToken.secretName` / `.key` | unset / `bootstrap-token` | Optional `LUMEWARP_BOOTSTRAP_TOKEN`. |
 | `controlPlane.scope` | `default` | Config scope published to gateways. |
 | `controlPlane.service.httpPort` / `.grpcPort` | `8091` / `50051` | Service and container ports. |
+| `controlPlane.service.metricsPort` | `9465` | Control-plane Prometheus listener (`LUMEWARP_METRICS_BIND`), separate from the API port. |
+| `controlPlane.metrics.enabled` | `true` | Serve and expose `lumewarp_cp_*` metrics; `false` leaves `LUMEWARP_METRICS_BIND` empty. |
 | `controlPlane.grpcTls.enabled` | `false` | Serve gateway gRPC over TLS from a Secret. |
 | `controlPlane.migrate.enabled` | `true` | Run the migration hook Job. |
 | `gateway.enabled` | `true` | Deploy the gateway. |
@@ -143,7 +143,7 @@ Common values (see [`values.yaml`](values.yaml) for the complete list):
 | `gateway.stateDir.persistence.enabled` | `false` | Use a RWO PVC instead of `emptyDir`. |
 | `gateway.stateDir.persistence.existingClaim` | empty | Use an existing RWO claim; it must be used by this single replica only. |
 | `gateway.server.*` | see values | `server:` block of the gateway's local YAML (listeners/timeouts). `adminListen` must be reachable by probes. |
-| `serviceMonitor.enabled` | `false` | Render a ServiceMonitor for the gateway admin port. |
+| `serviceMonitor.enabled` | `false` | Render ServiceMonitors for the gateway admin port and the control-plane metrics port (each only if that component and its metrics are enabled). |
 | `serviceMonitor.labels` | `{}` | Extra labels so your Prometheus selects the ServiceMonitor. |
 
 All pods honour `nodeSelector`, `tolerations`, `affinity`, `resources`,
@@ -192,11 +192,13 @@ selector. Missing targets are not detected by `up == 0`; configure scrape target
 discovery separately. Standalone YAML gateways are excluded from config-stream
 and version-mismatch alerts via `lumewarp_config_info{source="yaml"}`.
 
-The existing ServiceMonitor scrapes only the gateway. Configure a separate scrape
-for the control plane's HTTP `/metrics` when that endpoint is implemented; future
-CP and routing panels remain empty until their exporters are deployed. Missing
-metrics do not trigger these threshold alerts. The reconciler's exporter must
-emit a zero timestamp before its first success to detect never-successful runs.
+`serviceMonitor.enabled` scrapes both the gateway admin port and the control
+plane's dedicated `metrics` port (`lumewarp_cp_*`, see the control-plane README).
+Panels whose exporters are not deployed stay empty; missing metrics do not trigger
+these threshold alerts. The control plane exports
+`lumewarp_cp_key_reconcile_last_success_timestamp_seconds` as 0 until the key
+reconciler's first success, so a never-successful reconciler still alerts. With
+`LUMEWARP_KEY_RECONCILE_ENABLED=false` the series is not exported at all.
 
 Dashboard filters apply only where metric labels exist: tokens support team and
 model, while spend supports team only. Spend panels explicitly cover all models;

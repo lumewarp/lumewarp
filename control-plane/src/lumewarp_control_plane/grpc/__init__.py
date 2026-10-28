@@ -11,7 +11,7 @@ import contextvars
 import logging
 import time
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -31,6 +31,7 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import (
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2, usage_pb2_grpc
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.ids import uuid7
+from lumewarp_control_plane.metrics import DISCARD, Metrics
 from lumewarp_control_plane.models import ConfigVersion, GatewaySession, GatewayToken
 from lumewarp_control_plane.security import SecretKind, hash_secret, parse_bearer, secret_kind
 from lumewarp_control_plane.settings import Settings
@@ -245,8 +246,11 @@ class SessionRegistry:
     load and one diff.
     """
 
-    def __init__(self, session_factory: SessionFactory | None = None) -> None:
+    def __init__(
+        self, session_factory: SessionFactory | None = None, metrics: Metrics = DISCARD
+    ) -> None:
         self.session_factory = session_factory
+        self.metrics = metrics
         self._sessions: dict[tuple[str, str], _StreamState] = {}
         self._lock = asyncio.Lock()
         self._build_lock = asyncio.Lock()
@@ -442,6 +446,7 @@ class SessionRegistry:
                 )
                 old.close(grpc.StatusCode.UNAVAILABLE, "gateway stream replaced")
             self._sessions[key] = state
+            self.metrics.gateway_sessions.set(len(self._sessions))
         try:
             await self._mirror(state)
             yield state
@@ -449,6 +454,7 @@ class SessionRegistry:
             async with self._lock:
                 if self._sessions.get(key) is state:
                     self._sessions.pop(key, None)
+                self.metrics.gateway_sessions.set(len(self._sessions))
             await self._mirror(state, disconnected=True)
 
 
@@ -664,6 +670,7 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
                 "ACK/NACK version does not match pending update",
             )
         if kind == "ack":
+            self.registry.metrics.gateway_acks.labels("ack").inc()
             state.acked_version = pending.version
             state.base = (pending.version, pending.digest)
             state.pending = None
@@ -682,6 +689,7 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
         }
         if code not in reasons:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "unknown NACK code")
+        self.registry.metrics.gateway_acks.labels("nack").inc()
         state.last_nack_version = pending.version
         state.last_nack_code = config_service_pb2.NackCode.Name(code)
         state.last_nack_reason = reasons[code]
@@ -704,9 +712,12 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
 
 
 class _UsageService(usage_pb2_grpc.UsageServiceServicer):
-    def __init__(self, settings: Settings, session_factory: SessionFactory) -> None:
+    def __init__(
+        self, settings: Settings, session_factory: SessionFactory, metrics: Metrics = DISCARD
+    ) -> None:
         self.settings = settings
         self.session_factory = session_factory
+        self.metrics = metrics
 
     async def Report(self, request, context):
         identity = _identity()
@@ -716,6 +727,7 @@ class _UsageService(usage_pb2_grpc.UsageServiceServicer):
             await context.abort(
                 grpc.StatusCode.PERMISSION_DENIED, "gateway_id does not match token"
             )
+        skipped: Counter[str] = Counter()
         try:
             async with self.session_factory() as session, session.begin():
                 accepted = await ingest(
@@ -724,13 +736,18 @@ class _UsageService(usage_pb2_grpc.UsageServiceServicer):
                     request.events,
                     scope_name=identity.scope,
                     max_batch_events=self.settings.max_usage_batch_events,
+                    skipped=skipped,
                 )
         except InvalidUsageBatch as exc:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+        # Committed: a retried report after a failed commit is not double counted.
+        self.metrics.record_usage(accepted, skipped)
         return usage_pb2.ReportResponse(accepted=accepted)
 
 
-async def serve(settings: Settings, session_factory: SessionFactory) -> grpc.aio.Server:
+async def serve(
+    settings: Settings, session_factory: SessionFactory, metrics: Metrics = DISCARD
+) -> grpc.aio.Server:
     """Start ConfigService, UsageService and gRPC health with symmetric 64 MiB limits.
 
     If TLS cert and key are configured the listener uses TLS; otherwise it is plaintext and
@@ -751,7 +768,7 @@ async def serve(settings: Settings, session_factory: SessionFactory) -> grpc.aio
         ("grpc.keepalive_time_ms", _KEEPALIVE_TIME_MS),
         ("grpc.keepalive_timeout_ms", _KEEPALIVE_TIMEOUT_MS),
     )
-    registry = SessionRegistry(session_factory)
+    registry = SessionRegistry(session_factory, metrics)
     server = grpc.aio.server(
         options=options,
         interceptors=(_GatewayAuthInterceptor(settings, session_factory),),
@@ -760,7 +777,7 @@ async def serve(settings: Settings, session_factory: SessionFactory) -> grpc.aio
         _ConfigService(settings, session_factory, registry), server
     )
     usage_pb2_grpc.add_UsageServiceServicer_to_server(
-        _UsageService(settings, session_factory), server
+        _UsageService(settings, session_factory, metrics), server
     )
     health_servicer = health.aio.HealthServicer()
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)

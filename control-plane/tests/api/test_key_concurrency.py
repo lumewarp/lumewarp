@@ -57,7 +57,12 @@ async def test_key_mutation_and_member_removal_do_not_deadlock(
     ):
         if operation == "update":
             mutation = keys.update_key(
-                key.id, KeyUpdate(name="renamed"), authz, key_session, api_settings
+                key.id,
+                KeyUpdate(name="renamed"),
+                authz,
+                key_session,
+                api_settings,
+                client.app.state.metrics,
             )
         else:
             handler = keys.rotate_key if operation == "rotate" else keys.revoke_key
@@ -66,7 +71,13 @@ async def test_key_mutation_and_member_removal_do_not_deadlock(
             tasks.create_task(mutation)
             tasks.create_task(
                 members.delete_member(
-                    team.id, owner.id, request, authz, member_session, api_settings
+                    team.id,
+                    owner.id,
+                    request,
+                    authz,
+                    member_session,
+                    api_settings,
+                    client.app.state.metrics,
                 )
             )
     assert key_locked.is_set() and removal_scope_attempted.is_set()

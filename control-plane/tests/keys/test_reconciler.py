@@ -1,4 +1,5 @@
 import asyncio
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -125,7 +126,9 @@ async def states(factory):
         }
 
 
-async def run_ticks(monkeypatch, factory, settings, backend, ticks, on_tick=None, full=300):
+async def run_ticks(
+    monkeypatch, factory, settings, backend, ticks, on_tick=None, full=300, metrics=None
+):
     """Advance the loop's monotonic clock at its wait boundary, without wall-clock sleeps."""
     clock = 100.0
     count = 0
@@ -151,6 +154,7 @@ async def run_ticks(monkeypatch, factory, settings, backend, ticks, on_tick=None
         poll_seconds=2,
         full_seconds=full,
         settings=settings,
+        **({"metrics": metrics} if metrics is not None else {}),
     )
     return delays
 
@@ -404,7 +408,7 @@ async def test_unexpected_failure_retries_without_advancing_cursor(store, monkey
             ChangeBatch(frozenset({str(rows["owner"].id)}), "b"),
         ]
     )
-    original = reconciler.reconcile_keys
+    original = reconciler._reconcile
     calls = 0
 
     async def fail_once(*args, **kwargs):
@@ -414,7 +418,7 @@ async def test_unexpected_failure_retries_without_advancing_cursor(store, monkey
             raise RuntimeError("temporary database failure")
         return await original(*args, **kwargs)
 
-    monkeypatch.setattr(reconciler, "reconcile_keys", fail_once)
+    monkeypatch.setattr(reconciler, "_reconcile", fail_once)
     delays = await run_ticks(monkeypatch, factory, settings, backend, 3)
     assert backend.cursors == [None, "a", "a"]
     assert delays == [2, 4, 2]
@@ -521,3 +525,58 @@ async def test_stop_interrupts_wait():
     task = asyncio.create_task(reconciler._wait(stop, 300))
     stop.set()
     await asyncio.wait_for(task, 1)
+
+
+# --------------------------------------------------------------------------- metrics
+
+
+async def test_suspension_metrics_count_committed_suspensions(store):
+    from lumewarp_control_plane.metrics import Metrics
+
+    factory, settings, rows = store
+    metrics = Metrics()
+    backend = Backend()
+    backend.overrides[(str(rows["owner"].id), str(rows["team"].id))] = Decision.DENY
+    assert await reconciler.reconcile_keys(factory, Authorizer(backend), settings, metrics=metrics)
+    assert metrics.value("lumewarp_cp_keys_suspended_total", {"reason": "owner_removed"}) == 2
+    # Nothing left to suspend: the counter does not move.
+    await reconciler.reconcile_keys(factory, Authorizer(backend), settings, metrics=metrics)
+    assert metrics.value("lumewarp_cp_keys_suspended_total", {"reason": "owner_removed"}) == 2
+
+
+@pytest.mark.parametrize(
+    ("decision", "succeeds"),
+    [(Decision.ALLOW, True), (Decision.DENY, True), (Decision.ERROR, False)],
+)
+async def test_last_success_timestamp(store, monkeypatch, decision, succeeds):
+    from lumewarp_control_plane.metrics import Metrics
+
+    factory, settings, rows = store
+    metrics = Metrics()
+    before = time.time()
+    await run_ticks(monkeypatch, factory, settings, Backend(decision), 2, metrics=metrics)
+    stamp = metrics.value("lumewarp_cp_key_reconcile_last_success_timestamp_seconds")
+    if succeeds:
+        assert before <= stamp <= time.time()
+    else:
+        # Authorization unavailable for some owner: not a successful reconciliation.
+        assert stamp == 0
+
+
+async def test_last_success_requires_readable_change_stream(store, monkeypatch):
+    from lumewarp_control_plane.metrics import Metrics
+
+    factory, settings, rows = store
+    metrics = Metrics()
+    stamps = []
+
+    async def tick(count):
+        stamps.append(metrics.value("lumewarp_cp_key_reconcile_last_success_timestamp_seconds"))
+
+    backend = ChangesBackend(
+        [RuntimeError("changes down"), ChangeBatch(frozenset(), "a", reset=True)]
+    )
+    await run_ticks(monkeypatch, factory, settings, backend, 2, tick, metrics=metrics)
+    # First step: changes() failed (the full scan still ran), so no success stamp.
+    assert stamps[0] == 0
+    assert stamps[1] > 0

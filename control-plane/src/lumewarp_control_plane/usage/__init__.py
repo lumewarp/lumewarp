@@ -65,6 +65,18 @@ _EVENT_FIELDS = (
     "outcome",
 )
 _USAGE_FIELDS = (*_EVENT_FIELDS, "owner_kind", "owner_id")
+# Per-event skip messages that are not field validation errors, and their metric reason.
+_REUSED_IN_BATCH = "request_id reused with different event data"
+_CONFLICTS_STORED = "request_id conflicts with a different stored event"
+_KEY_MISMATCH = "usage key unknown or not in the event's team"
+# `lumewarp_cp_usage_events_skipped_total{reason}`: a bounded set. Every other message comes
+# from `_prepare_event` (malformed fields) and maps to "invalid_event".
+SKIP_REASONS = ("invalid_event", "request_id_conflict", "key_mismatch")
+_SKIP_REASON = {
+    _REUSED_IN_BATCH: "request_id_conflict",
+    _CONFLICTS_STORED: "request_id_conflict",
+    _KEY_MISMATCH: "key_mismatch",
+}
 
 
 class InvalidUsageBatch(ValueError):
@@ -439,7 +451,7 @@ async def _persist_events(
             prepared = by_id[request_id]
             if existing is None or not _same_event(existing, prepared.values):
                 # Nothing was inserted for it (ON CONFLICT DO NOTHING); the stored row wins.
-                rejected["request_id conflicts with a different stored event"] += 1
+                rejected[_CONFLICTS_STORED] += 1
                 accepted -= 1
 
     aggregates: dict[tuple[ScopeType, uuid.UUID, datetime], list[int]] = {}
@@ -468,6 +480,7 @@ async def ingest(
     *,
     scope_name: str | None = None,
     max_batch_events: int | None = None,
+    skipped: Counter[str] | None = None,
 ) -> int:
     """Record a batch in the caller's transaction and return its accepted count.
 
@@ -477,6 +490,9 @@ async def ingest(
     id with an identical payload is accepted without re-counting. Only batch-level problems
     (gateway identity, batch size) reject the whole batch. Event timestamps, not receipt
     time, select the UTC month.
+
+    If `skipped` is given, skipped events are added to it by bounded reason (`SKIP_REASONS`)
+    for the caller to export once the transaction has committed.
     """
     if not isinstance(gateway_id, str) or not gateway_id or len(gateway_id) > 200:
         raise InvalidUsageBatch("invalid gateway identity")
@@ -500,14 +516,14 @@ async def ingest(
             by_id[prepared.request_id] = prepared
         elif any(previous.values[k] != prepared.values[k] for k in _EVENT_FIELDS):
             # The first occurrence is kept; the conflicting copy is dropped.
-            rejected["request_id reused with different event data"] += 1
+            rejected[_REUSED_IN_BATCH] += 1
         else:
             duplicates[prepared.request_id] += 1
 
     mismatched, keys = await _validate_key_hierarchy(session, list(by_id.values()))
     for request_id in mismatched:
         # Identical in-batch copies of a rejected event are rejected with it.
-        rejected["usage key unknown or not in the event's team"] += 1 + duplicates[request_id]
+        rejected[_KEY_MISMATCH] += 1 + duplicates[request_id]
         del by_id[request_id]
 
     try:
@@ -526,6 +542,9 @@ async def ingest(
                 rejected,
             )
     finally:
+        if skipped is not None:
+            for message, n in rejected.items():
+                skipped[_SKIP_REASON.get(message, "invalid_event")] += n
         if rejected:
             log.warning(
                 "usage report from gateway %s: skipped %d of %d events: %s",

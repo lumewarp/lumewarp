@@ -414,3 +414,82 @@ async def test_compiler_loop(factory, require_local_membership) -> None:
     assert wire.status == (
         pb.KEY_STATUS_SUSPENDED if require_local_membership else pb.KEY_STATUS_ACTIVE
     )
+
+
+# --------------------------------------------------------------------------- metrics
+
+
+async def test_compile_metrics(factory, monkeypatch) -> None:
+    from lumewarp_control_plane.metrics import Metrics, refresh_db_gauges
+    from lumewarp_control_plane.settings import get_settings
+
+    metrics = Metrics()
+    await seed_scope(factory)
+    assert await publish(factory, metrics=metrics) is None
+    # Nothing pending: no compile happened.
+    assert metrics.value("lumewarp_cp_compile_duration_seconds_count") == 0
+
+    async with factory() as s, s.begin():
+        t, u = await add_hierarchy(s)
+        await add_key(s, t, u, name="k1")
+    await touch(factory)
+    await refresh_db_gauges(metrics, factory, SCOPE)
+    assert metrics.value("lumewarp_cp_outbox_pending") == 1
+    assert await publish(factory, metrics=metrics) == 1
+    assert metrics.value("lumewarp_cp_compile_duration_seconds_count") == 1
+    assert metrics.value("lumewarp_cp_compile_duration_seconds_sum") > 0
+    assert metrics.value("lumewarp_cp_compile_failures_total") == 0
+    assert metrics.value("lumewarp_cp_config_version") == 1
+
+    # Unchanged content is still a compile, but publishes nothing new.
+    await touch(factory)
+    assert await publish(factory, metrics=metrics) is None
+    assert metrics.value("lumewarp_cp_compile_duration_seconds_count") == 2
+    assert metrics.value("lumewarp_cp_config_version") == 1
+
+    monkeypatch.setattr(get_settings(), "max_snapshot_keys", 1)
+    async with factory() as s, s.begin():
+        t, u = await add_hierarchy(s, name="second")
+        await add_key(s, t, u, name="k2")
+    await touch(factory)
+    assert await publish(factory, metrics=metrics) is None
+    assert metrics.value("lumewarp_cp_compile_failures_total") == 1
+    assert metrics.value("lumewarp_cp_compile_duration_seconds_count") == 3
+    assert metrics.value("lumewarp_cp_config_version") == 1
+
+    await refresh_db_gauges(metrics, factory, SCOPE)
+    assert metrics.value("lumewarp_cp_outbox_pending") == 0
+    # The refresher also tracks versions published elsewhere (rollback via the API).
+    metrics.config_version.set(0)
+    await refresh_db_gauges(metrics, factory, SCOPE)
+    assert metrics.value("lumewarp_cp_config_version") == 1
+
+
+async def test_compiler_loop_publishes_metrics(factory) -> None:
+    from lumewarp_control_plane.metrics import Metrics
+
+    metrics = Metrics()
+    await seed_scope(factory)
+    async with factory() as s, s.begin():
+        t, u = await add_hierarchy(s)
+        await add_key(s, t, u)
+    await touch(factory)
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run_compiler_loop(
+            factory,
+            stop,
+            scope=SCOPE,
+            interval_seconds=0.01,
+            require_local_membership=True,
+            metrics=metrics,
+        )
+    )
+    try:
+        async with asyncio.timeout(5):
+            while metrics.value("lumewarp_cp_config_version") != 1:
+                await asyncio.sleep(0.01)
+    finally:
+        stop.set()
+        await task
+    assert metrics.value("lumewarp_cp_compile_duration_seconds_count") >= 1

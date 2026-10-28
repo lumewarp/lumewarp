@@ -120,7 +120,7 @@ flowchart TB
 
 ## Metrics 與 Alert
 
-gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control plane 的 metrics 與 OTLP 為後續階段（見「P1 已實作」）。
+gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control plane 在獨立的 metrics listener（`LUMEWARP_METRICS_BIND`，預設 `127.0.0.1:9465`，不在 admin API port）輸出 `lumewarp_cp_*`（下表後半，完整說明見 [control-plane README](../control-plane/README.md#metrics)）；control plane 的 OTLP 仍為後續階段。
 
 | 指標 | 標籤 | 用途 |
 | --- | --- | --- |
@@ -134,12 +134,18 @@ gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control 
 | `lumewarp_vllm_queue_depth`、`lumewarp_vllm_kv_cache_usage` | deployment | vLLM 負載 |
 | `lumewarp_mcp_tool_calls_total` | server, tool, team, status | MCP 使用 |
 | `lumewarp_config_version`、`lumewarp_config_apply_failures_total` | gateway | 設定同步 |
+| `lumewarp_cp_compile_duration_seconds`、`lumewarp_cp_compile_failures_total` | — | 設定編譯（CP） |
+| `lumewarp_cp_config_version`、`lumewarp_cp_outbox_pending` | — | 最新發布版本與 outbox 積壓（CP） |
+| `lumewarp_cp_gateway_sessions`、`lumewarp_cp_gateway_acks_total` | result（ack／nack） | config stream 連線與回覆（CP） |
+| `lumewarp_cp_usage_events_ingested_total`、`lumewarp_cp_usage_events_skipped_total` | reason（skipped） | 用量匯入（CP） |
+| `lumewarp_cp_authz_checks_total` | backend, decision | 授權後端（CP） |
+| `lumewarp_cp_keys_suspended_total`、`lumewarp_cp_key_reconcile_last_success_timestamp_seconds` | reason（suspended） | key 停用與 reconciler 新鮮度（CP） |
 
 ### P0 已實作
 
 P0 當時 gateway 提供 `lumewarp_requests_total`、`lumewarp_request_duration_seconds`、`lumewarp_gateway_overhead_seconds`、`lumewarp_request_body_read_seconds`、`lumewarp_ttft_seconds`、`lumewarp_upstream_errors_total`、`lumewarp_in_flight_requests`、`lumewarp_config_version`（YAML 為 0）與 `lumewarp_config_info`，由獨立 admin listener 的 `/metrics` 輸出；當時尚無 `team` 標籤、token／TPOT／spend 計量或 OTLP metrics，OTLP traces 為選用。P1 新增的指標見下節。非串流與串流的 overhead 均為「body 讀完 → upstream request 送出」加「upstream headers 收到 → handler 返回」；串流再加第一個 frame 已 ready 到轉交的本地處理時間，不含等待 upstream headers、prefill、後續 body 生成或 client socket flush／ACK。未路由的請求以 body 讀完到 handler 返回近似，未讀 body 則從 request start 計；取消中的 upload 只進 body-read duration，不算 overhead。此為內部處理時間近似，不同於 bench 的 gateway／direct 端到端延遲差值。完整操作、TTFT／body-read 與標籤定義見 [gateway README](../gateway/README.md)。
 
-API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可選 ServiceMonitor；Prometheus rules 與 Grafana dashboard 規劃中（維運）；control plane 內建預算告警，經 webhook / Slack / Email / PagerDuty（業務），可用 notifier plugin 擴充。每個請求一條 OTel trace，接續 W3C `traceparent`。log 預設不記 prompt/response。
+API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可選 ServiceMonitor（gateway admin port 與 control plane metrics port）；Prometheus rules 與 Grafana dashboard 規劃中（維運）；control plane 內建預算告警，經 webhook / Slack / Email / PagerDuty（業務），可用 notifier plugin 擴充。每個請求一條 OTel trace，接續 W3C `traceparent`。log 預設不記 prompt/response。
 
 ## P1 已實作
 
@@ -171,7 +177,7 @@ P1 的 control plane、設定串流、Team 模型與 Admin UI 第一版已實作
 **尚未包含（延後）**
 
 - OIDC／SSO、JWT／mTLS 用戶端認證、SCIM、auth plugin 執行（P2）。
-- 跨 gateway 的共享限流（Redis 對帳）、ClickHouse、control plane 的 Prometheus `/metrics` 與 OTLP metrics／traces；gateway 只有選用的 OTLP traces，沒有 metrics exporter。
+- 跨 gateway 的共享限流（Redis 對帳）、ClickHouse、control plane 的 OTLP metrics／traces（Prometheus `lumewarp_cp_*` 已於 P2 加入）；gateway 只有選用的 OTLP traces，沒有 metrics exporter。
 - Canary／百分比切流、vLLM 負載感知與最低延遲路由、fallback／retry／circuit breaker、主動健康檢查。
 - 預算為 eventual；佇列滿或 gateway 重啟會遺失用量事件，進行中的串流不會因超額被切斷；月窗口固定為 UTC 日曆月。
 - MCP／A2A 代理與其稽核、工具權限。
