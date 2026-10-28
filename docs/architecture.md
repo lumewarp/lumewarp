@@ -7,7 +7,7 @@
 Lumewarp 是比 LiteLLM 更快、更好管理的 LLM gateway，拆成兩個獨立部署的元件：
 
 - **Data plane（gateway）**：Rust。只處理請求，熱路徑不碰資料庫、不跑 Python。
-- **Control plane（管理端）**：Python（FastAPI）+ React Admin UI。管理 Org/Team、SSO、路由、plugin，產生設定快照。
+- **Control plane（管理端）**：Python（FastAPI）+ React Admin UI。管理 Team／Member／Service Account、SSO、路由、plugin，產生設定快照。
 
 兩者之間只透過一條版本化的 gRPC 設定串流溝通。control plane 掛掉時 gateway 照常服務。
 
@@ -25,7 +25,7 @@ Lumewarp 是比 LiteLLM 更快、更好管理的 LLM gateway，拆成兩個獨�
 flowchart TB
   IdP["Keycloak / OIDC IdP"] -->|OIDC 登入| API
   subgraph CP["Control plane (Python)"]
-    API["管理 API + plugin<br/>Org/Team、RBAC、路由設定"] --> PG[("Postgres<br/>唯一事實來源、稽核")]
+    API["管理 API + plugin<br/>Team／Member／Service Account、授權、路由設定"] --> PG[("Postgres<br/>唯一事實來源、稽核")]
     PG --> COMP["Config compiler<br/>展開繼承 → 版本化快照"]
     UI["React Admin UI (static SPA)"] --> API
   end
@@ -54,7 +54,7 @@ flowchart TB
 ## 設定下發
 
 1. 管理者在 UI/API 改設定，寫入 Postgres 並留稽核紀錄。
-2. Config compiler 把組織繼承、路由、權限展開成已解析的 protobuf 快照，給遞增版本號，發布前驗證。
+2. Config compiler 把 team 與 key owner 的繼承、路由、權限展開成已解析的 protobuf 快照，給遞增版本號，發布前驗證。
 3. gateway 開機訂閱 gRPC 串流，先收全量，之後收 delta（例如新增/撤銷 API key）。
 4. gateway 背景建好新索引，ArcSwap 原子替換；成功回 ACK，失敗回 NACK 並保留舊版。
 5. 最後一份成功快照寫到本地磁碟，control plane 掛掉仍可重啟服務。
@@ -69,15 +69,18 @@ flowchart TB
 ### SSO（Keycloak / OIDC）
 
 - control plane 是標準 OIDC RP；Keycloak 是預設但非必要。SAML 交給 Keycloak brokering。
-- 管理端登入：Authorization Code + PKCE；groups claim 對應 Org/Team 與角色；之後加 SCIM。
+- 管理端登入：Authorization Code + PKCE；groups claim 對應 team 與角色；之後加 SCIM。
 - gateway 憑證：虛擬 API key（只存 hash）、IdP 簽發的 JWT（JWKS 本地驗證）、mTLS / workload identity。
 - 停權時推撤銷 delta，所有 gateway 秒級內拒絕。
 
-### Org / Team
+### Team / Member / Service Account
 
-- 階層：Organization → Team → Project → API key；每層可設預算、限流、模型清單、MCP 工具清單。
-- 子層只能收窄父層限制；compiler 預先展開成每個 key 的有效策略。
-- RBAC：Owner / Admin / Member / Viewer。
+- 階層：installation（superuser）→ team → member（admin／member）與 service account → API key；沒有 org／project 層級。
+- API key 屬於一個 team，owner 是該 team 的成員或 service account；key 本身不帶 policy，owner 身分也不進快照，compiler 只把展開後的有效策略寫進 key。
+- team 與 key owner（member、service account）各自可設模型清單、限流、預算；owner 只能收窄 team，compiler 預先展開成每個 key 的有效策略。
+- 授權：installation superuser、team admin、team member。member 可讀 team、建立與管理自己的 key；admin 另可改 team 設定、管理成員、service account 與 team 內所有 key；superuser 可建立／刪除 team 與管理安裝層設定。
+- 授權後端可換：內建讀 `users.is_superuser` 與 `team_members`；也可用 `lumewarp.authz` entry point 接外部系統（例如 OpenFGA）。後端只回答關係（superuser／admin／member），單一 async 函式 `check(user_id, relation, resource) -> Decision`；`admin` 隱含 `member`、`superuser` 隱含所有 team 的 `admin`，由後端保證。`ERROR`（後端不可用或逾時）不是 deny：管理 API 回 503。
+- 用量與限流按 team 與 key owner 歸屬：member 的 scope id 是 `uuid5(team_id, user_id)`，service account 用其 id；限流 scope 為 `team:<id>`、`member:<id>`、`sa:<id>`。
 - 預算：依 token 與單價計費，軟上限通知、硬上限拒絕。
 
 ### Router
@@ -126,7 +129,7 @@ gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control 
 | `lumewarp_gateway_overhead_seconds` | route | gateway 自身額外延遲 |
 | `lumewarp_ttft_seconds`、`lumewarp_tpot_seconds` | model, deployment | 串流延遲 |
 | `lumewarp_tokens_total` | model, team, direction | token 用量 |
-| `lumewarp_spend_total` | team, project | 花費 |
+| `lumewarp_spend_total` | team | 花費 |
 | `lumewarp_upstream_circuit_state` | deployment | 熔斷與健康 |
 | `lumewarp_vllm_queue_depth`、`lumewarp_vllm_kv_cache_usage` | deployment | vLLM 負載 |
 | `lumewarp_mcp_tool_calls_total` | server, tool, team, status | MCP 使用 |
@@ -140,15 +143,15 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 
 ## P1 已實作
 
-P1 的 control plane、設定串流、Org/Team/Project 與 Admin UI 第一版已實作；SSO 與進階路由仍屬 P2。以下只列現況，設計內容以上文為準。
+P1 的 control plane、設定串流、Team 模型與 Admin UI 第一版已實作；SSO 與進階路由仍屬 P2。以下只列現況，設計內容以上文為準。
 
 **Control plane（`control-plane/`）**
 
 - 單一 Python 程序：FastAPI（HTTP 8091）＋ gRPC（50051）的 ConfigService／UsageService／health，加上 compiler loop、月結 rollover 與 notifier outbox；`/readyz` 檢查 DB、migration head 與背景服務，`/healthz` 為 liveness，gRPC 意外停止會讓程序結束。
-- Postgres schema 由 Alembic 管理（單一 scope）；bootstrap token（安裝層 superuser）與每人 PAT，RBAC 為 Owner／Admin／Member／Viewer。
-- REST `/api/v1`：org／team／project／key（含撤銷）、預算／限流／模型 allowlist、upstream／deployment／route（含價格）、使用者與 membership、usage 聚合、audit、gateway 狀態與 token、config versions 與 routing rollback。
+- Postgres schema 由 Alembic 管理（單一 scope）；bootstrap token（安裝層 superuser）與每人 PAT；授權為 installation superuser 與 team admin／member，成員關係在 `team_members`，也可換成外部 `lumewarp.authz` 後端。
+- REST `/api/v1`：team／member／service account／key（含撤銷與輪替）、預算／限流／模型 allowlist、upstream／deployment／route（含價格）、使用者、usage 聚合、audit、gateway 狀態與 token、config versions 與 routing rollback。
 - 設定發布：寫入交易內同時寫 outbox；compiler 以 advisory lock 序列化，產生不可變版本快照；gRPC 串流支援全量／delta、digest、ACK／NACK、base mismatch 重送全量、壞版本隔離與 persist 重試，舊版 payload 依保留策略壓縮。
-- 用量與預算：`UsageService.Report` 以 `request_id` 冪等寫入，同一交易累計 key／project／team／org 的 UTC 月總額並評估預算；超額把 key 翻成 `BUDGET_EXCEEDED` 並推新版本（eventual，約 5 秒內；不切斷進行中的串流）。soft limit 走 notifier outbox（內建 webhook，可換 plugin）。
+- 用量與預算：`UsageService.Report` 以 `request_id` 冪等寫入，同一交易累計 team 與 owner（member／service account）的 UTC 月總額並評估預算；超額把 key 翻成 `BUDGET_EXCEEDED` 並推新版本（eventual，約 5 秒內；不切斷進行中的串流）。soft limit 走 notifier outbox（內建 webhook，可換 plugin）。
 - Plugin：`lumewarp.router`（編譯期調整 deployment 權重，2 秒逾時，非法輸出整批丟棄）與 `lumewarp.notifier`（outbox 投遞）已接上；`lumewarp.auth` 只有 protocol，P1 不呼叫。
 - Admin UI：Vite 靜態檔由 control plane 掛在 `/`，登入用 bootstrap token 或 PAT；API 文件在 `/docs`，OpenAPI 可離線輸出。UI 沒 build 時只有 API。
 
@@ -191,7 +194,7 @@ P1 的 control plane、設定串流、Org/Team/Project 與 Admin UI 第一版已
 | 階段 | 內容 | 進入下一階段的門檻 |
 | --- | --- | --- |
 | **P0** gateway 骨架 + benchmark | Rust gateway 以 YAML 啟動；OpenAI 相容端點，上游 vLLM 與 OpenAI，含 SSE；mock 上游 + 對 LiteLLM 的 benchmark 進 CI；基本 Prometheus 指標 | 同機額外延遲 p99 明顯低於 LiteLLM |
-| **P1** control plane + Org/Team | Python control plane + Postgres + gRPC 設定串流與本地快照；plugin 介面；Org/Team/Project、虛擬 key、預算限流；React Admin UI 第一版 | control plane 停機時 gateway 照常服務、可重啟 |
+| **P1** control plane + Team | Python control plane + Postgres + gRPC 設定串流與本地快照；plugin 介面；team／member／service account、虛擬 key、預算限流；React Admin UI 第一版 | control plane 停機時 gateway 照常服務、可重啟 |
 | **P2** SSO + 路由 | Keycloak/OIDC、groups 對應、JWT 呼叫 gateway；vLLM 負載感知路由、fallback、canary、router plugin；OTel trace、告警規則與 dashboard | SSO → 發 key → 呼叫 → 計費 端到端跑通 |
 | **P3** MCP / A2A | MCP 註冊聚合、工具權限、OAuth 代管；A2A 代理；三種流量共用稽核與 tracing | |
 

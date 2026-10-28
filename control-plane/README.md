@@ -24,7 +24,7 @@ From `control-plane/`:
 
 ```sh
 ../scripts/dev-db.sh up                          # postgres:16 on 127.0.0.1:55432
-uv sync                                          # project + dev dependencies
+uv sync                                          # runtime + dev dependencies
 uv run --no-sync lumewarp-control-plane migrate  # alembic upgrade head
 
 # Creates the config scope and prints one `lwg-...` gateway token (shown once).
@@ -108,6 +108,7 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 | `LUMEWARP_GRPC_BIND` | `127.0.0.1:50051` | Gateway-facing gRPC bind address. |
 | `LUMEWARP_GRPC_TLS_CERT_FILE` / `LUMEWARP_GRPC_TLS_KEY_FILE` | unset | PEM certificate chain and key. Both or neither; unset means plaintext gRPC. |
 | `LUMEWARP_BOOTSTRAP_TOKEN` | unset | Installation-level superuser Bearer token. Compared in constant time, never stored. Unset disables bootstrap access; PATs still work. |
+| `LUMEWARP_AUTHZ_BACKEND` | `builtin` | Authorization backend: `builtin` (users and `team_members`) or a `lumewarp.authz` entry-point name. See [Authorization](#authorization). |
 | `LUMEWARP_SCOPE` | `default` | `Snapshot.scope` this installation publishes. Gateways must use the same value. |
 | `LUMEWARP_MAX_SNAPSHOT_BYTES` | `67108864` (64 MiB) | Compilation fails above this serialized size. |
 | `LUMEWARP_MAX_SNAPSHOT_KEYS` | `200000` | Compilation fails above this key count. |
@@ -117,7 +118,7 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 | `LUMEWARP_MAX_USAGE_BATCH_EVENTS` | `10000` | Maximum events per `UsageService.Report` (1–10000; keeps asyncpg's parameter count in range). |
 | `LUMEWARP_BACKGROUND_ENABLED` | `true` | Start gRPC and the loops in `serve`. Tests set `false`; keep it true in production. |
 
-## Bootstrap credentials and RBAC
+## Credentials and access model
 
 There are four credential types, all stored only as SHA-256 hashes except the bootstrap
 token, which is never stored:
@@ -127,17 +128,102 @@ token, which is never stored:
 | Bootstrap token | none | Installation superuser over the admin API/UI; comes from `LUMEWARP_BOOTSTRAP_TOKEN`. |
 | Personal access token (PAT) | `lwp-` | A user over the admin API/UI; created under Settings in the UI or `POST /api/v1/users/me/tokens`. |
 | Gateway token | `lwg-` | A gateway for the config stream and usage reporting; the first one comes from `bootstrap` (which also creates the scope), later ones from the gateways API/UI. |
-| Virtual API key | `lw-` | Clients calling the gateway; created in a project; the gateway only receives its hash in the snapshot. |
+| Virtual API key | `lw-` | Clients calling the gateway; owned by a team member or a service account of a team; the gateway only receives its hash in the snapshot. |
 
 The bootstrap token is not tied to a user: it is an installation superuser, has no PATs of
-its own, and is meant to create the first users/memberships. Installation superusers
+its own, and is meant to create the first users and teams. Installation superusers
 (bootstrap or a superuser PAT) can issue a PAT for an active user with
 `POST /api/v1/users/{user_id}/tokens` using `{"name":"initial access"}` (optional
 `expires_at`). The secret is returned only on creation; issuance is audited with the
-actor and target user, never the secret. Org/team admins cannot use this endpoint.
-RBAC roles are Owner, Admin,
-Member and Viewer at organization/team scope; child scopes can only narrow their parent's
-allowlists, limits and budgets. See `rbac.py` and the API schema for the exact matrix.
+actor and target user, never the secret. Team admins cannot use this endpoint.
+
+### Tenancy model
+
+There is exactly one installation and no org or project level:
+
+- **Team**: a name plus policy (`model_access` and `allowed_models`, `rpm_limit`,
+  `tpm_limit`, `max_parallel`, `budget_nano_usd`, `soft_budget_nano_usd`).
+- **Team member**: a user in a team with role `admin` or `member` and the member's own
+  narrowing policy. For regular users, membership determines team visibility
+  (`team_members` for the built-in backend); a superuser sees every team.
+- **Service account**: a non-human key owner in one team, with its own narrowing policy,
+  managed by the team's admins. It is unaffected by people joining or leaving.
+- **API key**: belongs to one team and is owned by a member (`owner_kind=user`) or a service
+  account (`owner_kind=service_account`). Keys carry no policy; the compiler narrows the
+  team policy by the owner policy into each key's effective policy. The snapshot carries
+  only the key id and hash, team id, status, expiry and effective policy; owner identity
+  stays in the control plane.
+
+Removing a member suspends that member's user-owned keys in the team
+(`suspended_reason=owner_removed`); deactivating a user suspends their user-owned keys
+(`owner_deactivated`). Revoked keys are kept for usage history. A key or a service
+account prevents team deletion.
+
+Usage is attributed to the key's team and owner: the event's `team_id` must match the
+key, and the owner (member or service account) is read from the key. A member's
+usage/rate-limit scope id is `member_scope_id = uuid5(team_id, user_id)`; it is derived, so
+removing and re-adding a member keeps the same total and bucket. A service account uses
+its own id. Rate-limit scopes are `team:<team_id>`, `member:<member_scope_id>` and
+`sa:<service_account_id>`.
+
+### Authorization
+
+Authorization has two layers. The action matrix below stays in Lumewarp; a backend only
+answers relation questions. A superuser passes every check, and an admin has every member
+permission. `admin` implies `member`, and an installation `superuser` implies `admin` of
+every team.
+
+| Action | Who |
+| --- | --- |
+| `TEAM_CREATE`, `TEAM_DELETE`, `USER_MANAGE`, `ROUTING_MANAGE`, `GATEWAY_TOKEN_MANAGE`, `GATEWAY_READ`, `CONFIG_READ`, `CONFIG_ROLLBACK`, `NOTIFIER_MANAGE` | Installation superuser |
+| `ROUTING_READ`, `OWN_TOKENS` | Any authenticated caller |
+| `TEAM_UPDATE`, `TEAM_MEMBERS_MANAGE`, `SERVICE_ACCOUNT_MANAGE`, `KEY_MANAGE_ANY` | Team admin |
+| `TEAM_READ`, `KEY_CREATE_OWN`, `KEY_MANAGE_OWN` | Team member |
+
+`LUMEWARP_AUTHZ_BACKEND` selects the backend: `builtin` (the default) reads
+`users.is_superuser` and `team_members`; any other value names a `lumewarp.authz` entry
+point. The entry point may be an async `check` function, an object with an async `check`
+method, or a class/zero-argument factory returning one; it is loaded once at startup. An
+unknown name with no matching entry point aborts startup.
+
+The only required method is:
+
+```python
+from lumewarp_control_plane.authz import Decision, Relation, Resource
+
+
+async def check(user_id: str, relation: Relation, resource: Resource) -> Decision: ...
+```
+
+`Relation` is `superuser` (installation only), `admin` or `member` (team). `Resource` is
+`installation:default` or a team. Return `Decision.ALLOW`, `Decision.DENY` or
+`Decision.ERROR`. `ERROR` means the backend is unavailable or timed out: the admin API
+answers `503 authz_unavailable` and background jobs skip the round; it is never treated
+as a deny. The gateway never calls the backend; it only sees compiled snapshots.
+
+Optional members are filled in from `check` when absent:
+
+- `async batch_check(items)` returns one `Decision` per `(user_id, relation, resource)` in
+  the same order; the default runs `check` with bounded concurrency.
+- `async list_teams(user_id, relation)` returns the team ids where the user holds the
+  relation; Lumewarp intersects the result with the candidate teams. Without it, the
+  candidates are filtered with `batch_check`. A raised exception or an `ERROR` decision
+  makes the admin API answer 503.
+- `manages_grants: bool` defaults to `False`: memberships live in the external system and
+  the member write endpoints answer `409 managed_externally`. The built-in backend sets it
+  to `True`.
+
+```toml
+# pyproject.toml
+[project.entry-points."lumewarp.authz"]
+my-authz = "my_plugin.authz:check"
+```
+
+The backend conformance suite is importable from
+`lumewarp_control_plane.authz.contract_tests`
+(`src/lumewarp_control_plane/authz/contract_tests.py`). Run it against a backend before
+setting `LUMEWARP_AUTHZ_BACKEND`; it covers the implied relations, inactive and unknown
+users, batch ordering, `list_teams` consistency and `ERROR` handling.
 
 ## Admin UI
 
@@ -170,7 +256,7 @@ install -e ./your-plugin`) and restart `serve`:
 | --- | --- | --- |
 | `lumewarp.router` | Adjust deployment weights at compile time (GPU cost, time of day, ...). | Called by the compiler. |
 | `lumewarp.notifier` | Deliver budget notifications for channels whose `kind` is the entry-point name. | Called by the notifier outbox loop. |
-| `lumewarp.auth` | Map an external identity (OIDC, LDAP, ...) to a user and grants. | Protocol only; not called in P1 (P2 SSO). |
+| `lumewarp.auth` | Map an external identity (OIDC, LDAP, ...) to a user. | Protocol only; not called in P1 (P2 SSO). |
 
 Every plugin declares `api_version = 1`; other versions are skipped with a warning, as are
 plugins that fail to import. Entry points may name an instance, a class or a zero-argument
@@ -219,9 +305,10 @@ Later plugins win on conflicts. Notifier plugins get the channel's `config` mapp
 - `UsageService.Report` validates per event (an invalid event is skipped and logged, the
   rest of the batch is kept; `REJECTED` events may omit model/deployment) and is
   idempotent by `request_id`; each new event
-  adds cost to key, project, team and org totals for the UTC calendar month in the same
-  transaction, then budget evaluation flips exhausted scopes to `BUDGET_EXCEEDED` and
-  publishes a new version (eventual; in-flight streams are not cut). Soft-limit
+  adds cost once to the team total and once to the key owner's (member or service account)
+  total for the UTC calendar month in the same transaction, then budget evaluation flips
+  exhausted scopes to `BUDGET_EXCEEDED` and publishes a new version (eventual; in-flight
+  streams are not cut). Soft-limit
   notifications go through the notifier outbox. Budget publishing targets the protocol's
   5 s eventual-enforcement window; it is not a configurable per-flip timeout. The unused
   `LUMEWARP_BUDGET_FLIP_DEADLINE_SECONDS` setting has been removed.
@@ -267,7 +354,7 @@ Generated modules are checked in under `src/lumewarp_control_plane/_proto/`. Aft
 | Module | Purpose |
 | --- | --- |
 | `settings.py`, `db.py`, `models.py`, `migrations/`, `migrate.py` | config, DB, schema |
-| `security.py`, `rbac.py`, `errors.py`, `audit.py`, `outbox.py` | auth, RBAC matrix, error shape, audit, recompile outbox |
+| `security.py`, `authz/`, `errors.py`, `audit.py`, `outbox.py` | auth, action matrix and authorization backends, error shape, audit, recompile outbox |
 | `api/` | REST under `/api/v1` |
 | `compiler/`, `plugins.py` | snapshots, versions, diff, rollback, plugin host |
 | `grpc/`, `usage/`, `notifier/` | ConfigService/UsageService, budgets, notifications |
