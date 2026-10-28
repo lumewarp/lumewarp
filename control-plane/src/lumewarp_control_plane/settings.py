@@ -26,6 +26,10 @@ class Settings(BaseSettings):
 
     http_bind: str = "127.0.0.1:8091"
     grpc_bind: str = "127.0.0.1:50051"
+    # Prometheus metrics listener (text format, any path), separate from the admin API.
+    # Empty string disables it. Not 9464: that is the gateway admin listener's default, and
+    # both often run on one dev host.
+    metrics_bind: str = "127.0.0.1:9465"
     # Optional TLS for the gateway-facing gRPC listener. Without it the
     # listener is plaintext and must sit behind a trusted boundary.
     grpc_tls_cert_file: str | None = None
@@ -88,6 +92,13 @@ class Settings(BaseSettings):
     @classmethod
     def _check_bind(cls, v: str) -> str:
         split_bind(v)
+        return v
+
+    @field_validator("metrics_bind")
+    @classmethod
+    def _check_metrics_bind(cls, v: str) -> str:
+        if v:
+            split_bind(v)
         return v
 
     @property

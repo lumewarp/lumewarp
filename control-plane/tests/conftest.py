@@ -18,6 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from lumewarp_control_plane import migrate
 from lumewarp_control_plane.settings import DEV_DATABASE_URL, Settings
 
+# Tests that start background services bind the metrics listener to an ephemeral port
+# instead of the fixed default.
+os.environ.setdefault("LUMEWARP_METRICS_BIND", "127.0.0.1:0")
+
 TEST_DB_PREFIX = "lumewarp_test_"
 SERVER_URL = os.environ.get("LUMEWARP_TEST_DATABASE_URL", DEV_DATABASE_URL)
 

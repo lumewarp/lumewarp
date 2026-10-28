@@ -11,6 +11,7 @@ from sqlalchemy import select
 from lumewarp_control_plane import audit
 from lumewarp_control_plane.api.common import (
     LimitDep,
+    MetricsDep,
     SessionDep,
     SettingsDep,
     conflict,
@@ -286,6 +287,7 @@ async def update_user(
     authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
+    metrics: MetricsDep,
 ) -> UserOut:
     await authz.require(Action.USER_MANAGE)
     _check_not_null(body, "email", "display_name", "is_superuser", "is_active")
@@ -324,6 +326,7 @@ async def update_user(
             },
         )
         await enqueue_recompile(session, settings, "api.user.update")
+    metrics.count_committed_suspensions(session)
     return UserOut.model_validate(row)
 
 

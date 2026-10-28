@@ -245,9 +245,38 @@ async def test_end_to_end(cp: ControlPlane) -> None:
         probe_token = (await cp.post("/gateways", {"gateway_id": "probe"}))["secret"]
         version, keys = await probe(cp.grpc_target, probe_token, "probe")
         assert (version, keys) == (a.snapshot.version, len(a.snapshot.api_keys))
+
+        # The metrics listener (its own port, not the admin API) reflects all of the above.
+        # The probe's stream is torn down asynchronously on the server: wait for it.
+        async with asyncio.timeout(5):
+            while (samples := await _scrape(cp))[("lumewarp_cp_gateway_sessions", ())] != 2:
+                await asyncio.sleep(0.02)
+        assert samples[("lumewarp_cp_config_version", ())] == a.snapshot.version
+        assert samples[("lumewarp_cp_compile_duration_seconds_count", ())] >= 3
+        assert samples[("lumewarp_cp_compile_failures_total", ())] == 0
+        assert samples[("lumewarp_cp_gateway_acks_total", (("result", "ack"),))] >= 4
+        assert samples[("lumewarp_cp_gateway_acks_total", (("result", "nack"),))] == 0
+        assert samples[("lumewarp_cp_usage_events_ingested_total", ())] == 2
+        builtin_allow = (("backend", "builtin"), ("decision", "allow"))
+        assert ("lumewarp_cp_authz_checks_total", builtin_allow) in samples
+        assert "lumewarp_cp_outbox_pending" in {name for name, _ in samples}
     finally:
         await a.close()
         await b.close()
+
+
+async def _scrape(cp: ControlPlane) -> dict[tuple[str, tuple], float]:
+    from prometheus_client.parser import text_string_to_metric_families
+
+    port = cp.app.state.runtime.metrics_server.port
+    async with httpx.AsyncClient() as http:
+        r = await http.get(f"http://127.0.0.1:{port}/metrics")
+    assert r.status_code == 200
+    return {
+        (s.name, tuple(sorted(s.labels.items()))): s.value
+        for family in text_string_to_metric_families(r.text)
+        for s in family.samples
+    }
 
 
 async def test_grpc_crash_fails_readiness_and_requests_exit(cp: ControlPlane) -> None:

@@ -56,6 +56,11 @@ spec:
             - name: grpc
               containerPort: {{ .Values.controlPlane.service.grpcPort }}
               protocol: TCP
+            {{- if .Values.controlPlane.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.controlPlane.service.metricsPort }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: LUMEWARP_DATABASE_URL
               valueFrom:
@@ -68,6 +73,8 @@ spec:
               value: "0.0.0.0:{{ .Values.controlPlane.service.grpcPort }}"
             - name: LUMEWARP_SCOPE
               value: {{ .Values.controlPlane.scope | quote }}
+            - name: LUMEWARP_METRICS_BIND
+              value: {{ ternary (printf "0.0.0.0:%v" .Values.controlPlane.service.metricsPort) "" .Values.controlPlane.metrics.enabled | quote }}
             {{- if .Values.controlPlane.bootstrapToken.secretName }}
             - name: LUMEWARP_BOOTSTRAP_TOKEN
               valueFrom:

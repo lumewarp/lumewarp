@@ -10,7 +10,9 @@ import asyncio
 import hashlib
 import logging
 import random
+import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy import func, literal, or_, select, update
@@ -29,6 +31,7 @@ from lumewarp_control_plane.compiler.compile import (
 )
 from lumewarp_control_plane.compiler.validate import SnapshotInvalid, validate_snapshot
 from lumewarp_control_plane.db import SessionFactory
+from lumewarp_control_plane.metrics import DISCARD, Metrics
 from lumewarp_control_plane.models import (
     ConfigOutbox,
     ConfigVersion,
@@ -152,12 +155,21 @@ async def store_version(
     return version
 
 
+@dataclass
+class _CompileOutcome:
+    """What one transaction attempt compiled; reported only once it has committed."""
+
+    duration: float | None = None
+    failed: bool = False
+
+
 async def _publish_locked(
     session: AsyncSession,
     scope: str,
     now: datetime | None,
     router_plugins: Sequence[plugin_api.LoadedPlugin] | None,
     require_local_membership: bool,
+    outcome: _CompileOutcome,
 ) -> int | None:
     pending = await session.scalar(
         select(func.count()).where(
@@ -175,6 +187,7 @@ async def _publish_locked(
         await _mark(session, scope, revision, OutboxStatus.DONE, version=latest[0])
         return None
     version = (latest[0] if latest else 0) + 1
+    started = time.perf_counter()
     try:
         compiled = await compile_scope(
             session,
@@ -193,6 +206,7 @@ async def _publish_locked(
                 compiled.snapshot.created_at_unix_ms = old.created_at_unix_ms
                 payload = compiled.snapshot.SerializeToString(deterministic=True)
                 if hashlib.sha256(payload).digest() == previous.digest:
+                    outcome.duration = time.perf_counter() - started
                     await _mark(session, scope, revision, OutboxStatus.DONE, version=latest[0])
                     return None
         await store_version(
@@ -203,7 +217,10 @@ async def _publish_locked(
             source_revision=compiled.source_revision,
             now=now,
         )
+        outcome.duration = time.perf_counter() - started
     except CompileError as exc:
+        outcome.duration = time.perf_counter() - started
+        outcome.failed = True
         log.error("compile of scope %s failed: %s", scope, exc)
         await _mark(session, scope, revision, OutboxStatus.FAILED, error=str(exc)[:MAX_ERROR_CHARS])
         return None
@@ -218,6 +235,7 @@ async def publish_pending(
     now: datetime | None = None,
     router_plugins: Sequence[plugin_api.LoadedPlugin] | None = None,
     require_local_membership: bool,
+    metrics: Metrics = DISCARD,
 ) -> int | None:
     """One step of the compiler loop for `scope` (default settings.scope).
 
@@ -228,6 +246,9 @@ async def publish_pending(
     transaction with bounded full jitter and a fresh snapshot. A compile failure marks
     rows failed and keeps the previous version current; nothing partial is published.
     Returns the newly published version, or None if nothing was published.
+
+    Compile duration and failures are recorded for the committed attempt only, and the
+    `lumewarp_cp_config_version` gauge is set to a newly published version.
     """
     scope = scope or get_settings().scope
     async with _engine(session_factory).connect() as conn:
@@ -236,12 +257,25 @@ async def publish_pending(
         try:
             await conn.execution_options(isolation_level="REPEATABLE READ")
             for attempt in range(SERIALIZATION_ATTEMPTS):
+                outcome = _CompileOutcome()
                 try:
                     async with AsyncSession(bind=conn, expire_on_commit=False) as session:
                         async with session.begin():
-                            return await _publish_locked(
-                                session, scope, now, router_plugins, require_local_membership
+                            version = await _publish_locked(
+                                session,
+                                scope,
+                                now,
+                                router_plugins,
+                                require_local_membership,
+                                outcome,
                             )
+                    if outcome.duration is not None:
+                        metrics.compile_duration.observe(outcome.duration)
+                    if outcome.failed:
+                        metrics.compile_failures.inc()
+                    if version is not None:
+                        metrics.config_version.set(version)
+                    return version
                 except DBAPIError as exc:
                     if not _serialization_failure(exc) or attempt == SERIALIZATION_ATTEMPTS - 1:
                         raise
@@ -442,6 +476,7 @@ async def run_compiler_loop(
     interval_seconds: float = 0.2,
     on_published: Callable[[str, int], None] | None = None,
     require_local_membership: bool,
+    metrics: Metrics = DISCARD,
 ) -> None:
     """Poll the outbox every `interval_seconds` and publish until `stop_event` is set.
 
@@ -459,6 +494,7 @@ async def run_compiler_loop(
                 scope,
                 router_plugins=router_plugins,
                 require_local_membership=require_local_membership,
+                metrics=metrics,
             )
             if version is not None:
                 log.info("published config version %d for scope %s", version, scope)

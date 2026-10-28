@@ -551,3 +551,111 @@ async def test_zero_budget_recompiles_once_for_zero_cost_batches(session_factory
             )
             == 1
         )
+
+
+def _skip_batch(key: ApiKey) -> list[usage_pb2.UsageEvent]:
+    valid = _event(key, cost=7)
+    wrong_team = _event(key)
+    wrong_team.team_id = str(uuid7())
+    unknown_key = _event(key)
+    unknown_key.key_id = str(uuid7())
+    bad_field = _event(key)
+    bad_field.route = ""
+    bad_status = _event(key)
+    bad_status.status = 600
+    reused = usage_pb2.UsageEvent.FromString(valid.SerializeToString())
+    reused.cost_nano_usd = 100
+    duplicate = usage_pb2.UsageEvent.FromString(valid.SerializeToString())
+    return [valid, wrong_team, unknown_key, bad_field, bad_status, reused, duplicate]
+
+
+@pytest.mark.asyncio
+async def test_ingest_reports_bounded_skip_reasons(session_factory: SessionFactory):
+    from collections import Counter
+
+    from lumewarp_control_plane.usage import SKIP_REASONS
+
+    scope_name, key = await _seed(session_factory)
+    skipped: Counter[str] = Counter()
+    async with session_factory() as session, session.begin():
+        accepted = await ingest(
+            session, "gateway-a", _skip_batch(key), scope_name=scope_name, skipped=skipped
+        )
+    assert accepted == 2
+    assert skipped == {"key_mismatch": 2, "invalid_event": 2, "request_id_conflict": 1}
+    assert set(skipped) <= set(SKIP_REASONS)
+
+    # A different stored event under a known request id is a conflict, too.
+    stored = _event(key)
+    async with session_factory() as session, session.begin():
+        await ingest(session, "gateway-a", [stored], scope_name=scope_name)
+    changed = usage_pb2.UsageEvent.FromString(stored.SerializeToString())
+    changed.cost_nano_usd = 99
+    skipped.clear()
+    async with session_factory() as session, session.begin():
+        accepted = await ingest(
+            session, "gateway-a", [changed], scope_name=scope_name, skipped=skipped
+        )
+    assert accepted == 0
+    assert skipped == {"request_id_conflict": 1}
+
+
+@pytest.mark.asyncio
+async def test_usage_report_metrics_count_committed_events(
+    session_factory: SessionFactory, monkeypatch
+):
+    from lumewarp_control_plane import grpc as grpc_module
+    from lumewarp_control_plane.metrics import Metrics
+    from lumewarp_control_plane.settings import Settings
+
+    scope_name, key = await _seed(session_factory)
+    metrics = Metrics()
+    monkeypatch.setattr(
+        grpc_module,
+        "_identity",
+        lambda: grpc_module.GatewayIdentity(uuid7(), "gateway-a", scope_name),
+    )
+
+    class Aborted(Exception):
+        pass
+
+    class Context:
+        async def abort(self, code, details):
+            raise Aborted(details)
+
+    service = grpc_module._UsageService(Settings(scope=scope_name), session_factory, metrics)
+    response = await service.Report(
+        usage_pb2.ReportRequest(gateway_id="gateway-a", events=_skip_batch(key)), Context()
+    )
+    assert response.accepted == 2
+
+    def skipped(reason):
+        return metrics.value("lumewarp_cp_usage_events_skipped_total", {"reason": reason})
+
+    assert metrics.value("lumewarp_cp_usage_events_ingested_total") == 2
+    assert (skipped("key_mismatch"), skipped("invalid_event")) == (2, 2)
+    assert skipped("request_id_conflict") == 1
+
+    # A batch-level rejection commits nothing and counts nothing.
+    too_many = [_event(key) for _ in range(3)]
+    small = grpc_module._UsageService(
+        Settings(scope=scope_name, max_usage_batch_events=2), session_factory, metrics
+    )
+    with pytest.raises(Aborted):
+        await small.Report(
+            usage_pb2.ReportRequest(gateway_id="gateway-a", events=too_many), Context()
+        )
+    assert metrics.value("lumewarp_cp_usage_events_ingested_total") == 2
+
+    # A failed commit counts nothing either.
+    async def failing_ingest(session, *args, skipped=None, **kwargs):
+        skipped["invalid_event"] += 1
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(grpc_module, "ingest", failing_ingest)
+    with pytest.raises(RuntimeError):
+        await service.Report(
+            usage_pb2.ReportRequest(gateway_id="gateway-a", events=[_event(key)]), Context()
+        )
+    assert metrics.value("lumewarp_cp_usage_events_ingested_total") == 2
+    assert skipped("invalid_event") == 2

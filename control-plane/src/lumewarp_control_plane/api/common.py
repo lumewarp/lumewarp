@@ -17,6 +17,7 @@ from lumewarp_control_plane import audit, outbox
 from lumewarp_control_plane.authz import Action, RequestAuthz
 from lumewarp_control_plane.db import get_session
 from lumewarp_control_plane.errors import ApiError, not_found
+from lumewarp_control_plane.metrics import DISCARD, Metrics, note_suspended
 from lumewarp_control_plane.models import ApiKey, KeyLifecycle, KeyOwnerKind, Scope, Team
 from lumewarp_control_plane.security import Principal
 from lumewarp_control_plane.settings import Settings
@@ -31,6 +32,13 @@ def app_settings(request: Request) -> Settings:
 
 
 SettingsDep = Annotated[Settings, Depends(app_settings)]
+
+
+def app_metrics(request: Request) -> Metrics:
+    return getattr(request.app.state, "metrics", DISCARD)
+
+
+MetricsDep = Annotated[Metrics, Depends(app_metrics)]
 
 
 def validation_error(field: str, message: str) -> ApiError:
@@ -158,6 +166,7 @@ async def suspend_user_keys(
     if team_id is not None:
         stmt = stmt.where(ApiKey.team_id == team_id)
     keys = (await session.scalars(stmt.order_by(ApiKey.id))).all()
+    note_suspended(session, reason, sum(k.lifecycle is KeyLifecycle.ACTIVE for k in keys))
     for key in keys:
         key.lifecycle = KeyLifecycle.SUSPENDED
         key.suspended_reason = reason

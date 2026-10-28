@@ -70,12 +70,12 @@ pods start.
 | Object | Notes |
 | --- | --- |
 | Control-plane Deployment | One replica. Runs the HTTP API + UI, gRPC ConfigService/UsageService, compiler loop, monthly rollover and notifier loop. `strategy: Recreate`. |
-| Control-plane Service | `http` (8091) and `grpc` (50051) ports. |
+| Control-plane Service | `http` (8091), `grpc` (50051) and `metrics` (9465, Prometheus `/metrics`; only with `controlPlane.metrics.enabled`) ports. |
 | Migration Job | Helm `pre-install,pre-upgrade` hook running `python -m lumewarp_control_plane migrate` with the database Secret. |
 | Gateway Deployment | One replica. The token is bound to `gateway.gatewayId`; boots from its state volume, then follows the config stream; `/readyz` stays 503 until a snapshot is loaded. |
 | Gateway Service | `http` (4000) and `admin` (9464, `/metrics` + `/readyz`) ports. |
 | Gateway state PVC | Only when `gateway.stateDir.persistence.enabled=true`; otherwise an `emptyDir` per pod. |
-| ServiceMonitor | Optional, gateway admin port only. Requires the Prometheus Operator CRDs. |
+| ServiceMonitors | Optional: one for the gateway admin port, one for the control-plane `metrics` port. Requires the Prometheus Operator CRDs. |
 
 Readiness/liveness:
 
@@ -113,8 +113,6 @@ Readiness/liveness:
 - **Budgets are eventual.** A key can exceed its budget briefly while usage batches are in
   flight; in-flight streams are not cut. Usage events are dropped when the gateway's
   bounded queue is full.
-- **The control plane has no Prometheus endpoint in P1.** `serviceMonitor` scrapes only
-  the gateway.
 
 ## Values
 
@@ -129,6 +127,8 @@ Common values (see [`values.yaml`](values.yaml) for the complete list):
 | `controlPlane.bootstrapToken.secretName` / `.key` | unset / `bootstrap-token` | Optional `LUMEWARP_BOOTSTRAP_TOKEN`. |
 | `controlPlane.scope` | `default` | Config scope published to gateways. |
 | `controlPlane.service.httpPort` / `.grpcPort` | `8091` / `50051` | Service and container ports. |
+| `controlPlane.service.metricsPort` | `9465` | Control-plane Prometheus listener (`LUMEWARP_METRICS_BIND`), separate from the API port. |
+| `controlPlane.metrics.enabled` | `true` | Serve and expose `lumewarp_cp_*` metrics; `false` leaves `LUMEWARP_METRICS_BIND` empty. |
 | `controlPlane.grpcTls.enabled` | `false` | Serve gateway gRPC over TLS from a Secret. |
 | `controlPlane.migrate.enabled` | `true` | Run the migration hook Job. |
 | `gateway.enabled` | `true` | Deploy the gateway. |
@@ -143,7 +143,7 @@ Common values (see [`values.yaml`](values.yaml) for the complete list):
 | `gateway.stateDir.persistence.enabled` | `false` | Use a RWO PVC instead of `emptyDir`. |
 | `gateway.stateDir.persistence.existingClaim` | empty | Use an existing RWO claim; it must be used by this single replica only. |
 | `gateway.server.*` | see values | `server:` block of the gateway's local YAML (listeners/timeouts). `adminListen` must be reachable by probes. |
-| `serviceMonitor.enabled` | `false` | Render a ServiceMonitor for the gateway admin port. |
+| `serviceMonitor.enabled` | `false` | Render ServiceMonitors for the gateway admin port and the control-plane metrics port (each only if that component and its metrics are enabled). |
 | `serviceMonitor.labels` | `{}` | Extra labels so your Prometheus selects the ServiceMonitor. |
 
 All pods honour `nodeSelector`, `tolerations`, `affinity`, `resources`,
@@ -151,6 +151,72 @@ All pods honour `nodeSelector`, `tolerations`, `affinity`, `resources`,
 global `imagePullSecrets`, `nameOverride`, `fullnameOverride` and `commonLabels`.
 
 ## Verify a release
+
+### Optional alert rules and Grafana dashboards
+
+Enable the bundled observability resources independently:
+
+```sh
+helm template lumewarp deploy/helm/lumewarp -n lumewarp \
+  --set serviceMonitor.enabled=true \
+  --set prometheusRule.enabled=true \
+  --set prometheusRule.labels.release=kube-prometheus-stack \
+  --set grafanaDashboards.enabled=true
+```
+
+`prometheusRule.enabled` defaults to `false` and requires Prometheus Operator
+CRDs. `prometheusRule.labels` must match your Prometheus `ruleSelector`.
+`grafanaDashboards.enabled` defaults to `false` and creates a ConfigMap containing
+four dashboards. The sidecar label defaults to `grafana_dashboard: "1"`; override
+`grafanaDashboards.sidecarLabel` / `sidecarLabelValue` to match your Grafana
+sidecar, which must watch the release namespace. Select a Prometheus datasource
+using the dashboard's `datasource` variable.
+
+The chart bundles `files/prometheus/rules.yaml` and `files/dashboards/*.json`.
+Their sources of truth are `deploy/prometheus/rules.yaml` and
+`deploy/grafana/dashboards/*.json`. Helm cannot read files outside a packaged chart,
+so update the bundled copies whenever sources change; the CI observability job
+checks byte equality and validates all dashboard expressions with promtool.
+
+Operational defaults and response steps are documented beside each alert in
+`rules.yaml`. The defaults include 5% 5xx at >=1 request/s, overhead p99 >10 ms
+for 10 minutes, TTFT p99 >5 s for 10 minutes, and queue >80,000 of the fixed
+100,000-event capacity. Tune TTFT, vLLM queue depth and backlog limits against
+production baselines. Overhead's alert threshold is not the benchmark target.
+
+Preserve the `namespace`, `job` and `instance` scrape labels. Version comparison
+assumes one control-plane installation per namespace (no cross-installation joins).
+The gateway-down alert selects `up{job=~".*lumewarp.*gateway.*"}`, matching chart
+gateway Service names; custom scrape jobs must follow that naming or adjust the
+selector. Missing targets are not detected by `up == 0`; configure scrape target
+discovery separately. Standalone YAML gateways are excluded from config-stream
+and version-mismatch alerts via `lumewarp_config_info{source="yaml"}`.
+
+`serviceMonitor.enabled` scrapes both the gateway admin port and the control
+plane's dedicated `metrics` port (`lumewarp_cp_*`, see the control-plane README).
+Panels whose exporters are not deployed stay empty; missing metrics do not trigger
+these threshold alerts. The control plane exports
+`lumewarp_cp_key_reconcile_last_success_timestamp_seconds` as 0 until the key
+reconciler's first success, so a never-successful reconciler still alerts. With
+`LUMEWARP_KEY_RECONCILE_ENABLED=false` the series is not exported at all.
+
+Dashboard filters apply only where metric labels exist: tokens support team and
+model, while spend supports team only. Spend panels explicitly cover all models;
+model-level cost cannot be derived from the current metrics contract. Latency
+histograms have no team label, and global pipeline and deployment gauges are not
+filtered by team. Gauge observations of the same vLLM upstream are aggregated
+with max/min, not summed across gateways.
+
+Validate rules locally (pinned CI image):
+
+```sh
+docker run --rm -v "$PWD/deploy/prometheus:/w" -w /w \
+  --entrypoint promtool prom/prometheus:v3.5.0 check rules rules.yaml
+docker run --rm -v "$PWD/deploy/prometheus:/w" -w /w \
+  --entrypoint promtool prom/prometheus:v3.5.0 test rules rules.test.yaml
+```
+
+### Chart checks
 
 ```sh
 helm lint deploy/helm/lumewarp

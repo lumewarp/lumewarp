@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from lumewarp_control_plane import app as app_module
 from lumewarp_control_plane.app import create_app
+from lumewarp_control_plane.metrics import Metrics
 from lumewarp_control_plane.plugins import GROUPS, discover
 from lumewarp_control_plane.settings import Settings
 
@@ -73,7 +74,8 @@ async def test_background_compiler_receives_backend_membership_mode(
         async def stop(self, grace):
             grpc_stopped.set()
 
-    async def serve(settings, factory):
+    async def serve(settings, factory, metrics):
+        assert metrics is app.state.metrics
         return Server()
 
     async def compiler_loop(factory, stop, *, require_local_membership, **kwargs):
@@ -84,8 +86,11 @@ async def test_background_compiler_receives_backend_membership_mode(
     async def notifier_loop(app, stop):
         await stop.wait()
 
-    async def reconcile_loop(factory, authorizer, stop, *, poll_seconds, full_seconds, settings):
+    async def reconcile_loop(
+        factory, authorizer, stop, *, poll_seconds, full_seconds, settings, metrics
+    ):
         assert factory is None
+        assert metrics is app.state.metrics
         assert authorizer is app.state.authorizer
         assert poll_seconds == settings.key_reconcile_poll_seconds
         assert full_seconds == settings.key_reconcile_full_seconds
@@ -109,6 +114,7 @@ async def test_background_compiler_receives_backend_membership_mode(
             authorizer=SimpleNamespace(manages_grants=backend == "builtin"),
             session_factory=None,
             fatal_handler=failures.append,
+            metrics=Metrics(),
         )
     )
     runtime = await app_module.start_background(app)

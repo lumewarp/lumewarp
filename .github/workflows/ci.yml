@@ -10,6 +10,60 @@ on:
     - cron: "17 3 * * *"
 
 jobs:
+  observability:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prometheus rules and alert unit tests
+        run: |
+          docker run --rm -v "$PWD/deploy/prometheus:/w" -w /w \
+            --entrypoint promtool prom/prometheus:v3.5.0 check rules rules.yaml
+          docker run --rm -v "$PWD/deploy/prometheus:/w" -w /w \
+            --entrypoint promtool prom/prometheus:v3.5.0 test rules rules.test.yaml
+      - name: Dashboard JSON, PromQL and bundled chart assets
+        run: |
+          python3 - <<'PY'
+          import json
+          import re
+          import subprocess
+          import tempfile
+          from pathlib import Path
+
+          chart = Path("deploy/helm/lumewarp/files")
+          source = Path("deploy/prometheus/rules.yaml")
+          assert source.read_bytes() == (chart / "prometheus/rules.yaml").read_bytes()
+          dashboards = sorted(Path("deploy/grafana/dashboards").glob("*.json"))
+          assert len(dashboards) == 4
+          assert {p.name for p in dashboards} == {p.name for p in (chart / "dashboards").glob("*.json")}
+          rules = []
+          for path in dashboards:
+              assert path.read_bytes() == (chart / "dashboards" / path.name).read_bytes()
+              dashboard = json.loads(path.read_text())
+              assert dashboard["uid"] == path.stem
+              assert dashboard["schemaVersion"] >= 39
+              expressions = [t["expr"] for p in dashboard["panels"] for t in p["targets"]]
+              for variable in dashboard["templating"]["list"]:
+                  if variable["type"] == "query":
+                      match = re.fullmatch(r"label_values\((.*),\s*\w+\)", variable["query"]["query"])
+                      assert match, variable
+                      expressions.append(match[1])
+              for expr in expressions:
+                  expr = expr.replace("$__rate_interval", "5m").replace("$__range", "1h")
+                  expr = re.sub(r"\$\{\w+:regex\}", ".*", expr)
+                  assert "$" not in expr, expr
+                  rules.append({"record": f"dashboard_expr_{len(rules)}", "expr": expr})
+          with tempfile.TemporaryDirectory() as directory:
+              # promtool runs as nobody inside the pinned image.
+              Path(directory).chmod(0o755)
+              path = Path(directory) / "dashboards.rules.json"
+              path.write_text(json.dumps({"groups": [{"name": "dashboards", "rules": rules}]}))
+              subprocess.run(["docker", "run", "--rm", "-v", f"{directory}:/w", "-w", "/w",
+                              "--entrypoint", "promtool", "prom/prometheus:v3.5.0",
+                              "check", "rules", path.name], check=True)
+          print(f"Validated {len(dashboards)} dashboards, {len(rules)} expressions and chart copies")
+          PY
+
   gateway:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest

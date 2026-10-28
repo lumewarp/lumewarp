@@ -7,8 +7,8 @@ path: the gateway only reads the immutable snapshot it last ACKed. Design:
 [`../docs/config-protocol.md`](../docs/config-protocol.md).
 
 One Python process serves everything: FastAPI (API + Admin UI), `grpc.aio`
-(`ConfigService`, `UsageService`, gRPC health), the compiler loop and the background
-schedulers all start and stop in the FastAPI lifespan. Running more than one process per
+(`ConfigService`, `UsageService`, gRPC health), the compiler loop, the background
+schedulers and the Prometheus metrics listener all start and stop in the FastAPI lifespan. Running more than one process per
 installation is not supported in P1.
 
 ## Requirements
@@ -39,6 +39,7 @@ In another terminal:
 ```sh
 curl -sS http://127.0.0.1:8091/readyz
 curl -sS http://127.0.0.1:8091/healthz
+curl -sS http://127.0.0.1:9465/metrics   # lumewarp_cp_* (see Metrics)
 ```
 
 Use `--no-sync` only when the environment is already synced; plain `uv run` also works.
@@ -64,15 +65,19 @@ only its SHA-256 hash.
 | --- | --- | --- |
 | HTTP | `127.0.0.1:8091` | Admin UI at `/`, REST at `/api/v1`, `/docs` and `/openapi.json`, `/healthz` and `/readyz` |
 | gRPC | `127.0.0.1:50051` | `lumewarp.config.v1.ConfigService`, `lumewarp.usage.v1.UsageService`, `grpc.health.v1.Health` |
+| Metrics | `127.0.0.1:9465` | Prometheus text format on any path (`/metrics`); see [Metrics](#metrics). `LUMEWARP_METRICS_BIND=""` disables it. |
 
-Both listeners are plaintext unless `LUMEWARP_GRPC_TLS_CERT_FILE` and
+All listeners are plaintext unless `LUMEWARP_GRPC_TLS_CERT_FILE` and
 `LUMEWARP_GRPC_TLS_KEY_FILE` configure TLS for the gRPC listener. The HTTP listener has no
-TLS; terminate it outside the process. Set both binds to `0.0.0.0:...` in a container.
+TLS; terminate it outside the process. Set the binds to `0.0.0.0:...` in a container. The
+metrics listener is separate from the HTTP port on purpose: it is unauthenticated, so keep
+it off the public admin ingress.
 
 ### Readiness and lifecycle
 
 - `GET /readyz` returns 200 only when the database is reachable, migrations are at head,
-  and the gRPC server, compiler loop, rollover scheduler and notifier loop are alive. It
+  and the gRPC server, compiler loop, rollover scheduler, notifier loop and (with a
+  metrics listener) the metrics gauge refresher are alive. It
   returns 503 with `{"status":"not_ready","checks":{...}}` otherwise.
 - `GET /healthz` is liveness only: the HTTP process is answering.
 - The gRPC server is the critical background service. If it stops unexpectedly the process
@@ -106,6 +111,7 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 | `LUMEWARP_DB_POOL_SIZE` | `10` | SQLAlchemy connection pool size per process. |
 | `LUMEWARP_HTTP_BIND` | `127.0.0.1:8091` | HTTP API/UI bind address (`host:port`, IPv6 hosts in brackets). |
 | `LUMEWARP_GRPC_BIND` | `127.0.0.1:50051` | Gateway-facing gRPC bind address. |
+| `LUMEWARP_METRICS_BIND` | `127.0.0.1:9465` | Prometheus metrics listener started by `serve` (`host:port`); empty string disables it. Not the admin API port, and not 9464 (the gateway admin listener's default). A bind failure aborts startup. |
 | `LUMEWARP_GRPC_TLS_CERT_FILE` / `LUMEWARP_GRPC_TLS_KEY_FILE` | unset | PEM certificate chain and key. Both or neither; unset means plaintext gRPC. |
 | `LUMEWARP_BOOTSTRAP_TOKEN` | unset | Installation-level superuser Bearer token. Compared in constant time, never stored. Unset disables bootstrap access; PATs still work. |
 | `LUMEWARP_AUTHZ_BACKEND` | `builtin` | Authorization backend: `builtin` (users and `team_members`) or a `lumewarp.authz` entry-point name. See [Authorization](#authorization). |
@@ -396,11 +402,36 @@ Later plugins win on conflicts. Notifier plugins get the channel's `config` mapp
   gateway keeps serving from its snapshot, but usage batches queue in memory and are lost
   if the queue fills or the gateway restarts.
 
+## Metrics
+
+`serve` exposes Prometheus metrics on `LUMEWARP_METRICS_BIND` (default
+`127.0.0.1:9465`, text format on any path). Each app owns its own `CollectorRegistry`
+(`metrics.py`); there are no process/platform collectors and no `*_created` series. Labels
+are bounded enums only: no key, user, team or gateway ids. Counters move only after the
+transaction that makes the event real has committed. The alert rules
+(`../deploy/prometheus/rules.yaml`) and the control-plane/usage Grafana dashboards consume
+these names.
+
+| Metric | Type | Labels | Updated |
+| --- | --- | --- | --- |
+| `lumewarp_cp_compile_duration_seconds` | histogram | | Compiler loop (`compiler/publish.py`), per committed compile: snapshot compile + validation, including compiles whose content is unchanged and failed ones. |
+| `lumewarp_cp_compile_failures_total` | counter | | A compile that raised `CompileError` (outbox rows marked failed; previous version stays current). |
+| `lumewarp_cp_config_version` | gauge | | Latest published version of `LUMEWARP_SCOPE`: set on publish, and refreshed from `config_versions` every 5 s (covers API rollbacks and restarts). |
+| `lumewarp_cp_outbox_pending` | gauge | | Pending `config_outbox` rows of the scope; one `COUNT` every 5 s by a background task, never per scrape. |
+| `lumewarp_cp_gateway_sessions` | gauge | | Connected config-stream sessions in this process (`grpc/` session registry). |
+| `lumewarp_cp_gateway_acks_total` | counter | `result` = `ack` \| `nack` | Each valid ACK/NACK of a pending update. Protocol errors are not counted. |
+| `lumewarp_cp_usage_events_ingested_total` | counter | | Events accepted by a committed `UsageService.Report` (an identical replay is accepted again but not re-costed). |
+| `lumewarp_cp_usage_events_skipped_total` | counter | `reason` = `invalid_event` \| `request_id_conflict` \| `key_mismatch` | Events skipped by per-event validation of a committed report: malformed fields; a request id reused with different data in the batch or vs. a stored event; unknown key or key not in the event's team. Batch-level rejections (`INVALID_ARGUMENT`) count nothing. |
+| `lumewarp_cp_authz_checks_total` | counter | `backend`, `decision` = `allow` \| `deny` \| `error` | Every `Authorizer.check` and every item of `Authorizer.batch_check` (native batch failures count one `error` per item). `backend` is `LUMEWARP_AUTHZ_BACKEND`. |
+| `lumewarp_cp_keys_suspended_total` | counter | `reason` = `owner_removed` \| `owner_deactivated` \| `admin` \| `owner` | Keys moved from active to suspended: key reconciler and member removal (`owner_removed`), user deactivation (`owner_deactivated`), `PATCH /keys/{id}` (`admin`/`owner`). |
+| `lumewarp_cp_key_reconcile_last_success_timestamp_seconds` | gauge | | Unix time of the key reconciler's last fully successful step: no exception, a decision for every owner checked and, with `changes()`, a readable change stream. 0 until the first success; not exported when `LUMEWARP_KEY_RECONCILE_ENABLED=false`. |
+
 ## Deployment
 
 The Helm chart in [`../deploy/helm/lumewarp`](../deploy/helm/lumewarp) deploys this
-Deployment with `/readyz` and `/healthz` probes, the HTTP/gRPC Service, the DB URL Secret
-and a migration hook Job. The control plane must stay at one replica.
+Deployment with `/readyz` and `/healthz` probes, the HTTP/gRPC/metrics Service (plus an
+optional ServiceMonitor for the metrics port), the DB URL Secret and a migration hook Job.
+The control plane must stay at one replica.
 
 ## Tests
 
@@ -434,6 +465,7 @@ Generated modules are checked in under `src/lumewarp_control_plane/_proto/`. Aft
 | Module | Purpose |
 | --- | --- |
 | `settings.py`, `db.py`, `models.py`, `migrations/`, `migrate.py` | config, DB, schema |
+| `metrics.py` | Prometheus registry, metrics listener, DB-backed gauge refresher |
 | `security.py`, `authz/`, `errors.py`, `audit.py`, `outbox.py` | auth, action matrix and authorization backends, error shape, audit, recompile outbox |
 | `api/` | REST under `/api/v1` |
 | `compiler/`, `plugins.py` | snapshots, versions, diff, rollback, plugin host |

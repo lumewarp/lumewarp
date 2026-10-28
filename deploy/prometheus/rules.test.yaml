@@ -1,0 +1,1109 @@
+{
+  "rule_files": [
+    "rules.yaml"
+  ],
+  "evaluation_interval": "1m",
+  "group_eval_order": [
+    "lumewarp.recording",
+    "lumewarp.alerts"
+  ],
+  "tests": [
+    {
+      "name": "LumewarpGatewayHigh5xxRatio fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",route=\"chat_completions\",status=\"200\"}",
+          "values": "0+60x40"
+        },
+        {
+          "series": "lumewarp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",route=\"chat_completions\",status=\"503\"}",
+          "values": "0+60x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpGatewayHigh5xxRatio",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpGatewayHigh5xxRatio",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "model": "m",
+                "severity": "critical"
+              },
+              "exp_annotations": {
+                "summary": "Gateway 5xx ratio is high",
+                "description": "Model m exceeds 5% 5xx responses for 5 minutes at >=1 request/s.",
+                "runbook": "Check upstream errors and routing dashboard; restore a healthy deployment or roll back routing."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpGatewayHigh5xxRatio healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",route=\"chat_completions\",status=\"200\"}",
+          "values": "0+120x40"
+        },
+        {
+          "series": "lumewarp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",route=\"chat_completions\",status=\"503\"}",
+          "values": "0+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpGatewayHigh5xxRatio",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpGatewayOverheadHigh fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",route=\"chat_completions\",le=\"0.005\"}",
+          "values": "0+0x40"
+        },
+        {
+          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",route=\"chat_completions\",le=\"0.025\"}",
+          "values": "0+60x40"
+        },
+        {
+          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",route=\"chat_completions\",le=\"+Inf\"}",
+          "values": "0+60x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpGatewayOverheadHigh",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpGatewayOverheadHigh",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "route": "chat_completions",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Gateway p99 overhead exceeds budget",
+                "description": "Route chat_completions has p99 processing overhead above 10 ms for 10 minutes.",
+                "runbook": "Check gateway CPU throttling, saturation and recent gateway releases; compare the benchmark baseline."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpGatewayOverheadHigh healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",route=\"chat_completions\",le=\"0.005\"}",
+          "values": "0+60x40"
+        },
+        {
+          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",route=\"chat_completions\",le=\"0.025\"}",
+          "values": "0+60x40"
+        },
+        {
+          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",route=\"chat_completions\",le=\"+Inf\"}",
+          "values": "0+60x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpGatewayOverheadHigh",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpTTFTHigh fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",deployment=\"d\",le=\"1\"}",
+          "values": "0+0x40"
+        },
+        {
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",deployment=\"d\",le=\"10\"}",
+          "values": "0+60x40"
+        },
+        {
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",deployment=\"d\",le=\"+Inf\"}",
+          "values": "0+60x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpTTFTHigh",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpTTFTHigh",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "model": "m",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Stream p99 TTFT is high",
+                "description": "Model m has p99 TTFT above 5 seconds for 10 minutes.",
+                "runbook": "Inspect vLLM queue and KV cache, upstream latency and request sizes; tune this baseline per model."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpTTFTHigh healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",deployment=\"d\",le=\"1\"}",
+          "values": "0+60x40"
+        },
+        {
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",deployment=\"d\",le=\"10\"}",
+          "values": "0+60x40"
+        },
+        {
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",deployment=\"d\",le=\"+Inf\"}",
+          "values": "0+60x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpTTFTHigh",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpUpstreamCircuitOpen fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_upstream_circuit_state{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",deployment=\"d\"}",
+          "values": "2+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpUpstreamCircuitOpen",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpUpstreamCircuitOpen",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "job": "lumewarp-gateway",
+                "instance": "gw:9464",
+                "deployment": "d",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Upstream circuit remains open",
+                "description": "Deployment d circuit has remained open for 2 minutes.",
+                "runbook": "Inspect attempts by outcome, upstream logs and health; repair the upstream before closing the circuit."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpUpstreamCircuitOpen healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_upstream_circuit_state{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",deployment=\"d\"}",
+          "values": "1+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpUpstreamCircuitOpen",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpUpstreamUnhealthy fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_upstream_healthy{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",upstream=\"u\"}",
+          "values": "0+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpUpstreamUnhealthy",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpUpstreamUnhealthy",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "job": "lumewarp-gateway",
+                "instance": "gw:9464",
+                "upstream": "u",
+                "severity": "critical"
+              },
+              "exp_annotations": {
+                "summary": "Upstream health checks are failing",
+                "description": "Upstream u has been unhealthy for 2 minutes.",
+                "runbook": "Check upstream health endpoint, credentials and network reachability; route away if needed."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpUpstreamUnhealthy healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_upstream_healthy{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",upstream=\"u\"}",
+          "values": "1+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpUpstreamUnhealthy",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpRetryBudgetExhausted fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_retries_budget_exhausted_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\"}",
+          "values": "0+60x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpRetryBudgetExhausted",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpRetryBudgetExhausted",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "model": "m",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Upstream retry budget is exhausted",
+                "description": "Model m is exhausting its retry budget.",
+                "runbook": "Inspect attempts, fallback availability and upstream capacity; do not increase retries during overload."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpRetryBudgetExhausted healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_retries_budget_exhausted_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\"}",
+          "values": "0+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpRetryBudgetExhausted",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpConfigStreamDisconnected fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_config_stream_connected{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\"}",
+          "values": "0+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpConfigStreamDisconnected",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpConfigStreamDisconnected",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "job": "lumewarp-gateway",
+                "instance": "gw:9464",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Gateway config stream is disconnected",
+                "description": "Gateway gw:9464 has not connected to the control plane for 5 minutes.",
+                "runbook": "Check control-plane gRPC service, gateway token, TLS and network; cached config still serves traffic."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpConfigStreamDisconnected healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_config_stream_connected{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\"}",
+          "values": "1+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpConfigStreamDisconnected",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpConfigVersionMismatch fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_config_version{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\"}",
+          "values": "1+0x40"
+        },
+        {
+          "series": "lumewarp_cp_config_version{namespace=\"demo\",job=\"lumewarp-control-plane\",instance=\"cp:8091\"}",
+          "values": "2+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpConfigVersionMismatch",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpConfigVersionMismatch",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "job": "lumewarp-gateway",
+                "instance": "gw:9464",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Gateway config version differs from control plane",
+                "description": "Gateway gw:9464 has not converged to the control-plane config version for 5 minutes.",
+                "runbook": "Inspect stream status, NACK codes and CP compilation; verify scope and intended canary version."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpConfigVersionMismatch healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_config_version{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\"}",
+          "values": "2+0x40"
+        },
+        {
+          "series": "lumewarp_cp_config_version{namespace=\"demo\",job=\"lumewarp-control-plane\",instance=\"cp:8091\"}",
+          "values": "2+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpConfigVersionMismatch",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpConfigApplyFailures fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_config_apply_failures_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",code=\"persist_failed\"}",
+          "values": "0+60x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpConfigApplyFailures",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpConfigApplyFailures",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "job": "lumewarp-gateway",
+                "instance": "gw:9464",
+                "code": "persist_failed",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Gateway cannot apply config",
+                "description": "Gateway gw:9464 is rejecting config with code persist_failed.",
+                "runbook": "Inspect NACK code, snapshot validation and state volume permissions or free space; restore the last good config."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpConfigApplyFailures healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_config_apply_failures_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",code=\"persist_failed\"}",
+          "values": "0+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpConfigApplyFailures",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpUsageEventsDropped fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_usage_events_dropped_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\"}",
+          "values": "0+60x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpUsageEventsDropped",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpUsageEventsDropped",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "job": "lumewarp-gateway",
+                "instance": "gw:9464",
+                "severity": "critical"
+              },
+              "exp_annotations": {
+                "summary": "Usage events are being lost",
+                "description": "Gateway gw:9464 dropped usage events in the last 5 minutes.",
+                "runbook": "Restore usage reporting and CP database availability; dropped events are not recoverable from the memory queue."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpUsageEventsDropped healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_usage_events_dropped_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\"}",
+          "values": "0+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpUsageEventsDropped",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpUsageEventsFailed fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_usage_events_failed_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\"}",
+          "values": "0+60x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpUsageEventsFailed",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpUsageEventsFailed",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "job": "lumewarp-gateway",
+                "instance": "gw:9464",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Usage reporting is failing",
+                "description": "Gateway gw:9464 has failed usage report attempts for 5 minutes.",
+                "runbook": "Inspect UsageService, gateway credentials and database health; failed attempts retry and are not confirmed data loss."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpUsageEventsFailed healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_usage_events_failed_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\"}",
+          "values": "0+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpUsageEventsFailed",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpUsageQueueNearCapacity fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_usage_queue_depth{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\"}",
+          "values": "80001+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpUsageQueueNearCapacity",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpUsageQueueNearCapacity",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "job": "lumewarp-gateway",
+                "instance": "gw:9464",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Usage queue is near capacity",
+                "description": "Gateway gw:9464 usage queue exceeds 80,000 events for 5 minutes.",
+                "runbook": "Check CP ingestion throughput and connectivity; recover before the 100,000-event queue drops new events."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpUsageQueueNearCapacity healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_usage_queue_depth{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\"}",
+          "values": "80000+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpUsageQueueNearCapacity",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpCPCompileFailures fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_cp_compile_failures_total{namespace=\"demo\",job=\"lumewarp-control-plane\",instance=\"cp:8091\"}",
+          "values": "0+60x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpCPCompileFailures",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpCPCompileFailures",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "job": "lumewarp-control-plane",
+                "instance": "cp:8091",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Control-plane config compilation is failing",
+                "description": "Control plane cp:8091 has repeated config compile failures.",
+                "runbook": "Inspect compiler errors, plugin output and invalid routes; correct the source config and confirm a new version publishes."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpCPCompileFailures healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_cp_compile_failures_total{namespace=\"demo\",job=\"lumewarp-control-plane\",instance=\"cp:8091\"}",
+          "values": "0+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpCPCompileFailures",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpCPOutboxBacklog fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_cp_outbox_pending{namespace=\"demo\",job=\"lumewarp-control-plane\",instance=\"cp:8091\"}",
+          "values": "101+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpCPOutboxBacklog",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpCPOutboxBacklog",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "job": "lumewarp-control-plane",
+                "instance": "cp:8091",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Control-plane outbox is backed up",
+                "description": "Control plane cp:8091 has more than 100 pending outbox entries for 10 minutes.",
+                "runbook": "Check compiler and notifier loops, database locks and delivery endpoints; restore draining before adding load."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpCPOutboxBacklog healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_cp_outbox_pending{namespace=\"demo\",job=\"lumewarp-control-plane\",instance=\"cp:8091\"}",
+          "values": "100+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpCPOutboxBacklog",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpCPAuthzErrorRatioHigh fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_cp_authz_checks_total{namespace=\"demo\",job=\"lumewarp-control-plane\",instance=\"cp:8091\",backend=\"openfga\",decision=\"error\"}",
+          "values": "0+6x40"
+        },
+        {
+          "series": "lumewarp_cp_authz_checks_total{namespace=\"demo\",job=\"lumewarp-control-plane\",instance=\"cp:8091\",backend=\"openfga\",decision=\"allow\"}",
+          "values": "0+54x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpCPAuthzErrorRatioHigh",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpCPAuthzErrorRatioHigh",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "backend": "openfga",
+                "severity": "critical"
+              },
+              "exp_annotations": {
+                "summary": "Control-plane authorization backend is failing",
+                "description": "Backend openfga exceeds 5% authorization errors at >=0.1 checks/s for 5 minutes.",
+                "runbook": "Check authorization backend health, timeout and network; error decisions return 503 rather than deny."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpCPAuthzErrorRatioHigh healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_cp_authz_checks_total{namespace=\"demo\",job=\"lumewarp-control-plane\",instance=\"cp:8091\",backend=\"openfga\",decision=\"error\"}",
+          "values": "0+0x40"
+        },
+        {
+          "series": "lumewarp_cp_authz_checks_total{namespace=\"demo\",job=\"lumewarp-control-plane\",instance=\"cp:8091\",backend=\"openfga\",decision=\"allow\"}",
+          "values": "0+60x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpCPAuthzErrorRatioHigh",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpKeyReconcilerStale fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_cp_key_reconcile_last_success_timestamp_seconds{namespace=\"demo\",job=\"lumewarp-control-plane\",instance=\"cp:8091\"}",
+          "values": "0+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpKeyReconcilerStale",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpKeyReconcilerStale",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "job": "lumewarp-control-plane",
+                "instance": "cp:8091",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Key reconciler has no recent success",
+                "description": "Control plane cp:8091 last reconciled keys more than 15 minutes ago.",
+                "runbook": "Inspect reconciler task, DB and identity provider connectivity; confirm suspended keys and a successful reconciliation."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpKeyReconcilerStale healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_cp_key_reconcile_last_success_timestamp_seconds{namespace=\"demo\",job=\"lumewarp-control-plane\",instance=\"cp:8091\"}",
+          "values": "0+60x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpKeyReconcilerStale",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpVLLMQueueHigh fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_vllm_queue_depth{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",deployment=\"d\"}",
+          "values": "101+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpVLLMQueueHigh",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpVLLMQueueHigh",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "job": "lumewarp-gateway",
+                "instance": "gw:9464",
+                "deployment": "d",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "vLLM request queue is growing",
+                "description": "Deployment d has over 100 queued requests for 10 minutes.",
+                "runbook": "Inspect GPU utilization and prefill load; add capacity or reduce admission and shift routing weights."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpVLLMQueueHigh healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_vllm_queue_depth{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",deployment=\"d\"}",
+          "values": "100+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpVLLMQueueHigh",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpVLLMKVCacheSaturated fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_vllm_kv_cache_usage{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",deployment=\"d\"}",
+          "values": "0.91+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpVLLMKVCacheSaturated",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpVLLMKVCacheSaturated",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "job": "lumewarp-gateway",
+                "instance": "gw:9464",
+                "deployment": "d",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "vLLM KV cache is saturated",
+                "description": "Deployment d KV cache exceeds 90% for 10 minutes.",
+                "runbook": "Inspect context lengths, concurrency and GPU memory; reduce admission or add capacity."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpVLLMKVCacheSaturated healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_vllm_kv_cache_usage{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",deployment=\"d\"}",
+          "values": "0.9+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpVLLMKVCacheSaturated",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpGatewayDown fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "up{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\"}",
+          "values": "0+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpGatewayDown",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpGatewayDown",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "job": "lumewarp-gateway",
+                "instance": "gw:9464",
+                "severity": "critical"
+              },
+              "exp_annotations": {
+                "summary": "Gateway scrape target is down",
+                "description": "Gateway gw:9464 cannot be scraped for 2 minutes.",
+                "runbook": "Check pod readiness, admin listener, ServiceMonitor selection and network policy; distinguish scrape failure from serving failure."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpGatewayDown healthy or threshold boundary",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "up{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\"}",
+          "values": "1+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpGatewayDown",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "Standalone YAML does not need config stream or CP version convergence",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_config_stream_connected{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\"}",
+          "values": "0+0x40"
+        },
+        {
+          "series": "lumewarp_config_version{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\"}",
+          "values": "0+0x40"
+        },
+        {
+          "series": "lumewarp_config_info{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",source=\"yaml\",sha256=\"abc\"}",
+          "values": "1+0x40"
+        },
+        {
+          "series": "lumewarp_cp_config_version{namespace=\"demo\",job=\"lumewarp-control-plane\",instance=\"cp:8091\"}",
+          "values": "2+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpConfigStreamDisconnected",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpConfigVersionMismatch",
+          "exp_alerts": []
+        }
+      ]
+    }
+  ]
+}

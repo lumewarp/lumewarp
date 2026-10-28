@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumewarp_control_plane import audit
 from lumewarp_control_plane.api.common import (
     LimitDep,
+    MetricsDep,
     SessionDep,
     SettingsDep,
     conflict,
@@ -46,6 +47,7 @@ from lumewarp_control_plane.authz import (
     team_resource,
 )
 from lumewarp_control_plane.errors import forbidden, not_found
+from lumewarp_control_plane.metrics import note_suspended
 from lumewarp_control_plane.models import (
     ApiKey,
     KeyLifecycle,
@@ -235,6 +237,7 @@ async def update_key(
     authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
+    metrics: MetricsDep,
 ) -> KeyOut:
     async with mutation(session):
         await lock_scope(session, settings)
@@ -278,6 +281,8 @@ async def update_key(
                 row.suspended_reason = "admin"
             elif row.suspended_reason in (None, "owner"):
                 row.suspended_reason = "owner"
+            if row.lifecycle is KeyLifecycle.ACTIVE:
+                note_suspended(session, row.suspended_reason or "owner")
             row.lifecycle = KeyLifecycle.SUSPENDED
         await session.flush()
         await session.refresh(row)
@@ -294,6 +299,7 @@ async def update_key(
             },
         )
         await enqueue_recompile(session, settings, "api.key.update")
+    metrics.count_committed_suspensions(session)
     return await _out(session, row)
 
 

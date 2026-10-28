@@ -1,8 +1,9 @@
 """FastAPI app factory and process lifespan.
 
 One supervised process: uvicorn (1 worker) + grpc.aio ConfigService/UsageService + the
-compiler loop + the budget rollover scheduler + the notifier delivery loop, all started
-and stopped in the FastAPI lifespan.
+compiler loop + the budget rollover scheduler + the notifier delivery loop + the Prometheus
+metrics listener (`LUMEWARP_METRICS_BIND`, its own port) and its DB gauge refresher, all
+started and stopped in the FastAPI lifespan.
 
 Readiness = DB reachable + migrations at head + every background service alive. A
 background service that stops on its own is logged and fails readiness; if it is the gRPC
@@ -29,7 +30,13 @@ from lumewarp_control_plane.authz import load_authorizer
 from lumewarp_control_plane.db import create_engine, create_session_factory
 from lumewarp_control_plane.errors import error_body, install_handlers
 from lumewarp_control_plane.keys.reconciler import run_key_reconciler
-from lumewarp_control_plane.settings import Settings, get_settings
+from lumewarp_control_plane.metrics import (
+    Metrics,
+    MetricsServer,
+    run_db_gauges,
+    start_metrics_server,
+)
+from lumewarp_control_plane.settings import Settings, get_settings, split_bind
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +61,7 @@ class Runtime:
     tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     grpc_server: object | None = None
     grpc_port: int | None = None
+    metrics_server: MetricsServer | None = None
     failures: dict[str, str] = field(default_factory=dict)
 
 
@@ -95,9 +103,19 @@ def _supervise(
 async def start_background(app: FastAPI) -> Runtime:
     settings: Settings = app.state.settings
     factory = app.state.session_factory
+    metrics: Metrics = app.state.metrics
     runtime = Runtime()
     # Bind errors surface here and abort startup.
-    server = await grpc_services.serve(settings, factory)
+    server = await grpc_services.serve(settings, factory, metrics)
+    if settings.metrics_bind:
+        try:
+            runtime.metrics_server = start_metrics_server(
+                metrics, *split_bind(settings.metrics_bind)
+            )
+        except OSError:
+            await server.stop(0)
+            raise
+        log.info("metrics listening on port %s", runtime.metrics_server.port)
     runtime.grpc_server = server
     runtime.grpc_port = grpc_services.bound_port(server)
     registry = grpc_services.registry_for(server)
@@ -117,6 +135,7 @@ async def start_background(app: FastAPI) -> Runtime:
             scope=settings.scope,
             on_published=on_published,
             require_local_membership=app.state.authorizer.manages_grants,
+            metrics=metrics,
         ),
     )
     runtime.tasks["rollover"] = _supervise(
@@ -134,12 +153,20 @@ async def start_background(app: FastAPI) -> Runtime:
                 poll_seconds=settings.key_reconcile_poll_seconds,
                 full_seconds=settings.key_reconcile_full_seconds,
                 settings=settings,
+                metrics=metrics,
             ),
         )
     runtime.tasks["notifier"] = _supervise(
         app, runtime, "notifier", _notifier_loop(app, runtime.stop)
     )
     log.info("gRPC listening on port %s", runtime.grpc_port)
+    if runtime.metrics_server is not None:
+        runtime.tasks["metrics"] = _supervise(
+            app,
+            runtime,
+            "metrics",
+            run_db_gauges(metrics, factory, runtime.stop, scope=settings.scope),
+        )
     return runtime
 
 
@@ -148,6 +175,8 @@ async def stop_background(runtime: Runtime, grace: float = SHUTDOWN_GRACE_SECOND
     seconds; whatever is still running after that is cancelled.
     """
     runtime.stop.set()
+    if runtime.metrics_server is not None:
+        await asyncio.to_thread(runtime.metrics_server.close)
     if runtime.grpc_server is not None:
         await runtime.grpc_server.stop(grace)
     tasks = list(runtime.tasks.values())
@@ -195,9 +224,15 @@ def create_app(
     settings = settings or get_settings()
     app = FastAPI(title="Lumewarp control plane", version=__version__, lifespan=lifespan)
     app.state.settings = settings
+    app.state.metrics = Metrics()
+    for reason in usage.SKIP_REASONS:
+        app.state.metrics.usage_skipped.labels(reason)
+    if not settings.key_reconcile_enabled:
+        # No reconciler: export no freshness series rather than a stale 0 that alerts.
+        app.state.metrics.registry.unregister(app.state.metrics.key_reconcile_last_success)
     app.state.engine = create_engine(settings)
     app.state.session_factory = create_session_factory(app.state.engine)
-    app.state.authorizer = load_authorizer(settings, app.state.session_factory)
+    app.state.authorizer = load_authorizer(settings, app.state.session_factory, app.state.metrics)
     app.state.runtime = Runtime()
     app.state.tasks = {}
     app.state.fatal_handler = fatal_handler or _terminate_process

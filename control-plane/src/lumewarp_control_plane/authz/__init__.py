@@ -40,6 +40,7 @@ import inspect
 import logging
 import math
 import uuid
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -49,6 +50,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 from fastapi import Depends, Request
 
 from lumewarp_control_plane.errors import ApiError, forbidden
+from lumewarp_control_plane.metrics import DISCARD, Metrics
 from lumewarp_control_plane.security import CurrentPrincipal, Principal
 
 if TYPE_CHECKING:
@@ -128,9 +130,19 @@ class _FunctionBackend:
 
 
 class Authorizer:
-    """A backend with the optional capabilities filled in from `check`."""
+    """A backend with the optional capabilities filled in from `check`.
 
-    def __init__(self, backend: Any, name: str = BUILTIN, timeout: float = 2.0) -> None:
+    Every decision of `check` and every item of `batch_check` is counted in
+    `lumewarp_cp_authz_checks_total{backend,decision}`.
+    """
+
+    def __init__(
+        self,
+        backend: Any,
+        name: str = BUILTIN,
+        timeout: float = 2.0,
+        metrics: Metrics = DISCARD,
+    ) -> None:
         if inspect.iscoroutinefunction(backend):
             backend = _FunctionBackend(backend)
         if not callable(getattr(backend, "check", None)):
@@ -139,6 +151,8 @@ class Authorizer:
         self.name = name
         self.timeout = timeout
         self.manages_grants: bool = bool(getattr(backend, "manages_grants", False))
+        self.metrics = metrics
+        metrics.init_authz_backend(name)
 
     @property
     def has_changes(self) -> bool:
@@ -147,24 +161,28 @@ class Authorizer:
     async def check(self, user_id: str, relation: Relation, resource: Resource) -> Decision:
         try:
             async with asyncio.timeout(self.timeout):
-                decision = await self.backend.check(user_id, relation, resource)
-            return Decision(decision)
+                decision = Decision(await self.backend.check(user_id, relation, resource))
         except Exception:
             log.exception("authz backend %s: check failed", self.name)
-            return Decision.ERROR
+            decision = Decision.ERROR
+        self.metrics.authz_checks.labels(self.name, decision.value).inc()
+        return decision
 
     async def batch_check(self, items: Sequence[CheckItem]) -> list[Decision]:
         native = getattr(self.backend, "batch_check", None)
         if native is not None:
             try:
                 async with asyncio.timeout(self.timeout * (math.ceil(len(items) / 50) + 1)):
-                    decisions = await native(list(items))
-                if len(decisions) != len(items):
+                    raw = await native(list(items))
+                if len(raw) != len(items):
                     raise ValueError("batch_check returned a different number of decisions")
-                return [Decision(d) for d in decisions]
+                decisions = [Decision(d) for d in raw]
             except Exception:
                 log.exception("authz backend %s: batch_check failed", self.name)
-                return [Decision.ERROR] * len(items)
+                decisions = [Decision.ERROR] * len(items)
+            self.metrics.record_authz(self.name, Counter(d.value for d in decisions))
+            return decisions
+        # Each item goes through `check`, which counts it.
         limit = asyncio.Semaphore(BATCH_CONCURRENCY)
 
         async def one(item: CheckItem) -> Decision:
@@ -212,21 +230,23 @@ class Authorizer:
             return None
 
 
-def load_authorizer(settings: Settings, session_factory: SessionFactory) -> Authorizer:
+def load_authorizer(
+    settings: Settings, session_factory: SessionFactory, metrics: Metrics = DISCARD
+) -> Authorizer:
     name = settings.authz_backend
     timeout = settings.authz_timeout_seconds
     if name == BUILTIN:
         from lumewarp_control_plane.authz.builtin import BuiltinBackend
 
-        return Authorizer(BuiltinBackend(session_factory), BUILTIN, timeout)
+        return Authorizer(BuiltinBackend(session_factory), BUILTIN, timeout, metrics)
     if name == OPENFGA:
         from lumewarp_control_plane.authz.openfga import OpenFGABackend
 
-        return Authorizer(OpenFGABackend(settings), OPENFGA, timeout)
+        return Authorizer(OpenFGABackend(settings), OPENFGA, timeout, metrics)
     if name == HTTP:
         from lumewarp_control_plane.authz.http import HttpBackend
 
-        return Authorizer(HttpBackend(settings), HTTP, timeout)
+        return Authorizer(HttpBackend(settings), HTTP, timeout, metrics)
     matches = [ep for ep in entry_points(group=ENTRY_POINT_GROUP) if ep.name == name]
     if not matches:
         raise RuntimeError(f"unknown authz backend {name!r} (no {ENTRY_POINT_GROUP} entry point)")
@@ -235,7 +255,7 @@ def load_authorizer(settings: Settings, session_factory: SessionFactory) -> Auth
         callable(obj) and not inspect.iscoroutinefunction(obj) and not hasattr(obj, "check")
     ):
         obj = obj()
-    return Authorizer(obj, name, timeout)
+    return Authorizer(obj, name, timeout, metrics)
 
 
 # --------------------------------------------------------------------------- actions

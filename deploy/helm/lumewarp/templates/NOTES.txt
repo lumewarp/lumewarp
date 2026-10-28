@@ -7,6 +7,9 @@ Control plane
   API base:  http://{{ include "lumewarp.controlPlane.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.controlPlane.service.httpPort }}/api/v1
   OpenAPI:   http://{{ include "lumewarp.controlPlane.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.controlPlane.service.httpPort }}/docs
   gRPC:      {{ include "lumewarp.controlPlane.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.controlPlane.service.grpcPort }}
+  {{- if .Values.controlPlane.metrics.enabled }}
+  Metrics:   http://{{ include "lumewarp.controlPlane.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.controlPlane.service.metricsPort }}/metrics
+  {{- end }}
 
   Log in at / with a personal access token, or with the installation bootstrap token
   from `controlPlane.bootstrapToken` if it is configured.

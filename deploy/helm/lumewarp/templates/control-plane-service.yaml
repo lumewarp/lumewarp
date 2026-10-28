@@ -16,6 +16,12 @@ spec:
       port: {{ .Values.controlPlane.service.grpcPort }}
       targetPort: grpc
       protocol: TCP
+    {{- if .Values.controlPlane.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.controlPlane.service.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "lumewarp.controlPlane.selectorLabels" . | nindent 4 }}
 {{- end }}

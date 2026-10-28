@@ -2,7 +2,7 @@
 #
 # The chart deploys two components:
 #   - controlPlane: FastAPI HTTP API + Admin UI, gRPC config/usage services, config
-#     compiler, budget rollover scheduler and notifier loop.
+#     compiler, budget rollover scheduler, notifier loop and a Prometheus metrics listener.
 #   - gateway: Rust data plane. It follows the control-plane config stream and keeps its
 #     last ACKed snapshot on a local state volume.
 #
@@ -43,6 +43,12 @@ controlPlane:
     type: ClusterIP
     httpPort: 8091
     grpcPort: 50051
+    # Prometheus metrics listener (LUMEWARP_METRICS_BIND), separate from the admin API.
+    metricsPort: 9465
+  # Serve lumewarp_cp_* metrics on service.metricsPort. Disabled = LUMEWARP_METRICS_BIND
+  # is empty and the port is not exposed.
+  metrics:
+    enabled: true
   # Optional TLS for the gateway-facing gRPC listener. Both files are read from one
   # Secret. The gateway verifies with the WebPKI root store, so a private CA certificate
   # will not work unless that CA is installed in the gateway image. When enabled and
@@ -148,9 +154,22 @@ gateway:
   extraArgs: []
 
 serviceMonitor:
-  # Requires the Prometheus Operator CRDs. Scrapes the gateway admin listener only; the
-  # control plane does not expose a Prometheus endpoint in P1.
+  # Requires the Prometheus Operator CRDs. Renders one ServiceMonitor for the gateway admin
+  # listener (gateway.enabled) and one for the control-plane metrics port
+  # (controlPlane.enabled and controlPlane.metrics.enabled).
   enabled: false
   interval: 30s
   scrapeTimeout: ""
   labels: {}
+
+prometheusRule:
+  # Requires the Prometheus Operator CRDs. Contains recording rules and alerts.
+  enabled: false
+  # Match your Prometheus ruleSelector (e.g. release: kube-prometheus-stack).
+  labels: {}
+
+grafanaDashboards:
+  enabled: false
+  # Match the Grafana sidecar's label and labelValue settings.
+  sidecarLabel: grafana_dashboard
+  sidecarLabelValue: "1"
