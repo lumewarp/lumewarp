@@ -353,16 +353,17 @@ async def test_routing(factory) -> None:
         await add_route(s, "unknown", [("llama-a", None)])
     c = await compile_(factory)
     snap = c.snapshot
-    assert [r.model for r in snap.routes] == ["llama"]
-    assert list(snap.routes[0].deployments) == ["llama-b", "llama-a"]  # position order kept
-    assert snap.routes[0].strategy == pb.ROUTING_STRATEGY_WEIGHTED
-    assert len(c.warnings) == 3
+    assert [r.model for r in snap.routes] == ["fast", "llama"]
+    assert snap.routes[0].strategy == pb.ROUTING_STRATEGY_LOWEST_LATENCY
+    assert list(snap.routes[1].deployments) == ["llama-b", "llama-a"]  # position order kept
+    assert snap.routes[1].strategy == pb.ROUTING_STRATEGY_WEIGHTED
+    assert len(c.warnings) == 2
     deps = {d.name: d for d in snap.deployments}
     assert not deps["llama-a"].HasField("price")  # unknown, not free
     assert deps["llama-b"].price == pb.Price(input_nano_usd_per_mtok=5, output_nano_usd_per_mtok=5)
     assert [(u.name, u.kind) for u in snap.upstreams] == [("vllm", pb.UPSTREAM_KIND_VLLM)]
     assert snap.upstreams[0].stream_usage_mode == pb.STREAM_USAGE_MODE_INCLUDE_USAGE
-    assert list(snap.required_capabilities) == []
+    assert list(snap.required_capabilities) == ["lowest_latency"]
 
 
 async def test_deterministic(factory) -> None:

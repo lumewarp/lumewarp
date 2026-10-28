@@ -374,6 +374,50 @@ Later plugins win on conflicts. Notifier plugins get the channel's `config` mapp
 `BudgetEvent`; raising makes the outbox retry with backoff. The built-in notifier kind is
 `webhook` (JSON POST of the event).
 
+## Routing
+
+Upstreams, deployments and routes are installation-wide (`/api/v1/upstreams`,
+`/deployments`, `/routes`): any authenticated principal may read them, writes need a
+superuser. Every write is audited and enqueues a recompile. P2 adds resilience settings
+that compile 1:1 into the snapshot (`proto/lumewarp/config/v1/snapshot.proto`):
+
+| API field | Where | Snapshot / default |
+| --- | --- | --- |
+| `health_check {path, interval_ms, timeout_ms, unhealthy_threshold, healthy_threshold}` | upstream | `Upstream.health_check`; `null` = no active probing; null path = `/models`, null thresholds = 3 / 1 |
+| `circuit_breaker {failure_threshold, open_ms}` | upstream | `Upstream.circuit_breaker`; `null` = never opens; `{}` = gateway defaults (5 failures, 30000 ms) |
+| `metrics_url` | upstream | `Upstream.metrics_url` for `vllm_load`; `null` = base URL minus `/v1` plus `/metrics` |
+| `strategy` | route | `weighted`, `least_in_flight`, `lowest_latency` (EWMA), `vllm_load` |
+| `retry {max_attempts, retry_on_status, total_timeout_ms}` | route | `ModelRoute.retry`; `null` = one attempt. `max_attempts: null` is emitted as 0, which the gateway reads as its default of 2 |
+| `fallback_route_ids` (ordered) | route | `ModelRoute.fallbacks` (aliases). Needs `retry` with at least 2 attempts to take effect |
+| `traffic_split [{name, weight, deployment_ids}]` | route | `ModelRoute.traffic_split`; with a split the route's own `deployment_ids` may be empty and are ignored |
+| `sticky` (`none`/`header`/`team`/`key`), `sticky_header` | route | `ModelRoute.sticky` / `sticky_header` |
+
+Validation mirrors the gateway's snapshot checks so an accepted write never makes a gateway
+NACK (422 otherwise): health interval >= 1000 ms and 0 < timeout < interval, path absolute
+without query/fragment; `metrics_url` plain http(s) without userinfo; `max_attempts` 1..5,
+statuses 400..599 and unique; fallbacks exist, are unique, never the route itself and never
+form a cycle across routes (route writes take the scope lock, so concurrent edits cannot
+race into one); at most 16 splits, names 1..32 of `[A-Za-z0-9_.-]` and unique, each split
+non-empty with existing, unique deployments, weights >= 0 summing to more than 0;
+`sticky_header` (an HTTP header name, stored lower-case) required iff `sticky=header`, and
+any sticky mode needs a split; a `weighted` route needs a positive total deployment weight
+per split (or over its deployments without a split), also checked when a deployment's
+weight changes. Deleting a route used as another route's fallback, or a deployment used by
+a route or a split, is 409. PATCH replaces lists that are given and keeps omitted fields;
+`retry: null` removes the policy, and leaving `sticky=header` drops the header.
+
+The compiler lists a capability in `required_capabilities` exactly when a field needs it
+(the gateway's rule): `health_check`, `circuit_breaker`, `vllm_load` (metrics URL or
+strategy), `retry`, `fallbacks`, `traffic_split` (split or sticky), `lowest_latency`.
+Defensively, a fallback to a route that is left out of the snapshot is dropped, and a route
+whose split ends up empty or (weighted) without weight is left out, each with a warning.
+
+Storage (migration `0003`): scalar settings are columns on `upstreams`/`routes` with CHECK
+constraints; the ordered lists are child tables with foreign keys: `route_fallbacks`
+(RESTRICT on the target route), `route_splits` and `route_split_deployments` (RESTRICT on
+the deployment). Downgrading to `0002` drops these settings and maps `vllm_load` to
+`least_in_flight`.
+
 ## Config publishing and usage
 
 - Every source mutation (API write, budget flip, rollover) commits with an audit row and an

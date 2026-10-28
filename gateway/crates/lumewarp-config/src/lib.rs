@@ -54,6 +54,7 @@ pub struct LocalSettings {
     pub shutdown_grace_ms: u64,
     pub header_read_timeout_ms: u64,
     pub body_read_timeout_ms: u64,
+    pub retry_budget_percent: u32,
 }
 
 /// The standalone YAML document.
@@ -87,6 +88,8 @@ pub struct Server {
     pub header_read_timeout_ms: u64,
     #[serde(default = "default_read_timeout_ms")]
     pub body_read_timeout_ms: u64,
+    #[serde(default = "default_retry_budget_percent")]
+    pub retry_budget_percent: u32,
     /// Shorthand: sha256 hex hashes of keys with no team that may call every model.
     #[serde(default)]
     pub api_keys: Vec<String>,
@@ -100,6 +103,7 @@ impl Default for Server {
             shutdown_grace_ms: default_shutdown_grace_ms(),
             header_read_timeout_ms: default_read_timeout_ms(),
             body_read_timeout_ms: default_read_timeout_ms(),
+            retry_budget_percent: default_retry_budget_percent(),
             api_keys: Vec::new(),
         }
     }
@@ -107,6 +111,9 @@ impl Default for Server {
 
 fn default_shutdown_grace_ms() -> u64 {
     25_000
+}
+fn default_retry_budget_percent() -> u32 {
+    20
 }
 fn default_read_timeout_ms() -> u64 {
     30_000
@@ -133,6 +140,34 @@ pub struct Upstream {
     pub timeout_ms: u32,
     #[serde(default)]
     pub stream_usage_mode: StreamUsageMode,
+    #[serde(default)]
+    pub health_check: Option<HealthCheck>,
+    #[serde(default)]
+    pub circuit_breaker: Option<CircuitBreaker>,
+    #[serde(default)]
+    pub metrics_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HealthCheck {
+    #[serde(default)]
+    pub path: String,
+    pub interval_ms: u32,
+    pub timeout_ms: u32,
+    #[serde(default)]
+    pub unhealthy_threshold: u32,
+    #[serde(default)]
+    pub healthy_threshold: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircuitBreaker {
+    #[serde(default)]
+    pub failure_threshold: u32,
+    #[serde(default)]
+    pub open_ms: u32,
 }
 
 pub fn default_timeout_ms() -> u32 {
@@ -188,9 +223,49 @@ pub struct Price {
 #[serde(deny_unknown_fields)]
 pub struct ModelRoute {
     pub model: String,
+    #[serde(default)]
     pub deployments: Vec<String>,
     #[serde(default)]
     pub strategy: RoutingStrategy,
+    #[serde(default)]
+    pub retry: Option<RetryPolicy>,
+    #[serde(default)]
+    pub fallbacks: Vec<String>,
+    #[serde(default)]
+    pub traffic_split: Vec<TrafficSplit>,
+    #[serde(default)]
+    pub sticky: StickyBy,
+    #[serde(default)]
+    pub sticky_header: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryPolicy {
+    #[serde(default)]
+    pub max_attempts: u32,
+    #[serde(default)]
+    pub retry_on_status: Vec<u32>,
+    #[serde(default)]
+    pub total_timeout_ms: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrafficSplit {
+    pub name: String,
+    pub deployments: Vec<String>,
+    pub weight: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StickyBy {
+    #[default]
+    None,
+    Header,
+    Team,
+    Key,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -200,6 +275,7 @@ pub enum RoutingStrategy {
     Weighted,
     LeastInFlight,
     LowestLatency,
+    VllmLoad,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -342,6 +418,11 @@ impl Config {
 
     fn local_settings(&self) -> Result<LocalSettings, ConfigError> {
         let server = &self.server;
+        if server.retry_budget_percent > 20 {
+            return Err(ConfigError::Invalid(
+                "server.retry_budget_percent must be in 0..=20".into(),
+            ));
+        }
         if server.listen == server.admin_listen {
             return Err(ConfigError::Invalid(
                 "server.admin_listen must differ from server.listen".into(),
@@ -364,6 +445,7 @@ impl Config {
             shutdown_grace_ms: server.shutdown_grace_ms,
             header_read_timeout_ms: server.header_read_timeout_ms,
             body_read_timeout_ms: server.body_read_timeout_ms,
+            retry_budget_percent: server.retry_budget_percent,
         })
     }
 
@@ -387,6 +469,18 @@ impl Config {
                     StreamUsageMode::IncludeUsage => pb::StreamUsageMode::IncludeUsage,
                     StreamUsageMode::Passthrough => pb::StreamUsageMode::Passthrough,
                 } as i32,
+                health_check: u.health_check.as_ref().map(|h| pb::HealthCheck {
+                    path: h.path.clone(),
+                    interval_ms: h.interval_ms,
+                    timeout_ms: h.timeout_ms,
+                    unhealthy_threshold: h.unhealthy_threshold,
+                    healthy_threshold: h.healthy_threshold,
+                }),
+                circuit_breaker: u.circuit_breaker.as_ref().map(|c| pb::CircuitBreaker {
+                    failure_threshold: c.failure_threshold,
+                    open_ms: c.open_ms,
+                }),
+                metrics_url: u.metrics_url.clone(),
             })
             .collect();
         let deployments = self
@@ -413,7 +507,30 @@ impl Config {
                     RoutingStrategy::Weighted => pb::RoutingStrategy::Weighted,
                     RoutingStrategy::LeastInFlight => pb::RoutingStrategy::LeastInFlight,
                     RoutingStrategy::LowestLatency => pb::RoutingStrategy::LowestLatency,
+                    RoutingStrategy::VllmLoad => pb::RoutingStrategy::VllmLoad,
                 } as i32,
+                retry: r.retry.as_ref().map(|p| pb::RetryPolicy {
+                    max_attempts: p.max_attempts,
+                    retry_on_status: p.retry_on_status.clone(),
+                    total_timeout_ms: p.total_timeout_ms,
+                }),
+                fallbacks: r.fallbacks.clone(),
+                traffic_split: r
+                    .traffic_split
+                    .iter()
+                    .map(|s| pb::TrafficSplit {
+                        name: s.name.clone(),
+                        deployments: s.deployments.clone(),
+                        weight: s.weight,
+                    })
+                    .collect(),
+                sticky: match r.sticky {
+                    StickyBy::None => pb::StickyBy::None,
+                    StickyBy::Header => pb::StickyBy::Header,
+                    StickyBy::Team => pb::StickyBy::Team,
+                    StickyBy::Key => pb::StickyBy::Key,
+                } as i32,
+                sticky_header: r.sticky_header.clone(),
             })
             .collect();
         let teams: Vec<pb::Team> = self
@@ -487,7 +604,50 @@ impl Config {
             api_keys,
             teams,
             created_at_unix_ms: 0,
-            required_capabilities: Vec::new(),
+            required_capabilities: {
+                let mut caps = Vec::new();
+                for (cap, used) in [
+                    ("retry", self.routes.iter().any(|r| r.retry.is_some())),
+                    (
+                        "fallbacks",
+                        self.routes.iter().any(|r| !r.fallbacks.is_empty()),
+                    ),
+                    (
+                        "health_check",
+                        self.upstreams.iter().any(|u| u.health_check.is_some()),
+                    ),
+                    (
+                        "circuit_breaker",
+                        self.upstreams.iter().any(|u| u.circuit_breaker.is_some()),
+                    ),
+                    (
+                        "traffic_split",
+                        self.routes.iter().any(|r| {
+                            !r.traffic_split.is_empty()
+                                || r.sticky != StickyBy::None
+                                || !r.sticky_header.is_empty()
+                        }),
+                    ),
+                    (
+                        "lowest_latency",
+                        self.routes
+                            .iter()
+                            .any(|r| r.strategy == RoutingStrategy::LowestLatency),
+                    ),
+                    (
+                        "vllm_load",
+                        self.routes
+                            .iter()
+                            .any(|r| r.strategy == RoutingStrategy::VllmLoad)
+                            || self.upstreams.iter().any(|u| !u.metrics_url.is_empty()),
+                    ),
+                ] {
+                    if used {
+                        caps.push(cap.into());
+                    }
+                }
+                caps
+            },
             scope: String::new(),
         })
     }
@@ -499,6 +659,63 @@ mod tests {
 
     const EXAMPLE: &str = include_str!("../../../config.example.yaml");
     const BENCH: &str = include_str!("../../../../bench/lumewarp/config.yaml");
+
+    #[test]
+    fn resilience_yaml_compiles_presence_based_capabilities() {
+        let (settings, s) = Config::parse(
+            r#"
+server: {retry_budget_percent: 10}
+upstreams:
+  - name: u
+    kind: vllm
+    base_url: http://localhost/v1
+    health_check: {interval_ms: 1000, timeout_ms: 100}
+    circuit_breaker: {}
+deployments:
+  - {name: d, upstream: u, upstream_model: actual}
+routes:
+  - model: public
+    deployments: [d]
+    retry: {}
+    fallbacks: [backup]
+  - {model: backup, deployments: [d]}
+"#,
+        )
+        .unwrap();
+        assert_eq!(settings.retry_budget_percent, 10);
+        assert_eq!(
+            s.required_capabilities,
+            ["retry", "fallbacks", "health_check", "circuit_breaker"]
+        );
+        assert_eq!(s.routes[0].retry.as_ref().unwrap().max_attempts, 0);
+        assert!(s.upstreams[0].circuit_breaker.is_some());
+        assert!(Config::parse("server: {retry_budget_percent: 21}").is_err());
+        assert!(Config::parse("{}")
+            .unwrap()
+            .1
+            .required_capabilities
+            .is_empty());
+    }
+
+    #[test]
+    fn w6_yaml_fields_compile_presence_based_capabilities() {
+        let (_, s) = Config::parse(
+            r#"
+upstreams:
+  - {name: u, kind: vllm, base_url: 'http://localhost/v1', metrics_url: 'http://localhost/metrics'}
+routes:
+  - model: public
+    strategy: vllm_load
+    traffic_split: [{name: stable, deployments: [d], weight: 1}]
+    sticky: header
+    sticky_header: x-session
+"#,
+        )
+        .unwrap();
+        assert_eq!(s.routes[0].traffic_split[0].name, "stable");
+        assert_eq!(s.routes[0].sticky, pb::StickyBy::Header as i32);
+        assert_eq!(s.required_capabilities, ["traffic_split", "vllm_load"]);
+    }
 
     #[test]
     fn example_and_bench_configs_convert() {

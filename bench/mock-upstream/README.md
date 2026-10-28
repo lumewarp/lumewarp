@@ -29,6 +29,27 @@ curl -N -H 'content-type: application/json' \
 | `--chunk-interval-ms` | `10` | Async delay between content events |
 | `--echo` | off | Reflect method, path, headers and original JSON body |
 | `--workers` | available parallelism | Tokio worker threads, must be positive |
+| `--fail-every` | `0` (disabled) | Fail every Nth POST inference request |
+| `--fail-status` | `503` | Status used by periodic failures |
+| `--fail-mode` | `status` | Periodic fault kind: `status`, `reset`, or `timeout` |
+| `--served-model-name` | `mock` | `model_name` label of the vLLM-style `/metrics` series |
+| `--waiting` | `0` | Initial `vllm:num_requests_waiting` |
+| `--kv-cache-usage` | `0` | Initial `vllm:kv_cache_usage_perc` (0..1) |
+
+Fault injection is opt-in: `x-mock-fail: 429` (any 400..599), `reset`
+(close before headers), or `timeout` (never send headers).
+`x-mock-retry-after` sets the fault response's `Retry-After` header.
+`POST /fault?status=503` fails all normal requests, including health probes;
+`POST /fault?status=0` restores normal behavior. The admin endpoint itself always
+remains available. Defaults retain the existing benchmark responses and timing.
+
+Load steering for `vllm_load` tests: `GET /metrics` returns vLLM-style
+Prometheus text (`vllm:num_requests_waiting`, `vllm:num_requests_running` (always
+0) and `vllm:kv_cache_usage_perc`, labelled `engine="0"` and `model_name`).
+`POST /load?waiting=12&kv=0.8` changes the reported values (any subset), and
+`POST /load?metrics_status=503` makes `/metrics` fail (`0` restores it) without
+affecting inference. The response reports the current values and how many times
+`/metrics` was scraped. Neither endpoint is subject to fault injection.
 
 Endpoints: `POST /v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
 `GET /v1/models`, `/health`. Unknown routes/methods return an OpenAI-shaped 404;

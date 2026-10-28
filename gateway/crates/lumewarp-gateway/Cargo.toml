@@ -20,6 +20,7 @@ arc-swap.workspace = true
 bytes.workspace = true
 clap.workspace = true
 http-body-util.workspace = true
+httpdate.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 hyper-rustls.workspace = true
@@ -45,6 +46,7 @@ uuid.workspace = true
 memchr.workspace = true
 
 [dev-dependencies]
+mock-upstream = { path = "../../../bench/mock-upstream" }
 hyper = { workspace = true, features = ["http2"] }
 tempfile.workspace = true
 tonic = { workspace = true, features = ["server", "router"] }

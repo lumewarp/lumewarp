@@ -63,6 +63,7 @@ fn snapshot(version: u64, keys: &[(&str, &str)]) -> Snapshot {
             model: "m1".into(),
             deployments: vec!["d".into()],
             strategy: 1,
+            ..Default::default()
         }],
         api_keys: keys.iter().map(|(id, secret)| key(id, secret)).collect(),
         created_at_unix_ms: 1,

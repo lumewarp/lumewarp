@@ -6,7 +6,7 @@ use std::{
     sync::{atomic::AtomicUsize, atomic::Ordering, Arc, Mutex},
 };
 
-use crate::{metrics::Metrics, ratelimit, usage::UsageSink};
+use crate::{balance, health, metrics::Metrics, proxy, ratelimit, usage::UsageSink};
 
 pub struct Runtime {
     /// Shared with the usage reporter, which exists before the runtime.
@@ -16,6 +16,11 @@ pub struct Runtime {
     /// Fixed at construction, before serving: `UsageSink::disabled()` in
     /// standalone mode, the `spawn_reporter` sink in control-plane mode.
     pub usage: UsageSink,
+    pub health: health::Registry,
+    pub retry_budget: health::RetryBudget,
+    /// Latency EWMAs, scraped vLLM load and scrape tasks (W6).
+    pub balance: balance::Registry,
+    pub client: proxy::UpstreamClient,
 }
 
 impl Runtime {
@@ -31,10 +36,15 @@ impl Runtime {
             inflight: InFlightRegistry::default(),
             limiters: ratelimit::Registry::new(),
             usage,
+            health: health::Registry::default(),
+            retry_budget: health::RetryBudget::new(),
+            balance: balance::Registry::default(),
+            client: proxy::client(),
         })
     }
 
     pub fn encode_metrics(&self) -> Result<String, std::fmt::Error> {
+        self.metrics.export_latency(self.balance.latencies());
         self.metrics.encode(&self.inflight)
     }
 }

@@ -35,6 +35,38 @@ message Upstream {
   string api_key_ref = 4;
   uint32 timeout_ms = 5;
   StreamUsageMode stream_usage_mode = 6;
+  // Active health probe of this upstream. Absent = no probing (passive
+  // failures still feed the circuit breaker). Capability "health_check".
+  HealthCheck health_check = 7;
+  // Per-deployment circuit breaker for deployments on this upstream. Absent =
+  // never opens. Capability "circuit_breaker".
+  CircuitBreaker circuit_breaker = 8;
+  // Prometheus endpoint scraped for load by ROUTING_STRATEGY_VLLM_LOAD.
+  // Empty = base_url with a trailing "/v1" removed, plus "/metrics".
+  string metrics_url = 9;
+}
+
+// GET <base_url><path> every interval; 2xx within timeout = success.
+message HealthCheck {
+  // Relative to base_url; empty = "/models".
+  string path = 1;
+  uint32 interval_ms = 2;
+  uint32 timeout_ms = 3;
+  // Consecutive failures before the upstream is marked unhealthy (0 = 3).
+  uint32 unhealthy_threshold = 4;
+  // Consecutive successes before it is healthy again (0 = 1).
+  uint32 healthy_threshold = 5;
+}
+
+// Opens after `failure_threshold` consecutive retryable failures (connect
+// error, timeout, 5xx/429 that would be retried); while open the deployment is
+// skipped; after `open_ms` one trial request is let through (half-open) and its
+// outcome closes or re-opens the breaker.
+message CircuitBreaker {
+  // 0 = 5.
+  uint32 failure_threshold = 1;
+  // 0 = 30000.
+  uint32 open_ms = 2;
 }
 
 // How the gateway obtains token usage for streamed responses.
@@ -78,15 +110,68 @@ message Price {
 // Public model alias -> deployments.
 message ModelRoute {
   string model = 1;
+  // Ignored when traffic_split is non-empty.
   repeated string deployments = 2;
   RoutingStrategy strategy = 3;
+  // Absent = a single attempt. Capability "retry".
+  RetryPolicy retry = 4;
+  // Other route aliases tried in order once every attempt on this route has
+  // failed retryably (before any response byte reached the client). Each
+  // fallback is tried with its own deployments and strategy but this route's
+  // retry budget; fallbacks of fallbacks are not followed. The client-visible
+  // model name is unchanged. Capability "fallbacks".
+  repeated string fallbacks = 5;
+  // Percentage split between groups of deployments (canary). A request first
+  // picks a split by weight (sticky when `sticky` is set), then a deployment
+  // inside it with `strategy`. Retries stay inside the chosen split, then fall
+  // back to the other splits. Capability "traffic_split".
+  repeated TrafficSplit traffic_split = 6;
+  StickyBy sticky = 7;
+  // Request header hashed when sticky = STICKY_BY_HEADER.
+  string sticky_header = 8;
 }
 
 enum RoutingStrategy {
   ROUTING_STRATEGY_UNSPECIFIED = 0;
   ROUTING_STRATEGY_WEIGHTED = 1;
   ROUTING_STRATEGY_LEAST_IN_FLIGHT = 2;
+  // EWMA of time to response headers per deployment. Capability
+  // "lowest_latency".
   ROUTING_STRATEGY_LOWEST_LATENCY = 3;
+  // Power of two choices on vLLM load (num_requests_waiting, then
+  // kv_cache_usage_perc) scraped every second; falls back to in-flight when a
+  // deployment's metrics are stale. Capability "vllm_load".
+  ROUTING_STRATEGY_VLLM_LOAD = 4;
+}
+
+// Retries happen only before any response byte is sent to the client: on
+// connect errors, upstream timeouts and the statuses below (for streams: only
+// before the upstream answered with headers). A retry picks another
+// deployment of the same route when one is available.
+message RetryPolicy {
+  // Total attempts including the first; 0 = 2.
+  uint32 max_attempts = 1;
+  // Empty = 429, 502, 503, 504.
+  repeated uint32 retry_on_status = 2;
+  // Upper bound for all attempts together; 0 = no bound beyond each
+  // upstream's timeout_ms.
+  uint32 total_timeout_ms = 3;
+}
+
+message TrafficSplit {
+  // Bounded label value for metrics (e.g. "stable", "canary").
+  string name = 1;
+  repeated string deployments = 2;
+  // Relative weight; the split's share is weight / sum(weights).
+  uint32 weight = 3;
+}
+
+enum StickyBy {
+  STICKY_BY_NONE = 0;
+  // Hash of the sticky_header value; requests without it are not sticky.
+  STICKY_BY_HEADER = 1;
+  STICKY_BY_TEAM = 2;
+  STICKY_BY_KEY = 3;
 }
 
 message Team {

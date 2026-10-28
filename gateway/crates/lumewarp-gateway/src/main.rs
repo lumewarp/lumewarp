@@ -1,6 +1,8 @@
 mod auth;
+mod balance;
 mod config_stream;
 mod error;
+mod health;
 mod metrics;
 mod proxy;
 mod ratelimit;
@@ -116,6 +118,7 @@ fn standalone(
         .metrics
         .set_yaml_hash(&hex::encode(Sha256::digest(yaml.as_bytes()))[..12]);
     runtime.metrics.config_applied(router.version);
+    router.activate_health();
     Ok((
         settings,
         Arc::new(ArcSwapOption::from_pointee(router)),
@@ -184,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
                                 "booting from cached snapshot"
                             );
                             runtime.metrics.config_applied(cached.version);
+                            router.activate_health();
                             slot.store(Some(Arc::new(router)));
                             current = cached;
                             digest = cached_digest;

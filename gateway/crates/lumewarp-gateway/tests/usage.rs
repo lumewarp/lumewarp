@@ -8,6 +8,7 @@ mod common;
 use std::{
     collections::VecDeque,
     convert::Infallible,
+    io::{BufRead, BufReader},
     net::{SocketAddr, TcpListener as StdListener},
     path::PathBuf,
     pin::Pin,
@@ -450,6 +451,7 @@ fn snapshot(upstream: SocketAddr) -> Snapshot {
         api_key_ref: String::new(),
         timeout_ms: 5000,
         stream_usage_mode: mode as i32,
+        ..Default::default()
     };
     let deployment = |name: &str, upstream: &str, price: Option<Price>| Deployment {
         name: name.into(),
@@ -462,6 +464,7 @@ fn snapshot(upstream: SocketAddr) -> Snapshot {
         model: model.into(),
         deployments: vec![deployment.into()],
         strategy: 1,
+        ..Default::default()
     };
     Snapshot {
         version: 7,
@@ -525,17 +528,15 @@ impl Gateway {
             NEXT_DIR.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let listen = StdListener::bind("127.0.0.1:0").unwrap();
-        let admin = StdListener::bind("127.0.0.1:0").unwrap();
-        let (addr, admin_addr) = (listen.local_addr().unwrap(), admin.local_addr().unwrap());
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let admin_addr: SocketAddr = "127.0.0.2:0".parse().unwrap();
         let local = dir.join("local.yaml");
         std::fs::write(
             &local,
             format!("server:\n  listen: '{addr}'\n  admin_listen: '{admin_addr}'\n"),
         )
         .unwrap();
-        drop((listen, admin));
-        let child = Command::new(env!("CARGO_BIN_EXE_lumewarp"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_lumewarp"))
             .args(["--control-plane", &format!("http://{control_plane}")])
             .args(["--gateway-token-env", TOKEN_ENV])
             .arg("--state-dir")
@@ -545,13 +546,51 @@ impl Gateway {
             .arg(&local)
             .env(TOKEN_ENV, "gw-secret")
             .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
-            .env("RUST_LOG", "error")
-            .stdout(Stdio::null())
+            .env(
+                "RUST_LOG",
+                "lumewarp::config_stream=info,lumewarp::server=info",
+            )
+            .env("NO_COLOR", "1")
+            .stdout(Stdio::piped())
             .stderr(Stdio::from(
                 std::fs::File::create(dir.join("stderr.log")).unwrap(),
             ))
             .spawn()
             .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let mut ready_tx = Some(ready_tx);
+            let (mut applied, mut listening) = (false, false);
+            let mut addresses = None;
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else {
+                    break;
+                };
+                applied |= line.contains("config applied");
+                listening |= line.contains("lumewarp gateway listening");
+                if line.contains("lumewarp gateway listening") {
+                    let addr = line
+                        .split_whitespace()
+                        .find_map(|p| p.strip_prefix("listen="))
+                        .unwrap()
+                        .parse::<SocketAddr>()
+                        .unwrap();
+                    let admin = line
+                        .split_whitespace()
+                        .find_map(|p| p.strip_prefix("admin_listen="))
+                        .unwrap()
+                        .parse::<SocketAddr>()
+                        .unwrap();
+                    addresses = Some((addr, admin));
+                }
+                if applied && listening {
+                    if let Some(tx) = ready_tx.take() {
+                        let _ = tx.send(addresses.unwrap());
+                    }
+                }
+            }
+        });
         let mut gateway = Self {
             child,
             addr,
@@ -559,25 +598,12 @@ impl Gateway {
             http: client(),
             dir,
         };
-        let ready = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if let Some(status) = gateway.child.try_wait().unwrap() {
-                    panic!("gateway exited {status}: {}", gateway.logs());
-                }
-                let request = Request::builder()
-                    .uri(format!("http://{}/readyz", gateway.admin))
-                    .body(Full::new(Bytes::new()))
-                    .unwrap();
-                if let Ok(response) = gateway.http.request(request).await {
-                    if response.status() == 200 {
-                        break;
-                    }
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await;
-        assert!(ready.is_ok(), "gateway not ready: {}", gateway.logs());
+        let (addr, admin) = tokio::time::timeout(Duration::from_secs(10), ready_rx)
+            .await
+            .unwrap_or_else(|_| panic!("gateway config not applied: {}", gateway.logs()))
+            .expect("gateway exited before config was applied");
+        gateway.addr = addr;
+        gateway.admin = admin;
         gateway
     }
 
@@ -621,6 +647,58 @@ async fn setup() -> (FakeCp, Upstream, Gateway) {
     let cp = FakeCp::start(snapshot(upstream.addr)).await;
     let gateway = Gateway::start(cp.addr).await;
     (cp, upstream, gateway)
+}
+
+#[tokio::test]
+async fn retried_request_reports_only_final_deployment_usage() {
+    let mut upstream = Upstream::start().await;
+    let mut snapshot = snapshot(upstream.addr);
+    snapshot.required_capabilities = vec!["retry".into()];
+    let mut second = snapshot.deployments[0].clone();
+    second.name = "second".into();
+    snapshot.deployments.push(second);
+    snapshot.routes[0].deployments.push("second".into());
+    snapshot.routes[0].retry = Some(lumewarp_proto::config::v1::RetryPolicy::default());
+    upstream.respond(503, "application/json", &[b"{\"error\":\"retry\"}"]);
+    upstream.respond(200, "application/json", &[CHAT_JSON]);
+    let mut cp = FakeCp::start(snapshot).await;
+    let gateway = Gateway::start(cp.addr).await;
+    let response = gateway
+        .post("/v1/chat/completions", KEY, r#"{"model":"public"}"#)
+        .await;
+    assert_eq!(response.status(), 200);
+    bytes(response).await;
+    upstream.received().await;
+    upstream.received().await;
+    let event = cp.event().await;
+    assert_eq!(event.model, "public");
+    assert_eq!((event.prompt_tokens, event.completion_tokens), (5, 3));
+    assert!(["d", "second"].contains(&event.deployment.as_str()));
+    let metrics = gateway.metrics().await;
+    assert_eq!(metrics.sum("lumewarp_usage_capture_total", &[]), 1.);
+    assert_eq!(
+        metrics.sum("lumewarp_requests_total", &[("model", "public")]),
+        1.
+    );
+    assert_eq!(
+        metrics.sum(
+            "lumewarp_upstream_attempts_total",
+            &[("deployment", &event.deployment), ("outcome", "success")]
+        ),
+        1.
+    );
+    assert_eq!(
+        metrics.sum(
+            "lumewarp_upstream_attempts_total",
+            &[
+                ("deployment", &event.deployment),
+                ("outcome", "retryable_status")
+            ]
+        ),
+        0.
+    );
+    assert_eq!(metrics.sum("lumewarp_in_flight_requests", &[]), 0.);
+    assert!(cp.events.try_recv().is_err());
 }
 
 fn state(event: &UsageEvent) -> (RequestOutcome, UsageState) {

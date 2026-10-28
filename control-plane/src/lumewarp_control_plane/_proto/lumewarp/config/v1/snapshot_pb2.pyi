@@ -26,6 +26,14 @@ class RoutingStrategy(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     ROUTING_STRATEGY_WEIGHTED: _ClassVar[RoutingStrategy]
     ROUTING_STRATEGY_LEAST_IN_FLIGHT: _ClassVar[RoutingStrategy]
     ROUTING_STRATEGY_LOWEST_LATENCY: _ClassVar[RoutingStrategy]
+    ROUTING_STRATEGY_VLLM_LOAD: _ClassVar[RoutingStrategy]
+
+class StickyBy(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    STICKY_BY_NONE: _ClassVar[StickyBy]
+    STICKY_BY_HEADER: _ClassVar[StickyBy]
+    STICKY_BY_TEAM: _ClassVar[StickyBy]
+    STICKY_BY_KEY: _ClassVar[StickyBy]
 
 class KeyStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -45,6 +53,11 @@ ROUTING_STRATEGY_UNSPECIFIED: RoutingStrategy
 ROUTING_STRATEGY_WEIGHTED: RoutingStrategy
 ROUTING_STRATEGY_LEAST_IN_FLIGHT: RoutingStrategy
 ROUTING_STRATEGY_LOWEST_LATENCY: RoutingStrategy
+ROUTING_STRATEGY_VLLM_LOAD: RoutingStrategy
+STICKY_BY_NONE: StickyBy
+STICKY_BY_HEADER: StickyBy
+STICKY_BY_TEAM: StickyBy
+STICKY_BY_KEY: StickyBy
 KEY_STATUS_UNSPECIFIED: KeyStatus
 KEY_STATUS_ACTIVE: KeyStatus
 KEY_STATUS_REVOKED: KeyStatus
@@ -74,20 +87,48 @@ class Snapshot(_message.Message):
     def __init__(self, version: _Optional[int] = ..., upstreams: _Optional[_Iterable[_Union[Upstream, _Mapping]]] = ..., deployments: _Optional[_Iterable[_Union[Deployment, _Mapping]]] = ..., routes: _Optional[_Iterable[_Union[ModelRoute, _Mapping]]] = ..., api_keys: _Optional[_Iterable[_Union[ApiKey, _Mapping]]] = ..., teams: _Optional[_Iterable[_Union[Team, _Mapping]]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ...) -> None: ...
 
 class Upstream(_message.Message):
-    __slots__ = ("name", "kind", "base_url", "api_key_ref", "timeout_ms", "stream_usage_mode")
+    __slots__ = ("name", "kind", "base_url", "api_key_ref", "timeout_ms", "stream_usage_mode", "health_check", "circuit_breaker", "metrics_url")
     NAME_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
     BASE_URL_FIELD_NUMBER: _ClassVar[int]
     API_KEY_REF_FIELD_NUMBER: _ClassVar[int]
     TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
     STREAM_USAGE_MODE_FIELD_NUMBER: _ClassVar[int]
+    HEALTH_CHECK_FIELD_NUMBER: _ClassVar[int]
+    CIRCUIT_BREAKER_FIELD_NUMBER: _ClassVar[int]
+    METRICS_URL_FIELD_NUMBER: _ClassVar[int]
     name: str
     kind: UpstreamKind
     base_url: str
     api_key_ref: str
     timeout_ms: int
     stream_usage_mode: StreamUsageMode
-    def __init__(self, name: _Optional[str] = ..., kind: _Optional[_Union[UpstreamKind, str]] = ..., base_url: _Optional[str] = ..., api_key_ref: _Optional[str] = ..., timeout_ms: _Optional[int] = ..., stream_usage_mode: _Optional[_Union[StreamUsageMode, str]] = ...) -> None: ...
+    health_check: HealthCheck
+    circuit_breaker: CircuitBreaker
+    metrics_url: str
+    def __init__(self, name: _Optional[str] = ..., kind: _Optional[_Union[UpstreamKind, str]] = ..., base_url: _Optional[str] = ..., api_key_ref: _Optional[str] = ..., timeout_ms: _Optional[int] = ..., stream_usage_mode: _Optional[_Union[StreamUsageMode, str]] = ..., health_check: _Optional[_Union[HealthCheck, _Mapping]] = ..., circuit_breaker: _Optional[_Union[CircuitBreaker, _Mapping]] = ..., metrics_url: _Optional[str] = ...) -> None: ...
+
+class HealthCheck(_message.Message):
+    __slots__ = ("path", "interval_ms", "timeout_ms", "unhealthy_threshold", "healthy_threshold")
+    PATH_FIELD_NUMBER: _ClassVar[int]
+    INTERVAL_MS_FIELD_NUMBER: _ClassVar[int]
+    TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
+    UNHEALTHY_THRESHOLD_FIELD_NUMBER: _ClassVar[int]
+    HEALTHY_THRESHOLD_FIELD_NUMBER: _ClassVar[int]
+    path: str
+    interval_ms: int
+    timeout_ms: int
+    unhealthy_threshold: int
+    healthy_threshold: int
+    def __init__(self, path: _Optional[str] = ..., interval_ms: _Optional[int] = ..., timeout_ms: _Optional[int] = ..., unhealthy_threshold: _Optional[int] = ..., healthy_threshold: _Optional[int] = ...) -> None: ...
+
+class CircuitBreaker(_message.Message):
+    __slots__ = ("failure_threshold", "open_ms")
+    FAILURE_THRESHOLD_FIELD_NUMBER: _ClassVar[int]
+    OPEN_MS_FIELD_NUMBER: _ClassVar[int]
+    failure_threshold: int
+    open_ms: int
+    def __init__(self, failure_threshold: _Optional[int] = ..., open_ms: _Optional[int] = ...) -> None: ...
 
 class Deployment(_message.Message):
     __slots__ = ("name", "upstream", "upstream_model", "weight", "price")
@@ -112,14 +153,44 @@ class Price(_message.Message):
     def __init__(self, input_nano_usd_per_mtok: _Optional[int] = ..., output_nano_usd_per_mtok: _Optional[int] = ...) -> None: ...
 
 class ModelRoute(_message.Message):
-    __slots__ = ("model", "deployments", "strategy")
+    __slots__ = ("model", "deployments", "strategy", "retry", "fallbacks", "traffic_split", "sticky", "sticky_header")
     MODEL_FIELD_NUMBER: _ClassVar[int]
     DEPLOYMENTS_FIELD_NUMBER: _ClassVar[int]
     STRATEGY_FIELD_NUMBER: _ClassVar[int]
+    RETRY_FIELD_NUMBER: _ClassVar[int]
+    FALLBACKS_FIELD_NUMBER: _ClassVar[int]
+    TRAFFIC_SPLIT_FIELD_NUMBER: _ClassVar[int]
+    STICKY_FIELD_NUMBER: _ClassVar[int]
+    STICKY_HEADER_FIELD_NUMBER: _ClassVar[int]
     model: str
     deployments: _containers.RepeatedScalarFieldContainer[str]
     strategy: RoutingStrategy
-    def __init__(self, model: _Optional[str] = ..., deployments: _Optional[_Iterable[str]] = ..., strategy: _Optional[_Union[RoutingStrategy, str]] = ...) -> None: ...
+    retry: RetryPolicy
+    fallbacks: _containers.RepeatedScalarFieldContainer[str]
+    traffic_split: _containers.RepeatedCompositeFieldContainer[TrafficSplit]
+    sticky: StickyBy
+    sticky_header: str
+    def __init__(self, model: _Optional[str] = ..., deployments: _Optional[_Iterable[str]] = ..., strategy: _Optional[_Union[RoutingStrategy, str]] = ..., retry: _Optional[_Union[RetryPolicy, _Mapping]] = ..., fallbacks: _Optional[_Iterable[str]] = ..., traffic_split: _Optional[_Iterable[_Union[TrafficSplit, _Mapping]]] = ..., sticky: _Optional[_Union[StickyBy, str]] = ..., sticky_header: _Optional[str] = ...) -> None: ...
+
+class RetryPolicy(_message.Message):
+    __slots__ = ("max_attempts", "retry_on_status", "total_timeout_ms")
+    MAX_ATTEMPTS_FIELD_NUMBER: _ClassVar[int]
+    RETRY_ON_STATUS_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
+    max_attempts: int
+    retry_on_status: _containers.RepeatedScalarFieldContainer[int]
+    total_timeout_ms: int
+    def __init__(self, max_attempts: _Optional[int] = ..., retry_on_status: _Optional[_Iterable[int]] = ..., total_timeout_ms: _Optional[int] = ...) -> None: ...
+
+class TrafficSplit(_message.Message):
+    __slots__ = ("name", "deployments", "weight")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    DEPLOYMENTS_FIELD_NUMBER: _ClassVar[int]
+    WEIGHT_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    deployments: _containers.RepeatedScalarFieldContainer[str]
+    weight: int
+    def __init__(self, name: _Optional[str] = ..., deployments: _Optional[_Iterable[str]] = ..., weight: _Optional[int] = ...) -> None: ...
 
 class Team(_message.Message):
     __slots__ = ("id", "name")

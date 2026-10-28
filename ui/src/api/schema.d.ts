@@ -667,6 +667,26 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /** CircuitBreakerIn */
+        CircuitBreakerIn: {
+            /**
+             * Failure Threshold
+             * @description Consecutive failures to open; null = 5.
+             */
+            failure_threshold?: number | null;
+            /**
+             * Open Ms
+             * @description Open time before a trial; null = 30000.
+             */
+            open_ms?: number | null;
+        };
+        /** CircuitBreakerOut */
+        CircuitBreakerOut: {
+            /** Failure Threshold */
+            failure_threshold: number | null;
+            /** Open Ms */
+            open_ms: number | null;
+        };
         /** ConfigVersionOut */
         ConfigVersionOut: {
             /** Scope */
@@ -845,6 +865,47 @@ export interface components {
             last_used_at: string | null;
             /** Revoked At */
             revoked_at: string | null;
+        };
+        /**
+         * HealthCheckIn
+         * @description Active probe: GET <base_url><path> every interval; 2xx within timeout = success.
+         */
+        HealthCheckIn: {
+            /**
+             * Path
+             * @description Relative to base_url; null = /models.
+             */
+            path?: string | null;
+            /** Interval Ms */
+            interval_ms: number;
+            /**
+             * Timeout Ms
+             * @description Must be below interval_ms.
+             */
+            timeout_ms: number;
+            /**
+             * Unhealthy Threshold
+             * @description Consecutive failures; null = 3.
+             */
+            unhealthy_threshold?: number | null;
+            /**
+             * Healthy Threshold
+             * @description Consecutive successes; null = 1.
+             */
+            healthy_threshold?: number | null;
+        };
+        /** HealthCheckOut */
+        HealthCheckOut: {
+            /** Path */
+            path: string | null;
+            /** Interval Ms */
+            interval_ms: number;
+            /** Timeout Ms */
+            timeout_ms: number;
+            /** Unhealthy Threshold */
+            unhealthy_threshold: number | null;
+            /** Healthy Threshold */
+            healthy_threshold: number | null;
         };
         /** KeyCreate */
         KeyCreate: {
@@ -1158,6 +1219,37 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
+        /**
+         * RetryPolicyIn
+         * @description Retries happen only before any response byte reached the client.
+         */
+        RetryPolicyIn: {
+            /**
+             * Max Attempts
+             * @description Total attempts including the first; null = gateway default (2).
+             */
+            max_attempts?: number | null;
+            /**
+             * Retry On Status
+             * @description Upstream statuses that are retried; empty = 429, 502, 503, 504.
+             */
+            retry_on_status?: number[];
+            /**
+             * Total Timeout Ms
+             * @description Bound for all attempts; 0 = none.
+             * @default 0
+             */
+            total_timeout_ms: number;
+        };
+        /** RetryPolicyOut */
+        RetryPolicyOut: {
+            /** Max Attempts */
+            max_attempts: number | null;
+            /** Retry On Status */
+            retry_on_status: number[];
+            /** Total Timeout Ms */
+            total_timeout_ms: number;
+        };
         /** RollbackCreate */
         RollbackCreate: {
             /** Version */
@@ -1174,8 +1266,23 @@ export interface components {
             model: string;
             /** @default weighted */
             strategy: components["schemas"]["RoutingStrategy"];
-            /** Deployment Ids */
-            deployment_ids: string[];
+            /**
+             * Deployment Ids
+             * @description Ordered deployments; may be empty only when traffic_split is set.
+             */
+            deployment_ids?: string[];
+            retry?: components["schemas"]["RetryPolicyIn"] | null;
+            /**
+             * Fallback Route Ids
+             * @description Routes tried in order once this route failed.
+             */
+            fallback_route_ids?: string[];
+            /** Traffic Split */
+            traffic_split?: components["schemas"]["TrafficSplitIn"][];
+            /** @default none */
+            sticky: components["schemas"]["StickyBy"];
+            /** Sticky Header */
+            sticky_header?: string | null;
         };
         /** RouteDeploymentOut */
         RouteDeploymentOut: {
@@ -1199,6 +1306,14 @@ export interface components {
             strategy: components["schemas"]["RoutingStrategy"];
             /** Deployments */
             deployments: components["schemas"]["RouteDeploymentOut"][];
+            retry: components["schemas"]["RetryPolicyOut"] | null;
+            /** Fallback Route Ids */
+            fallback_route_ids: string[];
+            /** Traffic Split */
+            traffic_split: components["schemas"]["TrafficSplitOut"][];
+            sticky: components["schemas"]["StickyBy"];
+            /** Sticky Header */
+            sticky_header: string | null;
             /**
              * Created At
              * Format: date-time
@@ -1210,19 +1325,31 @@ export interface components {
              */
             updated_at: string;
         };
-        /** RouteUpdate */
+        /**
+         * RouteUpdate
+         * @description PATCH: omitted fields are unchanged; lists replace the stored list; `retry` and
+         *     `sticky_header` accept null to remove the setting.
+         */
         RouteUpdate: {
             /** Model */
             model?: string | null;
             strategy?: components["schemas"]["RoutingStrategy"] | null;
             /** Deployment Ids */
             deployment_ids?: string[] | null;
+            retry?: components["schemas"]["RetryPolicyIn"] | null;
+            /** Fallback Route Ids */
+            fallback_route_ids?: string[] | null;
+            /** Traffic Split */
+            traffic_split?: components["schemas"]["TrafficSplitIn"][] | null;
+            sticky?: components["schemas"]["StickyBy"] | null;
+            /** Sticky Header */
+            sticky_header?: string | null;
         };
         /**
          * RoutingStrategy
          * @enum {string}
          */
-        RoutingStrategy: "weighted" | "least_in_flight" | "lowest_latency";
+        RoutingStrategy: "weighted" | "least_in_flight" | "lowest_latency" | "vllm_load";
         /** ServiceAccountCreate */
         ServiceAccountCreate: {
             model_access?: components["schemas"]["ModelAccess"] | null;
@@ -1332,6 +1459,12 @@ export interface components {
             /** Is Superuser */
             is_superuser: boolean;
         };
+        /**
+         * StickyBy
+         * @description What a traffic split hashes to keep a caller on one split (proto StickyBy).
+         * @enum {string}
+         */
+        StickyBy: "none" | "header" | "team" | "key";
         /**
          * StreamUsageMode
          * @enum {string}
@@ -1447,6 +1580,30 @@ export interface components {
             /** Revoked At */
             revoked_at: string | null;
         };
+        /** TrafficSplitIn */
+        TrafficSplitIn: {
+            /**
+             * Name
+             * @description 1..32 of [A-Za-z0-9_.-]; a metric label.
+             */
+            name: string;
+            /**
+             * Weight
+             * @description Share = weight / sum(weights).
+             */
+            weight: number;
+            /** Deployment Ids */
+            deployment_ids: string[];
+        };
+        /** TrafficSplitOut */
+        TrafficSplitOut: {
+            /** Name */
+            name: string;
+            /** Weight */
+            weight: number;
+            /** Deployment Ids */
+            deployment_ids: string[];
+        };
         /** UpstreamCreate */
         UpstreamCreate: {
             /** Name */
@@ -1463,6 +1620,10 @@ export interface components {
             timeout_ms: number;
             /** @default include_usage */
             stream_usage_mode: components["schemas"]["StreamUsageMode"];
+            health_check?: components["schemas"]["HealthCheckIn"] | null;
+            circuit_breaker?: components["schemas"]["CircuitBreakerIn"] | null;
+            /** Metrics Url */
+            metrics_url?: string | null;
         };
         /**
          * UpstreamKind
@@ -1486,6 +1647,10 @@ export interface components {
             /** Timeout Ms */
             timeout_ms: number;
             stream_usage_mode: components["schemas"]["StreamUsageMode"];
+            health_check: components["schemas"]["HealthCheckOut"] | null;
+            circuit_breaker: components["schemas"]["CircuitBreakerOut"] | null;
+            /** Metrics Url */
+            metrics_url: string | null;
             /**
              * Created At
              * Format: date-time
@@ -1497,7 +1662,11 @@ export interface components {
              */
             updated_at: string;
         };
-        /** UpstreamUpdate */
+        /**
+         * UpstreamUpdate
+         * @description PATCH: omitted fields are unchanged; `health_check`, `circuit_breaker` and
+         *     `metrics_url` accept null to remove the setting.
+         */
         UpstreamUpdate: {
             /** Name */
             name?: string | null;
@@ -1509,6 +1678,10 @@ export interface components {
             /** Timeout Ms */
             timeout_ms?: number | null;
             stream_usage_mode?: components["schemas"]["StreamUsageMode"] | null;
+            health_check?: components["schemas"]["HealthCheckIn"] | null;
+            circuit_breaker?: components["schemas"]["CircuitBreakerIn"] | null;
+            /** Metrics Url */
+            metrics_url?: string | null;
         };
         /** UsageRowOut */
         UsageRowOut: {

@@ -1,12 +1,21 @@
 //! Fixed-latency OpenAI-compatible benchmark upstream; not for production use.
 use bytes::Bytes;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, StreamBody};
 use hyper::{body::Frame, service::service_fn, Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, value::RawValue, Value};
-use std::{borrow::Cow, convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow,
+    convert::Infallible,
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicU16, AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::net::TcpListener;
 
 type Body = UnsyncBoxBody<Bytes, Infallible>;
@@ -28,6 +37,29 @@ pub struct Options {
     pub echo: bool,
     #[arg(long, default_value_t = default_workers(), value_parser = parse_workers)]
     pub workers: usize,
+    /// Fail every Nth inference request; zero leaves benchmark behavior unchanged.
+    #[arg(long, default_value_t = 0)]
+    pub fail_every: u64,
+    #[arg(long, default_value_t = 503)]
+    pub fail_status: u16,
+    #[arg(long, value_enum, default_value_t = FailMode::Status)]
+    pub fail_mode: FailMode,
+    /// `model_name` label of the vLLM-style series served on `/metrics`.
+    #[arg(long, default_value = "mock")]
+    pub served_model_name: String,
+    /// Initial `vllm:num_requests_waiting`; change at runtime with `POST /load`.
+    #[arg(long, default_value_t = 0.0)]
+    pub waiting: f64,
+    /// Initial `vllm:kv_cache_usage_perc` (0..1).
+    #[arg(long, default_value_t = 0.0)]
+    pub kv_cache_usage: f64,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum FailMode {
+    Status,
+    Reset,
+    Timeout,
 }
 
 fn parse_workers(value: &str) -> Result<usize, String> {
@@ -121,6 +153,14 @@ pub struct App {
     chat: Arc<Payloads>,
     completions: Arc<Payloads>,
     models: Bytes,
+    fault: AtomicU16,
+    requests: AtomicU64,
+    /// f64 bits of the reported queue depth and KV-cache usage.
+    waiting: AtomicU64,
+    kv: AtomicU64,
+    /// Non-zero: `/metrics` answers with this status instead.
+    metrics_status: AtomicU16,
+    metrics_scrapes: AtomicU64,
 }
 
 impl App {
@@ -129,8 +169,89 @@ impl App {
             chat: Arc::new(Payloads::new("mock", true, options.stream_chunks)),
             completions: Arc::new(Payloads::new("mock", false, options.stream_chunks)),
             models: Bytes::from(json!({"object":"list","data":[{"id":"mock","object":"model","created":1700000000,"owned_by":"mock"}]}).to_string()),
+            fault: AtomicU16::new(0),
+            requests: AtomicU64::new(0),
+            waiting: AtomicU64::new(options.waiting.to_bits()),
+            kv: AtomicU64::new(options.kv_cache_usage.to_bits()),
+            metrics_status: AtomicU16::new(0),
+            metrics_scrapes: AtomicU64::new(0),
             options,
         })
+    }
+
+    async fn respond(
+        &self,
+        request: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Body>, std::io::Error> {
+        if request.method() == Method::POST && request.uri().path() == "/fault" {
+            let status = request
+                .uri()
+                .query()
+                .and_then(|q| q.strip_prefix("status="))
+                .and_then(|s| s.parse::<u16>().ok());
+            return Ok(match status {
+                Some(status) if status == 0 || (400..=599).contains(&status) => {
+                    self.fault.store(status, Ordering::Relaxed);
+                    response(
+                        StatusCode::OK,
+                        "application/json",
+                        Bytes::from_static(b"{\"ok\":true}"),
+                    )
+                }
+                _ => error(
+                    StatusCode::BAD_REQUEST,
+                    "Expected status=0 or status=400..599",
+                ),
+            });
+        }
+        if request.uri().path() == "/load" && request.method() == Method::POST {
+            return Ok(self.set_load(request.uri().query().unwrap_or("")));
+        }
+        if request.uri().path() == "/metrics" && request.method() == Method::GET {
+            return Ok(self.metrics());
+        }
+        let failure = request
+            .headers()
+            .get("x-mock-fail")
+            .and_then(|h| h.to_str().ok());
+        match failure {
+            Some("reset") => return Err(std::io::Error::other("injected connection reset")),
+            Some("timeout") => return std::future::pending().await,
+            _ => {}
+        }
+        let periodic = self.options.fail_every > 0
+            && request.method() == Method::POST
+            && (self.requests.fetch_add(1, Ordering::Relaxed) + 1)
+                .is_multiple_of(self.options.fail_every);
+        if periodic {
+            match self.options.fail_mode {
+                FailMode::Reset => return Err(std::io::Error::other("injected connection reset")),
+                FailMode::Timeout => return std::future::pending().await,
+                FailMode::Status => {}
+            }
+        }
+        let status = failure
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or_else(|| {
+                if periodic {
+                    self.options.fail_status
+                } else {
+                    self.fault.load(Ordering::Relaxed)
+                }
+            });
+        if (400..=599).contains(&status) {
+            let mut response = error(
+                StatusCode::from_u16(status).expect("validated status"),
+                "Injected upstream failure",
+            );
+            if let Some(value) = request.headers().get("x-mock-retry-after") {
+                response
+                    .headers_mut()
+                    .insert(hyper::header::RETRY_AFTER, value.clone());
+            }
+            return Ok(response);
+        }
+        Ok(self.handle(request).await)
     }
 
     async fn handle(&self, request: Request<hyper::body::Incoming>) -> Response<Body> {
@@ -271,6 +392,87 @@ impl App {
             .expect("static headers")
     }
 
+    /// `POST /load?waiting=<n>&kv=<0..1>&metrics_status=<0|400..599>`: any
+    /// subset; values persist until changed.
+    fn set_load(&self, query: &str) -> Response<Body> {
+        let mut updates = Vec::new();
+        for pair in query.split('&').filter(|p| !p.is_empty()) {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            let ok = match key {
+                "waiting" => value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite() && *v >= 0.0)
+                    .map(|v| updates.push((&self.waiting, v.to_bits()))),
+                "kv" => value
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| (0.0..=1.0).contains(v))
+                    .map(|v| updates.push((&self.kv, v.to_bits()))),
+                "metrics_status" => value
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|&s| s == 0 || (400..=599).contains(&s))
+                    .map(|s| self.metrics_status.store(s, Ordering::Relaxed)),
+                _ => None,
+            };
+            if ok.is_none() {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "Expected waiting>=0, kv in 0..1, metrics_status=0|400..599",
+                );
+            }
+        }
+        for (target, bits) in updates {
+            target.store(bits, Ordering::Relaxed);
+        }
+        response(
+            StatusCode::OK,
+            "application/json",
+            Bytes::from(
+                json!({"waiting": f64::from_bits(self.waiting.load(Ordering::Relaxed)),
+                    "kv": f64::from_bits(self.kv.load(Ordering::Relaxed)),
+                    "scrapes": self.metrics_scrapes.load(Ordering::Relaxed)})
+                .to_string(),
+            ),
+        )
+    }
+
+    /// vLLM-style Prometheus text with the values set through `/load`.
+    fn metrics(&self) -> Response<Body> {
+        self.metrics_scrapes.fetch_add(1, Ordering::Relaxed);
+        let status = self.metrics_status.load(Ordering::Relaxed);
+        if status != 0 {
+            return error(
+                StatusCode::from_u16(status).expect("validated status"),
+                "Injected metrics failure",
+            );
+        }
+        let model = self
+            .options
+            .served_model_name
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let waiting = f64::from_bits(self.waiting.load(Ordering::Relaxed));
+        let kv = f64::from_bits(self.kv.load(Ordering::Relaxed));
+        let labels = format!("engine=\"0\",model_name=\"{model}\"");
+        response(
+            StatusCode::OK,
+            "text/plain; version=0.0.4; charset=utf-8",
+            Bytes::from(format!(
+                "# HELP vllm:num_requests_waiting Number of requests waiting to be processed.\n\
+                 # TYPE vllm:num_requests_waiting gauge\n\
+                 vllm:num_requests_waiting{{{labels}}} {waiting:?}\n\
+                 # HELP vllm:num_requests_running Number of requests in model execution batches.\n\
+                 # TYPE vllm:num_requests_running gauge\n\
+                 vllm:num_requests_running{{{labels}}} 0.0\n\
+                 # HELP vllm:kv_cache_usage_perc KV-cache usage. 1 means 100 percent usage.\n\
+                 # TYPE vllm:kv_cache_usage_perc gauge\n\
+                 vllm:kv_cache_usage_perc{{{labels}}} {kv:?}\n"
+            )),
+        )
+    }
+
     async fn latency(&self) {
         if self.options.latency_ms > 0 {
             tokio::time::sleep(Duration::from_millis(self.options.latency_ms)).await;
@@ -306,7 +508,7 @@ pub async fn serve(listener: TcpListener, app: Arc<App>) -> std::io::Result<()> 
         tokio::spawn(async move {
             let service = service_fn(move |request| {
                 let app = app.clone();
-                async move { Ok::<_, Infallible>(app.handle(request).await) }
+                async move { app.respond(request).await }
             });
             let _ = hyper::server::conn::http1::Builder::new()
                 .keep_alive(true)

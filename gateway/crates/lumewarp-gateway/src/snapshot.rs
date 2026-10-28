@@ -17,7 +17,18 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 /// Capabilities this gateway understands (`Snapshot.required_capabilities`).
-pub const SUPPORTED_CAPABILITIES: &[&str] = &[];
+pub const SUPPORTED_CAPABILITIES: &[&str] = &[
+    "retry",
+    "fallbacks",
+    "health_check",
+    "circuit_breaker",
+    "traffic_split",
+    "lowest_latency",
+    "vllm_load",
+];
+/// Upper bounds that keep split labels and per-request work bounded.
+pub const MAX_SPLITS: usize = 16;
+pub const MAX_SPLIT_NAME: usize = 32;
 pub const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_KEYS: usize = 200_000;
 pub const FILE_NAME: &str = "snapshot.pb";
@@ -97,6 +108,14 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             "unsupported capability {cap:?}"
         )));
     }
+    let require = |used: bool, cap: &str| -> Result<(), ApplyError> {
+        if used && !snapshot.required_capabilities.iter().any(|c| c == cap) {
+            return Err(ApplyError::invalid(format!(
+                "field requires capability {cap:?}"
+            )));
+        }
+        Ok(())
+    };
     if snapshot.api_keys.len() > MAX_KEYS {
         return Err(ApplyError::invalid(format!(
             "snapshot has more than {MAX_KEYS} keys"
@@ -112,6 +131,21 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
         "upstream",
     )?;
     for u in &snapshot.upstreams {
+        require(u.health_check.is_some(), "health_check")?;
+        require(u.circuit_breaker.is_some(), "circuit_breaker")?;
+        require(!u.metrics_url.is_empty(), "vllm_load")?;
+        if let Some(h) = &u.health_check {
+            if h.interval_ms < 1000 || h.timeout_ms == 0 || h.timeout_ms >= h.interval_ms {
+                return Err(ApplyError::invalid(
+                    "health interval must be >= 1000 ms and 0 < timeout < interval",
+                ));
+            }
+            if !h.path.is_empty() && (!h.path.starts_with('/') || h.path.contains(['?', '#'])) {
+                return Err(ApplyError::invalid(
+                    "health path must be an absolute path without query or fragment",
+                ));
+            }
+        }
         known::<pb::UpstreamKind>(u.kind, false, &format!("upstream {:?} kind", u.name))?;
         // UNSPECIFIED is documented as INCLUDE_USAGE.
         known::<pb::StreamUsageMode>(
@@ -138,8 +172,31 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             )));
         }
     }
-    unique(snapshot.routes.iter().map(|r| r.model.as_str()), "route")?;
+    let routes = unique(snapshot.routes.iter().map(|r| r.model.as_str()), "route")?;
     for r in &snapshot.routes {
+        require(r.retry.is_some(), "retry")?;
+        require(!r.fallbacks.is_empty(), "fallbacks")?;
+        require(
+            !r.traffic_split.is_empty() || r.sticky != 0 || !r.sticky_header.is_empty(),
+            "traffic_split",
+        )?;
+        let sticky = known::<pb::StickyBy>(r.sticky, true, "sticky")?;
+        validate_split(r, sticky, &deployments)?;
+        if let Some(p) = &r.retry {
+            if p.max_attempts > 5 || p.retry_on_status.iter().any(|s| !(400..=599).contains(s)) {
+                return Err(ApplyError::invalid(
+                    "retry max_attempts must be <= 5 and statuses in 400..=599",
+                ));
+            }
+        }
+        for fallback in &r.fallbacks {
+            if fallback == &r.model || !routes.contains(fallback.as_str()) {
+                return Err(ApplyError::invalid(format!(
+                    "route {:?} has a self or unknown fallback {:?}",
+                    r.model, fallback
+                )));
+            }
+        }
         if r.model == "unknown" {
             return Err(ApplyError::invalid(
                 "route alias 'unknown' is reserved for metrics",
@@ -150,11 +207,14 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             false,
             &format!("route {:?} strategy", r.model),
         )?;
-        if strategy == pb::RoutingStrategy::LowestLatency {
-            return Err(ApplyError::unsupported(format!(
-                "route {:?}: lowest_latency is not supported yet",
-                r.model
-            )));
+        require(
+            strategy == pb::RoutingStrategy::LowestLatency,
+            "lowest_latency",
+        )?;
+        require(strategy == pb::RoutingStrategy::VllmLoad, "vllm_load")?;
+        // With traffic_split the route's own deployment list is ignored.
+        if !r.traffic_split.is_empty() {
+            continue;
         }
         if r.deployments.is_empty() {
             return Err(ApplyError::invalid(format!(
@@ -236,6 +296,76 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+/// Split names are bounded metric labels; every split names known deployments
+/// and the weights must leave something to route to.
+fn validate_split(
+    r: &pb::ModelRoute,
+    sticky: pb::StickyBy,
+    deployments: &HashSet<&str>,
+) -> Result<(), ApplyError> {
+    let model = &r.model;
+    let fail = |what: String| Err(ApplyError::invalid(format!("route {model:?}: {what}")));
+    match sticky {
+        pb::StickyBy::Header => {
+            if r.sticky_header.is_empty()
+                || hyper::header::HeaderName::from_bytes(r.sticky_header.as_bytes()).is_err()
+            {
+                return fail("sticky=header needs a valid sticky_header".into());
+            }
+        }
+        _ if !r.sticky_header.is_empty() => {
+            return fail("sticky_header is only used with sticky=header".into());
+        }
+        _ => {}
+    }
+    if r.traffic_split.is_empty() {
+        if sticky != pb::StickyBy::None {
+            return fail("sticky needs a traffic_split".into());
+        }
+        return Ok(());
+    }
+    if r.traffic_split.len() > MAX_SPLITS {
+        return fail(format!("more than {MAX_SPLITS} traffic splits"));
+    }
+    let mut names = HashSet::new();
+    let mut total = 0u64;
+    for split in &r.traffic_split {
+        let name = &split.name;
+        if name.is_empty()
+            || name.len() > MAX_SPLIT_NAME
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        {
+            return fail(format!(
+                "split name {name:?} must be 1..={MAX_SPLIT_NAME} of [A-Za-z0-9_.-]"
+            ));
+        }
+        if !names.insert(name.as_str()) {
+            return fail(format!("duplicate split {name:?}"));
+        }
+        if split.deployments.is_empty() {
+            return fail(format!("split {name:?} has no deployments"));
+        }
+        let mut seen = HashSet::new();
+        for d in &split.deployments {
+            if !deployments.contains(d.as_str()) {
+                return fail(format!(
+                    "split {name:?} references unknown deployment {d:?}"
+                ));
+            }
+            if !seen.insert(d.as_str()) {
+                return fail(format!("split {name:?} repeats deployment {d:?}"));
+            }
+        }
+        total += u64::from(split.weight);
+    }
+    if total == 0 {
+        return fail("traffic split weights must sum to more than 0".into());
     }
     Ok(())
 }
@@ -488,6 +618,7 @@ pub(crate) mod tests {
             model: model.into(),
             deployments: deployments.iter().map(|d| d.to_string()).collect(),
             strategy: pb::RoutingStrategy::Weighted as i32,
+            ..Default::default()
         }
     }
 
@@ -562,6 +693,157 @@ pub(crate) mod tests {
     fn base_is_valid() {
         validate(&base(), SUPPORTED_CAPABILITIES).unwrap();
         validate(&Snapshot::default(), SUPPORTED_CAPABILITIES).unwrap();
+    }
+
+    #[test]
+    fn resilience_fields_require_their_capabilities() {
+        for cap in SUPPORTED_CAPABILITIES {
+            let mut s = base();
+            match *cap {
+                "retry" => s.routes[0].retry = Some(pb::RetryPolicy::default()),
+                "fallbacks" => s.routes[0].fallbacks = vec!["m2".into()],
+                "health_check" => {
+                    s.upstreams[0].health_check = Some(pb::HealthCheck {
+                        interval_ms: 1000,
+                        timeout_ms: 100,
+                        ..Default::default()
+                    })
+                }
+                "circuit_breaker" => {
+                    s.upstreams[0].circuit_breaker = Some(pb::CircuitBreaker::default())
+                }
+                "traffic_split" => s.routes[0].traffic_split = vec![split("stable", &["a"], 1)],
+                "lowest_latency" => {
+                    s.routes[0].strategy = pb::RoutingStrategy::LowestLatency as i32
+                }
+                "vllm_load" => s.routes[0].strategy = pb::RoutingStrategy::VllmLoad as i32,
+                _ => unreachable!(),
+            }
+            assert_code(
+                validate(&s, SUPPORTED_CAPABILITIES),
+                NackCode::InvalidConfig,
+            );
+            s.required_capabilities.push((*cap).into());
+            validate(&s, SUPPORTED_CAPABILITIES).unwrap();
+        }
+    }
+
+    #[test]
+    fn retry_fallback_and_health_boundaries() {
+        for (attempts, statuses, valid) in [
+            (0, vec![], true),
+            (5, vec![400, 599], true),
+            (6, vec![], false),
+            (2, vec![399], false),
+            (2, vec![600], false),
+        ] {
+            let mut s = base();
+            s.required_capabilities.push("retry".into());
+            s.routes[0].retry = Some(pb::RetryPolicy {
+                max_attempts: attempts,
+                retry_on_status: statuses,
+                total_timeout_ms: 10,
+            });
+            assert_eq!(validate(&s, SUPPORTED_CAPABILITIES).is_ok(), valid);
+        }
+        for (interval, timeout, valid) in [
+            (1000, 999, true),
+            (999, 1, false),
+            (1000, 1000, false),
+            (1000, 0, false),
+        ] {
+            let mut s = base();
+            s.required_capabilities.push("health_check".into());
+            s.upstreams[0].health_check = Some(pb::HealthCheck {
+                interval_ms: interval,
+                timeout_ms: timeout,
+                ..Default::default()
+            });
+            assert_eq!(validate(&s, SUPPORTED_CAPABILITIES).is_ok(), valid);
+        }
+        for fallback in ["m1", "missing"] {
+            let mut s = base();
+            s.required_capabilities.push("fallbacks".into());
+            s.routes[0].fallbacks.push(fallback.into());
+            assert_code(
+                validate(&s, SUPPORTED_CAPABILITIES),
+                NackCode::InvalidConfig,
+            );
+        }
+    }
+
+    pub fn split(name: &str, deployments: &[&str], weight: u32) -> pb::TrafficSplit {
+        pb::TrafficSplit {
+            name: name.into(),
+            deployments: deployments.iter().map(|d| d.to_string()).collect(),
+            weight,
+        }
+    }
+
+    #[test]
+    fn traffic_split_and_sticky_validation() {
+        let check = |mutate: &dyn Fn(&mut pb::ModelRoute)| {
+            let mut s = base();
+            s.required_capabilities.push("traffic_split".into());
+            s.routes[1].traffic_split =
+                vec![split("stable", &["a"], 9), split("canary", &["b"], 1)];
+            mutate(&mut s.routes[1]);
+            validate(&s, SUPPORTED_CAPABILITIES)
+        };
+        check(&|_| {}).unwrap();
+        // The route's own list is ignored (may be empty) with splits.
+        check(&|r| r.deployments.clear()).unwrap();
+        check(&|r| r.traffic_split[1].weight = 0).unwrap();
+        check(&|r| {
+            r.sticky = pb::StickyBy::Header as i32;
+            r.sticky_header = "X-Session".into();
+        })
+        .unwrap();
+        check(&|r| r.sticky = pb::StickyBy::Team as i32).unwrap();
+        check(&|r| r.sticky = pb::StickyBy::Key as i32).unwrap();
+        type Mutation = Box<dyn Fn(&mut pb::ModelRoute)>;
+        let bad: Vec<Mutation> = vec![
+            Box::new(|r| {
+                r.traffic_split[0].weight = 0;
+                r.traffic_split[1].weight = 0;
+            }),
+            Box::new(|r| r.traffic_split[1].name = "stable".into()),
+            Box::new(|r| r.traffic_split[1].name.clear()),
+            Box::new(|r| r.traffic_split[1].name = "x".repeat(MAX_SPLIT_NAME + 1)),
+            Box::new(|r| r.traffic_split[1].name = "can ary".into()),
+            Box::new(|r| r.traffic_split[1].deployments.clear()),
+            Box::new(|r| r.traffic_split[1].deployments = vec!["nope".into()]),
+            Box::new(|r| r.traffic_split[1].deployments = vec!["b".into(), "b".into()]),
+            Box::new(|r| r.sticky = pb::StickyBy::Header as i32),
+            Box::new(|r| {
+                r.sticky = pb::StickyBy::Header as i32;
+                r.sticky_header = "bad header".into();
+            }),
+            Box::new(|r| r.sticky_header = "x-session".into()),
+            Box::new(|r| r.sticky = 99),
+            Box::new(|r| {
+                r.traffic_split = (0..=MAX_SPLITS)
+                    .map(|i| split(&format!("s{i}"), &["a"], 1))
+                    .collect()
+            }),
+            Box::new(|r| {
+                r.traffic_split.clear();
+                r.sticky = pb::StickyBy::Key as i32;
+            }),
+        ];
+        for mutate in &bad {
+            assert_code(check(mutate.as_ref()), NackCode::InvalidConfig);
+        }
+        // Without the capability the fields are an error, not ignored.
+        let mut s = base();
+        s.routes[0].traffic_split = vec![split("stable", &["a"], 1)];
+        assert_code(
+            validate(&s, SUPPORTED_CAPABILITIES),
+            NackCode::InvalidConfig,
+        );
+        // An unsupported capability is still a NACK of its own kind.
+        s.required_capabilities.push("traffic_split".into());
+        assert_code(validate(&s, &[]), NackCode::UnsupportedFeature);
     }
 
     #[test]
@@ -724,6 +1006,9 @@ pub(crate) mod tests {
         validate(&s, &["jwt"]).unwrap();
         let mut s = base();
         s.routes[0].strategy = pb::RoutingStrategy::LowestLatency as i32;
+        assert_code(validate(&s, &[]), NackCode::InvalidConfig);
+        s.required_capabilities = vec!["lowest_latency".into()];
+        validate(&s, &["lowest_latency"]).unwrap();
         assert_code(validate(&s, &[]), NackCode::UnsupportedFeature);
     }
 

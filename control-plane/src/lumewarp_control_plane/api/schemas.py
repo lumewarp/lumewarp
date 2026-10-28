@@ -11,7 +11,6 @@ import uuid
 from datetime import UTC, datetime
 from datetime import date as date_type
 from typing import Annotated, Any
-from urllib.parse import urlsplit
 
 from pydantic import (
     AfterValidator,
@@ -22,12 +21,18 @@ from pydantic import (
     model_validator,
 )
 
+from lumewarp_control_plane.compiler.validate import (
+    health_path_problem,
+    metrics_url_problem,
+    upstream_url_problem,
+)
 from lumewarp_control_plane.models import (
     KeyLifecycle,
     KeyOwnerKind,
     ModelAccess,
     RequestOutcome,
     RoutingStrategy,
+    StickyBy,
     StreamUsageMode,
     TeamRole,
     UpstreamKind,
@@ -265,6 +270,88 @@ class KeyCreated(ApiModel):
 # --------------------------------------------------------------------------- routing
 
 
+INT32_MAX = 2**31 - 1
+# RFC 9110 token: what the gateway accepts as a header name (hyper HeaderName).
+_HEADER_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+# Split names are metric labels on the gateway (snapshot.rs::validate_split).
+_SPLIT_NAME = re.compile(r"[A-Za-z0-9_.-]{1,32}")
+MAX_SPLITS = 16
+MAX_RETRY_ATTEMPTS = 5
+
+
+def _base_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if problem := upstream_url_problem(value):
+        raise ValueError(f"base_url {problem}")
+    return value.rstrip("/")
+
+
+def _metrics_url(value: str | None) -> str | None:
+    """Gateway rule (router.rs::metrics_uri): explicit URL is plain http(s), no userinfo."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if problem := metrics_url_problem(value):
+        raise ValueError(f"metrics_url {problem}")
+    return value
+
+
+class HealthCheckIn(ApiModel):
+    """Active probe: GET <base_url><path> every interval; 2xx within timeout = success."""
+
+    path: str | None = Field(
+        default=None, max_length=400, description="Relative to base_url; null = /models."
+    )
+    interval_ms: int = Field(ge=1000, le=INT32_MAX)
+    timeout_ms: int = Field(ge=1, le=INT32_MAX, description="Must be below interval_ms.")
+    unhealthy_threshold: int | None = Field(
+        default=None, ge=1, le=1000, description="Consecutive failures; null = 3."
+    )
+    healthy_threshold: int | None = Field(
+        default=None, ge=1, le=1000, description="Consecutive successes; null = 1."
+    )
+
+    @field_validator("path")
+    @classmethod
+    def _path(cls, value: str | None) -> str | None:
+        if value is None or value == "":
+            return None
+        if problem := health_path_problem(value):
+            raise ValueError(problem)
+        return value
+
+    @model_validator(mode="after")
+    def _timeout_below_interval(self) -> HealthCheckIn:
+        if self.timeout_ms >= self.interval_ms:
+            raise ValueError("timeout_ms must be below interval_ms")
+        return self
+
+
+class HealthCheckOut(ReadModel):
+    path: str | None
+    interval_ms: int
+    timeout_ms: int
+    unhealthy_threshold: int | None
+    healthy_threshold: int | None
+
+
+class CircuitBreakerIn(ApiModel):
+    failure_threshold: int | None = Field(
+        default=None, ge=1, le=1000, description="Consecutive failures to open; null = 5."
+    )
+    open_ms: int | None = Field(
+        default=None, ge=1, le=INT32_MAX, description="Open time before a trial; null = 30000."
+    )
+
+
+class CircuitBreakerOut(ReadModel):
+    failure_threshold: int | None
+    open_ms: int | None
+
+
 class UpstreamCreate(ApiModel):
     name: Name
     kind: UpstreamKind
@@ -272,47 +359,55 @@ class UpstreamCreate(ApiModel):
     api_key_ref: str | None = Field(default=None, max_length=200)
     timeout_ms: int = Field(default=0, ge=0)
     stream_usage_mode: StreamUsageMode = StreamUsageMode.INCLUDE_USAGE
+    health_check: HealthCheckIn | None = None
+    circuit_breaker: CircuitBreakerIn | None = None
+    metrics_url: str | None = Field(default=None, max_length=2000)
 
     @field_validator("base_url")
     @classmethod
     def _http_url(cls, value: str) -> str:
-        parts = urlsplit(value)
-        if parts.scheme not in ("http", "https") or not parts.netloc:
-            raise ValueError("base_url must be an absolute http(s) URL")
-        if parts.query or parts.fragment or parts.username or parts.password:
-            raise ValueError("base_url must not contain userinfo, query or fragment")
-        return value.rstrip("/")
+        return _base_url(value)  # type: ignore[return-value]
 
     @field_validator("api_key_ref")
     @classmethod
     def _check_api_key_ref(cls, value: str | None) -> str | None:
         return _env_name(value)
 
+    @field_validator("metrics_url")
+    @classmethod
+    def _check_metrics_url(cls, value: str | None) -> str | None:
+        return _metrics_url(value)
+
 
 class UpstreamUpdate(ApiModel):
+    """PATCH: omitted fields are unchanged; `health_check`, `circuit_breaker` and
+    `metrics_url` accept null to remove the setting.
+    """
+
     name: Name | None = None
     kind: UpstreamKind | None = None
     base_url: str | None = Field(default=None, min_length=1)
     api_key_ref: str | None = Field(default=None, max_length=200)
     timeout_ms: int | None = Field(default=None, ge=0)
     stream_usage_mode: StreamUsageMode | None = None
+    health_check: HealthCheckIn | None = None
+    circuit_breaker: CircuitBreakerIn | None = None
+    metrics_url: str | None = Field(default=None, max_length=2000)
 
     @field_validator("base_url")
     @classmethod
     def _http_url(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        parts = urlsplit(value)
-        if parts.scheme not in ("http", "https") or not parts.netloc:
-            raise ValueError("base_url must be an absolute http(s) URL")
-        if parts.query or parts.fragment or parts.username or parts.password:
-            raise ValueError("base_url must not contain userinfo, query or fragment")
-        return value.rstrip("/")
+        return _base_url(value)
 
     @field_validator("api_key_ref")
     @classmethod
     def _check_api_key_ref(cls, value: str | None) -> str | None:
         return _env_name(value)
+
+    @field_validator("metrics_url")
+    @classmethod
+    def _check_metrics_url(cls, value: str | None) -> str | None:
+        return _metrics_url(value)
 
 
 class UpstreamOut(ReadModel):
@@ -323,8 +418,45 @@ class UpstreamOut(ReadModel):
     api_key_ref: str | None
     timeout_ms: int
     stream_usage_mode: StreamUsageMode
+    health_check: HealthCheckOut | None
+    circuit_breaker: CircuitBreakerOut | None
+    metrics_url: str | None
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_row(cls, data: Any) -> Any:
+        if isinstance(data, dict) or not hasattr(data, "health_check_interval_ms"):
+            return data
+        health = None
+        if data.health_check_interval_ms is not None:
+            health = HealthCheckOut(
+                path=data.health_check_path,
+                interval_ms=data.health_check_interval_ms,
+                timeout_ms=data.health_check_timeout_ms,
+                unhealthy_threshold=data.health_check_unhealthy_threshold,
+                healthy_threshold=data.health_check_healthy_threshold,
+            )
+        breaker = None
+        if data.circuit_breaker_enabled:
+            breaker = CircuitBreakerOut(
+                failure_threshold=data.circuit_failure_threshold, open_ms=data.circuit_open_ms
+            )
+        return {
+            "id": data.id,
+            "name": data.name,
+            "kind": data.kind,
+            "base_url": data.base_url,
+            "api_key_ref": data.api_key_ref,
+            "timeout_ms": data.timeout_ms,
+            "stream_usage_mode": data.stream_usage_mode,
+            "health_check": health,
+            "circuit_breaker": breaker,
+            "metrics_url": data.metrics_url,
+            "created_at": data.created_at,
+            "updated_at": data.updated_at,
+        }
 
 
 class DeploymentCreate(ApiModel):
@@ -365,16 +497,130 @@ class DeploymentOut(ReadModel):
     updated_at: datetime
 
 
+class RetryPolicyIn(ApiModel):
+    """Retries happen only before any response byte reached the client."""
+
+    max_attempts: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_RETRY_ATTEMPTS,
+        description="Total attempts including the first; null = gateway default (2).",
+    )
+    retry_on_status: list[int] = Field(
+        default_factory=list,
+        max_length=200,
+        description="Upstream statuses that are retried; empty = 429, 502, 503, 504.",
+    )
+    total_timeout_ms: int = Field(
+        default=0, ge=0, le=INT32_MAX, description="Bound for all attempts; 0 = none."
+    )
+
+    @field_validator("retry_on_status")
+    @classmethod
+    def _statuses(cls, value: list[int]) -> list[int]:
+        if any(not 400 <= code <= 599 for code in value):
+            raise ValueError("retry_on_status entries must be in 400..599")
+        if len(set(value)) != len(value):
+            raise ValueError("retry_on_status contains duplicates")
+        return sorted(value)
+
+
+class RetryPolicyOut(ReadModel):
+    max_attempts: int | None
+    retry_on_status: list[int]
+    total_timeout_ms: int
+
+
+class TrafficSplitIn(ApiModel):
+    name: str = Field(description="1..32 of [A-Za-z0-9_.-]; a metric label.")
+    weight: int = Field(ge=0, le=INT32_MAX, description="Share = weight / sum(weights).")
+    deployment_ids: list[uuid.UUID] = Field(min_length=1)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, value: str) -> str:
+        if not _SPLIT_NAME.fullmatch(value):
+            raise ValueError("split name must be 1..32 characters of [A-Za-z0-9_.-]")
+        return value
+
+    @field_validator("deployment_ids")
+    @classmethod
+    def _unique(cls, value: list[uuid.UUID]) -> list[uuid.UUID]:
+        if len(set(value)) != len(value):
+            raise ValueError("a split lists a deployment twice")
+        return value
+
+
+class TrafficSplitOut(ReadModel):
+    name: str
+    weight: int
+    deployment_ids: list[uuid.UUID]
+
+
+def _check_splits(value: list[TrafficSplitIn] | None) -> list[TrafficSplitIn] | None:
+    if not value:
+        return value
+    if len(value) > MAX_SPLITS:
+        raise ValueError(f"at most {MAX_SPLITS} traffic splits")
+    names = [s.name for s in value]
+    if len(set(names)) != len(names):
+        raise ValueError("split names must be unique")
+    if sum(s.weight for s in value) <= 0:
+        raise ValueError("split weights must sum to more than 0")
+    return value
+
+
+def _sticky_header(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not _HEADER_TOKEN.fullmatch(value):
+        raise ValueError("sticky_header must be a valid HTTP header name")
+    return value.lower()
+
+
+StickyHeader = Annotated[str, Field(max_length=200)]
+Splits = Annotated[list[TrafficSplitIn], AfterValidator(_check_splits)]
+
+
 class RouteCreate(ApiModel):
     model: ModelName
     strategy: RoutingStrategy = RoutingStrategy.WEIGHTED
-    deployment_ids: list[uuid.UUID] = Field(min_length=1)
+    deployment_ids: list[uuid.UUID] = Field(
+        default_factory=list,
+        description="Ordered deployments; may be empty only when traffic_split is set.",
+    )
+    retry: RetryPolicyIn | None = None
+    fallback_route_ids: list[uuid.UUID] = Field(
+        default_factory=list, description="Routes tried in order once this route failed."
+    )
+    traffic_split: Splits = Field(default_factory=list)
+    sticky: StickyBy = StickyBy.NONE
+    sticky_header: StickyHeader | None = None
+
+    @field_validator("sticky_header")
+    @classmethod
+    def _header(cls, value: str | None) -> str | None:
+        return _sticky_header(value)
 
 
 class RouteUpdate(ApiModel):
+    """PATCH: omitted fields are unchanged; lists replace the stored list; `retry` and
+    `sticky_header` accept null to remove the setting.
+    """
+
     model: ModelName | None = None
     strategy: RoutingStrategy | None = None
-    deployment_ids: list[uuid.UUID] | None = Field(default=None, min_length=1)
+    deployment_ids: list[uuid.UUID] | None = None
+    retry: RetryPolicyIn | None = None
+    fallback_route_ids: list[uuid.UUID] | None = None
+    traffic_split: Splits | None = None
+    sticky: StickyBy | None = None
+    sticky_header: StickyHeader | None = None
+
+    @field_validator("sticky_header")
+    @classmethod
+    def _header(cls, value: str | None) -> str | None:
+        return _sticky_header(value)
 
 
 class RouteDeploymentOut(ReadModel):
@@ -387,6 +633,11 @@ class RouteOut(ReadModel):
     model: str
     strategy: RoutingStrategy
     deployments: list[RouteDeploymentOut]
+    retry: RetryPolicyOut | None
+    fallback_route_ids: list[uuid.UUID]
+    traffic_split: list[TrafficSplitOut]
+    sticky: StickyBy
+    sticky_header: str | None
     created_at: datetime
     updated_at: datetime
 

@@ -66,6 +66,8 @@ class RouteView:
     model: str
     strategy: str  # models.RoutingStrategy value
     deployments: tuple[DeploymentView, ...]
+    # Each split is an independent pool; empty means the plain deployments pool.
+    deployment_pools: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -253,9 +255,10 @@ def _breaks_weighted_route(routes: Sequence[RouteView], before: dict[str, int],
     for r in routes:
         if r.strategy != "weighted":
             continue
-        names = [d.name for d in r.deployments]
-        if sum(before[n] for n in names) > 0 and sum(after[n] for n in names) == 0:
-            return r.model
+        pools = r.deployment_pools or (tuple(d.name for d in r.deployments),)
+        for names in pools:
+            if sum(before[n] for n in names) > 0 and sum(after[n] for n in names) == 0:
+                return r.model
     return None
 
 

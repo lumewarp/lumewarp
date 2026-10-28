@@ -5,7 +5,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use bytes::{Bytes, BytesMut};
@@ -21,18 +21,21 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use lumewarp_proto::{
-    config::v1::StreamUsageMode,
+    config::v1::{CircuitBreaker, StreamUsageMode},
     usage::v1::{RequestOutcome, UsageState},
 };
 use serde::Deserialize;
 use serde_json::value::RawValue;
+use tracing::Instrument;
 
 use crate::{
     auth::{self, Caller},
     error,
-    metrics::{Observation, RequestMetrics, UpstreamError},
+    health::Breaker,
+    metrics::{Observation, RequestMetrics, UpstreamError, ATTEMPT_OUTCOMES},
+    ratelimit::clock,
     ratelimit::Permit,
-    router::{Deployment, InFlight, Router},
+    router::{Deployment, InFlight, Router, Skipped},
     telemetry,
     usage::{Captured, PendingCapture, RequestCtx, SseFilter, Tee, UsageCapture},
 };
@@ -377,22 +380,54 @@ pub async fn forward(
             return error::rate_limited(limited.retry_after_secs);
         }
     };
-    let guard = router.acquire(route, endpoint, &caller);
+    // Only requests that may retry fund the global retry budget; routes
+    // without a retry policy never touch its shared state.
+    if route.retry.is_some() {
+        router.runtime.retry_budget.request();
+    }
+    let mut skipped = Skipped::default();
+    let Some((mut guard, initial_fallback, split)) =
+        router.acquire_initial(route, endpoint, &caller, &parts.headers, &mut skipped)
+    else {
+        let handles = router.rejected_model(&caller, &model, endpoint);
+        observation.routed(handles.clone(), stream);
+        report_rejection(
+            router,
+            &caller,
+            request,
+            handles,
+            endpoint,
+            stream,
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+        return error::json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_unavailable",
+            "Upstream recovery trial already in progress",
+        );
+    };
+    if let Some(counter) = initial_fallback {
+        counter.inc();
+    }
     observation.routed(guard.metrics.clone(), stream);
-    let deployment = &guard.deployment;
-    tracing::debug!(deployment = %deployment.name, stream, "proxying request");
-    // Streams carry usage only with include_usage; force it where the upstream
-    // supports it and strip the extra event again if the client did not ask.
-    let inject = stream
-        && deployment.stream_usage_mode == StreamUsageMode::IncludeUsage
-        && !include_usage.requested();
-    let rewritten = fields.rewrite(
-        &body,
-        &deployment.upstream_model_json,
-        inject.then_some(&include_usage),
-    );
-    let uri = match upstream_uri(deployment, &parts.uri) {
-        Ok(uri) => uri,
+    strip_request_headers(&mut parts.headers);
+    parts.headers.remove(header::AUTHORIZATION);
+    parts.extensions.clear();
+    parts.version = hyper::Version::HTTP_11;
+    let max_attempts = route.retry.as_ref().map_or(1, |p| {
+        if p.max_attempts == 0 {
+            2
+        } else {
+            p.max_attempts
+        }
+    });
+    // Preserve headers only for retry-enabled routes. The ordinary single-send
+    // path moves the original map and adds no replay allocation.
+    let replay = (max_attempts > 1).then(|| parts.clone());
+    // Resolved before a usage capture exists: an unusable request URI is a
+    // client error, never a cancelled (499) usage event.
+    let mut first_uri = match upstream_uri(&guard.deployment, &parts.uri) {
+        Ok(uri) => Some(uri),
         Err(_) => {
             return error::json(
                 StatusCode::BAD_REQUEST,
@@ -401,23 +436,14 @@ pub async fn forward(
             )
         }
     };
-    strip_request_headers(&mut parts.headers);
-    parts.headers.remove(header::AUTHORIZATION);
-    if let Some(value) = &deployment.authorization {
-        parts.headers.insert(header::AUTHORIZATION, value.clone());
-    }
-    parts.headers.insert(header::HOST, deployment.host.clone());
-    parts.uri = uri;
-    parts.extensions.clear();
-    if observation.otel {
-        telemetry::inject(&mut parts.headers);
-    }
-    // The downstream protocol version is independent of the upstream connection.
-    parts.version = hyper::Version::HTTP_11;
-    let upstream_request = Request::from_parts(parts, Full::new(rewritten));
-    // Held across the upstream await: dropping this future (client gone
-    // before headers) still accounts the request once, as cancelled.
-    let pending = PendingCapture::new(UsageCapture {
+    let original_uri = parts.uri.clone();
+    let mut next_parts = Some(parts);
+    let deadline = route
+        .retry
+        .as_ref()
+        .filter(|p| p.total_timeout_ms > 0)
+        .map(|p| tokio::time::Instant::now() + Duration::from_millis(p.total_timeout_ms.into()));
+    let mut pending = PendingCapture::new(UsageCapture {
         runtime: router.runtime.clone(),
         caller: caller.clone(),
         request,
@@ -428,57 +454,544 @@ pub async fn forward(
         stream,
         status: 499,
     });
-    let failed = |pending: PendingCapture, status: StatusCode| {
-        let mut capture = pending.take();
-        capture.status = status.as_u16();
-        capture.finalize(RequestOutcome::UpstreamError, UsageState::Missing, None);
-    };
-    observation.upstream_started = Some(Instant::now());
-    let response =
-        match tokio::time::timeout(deployment.timeout, client.request(upstream_request)).await {
-            Ok(Ok(response)) => response,
+    let mut tried = [0; 5];
+    // The latest upstream response kept while a later attempt runs, with the
+    // reservation (deployment, metrics handles, in-flight slot) it belongs to.
+    let mut last_response: Option<(Response<Incoming>, bool, bool, InFlight)> = None;
+    let mut used_fallback = initial_fallback.is_some();
+    let mut current_fallback = initial_fallback;
+    let mut attempt = 0usize;
+    let (response, fallback_response, inject) = loop {
+        attempt += 1;
+        tried[attempt - 1] = guard.deployment.label;
+        let deployment = &guard.deployment;
+        let inject = stream
+            && deployment.stream_usage_mode == StreamUsageMode::IncludeUsage
+            && !include_usage.requested();
+        let rewritten = fields.rewrite(
+            &body,
+            &deployment.upstream_model_json,
+            inject.then_some(&include_usage),
+        );
+        let mut parts = next_parts
+            .take()
+            .unwrap_or_else(|| replay.as_ref().expect("retry template").clone());
+        let uri = match first_uri.take() {
+            Some(uri) => Ok(uri),
+            None => upstream_uri(deployment, &original_uri),
+        };
+        parts.uri = match uri {
+            Ok(uri) => uri,
+            Err(_) => {
+                pending.discard();
+                return error::json(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "Invalid request URI",
+                );
+            }
+        };
+        if let Some(value) = &deployment.authorization {
+            parts.headers.insert(header::AUTHORIZATION, value.clone());
+        }
+        parts.headers.insert(header::HOST, deployment.host.clone());
+        let span = if observation.otel {
+            tracing::info_span!(parent: &observation.span, "upstream_attempt",
+                deployment = %deployment.name, attempt, outcome = tracing::field::Empty)
+        } else {
+            tracing::Span::none()
+        };
+        if observation.otel {
+            let _entered = span.enter();
+            telemetry::inject(&mut parts.headers);
+        }
+        let upstream_request = Request::from_parts(parts, Full::new(rewritten));
+        // `capped`: the route's total_timeout, not the deployment's own
+        // timeout, bounds this attempt.
+        let (timeout, capped) = match deadline {
+            Some(end) => {
+                let left = end.saturating_duration_since(tokio::time::Instant::now());
+                if left < deployment.timeout {
+                    (left, true)
+                } else {
+                    (deployment.timeout, false)
+                }
+            }
+            None => (deployment.timeout, false),
+        };
+        observation
+            .upstream_started
+            .get_or_insert_with(Instant::now);
+        // Only deployments behind a LOWEST_LATENCY route pay for a clock read.
+        let attempt_started = deployment.track_latency.then(Instant::now);
+        let result = tokio::time::timeout(timeout, client.request(upstream_request))
+            .instrument(span.clone())
+            .await;
+        let (response, outcome, retryable, error_status) = match result {
+            Ok(Ok(response)) => {
+                let status = response.status();
+                let retryable = retry_status(route.retry.as_ref(), status.as_u16());
+                if matches!(status.as_u16(), 429 | 503) {
+                    if let Some(delay) = response
+                        .headers()
+                        .get(header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| retry_after(v, SystemTime::now()))
+                    {
+                        guard.deployment.breaker.retry_after.fetch_max(
+                            clock::mono_ms()
+                                .saturating_add(cooldown_ms(delay, guard.deployment.circuit)),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                }
+                let outcome = if status.is_success() {
+                    0
+                } else if retryable {
+                    1
+                } else {
+                    5
+                };
+                (
+                    Some(response),
+                    outcome,
+                    retryable && !stream,
+                    StatusCode::BAD_GATEWAY,
+                )
+            }
             Ok(Err(err)) => {
-                observation.handles.upstream_error(if err.is_connect() {
+                guard.metrics.upstream_error(if err.is_connect() {
                     UpstreamError::Connect
                 } else {
                     UpstreamError::Protocol
                 });
-                failed(pending, StatusCode::BAD_GATEWAY);
-                return error::json(
-                    StatusCode::BAD_GATEWAY,
-                    "upstream_error",
-                    "Upstream connection failed",
-                );
+                (None, 2, true, StatusCode::BAD_GATEWAY)
             }
             Err(_) => {
-                observation.handles.upstream_error(UpstreamError::Timeout);
-                failed(pending, StatusCode::GATEWAY_TIMEOUT);
-                return error::json(
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "upstream_timeout",
-                    "Upstream response timed out",
-                );
+                guard.metrics.upstream_error(UpstreamError::Timeout);
+                (None, 3, true, StatusCode::GATEWAY_TIMEOUT)
             }
         };
+        guard.metrics.attempts[outcome].inc();
+        span.record("outcome", ATTEMPT_OUTCOMES[outcome]);
+        // An attempt cut short by the route's total_timeout says nothing
+        // about the deployment: no breaker verdict, no latency sample (it
+        // still counts as outcome="timeout" in the attempts metric).
+        let cut_short = outcome == 3 && capped;
+        let failed = matches!(outcome, 2 | 3)
+            || (outcome == 1
+                && response
+                    .as_ref()
+                    .is_some_and(|r| r.status().is_server_error() || r.status().as_u16() == 429));
+        if let Some(started) = attempt_started.filter(|_| !cut_short) {
+            // Successes feed the EWMA; breaker-worthy failures add a penalty;
+            // client errors (4xx other than 429) say nothing about latency.
+            if outcome == 0 {
+                guard.deployment.latency.success(started.elapsed());
+            } else if failed {
+                guard.deployment.latency.failure(started.elapsed());
+            }
+        }
+        // Left unfinished, a cut-short half-open trial is abandoned on drop.
+        if !cut_short {
+            guard.complete(failed);
+        }
+        if retryable
+            && attempt < max_attempts as usize
+            && deadline.is_none_or(|end| tokio::time::Instant::now() < end)
+        {
+            let headers = &replay.as_ref().expect("retries keep a template").headers;
+            if let Some((next, fallback)) = router.retry(
+                route,
+                endpoint,
+                &caller,
+                headers,
+                &tried[..attempt],
+                split,
+                &mut skipped,
+            ) {
+                if router.runtime.retry_budget.take() {
+                    if let Some(counter) = fallback {
+                        if !current_fallback.is_some_and(|previous| std::ptr::eq(previous, counter))
+                        {
+                            counter.inc();
+                        }
+                    }
+                    current_fallback = fallback;
+                    let previous = std::mem::replace(&mut guard, next);
+                    match response {
+                        // Keep the response with its own reservation: it may
+                        // still be the final answer. Replacing an older kept
+                        // response releases that one's slot.
+                        Some(response) => {
+                            last_response = Some((response, used_fallback, inject, previous))
+                        }
+                        // Releases the abandoned attempt's in-flight slot.
+                        None => drop(previous),
+                    }
+                    used_fallback = fallback.is_some();
+                    observation.routed(guard.metrics.clone(), stream);
+                    let mut capture = pending.take();
+                    capture.handles = guard.metrics.clone();
+                    capture.deployment = Some(guard.deployment.clone());
+                    pending = PendingCapture::new(capture);
+                    continue;
+                }
+                route.budget_exhausted.inc();
+            }
+        }
+        if let Some(response) = response {
+            break (response, used_fallback, inject);
+        }
+        match last_response.take() {
+            Some((response, fallback, inject, kept)) => {
+                // The earlier attempt's response is the answer: account it to
+                // that attempt's deployment and release this failed one.
+                guard = kept;
+                observation.routed(guard.metrics.clone(), stream);
+                let mut capture = pending.take();
+                capture.handles = guard.metrics.clone();
+                capture.deployment = Some(guard.deployment.clone());
+                pending = PendingCapture::new(capture);
+                break (response, fallback, inject);
+            }
+            None => {
+                let mut capture = pending.take();
+                capture.status = error_status.as_u16();
+                capture.finalize(RequestOutcome::UpstreamError, UsageState::Missing, None);
+                return if error_status == StatusCode::GATEWAY_TIMEOUT {
+                    error::json(
+                        error_status,
+                        "upstream_timeout",
+                        "Upstream response timed out",
+                    )
+                } else {
+                    error::json(error_status, "upstream_error", "Upstream connection failed")
+                };
+            }
+        }
+    };
     observation.headers_received = Some(Instant::now());
     let (mut parts, body) = response.into_parts();
     strip_response_headers(&mut parts.headers);
     let meter = Meter::select(&parts, stream, inject, include_usage.requested());
     let mut capture = pending.take();
     capture.status = parts.status.as_u16();
+    let alias = (fallback_response && parts.status.is_success()).then(|| {
+        AliasBody::new(
+            serde_json::to_vec(model.as_ref()).expect("model serializes"),
+            stream
+                && !parts
+                    .headers
+                    .get(header::CONTENT_TYPE)
+                    .is_some_and(|v| v.as_bytes().starts_with(b"application/json")),
+        )
+    });
+    let body = MeteredBody {
+        body,
+        guard: Some(guard),
+        permit: Some(permit),
+        meter,
+        capture: Some(capture),
+        end: None,
+        held: None,
+    }
+    .boxed_unsync();
     Response::from_parts(
         parts,
-        MeteredBody {
-            body,
-            guard: Some(guard),
-            permit: Some(permit),
-            meter,
-            capture: Some(capture),
-            end: None,
+        match alias {
+            Some(mut alias) => {
+                alias.body = body;
+                alias.boxed_unsync()
+            }
+            None => body,
+        },
+    )
+}
+
+fn retry_status(policy: Option<&lumewarp_proto::config::v1::RetryPolicy>, status: u16) -> bool {
+    match policy {
+        Some(p) if !p.retry_on_status.is_empty() => p.retry_on_status.contains(&u32::from(status)),
+        _ => matches!(status, 429 | 502 | 503 | 504),
+    }
+}
+
+/// Longest `Retry-After` cooldown honoured.
+const MAX_COOLDOWN_MS: u64 = 60_000;
+
+/// A deployment's `Retry-After` cooldown in ms: at most 60 s, and never
+/// longer than its breaker's open interval when one is configured.
+fn cooldown_ms(delay: Duration, circuit: Option<CircuitBreaker>) -> u64 {
+    let ms = u64::try_from(delay.as_millis())
+        .unwrap_or(u64::MAX)
+        .min(MAX_COOLDOWN_MS);
+    circuit.map_or(ms, |config| ms.min(Breaker::open_ms(&config)))
+}
+
+fn retry_after(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) {
+        return value.parse().ok().map(Duration::from_secs);
+    }
+    httpdate::parse_http_date(value)
+        .ok()
+        .map(|at| at.duration_since(now).unwrap_or_default())
+}
+
+#[cfg(test)]
+mod resilience_tests {
+    use super::*;
+    use lumewarp_proto::config::v1::RetryPolicy;
+
+    #[test]
+    fn retry_status_defaults_and_explicit_override() {
+        for status in [429, 502, 503, 504] {
+            assert!(retry_status(None, status));
+        }
+        for status in [200, 400, 500] {
+            assert!(!retry_status(None, status));
+        }
+        let policy = RetryPolicy {
+            retry_on_status: vec![500],
+            ..Default::default()
+        };
+        assert!(retry_status(Some(&policy), 500));
+        assert!(!retry_status(Some(&policy), 503));
+    }
+
+    #[test]
+    fn retry_after_seconds_dates_and_invalid_values() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert_eq!(retry_after(" 30 ", now), Some(Duration::from_secs(30)));
+        assert_eq!(
+            retry_after(&httpdate::fmt_http_date(now + Duration::from_secs(10)), now),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            retry_after(&httpdate::fmt_http_date(now - Duration::from_secs(1)), now),
+            Some(Duration::ZERO)
+        );
+        for value in ["", "-1", "1.5", "tomorrow", "18446744073709551616"] {
+            assert_eq!(retry_after(value, now), None);
+        }
+    }
+
+    #[test]
+    fn fallback_alias_rewrites_json_and_split_multiline_sse() {
+        let mut alias = AliasBody::new(br#""public""#.to_vec(), false);
+        alias.pending = br#"{ "model": "backup", "extra":{"model":"untouched"} }"#.to_vec();
+        assert_eq!(
+            alias.flush(true),
+            br#"{ "model": "public", "extra":{"model":"untouched"} }"#.as_slice()
+        );
+        let mut alias = AliasBody::new(br#""public""#.to_vec(), true);
+        alias.pending.extend_from_slice(b"data: {\"model\":\r\n");
+        assert!(alias.flush(false).is_empty());
+        alias
+            .pending
+            .extend_from_slice(b"data: \"backup\"}\r\n\r\n");
+        let event = alias.flush(false);
+        assert_eq!(
+            event,
+            b"data: {\"model\":\ndata: \"public\"}\n\n".as_slice()
+        );
+        // Valid SSE: one event, every line a `data:` field, and the joined
+        // field values are the rewritten JSON.
+        let text = std::str::from_utf8(&event).unwrap();
+        let body = text.strip_suffix("\n\n").expect("event terminator");
+        let data: Vec<&str> = body
+            .split('\n')
+            .map(|line| line.strip_prefix("data: ").expect("data field"))
+            .collect();
+        let value: serde_json::Value = serde_json::from_str(&data.join("\n")).unwrap();
+        assert_eq!(value["model"], "public");
+        // Comments and other fields are kept; a single-line payload is unchanged.
+        alias
+            .pending
+            .extend_from_slice(b": keep\nevent: chunk\ndata: {\"model\":\"backup\"}\n\n");
+        assert_eq!(
+            alias.flush(false),
+            b": keep\nevent: chunk\ndata: {\"model\":\"public\"}\n\n".as_slice()
+        );
+    }
+
+    #[test]
+    fn retry_after_cooldown_is_clamped() {
+        let s = Duration::from_secs;
+        assert_eq!(cooldown_ms(s(10), None), 10_000);
+        assert_eq!(cooldown_ms(s(3600), None), MAX_COOLDOWN_MS);
+        assert_eq!(cooldown_ms(Duration::MAX, None), MAX_COOLDOWN_MS);
+        let breaker = |open_ms| {
+            Some(CircuitBreaker {
+                failure_threshold: 1,
+                open_ms,
+            })
+        };
+        assert_eq!(cooldown_ms(s(120), breaker(5_000)), 5_000);
+        assert_eq!(cooldown_ms(s(2), breaker(5_000)), 2_000);
+        // open_ms 0 is the 30 s default.
+        assert_eq!(cooldown_ms(s(120), breaker(0)), 30_000);
+    }
+}
+
+/// Only fallback responses need alias restoration. Bound buffering to one SSE
+/// event or one JSON response; ordinary responses retain the original body.
+struct AliasBody {
+    body: ProxyBody,
+    model: Vec<u8>,
+    pending: Vec<u8>,
+    stream: bool,
+    ended: bool,
+    held: Option<Frame<Bytes>>,
+}
+
+impl AliasBody {
+    fn new(model: Vec<u8>, stream: bool) -> Self {
+        Self {
+            body: full_body(Bytes::new()),
+            model,
+            pending: Vec::new(),
+            stream,
+            ended: false,
             held: None,
         }
-        .boxed_unsync(),
-    )
+    }
+
+    fn rewrite(&self, bytes: &[u8]) -> Bytes {
+        match RequestFields::parse(bytes) {
+            Ok(fields) => fields.rewrite(bytes, &self.model, None),
+            Err(_) => Bytes::copy_from_slice(bytes),
+        }
+    }
+
+    fn flush(&mut self, eof: bool) -> Bytes {
+        if !self.stream {
+            if !eof {
+                return Bytes::new();
+            }
+            let pending = std::mem::take(&mut self.pending);
+            return self.rewrite(&pending);
+        }
+        let mut output = Vec::new();
+        // SSE field values are UTF-8 text; keep comments and non-data fields.
+        // Reassemble multiline data values before parsing their JSON.
+        while let Some(end) = sse_event_end(&self.pending)
+            .or_else(|| (eof && !self.pending.is_empty()).then_some(self.pending.len()))
+        {
+            let event: Vec<_> = self.pending.drain(..end).collect();
+            let mut data = Vec::new();
+            let mut metadata = Vec::new();
+            for line in event.split(|b| *b == b'\n') {
+                let line = line.strip_suffix(b"\r").unwrap_or(line);
+                if let Some(value) = line.strip_prefix(b"data:") {
+                    if !data.is_empty() {
+                        data.push(b'\n');
+                    }
+                    data.extend_from_slice(value.strip_prefix(b" ").unwrap_or(value));
+                } else if !line.is_empty() {
+                    metadata.extend_from_slice(line);
+                    metadata.push(b'\n');
+                }
+            }
+            output.extend_from_slice(&metadata);
+            if !data.is_empty() {
+                // Every line of the (possibly multiline) payload is its own
+                // `data:` field, so the client reassembles the same value.
+                for line in self.rewrite(&data).split(|b| *b == b'\n') {
+                    output.extend_from_slice(b"data: ");
+                    output.extend_from_slice(line);
+                    output.push(b'\n');
+                }
+            }
+            output.push(b'\n');
+        }
+        Bytes::from(output)
+    }
+}
+
+fn sse_event_end(bytes: &[u8]) -> Option<usize> {
+    let mut line_start = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        if matches!(bytes[at], b'\r' | b'\n') {
+            let empty = at == line_start;
+            if bytes[at] == b'\r' {
+                if at + 1 == bytes.len() {
+                    return None;
+                }
+                if bytes[at + 1] == b'\n' {
+                    at += 1;
+                }
+            }
+            at += 1;
+            if empty {
+                return Some(at);
+            }
+            line_start = at;
+        } else {
+            at += 1;
+        }
+    }
+    None
+}
+
+impl Body for AliasBody {
+    type Data = Bytes;
+    type Error = BoxError;
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+        if let Some(frame) = self.held.take() {
+            return Poll::Ready(Some(Ok(frame)));
+        }
+        if self.ended {
+            return Poll::Ready(None);
+        }
+        loop {
+            match Pin::new(&mut self.body).poll_frame(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Err(err))) => {
+                    self.ended = true;
+                    return Poll::Ready(Some(Err(err)));
+                }
+                Poll::Ready(frame) => {
+                    let eof = frame.is_none();
+                    if let Some(Ok(frame)) = frame {
+                        match frame.into_data() {
+                            Ok(data) => self.pending.extend_from_slice(&data),
+                            Err(trailers) => {
+                                self.held = Some(trailers);
+                                let tail = self.flush(true);
+                                if !tail.is_empty() {
+                                    return Poll::Ready(Some(Ok(Frame::data(tail))));
+                                }
+                                return Poll::Ready(self.held.take().map(Ok));
+                            }
+                        }
+                    }
+                    if self.pending.len() > MAX_BODY {
+                        self.ended = true;
+                        return Poll::Ready(Some(Err(std::io::Error::other(
+                            "fallback response exceeds alias rewrite limit",
+                        )
+                        .into())));
+                    }
+                    self.ended = eof;
+                    let data = self.flush(eof);
+                    if !data.is_empty() {
+                        return Poll::Ready(Some(Ok(Frame::data(data))));
+                    }
+                    if eof {
+                        return Poll::Ready(None);
+                    }
+                }
+            }
+        }
+    }
+    fn is_end_stream(&self) -> bool {
+        self.ended && self.held.is_none()
+    }
 }
 
 fn upstream_uri(deployment: &Deployment, request: &Uri) -> Result<Uri, hyper::http::Error> {
