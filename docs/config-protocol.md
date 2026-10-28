@@ -57,7 +57,48 @@ receive → apply to a private copy → validate (capabilities, references, hash
 - Persist failure → NACK `PERSIST_FAILED`, keep serving the previous version in memory.
 - ACK means "active and durable": a gateway restarted right after ACK boots into that version.
 - Validation failure (including an unresolvable `api_key_ref`) → NACK `INVALID_CONFIG`, keep the previous version.
-- State survives swaps: per-deployment in-flight counters, rate-limit buckets (by `RateLimitScope.id`) and the metrics registry are process-lifetime, keyed by stable ids.
+- State survives swaps: per-deployment in-flight counters and circuit breakers,
+  upstream health, the gateway retry budget, rate-limit buckets (by
+  `RateLimitScope.id`) and the metrics registry are process-lifetime. Active
+  probes are reconfigured only after an accepted snapshot, not during validation
+  or compilation of a candidate that might fail persistence.
+
+### Routing capabilities
+
+The gateway advertises `retry`, `fallbacks`, `health_check`, `circuit_breaker`,
+`traffic_split`, `lowest_latency` and `vllm_load`. Compilers add a capability
+only when its field is set:
+
+| Capability | Fields |
+| --- | --- |
+| `retry` | Present `ModelRoute.retry`, including an empty message |
+| `fallbacks` | Nonempty `ModelRoute.fallbacks` |
+| `health_check` | Present `Upstream.health_check` |
+| `circuit_breaker` | Present `Upstream.circuit_breaker`, including an empty message |
+| `traffic_split` | Nonempty split, non-NONE sticky, or nonempty sticky header |
+| `lowest_latency` | LOWEST_LATENCY strategy |
+| `vllm_load` | VLLM_LOAD strategy or nonempty metrics URL |
+
+Using a field without its capability is `INVALID_CONFIG`; requiring an
+unsupported capability is `UNSUPPORTED_FEATURE`. No field can bypass the gate
+by omitting its capability. Standalone YAML emits the same presence-based
+capabilities. Retry attempts are capped at five; statuses must be 400..599;
+fallback references must exist and cannot name the original route. Health
+intervals must be at least 1000 ms with a positive timeout below the interval.
+Fallbacks do not recurse. If all candidates are unhealthy/open, routing tries one
+anyway, except that a half-open trial already in progress is never duplicated.
+
+Traffic split validation (`INVALID_CONFIG` otherwise): at most 16 splits; names
+unique and 1..=32 characters of `[A-Za-z0-9_.-]` (they are a metric label); each
+split names a nonempty list of distinct existing deployments; split weights sum
+to more than 0. With splits, `ModelRoute.deployments` is ignored and may be
+empty. `STICKY_BY_HEADER` requires a valid `sticky_header`; `sticky_header` with
+any other `sticky` is rejected, as is a non-NONE `sticky` without splits. A
+nonempty `Upstream.metrics_url` must be an absolute http(s) URL without
+userinfo. Sticky assignment uses a fixed-seed hash, so every gateway replica
+puts the same header value / team / key in the same split for the same weights.
+Latency EWMAs and scraped vLLM load are keyed by deployment name and survive
+swaps; scrapers, like probes, restart only after a snapshot is accepted.
 
 ## Gateway: boot
 

@@ -45,6 +45,72 @@ async fn non_stream_chat_shape() {
     assert!(body["usage"]["total_tokens"].as_u64().unwrap() > 0);
 }
 
+#[tokio::test]
+async fn request_faults_periodic_failures_and_admin_recovery() {
+    let server = server(&[]).await;
+    let client = reqwest::Client::new();
+    let endpoint = format!("{}/v1/chat/completions", server.url);
+    let response = client
+        .post(&endpoint)
+        .header("x-mock-fail", "429")
+        .header("x-mock-retry-after", "12")
+        .json(&json!({"model":"mock"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 429);
+    assert_eq!(response.headers()["retry-after"], "12");
+    assert!(client
+        .post(&endpoint)
+        .header("x-mock-fail", "reset")
+        .json(&json!({}))
+        .send()
+        .await
+        .is_err());
+    assert!(client
+        .post(&endpoint)
+        .header("x-mock-fail", "timeout")
+        .timeout(Duration::from_millis(30))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap_err()
+        .is_timeout());
+    for (status, expected) in [(503, 503), (0, 200)] {
+        assert_eq!(
+            client
+                .post(format!("{}/fault?status={status}", server.url))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        assert_eq!(
+            client
+                .get(format!("{}/health", server.url))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            expected
+        );
+    }
+    let server = self::server(&["--fail-every", "2", "--fail-status", "502"]).await;
+    for expected in [200, 502, 200, 502] {
+        assert_eq!(
+            client
+                .post(format!("{}/v1/chat/completions", server.url))
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            expected
+        );
+    }
+}
+
 async fn events(server: &Server, path: &str, body: Value) -> Vec<String> {
     let response = reqwest::Client::new()
         .post(format!("{}{path}", server.url))
@@ -312,4 +378,54 @@ async fn embeddings_models_health_errors_and_completions() {
         .unwrap();
     assert_eq!(completion["object"], "text_completion");
     assert!(completion["choices"][0]["text"].is_string());
+}
+
+#[tokio::test]
+async fn vllm_metrics_follow_load_control() {
+    let server = server(&["--served-model-name", "llama \"x\"", "--waiting", "2"]).await;
+    let client = reqwest::Client::new();
+    let metrics = || async {
+        let response = client
+            .get(format!("{}/metrics", server.url))
+            .send()
+            .await
+            .unwrap();
+        (response.status().as_u16(), response.text().await.unwrap())
+    };
+    let (status, text) = metrics().await;
+    assert_eq!(status, 200);
+    assert!(text
+        .contains("vllm:num_requests_waiting{engine=\"0\",model_name=\"llama \\\"x\\\"\"} 2.0\n"));
+    assert!(text
+        .contains("vllm:kv_cache_usage_perc{engine=\"0\",model_name=\"llama \\\"x\\\"\"} 0.0\n"));
+    let load = |query: &'static str| {
+        let client = client.clone();
+        let url = format!("{}/load?{query}", server.url);
+        async move { client.post(url).send().await.unwrap() }
+    };
+    let response = load("waiting=17&kv=0.75").await;
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["waiting"], 17.0);
+    assert_eq!(body["scrapes"], 1);
+    let (_, text) = metrics().await;
+    assert!(
+        text.contains("} 17.0\n") && text.contains("} 0.75\n"),
+        "{text}"
+    );
+    for bad in ["kv=2", "waiting=-1", "metrics_status=200", "bogus=1"] {
+        assert_eq!(load(bad).await.status(), 400, "{bad}");
+    }
+    assert_eq!(load("metrics_status=503").await.status(), 200);
+    assert_eq!(metrics().await.0, 503);
+    // Inference is unaffected by the metrics fault.
+    let response = client
+        .post(format!("{}/v1/chat/completions", server.url))
+        .json(&json!({"model":"mock"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    load("metrics_status=0").await;
+    assert_eq!(metrics().await.0, 200);
 }

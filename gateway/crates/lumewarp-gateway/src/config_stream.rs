@@ -205,6 +205,7 @@ impl Client {
         .unwrap_or_else(|_| Err(ApplyError::invalid("apply task failed")));
         match applied {
             Ok((next, router, digest)) => {
+                router.activate_health();
                 self.slot.store(Some(Arc::new(router)));
                 self.runtime.metrics.config_applied(next.version);
                 tracing::info!(version = next.version, "config applied");

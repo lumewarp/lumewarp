@@ -5,6 +5,7 @@ server:
   shutdown_grace_ms: 25000
   header_read_timeout_ms: 30000
   body_read_timeout_ms: 30000
+  retry_budget_percent: 20
   # Shorthand for keys with no team that may call every model: SHA-256 hex of
   # each client bearer key. With no keys here and no `keys:` section the
   # gateway is open (no client authentication).
@@ -14,6 +15,12 @@ upstreams:
   - name: vllm-local
     kind: vllm
     base_url: http://localhost:8000/v1
+    # Relative to base_url: /v1/models. Use a prefix appropriate for your server.
+    health_check: {path: /models, interval_ms: 5000, timeout_ms: 1000}
+    circuit_breaker: {failure_threshold: 5, open_ms: 30000}
+    # Scraped every second by `vllm_load` routes. Empty = base_url minus a
+    # trailing /v1, plus /metrics.
+    # metrics_url: http://localhost:8000/metrics
   - name: openai
     kind: openai
     base_url: https://api.openai.com/v1
@@ -33,8 +40,18 @@ deployments:
 routes:
   - model: llama-3.1-8b
     deployments: [llama-vllm]
+    retry: {max_attempts: 2, retry_on_status: [429, 502, 503, 504], total_timeout_ms: 30000}
+    fallbacks: [gpt-4o-mini]
   - model: gpt-4o-mini
     deployments: [gpt-4o-mini]
+  # Load-aware routing and a sticky 10% canary (needs a second vLLM deployment):
+  # - model: llama-canary
+  #   strategy: vllm_load          # or lowest_latency, weighted, least_in_flight
+  #   traffic_split:
+  #     - {name: stable, deployments: [llama-vllm], weight: 90}
+  #     - {name: canary, deployments: [llama-vllm-next], weight: 10}
+  #   sticky: header               # none | header | team | key
+  #   sticky_header: x-session-id
 
 # Teams are the bounded `team` metric label. Their rate limits are shared by
 # every key of the team (local to this gateway instance).

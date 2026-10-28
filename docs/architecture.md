@@ -131,7 +131,14 @@ gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control 
 | `lumewarp_tokens_total` | model, team, direction | token 用量 |
 | `lumewarp_spend_total` | team | 花費 |
 | `lumewarp_upstream_circuit_state` | deployment | 熔斷與健康 |
-| `lumewarp_vllm_queue_depth`、`lumewarp_vllm_kv_cache_usage` | deployment | vLLM 負載 |
+| `lumewarp_upstream_attempts_total` | model, deployment, outcome | 每次上游嘗試；success / retryable_status / connect_error / timeout / circuit_open / non_retryable |
+| `lumewarp_fallbacks_total` | model, fallback_model | 切換至備援路由 |
+| `lumewarp_retries_budget_exhausted_total` | model | 全域重試額度耗盡 |
+| `lumewarp_upstream_healthy` | upstream | 主動健康檢查狀態（1 正常、0 異常）；探測不計入請求與用量 |
+| `lumewarp_vllm_queue_depth`、`lumewarp_vllm_kv_cache_usage` | deployment | vLLM 負載（每秒背景抓取；`vllm_load` 路由使用） |
+| `lumewarp_vllm_scrape_failures_total` | upstream | vLLM metrics 抓取失敗（失敗即退回 in-flight 比較） |
+| `lumewarp_upstream_latency_ewma_seconds` | deployment | `lowest_latency` 使用的回應標頭時間 EWMA（於 `/metrics` 抓取時計算） |
+| `lumewarp_split_requests_total` | model, split | 依 traffic split 分配的請求數（canary 比例） |
 | `lumewarp_mcp_tool_calls_total` | server, tool, team, status | MCP 使用 |
 | `lumewarp_config_version`、`lumewarp_config_apply_failures_total` | gateway | 設定同步 |
 
@@ -172,10 +179,23 @@ P1 的 control plane、設定串流、Team 模型與 Admin UI 第一版已實作
 
 - OIDC／SSO、JWT／mTLS 用戶端認證、SCIM、auth plugin 執行（P2）。
 - 跨 gateway 的共享限流（Redis 對帳）、ClickHouse、control plane 的 Prometheus `/metrics` 與 OTLP metrics／traces；gateway 只有選用的 OTLP traces，沒有 metrics exporter。
-- Canary／百分比切流、vLLM 負載感知與最低延遲路由、fallback／retry／circuit breaker、主動健康檢查。
+- Canary／百分比切流、vLLM 負載感知與最低延遲路由。
 - 預算為 eventual；佇列滿或 gateway 重啟會遺失用量事件，進行中的串流不會因超額被切斷；月窗口固定為 UTC 日曆月。
 - MCP／A2A 代理與其稽核、工具權限。
 - `gateway/Dockerfile`、`control-plane/Dockerfile` 可建置映像，但尚未有發佈映像的 CI；Helm chart 需自行指定 repository/tag。
+
+## P2 W5 gateway 路由韌性
+
+- 快照與 standalone YAML 支援 `retry`、`fallbacks`、`health_check`、
+  `circuit_breaker` capability；W6 策略與切流欄位仍拒絕套用。
+- 重試僅限回應送出前，串流僅限收到上游 headers 前；最多五次，
+  共用原路由 timeout 與全域重試額度（預設 20%，低流量允許三次 burst）。
+  `Retry-After` 使用 deployment cooldown，重試跳過冷卻中的 deployment。
+- 部署熔斷狀態以名稱保存在 Runtime，跨快照保留；主動健康探測在背景執行，
+  接受新快照才重啟。所有候選都異常或開路時仍嘗試一個，避免 fail closed；
+  已進行中的 half-open trial 不重複。
+- 每次 attempt 有獨立 OTel 子 span；請求指標與用量只記最終 attempt。
+  fallback 的 JSON／SSE 回應保留原公開模型名。
 
 ## 效能目標（尚未實測）
 

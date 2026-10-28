@@ -1,22 +1,30 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
 };
 
 use bytes::Bytes;
-use hyper::{header::HeaderValue, Uri};
+use hyper::{
+    header::{HeaderName, HeaderValue},
+    HeaderMap, Uri,
+};
 use lumewarp_config::AuthMode;
 use lumewarp_proto::config::v1::{
-    KeyStatus, Price, RateLimit, RoutingStrategy, Snapshot, StreamUsageMode,
+    CircuitBreaker, KeyStatus, Price, RateLimit, RetryPolicy, RoutingStrategy, Snapshot, StickyBy,
+    StreamUsageMode,
 };
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 
 use crate::{
     auth::Caller,
+    balance::{self, Latency, Scrape, VllmLoad},
+    health::{Breaker, Probe},
     metrics::{HandleKey, LabelId, RequestMetrics, ROUTES},
+    ratelimit::clock,
     runtime::Runtime,
     snapshot::{self, ApplyError},
 };
@@ -42,6 +50,14 @@ pub struct Deployment {
     pub stream_usage_mode: StreamUsageMode,
     /// Interned deployment name for metric handle lookups.
     pub label: LabelId,
+    pub breaker: Arc<Breaker>,
+    pub circuit: Option<CircuitBreaker>,
+    pub healthy: Arc<AtomicBool>,
+    /// Shared by deployment name through `Runtime::balance` (survive swaps).
+    pub latency: Arc<Latency>,
+    /// Feed `latency` only when a `LOWEST_LATENCY` route uses this deployment.
+    pub track_latency: bool,
+    pub load: Arc<VllmLoad>,
 }
 
 /// A compiled virtual key with its already-resolved effective policy.
@@ -59,28 +75,182 @@ pub struct KeyContext {
     pub team_label: LabelId,
 }
 
-pub struct Route {
-    model: Box<str>,
-    model_label: LabelId,
+/// The deployments of one traffic split (or of the whole route without one).
+struct Pool {
     deployments: Vec<Arc<Deployment>>,
     cumulative_weights: Vec<u64>,
     total_weight: u64,
+    attempts: Vec<[Counter; 6]>,
+}
+
+pub struct Route {
+    model: Box<str>,
+    model_label: LabelId,
+    /// One pool per traffic split, in declaration order; exactly one pool
+    /// when the route has no split.
+    pools: Vec<Pool>,
+    split_cumulative: Vec<u64>,
+    split_total: u64,
+    /// `lumewarp_split_requests_total{model,split}`; empty without splits.
+    split_requests: Vec<Counter>,
+    sticky: StickyBy,
+    sticky_header: Option<HeaderName>,
     strategy: RoutingStrategy,
+    pub retry: Option<RetryPolicy>,
+    pub fallbacks: Vec<(String, Counter)>,
+    pub budget_exhausted: Counter,
 }
 
 impl Route {
-    fn pick(&self) -> usize {
-        match self.strategy {
+    /// Picks the split for a request: by the sticky hash when the route is
+    /// sticky and the request carries the input, else by a random draw.
+    /// Allocation-free: the header value / ids are hashed in place.
+    pub fn split_for(&self, headers: &HeaderMap, caller: &Caller) -> usize {
+        if self.pools.len() <= 1 {
+            return 0;
+        }
+        let key: Option<&[u8]> = match (self.sticky, caller) {
+            (StickyBy::Header, _) => self
+                .sticky_header
+                .as_ref()
+                .and_then(|name| headers.get(name))
+                .map(HeaderValue::as_bytes),
+            (StickyBy::Team, Caller::Key(key)) if !key.team_id.is_empty() => {
+                Some(key.team_id.as_bytes())
+            }
+            (StickyBy::Key, Caller::Key(key)) => Some(key.key_id.as_bytes()),
+            _ => None,
+        };
+        let draw = match key {
+            Some(key) => balance::scale(balance::sticky_hash(key), self.split_total),
+            None => fastrand::u64(0..self.split_total),
+        };
+        self.split_cumulative.partition_point(|&w| w <= draw)
+    }
+
+    /// `first` first, then the other pools in declaration order.
+    fn pool_order(&self, first: usize) -> impl Iterator<Item = &Pool> + '_ {
+        let len = self.pools.len();
+        (0..len).map(move |offset| &self.pools[(first + offset) % len])
+    }
+}
+
+impl Pool {
+    fn pick(
+        &self,
+        strategy: RoutingStrategy,
+        excluded: Option<&[LabelId]>,
+        now: u64,
+        strict: bool,
+    ) -> Option<usize> {
+        let eligible = |i: usize| {
+            let d = &self.deployments[i];
+            !excluded.is_some_and(|tried| tried.contains(&d.label))
+                && (excluded.is_none() || d.breaker.retry_after.load(Ordering::Relaxed) <= now)
+                && (!strict
+                    || (d.healthy.load(Ordering::Acquire)
+                        && (d.circuit.is_none() || d.breaker.available(now))))
+        };
+        let in_flight = |i: usize| self.deployments[i].in_flight.load(Ordering::Relaxed);
+        match strategy {
             RoutingStrategy::LeastInFlight => {
                 let len = self.deployments.len();
                 let start = fastrand::usize(0..len);
                 (0..len)
                     .map(|offset| (start + offset) % len)
-                    .min_by_key(|&i| self.deployments[i].in_flight.load(Ordering::Relaxed))
-                    .expect("validated nonempty route")
+                    .filter(|&i| eligible(i))
+                    .min_by_key(|&i| in_flight(i))
             }
-            // Validation rejects UNSPECIFIED and LOWEST_LATENCY.
-            _ => self.weighted_index(fastrand::u64(0..self.total_weight)),
+            RoutingStrategy::LowestLatency => {
+                if fastrand::u32(0..100) < balance::EXPLORE_PERCENT {
+                    return self.random_eligible(&eligible);
+                }
+                // Peak-EWMA style cost: latency scaled by queued work here.
+                // No samples yet = cost 0, so new deployments get explored.
+                let cost = |i: usize| {
+                    u128::from(self.deployments[i].latency.get_us()) * (in_flight(i) as u128 + 1)
+                };
+                self.two_choices(&eligible, |a, b| cost(a) < cost(b))
+            }
+            RoutingStrategy::VllmLoad => self.two_choices(&eligible, |a, b| {
+                let (da, db) = (&self.deployments[a], &self.deployments[b]);
+                match (da.load.score(now), db.load.score(now)) {
+                    (Some((wa, ka)), Some((wb, kb))) => {
+                        (wa, ka, in_flight(a)) < (wb, kb, in_flight(b))
+                    }
+                    // Stale or failed scrape on either side: in-flight only.
+                    _ => in_flight(a) < in_flight(b),
+                }
+            }),
+            _ => {
+                let weight = |i: usize| {
+                    self.cumulative_weights[i]
+                        - if i == 0 {
+                            0
+                        } else {
+                            self.cumulative_weights[i - 1]
+                        }
+                };
+                let total: u64 = (0..self.deployments.len())
+                    .filter(|&i| eligible(i))
+                    .map(weight)
+                    .sum();
+                if total == 0 {
+                    return None;
+                }
+                // Keep the original fast cumulative draw when nothing is filtered.
+                if total == self.total_weight {
+                    return Some(self.weighted_index(fastrand::u64(0..total)));
+                }
+                let mut draw = fastrand::u64(0..total);
+                (0..self.deployments.len()).find(|&i| {
+                    if !eligible(i) {
+                        return false;
+                    }
+                    let w = weight(i);
+                    if draw < w {
+                        return true;
+                    }
+                    draw -= w;
+                    false
+                })
+            }
+        }
+    }
+
+    fn nth_eligible(&self, eligible: &impl Fn(usize) -> bool, n: usize) -> Option<usize> {
+        (0..self.deployments.len()).filter(|&i| eligible(i)).nth(n)
+    }
+
+    fn random_eligible(&self, eligible: &impl Fn(usize) -> bool) -> Option<usize> {
+        let count = (0..self.deployments.len()).filter(|&i| eligible(i)).count();
+        if count == 0 {
+            return None;
+        }
+        self.nth_eligible(eligible, fastrand::usize(0..count))
+    }
+
+    /// Power of two choices: two distinct random eligible deployments, keep
+    /// the one `better` prefers (ties keep the first, itself random).
+    fn two_choices(
+        &self,
+        eligible: &impl Fn(usize) -> bool,
+        better: impl Fn(usize, usize) -> bool,
+    ) -> Option<usize> {
+        let count = (0..self.deployments.len()).filter(|&i| eligible(i)).count();
+        match count {
+            0 => None,
+            1 => self.nth_eligible(eligible, 0),
+            _ => {
+                let a = fastrand::usize(0..count);
+                let mut b = fastrand::usize(0..count - 1);
+                if b >= a {
+                    b += 1;
+                }
+                let a = self.nth_eligible(eligible, a)?;
+                let b = self.nth_eligible(eligible, b)?;
+                Some(if better(b, a) { b } else { a })
+            }
         }
     }
 
@@ -93,10 +263,26 @@ impl Route {
 pub struct InFlight {
     pub deployment: Arc<Deployment>,
     pub metrics: Arc<RequestMetrics>,
+    trial: bool,
+    finished: bool,
+}
+
+impl InFlight {
+    pub fn complete(&mut self, retryable_failure: bool) {
+        self.finished = true;
+        if let Some(config) = self.deployment.circuit {
+            self.deployment
+                .breaker
+                .finish(config, self.trial, retryable_failure, clock::mono_ms());
+        }
+    }
 }
 
 impl Drop for InFlight {
     fn drop(&mut self) {
+        if self.trial && !self.finished {
+            self.deployment.breaker.abandon_trial(clock::mono_ms());
+        }
         self.deployment.in_flight.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -113,6 +299,9 @@ pub struct Router {
     /// Route aliases in snapshot order, for filtered `/v1/models`.
     models: Box<[Box<str>]>,
     unknown_label: LabelId,
+    probes: Vec<Probe>,
+    unprobed: Vec<(Arc<AtomicBool>, Gauge)>,
+    scrapes: Vec<Scrape>,
 }
 
 fn invalid(reason: String) -> ApplyError {
@@ -129,6 +318,27 @@ impl Router {
     ) -> Result<Self, ApplyError> {
         snapshot::validate(snapshot, snapshot::SUPPORTED_CAPABILITIES)?;
         let mut upstreams = HashMap::new();
+        let mut probes = Vec::new();
+        let mut unprobed = Vec::new();
+        let mut metrics_uris = HashMap::new();
+        // Which deployments need latency samples, which upstreams scraping.
+        let upstream_of: HashMap<&str, &str> = snapshot
+            .deployments
+            .iter()
+            .map(|d| (d.name.as_str(), d.upstream.as_str()))
+            .collect();
+        let mut latency_tracked = HashSet::new();
+        let mut scraped_upstreams = HashSet::new();
+        for r in &snapshot.routes {
+            let names = route_deployment_names(r);
+            match RoutingStrategy::try_from(r.strategy) {
+                Ok(RoutingStrategy::LowestLatency) => latency_tracked.extend(names),
+                Ok(RoutingStrategy::VllmLoad) => {
+                    scraped_upstreams.extend(names.filter_map(|d| upstream_of.get(d).copied()))
+                }
+                _ => {}
+            }
+        }
         for upstream in &snapshot.upstreams {
             let name = &upstream.name;
             let base: Uri = upstream
@@ -176,6 +386,34 @@ impl Router {
                 endpoint("/completions")?,
                 endpoint("/embeddings")?,
             ];
+            let metrics_uri = metrics_uri(&base, &upstream.metrics_url).ok_or_else(|| {
+                invalid(format!(
+                    "upstream {name:?} requires an http(s) metrics_url without userinfo"
+                ))
+            })?;
+            // The upstream's bearer token goes only to its own host.
+            let metrics_authorization = authorization
+                .clone()
+                .filter(|_| metrics_uri.authority() == base.authority());
+            metrics_uris.insert(name.as_str(), (metrics_uri, metrics_authorization));
+            let healthy = runtime.health.upstream(name);
+            let gauge = runtime.metrics.health_gauge(name);
+            if let Some(config) = &upstream.health_check {
+                probes.push(Probe {
+                    name: name.clone(),
+                    uri: endpoint(if config.path.is_empty() {
+                        "/models"
+                    } else {
+                        &config.path
+                    })?,
+                    authorization: authorization.clone(),
+                    config: config.clone(),
+                    healthy: healthy.clone(),
+                    gauge,
+                });
+            } else {
+                unprobed.push((healthy.clone(), gauge));
+            }
             // Zero is "unset" on the wire; use the standalone default.
             let timeout_ms = match upstream.timeout_ms {
                 0 => lumewarp_config::default_timeout_ms(),
@@ -195,13 +433,15 @@ impl Router {
                     authorization,
                     Duration::from_millis(timeout_ms.into()),
                     stream_usage_mode,
+                    healthy,
+                    upstream.circuit_breaker,
                 ),
             );
         }
         let metrics = &runtime.metrics;
         let mut deployments = HashMap::new();
         for d in &snapshot.deployments {
-            let (endpoints, host, authorization, timeout, stream_usage_mode) =
+            let (endpoints, host, authorization, timeout, stream_usage_mode, healthy, circuit) =
                 &upstreams[d.upstream.as_str()];
             metrics.register_deployment(&d.name);
             deployments.insert(
@@ -220,6 +460,14 @@ impl Router {
                         price: d.price,
                         stream_usage_mode: *stream_usage_mode,
                         label: metrics.label_id(&d.name),
+                        breaker: runtime
+                            .health
+                            .breaker(&d.name, metrics.circuit_gauge(&d.name)),
+                        circuit: *circuit,
+                        healthy: healthy.clone(),
+                        latency: runtime.balance.latency(&d.name),
+                        track_latency: latency_tracked.contains(d.name.as_str()),
+                        load: runtime.balance.load(&d.name, metrics),
                     }),
                     d.weight,
                 ),
@@ -231,40 +479,111 @@ impl Router {
         for endpoint in 0..ENDPOINTS {
             drop(metrics.handles("unknown", "", endpoint, ""));
         }
+        let mut scrapes: Vec<Scrape> = Vec::new();
+        for upstream in &snapshot.upstreams {
+            let name = upstream.name.as_str();
+            if !scraped_upstreams.contains(name) {
+                continue;
+            }
+            let (uri, authorization) = metrics_uris[name].clone();
+            scrapes.push(Scrape {
+                upstream: name.into(),
+                uri,
+                authorization,
+                targets: snapshot
+                    .deployments
+                    .iter()
+                    .filter(|d| d.upstream == name)
+                    .map(|d| {
+                        (
+                            d.upstream_model.clone(),
+                            deployments[d.name.as_str()].0.load.clone(),
+                        )
+                    })
+                    .collect(),
+                failures: metrics.scrape_failures(name),
+            });
+        }
+
         let mut routes = HashMap::new();
         for r in &snapshot.routes {
-            let mut resolved = Vec::new();
-            let mut cumulative_weights = Vec::new();
-            let mut total_weight = 0u64;
-            for name in &r.deployments {
-                let (deployment, weight) = &deployments[name.as_str()];
-                resolved.push(deployment.clone());
-                total_weight = total_weight
-                    .checked_add(u64::from(*weight))
-                    .ok_or_else(|| invalid(format!("route {:?} weights overflow", r.model)))?;
-                cumulative_weights.push(total_weight);
-            }
             let strategy = RoutingStrategy::try_from(r.strategy).expect("validated strategy");
-            if strategy == RoutingStrategy::Weighted && total_weight == 0 {
-                return Err(invalid(format!(
-                    "route {:?} must have deployments with positive total weight",
-                    r.model
-                )));
-            }
-            for deployment in std::iter::once("").chain(resolved.iter().map(|d| d.name.as_str())) {
-                for endpoint in 0..ENDPOINTS {
-                    drop(metrics.handles(&r.model, deployment, endpoint, ""));
+            let groups: Vec<(&str, &[String], u32)> = if r.traffic_split.is_empty() {
+                vec![("", r.deployments.as_slice(), 1)]
+            } else {
+                r.traffic_split
+                    .iter()
+                    .map(|s| (s.name.as_str(), s.deployments.as_slice(), s.weight))
+                    .collect()
+            };
+            let mut pools = Vec::with_capacity(groups.len());
+            let mut split_cumulative = Vec::with_capacity(groups.len());
+            let mut split_total = 0u64;
+            for (split, names, split_weight) in groups {
+                let mut resolved = Vec::new();
+                let mut cumulative_weights = Vec::new();
+                let mut total_weight = 0u64;
+                for name in names {
+                    let (deployment, weight) = &deployments[name.as_str()];
+                    resolved.push(deployment.clone());
+                    total_weight = total_weight
+                        .checked_add(u64::from(*weight))
+                        .ok_or_else(|| invalid(format!("route {:?} weights overflow", r.model)))?;
+                    cumulative_weights.push(total_weight);
                 }
+                if strategy == RoutingStrategy::Weighted && total_weight == 0 {
+                    return Err(invalid(format!(
+                        "route {:?}{}{split} must have deployments with positive total weight",
+                        r.model,
+                        if split.is_empty() { "" } else { " split " },
+                    )));
+                }
+                for deployment in
+                    std::iter::once("").chain(resolved.iter().map(|d| d.name.as_str()))
+                {
+                    for endpoint in 0..ENDPOINTS {
+                        drop(metrics.handles(&r.model, deployment, endpoint, ""));
+                    }
+                }
+                split_total += u64::from(split_weight);
+                split_cumulative.push(split_total);
+                pools.push(Pool {
+                    deployments: resolved,
+                    cumulative_weights,
+                    total_weight,
+                    attempts: names
+                        .iter()
+                        .map(|d| metrics.attempt_handles(&r.model, d))
+                        .collect(),
+                });
             }
+            let sticky = StickyBy::try_from(r.sticky).expect("validated sticky");
             routes.insert(
                 r.model.clone(),
                 Route {
                     model: r.model.as_str().into(),
                     model_label: metrics.label_id(&r.model),
-                    deployments: resolved,
-                    cumulative_weights,
-                    total_weight,
+                    pools,
+                    split_cumulative,
+                    split_total,
+                    split_requests: r
+                        .traffic_split
+                        .iter()
+                        .map(|s| metrics.split_handle(&r.model, &s.name))
+                        .collect(),
+                    sticky,
+                    sticky_header: (sticky == StickyBy::Header).then(|| {
+                        HeaderName::from_bytes(r.sticky_header.as_bytes())
+                            .expect("validated sticky_header")
+                    }),
                     strategy,
+                    retry: r.retry.clone(),
+                    fallbacks: r
+                        .fallbacks
+                        .iter()
+                        .map(|f| (f.clone(), metrics.fallback_handle(&r.model, f)))
+                        .collect(),
+                    budget_exhausted: metrics.budget_handle(&r.model),
                 },
             );
         }
@@ -332,6 +651,9 @@ impl Router {
             runtime: runtime.clone(),
             models,
             unknown_label: metrics.label_id("unknown"),
+            probes,
+            unprobed,
+            scrapes,
         })
     }
 
@@ -387,19 +709,150 @@ impl Router {
     }
 
     /// Picks a deployment and reserves an in-flight slot on it.
+    #[cfg(test)]
     pub fn acquire(&self, route: &Route, endpoint: usize, caller: &Caller) -> InFlight {
-        let deployment = route.deployments[route.pick()].clone();
+        self.acquire_initial(route, endpoint, caller, &HeaderMap::new())
+            .expect("test route has an available deployment")
+            .0
+    }
+
+    /// Chooses the request's split (counted once), then its own split, the
+    /// other splits, the fallbacks, and finally fails open on its own route.
+    /// Returns the guard, the fallback counter if one was used, and the split.
+    pub fn acquire_initial<'a>(
+        &'a self,
+        route: &'a Route,
+        endpoint: usize,
+        caller: &Caller,
+        headers: &HeaderMap,
+    ) -> Option<(InFlight, Option<&'a Counter>, usize)> {
+        let split = route.split_for(headers, caller);
+        if let Some(counter) = route.split_requests.get(split) {
+            counter.inc();
+        }
+        if let Some(guard) = self.acquire_from(route, route, split, endpoint, caller, None, false) {
+            return Some((guard, None, split));
+        }
+        for (name, counter) in &route.fallbacks {
+            let fallback = &self.routes[name];
+            let first = fallback.split_for(headers, caller);
+            if let Some(guard) =
+                self.acquire_from(route, fallback, first, endpoint, caller, None, false)
+            {
+                return Some((guard, Some(counter), split));
+            }
+        }
+        self.acquire_from(route, route, split, endpoint, caller, None, true)
+            .map(|guard| (guard, None, split))
+    }
+
+    /// First exhaust untried deployments (the chosen split, then the other
+    /// splits), then fallbacks in declaration order. Only when every eligible
+    /// candidate is unhealthy/open do we fail open.
+    pub fn retry<'a>(
+        &'a self,
+        root: &'a Route,
+        endpoint: usize,
+        caller: &Caller,
+        headers: &HeaderMap,
+        tried: &[LabelId],
+        split: usize,
+    ) -> Option<(InFlight, Option<&'a Counter>)> {
+        for strict in [true, false] {
+            for excluded in [tried, &[][..]] {
+                if let Some(guard) =
+                    self.acquire_from(root, root, split, endpoint, caller, Some(excluded), !strict)
+                {
+                    return Some((guard, None));
+                }
+                for (name, counter) in &root.fallbacks {
+                    let fallback = &self.routes[name];
+                    if let Some(guard) = self.acquire_from(
+                        root,
+                        fallback,
+                        fallback.split_for(headers, caller),
+                        endpoint,
+                        caller,
+                        Some(excluded),
+                        !strict,
+                    ) {
+                        return Some((guard, Some(counter)));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn acquire_from(
+        &self,
+        root: &Route,
+        route: &Route,
+        split: usize,
+        endpoint: usize,
+        caller: &Caller,
+        excluded: Option<&[LabelId]>,
+        fail_open: bool,
+    ) -> Option<InFlight> {
+        let now = clock::mono_ms();
+        for pool in &route.pools {
+            for (i, d) in pool.deployments.iter().enumerate() {
+                if d.circuit.is_some() && !d.breaker.available(now) {
+                    pool.attempts[i][4].inc();
+                }
+            }
+        }
+        let pick = |strict: bool| {
+            route.pool_order(split).find_map(|pool| {
+                pool.pick(route.strategy, excluded, now, strict)
+                    .map(|i| &pool.deployments[i])
+            })
+        };
+        let deployment = pick(true)
+            .or_else(|| fail_open.then(|| pick(false)).flatten())?
+            .clone();
+        let trial = if deployment.circuit.is_some() {
+            match deployment.breaker.reserve(now) {
+                Some(trial) => trial,
+                None if fail_open && !deployment.breaker.trial_in_progress() => false,
+                None => return None,
+            }
+        } else {
+            false
+        };
         deployment.in_flight.fetch_add(1, Ordering::Relaxed);
         let metrics = self.handles(
             caller,
-            (route.model_label, &route.model),
+            (root.model_label, &root.model),
             (deployment.label, &deployment.name),
             endpoint,
         );
-        InFlight {
+        Some(InFlight {
             deployment,
             metrics,
+            trial,
+            finished: false,
+        })
+    }
+
+    pub fn activate_health(&self) {
+        for (healthy, gauge) in &self.unprobed {
+            healthy.store(true, Ordering::Release);
+            gauge.set(1);
         }
+        for probe in &self.probes {
+            probe
+                .gauge
+                .set(i64::from(probe.healthy.load(Ordering::Acquire)));
+        }
+        self.runtime
+            .health
+            .configure(&self.probes, &self.runtime.client);
+        // vLLM load scrapers follow the same accepted-snapshot lifecycle.
+        self.runtime
+            .balance
+            .configure(&self.scrapes, &self.runtime.client);
     }
 
     /// `/v1/models` body: every alias, or only those the caller's key allows.
@@ -413,6 +866,37 @@ impl Router {
             _ => self.models_json.clone(),
         }
     }
+}
+
+/// Every deployment a route can use: its splits' or its own list.
+fn route_deployment_names(
+    r: &lumewarp_proto::config::v1::ModelRoute,
+) -> Box<dyn Iterator<Item = &str> + '_> {
+    if r.traffic_split.is_empty() {
+        Box::new(r.deployments.iter().map(String::as_str))
+    } else {
+        Box::new(
+            r.traffic_split
+                .iter()
+                .flat_map(|s| s.deployments.iter().map(String::as_str)),
+        )
+    }
+}
+
+/// Explicit `metrics_url`, or `base_url` minus a trailing `/v1` plus
+/// `/metrics`. `None` when an explicit URL is not plain http(s).
+fn metrics_uri(base: &Uri, explicit: &str) -> Option<Uri> {
+    if !explicit.is_empty() {
+        let uri: Uri = explicit.parse().ok()?;
+        let plain = matches!(uri.scheme_str(), Some("http" | "https"))
+            && uri.authority().is_some_and(|a| !a.as_str().contains('@'));
+        return plain.then_some(uri);
+    }
+    let path = base.path().trim_end_matches('/');
+    let path = path.strip_suffix("/v1").unwrap_or(path);
+    let mut parts = base.clone().into_parts();
+    parts.path_and_query = Some(format!("{path}/metrics").parse().ok()?);
+    Uri::from_parts(parts).ok()
 }
 
 fn models_json<'a>(models: impl Iterator<Item = &'a Box<str>>) -> Bytes {
@@ -442,10 +926,16 @@ mod tests {
         b.weight = 3;
         let mut public = route("public", &["a", "b"]);
         public.strategy = strategy as i32;
+        let required_capabilities = match strategy {
+            RoutingStrategy::LowestLatency => vec!["lowest_latency".into()],
+            RoutingStrategy::VllmLoad => vec!["vllm_load".into()],
+            _ => vec![],
+        };
         Snapshot {
             upstreams: vec![upstream("u")],
             deployments: vec![a, b],
             routes: vec![public],
+            required_capabilities,
             ..Default::default()
         }
     }
@@ -462,7 +952,8 @@ mod tests {
         // Seeded draws make this deterministic while exercising cumulative selection.
         let mut rng = fastrand::Rng::with_seed(42);
         for _ in 0..20000 {
-            a += usize::from(route.weighted_index(rng.u64(0..route.total_weight)) == 0);
+            let pool = &route.pools[0];
+            a += usize::from(pool.weighted_index(rng.u64(0..pool.total_weight)) == 0);
         }
         assert!((4500..5500).contains(&a), "{a}");
     }
@@ -482,7 +973,7 @@ mod tests {
             first_name
         );
         drop(second);
-        assert!(route
+        assert!(route.pools[0]
             .deployments
             .iter()
             .all(|d| d.in_flight.load(Ordering::Relaxed) == 0));
@@ -536,6 +1027,56 @@ mod tests {
         assert!(runtime.encode_metrics().unwrap().contains(
             "{model=\"\",route=\"chat_completions\",deployment=\"\",team=\"\",status=\"404\"} 2"
         ));
+    }
+
+    #[test]
+    fn breaker_and_health_survive_swaps_without_hot_path_allocations() {
+        let runtime = Runtime::new();
+        let mut s = snapshot(RoutingStrategy::Weighted);
+        s.required_capabilities = vec!["circuit_breaker".into(), "retry".into()];
+        s.upstreams[0].circuit_breaker = Some(CircuitBreaker {
+            failure_threshold: 1,
+            open_ms: 30_000,
+        });
+        s.routes[0].retry = Some(RetryPolicy::default());
+        let old = Router::compile(&s, AuthMode::Open, &runtime).unwrap();
+        let mut first = old.acquire(&old.routes["public"], 0, &Caller::Anonymous);
+        let name = first.deployment.name.clone();
+        let breaker = first.deployment.breaker.clone();
+        first.complete(true);
+        drop(first);
+        let next = Router::compile(&s, AuthMode::Open, &runtime).unwrap();
+        let guard = next.acquire(&next.routes["public"], 0, &Caller::Anonymous);
+        assert_ne!(guard.deployment.name, name);
+        assert!(Arc::ptr_eq(
+            &breaker,
+            &next.routes["public"].pools[0]
+                .deployments
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap()
+                .breaker
+        ));
+        drop(guard);
+        let ((allocations, bytes), guard) = crate::test_alloc::count(|| {
+            runtime.retry_budget.request();
+            next.acquire(&next.routes["public"], 0, &Caller::Anonymous)
+        });
+        assert_eq!((allocations, bytes), (0, 0));
+        drop(guard);
+        // The only remaining deployment is also down: routing fails open
+        // rather than rejecting all traffic on passive health alone.
+        next.routes["public"].pools[0].deployments[0]
+            .healthy
+            .store(false, Ordering::Release);
+        assert!(next
+            .acquire_initial(
+                &next.routes["public"],
+                0,
+                &Caller::Anonymous,
+                &HeaderMap::new()
+            )
+            .is_some());
     }
 
     #[test]
@@ -720,5 +1261,307 @@ mod tests {
         let fresh = swapped.acquire(&swapped.routes["paid"], 0, &Caller::Anonymous);
         assert_eq!(fresh.deployment.price, next.deployments[0].price);
         assert_eq!(fresh.deployment.in_flight.load(Ordering::Relaxed), 2);
+    }
+
+    fn split_snapshot(sticky: pb::StickyBy, strategy: RoutingStrategy) -> Snapshot {
+        let mut s = snapshot(strategy);
+        s.deployments.push(deployment("c", "u"));
+        let r = &mut s.routes[0];
+        r.deployments.clear();
+        r.traffic_split = vec![
+            crate::snapshot::tests::split("stable", &["a"], 9),
+            crate::snapshot::tests::split("canary", &["b", "c"], 1),
+        ];
+        r.sticky = sticky as i32;
+        if sticky == pb::StickyBy::Header {
+            r.sticky_header = "x-session".into();
+        }
+        s.required_capabilities = vec!["traffic_split".into()];
+        for cap in ["lowest_latency", "vllm_load"] {
+            s.required_capabilities.push(cap.into());
+        }
+        s
+    }
+
+    fn headers(session: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-session", HeaderValue::from_str(session).unwrap());
+        h
+    }
+
+    #[test]
+    fn ten_percent_split_over_10k_requests() {
+        fastrand::seed(7);
+        let runtime = Runtime::new();
+        let router = Router::compile(
+            &split_snapshot(pb::StickyBy::None, RoutingStrategy::Weighted),
+            AuthMode::Open,
+            &runtime,
+        )
+        .unwrap();
+        let route = &router.routes["public"];
+        let mut canary = 0;
+        for _ in 0..10_000 {
+            let (guard, _, split) = router
+                .acquire_initial(route, 0, &Caller::Anonymous, &HeaderMap::new())
+                .unwrap();
+            assert_eq!(split == 1, guard.deployment.name != "a");
+            canary += usize::from(split == 1);
+        }
+        assert!((900..=1100).contains(&canary), "canary got {canary}");
+        let text = runtime.encode_metrics().unwrap();
+        assert!(text.contains(&format!(
+            "lumewarp_split_requests_total{{model=\"public\",split=\"canary\"}} {canary}"
+        )));
+    }
+
+    #[test]
+    fn sticky_splits_are_stable_and_follow_weights() {
+        let router = compile(&split_snapshot(
+            pb::StickyBy::Header,
+            RoutingStrategy::Weighted,
+        ));
+        let route = &router.routes["public"];
+        let anonymous = Caller::Anonymous;
+        let mut canary = 0;
+        for user in 0..10_000 {
+            let h = headers(&format!("session-{user}"));
+            let first = route.split_for(&h, &anonymous);
+            for _ in 0..3 {
+                assert_eq!(route.split_for(&h, &anonymous), first);
+            }
+            canary += usize::from(first == 1);
+        }
+        assert!((850..=1150).contains(&canary), "canary got {canary}");
+        // Fixed-seed hash: the same session lands in the same split in every
+        // process (golden value).
+        assert_eq!(route.split_for(&headers("session-1"), &anonymous), 0);
+        // Missing header: not sticky, but still split by weight.
+        let mut seen = [false; 2];
+        for _ in 0..1000 {
+            seen[route.split_for(&HeaderMap::new(), &anonymous)] = true;
+        }
+        assert_eq!(seen, [true, true]);
+    }
+
+    #[test]
+    fn sticky_by_team_and_key() {
+        let mut s = split_snapshot(pb::StickyBy::Team, RoutingStrategy::Weighted);
+        s.teams = vec![crate::snapshot::tests::team("t1")];
+        s.api_keys = vec![
+            key("k1", "s1", "t1", &["public"]),
+            key("k2", "s2", "t1", &["public"]),
+        ];
+        let router = Router::compile(&s, AuthMode::RequireKey, &Runtime::new()).unwrap();
+        let k1 = Caller::Key(router.keys[&hash("s1")].clone());
+        let k2 = Caller::Key(router.keys[&hash("s2")].clone());
+        let route = &router.routes["public"];
+        let none = HeaderMap::new();
+        let team = route.split_for(&none, &k1);
+        for _ in 0..100 {
+            assert_eq!(route.split_for(&none, &k1), team);
+            assert_eq!(route.split_for(&none, &k2), team, "same team, same split");
+        }
+        s.routes[0].sticky = pb::StickyBy::Key as i32;
+        let router = Router::compile(&s, AuthMode::RequireKey, &Runtime::new()).unwrap();
+        let route = &router.routes["public"];
+        let k1 = Caller::Key(router.keys[&hash("s1")].clone());
+        let first = route.split_for(&none, &k1);
+        for _ in 0..100 {
+            assert_eq!(route.split_for(&none, &k1), first);
+        }
+    }
+
+    #[test]
+    fn retries_stay_in_the_split_then_move_to_other_splits() {
+        let router = compile(&split_snapshot(
+            pb::StickyBy::Header,
+            RoutingStrategy::Weighted,
+        ));
+        let route = &router.routes["public"];
+        let anonymous = Caller::Anonymous;
+        // Find a session that the hash puts into the canary split.
+        let h = (0..)
+            .map(|i| headers(&format!("u{i}")))
+            .find(|h| route.split_for(h, &anonymous) == 1)
+            .unwrap();
+        let (first, _, split) = router.acquire_initial(route, 0, &anonymous, &h).unwrap();
+        assert_eq!(split, 1);
+        let label = |name: &str| router.runtime.metrics.label_id(name);
+        let other = if first.deployment.name == "b" {
+            "c"
+        } else {
+            "b"
+        };
+        assert_ne!(first.deployment.name, "a");
+        let tried = [first.deployment.label];
+        for _ in 0..50 {
+            let (next, fallback) = router
+                .retry(route, 0, &anonymous, &h, &tried, split)
+                .unwrap();
+            assert!(fallback.is_none());
+            assert_eq!(next.deployment.name, other, "stays inside the canary split");
+        }
+        let tried = [label("b"), label("c")];
+        let (next, _) = router
+            .retry(route, 0, &anonymous, &h, &tried, split)
+            .unwrap();
+        assert_eq!(next.deployment.name, "a", "then the other split");
+    }
+
+    #[test]
+    fn lowest_latency_prefers_fast_and_explores_unmeasured() {
+        fastrand::seed(11);
+        let router = compile(&snapshot(RoutingStrategy::LowestLatency));
+        let route = &router.routes["public"];
+        let pool = &route.pools[0];
+        assert!(pool.deployments.iter().all(|d| d.track_latency));
+        // Nothing measured: both are "best" and get explored.
+        let mut a = 0;
+        for _ in 0..1000 {
+            a += usize::from(router.acquire(route, 0, &Caller::Anonymous).deployment.name == "a");
+        }
+        assert!((350..650).contains(&a), "{a}");
+        let count = |name: &str| {
+            (0..1000)
+                .filter(|_| router.acquire(route, 0, &Caller::Anonymous).deployment.name == name)
+                .count()
+        };
+        pool.deployments[0]
+            .latency
+            .success(Duration::from_millis(5));
+        // b is unmeasured, so it still wins against a measured deployment;
+        // only exploration (5%, half of it to a) reaches a.
+        assert!(count("b") >= 940);
+        pool.deployments[1]
+            .latency
+            .success(Duration::from_millis(50));
+        let fast = count("a");
+        assert!(fast >= 940, "fast deployment got {fast}/1000");
+        assert!(fast < 1000, "exploration keeps measuring the slow one");
+        // Cost scales with queued work (peak-EWMA style): concurrent load
+        // spreads roughly inversely to latency (10:1 here) instead of piling
+        // everything onto the fastest deployment.
+        let held: Vec<_> = (0..44)
+            .map(|_| router.acquire(route, 0, &Caller::Anonymous))
+            .collect();
+        let busy = |i: usize| pool.deployments[i].in_flight.load(Ordering::Relaxed);
+        assert!((1..=7).contains(&busy(1)), "a={} b={}", busy(0), busy(1));
+        drop(held);
+    }
+
+    #[test]
+    fn vllm_load_avoids_congestion_and_falls_back_when_stale() {
+        fastrand::seed(3);
+        let router = compile(&snapshot(RoutingStrategy::VllmLoad));
+        let route = &router.routes["public"];
+        let pool = &route.pools[0];
+        let count = |name: &str| {
+            (0..1000)
+                .filter(|_| router.acquire(route, 0, &Caller::Anonymous).deployment.name == name)
+                .count()
+        };
+        let now = clock::mono_ms();
+        pool.deployments[0].load.set(50.0, 0.5, now);
+        pool.deployments[1].load.set(0.0, 0.5, now);
+        let congested = count("a");
+        assert!(
+            congested <= 100,
+            "congested deployment got {congested}/1000"
+        );
+        // Equal queues: KV-cache usage decides.
+        pool.deployments[0].load.set(0.0, 0.95, now);
+        pool.deployments[1].load.set(0.0, 0.10, now);
+        assert_eq!(count("b"), 1000);
+        // Equal load: in-flight decides.
+        pool.deployments[0].load.set(0.0, 0.1, now);
+        pool.deployments[1]
+            .in_flight
+            .fetch_add(3, Ordering::Relaxed);
+        assert_eq!(count("a"), 1000);
+        // a's scrape failed: comparisons with it use in-flight only, so the
+        // (stale) queue no longer protects it.
+        pool.deployments[0].load.set(99.0, 1.0, now);
+        pool.deployments[0].load.fail();
+        assert_eq!(count("a"), 1000);
+        pool.deployments[1]
+            .in_flight
+            .fetch_sub(3, Ordering::Relaxed);
+        // Fresh again but old: older than the staleness bound is ignored.
+        pool.deployments[0]
+            .load
+            .set(99.0, 1.0, now.saturating_sub(balance::LOAD_STALE_MS + 1));
+        pool.deployments[0]
+            .in_flight
+            .fetch_add(1, Ordering::Relaxed);
+        assert_eq!(count("b"), 1000);
+        pool.deployments[0]
+            .in_flight
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn scrape_targets_and_metrics_urls() {
+        let mut s = snapshot(RoutingStrategy::VllmLoad);
+        s.upstreams.push(upstream("idle"));
+        s.deployments.push(deployment("c", "idle"));
+        let router = compile(&s);
+        assert_eq!(
+            router.scrapes.len(),
+            1,
+            "only upstreams behind vllm_load routes"
+        );
+        let scrape = &router.scrapes[0];
+        assert_eq!(scrape.uri, "http://localhost:8000/metrics");
+        assert_eq!(scrape.targets.len(), 2);
+        assert!(!router.routes["public"].pools[0].deployments[0].track_latency);
+        let base: Uri = "https://h:1/prefix/v1/".parse().unwrap();
+        assert_eq!(
+            metrics_uri(&base, "").unwrap(),
+            "https://h:1/prefix/metrics"
+        );
+        let base: Uri = "http://h/openai".parse().unwrap();
+        assert_eq!(metrics_uri(&base, "").unwrap(), "http://h/openai/metrics");
+        assert_eq!(
+            metrics_uri(&base, "http://other:9/m?x=1").unwrap(),
+            "http://other:9/m?x=1"
+        );
+        for bad in ["ftp://h/m", "http://u:p@h/m", "/metrics", "not a url"] {
+            assert!(metrics_uri(&base, bad).is_none(), "{bad}");
+        }
+        s.upstreams[0].metrics_url = "ftp://h/m".into();
+        assert!(Router::compile(&s, AuthMode::Open, &Runtime::new()).is_err());
+    }
+
+    #[test]
+    fn load_aware_and_sticky_picks_do_not_allocate() {
+        use crate::test_alloc::count;
+        for (sticky, strategy) in [
+            (pb::StickyBy::None, RoutingStrategy::LowestLatency),
+            (pb::StickyBy::None, RoutingStrategy::VllmLoad),
+            (pb::StickyBy::Header, RoutingStrategy::LowestLatency),
+            (pb::StickyBy::Header, RoutingStrategy::VllmLoad),
+        ] {
+            let router = compile(&split_snapshot(sticky, strategy));
+            let route = &router.routes["public"];
+            let h = headers("session-1");
+            for d in route.pools.iter().flat_map(|p| &p.deployments) {
+                d.latency.success(Duration::from_millis(1));
+                d.load.set(1.0, 0.5, clock::mono_ms());
+            }
+            // Warm every handle the picks below can reach.
+            for _ in 0..200 {
+                drop(router.acquire_initial(route, 0, &Caller::Anonymous, &h));
+                drop(router.acquire(route, 0, &Caller::Anonymous));
+            }
+            let (warm, guard) = count(|| router.acquire_initial(route, 0, &Caller::Anonymous, &h));
+            drop(guard);
+            assert_eq!(warm, (0, 0), "{sticky:?} {strategy:?}");
+            let tried = [route.pools[1].deployments[0].label];
+            let (retry, guard) =
+                count(|| router.retry(route, 0, &Caller::Anonymous, &h, &tried, 1));
+            drop(guard);
+            assert_eq!(retry, (0, 0), "retry {sticky:?} {strategy:?}");
+        }
     }
 }

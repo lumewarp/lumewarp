@@ -65,6 +65,39 @@ fn nack_label(code: NackCode) -> &'static str {
 /// `lumewarp_usage_capture_total{state}` labels, indexed by `UsageState`.
 const USAGE_STATES: [&str; 5] = ["unspecified", "reported", "missing", "partial", "invalid"];
 const ERROR_KINDS: [&str; 4] = ["connect", "timeout", "stream", "protocol"];
+pub const ATTEMPT_OUTCOMES: [&str; 6] = [
+    "success",
+    "retryable_status",
+    "connect_error",
+    "timeout",
+    "circuit_open",
+    "non_retryable",
+];
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct AttemptLabels {
+    model: String,
+    deployment: String,
+    outcome: &'static str,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct FallbackLabels {
+    model: String,
+    fallback_model: String,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ModelLabels {
+    model: String,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct SplitLabels {
+    model: String,
+    split: String,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct UpstreamLabels {
+    upstream: String,
+}
 
 pub enum UpstreamError {
     Connect,
@@ -169,6 +202,7 @@ pub struct RequestMetrics {
     body_read: Histogram,
     ttft: Option<Histogram>,
     errors: Option<[Counter; 4]>,
+    pub attempts: [Counter; 6],
 }
 
 impl RequestMetrics {
@@ -241,6 +275,16 @@ pub struct Metrics {
     /// team -> spend series, so recording spend is lock- and allocation-free
     /// after the first request of a team.
     spend_cache: papaya::HashMap<Box<str>, SpendCounter>,
+    attempts: Family<AttemptLabels, Counter>,
+    fallbacks: Family<FallbackLabels, Counter>,
+    budget_exhausted: Family<ModelLabels, Counter>,
+    circuit: Family<DeploymentLabels, Gauge>,
+    healthy: Family<UpstreamLabels, Gauge>,
+    splits: Family<SplitLabels, Counter>,
+    vllm_queue: Family<DeploymentLabels, Gauge>,
+    vllm_kv: Family<DeploymentLabels, Gauge<f64, AtomicU64>>,
+    vllm_scrape_failures: Family<UpstreamLabels, Counter>,
+    latency_ewma: Family<DeploymentLabels, Gauge<f64, AtomicU64>>,
 }
 
 impl Metrics {
@@ -269,6 +313,66 @@ impl Metrics {
         });
         let tokens = Family::default();
         let spend = Family::default();
+        let attempts = Family::default();
+        let fallbacks = Family::default();
+        let budget_exhausted = Family::default();
+        let circuit = Family::default();
+        let healthy = Family::default();
+        let splits = Family::default();
+        let vllm_queue = Family::default();
+        let vllm_kv = Family::default();
+        let vllm_scrape_failures = Family::default();
+        let latency_ewma = Family::default();
+        registry.register(
+            "lumewarp_split_requests",
+            "Requests assigned to a traffic split",
+            splits.clone(),
+        );
+        registry.register(
+            "lumewarp_vllm_queue_depth",
+            "Last scraped vllm:num_requests_waiting",
+            vllm_queue.clone(),
+        );
+        registry.register(
+            "lumewarp_vllm_kv_cache_usage",
+            "Last scraped vLLM KV-cache usage (0..1)",
+            vllm_kv.clone(),
+        );
+        registry.register(
+            "lumewarp_vllm_scrape_failures",
+            "Failed vLLM metrics scrapes",
+            vllm_scrape_failures.clone(),
+        );
+        registry.register(
+            "lumewarp_upstream_latency_ewma_seconds",
+            "Time-to-response-headers EWMA used by lowest_latency routing",
+            latency_ewma.clone(),
+        );
+        registry.register(
+            "lumewarp_upstream_attempts",
+            "Upstream attempts by outcome",
+            attempts.clone(),
+        );
+        registry.register(
+            "lumewarp_fallbacks",
+            "Requests moving to a fallback route",
+            fallbacks.clone(),
+        );
+        registry.register(
+            "lumewarp_retries_budget_exhausted",
+            "Retries refused by the process budget",
+            budget_exhausted.clone(),
+        );
+        registry.register(
+            "lumewarp_upstream_circuit_state",
+            "Deployment breaker: closed 0, half-open 1, open 2",
+            circuit.clone(),
+        );
+        registry.register(
+            "lumewarp_upstream_healthy",
+            "Active upstream health: healthy 1, unhealthy 0",
+            healthy.clone(),
+        );
         registry.register(
             "lumewarp_requests",
             "Completed requests, including dropped response bodies",
@@ -387,12 +491,103 @@ impl Metrics {
             tokens,
             spend,
             spend_cache: papaya::HashMap::new(),
+            attempts,
+            fallbacks,
+            budget_exhausted,
+            circuit,
+            healthy,
+            splits,
+            vllm_queue,
+            vllm_kv,
+            vllm_scrape_failures,
+            latency_ewma,
+        }
+    }
+
+    pub fn split_handle(&self, model: &str, split: &str) -> Counter {
+        self.splits
+            .get_or_create(&SplitLabels {
+                model: model.into(),
+                split: split.into(),
+            })
+            .clone()
+    }
+
+    pub fn vllm_gauges(&self, deployment: &str) -> (Gauge, Gauge<f64, AtomicU64>) {
+        let labels = DeploymentLabels {
+            deployment: deployment.into(),
+        };
+        (
+            self.vllm_queue.get_or_create(&labels).clone(),
+            self.vllm_kv.get_or_create(&labels).clone(),
+        )
+    }
+
+    pub fn scrape_failures(&self, upstream: &str) -> Counter {
+        self.vllm_scrape_failures
+            .get_or_create(&UpstreamLabels {
+                upstream: upstream.into(),
+            })
+            .clone()
+    }
+
+    /// Off the request path: refreshed when `/metrics` is scraped.
+    pub fn export_latency(&self, latencies: Vec<(String, u64)>) {
+        for (deployment, us) in latencies {
+            self.latency_ewma
+                .get_or_create(&DeploymentLabels { deployment })
+                .set(us as f64 / 1e6);
         }
     }
 
     pub fn config_applied(&self, version: u64) {
         self.config_version
             .set(i64::try_from(version).unwrap_or(i64::MAX));
+    }
+
+    pub fn attempt_handles(&self, model: &str, deployment: &str) -> [Counter; 6] {
+        ATTEMPT_OUTCOMES.map(|outcome| {
+            self.attempts
+                .get_or_create(&AttemptLabels {
+                    model: model.into(),
+                    deployment: deployment.into(),
+                    outcome,
+                })
+                .clone()
+        })
+    }
+
+    pub fn fallback_handle(&self, model: &str, fallback_model: &str) -> Counter {
+        self.fallbacks
+            .get_or_create(&FallbackLabels {
+                model: model.into(),
+                fallback_model: fallback_model.into(),
+            })
+            .clone()
+    }
+
+    pub fn budget_handle(&self, model: &str) -> Counter {
+        self.budget_exhausted
+            .get_or_create(&ModelLabels {
+                model: model.into(),
+            })
+            .clone()
+    }
+
+    pub fn circuit_gauge(&self, deployment: &str) -> Gauge {
+        self.circuit
+            .get_or_create(&DeploymentLabels {
+                deployment: deployment.into(),
+            })
+            .clone()
+    }
+
+    pub fn health_gauge(&self, upstream: &str) -> Gauge {
+        self.healthy
+            .get_or_create(&UpstreamLabels {
+                upstream: upstream.into(),
+            })
+            .clone()
     }
 
     pub fn config_apply_failed(&self, code: NackCode) {
@@ -572,6 +767,7 @@ impl Metrics {
             body_read,
             ttft,
             errors,
+            attempts: self.attempt_handles(model, deployment),
         })
     }
 

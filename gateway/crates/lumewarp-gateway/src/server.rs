@@ -53,13 +53,16 @@ pub async fn serve(
     let header_read_timeout = Duration::from_millis(config.header_read_timeout_ms);
     let body_read_timeout = Duration::from_millis(config.body_read_timeout_ms);
     let shutdown_grace = Duration::from_millis(config.shutdown_grace_ms);
-    let client = proxy::client();
+    let client = runtime.client.clone();
+    runtime.retry_budget.configure(config.retry_budget_percent);
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding {listen}"))?;
     let admin_listener = TcpListener::bind(admin_listen)
         .await
         .with_context(|| format!("binding admin {admin_listen}"))?;
+    let listen = listener.local_addr()?;
+    let admin_listen = admin_listener.local_addr()?;
     tracing::info!(%listen, %admin_listen, "lumewarp gateway listening");
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -377,6 +380,7 @@ mod tests {
                 shutdown_grace_ms: 1000,
                 header_read_timeout_ms: 1000,
                 body_read_timeout_ms: 1000,
+                retry_budget_percent: 20,
             };
             let task = tokio::spawn({
                 let settings = settings.clone();
