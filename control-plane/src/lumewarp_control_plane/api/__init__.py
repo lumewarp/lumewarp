@@ -23,6 +23,7 @@ from lumewarp_control_plane.api import (
     members,
     routing,
     service_accounts,
+    session,
     teams,
     usage,
     users,
@@ -53,3 +54,4 @@ router.include_router(usage.router)
 router.include_router(audit.router)
 router.include_router(gateways.router)
 router.include_router(config.router)
+router.include_router(session.router)

@@ -99,6 +99,7 @@ def matches_bootstrap(token: str, settings: Settings) -> bool:
 class PrincipalKind(StrEnum):
     BOOTSTRAP = "bootstrap"
     USER = "user"
+    SESSION = "session"
 
 
 @dataclass(frozen=True)
@@ -161,10 +162,18 @@ async def current_principal(request: Request) -> Principal:
     """
     token = parse_bearer(request.headers.get("authorization"))
     if token is None:
-        raise unauthorized()
-    principal = await authenticate(
-        request.app.state.session_factory, token, request.app.state.settings
-    )
+        from lumewarp_control_plane.auth.sessions import COOKIE_NAME, authenticate_session
+
+        cookie = request.cookies.get(COOKIE_NAME)
+        principal = (
+            await authenticate_session(request.app.state.session_factory, cookie, request)
+            if cookie
+            else None
+        )
+    else:
+        principal = await authenticate(
+            request.app.state.session_factory, token, request.app.state.settings
+        )
     if principal is None:
         raise unauthorized()
     return principal
