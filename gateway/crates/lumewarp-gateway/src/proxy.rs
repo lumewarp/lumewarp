@@ -37,7 +37,9 @@ use crate::{
     ratelimit::Permit,
     router::{InFlight, Model, RoutingTable, Skipped},
     telemetry,
-    usage::{Captured, PendingCapture, RequestCtx, SseFilter, Tee, UsageCapture},
+    usage::{
+        bounded_requested, Captured, PendingCapture, RequestCtx, SseFilter, Tee, UsageCapture,
+    },
 };
 
 pub type BoxError = Box<dyn Error + Send + Sync>;
@@ -232,24 +234,33 @@ impl<'a> RequestFields<'a> {
     }
 }
 
-/// Reports a request rejected after its model was parsed (403 / 429). Only
-/// keyed callers are reported: anonymous rejections would be unattributable.
+/// Reports a request rejected after its model field was parsed (403 / 404 /
+/// 429 / 503) under the name it called, with whatever provenance that name has.
+/// Only keyed callers are reported: anonymous rejections would be unattributable.
+#[allow(clippy::too_many_arguments)]
 fn report_rejection(
     routing_table: &RoutingTable,
     caller: &Caller,
     request: RequestCtx,
     handles: Arc<RequestMetrics>,
+    requested: &str,
     endpoint: usize,
     stream: bool,
     status: StatusCode,
 ) {
     if matches!(caller, Caller::Key(_)) && routing_table.runtime.usage.enabled() {
+        let called = routing_table.lookup(requested);
         UsageCapture {
             runtime: routing_table.runtime.clone(),
             caller: caller.clone(),
             request,
             handles,
+            requested: bounded_requested(requested).as_ref().into(),
+            alias: called.and_then(|c| c.alias.clone()),
+            router: called.and_then(|c| c.router.clone()),
             model: None,
+            fallback: false,
+            attempts: 0,
             config_version: routing_table.version,
             endpoint,
             stream,
@@ -344,7 +355,8 @@ pub async fn forward(
         Ok(include_usage) => include_usage,
         Err(message) => return error::json(StatusCode::BAD_REQUEST, "invalid_request", message),
     };
-    // Before router lookup, so denied callers cannot probe which aliases exist.
+    observation.requested(&model);
+    // Before the name lookup, so denied callers cannot probe which names exist.
     if let Err(err) = auth::check_model(&caller, &model) {
         let handles = routing_table.rejected_model(&caller, &model, endpoint);
         observation.routed(handles.clone(), stream);
@@ -353,16 +365,30 @@ pub async fn forward(
             &caller,
             request,
             handles,
+            &model,
             endpoint,
             stream,
             err.status(),
         );
         return err.into();
     }
-    let Some(router) = routing_table.routers.get(model.as_ref()) else {
-        observation.routed(routing_table.unknown(&caller, endpoint), stream);
+    let Some(called) = routing_table.lookup(model.as_ref()) else {
+        let handles = routing_table.unknown(&caller, endpoint);
+        observation.routed(handles.clone(), stream);
+        report_rejection(
+            routing_table,
+            &caller,
+            request,
+            handles,
+            &model,
+            endpoint,
+            stream,
+            StatusCode::NOT_FOUND,
+        );
         return error::json(StatusCode::NOT_FOUND, "model_not_found", "Model not found");
     };
+    let router = &*called.target;
+    observation.provenance(called.alias.as_deref(), called.router.as_deref());
     let permit = match routing_table.runtime.limiters.admit(&caller) {
         Ok(permit) => permit,
         Err(limited) => {
@@ -373,6 +399,7 @@ pub async fn forward(
                 &caller,
                 request,
                 handles,
+                &model,
                 endpoint,
                 stream,
                 StatusCode::TOO_MANY_REQUESTS,
@@ -387,7 +414,7 @@ pub async fn forward(
     }
     let mut skipped = Skipped::default();
     let Some((mut guard, initial_fallback, split)) =
-        routing_table.acquire_initial(router, endpoint, &caller, &parts.headers, &mut skipped)
+        routing_table.acquire_initial(called, endpoint, &caller, &parts.headers, &mut skipped)
     else {
         let handles = routing_table.rejected_model(&caller, &model, endpoint);
         observation.routed(handles.clone(), stream);
@@ -396,6 +423,7 @@ pub async fn forward(
             &caller,
             request,
             handles,
+            &model,
             endpoint,
             stream,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -448,7 +476,12 @@ pub async fn forward(
         caller: caller.clone(),
         request,
         handles: guard.metrics.clone(),
+        requested: called.name.clone(),
+        alias: called.alias.clone(),
+        router: called.router.clone(),
         model: Some(guard.model.clone()),
+        fallback: initial_fallback.is_some(),
+        attempts: 0,
         config_version: routing_table.version,
         endpoint,
         stream,
@@ -463,6 +496,7 @@ pub async fn forward(
     let mut attempt = 0usize;
     let (response, fallback_response, inject) = loop {
         attempt += 1;
+        pending.attempts(attempt as u32);
         tried[attempt - 1] = guard.model.label;
         let model = &guard.model;
         let inject = stream
@@ -497,7 +531,10 @@ pub async fn forward(
         parts.headers.insert(header::HOST, model.host.clone());
         let span = if observation.otel {
             tracing::info_span!(parent: &observation.span, "upstream_attempt",
-                model = %model.name, attempt, outcome = tracing::field::Empty)
+                model = %model.name, upstream = &*model.upstream,
+                upstream_model = &*model.upstream_model, attempt,
+                fallback = used_fallback, outcome = tracing::field::Empty,
+                upstream_status = tracing::field::Empty)
         } else {
             tracing::Span::none()
         };
@@ -530,6 +567,7 @@ pub async fn forward(
         let (response, outcome, retryable, error_status) = match result {
             Ok(Ok(response)) => {
                 let status = response.status();
+                span.record("upstream_status", status.as_u16());
                 let retryable = retry_status(router.retry.as_ref(), status.as_u16());
                 if matches!(status.as_u16(), 429 | 503) {
                     if let Some(delay) = response
@@ -602,7 +640,7 @@ pub async fn forward(
         {
             let headers = &replay.as_ref().expect("retries keep a template").headers;
             if let Some((next, fallback)) = routing_table.retry(
-                router,
+                called,
                 endpoint,
                 &caller,
                 headers,
@@ -634,6 +672,7 @@ pub async fn forward(
                     let mut capture = pending.take();
                     capture.handles = guard.metrics.clone();
                     capture.model = Some(guard.model.clone());
+                    capture.fallback = used_fallback;
                     pending = PendingCapture::new(capture);
                     continue;
                 }
@@ -652,10 +691,17 @@ pub async fn forward(
                 let mut capture = pending.take();
                 capture.handles = guard.metrics.clone();
                 capture.model = Some(guard.model.clone());
+                capture.fallback = fallback;
                 pending = PendingCapture::new(capture);
                 break (response, fallback, inject);
             }
             None => {
+                observation.served(
+                    &guard.model.upstream,
+                    &guard.model.upstream_model,
+                    attempt,
+                    used_fallback,
+                );
                 let mut capture = pending.take();
                 capture.status = error_status.as_u16();
                 capture.finalize(RequestOutcome::UpstreamError, UsageState::Missing, None);
@@ -672,6 +718,12 @@ pub async fn forward(
         }
     };
     observation.headers_received = Some(Instant::now());
+    observation.served(
+        &guard.model.upstream,
+        &guard.model.upstream_model,
+        attempt,
+        fallback_response,
+    );
     let (mut parts, body) = response.into_parts();
     strip_response_headers(&mut parts.headers);
     let meter = Meter::select(&parts, stream, inject, include_usage.requested());
@@ -679,7 +731,7 @@ pub async fn forward(
     capture.status = parts.status.as_u16();
     let alias = (fallback_response && parts.status.is_success()).then(|| {
         AliasBody::new(
-            serde_json::to_vec(model.as_ref()).expect("model serializes"),
+            serde_json::to_vec(&*called.name).expect("name serializes"),
             stream
                 && !parts
                     .headers
@@ -1411,7 +1463,7 @@ upstreams:
 models:
   - {name: d, upstream: u, upstream_model: actual}
 routers:
-  - {name: public, models: [d]}
+  - {name: public, members: [{model: d}]}
 "#,
         )
         .unwrap();
@@ -1421,7 +1473,7 @@ routers:
             &crate::runtime::Runtime::new(),
         )
         .unwrap();
-        let guard = routing_table.acquire(&routing_table.routers["public"], 0, &Caller::Anonymous);
+        let guard = routing_table.acquire(&routing_table.names["public"], 0, &Caller::Anonymous);
         let model = &guard.model;
         assert_eq!(model.host, "localhost:8123");
         assert_eq!(model.upstream_model_json, br#""actual""#.as_slice());

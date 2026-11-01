@@ -316,7 +316,7 @@ async fn oversized_content_length_is_rejected_before_reading_body() {
 }
 
 #[tokio::test]
-async fn models_lists_router_aliases() {
+async fn models_lists_every_callable_name() {
     let mut mock = Mock::start(Behavior::Json).await;
     let gateway = Gateway::start(&[mock.addr], false, 2000).await;
     let response = gateway
@@ -332,7 +332,7 @@ async fn models_lists_router_aliases() {
         .map(|model| model["id"].as_str().unwrap())
         .collect();
     models.sort_unstable();
-    assert_eq!(models, ["another-alias", "public"]);
+    assert_eq!(models, ["another-alias", "d0", "public"]);
     assert!(
         mock.records.try_recv().is_err(),
         "models must be served locally"

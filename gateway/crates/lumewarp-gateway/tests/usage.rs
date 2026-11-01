@@ -32,9 +32,9 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use lumewarp_proto::{
     config::v1::{
-        config_update::Update, ApiKey, ConfigUpdate, EffectivePolicy, GatewayMessage, KeyStatus,
-        Model, Price, RateLimit, RateLimitScope, Router, Snapshot, StreamUsageMode, Team,
-        Upstream as UpstreamConfig, UpstreamKind,
+        config_update::Update, Alias, ApiKey, ConfigUpdate, EffectivePolicy, GatewayMessage,
+        KeyStatus, Model, Price, RateLimit, RateLimitScope, Router, RouterMember, Snapshot,
+        StreamUsageMode, Team, Upstream as UpstreamConfig, UpstreamKind,
     },
     usage::v1::{ReportRequest, ReportResponse, RequestOutcome, UsageEvent, UsageState},
 };
@@ -58,6 +58,7 @@ const FINISH: &[u8] = b"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\"
 const USAGE: &[u8] = b"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18}}\n\n";
 const DONE: &[u8] = b"data: [DONE]\n\n";
 const CHAT_JSON: &[u8] = br#"{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}"#;
+const NAMED_CHAT_JSON: &[u8] = br#"{"id":"c","object":"chat.completion","model":"actual","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}"#;
 const EMBEDDINGS_JSON: &[u8] = br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.5]}],"model":"m","usage":{"prompt_tokens":8,"total_tokens":8}}"#;
 /// $1 / Mtok input, $2 / Mtok output.
 const PRICE: Price = Price {
@@ -457,13 +458,16 @@ fn snapshot(upstream: SocketAddr) -> Snapshot {
         name: name.into(),
         upstream: upstream.into(),
         upstream_model: "actual".into(),
-        weight: 1,
         price,
     };
     let router = |name: &str, model: &str| Router {
         name: name.into(),
-        models: vec![model.into()],
-        strategy: 1,
+        members: vec![RouterMember {
+            model: model.into(),
+            weight: 1,
+            ..Default::default()
+        }],
+        strategy: "weighted".into(),
         ..Default::default()
     };
     Snapshot {
@@ -505,7 +509,8 @@ fn snapshot(upstream: SocketAddr) -> Snapshot {
             name: "Team one".into(),
         }],
         created_at_unix_ms: 1,
-        required_capabilities: Vec::new(),
+        aliases: vec![],
+        required_capabilities: vec!["strategy:weighted".into()],
         scope: SCOPE.into(),
     }
 }
@@ -653,11 +658,15 @@ async fn setup() -> (FakeCp, Upstream, Gateway) {
 async fn retried_request_reports_only_final_model_usage() {
     let mut upstream = Upstream::start().await;
     let mut snapshot = snapshot(upstream.addr);
-    snapshot.required_capabilities = vec!["retry".into()];
+    snapshot.required_capabilities.push("retry".into());
     let mut second = snapshot.models[0].clone();
     second.name = "second".into();
     snapshot.models.push(second);
-    snapshot.routers[0].models.push("second".into());
+    snapshot.routers[0].members.push(RouterMember {
+        model: "second".into(),
+        weight: 1,
+        ..Default::default()
+    });
     snapshot.routers[0].retry = Some(lumewarp_proto::config::v1::RetryPolicy::default());
     upstream.respond(503, "application/json", &[b"{\"error\":\"retry\"}"]);
     upstream.respond(200, "application/json", &[CHAT_JSON]);
@@ -1032,12 +1041,30 @@ async fn keyed_rejections_are_reported_without_spam() {
         (event.status, event.requested.as_str(), event.model.as_str()),
         (403, "secret", "")
     );
-    // Unknown aliases are not echoed into events.
+    // A name that does not exist is what the owner of the key looks for: it is
+    // kept in the event, bounded. It stays out of the metric labels.
     let response = gateway
         .post("/v1/chat/completions", KEY, r#"{"model":"client-made-up"}"#)
         .await;
     assert_eq!(response.status(), 403);
-    assert_eq!(cp.event().await.requested, "unknown");
+    assert_eq!(cp.event().await.requested, "client-made-up");
+    let long = "n".repeat(1000);
+    let response = gateway
+        .post(
+            "/v1/chat/completions",
+            KEY,
+            &format!(r#"{{"model":"{long}"}}"#),
+        )
+        .await;
+    assert_eq!(response.status(), 403);
+    assert_eq!(cp.event().await.requested, "n".repeat(400));
+    assert_eq!(
+        gateway.metrics().await.sum(
+            "lumewarp_requests_total",
+            &[("requested", "client-made-up")]
+        ),
+        0.
+    );
 
     // 429: the second request in the minute.
     upstream.respond(200, "application/json", &[CHAT_JSON]);
@@ -1180,4 +1207,218 @@ async fn compressed_streams_pass_through_unparsed() {
         (RequestOutcome::Completed, UsageState::Invalid)
     );
     assert_eq!((event.prompt_tokens, event.cost_known), (0, false));
+}
+
+/// `flaky` always fails its only member, the model on the dead upstream, and
+/// falls back to `d`, which is the live one.
+async fn catalog_setup() -> (FakeCp, Upstream, Gateway) {
+    let upstream = Upstream::start().await;
+    let mut snapshot = snapshot(upstream.addr);
+    snapshot.aliases = vec![
+        Alias {
+            name: "to-model".into(),
+            target: "d".into(),
+        },
+        Alias {
+            name: "to-router".into(),
+            target: "public".into(),
+        },
+        Alias {
+            name: "to-flaky".into(),
+            target: "flaky".into(),
+        },
+    ];
+    let mut flaky = snapshot.routers[0].clone();
+    flaky.name = "flaky".into();
+    flaky.members[0].model = "dd".into();
+    flaky.retry = Some(lumewarp_proto::config::v1::RetryPolicy {
+        max_attempts: 2,
+        ..Default::default()
+    });
+    flaky.fallbacks = vec!["d".into()];
+    snapshot.routers.push(flaky);
+    snapshot
+        .required_capabilities
+        .extend(["retry".into(), "fallbacks".into()]);
+    snapshot.api_keys[0].policy.as_mut().unwrap().allowed_models = [
+        "public",
+        "d",
+        "dd",
+        "to-model",
+        "to-router",
+        "to-flaky",
+        "flaky",
+    ]
+    .map(String::from)
+    .to_vec();
+    let cp = FakeCp::start(snapshot).await;
+    let gateway = Gateway::start(cp.addr).await;
+    (cp, upstream, gateway)
+}
+
+#[tokio::test]
+async fn usage_event_for_each_way_of_calling_a_name() {
+    let (mut cp, mut upstream, gateway) = catalog_setup().await;
+    // called, alias, router, final model, upstream, fallback, attempts
+    let rows: &[(&str, &str, &str, &str, &str, bool, u32)] = &[
+        ("d", "", "", "d", "u", false, 1),
+        ("to-model", "to-model", "", "d", "u", false, 1),
+        ("public", "", "public", "d", "u", false, 1),
+        ("to-router", "to-router", "public", "d", "u", false, 1),
+        ("to-flaky", "to-flaky", "flaky", "d", "u", true, 2),
+    ];
+    for &(called, alias, router, model, upstream_name, fallback, attempts) in rows {
+        upstream.respond(200, "application/json", &[NAMED_CHAT_JSON]);
+        let response = gateway
+            .post(
+                "/v1/chat/completions",
+                KEY,
+                &format!(r#"{{"model":"{called}"}}"#),
+            )
+            .await;
+        assert_eq!(response.status(), 200, "{called}");
+        let header = response.headers()["x-lumewarp-request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = json(&bytes(response).await);
+        let event = cp.event().await;
+        assert_eq!(event.requested, called);
+        assert_eq!(event.alias, alias, "{called}");
+        assert_eq!(event.router, router, "{called}");
+        assert_eq!(event.model, model, "{called}");
+        assert_eq!(event.upstream, upstream_name, "{called}");
+        assert_eq!(event.upstream_model, "actual", "{called}");
+        assert_eq!(event.fallback, fallback, "{called}");
+        assert_eq!(event.attempts, attempts, "{called}");
+        assert_eq!(event.request_id, header, "{called}");
+        if fallback {
+            assert_eq!(body["model"], called, "a fallback keeps the called name");
+        }
+        // The body reaches the upstream with its upstream_model.
+        let received = upstream.received().await;
+        assert_eq!(json(&received.body)["model"], "actual");
+    }
+    let metrics = gateway.metrics().await;
+    assert_eq!(
+        metrics.sum(
+            "lumewarp_fallbacks_total",
+            &[("router", "flaky"), ("model", "d")]
+        ),
+        1.
+    );
+    assert_eq!(
+        metrics.sum(
+            "lumewarp_requests_total",
+            &[("requested", "to-flaky"), ("model", "d"), ("status", "200")]
+        ),
+        1.
+    );
+}
+
+#[tokio::test]
+async fn direct_model_is_one_attempt_even_when_a_router_retries_it() {
+    let (mut cp, _upstream, gateway) = catalog_setup().await;
+    let response = gateway
+        .post("/v1/chat/completions", KEY, r#"{"model":"dd"}"#)
+        .await;
+    assert_eq!(response.status(), 502);
+    bytes(response).await;
+    let event = cp.event().await;
+    assert_eq!(
+        (event.requested.as_str(), event.model.as_str()),
+        ("dd", "dd")
+    );
+    assert_eq!((event.alias.as_str(), event.router.as_str()), ("", ""));
+    assert_eq!((event.attempts, event.fallback), (1, false));
+    let metrics = gateway.metrics().await;
+    assert_eq!(
+        metrics.sum("lumewarp_upstream_attempts_total", &[("model", "dd")]),
+        1.
+    );
+    assert_eq!(metrics.sum("lumewarp_fallbacks_total", &[]), 0.);
+}
+
+#[tokio::test]
+async fn a_grant_covers_the_called_name_only() {
+    let upstream = Upstream::start().await;
+    let mut snapshot = snapshot(upstream.addr);
+    snapshot.aliases = vec![
+        Alias {
+            name: "nick".into(),
+            target: "d".into(),
+        },
+        Alias {
+            name: "to-public".into(),
+            target: "public".into(),
+        },
+    ];
+    // k1 holds a router and an alias, and none of what they point to by name.
+    snapshot.api_keys[0].policy.as_mut().unwrap().allowed_models =
+        vec!["public".into(), "nick".into()];
+    let mut all = key("k3", "lw-all", &[], Vec::new());
+    all.policy.as_mut().unwrap().allow_all_models = true;
+    snapshot.api_keys.push(all);
+    let mut cp = FakeCp::start(snapshot).await;
+    let gateway = Gateway::start(cp.addr).await;
+    for (secret, name, want) in [
+        (KEY, "d", 403),
+        (KEY, "to-public", 403),
+        (KEY, "dd", 403),
+        (KEY, "nope", 403),
+        ("lw-all", "nope", 404),
+    ] {
+        let response = gateway
+            .post(
+                "/v1/chat/completions",
+                secret,
+                &format!(r#"{{"model":"{name}"}}"#),
+            )
+            .await;
+        assert_eq!(response.status(), want, "{name}");
+        assert!(response.headers().contains_key("x-lumewarp-request-id"));
+        bytes(response).await;
+        let event = cp.event().await;
+        assert_eq!(event.requested, name, "named even on rejection");
+        assert_eq!(event.model, "", "{name}");
+        assert_eq!(event.status as u16, want, "{name}");
+        assert_eq!(event.attempts, 0, "{name}");
+        assert_eq!(state(&event).0, RequestOutcome::Rejected, "{name}");
+    }
+    // Provenance of a known name is known on rejection too.
+    let response = gateway
+        .post("/v1/chat/completions", KEY, r#"{"model":"to-public"}"#)
+        .await;
+    bytes(response).await;
+    let event = cp.event().await;
+    assert_eq!(
+        (event.alias.as_str(), event.router.as_str()),
+        ("to-public", "public")
+    );
+
+    // Unknown names stay out of the metric labels, whatever the client sends.
+    let metrics = gateway.metrics().await;
+    assert_eq!(
+        metrics.sum("lumewarp_requests_total", &[("requested", "nope")]),
+        0.
+    );
+    assert_eq!(
+        metrics.sum("lumewarp_requests_total", &[("requested", "unknown")]),
+        2.
+    );
+
+    // /v1/models lists exactly what the key can call.
+    let request = Request::builder()
+        .uri(format!("http://{}/v1/models", gateway.addr))
+        .header("authorization", format!("Bearer {KEY}"))
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let body = json(&bytes(bounded(gateway.http.request(request)).await.unwrap()).await);
+    let ids: Vec<_> = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["nick", "public"]);
 }

@@ -355,7 +355,7 @@ impl Metrics {
         );
         registry.register(
             "lumewarp_fallbacks",
-            "Requests moving to a fallback router",
+            "Requests moving to a fallback model",
             fallbacks.clone(),
         );
         registry.register(
@@ -504,10 +504,10 @@ impl Metrics {
         }
     }
 
-    pub fn split_handle(&self, requested: &str, split: &str) -> Counter {
+    pub fn split_handle(&self, router: &str, split: &str) -> Counter {
         self.splits
             .get_or_create(&SplitLabels {
-                router: requested.into(),
+                router: router.into(),
                 split: split.into(),
             })
             .clone()
@@ -557,19 +557,19 @@ impl Metrics {
         })
     }
 
-    pub fn fallback_handle(&self, requested: &str, fallback_model: &str) -> Counter {
+    pub fn fallback_handle(&self, router: &str, model: &str) -> Counter {
         self.fallbacks
             .get_or_create(&FallbackLabels {
-                router: requested.into(),
-                model: fallback_model.into(),
+                router: router.into(),
+                model: model.into(),
             })
             .clone()
     }
 
-    pub fn budget_handle(&self, requested: &str) -> Counter {
+    pub fn budget_handle(&self, router: &str) -> Counter {
         self.budget_exhausted
             .get_or_create(&RouterLabels {
-                router: requested.into(),
+                router: router.into(),
             })
             .clone()
     }
@@ -865,9 +865,55 @@ impl Observation {
     pub fn routed(&mut self, handles: Arc<RequestMetrics>, stream: bool) {
         self.handles = handles;
         self.stream = stream;
-        self.span.record("requested", &self.handles.requested);
-        self.span.record("model", &self.handles.model);
-        self.span.record("stream", stream);
+        if self.otel {
+            self.span.record("model", &self.handles.model);
+            self.span.record("stream", stream);
+        }
+    }
+
+    /// Identifiers known once the request entered `/v1/*`.
+    pub fn identified(&self, request_id: &uuid::Uuid, config_version: u64) {
+        if self.otel {
+            self.span
+                .record("request_id", tracing::field::display(request_id));
+            self.span.record("config_version", config_version);
+        }
+    }
+
+    pub fn caller(&self, key_id: &str, team_id: &str) {
+        if self.otel {
+            self.span.record("key_id", key_id);
+            self.span.record("team_id", team_id);
+        }
+    }
+
+    /// The name the client called, bounded because it is client input.
+    pub fn requested(&self, name: &str) {
+        if self.otel {
+            self.span
+                .record("requested", &*crate::usage::bounded_requested(name));
+        }
+    }
+
+    pub fn provenance(&self, alias: Option<&str>, router: Option<&str>) {
+        if self.otel {
+            if let Some(alias) = alias {
+                self.span.record("alias", alias);
+            }
+            if let Some(router) = router {
+                self.span.record("router", router);
+            }
+        }
+    }
+
+    /// What finally served (or last failed) the request.
+    pub fn served(&self, upstream: &str, upstream_model: &str, attempts: usize, fallback: bool) {
+        if self.otel {
+            self.span.record("upstream", upstream);
+            self.span.record("upstream_model", upstream_model);
+            self.span.record("attempts", attempts);
+            self.span.record("fallback", fallback);
+        }
     }
 
     fn first_frame(&mut self, ready_at: Instant) {
@@ -928,7 +974,9 @@ impl Observation {
         if let Some(read) = self.body_read_duration(now) {
             self.handles.body_read.observe(read.as_secs_f64());
         }
-        self.span.record("status", self.status.as_u16());
+        if self.otel {
+            self.span.record("status", self.status.as_u16());
+        }
     }
 
     pub fn wrap(mut self, response: hyper::Response<ProxyBody>) -> hyper::Response<ProxyBody> {
@@ -1051,7 +1099,7 @@ upstreams:
 models:
   - {name: d, upstream: u, upstream_model: actual}
 routers:
-  - {name: public, models: [d]}
+  - {name: public, members: [{model: d}]}
 "#,
         )
         .unwrap();
@@ -1066,7 +1114,7 @@ routers:
         let metrics = &runtime.metrics;
         metrics.set_yaml_hash("123456789abc");
         assert!(!router
-            .routers
+            .names
             .contains_key("client-supplied-secret-requested"));
         let mut observation = Observation::new(router.unknown(&anonymous, 0), Span::none(), false);
         observation.status = StatusCode::NOT_FOUND;
@@ -1105,7 +1153,7 @@ routers:
         assert!(runtime.encode_metrics().unwrap().contains(
             "requested=\"unknown\",endpoint=\"chat_completions\",model=\"\",team=\"\",status=\"499\"} 1"
         ));
-        let guard = router.acquire(&router.routers["public"], 0, &anonymous);
+        let guard = router.acquire(&router.names["public"], 0, &anonymous);
         assert!(runtime
             .encode_metrics()
             .unwrap()

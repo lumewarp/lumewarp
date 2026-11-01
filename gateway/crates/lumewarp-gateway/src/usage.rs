@@ -11,6 +11,7 @@
 //! `spawn_reporter` and `UsageSink` is frozen (GI).
 
 use std::{
+    borrow::Cow,
     ops::Range,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -47,6 +48,25 @@ use crate::{
 pub const MAX_SSE_EVENT: usize = 1024 * 1024;
 /// Largest non-stream body kept for usage parsing; longer is INVALID.
 pub const MAX_JSON_CAPTURE: usize = 4 * 1024 * 1024;
+
+/// Longest `requested` reported; the control plane refuses longer ones.
+const MAX_REQUESTED: usize = 400;
+
+/// A called name as reported in usage and spans. A name that does not exist is
+/// client input: cut to the limit on a character boundary and without NUL,
+/// which Postgres text cannot hold. Allocates only for such a name.
+pub fn bounded_requested(name: &str) -> Cow<'_, str> {
+    let mut end = name.len().min(MAX_REQUESTED);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = &name[..end];
+    if cut.contains('\0') {
+        Cow::Owned(cut.replace('\0', "\u{fffd}"))
+    } else {
+        Cow::Borrowed(cut)
+    }
+}
 
 /// Created once per `/v1/*` request at entry in `server.rs`, never from client
 /// headers, and passed by value into `proxy::forward`. `request_id` is the
@@ -556,10 +576,20 @@ pub struct UsageCapture {
     pub runtime: Arc<Runtime>,
     pub caller: Caller,
     pub request: RequestCtx,
-    /// Model label (router alias or `unknown`) and the caller's team.
+    /// Metric label (the called name or `unknown`) and the caller's team.
     pub handles: Arc<RequestMetrics>,
+    /// The name the client called, even when it is `unknown` to the metrics.
+    pub requested: Arc<str>,
+    /// The alias called, if any.
+    pub alias: Option<Arc<str>>,
+    /// The router behind the called name, if any.
+    pub router: Option<Arc<str>>,
     /// The model (with the price) this request was served with.
     pub model: Option<Arc<Model>>,
+    /// `model` is a fallback of the router.
+    pub fallback: bool,
+    /// Upstream attempts so far.
+    pub attempts: u32,
     pub config_version: u64,
     /// Index into `API_ENDPOINTS`.
     pub endpoint: usize,
@@ -611,12 +641,26 @@ impl UsageCapture {
                 .saturating_add(i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)),
             key_id,
             team_id: team.into(),
-            requested: self.handles.requested.clone(),
+            requested: self.requested.to_string(),
+            alias: self.alias.as_deref().unwrap_or_default().into(),
+            router: self.router.as_deref().unwrap_or_default().into(),
             model: self
                 .model
                 .as_ref()
                 .map(|d| d.name.clone())
                 .unwrap_or_default(),
+            upstream: self
+                .model
+                .as_ref()
+                .map(|d| d.upstream.to_string())
+                .unwrap_or_default(),
+            upstream_model: self
+                .model
+                .as_ref()
+                .map(|d| d.upstream_model.to_string())
+                .unwrap_or_default(),
+            fallback: self.fallback,
+            attempts: self.attempts,
             endpoint: API_ENDPOINTS[self.endpoint].into(),
             status: self.status.into(),
             stream: self.stream,
@@ -643,6 +687,13 @@ impl PendingCapture {
     /// `capture.status` should be the cancellation status (499).
     pub fn new(capture: UsageCapture) -> Self {
         Self(Some(capture))
+    }
+
+    /// Upstream attempts so far, for a request cancelled during the next one.
+    pub fn attempts(&mut self, attempts: u32) {
+        if let Some(capture) = &mut self.0 {
+            capture.attempts = attempts;
+        }
     }
 
     /// Hands the capture to whoever finalizes it next.
@@ -1292,6 +1343,11 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
             endpoint: 0,
             stream: false,
             status: 499,
+            requested: "m".into(),
+            alias: None,
+            router: None,
+            fallback: false,
+            attempts: 0,
         };
         let captured = || {
             runtime

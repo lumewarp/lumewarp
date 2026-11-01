@@ -68,6 +68,8 @@ pub struct Config {
     #[serde(default)]
     pub models: Vec<Model>,
     #[serde(default)]
+    pub aliases: Vec<Alias>,
+    #[serde(default)]
     pub routers: Vec<Router>,
     #[serde(default)]
     pub teams: Vec<Team>,
@@ -196,8 +198,6 @@ pub struct Model {
     pub name: String,
     pub upstream: String,
     pub upstream_model: String,
-    #[serde(default = "default_weight")]
-    pub weight: u32,
     /// Absent = price unknown (usage metered, cost unknown); explicit zeros = free.
     #[serde(default)]
     pub price: Option<Price>,
@@ -219,20 +219,40 @@ pub struct Price {
     pub output_usd_per_mtok: u64,
 }
 
+/// Another callable name for a model or a router.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Alias {
+    pub name: String,
+    pub target: String,
+}
+
+/// One model of a router or traffic split, with this router's settings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouterMember {
+    pub model: String,
+    #[serde(default = "default_weight")]
+    pub weight: u32,
+    #[serde(default)]
+    pub params: serde_json::Map<String, serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Router {
     pub name: String,
     #[serde(default)]
-    pub models: Vec<String>,
+    pub members: Vec<RouterMember>,
+    /// `weighted`, `least_in_flight`, `lowest_latency`, `vllm_load` or the
+    /// name of a compiled-in strategy.
+    #[serde(default = "default_strategy")]
+    pub strategy: String,
     #[serde(default)]
-    pub strategy: RoutingStrategy,
-    #[serde(default)]
-    pub custom_strategy: String,
-    #[serde(default)]
-    pub strategy_params: serde_json::Map<String, serde_json::Value>,
+    pub params: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     pub retry: Option<RetryPolicy>,
+    /// Model names.
     #[serde(default)]
     pub fallbacks: Vec<String>,
     #[serde(default)]
@@ -241,6 +261,29 @@ pub struct Router {
     pub sticky: StickyBy,
     #[serde(default)]
     pub sticky_header: String,
+}
+
+fn default_strategy() -> String {
+    "weighted".into()
+}
+
+fn params_json(params: &serde_json::Map<String, serde_json::Value>) -> String {
+    if params.is_empty() {
+        String::new()
+    } else {
+        serde_json::to_string(params).expect("JSON object")
+    }
+}
+
+fn wire_members(members: &[RouterMember]) -> Vec<pb::RouterMember> {
+    members
+        .iter()
+        .map(|m| pb::RouterMember {
+            model: m.model.clone(),
+            weight: m.weight,
+            params_json: params_json(&m.params),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -258,7 +301,7 @@ pub struct RetryPolicy {
 #[serde(deny_unknown_fields)]
 pub struct TrafficSplit {
     pub name: String,
-    pub models: Vec<String>,
+    pub members: Vec<RouterMember>,
     pub weight: u32,
 }
 
@@ -270,17 +313,6 @@ pub enum StickyBy {
     Header,
     Team,
     Key,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RoutingStrategy {
-    #[default]
-    Weighted,
-    LeastInFlight,
-    LowestLatency,
-    VllmLoad,
-    Custom,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -495,11 +527,18 @@ impl Config {
                 name: d.name.clone(),
                 upstream: d.upstream.clone(),
                 upstream_model: d.upstream_model.clone(),
-                weight: d.weight,
                 price: d.price.as_ref().map(|p| pb::Price {
                     input_nano_usd_per_mtok: p.input_usd_per_mtok,
                     output_nano_usd_per_mtok: p.output_usd_per_mtok,
                 }),
+            })
+            .collect();
+        let aliases = self
+            .aliases
+            .iter()
+            .map(|a| pb::Alias {
+                name: a.name.clone(),
+                target: a.target.clone(),
             })
             .collect();
         let routers = self
@@ -507,20 +546,9 @@ impl Config {
             .iter()
             .map(|r| pb::Router {
                 name: r.name.clone(),
-                models: r.models.clone(),
-                strategy: match r.strategy {
-                    RoutingStrategy::Weighted => pb::RoutingStrategy::Weighted,
-                    RoutingStrategy::LeastInFlight => pb::RoutingStrategy::LeastInFlight,
-                    RoutingStrategy::LowestLatency => pb::RoutingStrategy::LowestLatency,
-                    RoutingStrategy::VllmLoad => pb::RoutingStrategy::VllmLoad,
-                    RoutingStrategy::Custom => pb::RoutingStrategy::Custom,
-                } as i32,
-                custom_strategy: r.custom_strategy.clone(),
-                strategy_params_json: if r.strategy_params.is_empty() {
-                    String::new()
-                } else {
-                    serde_json::to_string(&r.strategy_params).expect("JSON object")
-                },
+                members: wire_members(&r.members),
+                strategy: r.strategy.clone(),
+                params_json: params_json(&r.params),
                 retry: r.retry.as_ref().map(|p| pb::RetryPolicy {
                     max_attempts: p.max_attempts,
                     retry_on_status: p.retry_on_status.clone(),
@@ -532,7 +560,7 @@ impl Config {
                     .iter()
                     .map(|s| pb::TrafficSplit {
                         name: s.name.clone(),
-                        models: s.models.clone(),
+                        members: wire_members(&s.members),
                         weight: s.weight,
                     })
                     .collect(),
@@ -612,6 +640,7 @@ impl Config {
             version: 0,
             upstreams,
             models,
+            aliases,
             routers,
             api_keys,
             teams,
@@ -641,17 +670,8 @@ impl Config {
                         }),
                     ),
                     (
-                        "lowest_latency",
-                        self.routers
-                            .iter()
-                            .any(|r| r.strategy == RoutingStrategy::LowestLatency),
-                    ),
-                    (
                         "vllm_load",
-                        self.routers
-                            .iter()
-                            .any(|r| r.strategy == RoutingStrategy::VllmLoad)
-                            || self.upstreams.iter().any(|u| !u.metrics_url.is_empty()),
+                        self.upstreams.iter().any(|u| !u.metrics_url.is_empty()),
                     ),
                 ] {
                     if used {
@@ -659,11 +679,9 @@ impl Config {
                     }
                 }
                 for r in &self.routers {
-                    if r.strategy == RoutingStrategy::Custom {
-                        let cap = format!("strategy:{}", r.custom_strategy);
-                        if !caps.contains(&cap) {
-                            caps.push(cap);
-                        }
+                    let cap = format!("strategy:{}", r.strategy);
+                    if !caps.contains(&cap) {
+                        caps.push(cap);
                     }
                 }
                 caps
@@ -683,20 +701,15 @@ mod tests {
     #[test]
     fn custom_strategy_yaml_preserves_object_and_emits_capability() {
         let (_, snapshot) = Config::parse(
-            "routers:\n  - name: custom\n    strategy: custom\n    custom_strategy: header_pin\n    strategy_params: {headers: [x-pin], value: 2}\n",
+            "routers:\n  - name: custom\n    strategy: header_pin\n    params: {headers: [x-pin], value: 2}\n",
         ).unwrap();
-        assert_eq!(
-            snapshot.routers[0].strategy,
-            pb::RoutingStrategy::Custom as i32
-        );
-        assert_eq!(snapshot.routers[0].custom_strategy, "header_pin");
+        assert_eq!(snapshot.routers[0].strategy, "header_pin");
         assert_eq!(snapshot.required_capabilities, ["strategy:header_pin"]);
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&snapshot.routers[0].strategy_params_json)
-                .unwrap(),
+            serde_json::from_str::<serde_json::Value>(&snapshot.routers[0].params_json).unwrap(),
             serde_json::json!({"headers": ["x-pin"], "value": 2})
         );
-        assert!(Config::parse("routers: [{name: custom, strategy_params: [1]}]").is_err());
+        assert!(Config::parse("routers: [{name: custom, params: [1]}]").is_err());
     }
 
     #[test]
@@ -712,19 +725,25 @@ upstreams:
     circuit_breaker: {}
 models:
   - {name: d, upstream: u, upstream_model: actual}
+  - {name: backup, upstream: u, upstream_model: actual}
 routers:
   - name: public
-    models: [d]
+    members: [{model: d}]
     retry: {}
     fallbacks: [backup]
-  - {name: backup, models: [d]}
 "#,
         )
         .unwrap();
         assert_eq!(settings.retry_budget_percent, 10);
         assert_eq!(
             s.required_capabilities,
-            ["retry", "fallbacks", "health_check", "circuit_breaker"]
+            [
+                "retry",
+                "fallbacks",
+                "health_check",
+                "circuit_breaker",
+                "strategy:weighted"
+            ]
         );
         assert_eq!(s.routers[0].retry.as_ref().unwrap().max_attempts, 0);
         assert!(s.upstreams[0].circuit_breaker.is_some());
@@ -745,7 +764,7 @@ upstreams:
 routers:
   - name: public
     strategy: vllm_load
-    traffic_split: [{name: stable, models: [d], weight: 1}]
+    traffic_split: [{name: stable, members: [{model: d}], weight: 1}]
     sticky: header
     sticky_header: x-session
 "#,
@@ -753,7 +772,10 @@ routers:
         .unwrap();
         assert_eq!(s.routers[0].traffic_split[0].name, "stable");
         assert_eq!(s.routers[0].sticky, pb::StickyBy::Header as i32);
-        assert_eq!(s.required_capabilities, ["traffic_split", "vllm_load"]);
+        assert_eq!(
+            s.required_capabilities,
+            ["traffic_split", "vllm_load", "strategy:vllm_load"]
+        );
     }
 
     #[test]
@@ -800,10 +822,12 @@ routers:
 upstreams:
   - { name: u, kind: vllm, base_url: "http://localhost:8000/v1", api_key_env: K, stream_usage_mode: passthrough }
 models:
-  - { name: d, upstream: u, upstream_model: m, weight: 3, price: { input_usd_per_mtok: "0.15", output_usd_per_mtok: "12" } }
+  - { name: d, upstream: u, upstream_model: m, price: { input_usd_per_mtok: "0.15", output_usd_per_mtok: "12" } }
   - { name: e, upstream: u, upstream_model: m }
 routers:
-  - { name: alias, models: [d, e], strategy: least_in_flight }
+  - { name: pool, members: [{model: d, weight: 3, params: {zone: a}}, {model: e}], strategy: least_in_flight }
+aliases:
+  - { name: nick, target: pool }
 "#,
         )
         .unwrap();
@@ -822,11 +846,23 @@ routers:
             })
         );
         assert_eq!(s.models[1].price, None);
-        assert_eq!(s.models[0].weight, 3);
-        assert_eq!(
-            s.routers[0].strategy,
-            pb::RoutingStrategy::LeastInFlight as i32
-        );
+        assert_eq!(s.routers[0].strategy, "least_in_flight");
+        assert_eq!(s.routers[0].members[0].weight, 3);
+        assert_eq!(s.routers[0].members[0].params_json, r#"{"zone":"a"}"#);
+        assert_eq!(s.routers[0].members[1].weight, 1, "default member weight");
+        assert_eq!(s.routers[0].members[1].params_json, "");
+        assert_eq!(s.aliases[0].target, "pool");
+        assert_eq!(s.required_capabilities, ["strategy:least_in_flight"]);
+        // The removed fields are errors, not silently ignored.
+        for removed in [
+            "models: [{name: d, upstream: u, upstream_model: m, weight: 3}]",
+            "routers: [{name: r, models: [d]}]",
+            "routers: [{name: r, custom_strategy: x}]",
+            "routers: [{name: r, strategy_params: {}}]",
+            "routers: [{name: r, traffic_split: [{name: s, models: [d], weight: 1}]}]",
+        ] {
+            assert!(Config::parse(removed).is_err(), "{removed}");
+        }
     }
 
     #[test]

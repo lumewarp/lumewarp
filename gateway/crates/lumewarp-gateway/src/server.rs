@@ -8,8 +8,11 @@ use anyhow::Context;
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use hyper::{
-    body::Incoming, header, server::conn::http1, service::service_fn, Method, Request, Response,
-    StatusCode,
+    body::Incoming,
+    header::{self, HeaderName, HeaderValue},
+    server::conn::http1,
+    service::service_fn,
+    Method, Request, Response, StatusCode,
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::{net::TcpListener, sync::watch, task::JoinSet};
@@ -24,6 +27,8 @@ use crate::{
     telemetry,
     usage::{RequestCtx, UsageEvent},
 };
+
+const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-lumewarp-request-id");
 
 /// The active routing table, absent until the first snapshot is applied (control-
 /// plane cold boot without an on-disk snapshot). The config stream stores
@@ -267,7 +272,16 @@ fn rejected_event(
         started_at_unix_ms: request.started_at_unix_ms,
         cost_nano_usd: 0,
         cost_known: false,
+        ..Default::default()
     }
+}
+
+/// `x-lumewarp-request-id`: the usage event's `request_id`, the key to look a
+/// request up in OTel. Not `x-request-id`, which upstreams set themselves.
+fn request_id_header(request: &RequestCtx) -> HeaderValue {
+    let mut buffer = [0u8; uuid::fmt::Hyphenated::LENGTH];
+    HeaderValue::from_str(request.request_id.hyphenated().encode_lower(&mut buffer))
+        .expect("a UUID is a valid header value")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -304,10 +318,42 @@ async fn dispatch(
         );
     };
     let request = RequestCtx::new(observation.started);
+    observation.identified(&request.request_id, routing_table.version);
+    let mut response = serve_api(
+        routing_table,
+        runtime,
+        client,
+        req,
+        observation,
+        endpoint,
+        request,
+        body_read_timeout,
+    )
+    .await;
+    // Replaces whatever an upstream may have sent under this name.
+    response
+        .headers_mut()
+        .insert(REQUEST_ID_HEADER, request_id_header(&request));
+    response
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_api(
+    routing_table: &RoutingTable,
+    runtime: &Runtime,
+    client: &UpstreamClient,
+    req: Request<Incoming>,
+    observation: &mut Observation,
+    endpoint: usize,
+    request: RequestCtx,
+    body_read_timeout: Duration,
+) -> Response<ProxyBody> {
+    let path = req.uri().path();
     let caller = match auth::authenticate(routing_table, req.headers()) {
         Ok(caller) => caller,
         Err(rejection) => {
             if let Some(key) = &rejection.key {
+                observation.caller(&key.key_id, &key.team_id);
                 runtime.usage.try_record(rejected_event(
                     routing_table,
                     key,
@@ -319,6 +365,9 @@ async fn dispatch(
             return rejection.into();
         }
     };
+    if let auth::Caller::Key(key) = &caller {
+        observation.caller(&key.key_id, &key.team_id);
+    }
     // Authenticated traffic carries the caller's team even when it never
     // reaches a model (/v1/models, malformed bodies); failed auth stays "".
     if caller.team_label() != 0 {
@@ -513,10 +562,11 @@ mod tests {
             assert_eq!(event.usage_state, UsageState::Missing as i32);
             assert_eq!(event.key_id, secret);
             assert_eq!(event.team_id, "t1");
-            assert_eq!(event.requested, "");
+            assert_eq!(event.requested, "", "authentication comes before the body");
             assert_eq!(event.endpoint, "models");
             assert_eq!(event.config_version, version);
             assert_eq!((event.prompt_tokens, event.completion_tokens), (0, 0));
+            assert_eq!(event.attempts, 0);
             let id = uuid::Uuid::parse_str(&event.request_id).unwrap();
             assert_eq!(id.get_version_num(), 7);
             assert!(event.started_at_unix_ms >= before - 5, "{secret}");

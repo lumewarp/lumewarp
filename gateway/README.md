@@ -37,7 +37,8 @@ models:
     upstream_model: mock
 routers:
   - name: demo
-    models: [mock-local]
+    members:
+      - {model: mock-local}
 ```
 
 In a second terminal:

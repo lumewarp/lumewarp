@@ -286,11 +286,11 @@ impl Gateway {
                 "  - {{name: d{i}, upstream: u{i}, upstream_model: actual}}\n"
             ));
         }
-        let models = (0..upstreams.len())
-            .map(|i| format!("d{i}"))
+        let members = (0..upstreams.len())
+            .map(|i| format!("{{model: d{i}}}"))
             .collect::<Vec<_>>()
             .join(", ");
-        yaml.push_str(&format!("routers:\n  - {{name: public, models: [{models}], strategy: least_in_flight}}\n  - {{name: another-alias, models: [{models}]}}\n"));
+        yaml.push_str(&format!("routers:\n  - {{name: public, members: [{members}], strategy: least_in_flight}}\n  - {{name: another-alias, members: [{members}]}}\n"));
         yaml.push_str(extra);
         let dir = std::env::temp_dir().join(format!(
             "lumewarp-proxy-test-{}-{}",

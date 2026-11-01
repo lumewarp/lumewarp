@@ -108,7 +108,14 @@ async fn virtual_key_allowed_and_denied_models() {
     );
     assert_eq!(
         models(&gateway, "all").await,
-        (200, vec!["another-alias".to_owned(), "public".to_owned()])
+        (
+            200,
+            vec![
+                "another-alias".to_owned(),
+                "d0".to_owned(),
+                "public".to_owned()
+            ]
+        )
     );
 }
 

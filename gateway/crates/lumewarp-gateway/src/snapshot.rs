@@ -23,9 +23,27 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     "health_check",
     "circuit_breaker",
     "traffic_split",
-    "lowest_latency",
     "vllm_load",
+    "strategy:weighted",
+    "strategy:least_in_flight",
+    "strategy:lowest_latency",
+    "strategy:vllm_load",
 ];
+
+/// The strategy of a pool that came from a `Model`, not a `Router`.
+pub const DEFAULT_STRATEGY: &str = "weighted";
+
+/// Built-in strategies by name; dispatched as an enum, without a vtable.
+pub fn builtin_strategy(name: &str) -> Option<lumewarp_router_api::Builtin> {
+    use lumewarp_router_api::Builtin;
+    match name {
+        "weighted" => Some(Builtin::Weighted),
+        "least_in_flight" => Some(Builtin::LeastInFlight),
+        "lowest_latency" => Some(Builtin::LowestLatency),
+        "vllm_load" => Some(Builtin::VllmLoad),
+        _ => None,
+    }
+}
 
 pub fn supported_capabilities() -> Vec<String> {
     let mut caps: Vec<_> = SUPPORTED_CAPABILITIES
@@ -47,19 +65,23 @@ pub fn valid_strategy_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
 }
 
-pub fn strategy_params(r: &pb::Router) -> Result<serde_json::Value, ApplyError> {
-    if r.strategy_params_json.len() > 16 * 1024 {
-        return Err(ApplyError::invalid("strategy params exceed 16 KiB"));
+fn params_object(text: &str, what: &str) -> Result<serde_json::Value, ApplyError> {
+    if text.len() > 16 * 1024 {
+        return Err(ApplyError::invalid(format!("{what} exceed 16 KiB")));
     }
-    if r.strategy_params_json.is_empty() {
+    if text.is_empty() {
         return Ok(serde_json::json!({}));
     }
-    let params: serde_json::Value = serde_json::from_str(&r.strategy_params_json)
-        .map_err(|_| ApplyError::invalid("strategy params must be a JSON object"))?;
+    let params: serde_json::Value = serde_json::from_str(text)
+        .map_err(|_| ApplyError::invalid(format!("{what} must be a JSON object")))?;
     if !params.is_object() {
-        return Err(ApplyError::invalid("strategy params must be a JSON object"));
+        return Err(ApplyError::invalid(format!("{what} must be a JSON object")));
     }
     Ok(params)
+}
+
+pub fn strategy_params(r: &pb::Router) -> Result<serde_json::Value, ApplyError> {
+    params_object(&r.params_json, "strategy params")
 }
 
 pub fn strategy_headers(r: &pb::Router) -> Result<Vec<String>, ApplyError> {
@@ -100,6 +122,10 @@ pub const FILE_NAME: &str = "snapshot.pb";
 const TMP_NAME: &str = "snapshot.pb.tmp";
 const DIGEST_LEN: usize = 32;
 const LEN_FIELD: usize = 4;
+/// First bytes of `snapshot.pb`. Bump with any change an older payload could
+/// decode under and mean something else: protobuf skips unknown fields, so
+/// decoding alone cannot tell the formats apart.
+const FILE_MAGIC: &[u8; 8] = b"LWSNAP02";
 /// Upper bound for the opaque control-plane digest.
 const MAX_DIGEST_BYTES: u32 = 1024;
 
@@ -135,6 +161,8 @@ pub enum LoadError {
     TooLarge,
     #[error("snapshot file is truncated or corrupt")]
     Corrupt,
+    #[error("snapshot file has an older format")]
+    OldFormat,
     #[error("snapshot scope {found:?} does not match the configured scope")]
     WrongScope { found: String },
 }
@@ -234,7 +262,30 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             )));
         }
     }
-    let routers = unique(snapshot.routers.iter().map(|r| r.name.as_str()), "router")?;
+    // Models, aliases and routers share one name space.
+    let names = unique(
+        snapshot
+            .models
+            .iter()
+            .map(|d| d.name.as_str())
+            .chain(snapshot.aliases.iter().map(|a| a.name.as_str()))
+            .chain(snapshot.routers.iter().map(|r| r.name.as_str())),
+        "name",
+    )?;
+    if names.contains("unknown") {
+        return Err(ApplyError::invalid(
+            "the name 'unknown' is reserved for metrics",
+        ));
+    }
+    let routers: HashSet<&str> = snapshot.routers.iter().map(|r| r.name.as_str()).collect();
+    for a in &snapshot.aliases {
+        if !models.contains(a.target.as_str()) && !routers.contains(a.target.as_str()) {
+            return Err(ApplyError::invalid(format!(
+                "alias {:?} target {:?} is not a model or router",
+                a.name, a.target
+            )));
+        }
+    }
     for r in &snapshot.routers {
         require(r.retry.is_some(), "retry")?;
         require(!r.fallbacks.is_empty(), "fallbacks")?;
@@ -252,58 +303,17 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             }
         }
         for fallback in &r.fallbacks {
-            if fallback == &r.name || !routers.contains(fallback.as_str()) {
+            if !models.contains(fallback.as_str()) {
                 return Err(ApplyError::invalid(format!(
-                    "router {:?} has a self or unknown fallback {:?}",
+                    "router {:?} fallback {:?} is not a model",
                     r.name, fallback
                 )));
             }
         }
-        if r.name == "unknown" {
-            return Err(ApplyError::invalid(
-                "router alias 'unknown' is reserved for metrics",
-            ));
-        }
-        let strategy = known::<pb::RoutingStrategy>(
-            r.strategy,
-            false,
-            &format!("router {:?} strategy", r.name),
-        )?;
-        require(
-            strategy == pb::RoutingStrategy::LowestLatency,
-            "lowest_latency",
-        )?;
-        require(strategy == pb::RoutingStrategy::VllmLoad, "vllm_load")?;
-        if strategy == pb::RoutingStrategy::Custom {
-            if !valid_strategy_name(&r.custom_strategy) {
-                return Err(ApplyError::invalid("invalid custom strategy name"));
-            }
-            require(true, &format!("strategy:{}", r.custom_strategy))?;
-            if lumewarp_router_api::lookup(&r.custom_strategy)
-                .map_err(|_| ApplyError::invalid("duplicate strategy registration"))?
-                .is_none()
-            {
-                return Err(ApplyError::unsupported("unregistered custom strategy"));
-            }
-            strategy_headers(r)?;
-        } else if !r.custom_strategy.is_empty() || !r.strategy_params_json.is_empty() {
-            return Err(ApplyError::invalid("custom strategy fields require CUSTOM"));
-        }
-        // With traffic_split the router's own model list is ignored.
-        if !r.traffic_split.is_empty() {
-            continue;
-        }
-        if r.models.is_empty() {
-            return Err(ApplyError::invalid(format!(
-                "router {:?} has no models",
-                r.name
-            )));
-        }
-        if let Some(d) = r.models.iter().find(|d| !models.contains(d.as_str())) {
-            return Err(ApplyError::invalid(format!(
-                "router {:?} references unknown model {:?}",
-                r.name, d
-            )));
+        validate_strategy(r, &require)?;
+        // With traffic_split the router's own member list is ignored.
+        if r.traffic_split.is_empty() {
+            validate_members(&r.name, "", &r.members, &models)?;
         }
     }
     unique(snapshot.teams.iter().map(|t| t.id.as_str()), "team")?;
@@ -373,6 +383,72 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
     Ok(())
 }
 
+/// An unknown name is `UNSUPPORTED_FEATURE`, also when the capability is not
+/// listed: the gateway cannot serve it either way.
+fn validate_strategy(
+    r: &pb::Router,
+    require: &impl Fn(bool, &str) -> Result<(), ApplyError>,
+) -> Result<(), ApplyError> {
+    if !valid_strategy_name(&r.strategy) {
+        return Err(ApplyError::invalid(format!(
+            "router {:?} has an invalid strategy name",
+            r.name
+        )));
+    }
+    let builtin = builtin_strategy(&r.strategy).is_some();
+    if !builtin
+        && lumewarp_router_api::lookup(&r.strategy)
+            .map_err(|_| ApplyError::invalid("duplicate strategy registration"))?
+            .is_none()
+    {
+        return Err(ApplyError::unsupported(format!(
+            "unregistered strategy {:?}",
+            r.strategy
+        )));
+    }
+    require(true, &format!("strategy:{}", r.strategy))?;
+    strategy_headers(r)?;
+    if builtin
+        && strategy_params(r)?
+            .as_object()
+            .is_some_and(|p| !p.is_empty())
+    {
+        return Err(ApplyError::invalid(format!(
+            "router {:?}: built-in strategy {:?} takes no params",
+            r.name, r.strategy
+        )));
+    }
+    Ok(())
+}
+
+/// A nonempty list of distinct known models with well-formed settings.
+fn validate_members(
+    router: &str,
+    split: &str,
+    members: &[pb::RouterMember],
+    models: &HashSet<&str>,
+) -> Result<(), ApplyError> {
+    let fail = |what: String| {
+        Err(ApplyError::invalid(format!(
+            "router {router:?}{split}: {what}"
+        )))
+    };
+    if members.is_empty() {
+        return fail("has no models".into());
+    }
+    let mut seen = HashSet::new();
+    for m in members {
+        if !models.contains(m.model.as_str()) {
+            return fail(format!("references unknown model {:?}", m.model));
+        }
+        if !seen.insert(m.model.as_str()) {
+            return fail(format!("repeats model {:?}", m.model));
+        }
+        params_object(&m.params_json, "member params")?;
+    }
+    Ok(())
+}
+
 /// Split names are bounded metric labels; every split names known models
 /// and the weights must leave something to router to.
 fn validate_split(
@@ -421,18 +497,7 @@ fn validate_split(
         if !names.insert(name.as_str()) {
             return fail(format!("duplicate split {name:?}"));
         }
-        if split.models.is_empty() {
-            return fail(format!("split {name:?} has no models"));
-        }
-        let mut seen = HashSet::new();
-        for d in &split.models {
-            if !models.contains(d.as_str()) {
-                return fail(format!("split {name:?} references unknown model {d:?}"));
-            }
-            if !seen.insert(d.as_str()) {
-                return fail(format!("split {name:?} repeats model {d:?}"));
-            }
-        }
+        validate_members(&r.name, &format!(" split {name:?}"), &split.members, models)?;
         total += u64::from(split.weight);
     }
     if total == 0 {
@@ -534,6 +599,13 @@ pub fn apply(base: &Snapshot, update: ConfigUpdate) -> Result<Snapshot, ApplyErr
                 "model",
             )?;
             merge(
+                &mut next.aliases,
+                delta.upsert_aliases,
+                &delta.remove_aliases,
+                |a| &a.name,
+                "alias",
+            )?;
+            merge(
                 &mut next.routers,
                 delta.upsert_routers,
                 &delta.remove_routers,
@@ -569,15 +641,14 @@ pub fn store(dir: &Path, snapshot: &Snapshot) -> io::Result<()> {
     store_with_digest(dir, snapshot, &[])
 }
 
-/// Atomically replaces `<dir>/snapshot.pb`: `payload || digest || len(digest)
-/// as u32 BE || sha256(everything before)`, written to a 0600 temp file,
+/// Atomically replaces `<dir>/snapshot.pb`: `FILE_MAGIC || payload || digest ||
+/// len(digest) as u32 BE || sha256(everything before)`, written to a 0600 temp file,
 /// fsynced, renamed, then the directory fsynced. `digest` is the control
 /// plane's opaque `target_digest`, kept in the same file so the two can never
 /// diverge. Creates `dir` (0700) if missing. Blocking: call from the apply
 /// task only.
 pub fn store_with_digest(dir: &Path, snapshot: &Snapshot, digest: &[u8]) -> io::Result<()> {
-    let mut data = snapshot.encode_to_vec();
-    if data.len() > MAX_SNAPSHOT_BYTES {
+    if snapshot.encoded_len() > MAX_SNAPSHOT_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "snapshot exceeds the size cap",
@@ -587,6 +658,12 @@ pub fn store_with_digest(dir: &Path, snapshot: &Snapshot, digest: &[u8]) -> io::
         .ok()
         .filter(|&n| n <= MAX_DIGEST_BYTES)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "digest too large"))?;
+    let mut data =
+        Vec::with_capacity(FILE_MAGIC.len() + snapshot.encoded_len() + digest.len() + LEN_FIELD);
+    data.extend_from_slice(FILE_MAGIC);
+    snapshot
+        .encode(&mut data)
+        .expect("the vector has room for the snapshot");
     data.extend_from_slice(digest);
     data.extend_from_slice(&digest_len.to_be_bytes());
     let checksum = Sha256::digest(&data);
@@ -617,8 +694,9 @@ fn create_dir(dir: &Path) -> io::Result<()> {
     builder.create(dir)
 }
 
-/// Reads `<dir>/snapshot.pb`. `Ok(None)` when absent; corrupt, oversized or
-/// wrong-scope files are errors, and the caller must not serve from them.
+/// Reads `<dir>/snapshot.pb`. `Ok(None)` when absent; corrupt, oversized,
+/// old-format or wrong-scope files are errors: the caller must not serve from
+/// them and fetches a full snapshot instead.
 #[cfg(test)]
 pub fn load(dir: &Path, scope: &str) -> Result<Option<Snapshot>, LoadError> {
     Ok(load_with_digest(dir, scope)?.map(|(snapshot, _)| snapshot))
@@ -631,7 +709,8 @@ pub fn load_with_digest(dir: &Path, scope: &str) -> Result<Option<(Snapshot, Vec
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err.into()),
     };
-    let cap = MAX_SNAPSHOT_BYTES + MAX_DIGEST_BYTES as usize + DIGEST_LEN + LEN_FIELD;
+    let cap =
+        FILE_MAGIC.len() + MAX_SNAPSHOT_BYTES + MAX_DIGEST_BYTES as usize + DIGEST_LEN + LEN_FIELD;
     let mut data = Vec::new();
     file.take(cap as u64 + 1).read_to_end(&mut data)?;
     if data.len() > cap {
@@ -642,6 +721,13 @@ pub fn load_with_digest(dir: &Path, scope: &str) -> Result<Option<(Snapshot, Vec
     }
     let (body, checksum) = data.split_at(data.len() - DIGEST_LEN);
     if Sha256::digest(body).as_slice() != checksum {
+        return Err(LoadError::Corrupt);
+    }
+    // After the checksum, so that a damaged file stays `Corrupt`.
+    let Some(body) = body.strip_prefix(FILE_MAGIC) else {
+        return Err(LoadError::OldFormat);
+    };
+    if body.len() < LEN_FIELD {
         return Err(LoadError::Corrupt);
     }
     let (rest, len) = body.split_at(body.len() - LEN_FIELD);
@@ -675,7 +761,7 @@ pub(crate) mod tests {
             "X-API-Key",
         ] {
             let router = pb::Router {
-                strategy_params_json: serde_json::json!({"headers": [header]}).to_string(),
+                params_json: serde_json::json!({"headers": [header]}).to_string(),
                 ..Default::default()
             };
             assert_eq!(
@@ -684,7 +770,7 @@ pub(crate) mod tests {
             );
         }
         let router = pb::Router {
-            strategy_params_json: r#"{"headers":["X-Tenant","x-request-id"]}"#.into(),
+            params_json: r#"{"headers":["X-Tenant","x-request-id"]}"#.into(),
             ..Default::default()
         };
         assert_eq!(
@@ -708,16 +794,24 @@ pub(crate) mod tests {
             name: name.into(),
             upstream: upstream.into(),
             upstream_model: "actual".into(),
-            weight: 1,
             price: None,
         }
     }
 
+    pub fn member(model: &str, weight: u32) -> pb::RouterMember {
+        pb::RouterMember {
+            model: model.into(),
+            weight,
+            ..Default::default()
+        }
+    }
+
+    /// Weighted, every member with weight 1.
     pub fn router(name: &str, models: &[&str]) -> pb::Router {
         pb::Router {
             name: name.into(),
-            models: models.iter().map(|d| d.to_string()).collect(),
-            strategy: pb::RoutingStrategy::Weighted as i32,
+            members: models.iter().map(|d| member(d, 1)).collect(),
+            strategy: "weighted".into(),
             ..Default::default()
         }
     }
@@ -753,8 +847,9 @@ pub(crate) mod tests {
             api_keys: vec![key("k1", "s1", "t1", &["m1"]), key("k2", "s2", "", &[])],
             teams: vec![team("t1"), team("t2")],
             created_at_unix_ms: 10,
-            required_capabilities: vec![],
+            required_capabilities: vec!["strategy:weighted".into()],
             scope: "scope-a".into(),
+            aliases: vec![],
         }
     }
 
@@ -799,9 +894,15 @@ pub(crate) mod tests {
     fn resilience_fields_require_their_capabilities() {
         for cap in SUPPORTED_CAPABILITIES {
             let mut s = base();
+            s.required_capabilities.clear();
+            s.routers.clear();
+            let mut r = router("r", &["a"]);
+            r.strategy = "least_in_flight".into();
+            s.required_capabilities
+                .push("strategy:least_in_flight".into());
             match *cap {
-                "retry" => s.routers[0].retry = Some(pb::RetryPolicy::default()),
-                "fallbacks" => s.routers[0].fallbacks = vec!["m2".into()],
+                "retry" => r.retry = Some(pb::RetryPolicy::default()),
+                "fallbacks" => r.fallbacks = vec!["b".into()],
                 "health_check" => {
                     s.upstreams[0].health_check = Some(pb::HealthCheck {
                         interval_ms: 1000,
@@ -812,13 +913,15 @@ pub(crate) mod tests {
                 "circuit_breaker" => {
                     s.upstreams[0].circuit_breaker = Some(pb::CircuitBreaker::default())
                 }
-                "traffic_split" => s.routers[0].traffic_split = vec![split("stable", &["a"], 1)],
-                "lowest_latency" => {
-                    s.routers[0].strategy = pb::RoutingStrategy::LowestLatency as i32
+                "traffic_split" => r.traffic_split = vec![split("stable", &["a"], 1)],
+                "vllm_load" => s.upstreams[0].metrics_url = "http://h/metrics".into(),
+                "strategy:least_in_flight" => continue,
+                strategy => {
+                    r.strategy = strategy.strip_prefix("strategy:").unwrap().into();
+                    s.required_capabilities.clear();
                 }
-                "vllm_load" => s.routers[0].strategy = pb::RoutingStrategy::VllmLoad as i32,
-                _ => unreachable!(),
             }
+            s.routers.push(r);
             assert_code(
                 validate(&s, SUPPORTED_CAPABILITIES),
                 NackCode::InvalidConfig,
@@ -826,6 +929,118 @@ pub(crate) mod tests {
             s.required_capabilities.push((*cap).into());
             validate(&s, SUPPORTED_CAPABILITIES).unwrap();
         }
+    }
+
+    #[test]
+    fn strategy_names_and_params() {
+        // A known built-in without its capability is a broken compiler output.
+        let mut s = base();
+        s.required_capabilities.clear();
+        assert_code(
+            validate(&s, SUPPORTED_CAPABILITIES),
+            NackCode::InvalidConfig,
+        );
+        // An unknown name cannot be served, whatever the capabilities say.
+        for caps in [vec![], vec!["strategy:not_compiled".to_owned()]] {
+            let mut s = base();
+            s.routers[0].strategy = "not_compiled".into();
+            s.required_capabilities.extend(caps);
+            let supported = ["strategy:weighted", "strategy:not_compiled"];
+            assert_code(validate(&s, &supported), NackCode::UnsupportedFeature);
+        }
+        for bad in ["", "Weighted", "has space", "9lives"] {
+            invalid(|s| s.routers[0].strategy = bad.into());
+        }
+        invalid(|s| s.routers[0].params_json = r#"{"zone":"a"}"#.into());
+        invalid(|s| s.routers[0].params_json = "[]".into());
+        invalid(|s| s.routers[0].params_json = "{".into());
+        invalid(|s| s.routers[0].params_json = format!(r#"{{"x":"{}"}}"#, "y".repeat(16 * 1024)));
+        invalid(|s| s.routers[0].members[0].params_json = "[]".into());
+        invalid(|s| {
+            s.routers[0].members[0].params_json = format!(r#"{{"x":"{}"}}"#, "y".repeat(16 * 1024))
+        });
+        // Empty object and member settings are fine, also on a built-in: only
+        // a strategy that declares them reads them.
+        let mut s = base();
+        s.routers[0].params_json = "{}".into();
+        s.routers[0].members[0].params_json = r#"{"zone":"a"}"#.into();
+        validate(&s, SUPPORTED_CAPABILITIES).unwrap();
+    }
+
+    #[test]
+    fn names_are_one_name_space_and_aliases_are_one_level() {
+        let alias = |name: &str, target: &str| pb::Alias {
+            name: name.into(),
+            target: target.into(),
+        };
+        let mut s = base();
+        s.aliases = vec![alias("to-model", "a"), alias("to-router", "m2")];
+        validate(&s, SUPPORTED_CAPABILITIES).unwrap();
+        // Across kinds, every pair.
+        invalid(|s| s.aliases = vec![alias("a", "m1")]);
+        invalid(|s| s.aliases = vec![alias("m1", "a")]);
+        invalid(|s| s.routers[0].name = "a".into());
+        invalid(|s| s.aliases = vec![alias("x", "a"), alias("x", "b")]);
+        // Reserved for every kind.
+        invalid(|s| s.aliases = vec![alias("unknown", "a")]);
+        invalid(|s| s.models[0].name = "unknown".into());
+        // Target must exist and must not be an alias.
+        invalid(|s| s.aliases = vec![alias("x", "nope")]);
+        invalid(|s| s.aliases = vec![alias("x", "a"), alias("y", "x")]);
+        invalid(|s| s.aliases = vec![alias("x", "x")]);
+        // Router members and fallbacks are models only.
+        invalid(|s| s.routers[0].members = vec![member("m2", 1)]);
+        invalid(|s| {
+            s.aliases = vec![alias("x", "a")];
+            s.routers[0].members = vec![member("x", 1)];
+        });
+        invalid(|s| s.routers[0].members = vec![member("a", 1), member("a", 1)]);
+        invalid(|s| {
+            s.required_capabilities.push("fallbacks".into());
+            s.routers[0].fallbacks = vec!["m2".into()];
+        });
+        invalid(|s| {
+            s.required_capabilities.push("fallbacks".into());
+            s.aliases = vec![alias("x", "a")];
+            s.routers[0].fallbacks = vec!["x".into()];
+        });
+    }
+
+    #[test]
+    fn delta_upserts_and_removes_aliases() {
+        let mut s = base();
+        s.aliases = vec![
+            pb::Alias {
+                name: "keep".into(),
+                target: "a".into(),
+            },
+            pb::Alias {
+                name: "drop".into(),
+                target: "a".into(),
+            },
+        ];
+        let d = Delta {
+            base_version: 1,
+            version: 2,
+            required_capabilities: s.required_capabilities.clone(),
+            upsert_aliases: vec![pb::Alias {
+                name: "keep".into(),
+                target: "m1".into(),
+            }],
+            remove_aliases: vec!["drop".into()],
+            ..Default::default()
+        };
+        let next = apply(
+            &s,
+            ConfigUpdate {
+                update: Some(Update::Delta(d)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(next.aliases.len(), 1);
+        assert_eq!(next.aliases[0].target, "m1");
+        validate(&next, SUPPORTED_CAPABILITIES).unwrap();
     }
 
     #[test]
@@ -861,7 +1076,7 @@ pub(crate) mod tests {
             });
             assert_eq!(validate(&s, SUPPORTED_CAPABILITIES).is_ok(), valid);
         }
-        for fallback in ["m1", "missing"] {
+        for fallback in ["m2", "missing"] {
             let mut s = base();
             s.required_capabilities.push("fallbacks".into());
             s.routers[0].fallbacks.push(fallback.into());
@@ -875,7 +1090,7 @@ pub(crate) mod tests {
     pub fn split(name: &str, models: &[&str], weight: u32) -> pb::TrafficSplit {
         pb::TrafficSplit {
             name: name.into(),
-            models: models.iter().map(|d| d.to_string()).collect(),
+            members: models.iter().map(|d| member(d, 1)).collect(),
             weight,
         }
     }
@@ -892,7 +1107,7 @@ pub(crate) mod tests {
         };
         check(&|_| {}).unwrap();
         // The router's own list is ignored (may be empty) with splits.
-        check(&|r| r.models.clear()).unwrap();
+        check(&|r| r.members.clear()).unwrap();
         check(&|r| r.traffic_split[1].weight = 0).unwrap();
         check(&|r| {
             r.sticky = pb::StickyBy::Header as i32;
@@ -911,9 +1126,9 @@ pub(crate) mod tests {
             Box::new(|r| r.traffic_split[1].name.clear()),
             Box::new(|r| r.traffic_split[1].name = "x".repeat(MAX_SPLIT_NAME + 1)),
             Box::new(|r| r.traffic_split[1].name = "can ary".into()),
-            Box::new(|r| r.traffic_split[1].models.clear()),
-            Box::new(|r| r.traffic_split[1].models = vec!["nope".into()]),
-            Box::new(|r| r.traffic_split[1].models = vec!["b".into(), "b".into()]),
+            Box::new(|r| r.traffic_split[1].members.clear()),
+            Box::new(|r| r.traffic_split[1].members = vec![member("nope", 1)]),
+            Box::new(|r| r.traffic_split[1].members = vec![member("b", 1), member("b", 1)]),
             Box::new(|r| r.sticky = pb::StickyBy::Header as i32),
             Box::new(|r| {
                 r.sticky = pb::StickyBy::Header as i32;
@@ -954,7 +1169,7 @@ pub(crate) mod tests {
         d.upsert_upstreams = vec![u, upstream("w")];
         d.remove_upstreams = vec!["v".into(), "missing".into()];
         let mut a = model("a", "w");
-        a.weight = 7;
+        a.upstream_model = "changed".into();
         d.upsert_models = vec![a, model("c", "u")];
         d.remove_models = vec!["b".into()];
         d.upsert_routers = vec![router("m2", &["c"]), router("m3", &["a"])];
@@ -993,7 +1208,7 @@ pub(crate) mod tests {
                 .collect::<Vec<_>>(),
             names(vec!["a", "c"])
         );
-        assert_eq!(next.models[0].weight, 7);
+        assert_eq!(next.models[0].upstream_model, "changed");
         assert_eq!(
             next.routers
                 .iter()
@@ -1001,7 +1216,7 @@ pub(crate) mod tests {
                 .collect::<Vec<_>>(),
             names(vec!["m2", "m3"])
         );
-        assert_eq!(next.routers[0].models, ["c"]);
+        assert_eq!(next.routers[0].members[0].model, "c");
         assert_eq!(
             next.api_keys
                 .iter()
@@ -1020,7 +1235,13 @@ pub(crate) mod tests {
             validate(&next, SUPPORTED_CAPABILITIES),
             NackCode::UnsupportedFeature,
         );
-        validate(&next, &["x"]).unwrap();
+        // The delta's capability list replaced the old one, strategy included.
+        assert_code(validate(&next, &["x"]), NackCode::InvalidConfig);
+        let mut with_strategy = next.clone();
+        with_strategy
+            .required_capabilities
+            .push("strategy:weighted".into());
+        validate(&with_strategy, &["x", "strategy:weighted"]).unwrap();
     }
 
     #[test]
@@ -1101,22 +1322,26 @@ pub(crate) mod tests {
     #[test]
     fn unknown_capability_is_unsupported() {
         let mut s = base();
-        s.required_capabilities = vec!["jwt".into()];
+        s.required_capabilities.push("jwt".into());
         assert_code(validate(&s, &[]), NackCode::UnsupportedFeature);
-        validate(&s, &["jwt"]).unwrap();
+        validate(&s, &["jwt", "strategy:weighted"]).unwrap();
         let mut s = base();
-        s.routers[0].strategy = pb::RoutingStrategy::LowestLatency as i32;
-        assert_code(validate(&s, &[]), NackCode::InvalidConfig);
-        s.required_capabilities = vec!["lowest_latency".into()];
-        validate(&s, &["lowest_latency"]).unwrap();
+        s.routers[0].strategy = "lowest_latency".into();
+        assert_code(
+            validate(&s, SUPPORTED_CAPABILITIES),
+            NackCode::InvalidConfig,
+        );
+        s.required_capabilities =
+            vec!["strategy:weighted".into(), "strategy:lowest_latency".into()];
+        validate(&s, SUPPORTED_CAPABILITIES).unwrap();
         assert_code(validate(&s, &[]), NackCode::UnsupportedFeature);
     }
 
     #[test]
     fn invalid_references() {
         invalid(|s| s.models[0].upstream = "nope".into());
-        invalid(|s| s.routers[0].models = vec!["nope".into()]);
-        invalid(|s| s.routers[0].models.clear());
+        invalid(|s| s.routers[0].members = vec![member("nope", 1)]);
+        invalid(|s| s.routers[0].members.clear());
         invalid(|s| s.api_keys[0].team_id = "nope".into());
         invalid(|s| s.routers[0].name = "unknown".into());
         invalid(|s| s.models[0].upstream_model.clear());
@@ -1165,7 +1390,7 @@ pub(crate) mod tests {
         let mut s = base();
         s.api_keys[0].policy.as_mut().unwrap().rate_limit_scopes = vec![scope("team:t1", 1)];
         s.api_keys[1].policy.as_mut().unwrap().rate_limit_scopes = vec![scope("team:t1", 1)];
-        validate(&s, &[]).unwrap();
+        validate(&s, SUPPORTED_CAPABILITIES).unwrap();
     }
 
     #[test]
@@ -1178,13 +1403,11 @@ pub(crate) mod tests {
         invalid(|s| s.upstreams[0].kind = 0);
         invalid(|s| s.upstreams[0].kind = 99);
         invalid(|s| s.upstreams[0].stream_usage_mode = 99);
-        invalid(|s| s.routers[0].strategy = 0);
-        invalid(|s| s.routers[0].strategy = 99);
         invalid(|s| s.api_keys[0].status = 0);
         invalid(|s| s.api_keys[0].status = 99);
         let mut s = base();
         s.upstreams[0].stream_usage_mode = 0;
-        validate(&s, &[]).unwrap();
+        validate(&s, SUPPORTED_CAPABILITIES).unwrap();
     }
 
     #[test]
@@ -1259,11 +1482,40 @@ pub(crate) mod tests {
             );
         }
         // Valid digest over bytes that are not a snapshot.
-        let mut garbage = vec![0xff; 40];
+        let mut garbage = FILE_MAGIC.to_vec();
+        garbage.extend_from_slice(&[0xff; 40]);
+        garbage.extend_from_slice(&0u32.to_be_bytes());
         let digest = Sha256::digest(&garbage);
         garbage.extend_from_slice(&digest);
         fs::write(&path, &garbage).unwrap();
         assert!(matches!(load(dir, "scope-a"), Err(LoadError::Corrupt)));
+    }
+
+    /// Protobuf skips unknown fields, so a file of the previous format decodes
+    /// into a snapshot with empty routers. It must not be trusted as a base.
+    #[test]
+    fn load_refuses_a_file_of_the_previous_format() {
+        let root = temp_dir();
+        let path = root.path().join(FILE_NAME);
+        // Snapshot{ routers: [Router{ name: "r", models: ["d"], strategy:
+        // WEIGHTED }], version: 7 } with the old field numbers, then the old
+        // file trailer: digest, its length, checksum.
+        let mut old = vec![
+            0x08, 0x07, 0x22, 0x08, 0x0a, 0x01, b'r', 0x12, 0x01, b'd', 0x18, 0x01,
+        ];
+        assert_eq!(Snapshot::decode(old.as_slice()).unwrap().version, 7);
+        assert!(Snapshot::decode(old.as_slice()).unwrap().routers[0]
+            .members
+            .is_empty());
+        old.extend_from_slice(b"digest");
+        old.extend_from_slice(&6u32.to_be_bytes());
+        let checksum = Sha256::digest(&old);
+        old.extend_from_slice(&checksum);
+        fs::write(&path, &old).unwrap();
+        assert!(matches!(load(root.path(), ""), Err(LoadError::OldFormat)));
+        // The next store replaces it.
+        store(root.path(), &base()).unwrap();
+        assert_eq!(load(root.path(), "scope-a").unwrap(), Some(base()));
     }
 
     #[test]
@@ -1272,7 +1524,12 @@ pub(crate) mod tests {
         let path = root.path().join(FILE_NAME);
         let file = File::create(&path).unwrap();
         file.set_len(
-            (MAX_SNAPSHOT_BYTES + MAX_DIGEST_BYTES as usize + DIGEST_LEN + LEN_FIELD + 1) as u64,
+            (FILE_MAGIC.len()
+                + MAX_SNAPSHOT_BYTES
+                + MAX_DIGEST_BYTES as usize
+                + DIGEST_LEN
+                + LEN_FIELD
+                + 1) as u64,
         )
         .unwrap();
         assert!(matches!(load(root.path(), ""), Err(LoadError::TooLarge)));

@@ -38,20 +38,27 @@ models:
     price: { input_usd_per_mtok: "0.15", output_usd_per_mtok: "0.60" }
 
 routers:
+  # A model is callable by its own name, one attempt, no retry. A router adds a
+  # strategy over weighted members, retries, and fallbacks (always models).
   - name: llama-3.1-8b
-    models: [llama-vllm]
+    members:
+      - {model: llama-vllm}
     retry: {max_attempts: 2, retry_on_status: [429, 502, 503, 504], total_timeout_ms: 30000}
     fallbacks: [gpt-4o-mini]
-  - name: gpt-4o-mini
-    models: [gpt-4o-mini]
   # Load-aware routing and a sticky 10% canary (needs a second vLLM model):
   # - name: llama-canary
   #   strategy: vllm_load          # or lowest_latency, weighted, least_in_flight
   #   traffic_split:
-  #     - {name: stable, models: [llama-vllm], weight: 90}
-  #     - {name: canary, models: [llama-vllm-next], weight: 10}
+  #     - {name: stable, members: [{model: llama-vllm}], weight: 90}
+  #     - {name: canary, members: [{model: llama-vllm-next}], weight: 10}
   #   sticky: header               # none | header | team | key
   #   sticky_header: x-session-id
+
+# A second name for a model or a router, one level only. Names are unique across
+# models, aliases and routers, and a key's allowed_models lists the names it may
+# call: being allowed a name does not allow its target or its members.
+aliases:
+  - {name: default-llm, target: llama-3.1-8b}
 
 # Teams are the bounded `team` metric label. Their rate limits are shared by
 # every key of the team (local to this gateway instance).

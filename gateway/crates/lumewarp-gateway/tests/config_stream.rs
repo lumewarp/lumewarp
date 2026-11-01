@@ -19,8 +19,9 @@ use fake_cp::{Conn, FakeCp};
 use http_body_util::Full;
 use hyper::Request;
 use lumewarp_proto::config::v1::{
-    config_update::Update, gateway_message::Msg, ApiKey, ConfigUpdate, Delta, EffectivePolicy,
-    KeyStatus, Model, NackCode, Router, Snapshot, Upstream, UpstreamKind,
+    config_update::Update, gateway_message::Msg, Alias, ApiKey, ConfigUpdate, Delta,
+    EffectivePolicy, KeyStatus, Model, NackCode, Router, RouterMember, Snapshot, Upstream,
+    UpstreamKind,
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -56,15 +57,19 @@ fn snapshot(version: u64, keys: &[(&str, &str)]) -> Snapshot {
             name: "d".into(),
             upstream: "u".into(),
             upstream_model: "actual".into(),
-            weight: 1,
             price: None,
         }],
         routers: vec![Router {
             name: "m1".into(),
-            models: vec!["d".into()],
-            strategy: 1,
+            members: vec![RouterMember {
+                model: "d".into(),
+                weight: 1,
+                ..Default::default()
+            }],
+            strategy: "weighted".into(),
             ..Default::default()
         }],
+        required_capabilities: vec!["strategy:weighted".into()],
         api_keys: keys.iter().map(|(id, secret)| key(id, secret)).collect(),
         created_at_unix_ms: 1,
         scope: SCOPE.into(),
@@ -90,18 +95,20 @@ fn delta(base: u64, version: u64, add: &[(&str, &str)]) -> ConfigUpdate {
             base_version: base,
             version,
             upsert_api_keys: add.iter().map(|(id, secret)| key(id, secret)).collect(),
+            required_capabilities: vec!["strategy:weighted".into()],
             created_at_unix_ms: 2,
             ..Default::default()
         })),
     }
 }
 
-/// The persisted file is `payload || digest || len(digest) u32 BE || sha256(all before)`.
+/// The persisted file is `magic || payload || digest || len(digest) u32 BE || sha256(all before)`.
 fn on_disk(dir: &Path) -> Option<(u64, Vec<u8>)> {
     let data = std::fs::read(dir.join("snapshot.pb")).ok()?;
     let (body, checksum) = data.split_at(data.len().checked_sub(32)?);
     assert_eq!(Sha256::digest(body).as_slice(), checksum, "checksum");
     let (rest, len) = body.split_at(body.len() - 4);
+    let rest = rest.strip_prefix(b"LWSNAP02").expect("magic");
     let len = u32::from_be_bytes(len.try_into().unwrap()) as usize;
     let (payload, digest) = rest.split_at(rest.len() - len);
     Some((Snapshot::decode(payload).unwrap().version, digest.to_vec()))
@@ -336,7 +343,7 @@ async fn invalid_snapshot_is_nacked_without_swap() {
     ack(&mut conn, 1, &env.state).await;
 
     let mut bad = snapshot(2, &[("k2", "secret-2")]);
-    bad.routers[0].models = vec!["missing".into()];
+    bad.routers[0].members[0].model = "missing".into();
     conn.send(full(bad));
     let nack = recv_nack(&mut conn).await;
     assert_eq!(nack.code(), NackCode::InvalidConfig);
@@ -460,14 +467,114 @@ async fn cold_boot_without_cache_is_not_ready_until_full() {
     assert_eq!(gw.models("secret-1").await, 200);
 }
 
+/// A file written before the catalog change: same trailer, no magic, routers
+/// with the old field numbers. Protobuf would decode it into a snapshot with
+/// empty routers, so only the format check keeps it from being a resume base.
+fn previous_format_file(version: u64) -> Vec<u8> {
+    let mut file = vec![0x08, version as u8];
+    // routers: Router { name: "m1", models: ["d"], strategy: WEIGHTED }
+    file.extend_from_slice(&[
+        0x22, 0x09, 0x0a, 0x02, b'm', b'1', 0x12, 0x01, b'd', 0x18, 0x01,
+    ]);
+    let digest = digest(version);
+    file.extend_from_slice(&digest);
+    file.extend_from_slice(&(digest.len() as u32).to_be_bytes());
+    let checksum = Sha256::digest(&file);
+    file.extend_from_slice(&checksum);
+    file
+}
+
+#[tokio::test]
+async fn previous_format_or_garbage_cache_is_discarded_for_a_fresh_full() {
+    for cached in [previous_format_file(9), vec![0xff; 200], Vec::new()] {
+        let env = env();
+        std::fs::create_dir_all(&env.state).unwrap();
+        std::fs::write(env.state.join("snapshot.pb"), &cached).unwrap();
+
+        let mut cp = FakeCp::start().await;
+        let gw = Gw::spawn(&cp.url(), &env.state, &env.work, "gw-1");
+        let mut conn = cp.accept().await;
+        let resumed = hello(&mut conn).await;
+        assert_eq!(resumed.have_version, 0, "not offered as a base");
+        assert!(resumed.have_digest.is_empty());
+        assert_eq!(gw.readyz().await, 503, "not served either");
+
+        conn.send(full(snapshot(3, &[("k1", "secret-1")])));
+        ack(&mut conn, 3, &env.state).await;
+        assert_eq!(gw.readyz().await, 200);
+        assert_eq!(gw.models("secret-1").await, 200);
+        assert_eq!(on_disk_version(&env.state), Some(3), "file replaced");
+    }
+}
+
+#[tokio::test]
+async fn unknown_strategy_is_unsupported_and_keeps_the_last_good_config() {
+    let env = env();
+    let mut cp = FakeCp::start().await;
+    let gw = Gw::spawn(&cp.url(), &env.state, &env.work, "gw-1");
+    let mut conn = cp.accept().await;
+    hello(&mut conn).await;
+    conn.send(full(snapshot(1, &[("k1", "secret-1")])));
+    ack(&mut conn, 1, &env.state).await;
+
+    let mut future = snapshot(2, &[("k1", "secret-1")]);
+    future.routers[0].strategy = "not_compiled_in".into();
+    future.required_capabilities = vec!["strategy:not_compiled_in".into()];
+    conn.send(full(future));
+    assert_eq!(nack_code(&mut conn).await, NackCode::UnsupportedFeature);
+    assert_eq!(gw.models("secret-1").await, 200);
+    assert_eq!(on_disk_version(&env.state), Some(1));
+}
+
+#[tokio::test]
+async fn delta_changes_aliases_on_the_stream() {
+    let env = env();
+    let mut cp = FakeCp::start().await;
+    let gw = Gw::spawn(&cp.url(), &env.state, &env.work, "gw-1");
+    let mut conn = cp.accept().await;
+    hello(&mut conn).await;
+    let mut first = snapshot(1, &[("k1", "secret-1")]);
+    first.aliases = vec![Alias {
+        name: "old-name".into(),
+        target: "m1".into(),
+    }];
+    conn.send(full(first));
+    ack(&mut conn, 1, &env.state).await;
+    let names = |body: String| -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let (_, body) = gw.get(gw.addr, "/v1/models", Some("secret-1")).await;
+    assert_eq!(names(body), ["d", "m1", "old-name"]);
+
+    let mut update = delta(1, 2, &[]);
+    let Some(Update::Delta(d)) = &mut update.update else {
+        unreachable!()
+    };
+    d.upsert_aliases = vec![Alias {
+        name: "new-name".into(),
+        target: "d".into(),
+    }];
+    d.remove_aliases = vec!["old-name".into()];
+    conn.send(update);
+    ack(&mut conn, 2, &env.state).await;
+    let (_, body) = gw.get(gw.addr, "/v1/models", Some("secret-1")).await;
+    assert_eq!(names(body), ["d", "m1", "new-name"]);
+}
+
 #[tokio::test]
 async fn wrong_scope_cache_and_full_are_refused() {
     let env = env();
     std::fs::create_dir_all(&env.state).unwrap();
     let mut foreign = snapshot(9, &[("k1", "secret-1")]);
     foreign.scope = "other".into();
-    let payload = foreign.encode_to_vec();
-    let mut file = payload.clone();
+    let mut file = b"LWSNAP02".to_vec();
+    file.extend_from_slice(&foreign.encode_to_vec());
     file.extend_from_slice(&0u32.to_be_bytes());
     let checksum = Sha256::digest(&file);
     file.extend_from_slice(&checksum);

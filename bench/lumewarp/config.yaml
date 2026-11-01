@@ -27,4 +27,5 @@ models:
 
 routers:
   - name: mock
-    models: [mock-model]
+    members:
+      - {model: mock-model}
