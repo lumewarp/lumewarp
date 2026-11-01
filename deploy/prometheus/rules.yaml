@@ -32,7 +32,7 @@ groups:
           severity: critical
         annotations:
           summary: "Gateway 5xx ratio is high"
-          description: "Model {{ $labels.requested }} exceeds 5% 5xx responses for 5 minutes at >=1 request/s."
+          description: "Requested {{ $labels.requested }} exceeds 5% 5xx responses for 5 minutes at >=1 request/s."
           runbook: "Check upstream errors and routing dashboard; restore a healthy model or roll back routing."
       # 10 ms is an operational page budget, not the tighter benchmark target.
       - alert: LumewarpGatewayOverheadHigh
@@ -42,9 +42,9 @@ groups:
           severity: warning
         annotations:
           summary: "Gateway p99 overhead exceeds budget"
-          description: "Router {{ $labels.endpoint }} has p99 processing overhead above 10 ms for 10 minutes."
+          description: "Endpoint {{ $labels.endpoint }} has p99 processing overhead above 10 ms for 10 minutes."
           runbook: "Check gateway CPU throttling, saturation and recent gateway releases; compare the benchmark baseline."
-      # Absolute 5 s regression guard; calibrate for requested size and prefill workload.
+      # Absolute 5 s regression guard; calibrate for model size and prefill workload.
       - alert: LumewarpTTFTHigh
         expr: "lumewarp:ttft:p99_5m > 5"
         for: 10m
@@ -52,8 +52,8 @@ groups:
           severity: warning
         annotations:
           summary: "Stream p99 TTFT is high"
-          description: "Model {{ $labels.requested }} has p99 TTFT above 5 seconds for 10 minutes."
-          runbook: "Inspect vLLM queue and KV cache, upstream latency and request sizes; tune this baseline per requested."
+          description: "Requested {{ $labels.requested }} has p99 TTFT above 5 seconds for 10 minutes."
+          runbook: "Inspect vLLM queue and KV cache, upstream latency and request sizes; tune this baseline per requested name."
       # State 2 is open; brief trips and half-open probes do not alert.
       - alert: LumewarpUpstreamCircuitOpen
         expr: "lumewarp_upstream_circuit_state == 2"
@@ -73,7 +73,7 @@ groups:
         annotations:
           summary: "Upstream health checks are failing"
           description: "Upstream {{ $labels.upstream }} has been unhealthy for 2 minutes."
-          runbook: "Check upstream health endpoint, credentials and network reachability; endpoint away if needed."
+          runbook: "Check upstream health endpoint, credentials and network reachability; shift traffic to another model if needed."
       # Any sustained exhaustion deserves investigation; five-minute counter window tolerates scrape jitter.
       - alert: LumewarpRetryBudgetExhausted
         expr: "sum by (namespace, router) (increase(lumewarp_retries_budget_exhausted_total[5m])) > 0"

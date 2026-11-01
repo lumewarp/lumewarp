@@ -48,7 +48,7 @@
       },
       {
         "name": "requested",
-        "label": "Model",
+        "label": "Requested",
         "type": "query",
         "datasource": {
           "type": "prometheus",
@@ -505,7 +505,7 @@
     {
       "id": 7,
       "title": "Spend / hour (all models)",
-      "description": "Spend has only a team label; requested selection cannot filter spend.",
+      "description": "Spend has only a team label; requested-name selection cannot filter spend.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",

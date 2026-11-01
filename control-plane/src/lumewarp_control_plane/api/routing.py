@@ -1,4 +1,4 @@
-"""Routing: upstreams, models and public name routers.
+"""Routing: upstreams, models and public routers.
 
 Router validation mirrors the gateway (snapshot.rs::validate / validate_split and
 router.rs::RoutingTable::compile) so a write the API accepts never makes the gateway NACK, plus
@@ -698,7 +698,7 @@ async def delete_model(
 # --------------------------------------------------------------------------- routers
 
 
-@router.get("/routers", response_model=Page[RouterOut], operation_id="listRoutes")
+@router.get("/routers", response_model=Page[RouterOut], operation_id="listRouters")
 async def list_routers(
     authz: Authz,
     session: SessionDep,

@@ -120,7 +120,7 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
     key_id = _uuid(event.key_id, "key_id")
     team_id = _uuid(event.team_id, "team_id")
     # A rejected request may never reach routing: authentication runs before the body is
-    # read (no requested) and policy rejections happen before a model is chosen.
+    # read (no requested name) and policy rejections happen before a model is chosen.
     rejected = event.outcome == usage_pb2.REQUEST_OUTCOME_REJECTED
     if len(event.requested) > 400 or not (event.requested or rejected):
         raise InvalidUsageBatch("invalid requested")

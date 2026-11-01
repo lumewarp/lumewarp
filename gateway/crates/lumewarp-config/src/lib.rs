@@ -758,7 +758,14 @@ routers:
 
     #[test]
     fn example_and_bench_configs_convert() {
-        for yaml in [EXAMPLE, BENCH] {
+        let quickstart = include_str!("../../../../README.md")
+            .split_once("```yaml\n")
+            .expect("README has a YAML quickstart")
+            .1
+            .split_once("```")
+            .expect("quickstart code block is closed")
+            .0;
+        for yaml in [EXAMPLE, BENCH, quickstart] {
             let (_, snapshot) = Config::parse(yaml).unwrap();
             assert!(!snapshot.routers.is_empty());
             assert_eq!(snapshot.version, 0);

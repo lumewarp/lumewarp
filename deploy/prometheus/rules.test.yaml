@@ -39,7 +39,7 @@
               },
               "exp_annotations": {
                 "summary": "Gateway 5xx ratio is high",
-                "description": "Model m exceeds 5% 5xx responses for 5 minutes at >=1 request/s.",
+                "description": "Requested m exceeds 5% 5xx responses for 5 minutes at >=1 request/s.",
                 "runbook": "Check upstream errors and routing dashboard; restore a healthy model or roll back routing."
               }
             }
@@ -103,7 +103,7 @@
               },
               "exp_annotations": {
                 "summary": "Gateway p99 overhead exceeds budget",
-                "description": "Router chat_completions has p99 processing overhead above 10 ms for 10 minutes.",
+                "description": "Endpoint chat_completions has p99 processing overhead above 10 ms for 10 minutes.",
                 "runbook": "Check gateway CPU throttling, saturation and recent gateway releases; compare the benchmark baseline."
               }
             }
@@ -171,8 +171,8 @@
               },
               "exp_annotations": {
                 "summary": "Stream p99 TTFT is high",
-                "description": "Model m has p99 TTFT above 5 seconds for 10 minutes.",
-                "runbook": "Inspect vLLM queue and KV cache, upstream latency and request sizes; tune this baseline per requested."
+                "description": "Requested m has p99 TTFT above 5 seconds for 10 minutes.",
+                "runbook": "Inspect vLLM queue and KV cache, upstream latency and request sizes; tune this baseline per requested name."
               }
             }
           ]
@@ -288,7 +288,7 @@
               "exp_annotations": {
                 "summary": "Upstream health checks are failing",
                 "description": "Upstream u has been unhealthy for 2 minutes.",
-                "runbook": "Check upstream health endpoint, credentials and network reachability; endpoint away if needed."
+                "runbook": "Check upstream health endpoint, credentials and network reachability; shift traffic to another model if needed."
               }
             }
           ]

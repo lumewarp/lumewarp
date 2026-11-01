@@ -7,6 +7,10 @@ Tables/columns and their constraints/indexes are renamed in place. These tables 
 UUID primary keys, so there are no routing-resource sequences to rename. Config
 versions store binary protobuf payloads: unchanged field numbers preserve all
 versions and their digests, including rollback and gateway snapshot.pb caches.
+
+Audit action and resource_type are renamed so filters remain consistent. Audit
+details are immutable history: their original JSON keys and values are deliberately
+preserved on both upgrade and downgrade.
 """
 
 import sqlalchemy as sa

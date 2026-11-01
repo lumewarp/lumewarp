@@ -1,5 +1,5 @@
 //! Process-lifetime state shared by every compiled `RoutingTable`. Snapshot swaps
-//! replace the routing_table, never this: counters keyed by stable names/ids survive.
+//! replace the routing table, never this: counters keyed by stable names/ids survive.
 
 use std::{
     collections::HashMap,

@@ -8,9 +8,9 @@ import { useNames, useTeamDirectory, useTeams } from "../hooks";
 
 const n = (x: number) => x.toLocaleString();
 const GROUPS = [
-  { value: "day,requested", label: "Day × requested" },
+  { value: "day,requested", label: "Day × requested name" },
   { value: "day", label: "Day" },
-  { value: "requested", label: "Model" },
+  { value: "requested", label: "Requested" },
   { value: "team", label: "Team" },
   { value: "owner", label: "Owner" },
   { value: "key", label: "API key" },
@@ -75,7 +75,7 @@ export function Usage() {
   };
   const dimCols: Record<string, Column<Row>> = {
     day: { key: "day", header: "Date", sort: (a, b) => (a.date ?? "").localeCompare(b.date ?? ""), cell: (row) => row.date ?? "—" },
-    requested: { key: "requested", header: "Model", sort: (a, b) => (a.requested ?? "").localeCompare(b.requested ?? ""), cell: (row) => row.requested ?? "—" },
+    requested: { key: "requested", header: "Requested", sort: (a, b) => (a.requested ?? "").localeCompare(b.requested ?? ""), cell: (row) => row.requested ?? "—" },
     team: { key: "team", header: "Team", cell: (row) => teamName(row.team_id) },
     owner: { key: "owner", header: "Owner", cell: (row) => ownerLabel(row.owner_kind, row.owner_id) },
     key: { key: "key", header: "API key", cell: (row) => row.key_id?.slice(0, 8) ?? "—" },

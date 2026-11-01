@@ -270,7 +270,7 @@ rustls with WebPKI roots.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `routers[].model` | Required | Unique public alias accepted in requests and listed by `/v1/models`. The literal alias `unknown` is reserved and rejected. |
+| `routers[].name` | Required | Unique public alias accepted in requests and listed by `/v1/models`. The literal alias `unknown` is reserved and rejected. |
 | `routers[].models` | Required without `traffic_split` | Nonempty list of existing model names. Ignored (may be empty) when `traffic_split` is set. |
 | `routers[].strategy` | `weighted` | `weighted`, `least_in_flight`, `lowest_latency` or `vllm_load`; see "Load-aware routing". With `traffic_split` it picks the model inside the chosen split. |
 | `routers[].retry` | Absent (one attempt) | `{max_attempts, retry_on_status, total_timeout_ms}`. An empty object enables two total attempts. `max_attempts` includes the first and is at most 5; `retry_on_status` defaults to `[429, 502, 503, 504]` and accepts only 400..599. `total_timeout_ms: 0` leaves only each upstream's header timeout. |
@@ -553,11 +553,11 @@ upstream supports it.
 
 Label semantics:
 
-- `model` is the **public alias**, never `upstream_model`. Unknown requested
+- `requested` is the **public alias**, never `upstream_model`. Unknown requested
   models use the fixed label `unknown`; other pre-routing rejections and local
-  endpoints use `model=""` / `model=""`. Arbitrary client model names never
+  endpoints use `requested=""` / `model=""`. Arbitrary client model names never
   become labels.
-- `router` is `chat_completions`, `completions`, `embeddings`, or `models`; local
+- `endpoint` is `chat_completions`, `completions`, `embeddings`, or `models`; local
   health/admin/other paths use bounded `healthz`, `metrics`, or `other` labels.
 - `model` is the configured model name.
 - `team` is the caller key's team id; `""` for anonymous callers, team-less
@@ -631,7 +631,7 @@ compiled exporter/SDK:
 | `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | Maximum batch size (SDK default 512 spans). |
 
 Use an HTTP/protobuf collector endpoint, not a gRPC-only endpoint. OTel-enabled
-request spans are INFO with `router`, `model`, `model`, `status`, and `stream`
+request spans are INFO with `endpoint`, `requested`, `model`, `status`, and `stream`
 attributes; the OTel layer accepts only `lumewarp` targets at INFO or above and
 disables code-location attributes. It does not enable/export dependency DEBUG /
 TRACE events. Explicit console verbosity is still controlled by `RUST_LOG`.

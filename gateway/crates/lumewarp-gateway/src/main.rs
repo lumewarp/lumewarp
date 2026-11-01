@@ -114,7 +114,7 @@ fn standalone(
     let runtime = runtime::Runtime::new();
     let routing_table =
         router::RoutingTable::compile(&snapshot, AuthMode::standalone(&snapshot), &runtime)
-            .context("compiling routing_table snapshot")?;
+            .context("compiling routing table snapshot")?;
     runtime
         .metrics
         .set_yaml_hash(&hex::encode(Sha256::digest(yaml.as_bytes()))[..12]);
@@ -171,7 +171,7 @@ async fn main() -> anyhow::Result<()> {
             let runtime = runtime::Runtime::with_usage(metrics, sink);
 
             // Serve a valid cached snapshot immediately; otherwise stay
-            // not-ready (never an open routing_table) until the first full arrives.
+            // not-ready (never an open routing table) until the first full arrives.
             let mut current = lumewarp_proto::config::v1::Snapshot {
                 scope: scope.clone(),
                 ..Default::default()

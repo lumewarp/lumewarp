@@ -3,10 +3,10 @@
 A published snapshot must never be NACKed INVALID_CONFIG by a healthy gateway: that would
 pin the whole fleet on the previous version and block revocations and budget blocks. These
 checks follow `gateway/crates/lumewarp-gateway/src/snapshot.rs::validate` and
-`router.rs::Router::compile`; keep them in sync with those files.
+`router.rs::RoutingTable::compile`; keep them in sync with those files.
 
 Not checkable here: `Upstream.api_key_ref` must name an env var that exists on every
-gateway (model configuration, not snapshot content).
+gateway (deployment environment configuration, not snapshot content).
 """
 
 import re
@@ -119,7 +119,7 @@ def _http_url_problem(url: str) -> str | None:
 
 
 def upstream_url_problem(url: str) -> str | None:
-    """Router::compile's base URI, including space for derived endpoint paths."""
+    """RoutingTable::compile's base URI, including space for derived endpoint paths."""
     if problem := _http_url_problem(url):
         return problem
     if "?" in url:
@@ -182,7 +182,7 @@ def capabilities_used(snap: pb.Snapshot) -> list[str]:
 
 
 def _validate_split(r: pb.Router, models: set[str], weight: dict[str, int]) -> None:
-    """snapshot.rs::validate_split, plus Router::compile's positive weight per pool."""
+    """snapshot.rs::validate_split, plus RoutingTable::compile's positive weight per pool."""
     if r.sticky == pb.STICKY_BY_HEADER:
         if not r.sticky_header or not _HEADER_NAME.fullmatch(r.sticky_header):
             raise SnapshotInvalid(f"router {r.name!r}: sticky=header needs a valid sticky_header")
@@ -341,7 +341,7 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
         if not k.HasField("policy"):
             raise SnapshotInvalid(f"key {k.key_id!r} has no policy")
         if any(not m for m in k.policy.allowed_models):
-            raise SnapshotInvalid(f"key {k.key_id!r} allows an empty name name")
+            raise SnapshotInvalid(f"key {k.key_id!r} allows an empty model name")
         own: set[str] = set()
         for scope in k.policy.rate_limit_scopes:
             if not scope.id or not scope.HasField("limit"):

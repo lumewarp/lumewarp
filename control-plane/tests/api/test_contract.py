@@ -46,7 +46,7 @@ EXPECTED_OPERATION_IDS = {
     "listMembers",
     "listOwnKeys",
     "listOwnTokens",
-    "listRoutes",
+    "listRouters",
     "listServiceAccounts",
     "listTeamKeys",
     "listTeams",

@@ -599,7 +599,7 @@ function TeamUsage({ team }: { team: Team }) {
             options={[
               { value: "owner", label: "Owner" },
               { value: "key", label: "Key" },
-              { value: "day,requested", label: "Day × requested" },
+              { value: "day,requested", label: "Day × requested name" },
             ]}
           />
         </div>

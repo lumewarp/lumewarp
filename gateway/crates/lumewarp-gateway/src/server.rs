@@ -25,23 +25,23 @@ use crate::{
     usage::{RequestCtx, UsageEvent},
 };
 
-/// The active routing_table, absent until the first snapshot is applied (control-
+/// The active routing table, absent until the first snapshot is applied (control-
 /// plane cold boot without an on-disk snapshot). The config stream stores
 /// into it; every request loads it exactly once, so a request in progress
-/// keeps the routing_table it started with across swaps.
+/// keeps the routing table it started with across swaps.
 pub type Snapshot = Arc<ArcSwapOption<RoutingTable>>;
 
-/// Readiness: a routing_table is loaded. Without one, `/v1/*` returns 503
+/// Readiness: a routing table is loaded. Without one, `/v1/*` returns 503
 /// `not_ready` (before authentication) and the admin `/readyz` returns 503;
-/// nothing falls back to an open routing_table.
+/// nothing falls back to an open routing table.
 #[cfg(test)]
 pub fn ready(snapshot: &Snapshot) -> bool {
     snapshot.load().is_some()
 }
 
-/// Serves whatever routing_table `snapshot` holds. `runtime` is the process-lifetime
-/// state (metrics, limiters, usage sink), usable while no routing_table is loaded;
-/// every routing_table stored in `snapshot` must be compiled with this `runtime`.
+/// Serves whatever routing table `snapshot` holds. `runtime` is the process-lifetime
+/// state (metrics, limiters, usage sink), usable while no routing table is loaded;
+/// every routing table stored in `snapshot` must be compiled with this `runtime`.
 pub async fn serve(
     config: &lumewarp_config::LocalSettings,
     snapshot: Snapshot,
@@ -295,7 +295,7 @@ async fn dispatch(
         };
     }
     // Checked before authentication: without a snapshot there are no keys,
-    // and serving anything would mean an open routing_table.
+    // and serving anything would mean an open routing table.
     let Some(routing_table) = routing_table else {
         return error::json(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -442,7 +442,7 @@ mod tests {
         let (status, body) = server.get(false, "/v1/models", None).await;
         assert_eq!(status, 503);
         assert!(String::from_utf8_lossy(&body).contains("not_ready"));
-        // Even with what would become a valid key: never an open routing_table.
+        // Even with what would become a valid key: never an open routing table.
         let auth = Some("Bearer secret");
         assert_eq!(server.get(false, "/v1/models", auth).await.0, 503);
         let (status, metrics) = server.get(true, "/metrics", None).await;

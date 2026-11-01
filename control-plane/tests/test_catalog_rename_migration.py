@@ -4,7 +4,7 @@ import hashlib
 import uuid
 
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, create_async_engine
 
 from lumewarp_control_plane import migrate
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
@@ -17,6 +17,21 @@ LEGACY_SNAPSHOT = bytes.fromhex(
     "0801121f0a017510011a18687474703a2f2f6c6f63616c686f73743a383132332f7631"
     "1a100a01641201751a0661637475616c2007220d0a067075626c696312016418014a0764656661756c74"
 )
+
+
+async def _constraint_and_index_names(conn: AsyncConnection) -> tuple[set[str], set[str]]:
+    constraints = set(
+        await conn.scalars(
+            text(
+                "SELECT conname FROM pg_constraint c "
+                "JOIN pg_namespace n ON n.oid = c.connamespace WHERE n.nspname = 'public'"
+            )
+        )
+    )
+    indexes = set(
+        await conn.scalars(text("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'"))
+    )
+    return constraints, indexes
 
 
 async def test_0006_rows_survive_rename_roundtrip_and_legacy_rollback():
@@ -70,9 +85,29 @@ async def test_0006_rows_survive_rename_roundtrip_and_legacy_rollback():
                 },
             )
 
+        async with engine.connect() as conn:
+            legacy_constraints, legacy_indexes = await _constraint_and_index_names(conn)
+
+        def renamed(names: set[str]) -> set[str]:
+            return {
+                name.replace("uq_routes_model", "uq_routers_name")
+                .replace("deployment", "model")
+                .replace("routes", "routers")
+                .replace("route_", "router_")
+                for name in names
+            }
+
         for _ in range(2):
             await migrate.upgrade(engine)
             async with engine.connect() as conn:
+                constraints, indexes = await _constraint_and_index_names(conn)
+                assert all(
+                    "deployment" not in name and "route_" not in name and "routes" not in name
+                    for name in constraints | indexes
+                )
+                assert constraints == renamed(legacy_constraints)
+                assert indexes == renamed(legacy_indexes)
+                assert "fk_router_split_models_split_id_router_splits" in constraints
                 assert (await conn.execute(text("SELECT id, name, weight FROM models"))).one() == (
                     ids["model"],
                     "d",
@@ -107,6 +142,10 @@ async def test_0006_rows_survive_rename_roundtrip_and_legacy_rollback():
                 assert list(snapshot.routers[0].models) == ["d"]
             await migrate.downgrade(engine, "0006")
             async with engine.connect() as conn:
+                assert await _constraint_and_index_names(conn) == (
+                    legacy_constraints,
+                    legacy_indexes,
+                )
                 assert (
                     await conn.execute(text("SELECT model, deployment, route FROM usage_events"))
                 ).one() == ("public", "d", "chat_completions")

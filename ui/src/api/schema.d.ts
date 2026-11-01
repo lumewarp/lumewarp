@@ -287,7 +287,7 @@ export interface paths {
             cookie?: never;
         };
         /** List Routers */
-        get: operations["listRoutes"];
+        get: operations["listRouters"];
         put?: never;
         /** Create Router */
         post: operations["createRouter"];
@@ -4035,7 +4035,7 @@ export interface operations {
             };
         };
     };
-    listRoutes: {
+    listRouters: {
         parameters: {
             query?: {
                 limit?: number;

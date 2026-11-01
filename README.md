@@ -46,7 +46,7 @@ upstreams:
 models:
   - {name: mock-local, upstream: local, upstream_model: mock}
 routers:
-  - {model: demo, models: [mock-local]}
+  - {name: demo, models: [mock-local]}
 ```
 
 Run the gateway, then use another terminal for curl:

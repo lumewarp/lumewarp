@@ -48,7 +48,7 @@
       },
       {
         "name": "requested",
-        "label": "Model",
+        "label": "Requested",
         "type": "query",
         "datasource": {
           "type": "prometheus",

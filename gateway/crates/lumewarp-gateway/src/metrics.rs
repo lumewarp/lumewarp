@@ -212,7 +212,7 @@ impl RequestMetrics {
         }
     }
 
-    /// Adds upstream-reported tokens for this handle's requested and team.
+    /// Adds upstream-reported tokens for this handle's requested name and team.
     /// Allocation-free after the first call per label set.
     pub fn record_tokens(&self, input: u64, output: u64) {
         let [input_counter, output_counter] = self.tokens.get_or_init(|| {
@@ -355,7 +355,7 @@ impl Metrics {
         );
         registry.register(
             "lumewarp_fallbacks",
-            "Requests moving to a fallback endpoint",
+            "Requests moving to a fallback router",
             fallbacks.clone(),
         );
         registry.register(
@@ -460,7 +460,7 @@ impl Metrics {
         );
         registry.register(
             "lumewarp_tokens",
-            "Upstream-reported tokens by public requested, team and direction",
+            "Upstream-reported tokens by requested name, team and direction",
             tokens.clone(),
         );
         registry.register(

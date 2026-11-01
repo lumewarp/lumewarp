@@ -1,7 +1,7 @@
 """P2 routing API: health checks, circuit breakers, retries, fallbacks, traffic splits.
 
 Every validation rule mirrors the gateway (snapshot.rs::validate / validate_split,
-router.rs::Router::compile), plus the control-plane rule that fallbacks never form a cycle.
+router.rs::RoutingTable::compile), plus the control-plane rule that fallbacks never form a cycle.
 """
 
 from __future__ import annotations

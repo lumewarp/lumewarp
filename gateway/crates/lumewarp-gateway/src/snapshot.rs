@@ -345,7 +345,7 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             .ok_or_else(|| ApplyError::invalid(format!("key {id:?} has no policy")))?;
         if policy.allowed_models.iter().any(String::is_empty) {
             return Err(ApplyError::invalid(format!(
-                "key {id:?} allows an empty name name"
+                "key {id:?} allows an empty model name"
             )));
         }
         let mut own = HashSet::new();

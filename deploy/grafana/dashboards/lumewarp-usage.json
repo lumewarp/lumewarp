@@ -48,7 +48,7 @@
       },
       {
         "name": "requested",
-        "label": "Model",
+        "label": "Requested",
         "type": "query",
         "datasource": {
           "type": "prometheus",
@@ -233,7 +233,7 @@
     {
       "id": 3,
       "title": "Spend / hour by team (all models)",
-      "description": "The metric has no requested dimension. Do not attribute team spend to the selected requested.",
+      "description": "The metric has no requested-name dimension. Do not attribute team spend to the selected requested name.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
