@@ -57,6 +57,8 @@ Environment overrides (defaults):
   BENCH_OTEL=0                1 exports Lumewarp's traces to a local OTLP sink on
                               OTLP_SINK_PORT (default 4318), at 100% sampling with
                               a queue sized not to drop; report it separately
+  BENCH_OTEL_SCHEDULE_DELAY=200  OTEL_BSP_SCHEDULE_DELAY in ms with BENCH_OTEL=1; a value
+                              longer than the run leaves export out of the measurement
   LITELLM_VERSION=1.106.2     litellm[proxy] pin (must match bench/litellm/config.yaml)
   LITELLM_WORKERS=$(nproc)    LiteLLM --num_workers
   DURATION_SECS               measured duration per scenario (profile default)
@@ -436,7 +438,7 @@ http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Sink).serve_for
   LUMEWARP_OTEL_ENV=(
     "OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:$OTLP_SINK_PORT"
     "OTEL_BSP_MAX_QUEUE_SIZE=65536"
-    "OTEL_BSP_SCHEDULE_DELAY=200"
+    "OTEL_BSP_SCHEDULE_DELAY=${BENCH_OTEL_SCHEDULE_DELAY:-200}"
     "OTEL_BSP_MAX_EXPORT_BATCH_SIZE=2048"
   )
   printf '%s\n' "${LUMEWARP_OTEL_ENV[@]}" >"$RUN_DIR/otel-env.txt"
