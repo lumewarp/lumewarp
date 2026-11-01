@@ -12,18 +12,16 @@ interface Values {
   name: string;
   upstream_id: string;
   upstream_model: string;
-  weight: number | null;
   price_in: number | null;
   price_out: number | null;
 }
-const blank: Values = { name: "", upstream_id: "", upstream_model: "", weight: 1, price_in: null, price_out: null };
+const blank: Values = { name: "", upstream_id: "", upstream_model: "", price_in: null, price_out: null };
 
 /** Prices are entered as USD per 1M tokens and stored as integer nano-USD per 1M tokens. */
 const body = (v: Values) => ({
   name: v.name,
   upstream_id: v.upstream_id,
   upstream_model: v.upstream_model,
-  weight: v.weight ?? 1,
   price_input_nano_usd_per_mtok: usdToNano(v.price_in),
   price_output_nano_usd_per_mtok: usdToNano(v.price_out),
 });
@@ -38,14 +36,14 @@ export function Models() {
   const [deleting, setDeleting] = useState<Model | null>(null);
   const form = useForm<Values>(blank, { name: required("Name"), upstream_id: required("Upstream"), upstream_model: required("Upstream model") });
   const create = useMut((v: Values) => api.createModel(body(v)), "Model created");
-  const update = useMut(({ id, v }: { id: string; v: Values }) => api.updateModel(id, body(v)), "Model saved");
+  const update = useMut(({ id, v }: { id: string; v: Values }) => api.updateModel(id, { ...body(v), keep_old_name_as_alias: false }), "Model saved");
   const remove = useMut((id: string) => api.deleteModel(id), "Model deleted");
 
   const open = (d: Model | "new") => {
     form.reset(
       d === "new"
         ? { ...blank, upstream_id: upstreams.data?.[0]?.id ?? "" }
-        : { name: d.name, upstream_id: d.upstream_id, upstream_model: d.upstream_model, weight: d.weight, price_in: nanoToUsd(d.price_input_nano_usd_per_mtok), price_out: nanoToUsd(d.price_output_nano_usd_per_mtok) },
+        : { name: d.name, upstream_id: d.upstream_id, upstream_model: d.upstream_model, price_in: nanoToUsd(d.price_input_nano_usd_per_mtok), price_out: nanoToUsd(d.price_output_nano_usd_per_mtok) },
     );
     setEditing(d);
   };
@@ -56,7 +54,7 @@ export function Models() {
 
   return (
     <>
-      <PageHeader title="Models" description="A model served by an upstream, with a routing weight and the price used to compute request cost." actions={<CreateButton can={perms.isSuper} onClick={() => open("new")}>New model</CreateButton>} />
+      <PageHeader title="Models" description="A model served by an upstream, with the price used to compute request cost." actions={<CreateButton can={perms.isSuper} onClick={() => open("new")}>New model</CreateButton>} />
       <DataTable
         rows={list.data}
         loading={list.isPending}
@@ -68,7 +66,6 @@ export function Models() {
           { key: "name", header: "Name", sort: (a, b) => a.name.localeCompare(b.name), cell: (r) => <strong>{r.name}</strong> },
           { key: "upstream", header: "Upstream", cell: (r) => upstreamName(r.upstream_id) },
           { key: "model", header: "Upstream model", cell: (r) => <code>{r.upstream_model}</code> },
-          { key: "weight", header: "Weight", align: "right", cell: (r) => r.weight },
           { key: "in", header: "Input / 1M tok", align: "right", cell: (r) => fmtUsd(r.price_input_nano_usd_per_mtok, "unpriced") },
           { key: "out", header: "Output / 1M tok", align: "right", cell: (r) => fmtUsd(r.price_output_nano_usd_per_mtok, "unpriced") },
           { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isSuper} canDelete={perms.isSuper} onEdit={() => open(r)} onDelete={() => setDeleting(r)} /> },
@@ -78,11 +75,10 @@ export function Models() {
         <TextField label="Name" value={form.values.name} onChange={(v) => form.set("name", v)} error={form.errors.name} autoFocus />
         <SelectField label="Upstream" value={form.values.upstream_id} onChange={(v) => form.set("upstream_id", v)} error={form.errors.upstream_id} options={(upstreams.data ?? []).map((u) => ({ value: u.id, label: u.name }))} />
         <TextField label="Upstream model" value={form.values.upstream_model} onChange={(v) => form.set("upstream_model", v)} error={form.errors.upstream_model} placeholder="meta-llama/Llama-3.1-8B-Instruct" hint="The model name sent to the upstream." />
-        <NumberField label="Weight" value={form.values.weight} onChange={(v) => form.set("weight", v)} error={form.errors.weight} min={1} hint="Share of traffic under the weighted strategy." />
         <NumberField label="Input price (USD per 1M tokens)" value={form.values.price_in} onChange={(v) => form.set("price_in", v)} error={form.errors.price_in} step="any" />
         <NumberField label="Output price (USD per 1M tokens)" value={form.values.price_out} onChange={(v) => form.set("price_out", v)} error={form.errors.price_out} step="any" hint="Leave prices empty if the cost is unknown; usage is then counted as unpriced." />
       </FormDialog>
-      <ConfirmDialog open={!!deleting} title="Delete model" message={`Delete “${deleting?.name}”? It must not be part of any router.`} onConfirm={() => remove.mutateAsync(deleting!.id)} onClose={() => setDeleting(null)} />
+      <ConfirmDialog open={!!deleting} title="Delete model" message={`Delete “${deleting?.name}”? It must not be used by any router or alias.`} onConfirm={() => remove.mutateAsync(deleting!.id)} onClose={() => setDeleting(null)} />
     </>
   );
 }

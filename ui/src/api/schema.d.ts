@@ -242,6 +242,23 @@ export interface paths {
         patch: operations["updateUpstream"];
         trace?: never;
     };
+    "/api/v1/catalog": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Catalog */
+        get: operations["listCatalog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models": {
         parameters: {
             query?: never;
@@ -277,6 +294,43 @@ export interface paths {
         head?: never;
         /** Update Model */
         patch: operations["updateModel"];
+        trace?: never;
+    };
+    "/api/v1/aliases": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Aliases */
+        get: operations["listAliases"];
+        put?: never;
+        /** Create Alias */
+        post: operations["createAlias"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/aliases/{alias_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Alias */
+        get: operations["getAlias"];
+        put?: never;
+        post?: never;
+        /** Delete Alias */
+        delete: operations["deleteAlias"];
+        options?: never;
+        head?: never;
+        /** Update Alias */
+        patch: operations["updateAlias"];
         trace?: never;
     };
     "/api/v1/routers": {
@@ -658,6 +712,52 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AliasCreate */
+        AliasCreate: {
+            /** Name */
+            name: string;
+            /**
+             * Target
+             * Format: uuid
+             * @description Id of a model or a router, not another alias.
+             */
+            target: string;
+        };
+        /** AliasOut */
+        AliasOut: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /**
+             * Target
+             * Format: uuid
+             */
+            target: string;
+            target_kind: components["schemas"]["CatalogKind"];
+            /** Target Name */
+            target_name: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** AliasUpdate */
+        AliasUpdate: {
+            /** Name */
+            name?: string | null;
+            /** Target */
+            target?: string | null;
+        };
         /** AuditOut */
         AuditOut: {
             /** Id */
@@ -692,6 +792,23 @@ export interface components {
              */
             password: string;
         };
+        /** CatalogEntryOut */
+        CatalogEntryOut: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            kind: components["schemas"]["CatalogKind"];
+        };
+        /**
+         * CatalogKind
+         * @description What a public name refers to. Model, alias and router share one namespace.
+         * @enum {string}
+         */
+        CatalogKind: "model" | "alias" | "router";
         /** CircuitBreakerIn */
         CircuitBreakerIn: {
             /**
@@ -1083,7 +1200,8 @@ export interface components {
          *
          *     INHERIT: take the team's effective set unchanged (not allowed on teams).
          *     ALL: no restriction at this level (effective set = the team's; universal on a team).
-         *     LIST: exactly `allowed_models`, intersected with the parent; an empty list is deny-all.
+         *     LIST: exactly the `policy_grants` of this level, intersected with the parent; an empty
+         *     list is deny-all.
          *     Resolve INHERIT first; a key whose effective set is still universal gets
          *     allow_all_models (see compiler.compile_scope).
          * @enum {string}
@@ -1100,11 +1218,6 @@ export interface components {
             upstream_id: string;
             /** Upstream Model */
             upstream_model: string;
-            /**
-             * Weight
-             * @default 1
-             */
-            weight: number;
             /** Price Input Nano Usd Per Mtok */
             price_input_nano_usd_per_mtok?: number | null;
             /** Price Output Nano Usd Per Mtok */
@@ -1126,8 +1239,6 @@ export interface components {
             upstream_id: string;
             /** Upstream Model */
             upstream_model: string;
-            /** Weight */
-            weight: number;
             /** Price Input Nano Usd Per Mtok */
             price_input_nano_usd_per_mtok: number | null;
             /** Price Output Nano Usd Per Mtok */
@@ -1151,17 +1262,35 @@ export interface components {
             upstream_id?: string | null;
             /** Upstream Model */
             upstream_model?: string | null;
-            /** Weight */
-            weight?: number | null;
             /** Price Input Nano Usd Per Mtok */
             price_input_nano_usd_per_mtok?: number | null;
             /** Price Output Nano Usd Per Mtok */
             price_output_nano_usd_per_mtok?: number | null;
+            /**
+             * Keep Old Name As Alias
+             * @description With a new name: add an alias under the old name, with its grants.
+             * @default false
+             */
+            keep_old_name_as_alias: boolean;
+        };
+        /** Page[AliasOut] */
+        Page_AliasOut_: {
+            /** Items */
+            items: components["schemas"]["AliasOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
         };
         /** Page[AuditOut] */
         Page_AuditOut_: {
             /** Items */
             items: components["schemas"]["AuditOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
+        /** Page[CatalogEntryOut] */
+        Page_CatalogEntryOut_: {
+            /** Items */
+            items: components["schemas"]["CatalogEntryOut"][];
             /** Next Cursor */
             next_cursor?: string | null;
         };
@@ -1294,25 +1423,29 @@ export interface components {
         RouterCreate: {
             /** Name */
             name: string;
-            /** @default weighted */
-            strategy: components["schemas"]["RoutingStrategy"];
-            /** Custom Strategy */
-            custom_strategy?: string | null;
-            /** Strategy Params */
-            strategy_params?: {
+            /**
+             * Strategy
+             * @default weighted
+             */
+            strategy: string;
+            /**
+             * Params
+             * @description Strategy-defined settings.
+             */
+            params?: {
                 [key: string]: unknown;
             };
             /**
-             * Model Ids
-             * @description Ordered models; may be empty only when traffic_split is set.
+             * Members
+             * @description Ordered models; empty exactly when traffic_split is set.
              */
-            model_ids?: string[];
+            members?: components["schemas"]["RouterMemberIn"][];
             retry?: components["schemas"]["RetryPolicyIn"] | null;
             /**
-             * Fallback Router Ids
-             * @description Routers tried in order once this router failed.
+             * Fallback Model Ids
+             * @description Models tried in order once the members failed.
              */
-            fallback_router_ids?: string[];
+            fallback_model_ids?: string[];
             /** Traffic Split */
             traffic_split?: components["schemas"]["TrafficSplitIn"][];
             /** @default none */
@@ -1320,15 +1453,40 @@ export interface components {
             /** Sticky Header */
             sticky_header?: string | null;
         };
-        /** RouterModelOut */
-        RouterModelOut: {
+        /** RouterMemberIn */
+        RouterMemberIn: {
             /**
              * Model Id
              * Format: uuid
              */
             model_id: string;
-            /** Position */
-            position: number;
+            /**
+             * Weight
+             * @description Share under `weighted`.
+             * @default 1
+             */
+            weight: number;
+            /**
+             * Params
+             * @description Strategy-defined settings.
+             */
+            params?: {
+                [key: string]: unknown;
+            };
+        };
+        /** RouterMemberOut */
+        RouterMemberOut: {
+            /**
+             * Model Id
+             * Format: uuid
+             */
+            model_id: string;
+            /** Weight */
+            weight: number;
+            /** Params */
+            params: {
+                [key: string]: unknown;
+            };
         };
         /** RouterOut */
         RouterOut: {
@@ -1339,18 +1497,17 @@ export interface components {
             id: string;
             /** Name */
             name: string;
-            strategy: components["schemas"]["RoutingStrategy"];
-            /** Custom Strategy */
-            custom_strategy?: string | null;
-            /** Strategy Params */
-            strategy_params?: {
+            /** Strategy */
+            strategy: string;
+            /** Params */
+            params: {
                 [key: string]: unknown;
             };
-            /** Models */
-            models: components["schemas"]["RouterModelOut"][];
+            /** Members */
+            members: components["schemas"]["RouterMemberOut"][];
             retry: components["schemas"]["RetryPolicyOut"] | null;
-            /** Fallback Router Ids */
-            fallback_router_ids: string[];
+            /** Fallback Model Ids */
+            fallback_model_ids: string[];
             /** Traffic Split */
             traffic_split: components["schemas"]["TrafficSplitOut"][];
             sticky: components["schemas"]["StickyBy"];
@@ -1375,29 +1532,23 @@ export interface components {
         RouterUpdate: {
             /** Name */
             name?: string | null;
-            strategy?: components["schemas"]["RoutingStrategy"] | null;
-            /** Custom Strategy */
-            custom_strategy?: string | null;
-            /** Strategy Params */
-            strategy_params?: {
+            /** Strategy */
+            strategy?: string | null;
+            /** Params */
+            params?: {
                 [key: string]: unknown;
             } | null;
-            /** Model Ids */
-            model_ids?: string[] | null;
+            /** Members */
+            members?: components["schemas"]["RouterMemberIn"][] | null;
             retry?: components["schemas"]["RetryPolicyIn"] | null;
-            /** Fallback Router Ids */
-            fallback_router_ids?: string[] | null;
+            /** Fallback Model Ids */
+            fallback_model_ids?: string[] | null;
             /** Traffic Split */
             traffic_split?: components["schemas"]["TrafficSplitIn"][] | null;
             sticky?: components["schemas"]["StickyBy"] | null;
             /** Sticky Header */
             sticky_header?: string | null;
         };
-        /**
-         * RoutingStrategy
-         * @enum {string}
-         */
-        RoutingStrategy: "weighted" | "least_in_flight" | "lowest_latency" | "vllm_load" | "custom";
         /** ServiceAccountCreate */
         ServiceAccountCreate: {
             model_access?: components["schemas"]["ModelAccess"] | null;
@@ -1652,8 +1803,8 @@ export interface components {
              * @description Share = weight / sum(weights).
              */
             weight: number;
-            /** Model Ids */
-            model_ids: string[];
+            /** Members */
+            members: components["schemas"]["RouterMemberIn"][];
         };
         /** TrafficSplitOut */
         TrafficSplitOut: {
@@ -1661,8 +1812,8 @@ export interface components {
             name: string;
             /** Weight */
             weight: number;
-            /** Model Ids */
-            model_ids: string[];
+            /** Members */
+            members: components["schemas"]["RouterMemberOut"][];
         };
         /** UpstreamCreate */
         UpstreamCreate: {
@@ -3695,6 +3846,74 @@ export interface operations {
             };
         };
     };
+    listCatalog: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_CatalogEntryOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     listModels: {
         parameters: {
             query?: {
@@ -3986,6 +4205,346 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ModelOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listAliases: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_AliasOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    createAlias: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AliasCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AliasOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getAlias: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                alias_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AliasOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    deleteAlias: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                alias_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    updateAlias: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                alias_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AliasUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AliasOut"];
                 };
             };
             /** @description Missing or invalid credentials */

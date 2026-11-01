@@ -472,11 +472,10 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
   };
   const upstream = await post("/upstreams", { name: "smoke-up", kind: "vllm", base_url: "http://127.0.0.1:9/v1" });
   const deps: Record<string, string> = {};
-  for (const name of ["smoke-stable", "smoke-canary", "smoke-backup-dep"]) {
+  for (const name of ["smoke-stable", "smoke-canary", "smoke-backup"]) {
     deps[name] = (await post("/models", { name, upstream_id: upstream.id, upstream_model: "m" })).id;
   }
-  const backup = await post("/routers", { name: "smoke-backup", model_ids: [deps["smoke-backup-dep"]] });
-  const main = await post("/routers", { name: "smoke-main", model_ids: [deps["smoke-stable"]] });
+  const main = await post("/routers", { name: "smoke-main", members: [{ model_id: deps["smoke-stable"] }] });
 
   await login(page, BREAK_GLASS);
   await page.getByRole("link", { name: "Routers", exact: true }).click();
@@ -487,7 +486,7 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
   await d.getByLabel("Retry failed attempts").check();
   await d.getByLabel("Max attempts").fill("3");
   await d.getByLabel("Retry on status").fill("503, 502");
-  await d.getByLabel("Add fallback router").selectOption({ label: "smoke-backup" });
+  await d.getByLabel("Add fallback model").selectOption({ label: "smoke-backup" });
   await expect(d.locator(".order-row")).toHaveText([/1\. smoke-backup/]);
 
   await d.getByRole("button", { name: "Add split" }).click();
@@ -517,21 +516,22 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
   const stored = await (await request.get(`/api/v1/routers/${main.id}`, { headers: admin })).json();
   expect(stored.strategy).toBe("vllm_load");
   expect(stored.retry).toEqual({ max_attempts: 3, retry_on_status: [502, 503], total_timeout_ms: 0 });
-  expect(stored.fallback_router_ids).toEqual([backup.id]);
+  expect(stored.fallback_model_ids).toEqual([deps["smoke-backup"]]);
   expect(stored.traffic_split).toEqual([
-    { name: "stable", weight: 90, model_ids: [deps["smoke-stable"]] },
-    { name: "canary", weight: 30, model_ids: [deps["smoke-canary"]] },
+    { name: "stable", weight: 90, members: [{ model_id: deps["smoke-stable"], weight: 1, params: {} }] },
+    { name: "canary", weight: 30, members: [{ model_id: deps["smoke-canary"], weight: 1, params: {} }] },
   ]);
   expect([stored.sticky, stored.sticky_header]).toEqual(["header", "x-session-id"]);
 
   // The fallback target cannot be deleted while referenced: the API error is shown.
+  await page.getByRole("link", { name: "Models", exact: true }).click();
   await page
     .getByRole("row")
     .filter({ has: page.getByRole("cell", { name: "smoke-backup", exact: true }) })
     .getByRole("button", { name: "Delete" })
     .click();
   await dialog(page).getByRole("button", { name: "Delete" }).click();
-  await expect(page.getByText(/fallback of router 'smoke-main'/)).toBeVisible();
+  await expect(page.getByText(/router smoke-main \(fallback\)/)).toBeVisible();
 
   // Upstream health check and circuit breaker.
   await page.getByRole("link", { name: "Upstreams", exact: true }).click();
