@@ -201,20 +201,20 @@ impl Drop for Gateway {
     }
 }
 
-fn config(a: SocketAddr, b: SocketAddr, upstream_options: &str, route: &str) -> String {
+fn config(a: SocketAddr, b: SocketAddr, upstream_options: &str, router: &str) -> String {
     format!(
         r#"upstreams:
   - {{name: a, kind: vllm, base_url: 'http://{a}/v1', timeout_ms: 100, {upstream_options}}}
   - {{name: b, kind: vllm, base_url: 'http://{b}/v1', timeout_ms: 100}}
-deployments:
+models:
   - {{name: a, upstream: a, upstream_model: actual-a}}
   - {{name: b, upstream: b, upstream_model: actual-b}}
-routes:
-{route}
+routers:
+{router}
 "#
     )
 }
-const FALLBACK: &str = "  - {name: public, deployments: [a], retry: {max_attempts: 2}, fallbacks: [backup]}\n  - {name: backup, deployments: [b]}";
+const FALLBACK: &str = "  - {name: public, models: [a], retry: {max_attempts: 2}, fallbacks: [backup]}\n  - {name: backup, models: [b]}";
 fn attempts(metrics: &Prometheus, outcome: &str) -> f64 {
     metrics.sum(
         "lumewarp_upstream_attempts_total",
@@ -223,9 +223,9 @@ fn attempts(metrics: &Prometheus, outcome: &str) -> f64 {
 }
 
 #[tokio::test]
-async fn retry_chooses_another_deployment_and_meters_once() {
+async fn retry_chooses_another_model_and_meters_once() {
     let backend = Backend::start(&["--fail-every", "2"]).await;
-    // The next inference fails, whichever deployment weighted routing chooses.
+    // The next inference fails, whichever model weighted routing chooses.
     let warm = client()
         .request(
             Request::builder()
@@ -241,7 +241,7 @@ async fn retry_chooses_another_deployment_and_meters_once() {
         backend.addr,
         backend.addr,
         "",
-        "  - {name: public, deployments: [a, b], retry: {max_attempts: 2}}",
+        "  - {name: public, models: [a, b], retry: {max_attempts: 2}}",
     ))
     .await;
     let response = gateway.post(false, &[]).await;
@@ -250,23 +250,23 @@ async fn retry_chooses_another_deployment_and_meters_once() {
     let metrics = gateway.metrics().await;
     assert_eq!(attempts(&metrics, "retryable_status"), 1.);
     assert_eq!(attempts(&metrics, "success"), 1.);
-    let final_deployment = if body["model"] == "actual-a" {
+    let final_model = if body["model"] == "actual-a" {
         "a"
     } else {
         "b"
     };
-    let first = if final_deployment == "a" { "b" } else { "a" };
+    let first = if final_model == "a" { "b" } else { "a" };
     assert_eq!(
         metrics.sum(
             "lumewarp_upstream_attempts_total",
-            &[("deployment", first), ("outcome", "retryable_status")]
+            &[("model", first), ("outcome", "retryable_status")]
         ),
         1.
     );
     assert_eq!(
         metrics.sum(
             "lumewarp_requests_total",
-            &[("deployment", final_deployment), ("status", "200")]
+            &[("model", final_model), ("status", "200")]
         ),
         1.
     );
@@ -287,23 +287,23 @@ async fn fallback_restores_public_model_and_does_not_follow_nested_fallbacks() {
     assert_eq!(
         metrics.sum(
             "lumewarp_fallbacks_total",
-            &[("router", "public"), ("fallback_model", "backup")]
+            &[("router", "public"), ("model", "backup")]
         ),
         1.
     );
     assert_eq!(
-        metrics.sum("lumewarp_requests_total", &[("deployment", "b")]),
+        metrics.sum("lumewarp_requests_total", &[("model", "b")]),
         1.
     );
 
-    let routes = "  - {name: public, deployments: [a], retry: {max_attempts: 3}, fallbacks: [backup]}\n  - {name: backup, deployments: [a], fallbacks: [third]}\n  - {name: third, deployments: [b]}";
-    let gateway = Gateway::start(config(bad.addr, good.addr, "", routes)).await;
+    let routers = "  - {name: public, models: [a], retry: {max_attempts: 3}, fallbacks: [backup]}\n  - {name: backup, models: [a], fallbacks: [third]}\n  - {name: third, models: [b]}";
+    let gateway = Gateway::start(config(bad.addr, good.addr, "", routers)).await;
     assert_eq!(gateway.post(false, &[]).await.status(), 503);
     assert_eq!(
         gateway
             .metrics()
             .await
-            .sum("lumewarp_upstream_attempts_total", &[("deployment", "b")]),
+            .sum("lumewarp_upstream_attempts_total", &[("model", "b")]),
         0.
     );
 }
@@ -366,9 +366,8 @@ async fn stream_is_not_retried_after_headers_or_first_byte() {
 #[tokio::test]
 async fn retry_after_cooldown_and_total_timeout_stop_retries() {
     let bad = Backend::start(&["--fail-every", "1"]).await;
-    let routes =
-        "  - {name: public, deployments: [a], retry: {max_attempts: 3, total_timeout_ms: 50}}";
-    let gateway = Gateway::start(config(bad.addr, bad.addr, "", routes)).await;
+    let routers = "  - {name: public, models: [a], retry: {max_attempts: 3, total_timeout_ms: 50}}";
+    let gateway = Gateway::start(config(bad.addr, bad.addr, "", routers)).await;
     let response = gateway.post(false, &[("x-mock-retry-after", "60")]).await;
     assert_eq!(response.status(), 503);
     bytes(response).await;
@@ -376,8 +375,8 @@ async fn retry_after_cooldown_and_total_timeout_stop_retries() {
 
     let hung = Mock::start(Behavior::Hang).await;
     let good = Backend::start(&[]).await;
-    let routes = "  - {name: public, deployments: [a], retry: {max_attempts: 2, total_timeout_ms: 20}, fallbacks: [backup]}\n  - {name: backup, deployments: [b]}";
-    let gateway = Gateway::start(config(hung.addr, good.addr, "", routes)).await;
+    let routers = "  - {name: public, models: [a], retry: {max_attempts: 2, total_timeout_ms: 20}, fallbacks: [backup]}\n  - {name: backup, models: [b]}";
+    let gateway = Gateway::start(config(hung.addr, good.addr, "", routers)).await;
     let response = gateway.post(false, &[]).await;
     assert_eq!(response.status(), 504);
     bytes(response).await;
@@ -388,8 +387,8 @@ async fn retry_after_cooldown_and_total_timeout_stop_retries() {
 #[tokio::test]
 async fn exhausted_global_budget_limits_attempts() {
     let bad = Backend::start(&["--fail-every", "1"]).await;
-    let routes = "  - {name: public, deployments: [a], retry: {max_attempts: 5}}";
-    let gateway = Gateway::start(config(bad.addr, bad.addr, "", routes)).await;
+    let routers = "  - {name: public, models: [a], retry: {max_attempts: 5}}";
+    let gateway = Gateway::start(config(bad.addr, bad.addr, "", routers)).await;
     let response = gateway.post(false, &[]).await;
     assert_eq!(response.status(), 503);
     bytes(response).await;
@@ -422,12 +421,12 @@ async fn returns_last_upstream_response_when_later_connection_fails() {
     assert_eq!(
         metrics.sum(
             "lumewarp_requests_total",
-            &[("deployment", "a"), ("status", "503")]
+            &[("model", "a"), ("status", "503")]
         ),
         1.
     );
     assert_eq!(
-        metrics.sum("lumewarp_requests_total", &[("deployment", "b")]),
+        metrics.sum("lumewarp_requests_total", &[("model", "b")]),
         0.
     );
     assert_eq!(metrics.sum("lumewarp_usage_capture_total", &[]), 1.);
@@ -435,12 +434,12 @@ async fn returns_last_upstream_response_when_later_connection_fails() {
 }
 
 #[tokio::test]
-async fn kept_response_is_accounted_to_its_deployment_after_a_later_timeout() {
+async fn kept_response_is_accounted_to_its_model_after_a_later_timeout() {
     // a answers 503 at once; the retry on b hangs until total_timeout.
     let bad = Backend::start(&["--fail-every", "1"]).await;
     let hung = Mock::start(Behavior::Hang).await;
-    let routes = "  - {name: public, deployments: [a], retry: {max_attempts: 2, total_timeout_ms: 80}, fallbacks: [backup]}\n  - {name: backup, deployments: [b]}";
-    let gateway = Gateway::start(config(bad.addr, hung.addr, "", routes)).await;
+    let routers = "  - {name: public, models: [a], retry: {max_attempts: 2, total_timeout_ms: 80}, fallbacks: [backup]}\n  - {name: backup, models: [b]}";
+    let gateway = Gateway::start(config(bad.addr, hung.addr, "", routers)).await;
     let response = gateway.post(false, &[]).await;
     assert_eq!(response.status(), 503);
     bytes(response).await;
@@ -450,12 +449,12 @@ async fn kept_response_is_accounted_to_its_deployment_after_a_later_timeout() {
     assert_eq!(
         metrics.sum(
             "lumewarp_requests_total",
-            &[("deployment", "a"), ("status", "503")]
+            &[("model", "a"), ("status", "503")]
         ),
         1.
     );
     assert_eq!(
-        metrics.sum("lumewarp_requests_total", &[("deployment", "b")]),
+        metrics.sum("lumewarp_requests_total", &[("model", "b")]),
         0.
     );
     assert_eq!(metrics.sum("lumewarp_usage_capture_total", &[]), 1.);
@@ -465,14 +464,15 @@ async fn kept_response_is_accounted_to_its_deployment_after_a_later_timeout() {
 }
 
 #[tokio::test]
-async fn routes_without_retry_do_not_fund_the_budget() {
+async fn routers_without_retry_do_not_fund_the_budget() {
     let bad = Backend::start(&["--fail-every", "1"]).await;
-    let routes = "  - {name: public, deployments: [a], retry: {max_attempts: 5}}\n  - {name: plain, deployments: [a]}";
-    let gateway = Gateway::start(config(bad.addr, bad.addr, "", routes)).await;
+    let routers =
+        "  - {name: public, models: [a], retry: {max_attempts: 5}}\n  - {name: plain, models: [a]}";
+    let gateway = Gateway::start(config(bad.addr, bad.addr, "", routers)).await;
     // Spend the initial three-retry burst.
     bytes(gateway.post(false, &[]).await).await;
     assert_eq!(attempts(&gateway.metrics().await, "retryable_status"), 4.);
-    // Ten requests on a route without a retry policy: 20% each would buy
+    // Ten requests on a router without a retry policy: 20% each would buy
     // two retries if they funded the budget.
     for _ in 0..10 {
         let response = gateway.post_model("plain", false, &[]).await;
@@ -496,45 +496,39 @@ async fn routes_without_retry_do_not_fund_the_budget() {
 }
 
 #[tokio::test]
-async fn total_timeout_cut_is_not_a_deployment_failure() {
+async fn total_timeout_cut_is_not_a_model_failure() {
     let hung = Mock::start(Behavior::Hang).await;
     let breaker = "circuit_breaker: {failure_threshold: 1, open_ms: 30000}";
-    // The route's 20 ms total_timeout cuts the attempt before the
-    // deployment's own 100 ms timeout: no breaker failure, no latency penalty.
-    let routes = "  - {name: public, deployments: [a], strategy: lowest_latency, retry: {max_attempts: 2, total_timeout_ms: 20}}";
-    let gateway = Gateway::start(config(hung.addr, hung.addr, breaker, routes)).await;
+    // The router's 20 ms total_timeout cuts the attempt before the
+    // model's own 100 ms timeout: no breaker failure, no latency penalty.
+    let routers = "  - {name: public, models: [a], strategy: lowest_latency, retry: {max_attempts: 2, total_timeout_ms: 20}}";
+    let gateway = Gateway::start(config(hung.addr, hung.addr, breaker, routers)).await;
     let response = gateway.post(false, &[]).await;
     assert_eq!(response.status(), 504);
     bytes(response).await;
     let metrics = gateway.metrics().await;
     assert_eq!(attempts(&metrics, "timeout"), 1.);
     assert_eq!(
-        metrics.value("lumewarp_upstream_circuit_state", &[("deployment", "a")]),
+        metrics.value("lumewarp_upstream_circuit_state", &[("model", "a")]),
         0.
     );
     assert_eq!(
-        metrics.sum(
-            "lumewarp_upstream_latency_ewma_seconds",
-            &[("deployment", "a")]
-        ),
+        metrics.sum("lumewarp_upstream_latency_ewma_seconds", &[("model", "a")]),
         0.
     );
-    // The deployment's own timeout is a failure and opens the breaker.
-    let routes = "  - {name: public, deployments: [a], strategy: lowest_latency, retry: {max_attempts: 2, total_timeout_ms: 1000}}";
-    let gateway = Gateway::start(config(hung.addr, hung.addr, breaker, routes)).await;
+    // The model's own timeout is a failure and opens the breaker.
+    let routers = "  - {name: public, models: [a], strategy: lowest_latency, retry: {max_attempts: 2, total_timeout_ms: 1000}}";
+    let gateway = Gateway::start(config(hung.addr, hung.addr, breaker, routers)).await;
     let response = gateway.post(false, &[]).await;
     assert_eq!(response.status(), 504);
     bytes(response).await;
     let metrics = gateway.metrics().await;
     assert_eq!(
-        metrics.value("lumewarp_upstream_circuit_state", &[("deployment", "a")]),
+        metrics.value("lumewarp_upstream_circuit_state", &[("model", "a")]),
         2.
     );
     assert!(
-        metrics.sum(
-            "lumewarp_upstream_latency_ewma_seconds",
-            &[("deployment", "a")]
-        ) >= 1.,
+        metrics.sum("lumewarp_upstream_latency_ewma_seconds", &[("model", "a")]) >= 1.,
         "timeout penalty"
     );
 }
@@ -555,7 +549,7 @@ async fn breaker_skips_open_primary_and_half_open_recovers() {
     bytes(gateway.post(false, &[]).await).await;
     let metrics = gateway.metrics().await;
     assert_eq!(
-        metrics.value("lumewarp_upstream_circuit_state", &[("deployment", "a")]),
+        metrics.value("lumewarp_upstream_circuit_state", &[("model", "a")]),
         2.
     );
     assert_eq!(attempts(&metrics, "retryable_status"), 1.);
@@ -570,7 +564,7 @@ async fn breaker_skips_open_primary_and_half_open_recovers() {
         gateway
             .metrics()
             .await
-            .value("lumewarp_upstream_circuit_state", &[("deployment", "a")]),
+            .value("lumewarp_upstream_circuit_state", &[("model", "a")]),
         0.
     );
 }
@@ -590,7 +584,7 @@ async fn active_health_probes_skip_down_upstreams_and_recover() {
     );
     assert_eq!(attempts(&metrics, "retryable_status"), 0.);
     assert_eq!(
-        metrics.sum("lumewarp_requests_total", &[("deployment", "b")]),
+        metrics.sum("lumewarp_requests_total", &[("model", "b")]),
         1.
     );
     a.fault(0).await;
@@ -625,50 +619,45 @@ async fn wait_metric(
     .await;
 }
 
-/// Sends `n` sequential requests and returns how many `deployment` served.
-async fn served_by(
-    gateway: &Gateway,
-    n: usize,
-    headers: &[(&str, &str)],
-    deployment: &str,
-) -> usize {
+/// Sends `n` sequential requests and returns how many `model` served.
+async fn served_by(gateway: &Gateway, n: usize, headers: &[(&str, &str)], model: &str) -> usize {
     let mut count = 0;
     for _ in 0..n {
         let response = gateway.post(false, headers).await;
         assert_eq!(response.status(), 200);
         let body: serde_json::Value = serde_json::from_slice(&bytes(response).await).unwrap();
-        count += usize::from(body["model"] == format!("actual-{deployment}"));
+        count += usize::from(body["model"] == format!("actual-{model}"));
     }
     count
 }
 
 #[tokio::test]
-async fn vllm_load_avoids_congested_deployment_and_falls_back_when_stale() {
+async fn vllm_load_avoids_congested_model_and_falls_back_when_stale() {
     let congested = Backend::start(&["--waiting", "50", "--kv-cache-usage", "0.9"]).await;
     let idle = Backend::start(&[]).await;
     let gateway = Gateway::start(config(
         congested.addr,
         idle.addr,
         "",
-        "  - {name: public, deployments: [a, b], strategy: vllm_load}",
+        "  - {name: public, models: [a, b], strategy: vllm_load}",
     ))
     .await;
     let queue = "lumewarp_vllm_queue_depth";
-    wait_metric(&gateway, queue, &[("deployment", "a")], |v| v == 50.).await;
+    wait_metric(&gateway, queue, &[("model", "a")], |v| v == 50.).await;
     wait_metric(
         &gateway,
         "lumewarp_vllm_kv_cache_usage",
-        &[("deployment", "b")],
+        &[("model", "b")],
         |v| v == 0.,
     )
     .await;
     let to_congested = served_by(&gateway, 100, &[], "a").await;
     assert!(
         to_congested <= 10,
-        "congested deployment served {to_congested}/100"
+        "congested model served {to_congested}/100"
     );
     // The scrape now fails: a's stale queue no longer counts; with equal
-    // in-flight load both deployments share the traffic again.
+    // in-flight load both models share the traffic again.
     congested.load("metrics_status=503").await;
     wait_metric(
         &gateway,
@@ -704,18 +693,13 @@ async fn lowest_latency_prefers_the_faster_upstream() {
         slow.addr,
         fast.addr,
         "",
-        "  - {name: public, deployments: [a, b], strategy: lowest_latency}",
+        "  - {name: public, models: [a, b], strategy: lowest_latency}",
     ))
     .await;
     let to_slow = served_by(&gateway, 80, &[], "a").await;
-    assert!(to_slow <= 12, "slow deployment served {to_slow}/80");
+    assert!(to_slow <= 12, "slow model served {to_slow}/80");
     let metrics = gateway.metrics().await;
-    let ewma = |d: &str| {
-        metrics.sum(
-            "lumewarp_upstream_latency_ewma_seconds",
-            &[("deployment", d)],
-        )
-    };
+    let ewma = |d: &str| metrics.sum("lumewarp_upstream_latency_ewma_seconds", &[("model", d)]);
     assert!(
         ewma("a") > 0.02 && ewma("b") < ewma("a"),
         "a={} b={}",
@@ -731,7 +715,7 @@ async fn sticky_traffic_split_is_stable_end_to_end() {
         backend.addr,
         backend.addr,
         "",
-        "  - name: public\n    traffic_split:\n      - {name: stable, deployments: [a], weight: 1}\n      - {name: canary, deployments: [b], weight: 1}\n    sticky: header\n    sticky_header: x-session",
+        "  - name: public\n    traffic_split:\n      - {name: stable, models: [a], weight: 1}\n      - {name: canary, models: [b], weight: 1}\n    sticky: header\n    sticky_header: x-session",
     ))
     .await;
     let mut splits = [0usize; 2];

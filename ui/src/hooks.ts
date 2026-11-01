@@ -105,6 +105,6 @@ export function useNames(rows: { id: string; name: string }[] | undefined) {
   return (id: string | null | undefined) => (id ? (map.get(id) ?? id.slice(0, 8)) : "—");
 }
 
-export function useRoutesQuery() {
-  return useQuery({ queryKey: ["routes"], queryFn: () => api.routes(), retry: false });
+export function useRoutersQuery() {
+  return useQuery({ queryKey: ["routers"], queryFn: () => api.routers(), retry: false });
 }

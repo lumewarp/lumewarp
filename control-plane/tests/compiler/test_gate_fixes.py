@@ -24,9 +24,9 @@ from lumewarp_control_plane.models import (
     ApiKey,
     ConfigOutbox,
     ConfigVersion,
-    Deployment,
     GatewaySession,
     KeyLifecycle,
+    Model,
     RoutingStrategy,
     Upstream,
 )
@@ -35,7 +35,7 @@ from tests.compiler.helpers import (
     SCOPE,
     add_hierarchy,
     add_key,
-    add_route,
+    add_router,
     load_version,
     seed_scope,
     touch,
@@ -61,23 +61,21 @@ async def _revoke(factory, key) -> None:
 # --------------------------------------------------------------------------- 1 / B1
 
 
-async def test_source_zero_weight_weighted_route_is_left_out(factory) -> None:
+async def test_source_zero_weight_weighted_router_is_left_out(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
         t, u = await add_hierarchy(s)
         key = await add_key(s, t, u)
-        await add_route(s, "zero", [("z1", None), ("z2", None)])
-        await add_route(s, "fine", [("ok", None)])
-        await add_route(s, "lif", [("z1", None)], strategy=RoutingStrategy.LEAST_IN_FLIGHT)
-        await s.execute(
-            update(Deployment).where(Deployment.name.in_(["z1", "z2"])).values(weight=0)
-        )
+        await add_router(s, "zero", [("z1", None), ("z2", None)])
+        await add_router(s, "fine", [("ok", None)])
+        await add_router(s, "lif", [("z1", None)], strategy=RoutingStrategy.LEAST_IN_FLIGHT)
+        await s.execute(update(Model).where(Model.name.in_(["z1", "z2"])).values(weight=0))
     await _revoke(factory, key)
     await touch(factory)
     assert await publish_pending(factory, SCOPE, require_local_membership=True) == 1
     snap = await load_version(factory, 1)
-    # least_in_flight ignores weights, so only the weighted route is dropped.
-    assert [r.name for r in snap.routes] == ["fine", "lif"]
+    # least_in_flight ignores weights, so only the weighted router is dropped.
+    assert [r.name for r in snap.routers] == ["fine", "lif"]
     assert list(snap.api_keys) == []
     async with factory() as s:
         c = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
@@ -104,24 +102,22 @@ def test_upstream_url_rules(url: str, ok: bool) -> None:
     assert (upstream_url_problem(url) is None) is ok
 
 
-async def test_invalid_upstream_url_left_out_with_its_routes(factory) -> None:
+async def test_invalid_upstream_url_left_out_with_its_routers(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
-        await add_route(s, "bad", [("bad-d", None)], upstream="bad")
-        await add_route(s, "mixed", [("good-d", None), ("bad-d", None)])
+        await add_router(s, "bad", [("bad-d", None)], upstream="bad")
+        await add_router(s, "mixed", [("good-d", None), ("bad-d", None)])
         await s.execute(
             update(Upstream).where(Upstream.name == "bad").values(base_url="http://h/v1?q")
         )
-        await s.execute(
-            update(Deployment).where(Deployment.name == "good-d").values(upstream_model="")
-        )
-        await add_route(s, "good", [("fine-d", None)])
+        await s.execute(update(Model).where(Model.name == "good-d").values(upstream_model=""))
+        await add_router(s, "good", [("fine-d", None)])
     async with factory() as s:
         c = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
     snap = c.snapshot
     assert [u.name for u in snap.upstreams] == ["vllm"]
-    assert [d.name for d in snap.deployments] == ["fine-d"]
-    assert [r.name for r in snap.routes] == ["good"]
+    assert [d.name for d in snap.models] == ["fine-d"]
+    assert [r.name for r in snap.routers] == ["good"]
     assert len(c.warnings) >= 4
 
 
@@ -129,8 +125,8 @@ def _valid_snapshot() -> pb.Snapshot:
     return pb.Snapshot(
         scope="s",
         upstreams=[pb.Upstream(name="u", kind=pb.UPSTREAM_KIND_VLLM, base_url="http://u/v1")],
-        deployments=[pb.Deployment(name="d", upstream="u", upstream_model="m", weight=1)],
-        routes=[pb.ModelRoute(name="a", deployments=["d"], strategy=pb.ROUTING_STRATEGY_WEIGHTED)],
+        models=[pb.Model(name="d", upstream="u", upstream_model="m", weight=1)],
+        routers=[pb.Router(name="a", models=["d"], strategy=pb.ROUTING_STRATEGY_WEIGHTED)],
         teams=[pb.Team(id="t")],
         api_keys=[
             pb.ApiKey(
@@ -157,16 +153,16 @@ def _mutations():
         "base url": lambda s: setattr(s.upstreams[0], "base_url", "http://a@b/v1"),
         "dup upstream": lambda s: s.upstreams.append(s.upstreams[0]),
         "empty upstream": lambda s: setattr(s.upstreams[0], "name", ""),
-        "unknown upstream": lambda s: setattr(s.deployments[0], "upstream", "x"),
-        "empty name": lambda s: setattr(s.deployments[0], "upstream_model", ""),
-        "dup deployment": lambda s: s.deployments.append(s.deployments[0]),
-        "reserved alias": lambda s: setattr(s.routes[0], "name", "unknown"),
-        "strategy 0": lambda s: setattr(s.routes[0], "strategy", 0),
-        "lowest latency": lambda s: setattr(s.routes[0], "strategy", 3),
-        "no deployments": lambda s: s.routes[0].ClearField("deployments"),
-        "unknown deployment": lambda s: s.routes[0].deployments.append("x"),
-        "zero weight": lambda s: setattr(s.deployments[0], "weight", 0),
-        "dup route": lambda s: s.routes.append(s.routes[0]),
+        "unknown upstream": lambda s: setattr(s.models[0], "upstream", "x"),
+        "empty name": lambda s: setattr(s.models[0], "upstream_model", ""),
+        "dup model": lambda s: s.models.append(s.models[0]),
+        "reserved alias": lambda s: setattr(s.routers[0], "name", "unknown"),
+        "strategy 0": lambda s: setattr(s.routers[0], "strategy", 0),
+        "lowest latency": lambda s: setattr(s.routers[0], "strategy", 3),
+        "no models": lambda s: s.routers[0].ClearField("models"),
+        "unknown model": lambda s: s.routers[0].models.append("x"),
+        "zero weight": lambda s: setattr(s.models[0], "weight", 0),
+        "dup router": lambda s: s.routers.append(s.routers[0]),
         "dup team": lambda s: s.teams.append(s.teams[0]),
         "empty team": lambda s: setattr(s.teams[0], "id", ""),
         "hash len": lambda s: setattr(k(s), "key_hash", b"\x01" * 31),
@@ -215,7 +211,7 @@ async def test_store_version_refuses_invalid_snapshot(factory) -> None:
     await seed_scope(factory)
     snap = _valid_snapshot()
     snap.scope = SCOPE
-    snap.deployments[0].weight = 0
+    snap.models[0].weight = 0
     async with factory() as s, s.begin():
         with pytest.raises(CompileError, match="zero total weight"):
             await store_version(s, SCOPE, snap, version=1, source_revision=1)
@@ -258,7 +254,7 @@ async def test_rollback_to_overweight_version_is_a_compile_error(factory) -> Non
     snap.scope = SCOPE
     snap.ClearField("api_keys")
     snap.ClearField("teams")
-    snap.deployments[0].weight = 2**31  # valid uint32, as older versions could carry
+    snap.models[0].weight = 2**31  # valid uint32, as older versions could carry
     async with factory() as s, s.begin():
         await store_version(s, SCOPE, snap, version=1, source_revision=0)
     async with factory() as s, s.begin():

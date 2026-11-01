@@ -1,11 +1,11 @@
 //! Version 1 of the compiled-in routing strategy API.
 //!
-//! `configure` runs once per route on snapshot application. `pick` must not do
+//! `configure` runs once per router on snapshot application. `pick` must not do
 //! I/O, block, or allocate in the common case. Given the same candidate state,
 //! request and RNG stream it must be deterministic. Return `None` only when no
 //! candidate is acceptable; the gateway then tries its existing fall-through
-//! paths. Deployment eligibility, retries, splits and breakers belong to the
-//! gateway, not to a strategy. Candidates expose eligible deployments only.
+//! paths. Model eligibility, retries, splits and breakers belong to the
+//! gateway, not to a strategy. Candidates expose eligible models only.
 //!
 //! Request headers are readable only when named in `params.headers` (an array
 //! of HTTP header names). There is deliberately no prompt or body interface.
@@ -27,9 +27,9 @@ pub struct Needs {
     pub vllm_load: bool,
 }
 
-pub struct RouteInfo<'a> {
+pub struct RouterInfo<'a> {
     pub name: &'a str,
-    pub deployments: &'a [&'a str],
+    pub models: &'a [&'a str],
 }
 
 /// Range draws, rather than a particular RNG implementation or version.
@@ -118,7 +118,7 @@ pub trait CandidateSource {
 }
 
 pub struct Candidate<'a, S: CandidateSource + ?Sized = dyn CandidateSource + 'a> {
-    /// Index in the current pool, not in RouteInfo's route-wide deployment list.
+    /// Index in the current pool, not in RouterInfo's router-wide model list.
     pub index: usize,
     source: &'a S,
 }
@@ -253,7 +253,7 @@ impl<'a, S: CandidateSource + ?Sized, E: Fn(usize) -> bool + ?Sized> Candidates<
 pub trait Strategy: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn needs(&self) -> Needs;
-    fn configure(route: &RouteInfo<'_>, params: &Params) -> Result<Self, ConfigError>
+    fn configure(router: &RouterInfo<'_>, params: &Params) -> Result<Self, ConfigError>
     where
         Self: Sized;
     fn pick(
@@ -264,7 +264,7 @@ pub trait Strategy: Send + Sync + 'static {
     ) -> Option<usize>;
 }
 
-pub type CreateStrategy = fn(&RouteInfo<'_>, &Params) -> Result<Box<dyn Strategy>, ConfigError>;
+pub type CreateStrategy = fn(&RouterInfo<'_>, &Params) -> Result<Box<dyn Strategy>, ConfigError>;
 
 pub struct StrategyFactory {
     pub name: &'static str,
@@ -281,8 +281,8 @@ macro_rules! register {
         $crate::__inventory::submit! {
             $crate::StrategyFactory {
                 name: $name,
-                create: |route, params| {
-                    <$strategy as $crate::Strategy>::configure(route, params)
+                create: |router, params| {
+                    <$strategy as $crate::Strategy>::configure(router, params)
                         .map(|s| Box::new(s) as Box<dyn $crate::Strategy>)
                 },
             }
@@ -324,7 +324,7 @@ macro_rules! builtin_strategy {
             fn needs(&self) -> Needs {
                 Builtin::$variant.needs()
             }
-            fn configure(_: &RouteInfo<'_>, _: &Params) -> Result<Self, ConfigError> {
+            fn configure(_: &RouterInfo<'_>, _: &Params) -> Result<Self, ConfigError> {
                 Ok(Self)
             }
             fn pick(
@@ -361,7 +361,7 @@ impl Strategy for Builtin {
         }
     }
 
-    fn configure(_: &RouteInfo<'_>, _: &Params) -> Result<Self, ConfigError> {
+    fn configure(_: &RouterInfo<'_>, _: &Params) -> Result<Self, ConfigError> {
         Err(ConfigError("select a built-in by its enum variant".into()))
     }
 

@@ -78,8 +78,8 @@ CASES = [
         {"name": "up-{mark}", "kind": "vllm", "base_url": "http://127.0.0.1:9000/v1"},
         (201, 403, 403, 403, 201),
     ),
-    ("deployments.list", "GET", "/deployments", None, ANY),
-    ("routes.list", "GET", "/routes", None, ANY),
+    ("models.list", "GET", "/models", None, ANY),
+    ("routers.list", "GET", "/routers", None, ANY),
     ("gateways.list", "GET", "/gateways", None, INSTALLATION),
     (
         "gateways.create",

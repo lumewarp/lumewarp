@@ -77,13 +77,13 @@ pub const ATTEMPT_OUTCOMES: [&str; 6] = [
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct AttemptLabels {
     requested: String,
-    deployment: String,
+    model: String,
     outcome: &'static str,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct FallbackLabels {
     router: String,
-    fallback_model: String,
+    model: String,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct RouterLabels {
@@ -122,13 +122,13 @@ pub fn endpoint_index(path: &str) -> usize {
 struct Labels {
     requested: String,
     endpoint: &'static str,
-    deployment: String,
+    model: String,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct RequestLabels {
     requested: String,
     endpoint: &'static str,
-    deployment: String,
+    model: String,
     team: String,
     status: &'static str,
 }
@@ -137,17 +137,17 @@ struct EndpointLabels {
     endpoint: &'static str,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct DeploymentLabels {
-    deployment: String,
+struct ModelLabels {
+    model: String,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct TtftLabels {
     requested: String,
-    deployment: String,
+    model: String,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct ErrorLabels {
-    deployment: String,
+    model: String,
     kind: &'static str,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -190,10 +190,10 @@ fn overhead_histogram() -> Histogram {
 
 pub struct RequestMetrics {
     pub requested: String,
-    pub deployment: String,
+    pub model: String,
     team: String,
     /// (input, output) `lumewarp_tokens_total` series, created on first use
-    /// so routes nobody meters do not export zero series.
+    /// so routers nobody meters do not export zero series.
     tokens: OnceLock<[Counter; 2]>,
     token_family: Family<TokenLabels, Counter>,
     counters: [Counter; 15],
@@ -231,7 +231,7 @@ impl RequestMetrics {
     }
 }
 
-/// Process-lifetime id of a label value (team id, alias or deployment name).
+/// Process-lifetime id of a label value (team id, alias or model name).
 /// Equal strings get equal ids in every snapshot; `""` is always 0.
 pub type LabelId = u32;
 
@@ -240,7 +240,7 @@ pub type LabelId = u32;
 pub struct HandleKey {
     pub team: LabelId,
     pub requested: LabelId,
-    pub deployment: LabelId,
+    pub model: LabelId,
     /// Index into `API_ENDPOINTS`.
     pub endpoint: u8,
 }
@@ -250,7 +250,7 @@ pub struct Metrics {
     registry: Registry,
     label_ids: Mutex<HashMap<Box<str>, LabelId>>,
     /// Lock-free reads; an entry is created on the first request with its
-    /// (team, requested, deployment, endpoint) and kept across snapshot swaps.
+    /// (team, requested, model, endpoint) and kept across snapshot swaps.
     handle_cache: papaya::HashMap<HandleKey, Arc<RequestMetrics>>,
     requests: Family<RequestLabels, Counter>,
     durations: Histograms<Labels>,
@@ -259,7 +259,7 @@ pub struct Metrics {
     ttft: Histograms<TtftLabels>,
     errors: Family<ErrorLabels, Counter>,
     config_info: Family<ConfigLabels, Gauge>,
-    gauges: Family<DeploymentLabels, Gauge>,
+    gauges: Family<ModelLabels, Gauge>,
     config_version: Gauge,
     // Written only through the methods the config stream calls (W2);
     // registered here so their series exist from boot.
@@ -278,13 +278,13 @@ pub struct Metrics {
     attempts: Family<AttemptLabels, Counter>,
     fallbacks: Family<FallbackLabels, Counter>,
     budget_exhausted: Family<RouterLabels, Counter>,
-    circuit: Family<DeploymentLabels, Gauge>,
+    circuit: Family<ModelLabels, Gauge>,
     healthy: Family<UpstreamLabels, Gauge>,
     splits: Family<SplitLabels, Counter>,
-    vllm_queue: Family<DeploymentLabels, Gauge>,
-    vllm_kv: Family<DeploymentLabels, Gauge<f64, AtomicU64>>,
+    vllm_queue: Family<ModelLabels, Gauge>,
+    vllm_kv: Family<ModelLabels, Gauge<f64, AtomicU64>>,
     vllm_scrape_failures: Family<UpstreamLabels, Counter>,
-    latency_ewma: Family<DeploymentLabels, Gauge<f64, AtomicU64>>,
+    latency_ewma: Family<ModelLabels, Gauge<f64, AtomicU64>>,
 }
 
 impl Metrics {
@@ -365,7 +365,7 @@ impl Metrics {
         );
         registry.register(
             "lumewarp_upstream_circuit_state",
-            "Deployment breaker: closed 0, half-open 1, open 2",
+            "Model breaker: closed 0, half-open 1, open 2",
             circuit.clone(),
         );
         registry.register(
@@ -405,7 +405,7 @@ impl Metrics {
         );
         registry.register(
             "lumewarp_in_flight_requests",
-            "Requests holding a deployment reservation",
+            "Requests holding a model reservation",
             gauges.clone(),
         );
         registry.register(
@@ -465,7 +465,7 @@ impl Metrics {
         );
         registry.register(
             "lumewarp_spend",
-            "Spend in USD computed from deployment prices",
+            "Spend in USD computed from model prices",
             spend.clone(),
         );
         Self {
@@ -513,9 +513,9 @@ impl Metrics {
             .clone()
     }
 
-    pub fn vllm_gauges(&self, deployment: &str) -> (Gauge, Gauge<f64, AtomicU64>) {
-        let labels = DeploymentLabels {
-            deployment: deployment.into(),
+    pub fn vllm_gauges(&self, model: &str) -> (Gauge, Gauge<f64, AtomicU64>) {
+        let labels = ModelLabels {
+            model: model.into(),
         };
         (
             self.vllm_queue.get_or_create(&labels).clone(),
@@ -533,9 +533,9 @@ impl Metrics {
 
     /// Off the request path: refreshed when `/metrics` is scraped.
     pub fn export_latency(&self, latencies: Vec<(String, u64)>) {
-        for (deployment, us) in latencies {
+        for (model, us) in latencies {
             self.latency_ewma
-                .get_or_create(&DeploymentLabels { deployment })
+                .get_or_create(&ModelLabels { model })
                 .set(us as f64 / 1e6);
         }
     }
@@ -545,23 +545,23 @@ impl Metrics {
             .set(i64::try_from(version).unwrap_or(i64::MAX));
     }
 
-    pub fn attempt_handles(&self, requested: &str, deployment: &str) -> [Counter; 6] {
+    pub fn attempt_handles(&self, requested: &str, model: &str) -> [Counter; 6] {
         ATTEMPT_OUTCOMES.map(|outcome| {
             self.attempts
                 .get_or_create(&AttemptLabels {
                     requested: requested.into(),
-                    deployment: deployment.into(),
+                    model: model.into(),
                     outcome,
                 })
                 .clone()
         })
     }
 
-    pub fn fallback_handle(&self, requested: &str, fallback_router: &str) -> Counter {
+    pub fn fallback_handle(&self, requested: &str, fallback_model: &str) -> Counter {
         self.fallbacks
             .get_or_create(&FallbackLabels {
                 router: requested.into(),
-                fallback_model: fallback_router.into(),
+                model: fallback_model.into(),
             })
             .clone()
     }
@@ -574,10 +574,10 @@ impl Metrics {
             .clone()
     }
 
-    pub fn circuit_gauge(&self, deployment: &str) -> Gauge {
+    pub fn circuit_gauge(&self, model: &str) -> Gauge {
         self.circuit
-            .get_or_create(&DeploymentLabels {
-                deployment: deployment.into(),
+            .get_or_create(&ModelLabels {
+                model: model.into(),
             })
             .clone()
     }
@@ -652,14 +652,14 @@ impl Metrics {
             .set(1);
     }
 
-    /// Pre-registers zero-valued per-deployment series.
-    pub fn register_deployment(&self, deployment: &str) {
-        drop(self.gauges.get_or_create(&DeploymentLabels {
-            deployment: deployment.into(),
+    /// Pre-registers zero-valued per-model series.
+    pub fn register_model(&self, model: &str) {
+        drop(self.gauges.get_or_create(&ModelLabels {
+            model: model.into(),
         }));
         for kind in ERROR_KINDS {
             drop(self.errors.get_or_create(&ErrorLabels {
-                deployment: deployment.into(),
+                model: model.into(),
                 kind,
             }));
         }
@@ -678,13 +678,13 @@ impl Metrics {
 
     /// Request-path lookup: lock-free and allocation-free once `key` was used
     /// in this process; the first use creates the series. `team`, `requested` and
-    /// `deployment` must be the strings `key` was interned from.
+    /// `model` must be the strings `key` was interned from.
     pub fn cached_handles(
         &self,
         key: HandleKey,
         team: &str,
         requested: &str,
-        deployment: &str,
+        model: &str,
     ) -> Arc<RequestMetrics> {
         let cache = self.handle_cache.pin();
         if let Some(handles) = cache.get(&key) {
@@ -692,7 +692,7 @@ impl Metrics {
         }
         cache
             .get_or_insert_with(key, || {
-                self.handles(requested, deployment, key.endpoint.into(), team)
+                self.handles(requested, model, key.endpoint.into(), team)
             })
             .clone()
     }
@@ -702,7 +702,7 @@ impl Metrics {
     pub fn handles(
         &self,
         requested: &str,
-        deployment: &str,
+        model: &str,
         endpoint: usize,
         team: &str,
     ) -> Arc<RequestMetrics> {
@@ -711,7 +711,7 @@ impl Metrics {
                 .get_or_create(&RequestLabels {
                     requested: requested.into(),
                     endpoint: API_ENDPOINTS[endpoint],
-                    deployment: deployment.into(),
+                    model: model.into(),
                     team: team.into(),
                     status: STATUSES[i],
                 })
@@ -722,7 +722,7 @@ impl Metrics {
             .get_or_create(&Labels {
                 requested: requested.into(),
                 endpoint: API_ENDPOINTS[endpoint],
-                deployment: deployment.into(),
+                model: model.into(),
             })
             .clone();
         let overhead = self
@@ -737,19 +737,19 @@ impl Metrics {
                 endpoint: API_ENDPOINTS[endpoint],
             })
             .clone();
-        let ttft = (!deployment.is_empty()).then(|| {
+        let ttft = (!model.is_empty()).then(|| {
             self.ttft
                 .get_or_create(&TtftLabels {
                     requested: requested.into(),
-                    deployment: deployment.into(),
+                    model: model.into(),
                 })
                 .clone()
         });
-        let errors = (!deployment.is_empty()).then(|| {
+        let errors = (!model.is_empty()).then(|| {
             ERROR_KINDS.map(|kind| {
                 self.errors
                     .get_or_create(&ErrorLabels {
-                        deployment: deployment.into(),
+                        model: model.into(),
                         kind,
                     })
                     .clone()
@@ -757,7 +757,7 @@ impl Metrics {
         });
         Arc::new(RequestMetrics {
             requested: requested.into(),
-            deployment: deployment.into(),
+            model: model.into(),
             team: team.into(),
             tokens: OnceLock::new(),
             token_family: self.tokens.clone(),
@@ -767,15 +767,15 @@ impl Metrics {
             body_read,
             ttft,
             errors,
-            attempts: self.attempt_handles(requested, deployment),
+            attempts: self.attempt_handles(requested, model),
         })
     }
 
     pub fn encode(&self, in_flight: &InFlightRegistry) -> Result<String, std::fmt::Error> {
-        for (deployment, count) in in_flight.counts() {
+        for (model, count) in in_flight.counts() {
             self.gauges
-                .get_or_create(&DeploymentLabels {
-                    deployment: deployment.to_string(),
+                .get_or_create(&ModelLabels {
+                    model: model.to_string(),
                 })
                 .set(count as i64);
         }
@@ -866,7 +866,7 @@ impl Observation {
         self.handles = handles;
         self.stream = stream;
         self.span.record("requested", &self.handles.requested);
-        self.span.record("deployment", &self.handles.deployment);
+        self.span.record("model", &self.handles.model);
         self.span.record("stream", stream);
     }
 
@@ -1038,12 +1038,8 @@ pub(crate) mod tests {
         observation.first_frame_forwarding = Duration::ZERO;
         assert!((observation.overhead(start + Duration::from_secs(10)) - 0.0011).abs() < 1e-9);
         let text = metrics.encode(&InFlightRegistry::default()).unwrap();
-        assert!(
-            text.contains("lumewarp_ttft_seconds_sum{requested=\"public\",deployment=\"d\"} 1.3")
-        );
-        assert!(
-            text.contains("lumewarp_ttft_seconds_count{requested=\"public\",deployment=\"d\"} 1")
-        );
+        assert!(text.contains("lumewarp_ttft_seconds_sum{requested=\"public\",model=\"d\"} 1.3"));
+        assert!(text.contains("lumewarp_ttft_seconds_count{requested=\"public\",model=\"d\"} 1"));
     }
 
     #[test]
@@ -1052,10 +1048,10 @@ pub(crate) mod tests {
             r#"
 upstreams:
   - {name: u, kind: vllm, base_url: 'http://localhost:8123/v1'}
-deployments:
+models:
   - {name: d, upstream: u, upstream_model: actual}
-routes:
-  - {name: public, deployments: [d]}
+routers:
+  - {name: public, models: [d]}
 "#,
         )
         .unwrap();
@@ -1070,14 +1066,14 @@ routes:
         let metrics = &runtime.metrics;
         metrics.set_yaml_hash("123456789abc");
         assert!(!router
-            .routes
+            .routers
             .contains_key("client-supplied-secret-requested"));
         let mut observation = Observation::new(router.unknown(&anonymous, 0), Span::none(), false);
         observation.status = StatusCode::NOT_FOUND;
         observation.finish();
         observation.finish();
         let text = runtime.encode_metrics().unwrap();
-        assert!(text.contains("lumewarp_requests_total{requested=\"unknown\",endpoint=\"chat_completions\",deployment=\"\",team=\"\",status=\"404\"} 1"));
+        assert!(text.contains("lumewarp_requests_total{requested=\"unknown\",endpoint=\"chat_completions\",model=\"\",team=\"\",status=\"404\"} 1"));
         for name in [
             "lumewarp_requests_total",
             "lumewarp_request_duration_seconds",
@@ -1107,27 +1103,27 @@ routes:
             false,
         ));
         assert!(runtime.encode_metrics().unwrap().contains(
-            "requested=\"unknown\",endpoint=\"chat_completions\",deployment=\"\",team=\"\",status=\"499\"} 1"
+            "requested=\"unknown\",endpoint=\"chat_completions\",model=\"\",team=\"\",status=\"499\"} 1"
         ));
-        let guard = router.acquire(&router.routes["public"], 0, &anonymous);
+        let guard = router.acquire(&router.routers["public"], 0, &anonymous);
         assert!(runtime
             .encode_metrics()
             .unwrap()
-            .contains("lumewarp_in_flight_requests{deployment=\"d\"} 1"));
+            .contains("lumewarp_in_flight_requests{model=\"d\"} 1"));
         drop(guard);
         assert!(runtime
             .encode_metrics()
             .unwrap()
-            .contains("lumewarp_in_flight_requests{deployment=\"d\"} 0"));
+            .contains("lumewarp_in_flight_requests{model=\"d\"} 0"));
         let mut fallback = Observation::new(router.unknown(&anonymous, 0), Span::none(), false);
         fallback.status = StatusCode::IM_A_TEAPOT;
         drop(fallback);
         assert!(runtime.encode_metrics().unwrap().contains(
-            "requested=\"unknown\",endpoint=\"chat_completions\",deployment=\"\",team=\"\",status=\"other\"} 1"
+            "requested=\"unknown\",endpoint=\"chat_completions\",model=\"\",team=\"\",status=\"other\"} 1"
         ));
         finish_with(&router.unknown(&anonymous, 0), 403);
         assert!(runtime.encode_metrics().unwrap().contains(
-            "requested=\"unknown\",endpoint=\"chat_completions\",deployment=\"\",team=\"\",status=\"403\"} 1"
+            "requested=\"unknown\",endpoint=\"chat_completions\",model=\"\",team=\"\",status=\"403\"} 1"
         ));
     }
 

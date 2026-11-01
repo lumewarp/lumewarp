@@ -124,13 +124,19 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 
 /// One sha256 and one map lookup; no allocation besides the `Arc` clone.
 /// Expiry uses the coarse clock (an atomic load, at most a few ms stale).
-pub fn authenticate(router: &RoutingTable, headers: &HeaderMap) -> Result<Caller, AuthRejection> {
-    if router.auth_mode == AuthMode::Open {
+pub fn authenticate(
+    routing_table: &RoutingTable,
+    headers: &HeaderMap,
+) -> Result<Caller, AuthRejection> {
+    if routing_table.auth_mode == AuthMode::Open {
         return Ok(Caller::Anonymous);
     }
     let key = bearer(headers).ok_or(AuthError::InvalidApiKey)?;
     let hash: [u8; 32] = Sha256::digest(key.as_bytes()).into();
-    let key = router.keys.get(&hash).ok_or(AuthError::InvalidApiKey)?;
+    let key = routing_table
+        .keys
+        .get(&hash)
+        .ok_or(AuthError::InvalidApiKey)?;
     let reject = |error| AuthRejection {
         error,
         key: Some(key.clone()),
@@ -148,7 +154,7 @@ pub fn authenticate(router: &RoutingTable, headers: &HeaderMap) -> Result<Caller
     }
 }
 
-/// Must run before a deployment is chosen. `allow_all_models=false` with an
+/// Must run before a model is chosen. `allow_all_models=false` with an
 /// empty list denies everything.
 pub fn check_model(caller: &Caller, alias: &str) -> Result<(), AuthError> {
     match caller {
@@ -178,31 +184,34 @@ mod tests {
         headers
     }
 
-    fn router(snapshot: &pb::Snapshot, mode: AuthMode) -> RoutingTable {
+    fn routing_table(snapshot: &pb::Snapshot, mode: AuthMode) -> RoutingTable {
         RoutingTable::compile(snapshot, mode, &Runtime::new()).unwrap()
     }
 
     #[test]
     fn bearer_parsing() {
-        let router = router(&base(), AuthMode::RequireKey);
+        let routing_table = routing_table(&base(), AuthMode::RequireKey);
         assert_eq!(
-            err(authenticate(&router, &HeaderMap::new())),
+            err(authenticate(&routing_table, &HeaderMap::new())),
             Some(AuthError::InvalidApiKey)
         );
         for bad in ["Bearer wrong", "Basic s1", "Bearer ", "s1"] {
             assert_eq!(
-                err(authenticate(&router, &headers(bad))),
+                err(authenticate(&routing_table, &headers(bad))),
                 Some(AuthError::InvalidApiKey),
                 "{bad}"
             );
         }
         for good in ["Bearer s1", "bearer  s1", "BEARER s1"] {
-            assert!(authenticate(&router, &headers(good)).is_ok(), "{good}");
+            assert!(
+                authenticate(&routing_table, &headers(good)).is_ok(),
+                "{good}"
+            );
         }
         let mut duplicate = headers("Bearer s1");
         duplicate.append(header::AUTHORIZATION, "Bearer s1".parse().unwrap());
         assert_eq!(
-            err(authenticate(&router, &duplicate)),
+            err(authenticate(&routing_table, &duplicate)),
             Some(AuthError::InvalidApiKey)
         );
     }
@@ -211,13 +220,13 @@ mod tests {
     fn open_mode_is_anonymous_and_require_key_with_no_keys_rejects_all() {
         let mut s = base();
         s.api_keys.clear();
-        let open = router(&s, AuthMode::Open);
+        let open = routing_table(&s, AuthMode::Open);
         assert!(matches!(
             authenticate(&open, &HeaderMap::new()),
             Ok(Caller::Anonymous)
         ));
         assert!(check_model(&Caller::Anonymous, "anything").is_ok());
-        let closed = router(&s, AuthMode::RequireKey);
+        let closed = routing_table(&s, AuthMode::RequireKey);
         for h in [HeaderMap::new(), headers("Bearer s1"), headers("Bearer ")] {
             assert_eq!(
                 err(authenticate(&closed, &h)),
@@ -248,8 +257,9 @@ mod tests {
         push("all", &|k| {
             k.policy.as_mut().unwrap().allow_all_models = true;
         });
-        let router = router(&s, AuthMode::RequireKey);
-        let auth = |secret: &str| authenticate(&router, &headers(&format!("Bearer {secret}")));
+        let routing_table = routing_table(&s, AuthMode::RequireKey);
+        let auth =
+            |secret: &str| authenticate(&routing_table, &headers(&format!("Bearer {secret}")));
         let rejected_key = |secret: &str| auth(secret).err().unwrap().key.map(|k| k.key_id.clone());
         for id in ["revoked", "suspended", "expired", "expired-budget"] {
             assert_eq!(err(auth(id)), Some(AuthError::InvalidApiKey), "{id}");
@@ -282,7 +292,7 @@ mod tests {
         }
         let all = auth("all").unwrap();
         assert!(check_model(&all, "m2").is_ok());
-        assert!(check_model(&all, "not-a-route").is_ok());
+        assert!(check_model(&all, "not-a-router").is_ok());
         assert_eq!(AuthError::ModelNotAllowed.status(), 403);
         assert_eq!(
             Response::from(AuthError::InsufficientQuota).status(),
@@ -306,8 +316,8 @@ mod tests {
         let mut s = base();
         s.api_keys[0].policy.as_mut().unwrap().rate_limit_scopes =
             vec![scope("team:t1"), scope("key:k1")];
-        let open = router(&s, AuthMode::Open);
-        let keyed = router(&s, AuthMode::RequireKey);
+        let open = routing_table(&s, AuthMode::Open);
+        let keyed = routing_table(&s, AuthMode::RequireKey);
         let cases = [
             ("open (anonymous)", &open, headers("Bearer s1")),
             ("key, no scopes", &keyed, headers("Bearer s2")),
@@ -315,16 +325,16 @@ mod tests {
             ("unknown key (401)", &keyed, headers("Bearer nope")),
         ];
         const N: u32 = 2_000_000;
-        for (name, router, headers) in cases {
-            let limiters = &router.runtime.limiters;
+        for (name, routing_table, headers) in cases {
+            let limiters = &routing_table.runtime.limiters;
             for _ in 0..10_000 {
-                if let Ok(caller) = authenticate(router, &headers) {
+                if let Ok(caller) = authenticate(routing_table, &headers) {
                     drop(black_box(limiters.admit(&caller)));
                 }
             }
             let start = Instant::now();
             for _ in 0..N {
-                if let Ok(caller) = authenticate(black_box(router), black_box(&headers)) {
+                if let Ok(caller) = authenticate(black_box(routing_table), black_box(&headers)) {
                     drop(black_box(limiters.admit(&caller)));
                 }
             }

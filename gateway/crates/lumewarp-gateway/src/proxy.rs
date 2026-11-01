@@ -35,7 +35,7 @@ use crate::{
     metrics::{Observation, RequestMetrics, UpstreamError, ATTEMPT_OUTCOMES},
     ratelimit::clock,
     ratelimit::Permit,
-    router::{Deployment, InFlight, RoutingTable, Skipped},
+    router::{InFlight, Model, RoutingTable, Skipped},
     telemetry,
     usage::{Captured, PendingCapture, RequestCtx, SseFilter, Tee, UsageCapture},
 };
@@ -235,7 +235,7 @@ impl<'a> RequestFields<'a> {
 /// Reports a request rejected after its model was parsed (403 / 429). Only
 /// keyed callers are reported: anonymous rejections would be unattributable.
 fn report_rejection(
-    router: &RoutingTable,
+    routing_table: &RoutingTable,
     caller: &Caller,
     request: RequestCtx,
     handles: Arc<RequestMetrics>,
@@ -243,14 +243,14 @@ fn report_rejection(
     stream: bool,
     status: StatusCode,
 ) {
-    if matches!(caller, Caller::Key(_)) && router.runtime.usage.enabled() {
+    if matches!(caller, Caller::Key(_)) && routing_table.runtime.usage.enabled() {
         UsageCapture {
-            runtime: router.runtime.clone(),
+            runtime: routing_table.runtime.clone(),
             caller: caller.clone(),
             request,
             handles,
-            deployment: None,
-            config_version: router.version,
+            model: None,
+            config_version: routing_table.version,
             endpoint,
             stream,
             status: status.as_u16(),
@@ -261,7 +261,7 @@ fn report_rejection(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn forward(
-    router: &RoutingTable,
+    routing_table: &RoutingTable,
     client: &UpstreamClient,
     req: Request<Incoming>,
     observation: &mut Observation,
@@ -344,12 +344,12 @@ pub async fn forward(
         Ok(include_usage) => include_usage,
         Err(message) => return error::json(StatusCode::BAD_REQUEST, "invalid_request", message),
     };
-    // Before route lookup, so denied callers cannot probe which aliases exist.
+    // Before router lookup, so denied callers cannot probe which aliases exist.
     if let Err(err) = auth::check_model(&caller, &model) {
-        let handles = router.rejected_model(&caller, &model, endpoint);
+        let handles = routing_table.rejected_model(&caller, &model, endpoint);
         observation.routed(handles.clone(), stream);
         report_rejection(
-            router,
+            routing_table,
             &caller,
             request,
             handles,
@@ -359,17 +359,17 @@ pub async fn forward(
         );
         return err.into();
     }
-    let Some(route) = router.routes.get(model.as_ref()) else {
-        observation.routed(router.unknown(&caller, endpoint), stream);
+    let Some(router) = routing_table.routers.get(model.as_ref()) else {
+        observation.routed(routing_table.unknown(&caller, endpoint), stream);
         return error::json(StatusCode::NOT_FOUND, "model_not_found", "Model not found");
     };
-    let permit = match router.runtime.limiters.admit(&caller) {
+    let permit = match routing_table.runtime.limiters.admit(&caller) {
         Ok(permit) => permit,
         Err(limited) => {
-            let handles = router.rejected_model(&caller, &model, endpoint);
+            let handles = routing_table.rejected_model(&caller, &model, endpoint);
             observation.routed(handles.clone(), stream);
             report_rejection(
-                router,
+                routing_table,
                 &caller,
                 request,
                 handles,
@@ -380,19 +380,19 @@ pub async fn forward(
             return error::rate_limited(limited.retry_after_secs);
         }
     };
-    // Only requests that may retry fund the global retry budget; routes
+    // Only requests that may retry fund the global retry budget; routers
     // without a retry policy never touch its shared state.
-    if route.retry.is_some() {
-        router.runtime.retry_budget.request();
+    if router.retry.is_some() {
+        routing_table.runtime.retry_budget.request();
     }
     let mut skipped = Skipped::default();
     let Some((mut guard, initial_fallback, split)) =
-        router.acquire_initial(route, endpoint, &caller, &parts.headers, &mut skipped)
+        routing_table.acquire_initial(router, endpoint, &caller, &parts.headers, &mut skipped)
     else {
-        let handles = router.rejected_model(&caller, &model, endpoint);
+        let handles = routing_table.rejected_model(&caller, &model, endpoint);
         observation.routed(handles.clone(), stream);
         report_rejection(
-            router,
+            routing_table,
             &caller,
             request,
             handles,
@@ -414,19 +414,19 @@ pub async fn forward(
     parts.headers.remove(header::AUTHORIZATION);
     parts.extensions.clear();
     parts.version = hyper::Version::HTTP_11;
-    let max_attempts = route.retry.as_ref().map_or(1, |p| {
+    let max_attempts = router.retry.as_ref().map_or(1, |p| {
         if p.max_attempts == 0 {
             2
         } else {
             p.max_attempts
         }
     });
-    // Preserve headers only for retry-enabled routes. The ordinary single-send
+    // Preserve headers only for retry-enabled routers. The ordinary single-send
     // path moves the original map and adds no replay allocation.
     let replay = (max_attempts > 1).then(|| parts.clone());
     // Resolved before a usage capture exists: an unusable request URI is a
     // client error, never a cancelled (499) usage event.
-    let mut first_uri = match upstream_uri(&guard.deployment, &parts.uri) {
+    let mut first_uri = match upstream_uri(&guard.model, &parts.uri) {
         Ok(uri) => Some(uri),
         Err(_) => {
             return error::json(
@@ -438,39 +438,39 @@ pub async fn forward(
     };
     let original_uri = parts.uri.clone();
     let mut next_parts = Some(parts);
-    let deadline = route
+    let deadline = router
         .retry
         .as_ref()
         .filter(|p| p.total_timeout_ms > 0)
         .map(|p| tokio::time::Instant::now() + Duration::from_millis(p.total_timeout_ms.into()));
     let mut pending = PendingCapture::new(UsageCapture {
-        runtime: router.runtime.clone(),
+        runtime: routing_table.runtime.clone(),
         caller: caller.clone(),
         request,
         handles: guard.metrics.clone(),
-        deployment: Some(guard.deployment.clone()),
-        config_version: router.version,
+        model: Some(guard.model.clone()),
+        config_version: routing_table.version,
         endpoint,
         stream,
         status: 499,
     });
     let mut tried = [0; 5];
     // The latest upstream response kept while a later attempt runs, with the
-    // reservation (deployment, metrics handles, in-flight slot) it belongs to.
+    // reservation (model, metrics handles, in-flight slot) it belongs to.
     let mut last_response: Option<(Response<Incoming>, bool, bool, InFlight)> = None;
     let mut used_fallback = initial_fallback.is_some();
     let mut current_fallback = initial_fallback;
     let mut attempt = 0usize;
     let (response, fallback_response, inject) = loop {
         attempt += 1;
-        tried[attempt - 1] = guard.deployment.label;
-        let deployment = &guard.deployment;
+        tried[attempt - 1] = guard.model.label;
+        let model = &guard.model;
         let inject = stream
-            && deployment.stream_usage_mode == StreamUsageMode::IncludeUsage
+            && model.stream_usage_mode == StreamUsageMode::IncludeUsage
             && !include_usage.requested();
         let rewritten = fields.rewrite(
             &body,
-            &deployment.upstream_model_json,
+            &model.upstream_model_json,
             inject.then_some(&include_usage),
         );
         let mut parts = next_parts
@@ -478,7 +478,7 @@ pub async fn forward(
             .unwrap_or_else(|| replay.as_ref().expect("retry template").clone());
         let uri = match first_uri.take() {
             Some(uri) => Ok(uri),
-            None => upstream_uri(deployment, &original_uri),
+            None => upstream_uri(model, &original_uri),
         };
         parts.uri = match uri {
             Ok(uri) => uri,
@@ -491,13 +491,13 @@ pub async fn forward(
                 );
             }
         };
-        if let Some(value) = &deployment.authorization {
+        if let Some(value) = &model.authorization {
             parts.headers.insert(header::AUTHORIZATION, value.clone());
         }
-        parts.headers.insert(header::HOST, deployment.host.clone());
+        parts.headers.insert(header::HOST, model.host.clone());
         let span = if observation.otel {
             tracing::info_span!(parent: &observation.span, "upstream_attempt",
-                deployment = %deployment.name, attempt, outcome = tracing::field::Empty)
+                model = %model.name, attempt, outcome = tracing::field::Empty)
         } else {
             tracing::Span::none()
         };
@@ -506,31 +506,31 @@ pub async fn forward(
             telemetry::inject(&mut parts.headers);
         }
         let upstream_request = Request::from_parts(parts, Full::new(rewritten));
-        // `capped`: the route's total_timeout, not the deployment's own
+        // `capped`: the router's total_timeout, not the model's own
         // timeout, bounds this attempt.
         let (timeout, capped) = match deadline {
             Some(end) => {
                 let left = end.saturating_duration_since(tokio::time::Instant::now());
-                if left < deployment.timeout {
+                if left < model.timeout {
                     (left, true)
                 } else {
-                    (deployment.timeout, false)
+                    (model.timeout, false)
                 }
             }
-            None => (deployment.timeout, false),
+            None => (model.timeout, false),
         };
         observation
             .upstream_started
             .get_or_insert_with(Instant::now);
-        // Only deployments behind a LOWEST_LATENCY route pay for a clock read.
-        let attempt_started = deployment.track_latency.then(Instant::now);
+        // Only models behind a LOWEST_LATENCY router pay for a clock read.
+        let attempt_started = model.track_latency.then(Instant::now);
         let result = tokio::time::timeout(timeout, client.request(upstream_request))
             .instrument(span.clone())
             .await;
         let (response, outcome, retryable, error_status) = match result {
             Ok(Ok(response)) => {
                 let status = response.status();
-                let retryable = retry_status(route.retry.as_ref(), status.as_u16());
+                let retryable = retry_status(router.retry.as_ref(), status.as_u16());
                 if matches!(status.as_u16(), 429 | 503) {
                     if let Some(delay) = response
                         .headers()
@@ -538,9 +538,9 @@ pub async fn forward(
                         .and_then(|v| v.to_str().ok())
                         .and_then(|v| retry_after(v, SystemTime::now()))
                     {
-                        guard.deployment.breaker.retry_after.fetch_max(
+                        guard.model.breaker.retry_after.fetch_max(
                             clock::mono_ms()
-                                .saturating_add(cooldown_ms(delay, guard.deployment.circuit)),
+                                .saturating_add(cooldown_ms(delay, guard.model.circuit)),
                             std::sync::atomic::Ordering::Relaxed,
                         );
                     }
@@ -574,8 +574,8 @@ pub async fn forward(
         };
         guard.metrics.attempts[outcome].inc();
         span.record("outcome", ATTEMPT_OUTCOMES[outcome]);
-        // An attempt cut short by the route's total_timeout says nothing
-        // about the deployment: no breaker verdict, no latency sample (it
+        // An attempt cut short by the router's total_timeout says nothing
+        // about the model: no breaker verdict, no latency sample (it
         // still counts as outcome="timeout" in the attempts metric).
         let cut_short = outcome == 3 && capped;
         let failed = matches!(outcome, 2 | 3)
@@ -587,9 +587,9 @@ pub async fn forward(
             // Successes feed the EWMA; breaker-worthy failures add a penalty;
             // client errors (4xx other than 429) say nothing about latency.
             if outcome == 0 {
-                guard.deployment.latency.success(started.elapsed());
+                guard.model.latency.success(started.elapsed());
             } else if failed {
-                guard.deployment.latency.failure(started.elapsed());
+                guard.model.latency.failure(started.elapsed());
             }
         }
         // Left unfinished, a cut-short half-open trial is abandoned on drop.
@@ -601,8 +601,8 @@ pub async fn forward(
             && deadline.is_none_or(|end| tokio::time::Instant::now() < end)
         {
             let headers = &replay.as_ref().expect("retries keep a template").headers;
-            if let Some((next, fallback)) = router.retry(
-                route,
+            if let Some((next, fallback)) = routing_table.retry(
+                router,
                 endpoint,
                 &caller,
                 headers,
@@ -610,7 +610,7 @@ pub async fn forward(
                 split,
                 &mut skipped,
             ) {
-                if router.runtime.retry_budget.take() {
+                if routing_table.runtime.retry_budget.take() {
                     if let Some(counter) = fallback {
                         if !current_fallback.is_some_and(|previous| std::ptr::eq(previous, counter))
                         {
@@ -633,11 +633,11 @@ pub async fn forward(
                     observation.routed(guard.metrics.clone(), stream);
                     let mut capture = pending.take();
                     capture.handles = guard.metrics.clone();
-                    capture.deployment = Some(guard.deployment.clone());
+                    capture.model = Some(guard.model.clone());
                     pending = PendingCapture::new(capture);
                     continue;
                 }
-                route.budget_exhausted.inc();
+                router.budget_exhausted.inc();
             }
         }
         if let Some(response) = response {
@@ -646,12 +646,12 @@ pub async fn forward(
         match last_response.take() {
             Some((response, fallback, inject, kept)) => {
                 // The earlier attempt's response is the answer: account it to
-                // that attempt's deployment and release this failed one.
+                // that attempt's model and release this failed one.
                 guard = kept;
                 observation.routed(guard.metrics.clone(), stream);
                 let mut capture = pending.take();
                 capture.handles = guard.metrics.clone();
-                capture.deployment = Some(guard.deployment.clone());
+                capture.model = Some(guard.model.clone());
                 pending = PendingCapture::new(capture);
                 break (response, fallback, inject);
             }
@@ -719,7 +719,7 @@ fn retry_status(policy: Option<&lumewarp_proto::config::v1::RetryPolicy>, status
 /// Longest `Retry-After` cooldown honoured.
 const MAX_COOLDOWN_MS: u64 = 60_000;
 
-/// A deployment's `Retry-After` cooldown in ms: at most 60 s, and never
+/// A model's `Retry-After` cooldown in ms: at most 60 s, and never
 /// longer than its breaker's open interval when one is configured.
 fn cooldown_ms(delay: Duration, circuit: Option<CircuitBreaker>) -> u64 {
     let ms = u64::try_from(delay.as_millis())
@@ -994,14 +994,14 @@ impl Body for AliasBody {
     }
 }
 
-fn upstream_uri(deployment: &Deployment, request: &Uri) -> Result<Uri, hyper::http::Error> {
+fn upstream_uri(model: &Model, request: &Uri) -> Result<Uri, hyper::http::Error> {
     let index = match request.path() {
         "/v1/chat/completions" => 0,
         "/v1/completions" => 1,
         "/v1/embeddings" => 2,
         _ => unreachable!("dispatch only forwards supported endpoints"),
     };
-    let endpoint = &deployment.endpoints[index];
+    let endpoint = &model.endpoints[index];
     let Some(query) = request.query() else {
         return Ok(endpoint.clone());
     };
@@ -1115,7 +1115,7 @@ impl Meter {
 }
 
 /// Upstream response body: meters usage while forwarding, holds the
-/// deployment reservation and rate-limit permit until EOF / error / drop,
+/// model reservation and rate-limit permit until EOF / error / drop,
 /// and finalizes the usage capture exactly once when dropped.
 struct MeteredBody {
     body: Incoming,
@@ -1408,32 +1408,32 @@ mod tests {
             r#"
 upstreams:
   - {name: u, kind: vllm, base_url: 'http://localhost:8123/prefix/v1/'}
-deployments:
+models:
   - {name: d, upstream: u, upstream_model: actual}
-routes:
-  - {name: public, deployments: [d]}
+routers:
+  - {name: public, models: [d]}
 "#,
         )
         .unwrap();
-        let router = RoutingTable::compile(
+        let routing_table = RoutingTable::compile(
             &snapshot,
             lumewarp_config::AuthMode::Open,
             &crate::runtime::Runtime::new(),
         )
         .unwrap();
-        let guard = router.acquire(&router.routes["public"], 0, &Caller::Anonymous);
-        let deployment = &guard.deployment;
-        assert_eq!(deployment.host, "localhost:8123");
-        assert_eq!(deployment.upstream_model_json, br#""actual""#.as_slice());
+        let guard = routing_table.acquire(&routing_table.routers["public"], 0, &Caller::Anonymous);
+        let model = &guard.model;
+        assert_eq!(model.host, "localhost:8123");
+        assert_eq!(model.upstream_model_json, br#""actual""#.as_slice());
         for suffix in ["/chat/completions", "/completions", "/embeddings"] {
             let request: Uri = format!("/v1{suffix}").parse().unwrap();
             assert_eq!(
-                upstream_uri(deployment, &request).unwrap().to_string(),
+                upstream_uri(model, &request).unwrap().to_string(),
                 format!("http://localhost:8123/prefix/v1{suffix}")
             );
             let request: Uri = format!("/v1{suffix}?x=a%2Fb&x=two").parse().unwrap();
             assert_eq!(
-                upstream_uri(deployment, &request).unwrap().to_string(),
+                upstream_uri(model, &request).unwrap().to_string(),
                 format!("http://localhost:8123/prefix/v1{suffix}?x=a%2Fb&x=two")
             );
         }

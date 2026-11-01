@@ -32,8 +32,8 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use lumewarp_proto::{
     config::v1::{
-        config_update::Update, ApiKey, ConfigUpdate, Deployment, EffectivePolicy, GatewayMessage,
-        KeyStatus, ModelRoute, Price, RateLimit, RateLimitScope, Snapshot, StreamUsageMode, Team,
+        config_update::Update, ApiKey, ConfigUpdate, EffectivePolicy, GatewayMessage, KeyStatus,
+        Model, Price, RateLimit, RateLimitScope, Router, Snapshot, StreamUsageMode, Team,
         Upstream as UpstreamConfig, UpstreamKind,
     },
     usage::v1::{ReportRequest, ReportResponse, RequestOutcome, UsageEvent, UsageState},
@@ -453,16 +453,16 @@ fn snapshot(upstream: SocketAddr) -> Snapshot {
         stream_usage_mode: mode as i32,
         ..Default::default()
     };
-    let deployment = |name: &str, upstream: &str, price: Option<Price>| Deployment {
+    let model = |name: &str, upstream: &str, price: Option<Price>| Model {
         name: name.into(),
         upstream: upstream.into(),
         upstream_model: "actual".into(),
         weight: 1,
         price,
     };
-    let route = |model: &str, deployment: &str| ModelRoute {
-        name: model.into(),
-        deployments: vec![deployment.into()],
+    let router = |name: &str, model: &str| Router {
+        name: name.into(),
+        models: vec![model.into()],
         strategy: 1,
         ..Default::default()
     };
@@ -473,16 +473,16 @@ fn snapshot(upstream: SocketAddr) -> Snapshot {
             config("passthrough", upstream, StreamUsageMode::Passthrough),
             config("dead", dead, StreamUsageMode::IncludeUsage),
         ],
-        deployments: vec![
-            deployment("d", "u", Some(PRICE)),
-            deployment("dp", "passthrough", None),
-            deployment("dd", "dead", Some(PRICE)),
+        models: vec![
+            model("d", "u", Some(PRICE)),
+            model("dp", "passthrough", None),
+            model("dd", "dead", Some(PRICE)),
         ],
-        routes: vec![
-            route("public", "d"),
-            route("pass", "dp"),
-            route("down", "dd"),
-            route("secret", "d"),
+        routers: vec![
+            router("public", "d"),
+            router("pass", "dp"),
+            router("down", "dd"),
+            router("secret", "d"),
         ],
         api_keys: vec![
             key("k1", KEY, &["public", "pass", "down"], Vec::new()),
@@ -650,15 +650,15 @@ async fn setup() -> (FakeCp, Upstream, Gateway) {
 }
 
 #[tokio::test]
-async fn retried_request_reports_only_final_deployment_usage() {
+async fn retried_request_reports_only_final_model_usage() {
     let mut upstream = Upstream::start().await;
     let mut snapshot = snapshot(upstream.addr);
     snapshot.required_capabilities = vec!["retry".into()];
-    let mut second = snapshot.deployments[0].clone();
+    let mut second = snapshot.models[0].clone();
     second.name = "second".into();
-    snapshot.deployments.push(second);
-    snapshot.routes[0].deployments.push("second".into());
-    snapshot.routes[0].retry = Some(lumewarp_proto::config::v1::RetryPolicy::default());
+    snapshot.models.push(second);
+    snapshot.routers[0].models.push("second".into());
+    snapshot.routers[0].retry = Some(lumewarp_proto::config::v1::RetryPolicy::default());
     upstream.respond(503, "application/json", &[b"{\"error\":\"retry\"}"]);
     upstream.respond(200, "application/json", &[CHAT_JSON]);
     let mut cp = FakeCp::start(snapshot).await;
@@ -673,7 +673,7 @@ async fn retried_request_reports_only_final_deployment_usage() {
     let event = cp.event().await;
     assert_eq!(event.requested, "public");
     assert_eq!((event.prompt_tokens, event.completion_tokens), (5, 3));
-    assert!(["d", "second"].contains(&event.deployment.as_str()));
+    assert!(["d", "second"].contains(&event.model.as_str()));
     let metrics = gateway.metrics().await;
     assert_eq!(metrics.sum("lumewarp_usage_capture_total", &[]), 1.);
     assert_eq!(
@@ -683,17 +683,14 @@ async fn retried_request_reports_only_final_deployment_usage() {
     assert_eq!(
         metrics.sum(
             "lumewarp_upstream_attempts_total",
-            &[("deployment", &event.deployment), ("outcome", "success")]
+            &[("model", &event.model), ("outcome", "success")]
         ),
         1.
     );
     assert_eq!(
         metrics.sum(
             "lumewarp_upstream_attempts_total",
-            &[
-                ("deployment", &event.deployment),
-                ("outcome", "retryable_status")
-            ]
+            &[("model", &event.model), ("outcome", "retryable_status")]
         ),
         0.
     );
@@ -762,7 +759,7 @@ async fn injected_usage_is_stripped_from_the_stream_and_reported() {
     assert_eq!(
         (
             event.requested.as_str(),
-            event.deployment.as_str(),
+            event.model.as_str(),
             event.endpoint.as_str()
         ),
         ("public", "d", "chat_completions")
@@ -803,7 +800,7 @@ async fn injected_usage_is_stripped_from_the_stream_and_reported() {
         state(&event),
         (RequestOutcome::Completed, UsageState::Missing)
     );
-    assert_eq!((event.deployment.as_str(), event.cost_known), ("dp", false));
+    assert_eq!((event.model.as_str(), event.cost_known), ("dp", false));
     cp.no_more_events().await;
 
     let metrics = gateway.metrics().await;
@@ -926,7 +923,7 @@ async fn cancelled_and_failed_streams_are_reported_once() {
         state(&event),
         (RequestOutcome::UpstreamError, UsageState::Missing)
     );
-    assert_eq!((event.status, event.deployment.as_str()), (502, "dd"));
+    assert_eq!((event.status, event.model.as_str()), (502, "dd"));
     cp.no_more_events().await;
     let metrics = gateway.metrics().await;
     assert_eq!(
@@ -1032,11 +1029,7 @@ async fn keyed_rejections_are_reported_without_spam() {
         (RequestOutcome::Rejected, UsageState::Missing)
     );
     assert_eq!(
-        (
-            event.status,
-            event.requested.as_str(),
-            event.deployment.as_str()
-        ),
+        (event.status, event.requested.as_str(), event.model.as_str()),
         (403, "secret", "")
     );
     // Unknown aliases are not echoed into events.
@@ -1141,11 +1134,7 @@ async fn client_abort_before_upstream_headers_is_reported_once() {
         (RequestOutcome::ClientCancelled, UsageState::Missing)
     );
     assert_eq!(
-        (
-            event.status,
-            event.requested.as_str(),
-            event.deployment.as_str()
-        ),
+        (event.status, event.requested.as_str(), event.model.as_str()),
         (499, "public", "d")
     );
     assert!(!event.cost_known);

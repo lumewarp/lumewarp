@@ -46,7 +46,7 @@ def _event(
         key_id=str(key.id),
         team_id=str(key.team_id),
         requested=requested,
-        deployment="test-deployment",
+        model="test-model",
         endpoint="chat_completions",
         status=200,
         prompt_tokens=10,
@@ -370,15 +370,15 @@ async def test_invalid_events_do_not_cost_the_rest_of_the_batch(
 
 
 @pytest.mark.asyncio
-async def test_rejected_events_may_omit_model_and_deployment(session_factory: SessionFactory):
+async def test_rejected_events_may_omit_requested_and_model(session_factory: SessionFactory):
     scope_name, key = await _seed(session_factory)
     completed = _event(key, cost=5)
-    # Authentication rejects before the body is read: no requested, no deployment.
+    # Authentication rejects before the body is read: no requested, no model.
     unauthenticated = _event(key, cost=0, requested="")
-    unauthenticated.deployment = ""
-    # Policy rejections (403/429) know the requested but never chose a deployment.
+    unauthenticated.model = ""
+    # Policy rejections (403/429) know the requested but never chose a model.
     rate_limited = _event(key, cost=0)
-    rate_limited.deployment = ""
+    rate_limited.model = ""
     for rejected in (unauthenticated, rate_limited):
         rejected.status = 429
         rejected.prompt_tokens = rejected.completion_tokens = 0
@@ -394,13 +394,13 @@ async def test_rejected_events_may_omit_model_and_deployment(session_factory: Se
 
     async with session_factory() as session:
         stored = {
-            row.request_id: (row.requested, row.deployment)
+            row.request_id: (row.requested, row.model)
             for row in (
                 await session.execute(select(UsageEventRow).where(UsageEventRow.key_id == key.id))
             ).scalars()
         }
     assert stored == {
-        uuid.UUID(completed.request_id): ("test-requested", "test-deployment"),
+        uuid.UUID(completed.request_id): ("test-requested", "test-model"),
         uuid.UUID(unauthenticated.request_id): ("", ""),
         uuid.UUID(rate_limited.request_id): ("test-requested", ""),
     }

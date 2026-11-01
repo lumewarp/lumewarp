@@ -1,4 +1,4 @@
-//! Passive per-deployment breakers and off-path active upstream probes.
+//! Passive per-model breakers and off-path active upstream probes.
 use std::{
     collections::HashMap,
     sync::{
@@ -128,7 +128,7 @@ impl Breaker {
         }
     }
 
-    /// The deployment's upstream no longer has a breaker: forget its state.
+    /// The model's upstream no longer has a breaker: forget its state.
     pub fn reset(&self) {
         self.state.store(0, Ordering::Release);
         self.failures.store(0, Ordering::Relaxed);
@@ -299,7 +299,7 @@ impl Probe {
 }
 
 /// Request-funded token bucket: one retry costs 100 units; each client
-/// request on a route with a retry policy adds `percent` (routes without one
+/// request on a router with a retry policy adds `percent` (routers without one
 /// neither fund nor touch the budget, so retries stay bounded by about
 /// `percent`% of the traffic that may retry). A three-retry burst permits
 /// low-traffic recovery; ten idle seconds restore that minimum.
@@ -330,7 +330,7 @@ impl RetryBudget {
         self.percent.store(percent, Ordering::Relaxed);
     }
 
-    /// Funds the budget for one client request on a retrying route.
+    /// Funds the budget for one client request on a retrying router.
     pub fn request(&self) {
         self.request_at(clock::mono_ms());
     }

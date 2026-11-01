@@ -25,11 +25,11 @@ def record(status=200, *, key="key", stream=False, **extra):
 
 
 @pytest.mark.parametrize(
-    ("deployment", "prompt", "completion", "expected"),
+    ("model", "prompt", "completion", "expected"),
     [("mock-a", 10, 3, 16000), ("mock-b", 10, 3, 42000), ("mock-a", 0, 0, 0)],
 )
-def test_unit_cost(deployment, prompt, completion, expected):
-    assert cost(deployment, prompt, completion) == expected
+def test_unit_cost(model, prompt, completion, expected):
+    assert cost(model, prompt, completion) == expected
 
 
 def test_unit_cost_rounds_half_up(monkeypatch):
@@ -276,7 +276,7 @@ def test_unit_cost_check(monkeypatch, broken):
             "team": "00000000-0000-0000-0000-000000000001",
             "owner_kind": "user",
             "owner": "user-1",
-            "deployment": "mock-a",
+            "model": "mock-a",
             "prompt_tokens": 10,
             "completion_tokens": 3,
             "cost_nano_usd": 16000,
@@ -286,7 +286,7 @@ def test_unit_cost_check(monkeypatch, broken):
             "team": "00000000-0000-0000-0000-000000000001",
             "owner_kind": "user",
             "owner": "user-1",
-            "deployment": "mock-b",
+            "model": "mock-b",
             "prompt_tokens": 10,
             "completion_tokens": 3,
             "cost_nano_usd": 42001 if broken else 42000,
@@ -305,7 +305,7 @@ def test_unit_cost_check(monkeypatch, broken):
                 "team": "team-2",
                 "owner_kind": "service_account",
                 "owner": "sa-2",
-                "deployment": "mock-a",
+                "model": "mock-a",
                 "prompt_tokens": 0,
                 "completion_tokens": 1,
                 "cost_nano_usd": 2000,
@@ -349,7 +349,7 @@ def test_unit_cost_check_member_scopes_are_team_specific(monkeypatch):
             "team": team,
             "owner_kind": "user",
             "owner": user,
-            "deployment": "mock-a",
+            "model": "mock-a",
             "prompt_tokens": 10,
             "completion_tokens": 3,
             "cost_nano_usd": 16000,

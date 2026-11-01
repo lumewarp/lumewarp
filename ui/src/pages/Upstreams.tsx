@@ -197,7 +197,7 @@ export function Upstreams() {
         </fieldset>
         <fieldset className="form-section">
           <legend>Circuit breaker</legend>
-          <CheckField label="Open the circuit after repeated failures" checked={form.values.breaker_enabled} onChange={(v) => form.set("breaker_enabled", v)} hint="Applies to each deployment on this upstream. While open the deployment gets no traffic; after the open time one trial request decides whether it closes." />
+          <CheckField label="Open the circuit after repeated failures" checked={form.values.breaker_enabled} onChange={(v) => form.set("breaker_enabled", v)} hint="Applies to each model on this upstream. While open the model gets no traffic; after the open time one trial request decides whether it closes." />
           {form.values.breaker_enabled && (
             <div className="field-grid">
               <NumberField label="Consecutive failures" value={form.values.breaker_failures} onChange={(v) => form.set("breaker_failures", v)} error={form.errors.breaker_failures} min={1} placeholder="default (5)" />
@@ -207,7 +207,7 @@ export function Upstreams() {
         </fieldset>
         <TextField label="Metrics URL" type="url" value={form.values.metrics_url} onChange={(v) => form.set("metrics_url", v)} error={form.errors.metrics_url} placeholder="http://vllm:8000/metrics" hint="vLLM Prometheus endpoint for the “vLLM load” strategy. Empty derives it from the base URL (…/v1 → …/metrics)." />
       </FormDialog>
-      <ConfirmDialog open={!!deleting} title="Delete upstream" message={`Delete “${deleting?.name}”? It must not be used by any deployment.`} onConfirm={() => remove.mutateAsync(deleting!.id)} onClose={() => setDeleting(null)} />
+      <ConfirmDialog open={!!deleting} title="Delete upstream" message={`Delete “${deleting?.name}”? It must not be used by any model.`} onConfirm={() => remove.mutateAsync(deleting!.id)} onClose={() => setDeleting(null)} />
     </>
   );
 }

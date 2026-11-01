@@ -6,7 +6,7 @@ Locust (`locust==2.32.4` via `uvx`, `FastHttpUser`, several processes) while the
 churn config and restart processes. Each scenario gets a fresh stack, so usage accounting is
 exact: every request a client made (Locust or the orchestrator's probes) is recorded, and
 the usage rows in Postgres must match them per key — 200s per key and stream flag, 429s per
-key — with no duplicates, and per-team and owner cost must equal tokens × deployment price in both
+key — with no duplicates, and per-team and owner cost must equal tokens × model price in both
 `usage_events` and `usage_totals`.
 
     scripts/load-e2e.sh                 # build, start dev Postgres if needed, run all
@@ -37,7 +37,7 @@ show a positive queue depth or an increase in usage report retry events during t
 | scenario | what it asserts |
 | --- | --- |
 | `test_steady_mixed_load` | 60 keys over 6 teams × 2 owners (one service account and one member using a PAT) × 5 keys, chat + stream mix: zero 5xx, zero connection errors, well-formed bodies/SSE (no leaked usage-only chunk), exact usage + cost accounting at team and owner scopes, no dropped events, config stream stays up. |
-| `test_churn_under_load` | Under load: revoke keys (each rejected < 2 s, measured per key, never accepted after the first 401), create keys (accepted < 2 s), add deployment `mock-b` (1:1 split), weight `mock-a` to 0 (all `mock-b`), remove `mock-b` (all `mock-a`) — checked by the config version each request was served under; lower an owner rpm limit (429 `rate_limit_exceeded` + `Retry-After` only for that owner's keys and window, never 5xx), clear it; publish 40 versions back to back through owner policy changes (gateway ACKs the latest, `source_revision`/`created_at` monotonic, nothing quarantined). |
+| `test_churn_under_load` | Under load: revoke keys (each rejected < 2 s, measured per key, never accepted after the first 401), create keys (accepted < 2 s), add model `mock-b` (1:1 split), weight `mock-a` to 0 (all `mock-b`), remove `mock-b` (all `mock-a`) — checked by the config version each request was served under; lower an owner rpm limit (429 `rate_limit_exceeded` + `Retry-After` only for that owner's keys and window, never 5xx), clear it; publish 40 versions back to back through owner policy changes (gateway ACKs the latest, `source_revision`/`created_at` monotonic, nothing quarantined). |
 | `test_control_plane_restart_under_load` | CP stopped for 20 s mid-run: every request still 200, usage queued meanwhile is delivered after restart (exact counts, drop counter 0), gateway reconnects and ACKs. |
 | `test_budget_under_load` | Separate service-account, member and team cases with a 0.01 USD budget: every affected key flips to 429 `insufficient_quota` < 5 s after the budget was exceeded at ingestion and is never accepted after its flip; keys outside the scope remain unaffected; overshoot recorded. |
 | `test_rate_limit_under_load` | A service account and member each share an RPM limiter across their keys: 429 `rate_limit_exceeded` with `Retry-After`, unrelated owners unaffected, clearing both limits restores service, exact usage and cost accounting. |

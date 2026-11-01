@@ -201,9 +201,9 @@ impl Client {
         .await
         .unwrap_or_else(|_| Err(ApplyError::invalid("apply task failed")));
         match applied {
-            Ok((next, router, digest)) => {
-                router.activate_health();
-                self.slot.store(Some(Arc::new(router)));
+            Ok((next, routing_table, digest)) => {
+                routing_table.activate_health();
+                self.slot.store(Some(Arc::new(routing_table)));
                 self.runtime.metrics.config_applied(next.version);
                 tracing::info!(version = next.version, "config applied");
                 self.current = Arc::new(next);
@@ -239,12 +239,12 @@ fn apply_update(
     runtime: &Arc<Runtime>,
 ) -> Result<(Snapshot, RoutingTable), ApplyError> {
     let next = snapshot::apply(base, update)?;
-    let router = compile(&next, runtime)?;
+    let routing_table = compile(&next, runtime)?;
     snapshot::store_with_digest(dir, &next, digest).map_err(|err| ApplyError {
         code: NackCode::PersistFailed,
         reason: format!("persisting snapshot failed: {:?}", err.kind()),
     })?;
-    Ok((next, router))
+    Ok((next, routing_table))
 }
 
 #[cfg(test)]

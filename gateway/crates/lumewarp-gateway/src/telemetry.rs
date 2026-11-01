@@ -63,7 +63,7 @@ pub fn request_span(enabled: bool, headers: &HeaderMap, endpoint: &'static str) 
             "request",
             endpoint,
             requested = "",
-            deployment = "",
+            model = "",
             status = tracing::field::Empty,
             stream = false
         )
@@ -72,7 +72,7 @@ pub fn request_span(enabled: bool, headers: &HeaderMap, endpoint: &'static str) 
             "request",
             endpoint,
             requested = "",
-            deployment = "",
+            model = "",
             status = tracing::field::Empty,
             stream = false
         )

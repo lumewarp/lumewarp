@@ -33,7 +33,7 @@ groups:
         annotations:
           summary: "Gateway 5xx ratio is high"
           description: "Model {{ $labels.requested }} exceeds 5% 5xx responses for 5 minutes at >=1 request/s."
-          runbook: "Check upstream errors and routing dashboard; restore a healthy deployment or roll back routing."
+          runbook: "Check upstream errors and routing dashboard; restore a healthy model or roll back routing."
       # 10 ms is an operational page budget, not the tighter benchmark target.
       - alert: LumewarpGatewayOverheadHigh
         expr: "lumewarp:gateway_overhead:p99_5m > 0.01"
@@ -42,7 +42,7 @@ groups:
           severity: warning
         annotations:
           summary: "Gateway p99 overhead exceeds budget"
-          description: "Route {{ $labels.endpoint }} has p99 processing overhead above 10 ms for 10 minutes."
+          description: "Router {{ $labels.endpoint }} has p99 processing overhead above 10 ms for 10 minutes."
           runbook: "Check gateway CPU throttling, saturation and recent gateway releases; compare the benchmark baseline."
       # Absolute 5 s regression guard; calibrate for requested size and prefill workload.
       - alert: LumewarpTTFTHigh
@@ -62,7 +62,7 @@ groups:
           severity: warning
         annotations:
           summary: "Upstream circuit remains open"
-          description: "Deployment {{ $labels.deployment }} circuit has remained open for 2 minutes."
+          description: "Model {{ $labels.model }} circuit has remained open for 2 minutes."
           runbook: "Inspect attempts by outcome, upstream logs and health; repair the upstream before closing the circuit."
       # Two minutes tolerates transient health-check failures.
       - alert: LumewarpUpstreamUnhealthy
@@ -153,7 +153,7 @@ groups:
         annotations:
           summary: "Control-plane config compilation is failing"
           description: "Control plane {{ $labels.instance }} has repeated config compile failures."
-          runbook: "Inspect compiler errors, plugin output and invalid routes; correct the source config and confirm a new version publishes."
+          runbook: "Inspect compiler errors, plugin output and invalid routers; correct the source config and confirm a new version publishes."
       # 100 entries for ten minutes filters ordinary short publication bursts.
       - alert: LumewarpCPOutboxBacklog
         expr: "lumewarp_cp_outbox_pending > 100"
@@ -184,7 +184,7 @@ groups:
           summary: "Key reconciler has no recent success"
           description: "Control plane {{ $labels.instance }} last reconciled keys more than 15 minutes ago."
           runbook: "Inspect reconciler task, DB and identity provider connectivity; confirm suspended keys and a successful reconciliation."
-      # 100 queued requests is a starting threshold; calibrate to deployment concurrency.
+      # 100 queued requests is a starting threshold; calibrate to model concurrency.
       - alert: LumewarpVLLMQueueHigh
         expr: "lumewarp_vllm_queue_depth > 100"
         for: 10m
@@ -192,7 +192,7 @@ groups:
           severity: warning
         annotations:
           summary: "vLLM request queue is growing"
-          description: "Deployment {{ $labels.deployment }} has over 100 queued requests for 10 minutes."
+          description: "Model {{ $labels.model }} has over 100 queued requests for 10 minutes."
           runbook: "Inspect GPU utilization and prefill load; add capacity or reduce admission and shift routing weights."
       # Usage is a 0..1 ratio, not a percentage; sustained 90% leaves little headroom.
       - alert: LumewarpVLLMKVCacheSaturated
@@ -202,7 +202,7 @@ groups:
           severity: warning
         annotations:
           summary: "vLLM KV cache is saturated"
-          description: "Deployment {{ $labels.deployment }} KV cache exceeds 90% for 10 minutes."
+          description: "Model {{ $labels.model }} KV cache exceeds 90% for 10 minutes."
           runbook: "Inspect context lengths, concurrency and GPU memory; reduce admission or add capacity."
       # Job selector matches chart gateway Service names; relabel custom scrape jobs to include lumewarp and gateway.
       - alert: LumewarpGatewayDown

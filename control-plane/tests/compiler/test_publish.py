@@ -19,18 +19,18 @@ from lumewarp_control_plane.models import (
     ConfigOutbox,
     ConfigVersion,
     ConfigVersionKind,
-    Deployment,
     GatewaySession,
     KeyLifecycle,
+    Model,
     OutboxStatus,
-    Route,
+    Router,
     Team,
 )
 from tests.compiler.helpers import (
     SCOPE,
     add_hierarchy,
     add_key,
-    add_route,
+    add_router,
     apply_delta,
     load_version,
     seed_scope,
@@ -95,7 +95,7 @@ async def test_concurrent_publishers_are_serialized(factory) -> None:
     published = []
     for i in range(6):
         async with factory() as s, s.begin():
-            await add_route(s, f"m{i}", [(f"d{i}", None)])
+            await add_router(s, f"m{i}", [(f"d{i}", None)])
         await touch(factory)
         results = await asyncio.gather(*(publish(factory) for _ in range(3)))
         new = [v for v in results if v is not None]
@@ -113,10 +113,10 @@ async def test_concurrent_writes_and_publishes(factory) -> None:
     async def writer() -> None:
         for i in range(10):
             async with factory() as s, s.begin():
-                await add_route(s, f"m{i}", [(f"d{i}", None)])
+                await add_router(s, f"m{i}", [(f"d{i}", None)])
                 from lumewarp_control_plane import outbox
 
-                await outbox.enqueue_recompile(s, SCOPE, "route.create")
+                await outbox.enqueue_recompile(s, SCOPE, "router.create")
             await asyncio.sleep(0)
 
     async def publisher() -> None:
@@ -187,14 +187,14 @@ async def test_rollback_restores_routing_not_security(factory) -> None:
     async with factory() as s, s.begin():
         t, u = await add_hierarchy(s)
         k1 = await add_key(s, t, u, name="k1")
-        await add_route(s, "llama", [("llama-a", 1)])
+        await add_router(s, "llama", [("llama-a", 1)])
     await touch(factory)
     assert await publish(factory) == 1
 
     # Change routing and revoke k1.
     async with factory() as s, s.begin():
-        await s.execute(update(Deployment).values(upstream_model="llama-new", weight=7))
-        await add_route(s, "qwen", [("qwen-a", None)])
+        await s.execute(update(Model).values(upstream_model="llama-new", weight=7))
+        await add_router(s, "qwen", [("qwen-a", None)])
         await s.execute(
             update(ApiKey)
             .where(ApiKey.id == k1.id)
@@ -207,7 +207,7 @@ async def test_rollback_restores_routing_not_security(factory) -> None:
         v3 = await rollback_routing(s, SCOPE, 1, require_local_membership=True)
     assert v3 == 3
     v1, s3 = await load_version(factory, 1), await load_version(factory, 3)
-    for field in ("upstreams", "deployments", "routes"):
+    for field in ("upstreams", "models", "routers"):
         assert list(getattr(s3, field)) == list(getattr(v1, field))
     assert str(k1.id) not in {k.key_id for k in s3.api_keys}  # revoked stays revoked
     row = (await versions(factory))[-1]
@@ -218,12 +218,12 @@ async def test_rollback_restores_routing_not_security(factory) -> None:
     async with factory() as s, s.begin():
         t2, u2 = await add_hierarchy(s, name="later")
         k2 = await add_key(s, t2, u2)
-        assert await s.scalar(select(Route.name).where(Route.name == "qwen")) is None
+        assert await s.scalar(select(Router.name).where(Router.name == "qwen")) is None
     await touch(factory)
     assert await publish(factory) == 4
     s4 = await load_version(factory, 4)
-    assert list(s4.deployments) == list(v1.deployments)
-    assert list(s4.routes) == list(v1.routes)
+    assert list(s4.models) == list(v1.models)
+    assert list(s4.routers) == list(v1.routers)
     assert str(k2.id) in {k.key_id for k in s4.api_keys}
     assert str(k1.id) not in {k.key_id for k in s4.api_keys}
 
@@ -251,7 +251,7 @@ async def test_diff_roundtrip_over_published_versions(factory) -> None:
         t, u = await add_hierarchy(s)
         k1 = await add_key(s, t, u, name="k1")
         k2 = await add_key(s, t, u, name="k2")
-        await add_route(s, "llama", [("llama-a", 1), ("llama-b", 2)])
+        await add_router(s, "llama", [("llama-a", 1), ("llama-b", 2)])
     await touch(factory)
     await publish(factory)
     async with factory() as s, s.begin():
@@ -261,7 +261,7 @@ async def test_diff_roundtrip_over_published_versions(factory) -> None:
             .values(lifecycle=KeyLifecycle.REVOKED, revoked_at=datetime.now(UTC))
         )
         await s.execute(update(Team).where(Team.id == t.id).values(rpm_limit=5))
-        await add_route(s, "qwen", [("qwen-a", None)], upstream="openai")
+        await add_router(s, "qwen", [("qwen-a", None)], upstream="openai")
         t2, u2 = await add_hierarchy(s, name="beta")
         await add_key(s, t2, u2)
     await touch(factory)
@@ -272,13 +272,13 @@ async def test_diff_roundtrip_over_published_versions(factory) -> None:
     assert (d.base_version, d.version, d.created_at_unix_ms) == (1, 2, b.created_at_unix_ms)
     assert list(d.remove_api_keys) == [str(k1.id)]
     assert {k.key_id for k in d.upsert_api_keys} >= {str(k2.id)}
-    assert [r.name for r in d.upsert_routes] == ["qwen"]
+    assert [r.name for r in d.upsert_routers] == ["qwen"]
     assert apply_delta(a, d) == b
     # Reverse direction and identity.
     assert apply_delta(b, diff(b, a)) == a
     same = diff(b, b)
     assert not any(
-        getattr(same, f) for f in ("upsert_api_keys", "remove_api_keys", "upsert_routes")
+        getattr(same, f) for f in ("upsert_api_keys", "remove_api_keys", "upsert_routers")
     )
 
 
@@ -287,8 +287,8 @@ def test_diff_unit_roundtrip() -> None:
         version=4,
         scope="s",
         upstreams=[pb.Upstream(name="u1"), pb.Upstream(name="u2")],
-        deployments=[pb.Deployment(name="d1", upstream="u1", weight=1)],
-        routes=[pb.ModelRoute(name="m1", deployments=["d1"])],
+        models=[pb.Model(name="d1", upstream="u1", weight=1)],
+        routers=[pb.Router(name="m1", models=["d1"])],
         teams=[pb.Team(id="t1", name="a")],
         api_keys=[pb.ApiKey(key_id="k1"), pb.ApiKey(key_id="k2", status=1)],
         required_capabilities=["x"],
@@ -298,16 +298,16 @@ def test_diff_unit_roundtrip() -> None:
         scope="s",
         created_at_unix_ms=123,
         upstreams=[pb.Upstream(name="u2", base_url="changed")],
-        deployments=[
-            pb.Deployment(name="d1", upstream="u2", weight=1),
-            pb.Deployment(name="d2", upstream="u2"),
+        models=[
+            pb.Model(name="d1", upstream="u2", weight=1),
+            pb.Model(name="d2", upstream="u2"),
         ],
-        routes=[],
+        routers=[],
         teams=[pb.Team(id="t1", name="a")],
         api_keys=[pb.ApiKey(key_id="k2", status=3), pb.ApiKey(key_id="k3")],
     )
     d = diff(old, new)
-    assert list(d.remove_upstreams) == ["u1"] and list(d.remove_routes) == ["m1"]
+    assert list(d.remove_upstreams) == ["u1"] and list(d.remove_routers) == ["m1"]
     assert list(d.remove_api_keys) == ["k1"] and not d.upsert_teams
     assert list(d.required_capabilities) == []
     assert apply_delta(old, d) == new
@@ -402,7 +402,7 @@ async def test_compiler_loop(factory, require_local_membership) -> None:
         await touch(factory)
         assert await asyncio.wait_for(published.get(), 5) == (SCOPE, 1)
         async with factory() as s, s.begin():
-            await add_route(s, "m", [("d", None)])
+            await add_router(s, "m", [("d", None)])
         await touch(factory)
         assert await asyncio.wait_for(published.get(), 5) == (SCOPE, 2)
     finally:

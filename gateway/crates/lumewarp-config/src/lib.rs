@@ -66,9 +66,9 @@ pub struct Config {
     #[serde(default)]
     pub upstreams: Vec<Upstream>,
     #[serde(default)]
-    pub deployments: Vec<Deployment>,
+    pub models: Vec<Model>,
     #[serde(default)]
-    pub routes: Vec<ModelRoute>,
+    pub routers: Vec<Router>,
     #[serde(default)]
     pub teams: Vec<Team>,
     #[serde(default)]
@@ -192,7 +192,7 @@ pub enum StreamUsageMode {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Deployment {
+pub struct Model {
     pub name: String,
     pub upstream: String,
     pub upstream_model: String,
@@ -221,10 +221,10 @@ pub struct Price {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ModelRoute {
+pub struct Router {
     pub name: String,
     #[serde(default)]
-    pub deployments: Vec<String>,
+    pub models: Vec<String>,
     #[serde(default)]
     pub strategy: RoutingStrategy,
     #[serde(default)]
@@ -258,7 +258,7 @@ pub struct RetryPolicy {
 #[serde(deny_unknown_fields)]
 pub struct TrafficSplit {
     pub name: String,
-    pub deployments: Vec<String>,
+    pub models: Vec<String>,
     pub weight: u32,
 }
 
@@ -488,10 +488,10 @@ impl Config {
                 metrics_url: u.metrics_url.clone(),
             })
             .collect();
-        let deployments = self
-            .deployments
+        let models = self
+            .models
             .iter()
-            .map(|d| pb::Deployment {
+            .map(|d| pb::Model {
                 name: d.name.clone(),
                 upstream: d.upstream.clone(),
                 upstream_model: d.upstream_model.clone(),
@@ -502,12 +502,12 @@ impl Config {
                 }),
             })
             .collect();
-        let routes = self
-            .routes
+        let routers = self
+            .routers
             .iter()
-            .map(|r| pb::ModelRoute {
+            .map(|r| pb::Router {
                 name: r.name.clone(),
-                deployments: r.deployments.clone(),
+                models: r.models.clone(),
                 strategy: match r.strategy {
                     RoutingStrategy::Weighted => pb::RoutingStrategy::Weighted,
                     RoutingStrategy::LeastInFlight => pb::RoutingStrategy::LeastInFlight,
@@ -532,7 +532,7 @@ impl Config {
                     .iter()
                     .map(|s| pb::TrafficSplit {
                         name: s.name.clone(),
-                        deployments: s.deployments.clone(),
+                        models: s.models.clone(),
                         weight: s.weight,
                     })
                     .collect(),
@@ -611,18 +611,18 @@ impl Config {
         Ok(Snapshot {
             version: 0,
             upstreams,
-            deployments,
-            routes,
+            models,
+            routers,
             api_keys,
             teams,
             created_at_unix_ms: 0,
             required_capabilities: {
                 let mut caps = Vec::new();
                 for (cap, used) in [
-                    ("retry", self.routes.iter().any(|r| r.retry.is_some())),
+                    ("retry", self.routers.iter().any(|r| r.retry.is_some())),
                     (
                         "fallbacks",
-                        self.routes.iter().any(|r| !r.fallbacks.is_empty()),
+                        self.routers.iter().any(|r| !r.fallbacks.is_empty()),
                     ),
                     (
                         "health_check",
@@ -634,7 +634,7 @@ impl Config {
                     ),
                     (
                         "traffic_split",
-                        self.routes.iter().any(|r| {
+                        self.routers.iter().any(|r| {
                             !r.traffic_split.is_empty()
                                 || r.sticky != StickyBy::None
                                 || !r.sticky_header.is_empty()
@@ -642,13 +642,13 @@ impl Config {
                     ),
                     (
                         "lowest_latency",
-                        self.routes
+                        self.routers
                             .iter()
                             .any(|r| r.strategy == RoutingStrategy::LowestLatency),
                     ),
                     (
                         "vllm_load",
-                        self.routes
+                        self.routers
                             .iter()
                             .any(|r| r.strategy == RoutingStrategy::VllmLoad)
                             || self.upstreams.iter().any(|u| !u.metrics_url.is_empty()),
@@ -658,7 +658,7 @@ impl Config {
                         caps.push(cap.into());
                     }
                 }
-                for r in &self.routes {
+                for r in &self.routers {
                     if r.strategy == RoutingStrategy::Custom {
                         let cap = format!("strategy:{}", r.custom_strategy);
                         if !caps.contains(&cap) {
@@ -683,20 +683,20 @@ mod tests {
     #[test]
     fn custom_strategy_yaml_preserves_object_and_emits_capability() {
         let (_, snapshot) = Config::parse(
-            "routes:\n  - name: custom\n    strategy: custom\n    custom_strategy: header_pin\n    strategy_params: {headers: [x-pin], value: 2}\n",
+            "routers:\n  - name: custom\n    strategy: custom\n    custom_strategy: header_pin\n    strategy_params: {headers: [x-pin], value: 2}\n",
         ).unwrap();
         assert_eq!(
-            snapshot.routes[0].strategy,
+            snapshot.routers[0].strategy,
             pb::RoutingStrategy::Custom as i32
         );
-        assert_eq!(snapshot.routes[0].custom_strategy, "header_pin");
+        assert_eq!(snapshot.routers[0].custom_strategy, "header_pin");
         assert_eq!(snapshot.required_capabilities, ["strategy:header_pin"]);
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&snapshot.routes[0].strategy_params_json)
+            serde_json::from_str::<serde_json::Value>(&snapshot.routers[0].strategy_params_json)
                 .unwrap(),
             serde_json::json!({"headers": ["x-pin"], "value": 2})
         );
-        assert!(Config::parse("routes: [{name: custom, strategy_params: [1]}]").is_err());
+        assert!(Config::parse("routers: [{name: custom, strategy_params: [1]}]").is_err());
     }
 
     #[test]
@@ -710,14 +710,14 @@ upstreams:
     base_url: http://localhost/v1
     health_check: {interval_ms: 1000, timeout_ms: 100}
     circuit_breaker: {}
-deployments:
+models:
   - {name: d, upstream: u, upstream_model: actual}
-routes:
+routers:
   - name: public
-    deployments: [d]
+    models: [d]
     retry: {}
     fallbacks: [backup]
-  - {name: backup, deployments: [d]}
+  - {name: backup, models: [d]}
 "#,
         )
         .unwrap();
@@ -726,7 +726,7 @@ routes:
             s.required_capabilities,
             ["retry", "fallbacks", "health_check", "circuit_breaker"]
         );
-        assert_eq!(s.routes[0].retry.as_ref().unwrap().max_attempts, 0);
+        assert_eq!(s.routers[0].retry.as_ref().unwrap().max_attempts, 0);
         assert!(s.upstreams[0].circuit_breaker.is_some());
         assert!(Config::parse("server: {retry_budget_percent: 21}").is_err());
         assert!(Config::parse("{}")
@@ -742,17 +742,17 @@ routes:
             r#"
 upstreams:
   - {name: u, kind: vllm, base_url: 'http://localhost/v1', metrics_url: 'http://localhost/metrics'}
-routes:
+routers:
   - name: public
     strategy: vllm_load
-    traffic_split: [{name: stable, deployments: [d], weight: 1}]
+    traffic_split: [{name: stable, models: [d], weight: 1}]
     sticky: header
     sticky_header: x-session
 "#,
         )
         .unwrap();
-        assert_eq!(s.routes[0].traffic_split[0].name, "stable");
-        assert_eq!(s.routes[0].sticky, pb::StickyBy::Header as i32);
+        assert_eq!(s.routers[0].traffic_split[0].name, "stable");
+        assert_eq!(s.routers[0].sticky, pb::StickyBy::Header as i32);
         assert_eq!(s.required_capabilities, ["traffic_split", "vllm_load"]);
     }
 
@@ -760,7 +760,7 @@ routes:
     fn example_and_bench_configs_convert() {
         for yaml in [EXAMPLE, BENCH] {
             let (_, snapshot) = Config::parse(yaml).unwrap();
-            assert!(!snapshot.routes.is_empty());
+            assert!(!snapshot.routers.is_empty());
             assert_eq!(snapshot.version, 0);
         }
         let (_, snapshot) = Config::parse(BENCH).unwrap();
@@ -787,16 +787,16 @@ routes:
     }
 
     #[test]
-    fn converts_upstreams_and_routes() {
+    fn converts_upstreams_and_routers() {
         let (_, s) = Config::parse(
             r#"
 upstreams:
   - { name: u, kind: vllm, base_url: "http://localhost:8000/v1", api_key_env: K, stream_usage_mode: passthrough }
-deployments:
+models:
   - { name: d, upstream: u, upstream_model: m, weight: 3, price: { input_usd_per_mtok: "0.15", output_usd_per_mtok: "12" } }
   - { name: e, upstream: u, upstream_model: m }
-routes:
-  - { name: alias, deployments: [d, e], strategy: least_in_flight }
+routers:
+  - { name: alias, models: [d, e], strategy: least_in_flight }
 "#,
         )
         .unwrap();
@@ -808,16 +808,16 @@ routes:
             pb::StreamUsageMode::Passthrough as i32
         );
         assert_eq!(
-            s.deployments[0].price,
+            s.models[0].price,
             Some(pb::Price {
                 input_nano_usd_per_mtok: 150_000_000,
                 output_nano_usd_per_mtok: 12_000_000_000,
             })
         );
-        assert_eq!(s.deployments[1].price, None);
-        assert_eq!(s.deployments[0].weight, 3);
+        assert_eq!(s.models[1].price, None);
+        assert_eq!(s.models[0].weight, 3);
         assert_eq!(
-            s.routes[0].strategy,
+            s.routers[0].strategy,
             pb::RoutingStrategy::LeastInFlight as i32
         );
     }
@@ -844,19 +844,19 @@ routes:
         }
         // Plain YAML numbers are read from their source text, never via f64.
         let plain = r#"
-deployments:
+models:
   - { name: d, upstream: u, upstream_model: m, price: { input_usd_per_mtok: 0.10, output_usd_per_mtok: 1.000000001 } }
 "#;
         let (_, s) = Config::parse(plain).unwrap();
         assert_eq!(
-            s.deployments[0].price,
+            s.models[0].price,
             Some(pb::Price {
                 input_nano_usd_per_mtok: 100_000_000,
                 output_nano_usd_per_mtok: 1_000_000_001,
             })
         );
         for bad in ["1e-3", "-1", "true", "[1]"] {
-            let yaml = format!("deployments:\n  - {{ name: d, upstream: u, upstream_model: m, price: {{ input_usd_per_mtok: {bad}, output_usd_per_mtok: '1' }} }}");
+            let yaml = format!("models:\n  - {{ name: d, upstream: u, upstream_model: m, price: {{ input_usd_per_mtok: {bad}, output_usd_per_mtok: '1' }} }}");
             assert!(Config::parse(&yaml).is_err(), "{bad}");
         }
     }

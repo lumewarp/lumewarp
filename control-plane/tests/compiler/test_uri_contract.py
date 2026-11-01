@@ -14,7 +14,7 @@ from lumewarp_control_plane.compiler.validate import (
     validate_snapshot,
 )
 from lumewarp_control_plane.models import Upstream
-from tests.compiler.helpers import OCT, SCOPE, add_route, seed_scope
+from tests.compiler.helpers import OCT, SCOPE, add_router, seed_scope
 from tests.compiler.test_routing_p2 import _base
 
 INVALID_URLS = [
@@ -66,7 +66,7 @@ async def test_invalid_uri_rejected_by_api_and_compiler(factory, url, field) -> 
         validate_snapshot(snap, max_bytes=1 << 26, max_keys=1000)
     await seed_scope(factory)
     async with factory() as session, session.begin():
-        await add_route(session, "name", [("a", None)])
+        await add_router(session, "name", [("a", None)])
         up = await session.scalar(select(Upstream))
         setattr(up, field, url)
     async with factory() as session:
@@ -74,10 +74,10 @@ async def test_invalid_uri_rejected_by_api_and_compiler(factory, url, field) -> 
     assert compiled.warnings
     if field == "base_url":
         assert not compiled.snapshot.upstreams
-        assert not compiled.snapshot.routes
+        assert not compiled.snapshot.routers
     else:
         assert compiled.snapshot.upstreams[0].metrics_url == ""
-        assert len(compiled.snapshot.routes) == 1
+        assert len(compiled.snapshot.routers) == 1
 
 
 @pytest.mark.parametrize("url", VALID_URLS)
@@ -110,7 +110,7 @@ async def test_invalid_health_uri_rejected_by_api_and_compiler(factory, path) ->
         HealthCheckIn(path=path, interval_ms=1000, timeout_ms=100)
     await seed_scope(factory)
     async with factory() as session, session.begin():
-        await add_route(session, "name", [("a", None)])
+        await add_router(session, "name", [("a", None)])
         up = await session.scalar(select(Upstream))
         up.health_check_path = path
         up.health_check_interval_ms = 1000

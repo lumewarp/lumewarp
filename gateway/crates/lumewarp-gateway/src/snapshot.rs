@@ -47,7 +47,7 @@ pub fn valid_strategy_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
 }
 
-pub fn strategy_params(r: &pb::ModelRoute) -> Result<serde_json::Value, ApplyError> {
+pub fn strategy_params(r: &pb::Router) -> Result<serde_json::Value, ApplyError> {
     if r.strategy_params_json.len() > 16 * 1024 {
         return Err(ApplyError::invalid("strategy params exceed 16 KiB"));
     }
@@ -62,7 +62,7 @@ pub fn strategy_params(r: &pb::ModelRoute) -> Result<serde_json::Value, ApplyErr
     Ok(params)
 }
 
-pub fn strategy_headers(r: &pb::ModelRoute) -> Result<Vec<String>, ApplyError> {
+pub fn strategy_headers(r: &pb::Router) -> Result<Vec<String>, ApplyError> {
     let params = strategy_params(r)?;
     let Some(headers) = params.get("headers") else {
         return Ok(Vec::new());
@@ -219,26 +219,23 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             &format!("upstream {:?} stream_usage_mode", u.name),
         )?;
     }
-    let deployments = unique(
-        snapshot.deployments.iter().map(|d| d.name.as_str()),
-        "deployment",
-    )?;
-    for d in &snapshot.deployments {
+    let models = unique(snapshot.models.iter().map(|d| d.name.as_str()), "model")?;
+    for d in &snapshot.models {
         if !upstreams.contains(d.upstream.as_str()) {
             return Err(ApplyError::invalid(format!(
-                "deployment {:?} references unknown upstream {:?}",
+                "model {:?} references unknown upstream {:?}",
                 d.name, d.upstream
             )));
         }
         if d.upstream_model.is_empty() {
             return Err(ApplyError::invalid(format!(
-                "deployment {:?} has an empty upstream_model",
+                "model {:?} has an empty upstream_model",
                 d.name
             )));
         }
     }
-    let routes = unique(snapshot.routes.iter().map(|r| r.name.as_str()), "route")?;
-    for r in &snapshot.routes {
+    let routers = unique(snapshot.routers.iter().map(|r| r.name.as_str()), "router")?;
+    for r in &snapshot.routers {
         require(r.retry.is_some(), "retry")?;
         require(!r.fallbacks.is_empty(), "fallbacks")?;
         require(
@@ -246,7 +243,7 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             "traffic_split",
         )?;
         let sticky = known::<pb::StickyBy>(r.sticky, true, "sticky")?;
-        validate_split(r, sticky, &deployments)?;
+        validate_split(r, sticky, &models)?;
         if let Some(p) = &r.retry {
             if p.max_attempts > 5 || p.retry_on_status.iter().any(|s| !(400..=599).contains(s)) {
                 return Err(ApplyError::invalid(
@@ -255,22 +252,22 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             }
         }
         for fallback in &r.fallbacks {
-            if fallback == &r.name || !routes.contains(fallback.as_str()) {
+            if fallback == &r.name || !routers.contains(fallback.as_str()) {
                 return Err(ApplyError::invalid(format!(
-                    "route {:?} has a self or unknown fallback {:?}",
+                    "router {:?} has a self or unknown fallback {:?}",
                     r.name, fallback
                 )));
             }
         }
         if r.name == "unknown" {
             return Err(ApplyError::invalid(
-                "route alias 'unknown' is reserved for metrics",
+                "router alias 'unknown' is reserved for metrics",
             ));
         }
         let strategy = known::<pb::RoutingStrategy>(
             r.strategy,
             false,
-            &format!("route {:?} strategy", r.name),
+            &format!("router {:?} strategy", r.name),
         )?;
         require(
             strategy == pb::RoutingStrategy::LowestLatency,
@@ -292,23 +289,19 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
         } else if !r.custom_strategy.is_empty() || !r.strategy_params_json.is_empty() {
             return Err(ApplyError::invalid("custom strategy fields require CUSTOM"));
         }
-        // With traffic_split the route's own deployment list is ignored.
+        // With traffic_split the router's own model list is ignored.
         if !r.traffic_split.is_empty() {
             continue;
         }
-        if r.deployments.is_empty() {
+        if r.models.is_empty() {
             return Err(ApplyError::invalid(format!(
-                "route {:?} has no deployments",
+                "router {:?} has no models",
                 r.name
             )));
         }
-        if let Some(d) = r
-            .deployments
-            .iter()
-            .find(|d| !deployments.contains(d.as_str()))
-        {
+        if let Some(d) = r.models.iter().find(|d| !models.contains(d.as_str())) {
             return Err(ApplyError::invalid(format!(
-                "route {:?} references unknown deployment {:?}",
+                "router {:?} references unknown model {:?}",
                 r.name, d
             )));
         }
@@ -380,15 +373,15 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
     Ok(())
 }
 
-/// Split names are bounded metric labels; every split names known deployments
-/// and the weights must leave something to route to.
+/// Split names are bounded metric labels; every split names known models
+/// and the weights must leave something to router to.
 fn validate_split(
-    r: &pb::ModelRoute,
+    r: &pb::Router,
     sticky: pb::StickyBy,
-    deployments: &HashSet<&str>,
+    models: &HashSet<&str>,
 ) -> Result<(), ApplyError> {
     let name = &r.name;
-    let fail = |what: String| Err(ApplyError::invalid(format!("route {name:?}: {what}")));
+    let fail = |what: String| Err(ApplyError::invalid(format!("router {name:?}: {what}")));
     match sticky {
         pb::StickyBy::Header => {
             if r.sticky_header.is_empty()
@@ -428,18 +421,16 @@ fn validate_split(
         if !names.insert(name.as_str()) {
             return fail(format!("duplicate split {name:?}"));
         }
-        if split.deployments.is_empty() {
-            return fail(format!("split {name:?} has no deployments"));
+        if split.models.is_empty() {
+            return fail(format!("split {name:?} has no models"));
         }
         let mut seen = HashSet::new();
-        for d in &split.deployments {
-            if !deployments.contains(d.as_str()) {
-                return fail(format!(
-                    "split {name:?} references unknown deployment {d:?}"
-                ));
+        for d in &split.models {
+            if !models.contains(d.as_str()) {
+                return fail(format!("split {name:?} references unknown model {d:?}"));
             }
             if !seen.insert(d.as_str()) {
-                return fail(format!("split {name:?} repeats deployment {d:?}"));
+                return fail(format!("split {name:?} repeats model {d:?}"));
             }
         }
         total += u64::from(split.weight);
@@ -536,18 +527,18 @@ pub fn apply(base: &Snapshot, update: ConfigUpdate) -> Result<Snapshot, ApplyErr
                 "upstream",
             )?;
             merge(
-                &mut next.deployments,
-                delta.upsert_deployments,
-                &delta.remove_deployments,
+                &mut next.models,
+                delta.upsert_models,
+                &delta.remove_models,
                 |d| &d.name,
-                "deployment",
+                "model",
             )?;
             merge(
-                &mut next.routes,
-                delta.upsert_routes,
-                &delta.remove_routes,
+                &mut next.routers,
+                delta.upsert_routers,
+                &delta.remove_routers,
                 |r| &r.name,
-                "route",
+                "router",
             )?;
             merge(
                 &mut next.api_keys,
@@ -683,21 +674,21 @@ pub(crate) mod tests {
             "set-cookie",
             "X-API-Key",
         ] {
-            let route = pb::ModelRoute {
+            let router = pb::Router {
                 strategy_params_json: serde_json::json!({"headers": [header]}).to_string(),
                 ..Default::default()
             };
             assert_eq!(
-                strategy_headers(&route).unwrap_err().code,
+                strategy_headers(&router).unwrap_err().code,
                 NackCode::InvalidConfig
             );
         }
-        let route = pb::ModelRoute {
+        let router = pb::Router {
             strategy_params_json: r#"{"headers":["X-Tenant","x-request-id"]}"#.into(),
             ..Default::default()
         };
         assert_eq!(
-            strategy_headers(&route).unwrap(),
+            strategy_headers(&router).unwrap(),
             vec!["x-tenant", "x-request-id"]
         );
     }
@@ -712,8 +703,8 @@ pub(crate) mod tests {
         }
     }
 
-    pub fn deployment(name: &str, upstream: &str) -> pb::Deployment {
-        pb::Deployment {
+    pub fn model(name: &str, upstream: &str) -> pb::Model {
+        pb::Model {
             name: name.into(),
             upstream: upstream.into(),
             upstream_model: "actual".into(),
@@ -722,10 +713,10 @@ pub(crate) mod tests {
         }
     }
 
-    pub fn route(name: &str, deployments: &[&str]) -> pb::ModelRoute {
-        pb::ModelRoute {
+    pub fn router(name: &str, models: &[&str]) -> pb::Router {
+        pb::Router {
             name: name.into(),
-            deployments: deployments.iter().map(|d| d.to_string()).collect(),
+            models: models.iter().map(|d| d.to_string()).collect(),
             strategy: pb::RoutingStrategy::Weighted as i32,
             ..Default::default()
         }
@@ -757,8 +748,8 @@ pub(crate) mod tests {
         Snapshot {
             version: 1,
             upstreams: vec![upstream("u"), upstream("v")],
-            deployments: vec![deployment("a", "u"), deployment("b", "v")],
-            routes: vec![route("m1", &["a"]), route("m2", &["a", "b"])],
+            models: vec![model("a", "u"), model("b", "v")],
+            routers: vec![router("m1", &["a"]), router("m2", &["a", "b"])],
             api_keys: vec![key("k1", "s1", "t1", &["m1"]), key("k2", "s2", "", &[])],
             teams: vec![team("t1"), team("t2")],
             created_at_unix_ms: 10,
@@ -809,8 +800,8 @@ pub(crate) mod tests {
         for cap in SUPPORTED_CAPABILITIES {
             let mut s = base();
             match *cap {
-                "retry" => s.routes[0].retry = Some(pb::RetryPolicy::default()),
-                "fallbacks" => s.routes[0].fallbacks = vec!["m2".into()],
+                "retry" => s.routers[0].retry = Some(pb::RetryPolicy::default()),
+                "fallbacks" => s.routers[0].fallbacks = vec!["m2".into()],
                 "health_check" => {
                     s.upstreams[0].health_check = Some(pb::HealthCheck {
                         interval_ms: 1000,
@@ -821,11 +812,11 @@ pub(crate) mod tests {
                 "circuit_breaker" => {
                     s.upstreams[0].circuit_breaker = Some(pb::CircuitBreaker::default())
                 }
-                "traffic_split" => s.routes[0].traffic_split = vec![split("stable", &["a"], 1)],
+                "traffic_split" => s.routers[0].traffic_split = vec![split("stable", &["a"], 1)],
                 "lowest_latency" => {
-                    s.routes[0].strategy = pb::RoutingStrategy::LowestLatency as i32
+                    s.routers[0].strategy = pb::RoutingStrategy::LowestLatency as i32
                 }
-                "vllm_load" => s.routes[0].strategy = pb::RoutingStrategy::VllmLoad as i32,
+                "vllm_load" => s.routers[0].strategy = pb::RoutingStrategy::VllmLoad as i32,
                 _ => unreachable!(),
             }
             assert_code(
@@ -848,7 +839,7 @@ pub(crate) mod tests {
         ] {
             let mut s = base();
             s.required_capabilities.push("retry".into());
-            s.routes[0].retry = Some(pb::RetryPolicy {
+            s.routers[0].retry = Some(pb::RetryPolicy {
                 max_attempts: attempts,
                 retry_on_status: statuses,
                 total_timeout_ms: 10,
@@ -873,7 +864,7 @@ pub(crate) mod tests {
         for fallback in ["m1", "missing"] {
             let mut s = base();
             s.required_capabilities.push("fallbacks".into());
-            s.routes[0].fallbacks.push(fallback.into());
+            s.routers[0].fallbacks.push(fallback.into());
             assert_code(
                 validate(&s, SUPPORTED_CAPABILITIES),
                 NackCode::InvalidConfig,
@@ -881,27 +872,27 @@ pub(crate) mod tests {
         }
     }
 
-    pub fn split(name: &str, deployments: &[&str], weight: u32) -> pb::TrafficSplit {
+    pub fn split(name: &str, models: &[&str], weight: u32) -> pb::TrafficSplit {
         pb::TrafficSplit {
             name: name.into(),
-            deployments: deployments.iter().map(|d| d.to_string()).collect(),
+            models: models.iter().map(|d| d.to_string()).collect(),
             weight,
         }
     }
 
     #[test]
     fn traffic_split_and_sticky_validation() {
-        let check = |mutate: &dyn Fn(&mut pb::ModelRoute)| {
+        let check = |mutate: &dyn Fn(&mut pb::Router)| {
             let mut s = base();
             s.required_capabilities.push("traffic_split".into());
-            s.routes[1].traffic_split =
+            s.routers[1].traffic_split =
                 vec![split("stable", &["a"], 9), split("canary", &["b"], 1)];
-            mutate(&mut s.routes[1]);
+            mutate(&mut s.routers[1]);
             validate(&s, SUPPORTED_CAPABILITIES)
         };
         check(&|_| {}).unwrap();
-        // The route's own list is ignored (may be empty) with splits.
-        check(&|r| r.deployments.clear()).unwrap();
+        // The router's own list is ignored (may be empty) with splits.
+        check(&|r| r.models.clear()).unwrap();
         check(&|r| r.traffic_split[1].weight = 0).unwrap();
         check(&|r| {
             r.sticky = pb::StickyBy::Header as i32;
@@ -910,7 +901,7 @@ pub(crate) mod tests {
         .unwrap();
         check(&|r| r.sticky = pb::StickyBy::Team as i32).unwrap();
         check(&|r| r.sticky = pb::StickyBy::Key as i32).unwrap();
-        type Mutation = Box<dyn Fn(&mut pb::ModelRoute)>;
+        type Mutation = Box<dyn Fn(&mut pb::Router)>;
         let bad: Vec<Mutation> = vec![
             Box::new(|r| {
                 r.traffic_split[0].weight = 0;
@@ -920,9 +911,9 @@ pub(crate) mod tests {
             Box::new(|r| r.traffic_split[1].name.clear()),
             Box::new(|r| r.traffic_split[1].name = "x".repeat(MAX_SPLIT_NAME + 1)),
             Box::new(|r| r.traffic_split[1].name = "can ary".into()),
-            Box::new(|r| r.traffic_split[1].deployments.clear()),
-            Box::new(|r| r.traffic_split[1].deployments = vec!["nope".into()]),
-            Box::new(|r| r.traffic_split[1].deployments = vec!["b".into(), "b".into()]),
+            Box::new(|r| r.traffic_split[1].models.clear()),
+            Box::new(|r| r.traffic_split[1].models = vec!["nope".into()]),
+            Box::new(|r| r.traffic_split[1].models = vec!["b".into(), "b".into()]),
             Box::new(|r| r.sticky = pb::StickyBy::Header as i32),
             Box::new(|r| {
                 r.sticky = pb::StickyBy::Header as i32;
@@ -945,7 +936,7 @@ pub(crate) mod tests {
         }
         // Without the capability the fields are an error, not ignored.
         let mut s = base();
-        s.routes[0].traffic_split = vec![split("stable", &["a"], 1)];
+        s.routers[0].traffic_split = vec![split("stable", &["a"], 1)];
         assert_code(
             validate(&s, SUPPORTED_CAPABILITIES),
             NackCode::InvalidConfig,
@@ -962,12 +953,12 @@ pub(crate) mod tests {
         u.timeout_ms = 5;
         d.upsert_upstreams = vec![u, upstream("w")];
         d.remove_upstreams = vec!["v".into(), "missing".into()];
-        let mut a = deployment("a", "w");
+        let mut a = model("a", "w");
         a.weight = 7;
-        d.upsert_deployments = vec![a, deployment("c", "u")];
-        d.remove_deployments = vec!["b".into()];
-        d.upsert_routes = vec![route("m2", &["c"]), route("m3", &["a"])];
-        d.remove_routes = vec!["m1".into()];
+        d.upsert_models = vec![a, model("c", "u")];
+        d.remove_models = vec!["b".into()];
+        d.upsert_routers = vec![router("m2", &["c"]), router("m3", &["a"])];
+        d.remove_routers = vec!["m1".into()];
         let mut k2 = key("k2", "s2-rotated", "t2", &["m3"]);
         k2.status = pb::KeyStatus::Revoked as i32;
         d.upsert_api_keys = vec![k2, key("k3", "s3", "", &["m2"])];
@@ -996,21 +987,21 @@ pub(crate) mod tests {
         );
         assert_eq!(next.upstreams[0].timeout_ms, 5);
         assert_eq!(
-            next.deployments
+            next.models
                 .iter()
                 .map(|d| d.name.clone())
                 .collect::<Vec<_>>(),
             names(vec!["a", "c"])
         );
-        assert_eq!(next.deployments[0].weight, 7);
+        assert_eq!(next.models[0].weight, 7);
         assert_eq!(
-            next.routes
+            next.routers
                 .iter()
                 .map(|r| r.name.clone())
                 .collect::<Vec<_>>(),
             names(vec!["m2", "m3"])
         );
-        assert_eq!(next.routes[0].deployments, ["c"]);
+        assert_eq!(next.routers[0].models, ["c"]);
         assert_eq!(
             next.api_keys
                 .iter()
@@ -1074,7 +1065,7 @@ pub(crate) mod tests {
             validate(&next, SUPPORTED_CAPABILITIES),
             NackCode::InvalidConfig,
         );
-        // Removing an upstream still used by a deployment, likewise.
+        // Removing an upstream still used by a model, likewise.
         let mut d = delta(2);
         d.remove_upstreams = vec!["u".into()];
         let next = apply_delta(d).unwrap();
@@ -1114,7 +1105,7 @@ pub(crate) mod tests {
         assert_code(validate(&s, &[]), NackCode::UnsupportedFeature);
         validate(&s, &["jwt"]).unwrap();
         let mut s = base();
-        s.routes[0].strategy = pb::RoutingStrategy::LowestLatency as i32;
+        s.routers[0].strategy = pb::RoutingStrategy::LowestLatency as i32;
         assert_code(validate(&s, &[]), NackCode::InvalidConfig);
         s.required_capabilities = vec!["lowest_latency".into()];
         validate(&s, &["lowest_latency"]).unwrap();
@@ -1123,12 +1114,12 @@ pub(crate) mod tests {
 
     #[test]
     fn invalid_references() {
-        invalid(|s| s.deployments[0].upstream = "nope".into());
-        invalid(|s| s.routes[0].deployments = vec!["nope".into()]);
-        invalid(|s| s.routes[0].deployments.clear());
+        invalid(|s| s.models[0].upstream = "nope".into());
+        invalid(|s| s.routers[0].models = vec!["nope".into()]);
+        invalid(|s| s.routers[0].models.clear());
         invalid(|s| s.api_keys[0].team_id = "nope".into());
-        invalid(|s| s.routes[0].name = "unknown".into());
-        invalid(|s| s.deployments[0].upstream_model.clear());
+        invalid(|s| s.routers[0].name = "unknown".into());
+        invalid(|s| s.models[0].upstream_model.clear());
     }
 
     #[test]
@@ -1180,15 +1171,15 @@ pub(crate) mod tests {
     #[test]
     fn duplicates_and_unspecified_enums() {
         invalid(|s| s.upstreams[1].name = "u".into());
-        invalid(|s| s.deployments[1].name = "a".into());
-        invalid(|s| s.routes[1].name = "m1".into());
+        invalid(|s| s.models[1].name = "a".into());
+        invalid(|s| s.routers[1].name = "m1".into());
         invalid(|s| s.teams[1].id = "t1".into());
         invalid(|s| s.teams[1].id.clear());
         invalid(|s| s.upstreams[0].kind = 0);
         invalid(|s| s.upstreams[0].kind = 99);
         invalid(|s| s.upstreams[0].stream_usage_mode = 99);
-        invalid(|s| s.routes[0].strategy = 0);
-        invalid(|s| s.routes[0].strategy = 99);
+        invalid(|s| s.routers[0].strategy = 0);
+        invalid(|s| s.routers[0].strategy = 99);
         invalid(|s| s.api_keys[0].status = 0);
         invalid(|s| s.api_keys[0].status = 99);
         let mut s = base();

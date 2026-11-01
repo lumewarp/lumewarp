@@ -5,8 +5,8 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import config_service_pb2,
 # (Snapshot field, Delta upsert field, Delta remove field, entity key)
 ENTITIES = (
     ("upstreams", "upsert_upstreams", "remove_upstreams", "name"),
-    ("deployments", "upsert_deployments", "remove_deployments", "name"),
-    ("routes", "upsert_routes", "remove_routes", "name"),
+    ("models", "upsert_models", "remove_models", "name"),
+    ("routers", "upsert_routers", "remove_routers", "name"),
     ("api_keys", "upsert_api_keys", "remove_api_keys", "key_id"),
     ("teams", "upsert_teams", "remove_teams", "id"),
 )

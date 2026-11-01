@@ -628,12 +628,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (deployment, kind) (rate(lumewarp_upstream_errors_total{namespace=~\"${namespace:regex}\"}[$__rate_interval]))",
+          "expr": "sum by (model, kind) (rate(lumewarp_upstream_errors_total{namespace=~\"${namespace:regex}\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{deployment}} {{kind}}",
+          "legendFormat": "{{model}} {{kind}}",
           "range": true
         }
       ]

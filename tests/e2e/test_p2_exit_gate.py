@@ -196,9 +196,9 @@ def traffic(keys):
             "base_url": f"http://127.0.0.1:{stack.mock_port}/v1",
         },
     )
-    deployment = stack.ok(
+    model = stack.ok(
         "POST",
-        "/deployments",
+        "/models",
         json={
             "name": "mock-a",
             "upstream_id": upstream["id"],
@@ -207,7 +207,7 @@ def traffic(keys):
             "price_output_nano_usd_per_mtok": 2_000_000_000,
         },
     )
-    stack.ok("POST", "/routes", json={"name": "mock", "deployment_ids": [deployment["id"]]})
+    stack.ok("POST", "/routers", json={"name": "mock", "model_ids": [model["id"]]})
 
     def published():
         rows = pg(stack.dsn, "SELECT payload FROM config_versions ORDER BY version DESC LIMIT 1")
@@ -215,12 +215,12 @@ def traffic(keys):
             return False
         snapshot = snapshot_pb2.Snapshot.FromString(rows[0]["payload"])
         return len(snapshot.api_keys) == 2 and any(
-            route.name == "mock" for route in snapshot.routes
+            router.name == "mock" for router in snapshot.routers
         )
 
     state.events.wait(
         published,
-        what="published keys and route",
+        what="published keys and router",
     )
     state.gateway = stack.start_gateway()
     state.events.wait(
@@ -284,7 +284,7 @@ def test_04_usage_owners_cost_and_team_totals_reconcile(traffic):
                 kind,
                 owner_id,
             )
-            assert (row["status"], row["requested"], row["deployment"]) == (200, "mock", "mock-a")
+            assert (row["status"], row["requested"], row["model"]) == (200, "mock", "mock-a")
             assert row["cost_known"] and row["prompt_tokens"] > 0 and row["completion_tokens"] > 0
             assert row["cost_nano_usd"] == (
                 row["prompt_tokens"] * 1000 + row["completion_tokens"] * 2000

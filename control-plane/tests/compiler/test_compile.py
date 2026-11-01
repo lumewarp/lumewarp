@@ -14,7 +14,7 @@ from lumewarp_control_plane.models import (
     member_scope_id,
 )
 from tests import factories
-from tests.compiler.helpers import OCT, SCOPE, add_key, add_route, seed_scope
+from tests.compiler.helpers import OCT, SCOPE, add_key, add_router, seed_scope
 
 ALL, INHERIT, LIST = ModelAccess.ALL, ModelAccess.INHERIT, ModelAccess.LIST
 
@@ -347,18 +347,18 @@ async def test_key_fields(factory) -> None:
 async def test_routing(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
-        await add_route(s, "llama", [("llama-b", 5), ("llama-a", None)])
-        await add_route(s, "empty", [])
-        await add_route(s, "fast", [("llama-a", None)], strategy=RoutingStrategy.LOWEST_LATENCY)
-        await add_route(s, "unknown", [("llama-a", None)])
+        await add_router(s, "llama", [("llama-b", 5), ("llama-a", None)])
+        await add_router(s, "empty", [])
+        await add_router(s, "fast", [("llama-a", None)], strategy=RoutingStrategy.LOWEST_LATENCY)
+        await add_router(s, "unknown", [("llama-a", None)])
     c = await compile_(factory)
     snap = c.snapshot
-    assert [r.name for r in snap.routes] == ["fast", "llama"]
-    assert snap.routes[0].strategy == pb.ROUTING_STRATEGY_LOWEST_LATENCY
-    assert list(snap.routes[1].deployments) == ["llama-b", "llama-a"]  # position order kept
-    assert snap.routes[1].strategy == pb.ROUTING_STRATEGY_WEIGHTED
+    assert [r.name for r in snap.routers] == ["fast", "llama"]
+    assert snap.routers[0].strategy == pb.ROUTING_STRATEGY_LOWEST_LATENCY
+    assert list(snap.routers[1].models) == ["llama-b", "llama-a"]  # position order kept
+    assert snap.routers[1].strategy == pb.ROUTING_STRATEGY_WEIGHTED
     assert len(c.warnings) == 2
-    deps = {d.name: d for d in snap.deployments}
+    deps = {d.name: d for d in snap.models}
     assert not deps["llama-a"].HasField("price")  # unknown, not free
     assert deps["llama-b"].price == pb.Price(input_nano_usd_per_mtok=5, output_nano_usd_per_mtok=5)
     assert [(u.name, u.kind) for u in snap.upstreams] == [("vllm", pb.UPSTREAM_KIND_VLLM)]
@@ -372,7 +372,7 @@ async def test_deterministic(factory) -> None:
         t, u = await _team_with_member(s, team=lvl(LIST, "b", "a"))
         for i in range(5):
             await add_key(s, t, u, name=f"k{i}")
-        await add_route(s, "m", [("d2", 1), ("d1", 2)])
+        await add_router(s, "m", [("d2", 1), ("d1", 2)])
     a = (await compile_(factory)).snapshot.SerializeToString(deterministic=True)
     b = (await compile_(factory)).snapshot.SerializeToString(deterministic=True)
     assert a == b

@@ -21,16 +21,16 @@ from lumewarp_control_plane.compiler.validate import (
 )
 from lumewarp_control_plane.models import (
     ApiKey,
-    Deployment,
     GatewaySession,
     KeyLifecycle,
     KeyOwnerKind,
+    Model,
     ModelAccess,
-    Route,
-    RouteDeployment,
-    RouteFallback,
-    RouteSplit,
-    RouteSplitDeployment,
+    Router,
+    RouterFallback,
+    RouterModel,
+    RouterSplit,
+    RouterSplitModel,
     RoutingStrategy,
     Scope,
     ScopeType,
@@ -85,7 +85,7 @@ class CompiledSnapshot:
     """Result of `compile_scope`, not yet published.
 
     `snapshot.version` and `created_at_unix_ms` are 0 here; publishing assigns them.
-    `warnings` lists source entities left out of the snapshot (e.g. an empty route).
+    `warnings` lists source entities left out of the snapshot (e.g. an empty router).
     """
 
     snapshot: pb.Snapshot
@@ -183,19 +183,19 @@ async def compile_scope(
       way), so revocation is a key removal in deltas. Expiry is passed through as
       `expires_at_unix_ms` and enforced by the gateway.
     - Source rows the gateway would reject are left out and reported in `warnings`:
-      upstreams with an invalid base URL (and their deployments), deployments with an
-      empty upstream_model, and routes that end up without deployments (or with an
+      upstreams with an invalid base URL (and their models), models with an
+      empty upstream_model, and routers that end up without models (or with an
       empty traffic split), use a reserved alias, or are weighted with zero total weight
       (per split when split).
       Expiry: NULL -> 0 (never); at or before the epoch -> 1 ms (expired).
-    - P2 routing: upstream health_check / circuit_breaker / metrics_url and route retry /
+    - P2 routing: upstream health_check / circuit_breaker / metrics_url and router retry /
       fallbacks / traffic_split / sticky are emitted when set; `required_capabilities`
       lists exactly the capabilities those fields need (validate.capabilities_used, the
       gateway's rule). A retry policy with max_attempts NULL is emitted as 0, which the
-      gateway reads as its default (2). Fallbacks to routes that are left out are
-      dropped (warning); a split whose deployments are all left out leaves the route out.
+      gateway reads as its default (2). Fallbacks to routers that are left out are
+      dropped (warning); a split whose models are all left out leaves the router out.
     - The result is checked against every gateway invariant (`validate.validate_snapshot`,
-      mirroring snapshot.rs::validate and Router::compile); a violation is a CompileError.
+      mirroring snapshot.rs::validate and RoutingTable::compile); a violation is a CompileError.
     - Enforces settings.max_snapshot_bytes / max_snapshot_keys (CompileError).
     - Deterministic: same source state -> byte-identical serialization (sorted entities).
     """
@@ -212,9 +212,9 @@ async def compile_scope(
     # Routing.
     upstreams = (await session.scalars(select(Upstream).order_by(Upstream.name))).all()
     upstream_name = {u.id: u.name for u in upstreams}
-    deployments = (await session.scalars(select(Deployment).order_by(Deployment.name))).all()
-    deployment_by_id = {d.id: d for d in deployments}
-    routes = (await session.scalars(select(Route).order_by(Route.name))).all()
+    models = (await session.scalars(select(Model).order_by(Model.name))).all()
+    model_by_id = {d.id: d for d in models}
+    routers = (await session.scalars(select(Router).order_by(Router.name))).all()
     advertised = {
         cap
         for caps in await session.scalars(
@@ -224,30 +224,30 @@ async def compile_scope(
         )
         for cap in caps
     }
-    route_name = {r.id: r.name for r in routes}
+    router_name = {r.id: r.name for r in routers}
     members: dict[uuid.UUID, list[uuid.UUID]] = {}
     for rd in await session.scalars(
-        select(RouteDeployment).order_by(RouteDeployment.route_id, RouteDeployment.position)
+        select(RouterModel).order_by(RouterModel.router_id, RouterModel.position)
     ):
-        members.setdefault(rd.route_id, []).append(rd.deployment_id)
+        members.setdefault(rd.router_id, []).append(rd.model_id)
     fallbacks: dict[uuid.UUID, list[uuid.UUID]] = {}
     for rf in await session.scalars(
-        select(RouteFallback).order_by(RouteFallback.route_id, RouteFallback.position)
+        select(RouterFallback).order_by(RouterFallback.router_id, RouterFallback.position)
     ):
-        fallbacks.setdefault(rf.route_id, []).append(rf.fallback_route_id)
+        fallbacks.setdefault(rf.router_id, []).append(rf.fallback_router_id)
     split_rows = (
-        await session.scalars(select(RouteSplit).order_by(RouteSplit.route_id, RouteSplit.position))
+        await session.scalars(
+            select(RouterSplit).order_by(RouterSplit.router_id, RouterSplit.position)
+        )
     ).all()
     split_members: dict[uuid.UUID, list[uuid.UUID]] = {}
     for sd in await session.scalars(
-        select(RouteSplitDeployment).order_by(
-            RouteSplitDeployment.split_id, RouteSplitDeployment.position
-        )
+        select(RouterSplitModel).order_by(RouterSplitModel.split_id, RouterSplitModel.position)
     ):
-        split_members.setdefault(sd.split_id, []).append(sd.deployment_id)
-    splits: dict[uuid.UUID, list[RouteSplit]] = {}
+        split_members.setdefault(sd.split_id, []).append(sd.model_id)
+    splits: dict[uuid.UUID, list[RouterSplit]] = {}
     for sr in split_rows:
-        splits.setdefault(sr.route_id, []).append(sr)
+        splits.setdefault(sr.router_id, []).append(sr)
 
     snap = pb.Snapshot(scope=scope)
     # Source entities the gateway would reject are left out (with a warning) instead of
@@ -293,73 +293,73 @@ async def compile_scope(
             else:
                 up.metrics_url = u.metrics_url
         snap.upstreams.append(up)
-    valid_deployments = []
-    for d in deployments:
+    valid_models = []
+    for d in models:
         if d.upstream_id not in valid_upstreams:
-            warnings.append(f"deployment {d.name!r} left out: its upstream is left out")
+            warnings.append(f"model {d.name!r} left out: its upstream is left out")
         elif not d.name or not d.upstream_model:
-            warnings.append(f"deployment {d.name!r} left out: empty name or upstream_model")
+            warnings.append(f"model {d.name!r} left out: empty name or upstream_model")
         else:
-            valid_deployments.append(d)
-    valid_deployment_ids = {d.id for d in valid_deployments}
+            valid_models.append(d)
+    valid_model_ids = {d.id for d in valid_models}
 
     def positive(ids: list[uuid.UUID]) -> bool:
-        return sum(deployment_by_id[i].weight for i in ids) > 0
+        return sum(model_by_id[i].weight for i in ids) > 0
 
-    # First pass: which routes are emitted (fallbacks may only name emitted routes).
-    emitted: list[tuple[Route, pb.ModelRoute]] = []
-    for r in routes:
+    # First pass: which routers are emitted (fallbacks may only name emitted routers).
+    emitted: list[tuple[Router, pb.Router]] = []
+    for r in routers:
         member_ids = members.get(r.id, [])
-        dropped = [deployment_by_id[i].name for i in member_ids if i not in valid_deployment_ids]
-        member_ids = [i for i in member_ids if i in valid_deployment_ids]
+        dropped = [model_by_id[i].name for i in member_ids if i not in valid_model_ids]
+        member_ids = [i for i in member_ids if i in valid_model_ids]
         if dropped:
-            warnings.append(f"route {r.name!r}: left-out deployments {dropped} removed")
+            warnings.append(f"router {r.name!r}: left-out models {dropped} removed")
         if not r.name or r.name in RESERVED_ALIASES:
-            warnings.append(f"route {r.name!r} left out: alias is empty or reserved")
+            warnings.append(f"router {r.name!r} left out: alias is empty or reserved")
             continue
         weighted = r.strategy is RoutingStrategy.WEIGHTED
-        route = pb.ModelRoute(name=r.name, strategy=ROUTING_STRATEGY[r.strategy])
+        router = pb.Router(name=r.name, strategy=ROUTING_STRATEGY[r.strategy])
         if r.strategy is RoutingStrategy.CUSTOM:
-            route.custom_strategy = r.custom_strategy
-            route.strategy_params_json = params_json(r.strategy_params or {})
-        route_splits = splits.get(r.id, [])
-        if route_splits:
+            router.custom_strategy = r.custom_strategy
+            router.strategy_params_json = params_json(r.strategy_params or {})
+        router_splits = splits.get(r.id, [])
+        if router_splits:
             bad = None
-            for sr in route_splits:
-                ids = [i for i in split_members.get(sr.id, []) if i in valid_deployment_ids]
+            for sr in router_splits:
+                ids = [i for i in split_members.get(sr.id, []) if i in valid_model_ids]
                 if not ids:
-                    bad = f"split {sr.name!r} has no deployments"
+                    bad = f"split {sr.name!r} has no models"
                 elif weighted and not positive(ids):
                     bad = f"split {sr.name!r} is weighted with zero total weight"
                 if bad:
                     break
-                route.traffic_split.append(
+                router.traffic_split.append(
                     pb.TrafficSplit(
                         name=sr.name,
                         weight=sr.weight,
-                        deployments=[deployment_by_id[i].name for i in ids],
+                        models=[model_by_id[i].name for i in ids],
                     )
                 )
-            if bad is None and not sum(sr.weight for sr in route_splits):
+            if bad is None and not sum(sr.weight for sr in router_splits):
                 bad = "traffic split weights sum to 0"
             if bad is not None:
-                warnings.append(f"route {r.name!r} left out: {bad}")
+                warnings.append(f"router {r.name!r} left out: {bad}")
                 continue
-            route.sticky = STICKY_BY[r.sticky]
+            router.sticky = STICKY_BY[r.sticky]
             if r.sticky is StickyBy.HEADER:
-                route.sticky_header = r.sticky_header or ""
+                router.sticky_header = r.sticky_header or ""
         else:
             if not member_ids:
-                warnings.append(f"route {r.name!r} left out: no deployments")
+                warnings.append(f"router {r.name!r} left out: no models")
                 continue
             if weighted and not positive(member_ids):
-                warnings.append(f"route {r.name!r} left out: weighted with zero total weight")
+                warnings.append(f"router {r.name!r} left out: weighted with zero total weight")
                 continue
             if r.sticky is not StickyBy.NONE:
-                warnings.append(f"route {r.name!r}: sticky without a traffic split ignored")
-        route.deployments.extend(deployment_by_id[i].name for i in member_ids)
+                warnings.append(f"router {r.name!r}: sticky without a traffic split ignored")
+        router.models.extend(model_by_id[i].name for i in member_ids)
         if r.retry_enabled:
-            route.retry.CopyFrom(
+            router.retry.CopyFrom(
                 pb.RetryPolicy(
                     # 0 = the gateway default (2 attempts).
                     max_attempts=r.retry_max_attempts or 0,
@@ -367,27 +367,28 @@ async def compile_scope(
                     total_timeout_ms=r.retry_total_timeout_ms,
                 )
             )
-        emitted.append((r, route))
+        emitted.append((r, router))
 
     emitted_ids = {r.id for r, _ in emitted}
-    for r, route in emitted:
+    for r, router in emitted:
         for fallback in fallbacks.get(r.id, []):
             if fallback in emitted_ids and fallback != r.id:
-                route.fallbacks.append(route_name[fallback])
+                router.fallbacks.append(router_name[fallback])
             else:
                 warnings.append(
-                    f"route {r.name!r}: fallback {route_name.get(fallback)!r} is left out, dropped"
+                    f"router {r.name!r}: fallback {router_name.get(fallback)!r} is left out,"
+                    " dropped"
                 )
-        snap.routes.append(route)
-        if route.strategy == pb.ROUTING_STRATEGY_CUSTOM:
-            capability = f"strategy:{route.custom_strategy}"
+        snap.routers.append(router)
+        if router.strategy == pb.ROUTING_STRATEGY_CUSTOM:
+            capability = f"strategy:{router.custom_strategy}"
             if capability not in advertised:
                 warnings.append(
-                    f"route {r.name!r}: {capability} is not advertised by any connected gateway"
+                    f"router {r.name!r}: {capability} is not advertised by any connected gateway"
                 )
 
-    for d in valid_deployments:
-        dep = pb.Deployment(
+    for d in valid_models:
+        dep = pb.Model(
             name=d.name,
             upstream=upstream_name[d.upstream_id],
             upstream_model=d.upstream_model,
@@ -400,7 +401,7 @@ async def compile_scope(
                     output_nano_usd_per_mtok=d.price_output_nano_usd_per_mtok or 0,
                 )
             )
-        snap.deployments.append(dep)
+        snap.models.append(dep)
 
     # Teams, key owners and keys.
     teams = {t.id: t for t in await session.scalars(select(Team))}

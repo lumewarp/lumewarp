@@ -48,13 +48,13 @@ class ReportResponse(_message.Message):
     def __init__(self, accepted: _Optional[int] = ...) -> None: ...
 
 class UsageEvent(_message.Message):
-    __slots__ = ("request_id", "timestamp_unix_ms", "key_id", "team_id", "requested", "deployment", "endpoint", "status", "stream", "prompt_tokens", "completion_tokens", "duration_ms", "config_version", "usage_state", "outcome", "started_at_unix_ms", "cost_nano_usd", "cost_known")
+    __slots__ = ("request_id", "timestamp_unix_ms", "key_id", "team_id", "requested", "model", "endpoint", "status", "stream", "prompt_tokens", "completion_tokens", "duration_ms", "config_version", "usage_state", "outcome", "started_at_unix_ms", "cost_nano_usd", "cost_known")
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     TIMESTAMP_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
     KEY_ID_FIELD_NUMBER: _ClassVar[int]
     TEAM_ID_FIELD_NUMBER: _ClassVar[int]
     REQUESTED_FIELD_NUMBER: _ClassVar[int]
-    DEPLOYMENT_FIELD_NUMBER: _ClassVar[int]
+    MODEL_FIELD_NUMBER: _ClassVar[int]
     ENDPOINT_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
     STREAM_FIELD_NUMBER: _ClassVar[int]
@@ -72,7 +72,7 @@ class UsageEvent(_message.Message):
     key_id: str
     team_id: str
     requested: str
-    deployment: str
+    model: str
     endpoint: str
     status: int
     stream: bool
@@ -85,4 +85,4 @@ class UsageEvent(_message.Message):
     started_at_unix_ms: int
     cost_nano_usd: int
     cost_known: bool
-    def __init__(self, request_id: _Optional[str] = ..., timestamp_unix_ms: _Optional[int] = ..., key_id: _Optional[str] = ..., team_id: _Optional[str] = ..., requested: _Optional[str] = ..., deployment: _Optional[str] = ..., endpoint: _Optional[str] = ..., status: _Optional[int] = ..., stream: _Optional[bool] = ..., prompt_tokens: _Optional[int] = ..., completion_tokens: _Optional[int] = ..., duration_ms: _Optional[int] = ..., config_version: _Optional[int] = ..., usage_state: _Optional[_Union[UsageState, str]] = ..., outcome: _Optional[_Union[RequestOutcome, str]] = ..., started_at_unix_ms: _Optional[int] = ..., cost_nano_usd: _Optional[int] = ..., cost_known: _Optional[bool] = ...) -> None: ...
+    def __init__(self, request_id: _Optional[str] = ..., timestamp_unix_ms: _Optional[int] = ..., key_id: _Optional[str] = ..., team_id: _Optional[str] = ..., requested: _Optional[str] = ..., model: _Optional[str] = ..., endpoint: _Optional[str] = ..., status: _Optional[int] = ..., stream: _Optional[bool] = ..., prompt_tokens: _Optional[int] = ..., completion_tokens: _Optional[int] = ..., duration_ms: _Optional[int] = ..., config_version: _Optional[int] = ..., usage_state: _Optional[_Union[UsageState, str]] = ..., outcome: _Optional[_Union[RequestOutcome, str]] = ..., started_at_unix_ms: _Optional[int] = ..., cost_nano_usd: _Optional[int] = ..., cost_known: _Optional[bool] = ...) -> None: ...

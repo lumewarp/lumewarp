@@ -192,7 +192,7 @@ async fn team_label_in_request_metrics() {
     assert_eq!(
         series(&[
             ("requested", "public"),
-            ("deployment", "d0"),
+            ("model", "d0"),
             ("endpoint", "chat_completions"),
             ("team", "team-a"),
             ("status", "200"),
@@ -202,7 +202,7 @@ async fn team_label_in_request_metrics() {
     assert_eq!(
         series(&[
             ("requested", "another-alias"),
-            ("deployment", ""),
+            ("model", ""),
             ("endpoint", "chat_completions"),
             ("team", "team-a"),
             ("status", "403"),
@@ -212,7 +212,7 @@ async fn team_label_in_request_metrics() {
     assert_eq!(
         series(&[
             ("requested", "public"),
-            ("deployment", "d0"),
+            ("model", "d0"),
             ("endpoint", "chat_completions"),
             ("team", "team-b"),
             ("status", "200"),
@@ -223,7 +223,7 @@ async fn team_label_in_request_metrics() {
     assert_eq!(
         series(&[
             ("requested", ""),
-            ("deployment", ""),
+            ("model", ""),
             ("endpoint", "chat_completions"),
             ("team", ""),
             ("status", "401"),
@@ -260,13 +260,13 @@ async fn authenticated_traffic_without_a_model_keeps_the_team() {
         }
     })
     .await;
-    let series = |route: &str, team: &str, status: &str| {
+    let series = |router: &str, team: &str, status: &str| {
         metrics.value(
             "lumewarp_requests_total",
             &[
                 ("requested", ""),
-                ("deployment", ""),
-                ("endpoint", route),
+                ("model", ""),
+                ("endpoint", router),
                 ("team", team),
                 ("status", status),
             ],

@@ -269,7 +269,7 @@ class Action(StrEnum):
     TEAM_CREATE = "team.create"
     TEAM_DELETE = "team.delete"
     USER_MANAGE = "user.manage"
-    ROUTING_MANAGE = "routing.manage"  # upstreams, deployments, routes, prices
+    ROUTING_MANAGE = "routing.manage"  # upstreams, models, routers, prices
     GATEWAY_TOKEN_MANAGE = "gateway_token.manage"
     GATEWAY_READ = "gateway.read"
     CONFIG_READ = "config.read"  # config versions

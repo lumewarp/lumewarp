@@ -1,0 +1,127 @@
+"""The vocabulary-only migrations preserve existing rows and binary snapshots."""
+
+import hashlib
+import uuid
+
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+from lumewarp_control_plane import migrate
+from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
+from lumewarp_control_plane.compiler.publish import _restore_routing
+from lumewarp_control_plane.models import Model, Router
+from tests.conftest import create_database, drop_database
+
+# Serialized with main's pre-rename snapshot.proto, not the renamed generated types.
+LEGACY_SNAPSHOT = bytes.fromhex(
+    "0801121f0a017510011a18687474703a2f2f6c6f63616c686f73743a383132332f7631"
+    "1a100a01641201751a0661637475616c2007220d0a067075626c696312016418014a0764656661756c74"
+)
+
+
+async def test_0006_rows_survive_rename_roundtrip_and_legacy_rollback():
+    url = await create_database()
+    engine = create_async_engine(url)
+    ids = {name: uuid.uuid4() for name in ("upstream", "model", "router", "fallback", "split")}
+    try:
+        await migrate.upgrade(engine, "0006")
+        async with engine.begin() as conn:
+            statements = (
+                "INSERT INTO scopes (name) VALUES ('default')",
+                "INSERT INTO upstreams (id, name, kind, base_url) "
+                "VALUES (:upstream, 'u', 'openai', 'http://localhost:8123/v1')",
+                "INSERT INTO deployments (id, name, upstream_id, upstream_model, weight) "
+                "VALUES (:model, 'd', :upstream, 'actual', 7)",
+                "INSERT INTO routes (id, model, retry_enabled, retry_max_attempts) "
+                "VALUES (:router, 'public', true, 2), (:fallback, 'backup', false, NULL)",
+                "INSERT INTO route_deployments (route_id, deployment_id, position) "
+                "VALUES (:router, :model, 0), (:fallback, :model, 0)",
+                "INSERT INTO route_fallbacks (route_id, fallback_route_id, position) "
+                "VALUES (:router, :fallback, 0)",
+                "INSERT INTO route_splits (id, route_id, name, weight, position) "
+                "VALUES (:split, :router, 'stable', 100, 0)",
+                "INSERT INTO route_split_deployments (split_id, deployment_id, position) "
+                "VALUES (:split, :model, 0)",
+                "INSERT INTO audit_log (actor_type, action, resource_type, resource_id) "
+                "VALUES ('system', 'deployment.create', 'deployment', "
+                "CAST(CAST(:model AS uuid) AS text)), "
+                "('system', 'route.update', 'route', CAST(CAST(:router AS uuid) AS text))",
+                "INSERT INTO usage_events "
+                "(request_id, gateway_id, ts, key_id, team_id, owner_kind, owner_id, model, "
+                "deployment, route, status, stream, prompt_tokens, completion_tokens, "
+                "cost_nano_usd, cost_known, duration_ms, config_version, usage_state, outcome) "
+                "VALUES (:router, 'gw', now(), :router, :router, 'user', :router, "
+                "'public', 'd', 'chat_completions', 200, false, 10, 5, 42, true, 1, 1, "
+                "'reported', 'completed')",
+            )
+            for sql in statements:
+                await conn.execute(text(sql), ids)
+            await conn.execute(
+                text(
+                    "INSERT INTO config_versions "
+                    "(scope, version, payload, digest, size_bytes, key_count, "
+                    "source_revision, kind) "
+                    "VALUES ('default', 1, :payload, :digest, :size, 0, 0, 'compile')"
+                ),
+                {
+                    "payload": LEGACY_SNAPSHOT,
+                    "digest": hashlib.sha256(LEGACY_SNAPSHOT).digest(),
+                    "size": len(LEGACY_SNAPSHOT),
+                },
+            )
+
+        for _ in range(2):
+            await migrate.upgrade(engine)
+            async with engine.connect() as conn:
+                assert (await conn.execute(text("SELECT id, name, weight FROM models"))).one() == (
+                    ids["model"],
+                    "d",
+                    7,
+                )
+                assert (
+                    await conn.execute(
+                        text("SELECT requested, model, endpoint, cost_nano_usd FROM usage_events")
+                    )
+                ).one() == ("public", "d", "chat_completions", 42)
+                assert (
+                    await conn.execute(
+                        text("SELECT router_id, fallback_router_id, position FROM router_fallbacks")
+                    )
+                ).one() == (ids["router"], ids["fallback"], 0)
+                assert (
+                    await conn.execute(
+                        text("SELECT split_id, model_id, position FROM router_split_models")
+                    )
+                ).one() == (ids["split"], ids["model"], 0)
+                assert set(
+                    (await conn.execute(text("SELECT action, resource_type FROM audit_log"))).all()
+                ) == {("model.create", "model"), ("router.update", "router")}
+                payload, digest = (
+                    await conn.execute(text("SELECT payload, digest FROM config_versions"))
+                ).one()
+                assert payload == LEGACY_SNAPSHOT
+                assert digest == hashlib.sha256(payload).digest()
+                snapshot = pb.Snapshot.FromString(payload)
+                assert snapshot.models[0].name == "d"
+                assert snapshot.routers[0].name == "public"
+                assert list(snapshot.routers[0].models) == ["d"]
+            await migrate.downgrade(engine, "0006")
+            async with engine.connect() as conn:
+                assert (
+                    await conn.execute(text("SELECT model, deployment, route FROM usage_events"))
+                ).one() == ("public", "d", "chat_completions")
+                assert set(
+                    (await conn.execute(text("SELECT action, resource_type FROM audit_log"))).all()
+                ) == {("deployment.create", "deployment"), ("route.update", "route")}
+                assert await conn.scalar(text("SELECT id FROM deployments")) == ids["model"]
+                assert await conn.scalar(text("SELECT count(*) FROM route_deployments")) == 2
+
+        await migrate.upgrade(engine)
+        async with AsyncSession(engine) as session, session.begin():
+            await _restore_routing(session, pb.Snapshot.FromString(LEGACY_SNAPSHOT))
+            assert await session.scalar(select(Model.id)) == ids["model"]
+            assert await session.scalar(select(Router.id)) == ids["router"]
+            assert (await session.scalars(select(Router.name))).all() == ["public"]
+    finally:
+        await engine.dispose()
+        await drop_database(url)

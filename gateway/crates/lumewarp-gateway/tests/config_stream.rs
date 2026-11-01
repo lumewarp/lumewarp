@@ -19,8 +19,8 @@ use fake_cp::{Conn, FakeCp};
 use http_body_util::Full;
 use hyper::Request;
 use lumewarp_proto::config::v1::{
-    config_update::Update, gateway_message::Msg, ApiKey, ConfigUpdate, Delta, Deployment,
-    EffectivePolicy, KeyStatus, ModelRoute, NackCode, Snapshot, Upstream, UpstreamKind,
+    config_update::Update, gateway_message::Msg, ApiKey, ConfigUpdate, Delta, EffectivePolicy,
+    KeyStatus, Model, NackCode, Router, Snapshot, Upstream, UpstreamKind,
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -52,16 +52,16 @@ fn snapshot(version: u64, keys: &[(&str, &str)]) -> Snapshot {
             timeout_ms: 1000,
             ..Default::default()
         }],
-        deployments: vec![Deployment {
+        models: vec![Model {
             name: "d".into(),
             upstream: "u".into(),
             upstream_model: "actual".into(),
             weight: 1,
             price: None,
         }],
-        routes: vec![ModelRoute {
+        routers: vec![Router {
             name: "m1".into(),
-            deployments: vec!["d".into()],
+            models: vec!["d".into()],
             strategy: 1,
             ..Default::default()
         }],
@@ -336,7 +336,7 @@ async fn invalid_snapshot_is_nacked_without_swap() {
     ack(&mut conn, 1, &env.state).await;
 
     let mut bad = snapshot(2, &[("k2", "secret-2")]);
-    bad.routes[0].deployments = vec!["missing".into()];
+    bad.routers[0].models = vec!["missing".into()];
     conn.send(full(bad));
     let nack = recv_nack(&mut conn).await;
     assert_eq!(nack.code(), NackCode::InvalidConfig);

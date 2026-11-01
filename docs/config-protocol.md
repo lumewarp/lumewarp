@@ -14,7 +14,7 @@ Normative rules for `lumewarp.config.v1.ConfigService` and `lumewarp.usage.v1.Us
 1. Every source mutation (API write, budget flip, rollover) and its audit row commit in one DB transaction together with an outbox row "recompile scope".
 2. A single compiler loop per scope (serialized with a Postgres advisory lock) reads source state at one consistent snapshot, compiles, validates and stores `config_versions(scope, version, payload, digest, source_revision, created_at)`. A compile failure leaves the previous version current and marks the outbox row failed with a reason; it never publishes a partial snapshot.
 3. A later compile always sees a later source revision; a slower, older compile must not publish after a newer one (check `source_revision` under the lock).
-4. Rollback re-publishes an older version's **routing** content (upstreams, deployments, routes) as a new version; API keys, teams, policies and statuses are always taken from current source state, so a revoked key can never be revived by a rollback.
+4. Rollback re-publishes an older version's **routing** content (upstreams, models, routers) as a new version; API keys, teams, policies and statuses are always taken from current source state, so a revoked key can never be revived by a rollback.
 5. Retention: keep the latest version, the last 50 versions and anything referenced by a connected session; older payloads may be compacted. A gateway whose base was compacted gets a full snapshot.
 6. Limits: a snapshot larger than 64 MiB or with more than 200k keys fails compilation. gRPC max message size is 64 MiB on both sides.
 
@@ -57,7 +57,7 @@ receive → apply to a private copy → validate (capabilities, references, hash
 - Persist failure → NACK `PERSIST_FAILED`, keep serving the previous version in memory.
 - ACK means "active and durable": a gateway restarted right after ACK boots into that version.
 - Validation failure (including an unresolvable `api_key_ref`) → NACK `INVALID_CONFIG`, keep the previous version.
-- State survives swaps: per-deployment in-flight counters and circuit breakers,
+- State survives swaps: per-model in-flight counters and circuit breakers,
   upstream health, the gateway retry budget, rate-limit buckets (by
   `RateLimitScope.id`) and the metrics registry are process-lifetime. Active
   probes are reconfigured only after an accepted snapshot, not during validation
@@ -65,7 +65,7 @@ receive → apply to a private copy → validate (capabilities, references, hash
   (upstream, URL, `HealthCheck`, credentials): a delta that leaves an upstream's
   probe unchanged (e.g. key-only) keeps that probe running with its failure
   counts. Removing `Upstream.circuit_breaker` resets the breakers of its
-  deployments to closed on activation.
+  models to closed on activation.
 
 ### Routing capabilities
 
@@ -75,8 +75,8 @@ only when its field is set:
 
 | Capability | Fields |
 | --- | --- |
-| `retry` | Present `ModelRoute.retry`, including an empty message |
-| `fallbacks` | Nonempty `ModelRoute.fallbacks` |
+| `retry` | Present `Router.retry`, including an empty message |
+| `fallbacks` | Nonempty `Router.fallbacks` |
 | `health_check` | Present `Upstream.health_check` |
 | `circuit_breaker` | Present `Upstream.circuit_breaker`, including an empty message |
 | `traffic_split` | Nonempty split, non-NONE sticky, or nonempty sticky header |
@@ -87,34 +87,34 @@ Using a field without its capability is `INVALID_CONFIG`; requiring an
 unsupported capability is `UNSUPPORTED_FEATURE`. No field can bypass the gate
 by omitting its capability. Standalone YAML emits the same presence-based
 capabilities. Retry attempts are capped at five; statuses must be 400..599;
-fallback references must exist and cannot name the original route. Health
+fallback references must exist and cannot name the original router. Health
 intervals must be at least 1000 ms with a positive timeout below the interval.
 Fallbacks do not recurse. If all candidates are unhealthy/open, routing tries one
 anyway, except that a half-open trial already in progress is never duplicated
 (another candidate is used instead).
 
-Response `model` contract: responses from the requested route's own
-deployments (`ModelRoute.deployments` / splits, including retries) are
-forwarded unchanged and carry `Deployment.upstream_model`. Successful responses
-served by a deployment of a `ModelRoute.fallbacks` route have their top-level
+Response `model` contract: responses from the requested router's own
+models (`Router.models` / splits, including retries) are
+forwarded unchanged and carry `Model.upstream_model`. Successful responses
+served by a model of a `Router.fallbacks` router have their top-level
 `model` (JSON body, or each SSE event's `data` JSON) rewritten to the public
-`ModelRoute.name` the client requested. Error responses are not rewritten.
+`Router.name` the client requested. Error responses are not rewritten.
 
 The retry budget (`retry_budget_percent`, gateway-local) is funded only by
-requests on routes with `ModelRoute.retry` set. A `Retry-After` cooldown is
+requests on routers with `Router.retry` set. A `Retry-After` cooldown is
 capped at 60 s and at the upstream's `CircuitBreaker.open_ms`. An attempt cut
 short by `RetryPolicy.total_timeout_ms` is not a breaker failure.
 
 Traffic split validation (`INVALID_CONFIG` otherwise): at most 16 splits; names
 unique and 1..=32 characters of `[A-Za-z0-9_.-]` (they are a metric label); each
-split names a nonempty list of distinct existing deployments; split weights sum
-to more than 0. With splits, `ModelRoute.deployments` is ignored and may be
+split names a nonempty list of distinct existing models; split weights sum
+to more than 0. With splits, `Router.models` is ignored and may be
 empty. `STICKY_BY_HEADER` requires a valid `sticky_header`; `sticky_header` with
 any other `sticky` is rejected, as is a non-NONE `sticky` without splits. A
 nonempty `Upstream.metrics_url` must be an absolute http(s) URL without
 userinfo. Sticky assignment uses a fixed-seed hash, so every gateway replica
 puts the same header value / team / key in the same split for the same weights.
-Latency EWMAs and scraped vLLM load are keyed by deployment name and survive
+Latency EWMAs and scraped vLLM load are keyed by model name and survive
 swaps; scrapers, like probes, are diffed only after a snapshot is accepted.
 
 ## Gateway: boot
@@ -139,6 +139,6 @@ swaps; scrapers, like probes, are diffed only after a snapshot is accepted.
 - Events are produced off the request path into a bounded queue (default 100k events). Batches go out every 1 s or at 500 events. Failed reports retry with backoff from the same queue; when the queue is full, new events are dropped and `lumewarp_usage_events_dropped_total` increments.
 - `request_id` is a UUIDv7 generated by the gateway at request start and reused for retries.
 - `Report` validates per event and is idempotent (`ON CONFLICT (request_id) DO NOTHING`). An invalid event (malformed field, unknown or mismatched key hierarchy, a `request_id` reused for different content) is skipped and logged by the control plane; the rest of the batch is recorded and `ReportResponse.accepted` counts what was kept, so one bad event never drops billable usage. Only batch-level errors (gateway identity, more than the configured maximum events) fail the call with `INVALID_ARGUMENT`. Per new event the control plane adds the cost once to the team total and once to the owner total for the event's UTC calendar month, in the same transaction, then evaluates budgets.
-- `requested` and `deployment` are required except for `REQUEST_OUTCOME_REJECTED` events: a request rejected at authentication has no model yet (the body is not read), and one rejected by policy (403/429) has no deployment. They are stored as empty strings.
+- `requested` and `model` are required except for `REQUEST_OUTCOME_REJECTED` events: a request rejected at authentication has no model yet (the body is not read), and one rejected by policy (403/429) has no model. They are stored as empty strings.
 - Budget enforcement is **eventual**: once usage is ingested, an exhausted scope flips affected keys to `BUDGET_EXCEEDED` and a new version is published within 5 s. Lost events (gateway crash, full queue) are not recovered in P1, and streams in flight when a budget runs out are not cut.
 - Month rollover is driven by a scheduler (runs at startup and at each UTC month boundary), not by incoming usage. While the control plane is down, blocked keys stay blocked.

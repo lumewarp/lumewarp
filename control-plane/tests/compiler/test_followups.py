@@ -8,16 +8,16 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError
 
 from lumewarp_control_plane.compiler import publish as publisher
-from lumewarp_control_plane.models import ConfigOutbox, ConfigVersion, Deployment, OutboxStatus
+from lumewarp_control_plane.models import ConfigOutbox, ConfigVersion, Model, OutboxStatus
 from lumewarp_control_plane.settings import Settings
 from lumewarp_control_plane.usage import _rollover_once
-from tests.compiler.helpers import SCOPE, add_route, seed_scope, touch
+from tests.compiler.helpers import SCOPE, add_router, seed_scope, touch
 
 
 async def test_restart_and_noop_recompile_keep_version(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
-        await add_route(s, "m", [("d", None)])
+        await add_router(s, "m", [("d", None)])
     await touch(factory)
     now = datetime(2026, 10, 10, tzinfo=UTC)
     assert (
@@ -49,7 +49,7 @@ async def test_restart_and_noop_recompile_keep_version(factory) -> None:
         assert all(r.status == OutboxStatus.DONE and r.published_version == 1 for r in rows)
 
     async with factory() as s, s.begin():
-        await s.execute(update(Deployment).values(weight=3))
+        await s.execute(update(Model).values(weight=3))
     await touch(factory)
     assert await publisher.publish_pending(factory, SCOPE, require_local_membership=True) == 2
 
@@ -86,7 +86,7 @@ async def test_config_insert_serialization_conflict_retries_fresh_snapshot(
         attempts += 1
         if attempts == 1:
             async with factory() as s, s.begin():
-                await add_route(s, "new", [("new-d", None)])
+                await add_router(s, "new", [("new-d", None)])
             await touch(factory)
         try:
             return await original(*args, **kwargs)
@@ -104,7 +104,7 @@ async def test_config_insert_serialization_conflict_retries_fresh_snapshot(
         assert version.source_revision == 2
         from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 
-        assert [r.name for r in pb.Snapshot.FromString(version.payload).routes] == ["new"]
+        assert [r.name for r in pb.Snapshot.FromString(version.payload).routers] == ["new"]
         assert all(r.status == OutboxStatus.DONE for r in await s.scalars(select(ConfigOutbox)))
     # The session advisory lock was released, and no work is left.
     assert await publisher.publish_pending(factory, SCOPE, require_local_membership=True) is None

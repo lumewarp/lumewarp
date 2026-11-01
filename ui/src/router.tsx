@@ -4,12 +4,12 @@ import { getCsrfToken } from "./auth";
 import { Layout } from "./components/Layout";
 import { Audit } from "./pages/Audit";
 import { Config } from "./pages/Config";
-import { Deployments } from "./pages/Deployments";
+import { Models } from "./pages/Models";
 import { Gateways } from "./pages/Gateways";
 import { Keys } from "./pages/Keys";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
-import { Routes } from "./pages/Routes";
+import { Routers } from "./pages/Routers";
 import { Settings } from "./pages/Settings";
 import { TeamDetail } from "./pages/TeamDetail";
 import { Teams } from "./pages/Teams";
@@ -54,8 +54,8 @@ const routeTree = rootRoute.addChildren([
     teamDetailRoute,
     page("/users", Users),
     page("/keys", Keys),
-    page("/routes", Routes),
-    page("/deployments", Deployments),
+    page("/routers", Routers),
+    page("/models", Models),
     page("/upstreams", Upstreams),
     page("/usage", Usage),
     page("/audit", Audit),

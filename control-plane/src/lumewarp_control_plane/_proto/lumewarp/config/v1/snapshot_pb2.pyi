@@ -67,11 +67,11 @@ KEY_STATUS_BUDGET_EXCEEDED: KeyStatus
 KEY_STATUS_SUSPENDED: KeyStatus
 
 class Snapshot(_message.Message):
-    __slots__ = ("version", "upstreams", "deployments", "routes", "api_keys", "teams", "created_at_unix_ms", "required_capabilities", "scope")
+    __slots__ = ("version", "upstreams", "models", "routers", "api_keys", "teams", "created_at_unix_ms", "required_capabilities", "scope")
     VERSION_FIELD_NUMBER: _ClassVar[int]
     UPSTREAMS_FIELD_NUMBER: _ClassVar[int]
-    DEPLOYMENTS_FIELD_NUMBER: _ClassVar[int]
-    ROUTES_FIELD_NUMBER: _ClassVar[int]
+    MODELS_FIELD_NUMBER: _ClassVar[int]
+    ROUTERS_FIELD_NUMBER: _ClassVar[int]
     API_KEYS_FIELD_NUMBER: _ClassVar[int]
     TEAMS_FIELD_NUMBER: _ClassVar[int]
     CREATED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
@@ -79,14 +79,14 @@ class Snapshot(_message.Message):
     SCOPE_FIELD_NUMBER: _ClassVar[int]
     version: int
     upstreams: _containers.RepeatedCompositeFieldContainer[Upstream]
-    deployments: _containers.RepeatedCompositeFieldContainer[Deployment]
-    routes: _containers.RepeatedCompositeFieldContainer[ModelRoute]
+    models: _containers.RepeatedCompositeFieldContainer[Model]
+    routers: _containers.RepeatedCompositeFieldContainer[Router]
     api_keys: _containers.RepeatedCompositeFieldContainer[ApiKey]
     teams: _containers.RepeatedCompositeFieldContainer[Team]
     created_at_unix_ms: int
     required_capabilities: _containers.RepeatedScalarFieldContainer[str]
     scope: str
-    def __init__(self, version: _Optional[int] = ..., upstreams: _Optional[_Iterable[_Union[Upstream, _Mapping]]] = ..., deployments: _Optional[_Iterable[_Union[Deployment, _Mapping]]] = ..., routes: _Optional[_Iterable[_Union[ModelRoute, _Mapping]]] = ..., api_keys: _Optional[_Iterable[_Union[ApiKey, _Mapping]]] = ..., teams: _Optional[_Iterable[_Union[Team, _Mapping]]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ...) -> None: ...
+    def __init__(self, version: _Optional[int] = ..., upstreams: _Optional[_Iterable[_Union[Upstream, _Mapping]]] = ..., models: _Optional[_Iterable[_Union[Model, _Mapping]]] = ..., routers: _Optional[_Iterable[_Union[Router, _Mapping]]] = ..., api_keys: _Optional[_Iterable[_Union[ApiKey, _Mapping]]] = ..., teams: _Optional[_Iterable[_Union[Team, _Mapping]]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ...) -> None: ...
 
 class Upstream(_message.Message):
     __slots__ = ("name", "kind", "base_url", "api_key_ref", "timeout_ms", "stream_usage_mode", "health_check", "circuit_breaker", "metrics_url")
@@ -132,7 +132,7 @@ class CircuitBreaker(_message.Message):
     open_ms: int
     def __init__(self, failure_threshold: _Optional[int] = ..., open_ms: _Optional[int] = ...) -> None: ...
 
-class Deployment(_message.Message):
+class Model(_message.Message):
     __slots__ = ("name", "upstream", "upstream_model", "weight", "price")
     NAME_FIELD_NUMBER: _ClassVar[int]
     UPSTREAM_FIELD_NUMBER: _ClassVar[int]
@@ -154,10 +154,10 @@ class Price(_message.Message):
     output_nano_usd_per_mtok: int
     def __init__(self, input_nano_usd_per_mtok: _Optional[int] = ..., output_nano_usd_per_mtok: _Optional[int] = ...) -> None: ...
 
-class ModelRoute(_message.Message):
-    __slots__ = ("name", "deployments", "strategy", "retry", "fallbacks", "traffic_split", "sticky", "sticky_header", "custom_strategy", "strategy_params_json")
+class Router(_message.Message):
+    __slots__ = ("name", "models", "strategy", "retry", "fallbacks", "traffic_split", "sticky", "sticky_header", "custom_strategy", "strategy_params_json")
     NAME_FIELD_NUMBER: _ClassVar[int]
-    DEPLOYMENTS_FIELD_NUMBER: _ClassVar[int]
+    MODELS_FIELD_NUMBER: _ClassVar[int]
     STRATEGY_FIELD_NUMBER: _ClassVar[int]
     RETRY_FIELD_NUMBER: _ClassVar[int]
     FALLBACKS_FIELD_NUMBER: _ClassVar[int]
@@ -167,7 +167,7 @@ class ModelRoute(_message.Message):
     CUSTOM_STRATEGY_FIELD_NUMBER: _ClassVar[int]
     STRATEGY_PARAMS_JSON_FIELD_NUMBER: _ClassVar[int]
     name: str
-    deployments: _containers.RepeatedScalarFieldContainer[str]
+    models: _containers.RepeatedScalarFieldContainer[str]
     strategy: RoutingStrategy
     retry: RetryPolicy
     fallbacks: _containers.RepeatedScalarFieldContainer[str]
@@ -176,7 +176,7 @@ class ModelRoute(_message.Message):
     sticky_header: str
     custom_strategy: str
     strategy_params_json: str
-    def __init__(self, name: _Optional[str] = ..., deployments: _Optional[_Iterable[str]] = ..., strategy: _Optional[_Union[RoutingStrategy, str]] = ..., retry: _Optional[_Union[RetryPolicy, _Mapping]] = ..., fallbacks: _Optional[_Iterable[str]] = ..., traffic_split: _Optional[_Iterable[_Union[TrafficSplit, _Mapping]]] = ..., sticky: _Optional[_Union[StickyBy, str]] = ..., sticky_header: _Optional[str] = ..., custom_strategy: _Optional[str] = ..., strategy_params_json: _Optional[str] = ...) -> None: ...
+    def __init__(self, name: _Optional[str] = ..., models: _Optional[_Iterable[str]] = ..., strategy: _Optional[_Union[RoutingStrategy, str]] = ..., retry: _Optional[_Union[RetryPolicy, _Mapping]] = ..., fallbacks: _Optional[_Iterable[str]] = ..., traffic_split: _Optional[_Iterable[_Union[TrafficSplit, _Mapping]]] = ..., sticky: _Optional[_Union[StickyBy, str]] = ..., sticky_header: _Optional[str] = ..., custom_strategy: _Optional[str] = ..., strategy_params_json: _Optional[str] = ...) -> None: ...
 
 class RetryPolicy(_message.Message):
     __slots__ = ("max_attempts", "retry_on_status", "total_timeout_ms")
@@ -189,14 +189,14 @@ class RetryPolicy(_message.Message):
     def __init__(self, max_attempts: _Optional[int] = ..., retry_on_status: _Optional[_Iterable[int]] = ..., total_timeout_ms: _Optional[int] = ...) -> None: ...
 
 class TrafficSplit(_message.Message):
-    __slots__ = ("name", "deployments", "weight")
+    __slots__ = ("name", "models", "weight")
     NAME_FIELD_NUMBER: _ClassVar[int]
-    DEPLOYMENTS_FIELD_NUMBER: _ClassVar[int]
+    MODELS_FIELD_NUMBER: _ClassVar[int]
     WEIGHT_FIELD_NUMBER: _ClassVar[int]
     name: str
-    deployments: _containers.RepeatedScalarFieldContainer[str]
+    models: _containers.RepeatedScalarFieldContainer[str]
     weight: int
-    def __init__(self, name: _Optional[str] = ..., deployments: _Optional[_Iterable[str]] = ..., weight: _Optional[int] = ...) -> None: ...
+    def __init__(self, name: _Optional[str] = ..., models: _Optional[_Iterable[str]] = ..., weight: _Optional[int] = ...) -> None: ...
 
 class Team(_message.Message):
     __slots__ = ("id", "name")

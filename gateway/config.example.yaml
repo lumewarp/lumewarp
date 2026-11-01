@@ -18,7 +18,7 @@ upstreams:
     # Relative to base_url: /v1/models. Use a prefix appropriate for your server.
     health_check: {path: /models, interval_ms: 5000, timeout_ms: 1000}
     circuit_breaker: {failure_threshold: 5, open_ms: 30000}
-    # Scraped every second by `vllm_load` routes. Empty = base_url minus a
+    # Scraped every second by `vllm_load` routers. Empty = base_url minus a
     # trailing /v1, plus /metrics.
     # metrics_url: http://localhost:8000/metrics
   - name: openai
@@ -26,7 +26,7 @@ upstreams:
     base_url: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
 
-deployments:
+models:
   - name: llama-vllm
     upstream: vllm-local
     upstream_model: meta-llama/Llama-3.1-8B-Instruct
@@ -37,19 +37,19 @@ deployments:
     # Omit `price` when unknown; explicit "0" means free.
     price: { input_usd_per_mtok: "0.15", output_usd_per_mtok: "0.60" }
 
-routes:
+routers:
   - name: llama-3.1-8b
-    deployments: [llama-vllm]
+    models: [llama-vllm]
     retry: {max_attempts: 2, retry_on_status: [429, 502, 503, 504], total_timeout_ms: 30000}
     fallbacks: [gpt-4o-mini]
   - name: gpt-4o-mini
-    deployments: [gpt-4o-mini]
-  # Load-aware routing and a sticky 10% canary (needs a second vLLM deployment):
+    models: [gpt-4o-mini]
+  # Load-aware routing and a sticky 10% canary (needs a second vLLM model):
   # - name: llama-canary
   #   strategy: vllm_load          # or lowest_latency, weighted, least_in_flight
   #   traffic_split:
-  #     - {name: stable, deployments: [llama-vllm], weight: 90}
-  #     - {name: canary, deployments: [llama-vllm-next], weight: 10}
+  #     - {name: stable, models: [llama-vllm], weight: 90}
+  #     - {name: canary, models: [llama-vllm-next], weight: 10}
   #   sticky: header               # none | header | team | key
   #   sticky_header: x-session-id
 

@@ -78,7 +78,7 @@ ModelName = Annotated[str, Field(min_length=1, max_length=400), AfterValidator(_
 
 
 class ApiModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
 
 class ErrorDetail(BaseModel):
@@ -93,7 +93,7 @@ class ErrorBody(BaseModel):
 
 
 class ReadModel(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
 
 
 class Page[T](ReadModel):
@@ -459,7 +459,7 @@ class UpstreamOut(ReadModel):
         }
 
 
-class DeploymentCreate(ApiModel):
+class ModelCreate(ApiModel):
     name: Name
     upstream_id: uuid.UUID
     upstream_model: str = Field(min_length=1, max_length=400)
@@ -468,7 +468,7 @@ class DeploymentCreate(ApiModel):
     price_output_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
-    def _price_pair(self) -> DeploymentCreate:
+    def _price_pair(self) -> ModelCreate:
         if (self.price_input_nano_usd_per_mtok is None) != (
             self.price_output_nano_usd_per_mtok is None
         ):
@@ -476,7 +476,7 @@ class DeploymentCreate(ApiModel):
         return self
 
 
-class DeploymentUpdate(ApiModel):
+class ModelUpdate(ApiModel):
     name: Name | None = None
     upstream_id: uuid.UUID | None = None
     upstream_model: str | None = Field(default=None, min_length=1, max_length=400)
@@ -485,7 +485,7 @@ class DeploymentUpdate(ApiModel):
     price_output_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
 
 
-class DeploymentOut(ReadModel):
+class ModelOut(ReadModel):
     id: uuid.UUID
     name: str
     upstream_id: uuid.UUID
@@ -534,7 +534,7 @@ class RetryPolicyOut(ReadModel):
 class TrafficSplitIn(ApiModel):
     name: str = Field(description="1..32 of [A-Za-z0-9_.-]; a metric label.")
     weight: int = Field(ge=0, le=INT32_MAX, description="Share = weight / sum(weights).")
-    deployment_ids: list[uuid.UUID] = Field(min_length=1)
+    model_ids: list[uuid.UUID] = Field(min_length=1)
 
     @field_validator("name")
     @classmethod
@@ -543,18 +543,18 @@ class TrafficSplitIn(ApiModel):
             raise ValueError("split name must be 1..32 characters of [A-Za-z0-9_.-]")
         return value
 
-    @field_validator("deployment_ids")
+    @field_validator("model_ids")
     @classmethod
     def _unique(cls, value: list[uuid.UUID]) -> list[uuid.UUID]:
         if len(set(value)) != len(value):
-            raise ValueError("a split lists a deployment twice")
+            raise ValueError("a split lists a model twice")
         return value
 
 
 class TrafficSplitOut(ReadModel):
     name: str
     weight: int
-    deployment_ids: list[uuid.UUID]
+    model_ids: list[uuid.UUID]
 
 
 def _check_splits(value: list[TrafficSplitIn] | None) -> list[TrafficSplitIn] | None:
@@ -582,18 +582,18 @@ StickyHeader = Annotated[str, Field(max_length=200)]
 Splits = Annotated[list[TrafficSplitIn], AfterValidator(_check_splits)]
 
 
-class RouteCreate(ApiModel):
+class RouterCreate(ApiModel):
     name: ModelName
     strategy: RoutingStrategy = RoutingStrategy.WEIGHTED
     custom_strategy: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,62}$")
     strategy_params: dict[str, Any] = Field(default_factory=dict)
-    deployment_ids: list[uuid.UUID] = Field(
+    model_ids: list[uuid.UUID] = Field(
         default_factory=list,
-        description="Ordered deployments; may be empty only when traffic_split is set.",
+        description="Ordered models; may be empty only when traffic_split is set.",
     )
     retry: RetryPolicyIn | None = None
-    fallback_route_ids: list[uuid.UUID] = Field(
-        default_factory=list, description="Routes tried in order once this route failed."
+    fallback_router_ids: list[uuid.UUID] = Field(
+        default_factory=list, description="Routers tried in order once this router failed."
     )
     traffic_split: Splits = Field(default_factory=list)
     sticky: StickyBy = StickyBy.NONE
@@ -605,7 +605,7 @@ class RouteCreate(ApiModel):
         return _sticky_header(value)
 
 
-class RouteUpdate(ApiModel):
+class RouterUpdate(ApiModel):
     """PATCH: omitted fields are unchanged; lists replace the stored list; `retry` and
     `sticky_header` accept null to remove the setting.
     """
@@ -614,9 +614,9 @@ class RouteUpdate(ApiModel):
     strategy: RoutingStrategy | None = None
     custom_strategy: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,62}$")
     strategy_params: dict[str, Any] | None = None
-    deployment_ids: list[uuid.UUID] | None = None
+    model_ids: list[uuid.UUID] | None = None
     retry: RetryPolicyIn | None = None
-    fallback_route_ids: list[uuid.UUID] | None = None
+    fallback_router_ids: list[uuid.UUID] | None = None
     traffic_split: Splits | None = None
     sticky: StickyBy | None = None
     sticky_header: StickyHeader | None = None
@@ -627,20 +627,20 @@ class RouteUpdate(ApiModel):
         return _sticky_header(value)
 
 
-class RouteDeploymentOut(ReadModel):
-    deployment_id: uuid.UUID
+class RouterModelOut(ReadModel):
+    model_id: uuid.UUID
     position: int
 
 
-class RouteOut(ReadModel):
+class RouterOut(ReadModel):
     id: uuid.UUID
     name: str
     strategy: RoutingStrategy
     custom_strategy: str | None = None
     strategy_params: dict[str, Any] = Field(default_factory=dict)
-    deployments: list[RouteDeploymentOut]
+    models: list[RouterModelOut]
     retry: RetryPolicyOut | None
-    fallback_route_ids: list[uuid.UUID]
+    fallback_router_ids: list[uuid.UUID]
     traffic_split: list[TrafficSplitOut]
     sticky: StickyBy
     sticky_header: str | None
@@ -746,7 +746,7 @@ class UsageEventOut(ReadModel):
     owner_kind: KeyOwnerKind
     owner_id: uuid.UUID
     requested: str
-    deployment: str
+    model: str
     endpoint: str
     status: int
     stream: bool

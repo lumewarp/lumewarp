@@ -15,9 +15,9 @@ from lumewarp_control_plane.models import (
     ConfigOutbox,
     ConfigVersion,
     ConfigVersionKind,
-    Deployment,
     KeyLifecycle,
     KeyOwnerKind,
+    Model,
     ModelAccess,
     RequestOutcome,
     Scope,
@@ -53,7 +53,7 @@ def _event(request_id: uuid.UUID, ids, cost: int = 100) -> dict:
         owner_kind=KeyOwnerKind.USER,
         owner_id=owner.id,
         requested="m",
-        deployment="d",
+        model="d",
         endpoint="chat_completions",
         status=200,
         stream=False,
@@ -226,9 +226,7 @@ async def test_routing_checks(session: AsyncSession) -> None:
     await session.flush()
     await _fails(
         session,
-        Deployment(
-            name="d1", upstream_id=up.id, upstream_model="m", price_input_nano_usd_per_mtok=1
-        ),
+        Model(name="d1", upstream_id=up.id, upstream_model="m", price_input_nano_usd_per_mtok=1),
     )
     await _fails(
         session, Upstream(name="u2", kind=UpstreamKind.OPENAI, base_url="x", api_key_ref="$(rm)")

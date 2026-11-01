@@ -13,7 +13,7 @@ import httpx
 from p2_events import DatabaseEvents
 from stack import free_port, pg, wait_for
 
-BAD_WEIGHT = 1000  # first attempts land on the bad deployment ~always
+BAD_WEIGHT = 1000  # first attempts land on the bad model ~always
 
 
 def test_unregistered_custom_strategy_nacks_and_keeps_last_snapshot(stack):
@@ -29,13 +29,13 @@ def test_unregistered_custom_strategy_nacks_and_keeps_last_snapshot(stack):
             c.startswith("strategy:") for c in stack.gateway_status()["capabilities"]
         )
         upstream = _upstream_id(stack, "mock")
-        dep = _deployment(stack, "custom-deployment", upstream)
+        dep = _model(stack, "custom-model", upstream)
         stack.ok(
             "POST",
-            "/routes",
+            "/routers",
             json={
                 "name": "custom-test",
-                "deployment_ids": [dep],
+                "model_ids": [dep],
                 "strategy": "custom",
                 "custom_strategy": "header_pin",
                 "strategy_params": {"headers": ["x-pin"]},
@@ -83,10 +83,10 @@ def _bad_upstream(stack, **settings) -> str:
     )["id"]
 
 
-def _deployment(stack, name: str, upstream_id: str, weight: int = 1) -> str:
+def _model(stack, name: str, upstream_id: str, weight: int = 1) -> str:
     return stack.ok(
         "POST",
-        "/deployments",
+        "/models",
         json={
             "name": name,
             "upstream_id": upstream_id,
@@ -99,7 +99,7 @@ def _deployment(stack, name: str, upstream_id: str, weight: int = 1) -> str:
 
 
 def _wait_served(gw, key: str, *models: str) -> None:
-    """Wait until the gateway's snapshot has the routes (no inference traffic)."""
+    """Wait until the gateway's snapshot has the routers (no inference traffic)."""
 
     def listed():
         r = httpx.get(
@@ -121,14 +121,14 @@ def _series(gw, name: str) -> dict[str, float]:
     return out
 
 
-def _attempts(gw, deployment: str, outcome: str | None = None) -> float:
-    """Requests actually sent to `deployment` (or with exactly `outcome`). An open
+def _attempts(gw, model: str, outcome: str | None = None) -> float:
+    """Requests actually sent to `model` (or with exactly `outcome`). An open
     breaker skips a candidate with outcome="circuit_open", which sends nothing.
     """
     return sum(
         v
         for labels, v in _series(gw, "lumewarp_upstream_attempts_total").items()
-        if f'deployment="{deployment}"' in labels
+        if f'model="{model}"' in labels
         and (
             f'outcome="{outcome}"' in labels
             if outcome
@@ -137,11 +137,11 @@ def _attempts(gw, deployment: str, outcome: str | None = None) -> float:
     )
 
 
-def _failed_attempts(gw, deployment: str) -> float:
+def _failed_attempts(gw, model: str) -> float:
     return sum(
         v
         for labels, v in _series(gw, "lumewarp_upstream_attempts_total").items()
-        if f'deployment="{deployment}"' in labels
+        if f'model="{model}"' in labels
         and not any(f'outcome="{o}"' in labels for o in ("success", "circuit_open"))
     )
 
@@ -154,18 +154,18 @@ def _settled_usage(stack, gw, count: int) -> list:
     return rows
 
 
-def test_retry_to_second_deployment_records_one_usage_event(stack):
+def test_retry_to_second_model_records_one_usage_event(stack):
     seeded = stack.seed()
     bad = _bad_upstream(stack)
     good = _upstream_id(stack, "mock")
     ids = [
-        _deployment(stack, "bad-a", bad, BAD_WEIGHT),
-        _deployment(stack, "good-a", good),
+        _model(stack, "bad-a", bad, BAD_WEIGHT),
+        _model(stack, "good-a", good),
     ]
     stack.ok(
         "POST",
-        "/routes",
-        json={"name": "retry", "deployment_ids": ids, "retry": {"max_attempts": 2}},
+        "/routers",
+        json={"name": "retry", "model_ids": ids, "retry": {"max_attempts": 2}},
     )
     gw = stack.start_gateway()
     _wait_served(gw, seeded.a.secret, "retry")
@@ -173,12 +173,12 @@ def test_retry_to_second_deployment_records_one_usage_event(stack):
     for _ in range(3):
         r = gw.chat(seeded.a.secret, model="retry")
         assert r.status_code == 200, r.text
-    assert _failed_attempts(gw, "bad-a") >= 1, "the bad deployment was tried first"
+    assert _failed_attempts(gw, "bad-a") >= 1, "the bad model was tried first"
     assert _attempts(gw, "good-a") == 3
     rows = _settled_usage(stack, gw, 3)
     assert len(rows) == 3, "exactly one usage event per client request"
     for row in rows:
-        assert (row["status"], row["requested"], row["deployment"]) == (
+        assert (row["status"], row["requested"], row["model"]) == (
             200,
             "retry",
             "good-a",
@@ -186,7 +186,7 @@ def test_retry_to_second_deployment_records_one_usage_event(stack):
         assert row["cost_known"] and row["prompt_tokens"] > 0
 
 
-def test_fallback_route_serves_with_original_model(stack):
+def test_fallback_router_serves_with_original_model(stack):
     seeded = stack.seed()
     bad = _bad_upstream(stack)
     good = _upstream_id(stack, "mock")
@@ -203,27 +203,27 @@ def test_fallback_route_serves_with_original_model(stack):
     )["id"]
     backup = stack.ok(
         "POST",
-        "/routes",
+        "/routers",
         json={
             "name": "backup",
-            "deployment_ids": [_deployment(stack, "good-a", good)],
+            "model_ids": [_model(stack, "good-a", good)],
         },
     )
     primaries = {}
     for model, upstream in (("primary", bad), ("primary-down", down)):
         primaries[model] = stack.ok(
             "POST",
-            "/routes",
+            "/routers",
             json={
                 "name": model,
-                "deployment_ids": [_deployment(stack, f"{model}-a", upstream)],
-                # Fallbacks share the route's attempt budget: primary + fallback.
+                "model_ids": [_model(stack, f"{model}-a", upstream)],
+                # Fallbacks share the router's attempt budget: primary + fallback.
                 "retry": {"max_attempts": 2},
-                "fallback_route_ids": [backup["id"]],
+                "fallback_router_ids": [backup["id"]],
             },
         )
     # The backup cannot be deleted while it is a fallback.
-    assert stack.api("DELETE", f"/routes/{backup['id']}").status_code == 409
+    assert stack.api("DELETE", f"/routers/{backup['id']}").status_code == 409
     gw = stack.start_gateway()
     _wait_served(gw, seeded.a.secret, "primary", "primary-down", "backup")
 
@@ -241,20 +241,20 @@ def test_fallback_route_serves_with_original_model(stack):
     assert events and all(e["model"] == "primary-down" for e in events)
 
     fallbacks = _series(gw, "lumewarp_fallbacks_total")
-    assert fallbacks.get('{router="primary",fallback_model="backup"}') == 1, fallbacks
-    assert fallbacks.get('{router="primary-down",fallback_model="backup"}') == 2, (
+    assert fallbacks.get('{router="primary",model="backup"}') == 1, fallbacks
+    assert fallbacks.get('{router="primary-down",model="backup"}') == 2, (
         fallbacks
     )
     assert _attempts(gw, "primary-a", "retryable_status") == 1
     assert _attempts(gw, "primary-down-a", "connect_error") == 2
     rows = _settled_usage(stack, gw, 3)
     assert len(rows) == 3, "one usage event per client request"
-    assert sorted((r["requested"], r["deployment"], r["status"]) for r in rows) == [
+    assert sorted((r["requested"], r["model"], r["status"]) for r in rows) == [
         ("primary", "good-a", 200),
         ("primary-down", "good-a", 200),
         ("primary-down", "good-a", 200),
     ]
-    assert primaries["primary"]["fallback_route_ids"] == [backup["id"]]
+    assert primaries["primary"]["fallback_router_ids"] == [backup["id"]]
 
 
 def test_uri_contract_snapshot_is_accepted_by_gateway(stack):
@@ -341,13 +341,13 @@ def test_circuit_breaker_opens_and_stops_traffic(stack):
     )
     good = _upstream_id(stack, "mock")
     ids = [
-        _deployment(stack, "bad-a", bad, BAD_WEIGHT),
-        _deployment(stack, "good-a", good),
+        _model(stack, "bad-a", bad, BAD_WEIGHT),
+        _model(stack, "good-a", good),
     ]
-    stack.ok("POST", "/routes", json={"name": "cb", "deployment_ids": ids})
+    stack.ok("POST", "/routers", json={"name": "cb", "model_ids": ids})
     gw = stack.start_gateway()
     _wait_served(gw, seeded.a.secret, "cb")
-    state = 'lumewarp_upstream_circuit_state{deployment="bad-a"}'
+    state = 'lumewarp_upstream_circuit_state{model="bad-a"}'
 
     statuses = []
     for _ in range(threshold * 10):

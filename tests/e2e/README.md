@@ -13,10 +13,10 @@ Environment: `E2E_PG_URL` (server DSN, default dev Postgres 127.0.0.1:55432), `E
 
 `test_p2_routing.py` (collected by `scripts/e2e-p1.sh` and `scripts/e2e-p2.sh`; no IdP) configures
 P2 routing over the admin API against a second mock started with `--fail-every 1` (always 503)
-and a closed port: retry to a second deployment with exactly one usage event for the final
-deployment; fallback routes (503 and connect error, streaming too) answering with the client's
+and a closed port: retry to a second model with exactly one usage event for the final
+model; fallback routers (503 and connect error, streaming too) answering with the client's
 model name; a circuit breaker reaching `lumewarp_upstream_circuit_state=2` after N failures, after
-which the failing deployment gets no attempts (`outcome="circuit_open"` only).
+which the failing model gets no attempts (`outcome="circuit_open"` only).
 
 ## P2: real OIDC and authorization exit gate
 

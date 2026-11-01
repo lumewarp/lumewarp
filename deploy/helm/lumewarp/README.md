@@ -234,7 +234,7 @@ reconciler's first success, so a never-successful reconciler still alerts. With
 Dashboard filters apply only where metric labels exist: tokens support team and
 model, while spend supports team only. Spend panels explicitly cover all models;
 model-level cost cannot be derived from the current metrics contract. Latency
-histograms have no team label, and global pipeline and deployment gauges are not
+histograms have no team label, and global pipeline and model gauges are not
 filtered by team. Gauge observations of the same vLLM upstream are aggregated
 with max/min, not summed across gateways.
 

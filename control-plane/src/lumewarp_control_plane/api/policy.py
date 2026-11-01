@@ -240,6 +240,6 @@ async def validate_owners_after_team_update(
         check_narrowing(team_eff, policy_of(account), f"service_accounts.{account.id}")
 
 
-def ensure_unique_ids(ids: list[uuid.UUID], field: str = "deployment_ids") -> None:
+def ensure_unique_ids(ids: list[uuid.UUID], field: str = "model_ids") -> None:
     if len(set(ids)) != len(ids):
         raise violation(field, "must not contain duplicate ids")

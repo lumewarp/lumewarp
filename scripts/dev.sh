@@ -14,7 +14,7 @@
 #
 # Ports: UI 5173 (Vite, proxies /api to the CP), CP 8091 (+ gRPC 50051, metrics 9465),
 # gateway 4000 (+ admin 9464), mock upstream 9100.
-# An empty database gets a demo route `demo`, a team `demo` and one key; the key secret
+# An empty database gets a demo router `demo`, a team `demo` and one key; the key secret
 # is kept in .dev/demo-key. Each start issues a fresh gateway token (.dev/env).
 set -euo pipefail
 
@@ -129,11 +129,11 @@ seed() {
     "$cp_url/api/v1/session/break-glass" >/dev/null
   admin_csrf="$(curl -fsS -b "$state/admin-cookie" "$cp_url/api/v1/session" | jq -r .csrf_token)"
   [[ $(api GET /upstreams | jq '.items | length') == 0 ]] || return 0
-  log "seeding demo upstream, route, team and key"
+  log "seeding demo upstream, router, team and key"
   local up dep team sa
   up="$(api POST /upstreams '{"name":"mock","kind":"openai_compatible","base_url":"http://127.0.0.1:9100/v1"}' | jq -r .id)"
-  dep="$(api POST /deployments "{\"name\":\"mock-local\",\"upstream_id\":\"$up\",\"upstream_model\":\"mock\"}" | jq -r .id)"
-  api POST /routes "{\"name\":\"demo\",\"deployment_ids\":[\"$dep\"]}" >/dev/null
+  dep="$(api POST /models "{\"name\":\"mock-local\",\"upstream_id\":\"$up\",\"upstream_model\":\"mock\"}" | jq -r .id)"
+  api POST /routers "{\"name\":\"demo\",\"model_ids\":[\"$dep\"]}" >/dev/null
   team="$(api POST /teams '{"name":"demo","model_access":"all"}' | jq -r .id)"
   sa="$(api POST "/teams/$team/service-accounts" '{"name":"chat"}' | jq -r .id)"
   api POST "/teams/$team/keys" "{\"name\":\"demo\",\"service_account_id\":\"$sa\"}" \

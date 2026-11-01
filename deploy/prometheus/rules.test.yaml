@@ -40,7 +40,7 @@
               "exp_annotations": {
                 "summary": "Gateway 5xx ratio is high",
                 "description": "Model m exceeds 5% 5xx responses for 5 minutes at >=1 request/s.",
-                "runbook": "Check upstream errors and routing dashboard; restore a healthy deployment or roll back routing."
+                "runbook": "Check upstream errors and routing dashboard; restore a healthy model or roll back routing."
               }
             }
           ]
@@ -103,7 +103,7 @@
               },
               "exp_annotations": {
                 "summary": "Gateway p99 overhead exceeds budget",
-                "description": "Route chat_completions has p99 processing overhead above 10 ms for 10 minutes.",
+                "description": "Router chat_completions has p99 processing overhead above 10 ms for 10 minutes.",
                 "runbook": "Check gateway CPU throttling, saturation and recent gateway releases; compare the benchmark baseline."
               }
             }
@@ -141,15 +141,15 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",deployment=\"d\",le=\"1\"}",
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",model=\"d\",le=\"1\"}",
           "values": "0+0x40"
         },
         {
-          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",deployment=\"d\",le=\"10\"}",
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",model=\"d\",le=\"10\"}",
           "values": "0+60x40"
         },
         {
-          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",deployment=\"d\",le=\"+Inf\"}",
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",model=\"d\",le=\"+Inf\"}",
           "values": "0+60x40"
         }
       ],
@@ -184,15 +184,15 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",deployment=\"d\",le=\"1\"}",
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",model=\"d\",le=\"1\"}",
           "values": "0+60x40"
         },
         {
-          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",deployment=\"d\",le=\"10\"}",
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",model=\"d\",le=\"10\"}",
           "values": "0+60x40"
         },
         {
-          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",deployment=\"d\",le=\"+Inf\"}",
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",model=\"d\",le=\"+Inf\"}",
           "values": "0+60x40"
         }
       ],
@@ -209,7 +209,7 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_upstream_circuit_state{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",deployment=\"d\"}",
+          "series": "lumewarp_upstream_circuit_state{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"d\"}",
           "values": "2+0x40"
         }
       ],
@@ -228,12 +228,12 @@
                 "namespace": "demo",
                 "job": "lumewarp-gateway",
                 "instance": "gw:9464",
-                "deployment": "d",
+                "model": "d",
                 "severity": "warning"
               },
               "exp_annotations": {
                 "summary": "Upstream circuit remains open",
-                "description": "Deployment d circuit has remained open for 2 minutes.",
+                "description": "Model d circuit has remained open for 2 minutes.",
                 "runbook": "Inspect attempts by outcome, upstream logs and health; repair the upstream before closing the circuit."
               }
             }
@@ -246,7 +246,7 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_upstream_circuit_state{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",deployment=\"d\"}",
+          "series": "lumewarp_upstream_circuit_state{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"d\"}",
           "values": "1+0x40"
         }
       ],
@@ -720,7 +720,7 @@
               "exp_annotations": {
                 "summary": "Control-plane config compilation is failing",
                 "description": "Control plane cp:8091 has repeated config compile failures.",
-                "runbook": "Inspect compiler errors, plugin output and invalid routes; correct the source config and confirm a new version publishes."
+                "runbook": "Inspect compiler errors, plugin output and invalid routers; correct the source config and confirm a new version publishes."
               }
             }
           ]
@@ -915,7 +915,7 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_vllm_queue_depth{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",deployment=\"d\"}",
+          "series": "lumewarp_vllm_queue_depth{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"d\"}",
           "values": "101+0x40"
         }
       ],
@@ -934,12 +934,12 @@
                 "namespace": "demo",
                 "job": "lumewarp-gateway",
                 "instance": "gw:9464",
-                "deployment": "d",
+                "model": "d",
                 "severity": "warning"
               },
               "exp_annotations": {
                 "summary": "vLLM request queue is growing",
-                "description": "Deployment d has over 100 queued requests for 10 minutes.",
+                "description": "Model d has over 100 queued requests for 10 minutes.",
                 "runbook": "Inspect GPU utilization and prefill load; add capacity or reduce admission and shift routing weights."
               }
             }
@@ -952,7 +952,7 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_vllm_queue_depth{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",deployment=\"d\"}",
+          "series": "lumewarp_vllm_queue_depth{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"d\"}",
           "values": "100+0x40"
         }
       ],
@@ -969,7 +969,7 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_vllm_kv_cache_usage{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",deployment=\"d\"}",
+          "series": "lumewarp_vllm_kv_cache_usage{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"d\"}",
           "values": "0.91+0x40"
         }
       ],
@@ -988,12 +988,12 @@
                 "namespace": "demo",
                 "job": "lumewarp-gateway",
                 "instance": "gw:9464",
-                "deployment": "d",
+                "model": "d",
                 "severity": "warning"
               },
               "exp_annotations": {
                 "summary": "vLLM KV cache is saturated",
-                "description": "Deployment d KV cache exceeds 90% for 10 minutes.",
+                "description": "Model d KV cache exceeds 90% for 10 minutes.",
                 "runbook": "Inspect context lengths, concurrency and GPU memory; reduce admission or add capacity."
               }
             }
@@ -1006,7 +1006,7 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_vllm_kv_cache_usage{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",deployment=\"d\"}",
+          "series": "lumewarp_vllm_kv_cache_usage{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"d\"}",
           "values": "0.9+0x40"
         }
       ],

@@ -37,14 +37,14 @@ from lumewarp_control_plane.models import (
     ConfigOutbox,
     ConfigVersion,
     ConfigVersionKind,
-    Deployment,
     GatewaySession,
+    Model,
     OutboxStatus,
-    Route,
-    RouteDeployment,
-    RouteFallback,
-    RouteSplit,
-    RouteSplitDeployment,
+    Router,
+    RouterFallback,
+    RouterModel,
+    RouterSplit,
+    RouterSplitModel,
     Scope,
     StreamUsageMode,
     Upstream,
@@ -297,18 +297,18 @@ async def _restore_routing(session: AsyncSession, old: pb.Snapshot) -> None:
     sticky = {v: k for k, v in STICKY_BY.items()}
 
     upstreams = {u.name: u for u in await session.scalars(select(Upstream))}
-    deployments = {d.name: d for d in await session.scalars(select(Deployment))}
-    routes = {r.name: r for r in await session.scalars(select(Route))}
-    want_routes = {r.name for r in old.routes}
-    want_deployments = {d.name for d in old.deployments}
+    models = {d.name: d for d in await session.scalars(select(Model))}
+    routers = {r.name: r for r in await session.scalars(select(Router))}
+    want_routers = {r.name for r in old.routers}
+    want_models = {d.name for d in old.models}
     want_upstreams = {u.name for u in old.upstreams}
 
-    # RESTRICT edges must disappear before their route/deployment targets do.
-    # Deleting splits cascades to their deployment memberships.
-    for table in (RouteFallback, RouteDeployment, RouteSplit):
+    # RESTRICT edges must disappear before their router/model targets do.
+    # Deleting splits cascades to their model memberships.
+    for table in (RouterFallback, RouterModel, RouterSplit):
         await session.execute(delete(table))
-    for name, row in routes.items():
-        if name not in want_routes:
+    for name, row in routers.items():
+        if name not in want_routers:
             await session.delete(row)
     await session.flush()
 
@@ -336,12 +336,12 @@ async def _restore_routing(session: AsyncSession, old: pb.Snapshot) -> None:
         upstreams[u.name] = row
     await session.flush()
 
-    for name, row in deployments.items():
-        if name not in want_deployments:
+    for name, row in models.items():
+        if name not in want_models:
             await session.delete(row)
     await session.flush()
-    for d in old.deployments:
-        row = deployments.get(d.name) or Deployment(name=d.name)
+    for d in old.models:
+        row = models.get(d.name) or Model(name=d.name)
         row.upstream_id = upstreams[d.upstream].id
         row.upstream_model = d.upstream_model
         row.weight = d.weight
@@ -349,15 +349,15 @@ async def _restore_routing(session: AsyncSession, old: pb.Snapshot) -> None:
         row.price_input_nano_usd_per_mtok = d.price.input_nano_usd_per_mtok if has_price else None
         row.price_output_nano_usd_per_mtok = d.price.output_nano_usd_per_mtok if has_price else None
         session.add(row)
-        deployments[d.name] = row
+        models[d.name] = row
     await session.flush()
 
     for name, row in upstreams.items():
         if name not in want_upstreams:
             await session.delete(row)
-    # Create every route before inserting fallbacks, whose targets may come later.
-    for r in old.routes:
-        row = routes.get(r.name) or Route(name=r.name)
+    # Create every router before inserting fallbacks, whose targets may come later.
+    for r in old.routers:
+        row = routers.get(r.name) or Router(name=r.name)
         row.strategy = strategy[r.strategy]
         row.custom_strategy = r.custom_strategy or None
         row.strategy_params = (
@@ -371,41 +371,41 @@ async def _restore_routing(session: AsyncSession, old: pb.Snapshot) -> None:
         row.sticky = sticky[r.sticky]
         row.sticky_header = r.sticky_header or None
         session.add(row)
-        routes[r.name] = row
+        routers[r.name] = row
     await session.flush()
 
-    for r in old.routes:
-        row = routes[r.name]
-        for position, name in enumerate(r.deployments):
+    for r in old.routers:
+        row = routers[r.name]
+        for position, name in enumerate(r.models):
             session.add(
-                RouteDeployment(
-                    route_id=row.id,
-                    deployment_id=deployments[name].id,
+                RouterModel(
+                    router_id=row.id,
+                    model_id=models[name].id,
                     position=position,
                 )
             )
         for position, name in enumerate(r.fallbacks):
             session.add(
-                RouteFallback(
-                    route_id=row.id,
-                    fallback_route_id=routes[name].id,
+                RouterFallback(
+                    router_id=row.id,
+                    fallback_router_id=routers[name].id,
                     position=position,
                 )
             )
         for position, split in enumerate(r.traffic_split):
-            split_row = RouteSplit(
-                route_id=row.id,
+            split_row = RouterSplit(
+                router_id=row.id,
                 name=split.name,
                 weight=split.weight,
                 position=position,
             )
             session.add(split_row)
             await session.flush()
-            for dep_position, name in enumerate(split.deployments):
+            for dep_position, name in enumerate(split.models):
                 session.add(
-                    RouteSplitDeployment(
+                    RouterSplitModel(
                         split_id=split_row.id,
-                        deployment_id=deployments[name].id,
+                        model_id=models[name].id,
                         position=dep_position,
                     )
                 )
@@ -420,7 +420,7 @@ async def rollback_routing(
     now: datetime | None = None,
     require_local_membership: bool,
 ) -> int:
-    """Publish a new version whose routing content (upstreams, deployments, routes) comes
+    """Publish a new version whose routing content (upstreams, models, routers) comes
     from `to_version` while keys, teams, policies and statuses come from current source
     state, so a revoked key is never revived. Returns the new version number.
 
@@ -436,12 +436,12 @@ async def rollback_routing(
     if row is None or row.payload is None:
         raise LookupError(f"config version {to_version} of scope {scope!r} is not retained")
     old = pb.Snapshot.FromString(row.payload)
-    # deployments.weight is a Postgres INTEGER; versions published before plugin weights
+    # models.weight is a Postgres INTEGER; versions published before plugin weights
     # were capped could carry larger uint32 weights. Refuse cleanly instead of a DB error.
-    too_heavy = [d.name for d in old.deployments if d.weight > (2**31 - 1)]
+    too_heavy = [d.name for d in old.models if d.weight > (2**31 - 1)]
     if too_heavy:
         raise CompileError(
-            f"version {to_version} has deployment weights above {(2**31 - 1)} "
+            f"version {to_version} has model weights above {(2**31 - 1)} "
             f"({', '.join(too_heavy)}); it cannot be restored"
         )
 
@@ -454,7 +454,7 @@ async def rollback_routing(
         require_local_membership=require_local_membership,
     )
     snap = compiled.snapshot
-    for field in ("upstreams", "deployments", "routes"):
+    for field in ("upstreams", "models", "routers"):
         del getattr(snap, field)[:]
         getattr(snap, field).extend(getattr(old, field))
 

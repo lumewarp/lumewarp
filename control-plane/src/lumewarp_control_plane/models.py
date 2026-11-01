@@ -560,7 +560,7 @@ class Upstream(TimestampMixin, Base):
     health_check_timeout_ms: Mapped[int | None] = mapped_column(Integer)
     health_check_unhealthy_threshold: Mapped[int | None] = mapped_column(Integer)
     health_check_healthy_threshold: Mapped[int | None] = mapped_column(Integer)
-    # Per-deployment circuit breaker (proto CircuitBreaker); NULL settings = gateway
+    # Per-model circuit breaker (proto CircuitBreaker); NULL settings = gateway
     # defaults (5 failures / 30000 ms).
     circuit_breaker_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
@@ -571,10 +571,10 @@ class Upstream(TimestampMixin, Base):
     metrics_url: Mapped[str | None] = mapped_column(Text)
 
 
-class Deployment(TimestampMixin, Base):
+class Model(TimestampMixin, Base):
     """A concrete model on one upstream. Price NULL = unknown (not free); both or neither."""
 
-    __tablename__ = "deployments"
+    __tablename__ = "models"
     __table_args__ = (
         CheckConstraint("weight >= 0", name="weight_nonneg"),
         CheckConstraint(
@@ -599,16 +599,16 @@ class Deployment(TimestampMixin, Base):
     price_output_nano_usd_per_mtok: Mapped[int | None] = mapped_column(BigInteger)
 
 
-class Route(TimestampMixin, Base):
-    """Public model alias -> ordered deployments (`route_deployments`).
+class Router(TimestampMixin, Base):
+    """Public model alias -> ordered models (`router_models`).
 
     Resilience (P2): an optional retry policy (scalar columns, `retry_enabled` = policy
-    present), ordered fallback routes (`route_fallbacks`) and an optional traffic split
-    (`route_splits` + `route_split_deployments`, sticky by header/team/key). With a
-    traffic split the gateway ignores the route's own deployment list.
+    present), ordered fallback routers (`router_fallbacks`) and an optional traffic split
+    (`router_splits` + `router_split_models`, sticky by header/team/key). With a
+    traffic split the gateway ignores the router's own model list.
     """
 
-    __tablename__ = "routes"
+    __tablename__ = "routers"
     __table_args__ = (
         CheckConstraint(
             "(strategy = 'custom') = (custom_strategy IS NOT NULL)"
@@ -675,78 +675,78 @@ class Route(TimestampMixin, Base):
     sticky_header: Mapped[str | None] = mapped_column(String(200))
 
 
-class RouteDeployment(Base):
-    __tablename__ = "route_deployments"
+class RouterModel(Base):
+    __tablename__ = "router_models"
     __table_args__ = (
-        PrimaryKeyConstraint("route_id", "deployment_id"),
-        UniqueConstraint("route_id", "position"),
-        Index(None, "deployment_id"),
+        PrimaryKeyConstraint("router_id", "model_id"),
+        UniqueConstraint("router_id", "position"),
+        Index(None, "model_id"),
     )
 
-    route_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("routes.id", ondelete="CASCADE"), nullable=False
+    router_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("routers.id", ondelete="CASCADE"), nullable=False
     )
-    deployment_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("deployments.id", ondelete="RESTRICT"), nullable=False
+    model_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("models.id", ondelete="RESTRICT"), nullable=False
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
-class RouteFallback(Base):
-    """Ordered fallback routes of a route. A route referenced as a fallback cannot be
+class RouterFallback(Base):
+    """Ordered fallback routers of a router. A router referenced as a fallback cannot be
     deleted (RESTRICT; the API answers 409). The API also rejects cycles.
     """
 
-    __tablename__ = "route_fallbacks"
+    __tablename__ = "router_fallbacks"
     __table_args__ = (
-        PrimaryKeyConstraint("route_id", "fallback_route_id"),
-        UniqueConstraint("route_id", "position"),
-        Index(None, "fallback_route_id"),
-        CheckConstraint("route_id <> fallback_route_id", name="no_self"),
+        PrimaryKeyConstraint("router_id", "fallback_router_id"),
+        UniqueConstraint("router_id", "position"),
+        Index(None, "fallback_router_id"),
+        CheckConstraint("router_id <> fallback_router_id", name="no_self"),
     )
 
-    route_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("routes.id", ondelete="CASCADE"), nullable=False
+    router_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("routers.id", ondelete="CASCADE"), nullable=False
     )
-    fallback_route_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("routes.id", ondelete="RESTRICT"), nullable=False
+    fallback_router_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("routers.id", ondelete="RESTRICT"), nullable=False
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
-class RouteSplit(Base):
-    """One traffic split (canary group) of a route; `name` is a bounded metric label."""
+class RouterSplit(Base):
+    """One traffic split (canary group) of a router; `name` is a bounded metric label."""
 
-    __tablename__ = "route_splits"
+    __tablename__ = "router_splits"
     __table_args__ = (
-        UniqueConstraint("route_id", "name"),
-        UniqueConstraint("route_id", "position"),
+        UniqueConstraint("router_id", "name"),
+        UniqueConstraint("router_id", "position"),
         CheckConstraint("name ~ '^[A-Za-z0-9_.-]{1,32}$'", name="name_charset"),
         CheckConstraint("weight >= 0", name="weight_nonneg"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    route_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("routes.id", ondelete="CASCADE"), nullable=False
+    router_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("routers.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(32), nullable=False)
     weight: Mapped[int] = mapped_column(Integer, nullable=False)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
-class RouteSplitDeployment(Base):
-    __tablename__ = "route_split_deployments"
+class RouterSplitModel(Base):
+    __tablename__ = "router_split_models"
     __table_args__ = (
-        PrimaryKeyConstraint("split_id", "deployment_id"),
+        PrimaryKeyConstraint("split_id", "model_id"),
         UniqueConstraint("split_id", "position"),
-        Index(None, "deployment_id"),
+        Index(None, "model_id"),
     )
 
     split_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("route_splits.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("router_splits.id", ondelete="CASCADE"), nullable=False
     )
-    deployment_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("deployments.id", ondelete="RESTRICT"), nullable=False
+    model_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("models.id", ondelete="RESTRICT"), nullable=False
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
 
@@ -913,7 +913,7 @@ class UsageEvent(Base):
     )
     owner_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     requested: Mapped[str] = mapped_column(String(400), nullable=False)
-    deployment: Mapped[str] = mapped_column(String(200), nullable=False)
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
     endpoint: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     stream: Mapped[bool] = mapped_column(Boolean, nullable=False)

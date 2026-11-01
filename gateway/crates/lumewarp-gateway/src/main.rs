@@ -112,17 +112,17 @@ fn standalone(
         std::fs::read_to_string(path).with_context(|| format!("loading {}", path.display()))?;
     let (settings, snapshot) = Config::parse(&yaml)?;
     let runtime = runtime::Runtime::new();
-    let router =
+    let routing_table =
         router::RoutingTable::compile(&snapshot, AuthMode::standalone(&snapshot), &runtime)
-            .context("compiling router snapshot")?;
+            .context("compiling routing_table snapshot")?;
     runtime
         .metrics
         .set_yaml_hash(&hex::encode(Sha256::digest(yaml.as_bytes()))[..12]);
-    runtime.metrics.config_applied(router.version);
-    router.activate_health();
+    runtime.metrics.config_applied(routing_table.version);
+    routing_table.activate_health();
     Ok((
         settings,
-        Arc::new(ArcSwapOption::from_pointee(router)),
+        Arc::new(ArcSwapOption::from_pointee(routing_table)),
         runtime,
     ))
 }
@@ -171,7 +171,7 @@ async fn main() -> anyhow::Result<()> {
             let runtime = runtime::Runtime::with_usage(metrics, sink);
 
             // Serve a valid cached snapshot immediately; otherwise stay
-            // not-ready (never an open router) until the first full arrives.
+            // not-ready (never an open routing_table) until the first full arrives.
             let mut current = lumewarp_proto::config::v1::Snapshot {
                 scope: scope.clone(),
                 ..Default::default()
@@ -182,14 +182,14 @@ async fn main() -> anyhow::Result<()> {
             match snapshot::load_with_digest(&state_dir, &scope) {
                 Ok(Some((cached, cached_digest))) => {
                     match config_stream::compile(&cached, &runtime) {
-                        Ok(router) => {
+                        Ok(routing_table) => {
                             tracing::info!(
                                 version = cached.version,
                                 "booting from cached snapshot"
                             );
                             runtime.metrics.config_applied(cached.version);
-                            router.activate_health();
-                            slot.store(Some(Arc::new(router)));
+                            routing_table.activate_health();
+                            slot.store(Some(Arc::new(routing_table)));
                             current = cached;
                             digest = cached_digest;
                             has_base = true;

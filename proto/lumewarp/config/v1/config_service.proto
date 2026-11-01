@@ -85,10 +85,10 @@ message Delta {
   uint64 version = 2;
   repeated Upstream upsert_upstreams = 3;
   repeated string remove_upstreams = 4;
-  repeated Deployment upsert_deployments = 5;
-  repeated string remove_deployments = 6;
-  repeated ModelRoute upsert_routes = 7;
-  repeated string remove_routes = 8;
+  repeated Model upsert_models = 5;
+  repeated string remove_models = 6;
+  repeated Router upsert_routers = 7;
+  repeated string remove_routers = 8;
   repeated ApiKey upsert_api_keys = 9;
   // key_id values.
   repeated string remove_api_keys = 10;

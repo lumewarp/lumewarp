@@ -2,7 +2,7 @@
 #
 #   lumewarp --config bench/lumewarp/config.yaml
 #
-# One upstream (the mock) and one route, so the benchmark measures the gateway
+# One upstream (the mock) and one router, so the benchmark measures the gateway
 # hot path and nothing else. `server.api_keys` is empty by default: the bench
 # compares the unauthenticated hot path against LiteLLM with no master key.
 # With BENCH_AUTH=1, run.sh replaces the empty list below with the SHA-256 of
@@ -20,11 +20,11 @@ upstreams:
     base_url: http://127.0.0.1:9000/v1
     # The mock ignores auth, so no api_key_env is set (no bearer header is sent).
 
-deployments:
-  - name: mock-deployment
+models:
+  - name: mock-model
     upstream: mock
     upstream_model: mock
 
-routes:
+routers:
   - name: mock
-    deployments: [mock-deployment]
+    models: [mock-model]

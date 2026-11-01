@@ -75,7 +75,7 @@ from right to left and stops at the first untrusted address. Configure only actu
 proxy networks, and have the edge proxy overwrite or append the real client address.
 Untrusted peers and malformed forwarding chains cannot select a forwarded identity.
 The CLI disables Uvicorn's own proxy-header rewriting so this policy sees the socket
-peer; alternate ASGI deployments must also disable upstream rewriting of `scope.client`.
+peer; alternate ASGI models must also disable upstream rewriting of `scope.client`.
 
 `LUMEWARP_BREAK_GLASS_ALLOWED_CIDRS` optionally restricts the resolved client addresses
 allowed to attempt emergency login, using the same comma-separated CIDR syntax.
@@ -370,7 +370,7 @@ install -e ./your-plugin`) and restart `serve`:
 
 | Group | Purpose | P1 status |
 | --- | --- | --- |
-| `lumewarp.router` | Adjust deployment weights at compile time (GPU cost, time of day, ...). | Called by the compiler. |
+| `lumewarp.router` | Adjust model weights at compile time (GPU cost, time of day, ...). | Called by the compiler. |
 | `lumewarp.notifier` | Deliver budget notifications for channels whose `kind` is the entry-point name. | Called by the notifier outbox loop. |
 | `lumewarp.auth` | Map an external identity (OIDC, LDAP, ...) to a user's email and display name. | Called on a first SSO login; the first plugin (by entry-point name) wins. |
 
@@ -392,22 +392,22 @@ from lumewarp_control_plane.plugins import WeightOverride
 class Policy:
     api_version = 1
 
-    def adjust(self, routes):  # sync or async
-        return [WeightOverride(deployment="gpu-a", weight=3)]
+    def adjust(self, routers):  # sync or async
+        return [WeightOverride(model="gpu-a", weight=3)]
 ```
 
 Router plugins run in entry-point name order; each call, result iteration and validation
 runs off the event loop with a 2 s budget. A plugin that raises, times out, returns invalid
-output (unknown deployment, weight outside 0..2^31-1, too many overrides) or would leave a
-weighted route with zero total weight is discarded as a whole; the compile continues.
+output (unknown model, weight outside 0..2^31-1, too many overrides) or would leave a
+weighted router with zero total weight is discarded as a whole; the compile continues.
 Later plugins win on conflicts. Notifier plugins get the channel's `config` mapping and a
 `BudgetEvent`; raising makes the outbox retry with backoff. The built-in notifier kind is
 `webhook` (JSON POST of the event).
 
 ## Routing
 
-Upstreams, deployments and routes are installation-wide (`/api/v1/upstreams`,
-`/deployments`, `/routes`): any authenticated principal may read them, writes need a
+Upstreams, models and routers are installation-wide (`/api/v1/upstreams`,
+`/models`, `/routers`): any authenticated principal may read them, writes need a
 superuser. Every write is audited and enqueues a recompile. P2 adds resilience settings
 that compile 1:1 into the snapshot (`proto/lumewarp/config/v1/snapshot.proto`):
 
@@ -416,36 +416,36 @@ that compile 1:1 into the snapshot (`proto/lumewarp/config/v1/snapshot.proto`):
 | `health_check {path, interval_ms, timeout_ms, unhealthy_threshold, healthy_threshold}` | upstream | `Upstream.health_check`; `null` = no active probing; null path = `/models`, null thresholds = 3 / 1 |
 | `circuit_breaker {failure_threshold, open_ms}` | upstream | `Upstream.circuit_breaker`; `null` = never opens; `{}` = gateway defaults (5 failures, 30000 ms) |
 | `metrics_url` | upstream | `Upstream.metrics_url` for `vllm_load`; `null` = base URL minus `/v1` plus `/metrics` |
-| `strategy` | route | `weighted`, `least_in_flight`, `lowest_latency` (EWMA), `vllm_load` |
-| `retry {max_attempts, retry_on_status, total_timeout_ms}` | route | `ModelRoute.retry`; `null` = one attempt. `max_attempts: null` is emitted as 0, which the gateway reads as its default of 2 |
-| `fallback_route_ids` (ordered) | route | `ModelRoute.fallbacks` (aliases). Needs `retry` with at least 2 attempts to take effect |
-| `traffic_split [{name, weight, deployment_ids}]` | route | `ModelRoute.traffic_split`; with a split the route's own `deployment_ids` may be empty and are ignored |
-| `sticky` (`none`/`header`/`team`/`key`), `sticky_header` | route | `ModelRoute.sticky` / `sticky_header` |
+| `strategy` | router | `weighted`, `least_in_flight`, `lowest_latency` (EWMA), `vllm_load` |
+| `retry {max_attempts, retry_on_status, total_timeout_ms}` | router | `Router.retry`; `null` = one attempt. `max_attempts: null` is emitted as 0, which the gateway reads as its default of 2 |
+| `fallback_router_ids` (ordered) | router | `Router.fallbacks` (aliases). Needs `retry` with at least 2 attempts to take effect |
+| `traffic_split [{name, weight, model_ids}]` | router | `Router.traffic_split`; with a split the router's own `model_ids` may be empty and are ignored |
+| `sticky` (`none`/`header`/`team`/`key`), `sticky_header` | router | `Router.sticky` / `sticky_header` |
 
 Validation mirrors the gateway's snapshot checks so an accepted write never makes a gateway
 NACK (422 otherwise): health interval >= 1000 ms and 0 < timeout < interval, path absolute
 without query/fragment; `metrics_url` plain http(s) without userinfo; `max_attempts` 1..5,
-statuses 400..599 and unique; fallbacks exist, are unique, never the route itself and never
-form a cycle across routes (route writes take the scope lock, so concurrent edits cannot
+statuses 400..599 and unique; fallbacks exist, are unique, never the router itself and never
+form a cycle across routers (router writes take the scope lock, so concurrent edits cannot
 race into one); at most 16 splits, names 1..32 of `[A-Za-z0-9_.-]` and unique, each split
-non-empty with existing, unique deployments, weights >= 0 summing to more than 0;
+non-empty with existing, unique models, weights >= 0 summing to more than 0;
 `sticky_header` (an HTTP header name, stored lower-case) required iff `sticky=header`, and
-any sticky mode needs a split; a `weighted` route needs a positive total deployment weight
-per split (or over its deployments without a split), also checked when a deployment's
-weight changes. Deleting a route used as another route's fallback, or a deployment used by
-a route or a split, is 409. PATCH replaces lists that are given and keeps omitted fields;
+any sticky mode needs a split; a `weighted` router needs a positive total model weight
+per split (or over its models without a split), also checked when a model's
+weight changes. Deleting a router used as another router's fallback, or a model used by
+a router or a split, is 409. PATCH replaces lists that are given and keeps omitted fields;
 `retry: null` removes the policy, and leaving `sticky=header` drops the header.
 
 The compiler lists a capability in `required_capabilities` exactly when a field needs it
 (the gateway's rule): `health_check`, `circuit_breaker`, `vllm_load` (metrics URL or
 strategy), `retry`, `fallbacks`, `traffic_split` (split or sticky), `lowest_latency`.
-Defensively, a fallback to a route that is left out of the snapshot is dropped, and a route
+Defensively, a fallback to a router that is left out of the snapshot is dropped, and a router
 whose split ends up empty or (weighted) without weight is left out, each with a warning.
 
-Storage (migration `0003`): scalar settings are columns on `upstreams`/`routes` with CHECK
-constraints; the ordered lists are child tables with foreign keys: `route_fallbacks`
-(RESTRICT on the target route), `route_splits` and `route_split_deployments` (RESTRICT on
-the deployment). Downgrading to `0002` drops these settings and maps `vllm_load` to
+Storage (migration `0003`): scalar settings are columns on `upstreams`/`routers` with CHECK
+constraints; the ordered lists are child tables with foreign keys: `router_fallbacks`
+(RESTRICT on the target router), `router_splits` and `router_split_models` (RESTRICT on
+the model). Downgrading to `0002` drops these settings and maps `vllm_load` to
 `least_in_flight`.
 
 ## Config publishing and usage
@@ -463,7 +463,7 @@ the deployment). Downgrading to `0002` drops these settings and maps `vllm_load`
   Rollback republishes an older version's **routing** only; keys and policies always come
   from current source state. Full rules: [config protocol](../docs/config-protocol.md).
 - `UsageService.Report` validates per event (an invalid event is skipped and logged, the
-  rest of the batch is kept; `REJECTED` events may omit model/deployment) and is
+  rest of the batch is kept; `REJECTED` events may omit model/model) and is
   idempotent by `request_id`; each new event
   adds cost once to the team total and once to the key owner's (member or service account)
   total for the UTC calendar month in the same transaction, then budget evaluation flips
@@ -500,10 +500,10 @@ these names.
 | `lumewarp_cp_keys_suspended_total` | counter | `reason` = `owner_removed` \| `owner_deactivated` \| `admin` \| `owner` | Keys moved from active to suspended: key reconciler and member removal (`owner_removed`), user deactivation (`owner_deactivated`), `PATCH /keys/{id}` (`admin`/`owner`). |
 | `lumewarp_cp_key_reconcile_last_success_timestamp_seconds` | gauge | | Unix time of the key reconciler's last fully successful step: no exception, a decision for every owner checked and, with `changes()`, a readable change stream. 0 until the first success; not exported when `LUMEWARP_KEY_RECONCILE_ENABLED=false`. |
 
-## Deployment
+## Model
 
 The Helm chart in [`../deploy/helm/lumewarp`](../deploy/helm/lumewarp) deploys this
-Deployment with `/readyz` and `/healthz` probes, the HTTP/gRPC/metrics Service (plus an
+Model with `/readyz` and `/healthz` probes, the HTTP/gRPC/metrics Service (plus an
 optional ServiceMonitor for the metrics port), the DB URL Secret and a migration hook Job.
 The control plane must stay at one replica.
 

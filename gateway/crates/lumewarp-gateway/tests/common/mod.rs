@@ -280,17 +280,17 @@ impl Gateway {
         for (i, upstream) in upstreams.iter().enumerate() {
             yaml.push_str(&format!("  - {{name: u{i}, kind: openai_compatible, base_url: 'http://{upstream}/prefix/v1', api_key_env: LUMEWARP_INTEGRATION_UPSTREAM_KEY, timeout_ms: {timeout_ms}}}\n"));
         }
-        yaml.push_str("deployments:\n");
+        yaml.push_str("models:\n");
         for i in 0..upstreams.len() {
             yaml.push_str(&format!(
                 "  - {{name: d{i}, upstream: u{i}, upstream_model: actual}}\n"
             ));
         }
-        let deployments = (0..upstreams.len())
+        let models = (0..upstreams.len())
             .map(|i| format!("d{i}"))
             .collect::<Vec<_>>()
             .join(", ");
-        yaml.push_str(&format!("routes:\n  - {{name: public, deployments: [{deployments}], strategy: least_in_flight}}\n  - {{name: another-alias, deployments: [{deployments}]}}\n"));
+        yaml.push_str(&format!("routers:\n  - {{name: public, models: [{models}], strategy: least_in_flight}}\n  - {{name: another-alias, models: [{models}]}}\n"));
         yaml.push_str(extra);
         let dir = std::env::temp_dir().join(format!(
             "lumewarp-proxy-test-{}-{}",

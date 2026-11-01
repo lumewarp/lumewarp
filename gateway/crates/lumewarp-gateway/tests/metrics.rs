@@ -11,15 +11,15 @@ use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, Request};
 use hyper_util::rt::TokioIo;
 
-const ROUTE: &[(&str, &str)] = &[("endpoint", "chat_completions")];
+const ENDPOINT: &[(&str, &str)] = &[("endpoint", "chat_completions")];
 const PUBLIC: &[(&str, &str)] = &[
     ("requested", "public"),
-    ("deployment", "d0"),
+    ("model", "d0"),
     ("endpoint", "chat_completions"),
 ];
 const UNKNOWN: &[(&str, &str)] = &[
     ("requested", "unknown"),
-    ("deployment", ""),
+    ("model", ""),
     ("endpoint", "chat_completions"),
 ];
 const STREAM: &[u8] = br#"{"model":"public","stream":true}"#;
@@ -87,7 +87,7 @@ async fn request_counts_labels_in_flight_and_histograms_match() {
         gateway
             .metrics()
             .await
-            .value("lumewarp_in_flight_requests", &[("deployment", "d0")]),
+            .value("lumewarp_in_flight_requests", &[("model", "d0")]),
         1.0
     );
     control.frames.send(Bytes::from_static(LAST)).await.unwrap();
@@ -104,7 +104,7 @@ async fn request_counts_labels_in_flight_and_histograms_match() {
     assert_eq!(response.status(), 404);
     bytes(response).await;
     let after = wait_metrics(&gateway, |m| {
-        m.sum("lumewarp_requests_total", ROUTE) - before.sum("lumewarp_requests_total", ROUTE)
+        m.sum("lumewarp_requests_total", ENDPOINT) - before.sum("lumewarp_requests_total", ENDPOINT)
             == 3.0
     })
     .await;
@@ -133,12 +133,12 @@ async fn request_counts_labels_in_flight_and_histograms_match() {
         1.0
     );
     assert_eq!(
-        after.sum("lumewarp_request_duration_seconds_count", ROUTE)
-            - before.sum("lumewarp_request_duration_seconds_count", ROUTE),
+        after.sum("lumewarp_request_duration_seconds_count", ENDPOINT)
+            - before.sum("lumewarp_request_duration_seconds_count", ENDPOINT),
         3.0
     );
     assert_eq!(
-        after.value("lumewarp_in_flight_requests", &[("deployment", "d0")]),
+        after.value("lumewarp_in_flight_requests", &[("model", "d0")]),
         0.0
     );
     assert_eq!(
@@ -175,17 +175,17 @@ async fn headers_first_prefill_is_ttft_not_gateway_overhead() {
     let expected = [FIRST, LAST].concat();
     assert_eq!(bytes(response).await, expected);
     let after = wait_metrics(&gateway, |m| {
-        m.sum("lumewarp_requests_total", ROUTE) > before.sum("lumewarp_requests_total", ROUTE)
+        m.sum("lumewarp_requests_total", ENDPOINT) > before.sum("lumewarp_requests_total", ENDPOINT)
     })
     .await;
-    let overhead = after.value("lumewarp_gateway_overhead_seconds_sum", ROUTE)
-        - before.value("lumewarp_gateway_overhead_seconds_sum", ROUTE);
+    let overhead = after.value("lumewarp_gateway_overhead_seconds_sum", ENDPOINT)
+        - before.value("lumewarp_gateway_overhead_seconds_sum", ENDPOINT);
     let ttft = after.value(
         "lumewarp_ttft_seconds_sum",
-        &[("requested", "public"), ("deployment", "d0")],
+        &[("requested", "public"), ("model", "d0")],
     ) - before.value(
         "lumewarp_ttft_seconds_sum",
-        &[("requested", "public"), ("deployment", "d0")],
+        &[("requested", "public"), ("model", "d0")],
     );
     assert!(
         (0.0..0.050).contains(&overhead),
@@ -239,11 +239,12 @@ async fn client_cancel_before_headers_records_499_not_500() {
         0.0
     );
     assert_eq!(
-        after.sum("lumewarp_requests_total", ROUTE) - before.sum("lumewarp_requests_total", ROUTE),
+        after.sum("lumewarp_requests_total", ENDPOINT)
+            - before.sum("lumewarp_requests_total", ENDPOINT),
         1.0
     );
     assert_eq!(
-        after.value("lumewarp_in_flight_requests", &[("deployment", "d0")]),
+        after.value("lumewarp_in_flight_requests", &[("model", "d0")]),
         0.0
     );
 }
@@ -263,18 +264,18 @@ async fn mid_stream_failure_counts_once_and_keeps_http_200() {
     // Closing this producer injects an error, not a clean chunked EOF.
     drop(control.frames);
     assert!(bounded(body.collect()).await.is_err());
-    let labels = &[("deployment", "d0"), ("kind", "stream")];
+    let labels = &[("model", "d0"), ("kind", "stream")];
     let after = wait_metrics(&gateway, |m| {
         m.value("lumewarp_upstream_errors_total", labels)
             - before.value("lumewarp_upstream_errors_total", labels)
             == 1.0
-            && m.sum("lumewarp_requests_total", ROUTE)
-                > before.sum("lumewarp_requests_total", ROUTE)
+            && m.sum("lumewarp_requests_total", ENDPOINT)
+                > before.sum("lumewarp_requests_total", ENDPOINT)
     })
     .await;
     assert_eq!(
-        after.sum("lumewarp_upstream_errors_total", &[("deployment", "d0")])
-            - before.sum("lumewarp_upstream_errors_total", &[("deployment", "d0")]),
+        after.sum("lumewarp_upstream_errors_total", &[("model", "d0")])
+            - before.sum("lumewarp_upstream_errors_total", &[("model", "d0")]),
         1.0
     );
     assert_eq!(
@@ -288,7 +289,7 @@ async fn mid_stream_failure_counts_once_and_keeps_http_200() {
         1.0
     );
     assert_eq!(
-        after.value("lumewarp_in_flight_requests", &[("deployment", "d0")]),
+        after.value("lumewarp_in_flight_requests", &[("model", "d0")]),
         0.0
     );
 }
@@ -308,7 +309,7 @@ async fn connect_and_protocol_errors_have_distinct_kinds() {
             .await;
         assert_eq!(response.status(), 502);
         bytes(response).await;
-        let labels = &[("deployment", "d0"), ("kind", kind)];
+        let labels = &[("model", "d0"), ("kind", kind)];
         let after = wait_metrics(gateway, |m| {
             m.value("lumewarp_upstream_errors_total", labels)
                 > before.value("lumewarp_upstream_errors_total", labels)
@@ -320,8 +321,8 @@ async fn connect_and_protocol_errors_have_distinct_kinds() {
             1.0
         );
         assert_eq!(
-            after.sum("lumewarp_upstream_errors_total", &[("deployment", "d0")])
-                - before.sum("lumewarp_upstream_errors_total", &[("deployment", "d0")]),
+            after.sum("lumewarp_upstream_errors_total", &[("model", "d0")])
+                - before.sum("lumewarp_upstream_errors_total", &[("model", "d0")]),
             1.0
         );
     }

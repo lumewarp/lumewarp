@@ -1,8 +1,8 @@
-"""Routing: upstreams, deployments and public name routes.
+"""Routing: upstreams, models and public name routers.
 
-Route validation mirrors the gateway (snapshot.rs::validate / validate_split and
-router.rs::Router::compile) so a write the API accepts never makes the gateway NACK, plus
-one control-plane rule: fallbacks never form a cycle across routes.
+Router validation mirrors the gateway (snapshot.rs::validate / validate_split and
+router.rs::RoutingTable::compile) so a write the API accepts never makes the gateway NACK, plus
+one control-plane rule: fallbacks never form a cycle across routers.
 """
 
 from __future__ import annotations
@@ -29,17 +29,17 @@ from lumewarp_control_plane.api.common import (
 from lumewarp_control_plane.api.policy import ensure_unique_ids
 from lumewarp_control_plane.api.schemas import (
     CircuitBreakerIn,
-    DeploymentCreate,
-    DeploymentOut,
-    DeploymentUpdate,
     HealthCheckIn,
+    ModelCreate,
+    ModelOut,
+    ModelUpdate,
     Page,
     RetryPolicyIn,
     RetryPolicyOut,
-    RouteCreate,
-    RouteDeploymentOut,
-    RouteOut,
-    RouteUpdate,
+    RouterCreate,
+    RouterModelOut,
+    RouterOut,
+    RouterUpdate,
     TrafficSplitIn,
     TrafficSplitOut,
     UpstreamCreate,
@@ -50,12 +50,12 @@ from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.compiler.strategy import strategy_problem
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import (
-    Deployment,
-    Route,
-    RouteDeployment,
-    RouteFallback,
-    RouteSplit,
-    RouteSplitDeployment,
+    Model,
+    Router,
+    RouterFallback,
+    RouterModel,
+    RouterSplit,
+    RouterSplitModel,
     RoutingStrategy,
     StickyBy,
     Upstream,
@@ -71,21 +71,19 @@ def _non_null(body: object, *fields: str) -> None:
             raise validation_error(name, "cannot be null")
 
 
-async def _existing_deployments(
-    session: AsyncSession, ids: list[uuid.UUID], field_name: str
-) -> None:
+async def _existing_models(session: AsyncSession, ids: list[uuid.UUID], field_name: str) -> None:
     if not ids:
         return
-    found = set((await session.scalars(select(Deployment.id).where(Deployment.id.in_(ids)))).all())
+    found = set((await session.scalars(select(Model.id).where(Model.id.in_(ids)))).all())
     missing = [str(item) for item in ids if item not in found]
     if missing:
-        raise validation_error(field_name, f"unknown deployments: {', '.join(missing)}")
+        raise validation_error(field_name, f"unknown models: {', '.join(missing)}")
 
 
 async def _total_weight(session: AsyncSession, ids: list[uuid.UUID]) -> int:
     return int(
         await session.scalar(
-            select(func.coalesce(func.sum(Deployment.weight), 0)).where(Deployment.id.in_(ids))
+            select(func.coalesce(func.sum(Model.weight), 0)).where(Model.id.in_(ids))
         )
         or 0
     )
@@ -105,35 +103,35 @@ def _apply_breaker(row: Upstream, breaker: CircuitBreakerIn | None) -> None:
     row.circuit_open_ms = breaker.open_ms if breaker else None
 
 
-# --------------------------------------------------------------------------- route state
+# --------------------------------------------------------------------------- router state
 
 
 @dataclass
-class RouteSpec:
-    """The full desired state of a route (create body, or stored state + PATCH)."""
+class RouterSpec:
+    """The full desired state of a router (create body, or stored state + PATCH)."""
 
     name: str
     strategy: RoutingStrategy
-    deployment_ids: list[uuid.UUID]
+    model_ids: list[uuid.UUID]
     custom_strategy: str | None = None
     strategy_params: dict = field(default_factory=dict)
     retry: RetryPolicyIn | None = None
-    fallback_route_ids: list[uuid.UUID] = field(default_factory=list)
+    fallback_router_ids: list[uuid.UUID] = field(default_factory=list)
     traffic_split: list[TrafficSplitIn] = field(default_factory=list)
     sticky: StickyBy = StickyBy.NONE
     sticky_header: str | None = None
 
 
-async def _load_spec(session: AsyncSession, row: Route) -> RouteSpec:
-    out = (await _routes_out(session, [row]))[0]
-    return RouteSpec(
+async def _load_spec(session: AsyncSession, row: Router) -> RouterSpec:
+    out = (await _routers_out(session, [row]))[0]
+    return RouterSpec(
         name=row.name,
         strategy=out.strategy,
         custom_strategy=out.custom_strategy,
         strategy_params=out.strategy_params,
-        deployment_ids=[d.deployment_id for d in out.deployments],
+        model_ids=[d.model_id for d in out.models],
         retry=RetryPolicyIn(**out.retry.model_dump()) if out.retry else None,
-        fallback_route_ids=list(out.fallback_route_ids),
+        fallback_router_ids=list(out.fallback_router_ids),
         traffic_split=[TrafficSplitIn(**s.model_dump()) for s in out.traffic_split],
         sticky=row.sticky,
         sticky_header=row.sticky_header,
@@ -141,26 +139,26 @@ async def _load_spec(session: AsyncSession, row: Route) -> RouteSpec:
 
 
 async def _fallback_cycle(
-    session: AsyncSession, route_id: uuid.UUID, fallbacks: list[uuid.UUID]
+    session: AsyncSession, router_id: uuid.UUID, fallbacks: list[uuid.UUID]
 ) -> list[uuid.UUID] | None:
-    """A path fallback -> ... -> route_id over the other routes' fallbacks, or None.
+    """A path fallback -> ... -> router_id over the other routers' fallbacks, or None.
 
-    The graph was acyclic before this write and only `route_id`'s edges change, so the
-    new edges close a cycle iff one of the fallbacks reaches `route_id`.
+    The graph was acyclic before this write and only `router_id`'s edges change, so the
+    new edges close a cycle iff one of the fallbacks reaches `router_id`.
     """
     graph: dict[uuid.UUID, list[uuid.UUID]] = {}
     for edge in await session.scalars(
-        select(RouteFallback)
-        .where(RouteFallback.route_id != route_id)
-        .order_by(RouteFallback.route_id, RouteFallback.position)
+        select(RouterFallback)
+        .where(RouterFallback.router_id != router_id)
+        .order_by(RouterFallback.router_id, RouterFallback.position)
     ):
-        graph.setdefault(edge.route_id, []).append(edge.fallback_route_id)
+        graph.setdefault(edge.router_id, []).append(edge.fallback_router_id)
     for start in fallbacks:
         stack = [(start, [start])]
         seen: set[uuid.UUID] = set()
         while stack:
             node, path = stack.pop()
-            if node == route_id:
+            if node == router_id:
                 return path
             if node in seen:
                 continue
@@ -170,19 +168,17 @@ async def _fallback_cycle(
 
 
 async def _validate_spec(
-    session: AsyncSession, spec: RouteSpec, route_id: uuid.UUID | None
+    session: AsyncSession, spec: RouterSpec, router_id: uuid.UUID | None
 ) -> None:
     """422 for anything the gateway would reject, plus fallback cycles."""
     if problem := strategy_problem(spec.strategy, spec.custom_strategy, spec.strategy_params):
         raise validation_error("strategy", problem)
-    ensure_unique_ids(spec.deployment_ids)
-    await _existing_deployments(session, spec.deployment_ids, "deployment_ids")
+    ensure_unique_ids(spec.model_ids)
+    await _existing_models(session, spec.model_ids, "model_ids")
     for split in spec.traffic_split:
-        await _existing_deployments(session, split.deployment_ids, "traffic_split")
-    if not spec.traffic_split and not spec.deployment_ids:
-        raise validation_error(
-            "deployment_ids", "pick at least one deployment or define a traffic_split"
-        )
+        await _existing_models(session, split.model_ids, "traffic_split")
+    if not spec.traffic_split and not spec.model_ids:
+        raise validation_error("model_ids", "pick at least one model or define a traffic_split")
     # Sticky (snapshot.rs::validate_split).
     if spec.sticky is StickyBy.HEADER and not spec.sticky_header:
         raise validation_error("sticky_header", "required when sticky is 'header'")
@@ -190,89 +186,87 @@ async def _validate_spec(
         raise validation_error("sticky_header", "only used when sticky is 'header'")
     if spec.sticky is not StickyBy.NONE and not spec.traffic_split:
         raise validation_error("sticky", "sticky needs a traffic_split")
-    # A weighted pool whose deployments all have weight 0 makes the gateway NACK.
+    # A weighted pool whose models all have weight 0 makes the gateway NACK.
     if spec.strategy is RoutingStrategy.WEIGHTED:
         if spec.traffic_split:
             for split in spec.traffic_split:
-                if not await _total_weight(session, split.deployment_ids):
+                if not await _total_weight(session, split.model_ids):
                     raise validation_error(
                         "traffic_split",
-                        f"split {split.name!r} of a weighted route needs deployments with"
+                        f"split {split.name!r} of a weighted router needs models with"
                         " a positive total weight",
                     )
-        elif not await _total_weight(session, spec.deployment_ids):
+        elif not await _total_weight(session, spec.model_ids):
             raise validation_error(
-                "deployment_ids", "a weighted route needs deployments with a positive total weight"
+                "model_ids", "a weighted router needs models with a positive total weight"
             )
-    # Fallbacks: known routes, no self reference, no cycle.
-    ensure_unique_ids(spec.fallback_route_ids, "fallback_route_ids")
-    if route_id is not None and route_id in spec.fallback_route_ids:
-        raise validation_error("fallback_route_ids", "a route cannot fall back to itself")
-    # Fallbacks spend the route's attempt budget: with a single attempt they never run.
-    if spec.fallback_route_ids and (spec.retry is None or spec.retry.max_attempts == 1):
+    # Fallbacks: known routers, no self reference, no cycle.
+    ensure_unique_ids(spec.fallback_router_ids, "fallback_router_ids")
+    if router_id is not None and router_id in spec.fallback_router_ids:
+        raise validation_error("fallback_router_ids", "a router cannot fall back to itself")
+    # Fallbacks spend the router's attempt budget: with a single attempt they never run.
+    if spec.fallback_router_ids and (spec.retry is None or spec.retry.max_attempts == 1):
         raise validation_error(
-            "fallback_route_ids", "fallbacks need a retry policy with at least 2 attempts"
+            "fallback_router_ids", "fallbacks need a retry policy with at least 2 attempts"
         )
-    if spec.fallback_route_ids:
+    if spec.fallback_router_ids:
         found = dict(
             (
                 await session.execute(
-                    select(Route.id, Route.name).where(Route.id.in_(spec.fallback_route_ids))
+                    select(Router.id, Router.name).where(Router.id.in_(spec.fallback_router_ids))
                 )
             ).all()
         )
-        missing = [str(i) for i in spec.fallback_route_ids if i not in found]
+        missing = [str(i) for i in spec.fallback_router_ids if i not in found]
         if missing:
-            raise validation_error("fallback_route_ids", f"unknown routes: {', '.join(missing)}")
-        if route_id is not None:
-            cycle = await _fallback_cycle(session, route_id, spec.fallback_route_ids)
+            raise validation_error("fallback_router_ids", f"unknown routers: {', '.join(missing)}")
+        if router_id is not None:
+            cycle = await _fallback_cycle(session, router_id, spec.fallback_router_ids)
             if cycle is not None:
                 names = [spec.name]
                 for node in cycle:
                     names.append(found.get(node) or await _name_of(session, node))
                 raise validation_error(
-                    "fallback_route_ids", f"fallbacks form a cycle: {' -> '.join(names)}"
+                    "fallback_router_ids", f"fallbacks form a cycle: {' -> '.join(names)}"
                 )
 
 
-async def _name_of(session: AsyncSession, route_id: uuid.UUID) -> str:
-    return await session.scalar(select(Route.name).where(Route.id == route_id)) or str(route_id)
+async def _name_of(session: AsyncSession, router_id: uuid.UUID) -> str:
+    return await session.scalar(select(Router.name).where(Router.id == router_id)) or str(router_id)
 
 
 async def _write_children(
-    session: AsyncSession, row: Route, spec: RouteSpec, fields: set[str]
+    session: AsyncSession, row: Router, spec: RouterSpec, fields: set[str]
 ) -> None:
     """Replace the child rows named in `fields` with `spec`'s lists."""
-    if "deployment_ids" in fields:
-        await session.execute(delete(RouteDeployment).where(RouteDeployment.route_id == row.id))
-        for position, deployment_id in enumerate(spec.deployment_ids):
+    if "model_ids" in fields:
+        await session.execute(delete(RouterModel).where(RouterModel.router_id == row.id))
+        for position, model_id in enumerate(spec.model_ids):
+            session.add(RouterModel(router_id=row.id, model_id=model_id, position=position))
+    if "fallback_router_ids" in fields:
+        await session.execute(delete(RouterFallback).where(RouterFallback.router_id == row.id))
+        for position, fallback in enumerate(spec.fallback_router_ids):
             session.add(
-                RouteDeployment(route_id=row.id, deployment_id=deployment_id, position=position)
-            )
-    if "fallback_route_ids" in fields:
-        await session.execute(delete(RouteFallback).where(RouteFallback.route_id == row.id))
-        for position, fallback in enumerate(spec.fallback_route_ids):
-            session.add(
-                RouteFallback(route_id=row.id, fallback_route_id=fallback, position=position)
+                RouterFallback(router_id=row.id, fallback_router_id=fallback, position=position)
             )
     if "traffic_split" in fields:
-        await session.execute(delete(RouteSplit).where(RouteSplit.route_id == row.id))
+        await session.execute(delete(RouterSplit).where(RouterSplit.router_id == row.id))
         await session.flush()
         for position, split in enumerate(spec.traffic_split):
-            split_row = RouteSplit(
-                route_id=row.id, name=split.name, weight=split.weight, position=position
+            split_row = RouterSplit(
+                router_id=row.id, name=split.name, weight=split.weight, position=position
             )
             session.add(split_row)
             await session.flush()
-            for dep_position, deployment_id in enumerate(split.deployment_ids):
+            for dep_position, model_id in enumerate(split.model_ids):
                 session.add(
-                    RouteSplitDeployment(
-                        split_id=split_row.id, deployment_id=deployment_id, position=dep_position
+                    RouterSplitModel(
+                        split_id=split_row.id, model_id=model_id, position=dep_position
                     )
                 )
 
 
-def _apply_scalars(row: Route, spec: RouteSpec) -> None:
+def _apply_scalars(row: Router, spec: RouterSpec) -> None:
     row.name = spec.name
     row.strategy = spec.strategy
     row.custom_strategy = spec.custom_strategy
@@ -285,53 +279,53 @@ def _apply_scalars(row: Route, spec: RouteSpec) -> None:
     row.sticky_header = spec.sticky_header
 
 
-async def _routes_out(session: AsyncSession, rows: list[Route]) -> list[RouteOut]:
+async def _routers_out(session: AsyncSession, rows: list[Router]) -> list[RouterOut]:
     ids = [row.id for row in rows]
-    links: dict[uuid.UUID, list[RouteDeploymentOut]] = {i: [] for i in ids}
+    links: dict[uuid.UUID, list[RouterModelOut]] = {i: [] for i in ids}
     fallbacks: dict[uuid.UUID, list[uuid.UUID]] = {i: [] for i in ids}
     splits: dict[uuid.UUID, list[TrafficSplitOut]] = {i: [] for i in ids}
     if rows:
         for link in await session.scalars(
-            select(RouteDeployment)
-            .where(RouteDeployment.route_id.in_(ids))
-            .order_by(RouteDeployment.route_id, RouteDeployment.position)
+            select(RouterModel)
+            .where(RouterModel.router_id.in_(ids))
+            .order_by(RouterModel.router_id, RouterModel.position)
         ):
-            links[link.route_id].append(
-                RouteDeploymentOut(deployment_id=link.deployment_id, position=link.position)
+            links[link.router_id].append(
+                RouterModelOut(model_id=link.model_id, position=link.position)
             )
         for edge in await session.scalars(
-            select(RouteFallback)
-            .where(RouteFallback.route_id.in_(ids))
-            .order_by(RouteFallback.route_id, RouteFallback.position)
+            select(RouterFallback)
+            .where(RouterFallback.router_id.in_(ids))
+            .order_by(RouterFallback.router_id, RouterFallback.position)
         ):
-            fallbacks[edge.route_id].append(edge.fallback_route_id)
+            fallbacks[edge.router_id].append(edge.fallback_router_id)
         split_rows = (
             await session.scalars(
-                select(RouteSplit)
-                .where(RouteSplit.route_id.in_(ids))
-                .order_by(RouteSplit.route_id, RouteSplit.position)
+                select(RouterSplit)
+                .where(RouterSplit.router_id.in_(ids))
+                .order_by(RouterSplit.router_id, RouterSplit.position)
             )
         ).all()
         members: dict[uuid.UUID, list[uuid.UUID]] = {s.id: [] for s in split_rows}
         if split_rows:
             for member in await session.scalars(
-                select(RouteSplitDeployment)
-                .where(RouteSplitDeployment.split_id.in_(members))
-                .order_by(RouteSplitDeployment.split_id, RouteSplitDeployment.position)
+                select(RouterSplitModel)
+                .where(RouterSplitModel.split_id.in_(members))
+                .order_by(RouterSplitModel.split_id, RouterSplitModel.position)
             ):
-                members[member.split_id].append(member.deployment_id)
+                members[member.split_id].append(member.model_id)
         for s in split_rows:
-            splits[s.route_id].append(
-                TrafficSplitOut(name=s.name, weight=s.weight, deployment_ids=members[s.id])
+            splits[s.router_id].append(
+                TrafficSplitOut(name=s.name, weight=s.weight, model_ids=members[s.id])
             )
     return [
-        RouteOut(
+        RouterOut(
             id=row.id,
             name=row.name,
             strategy=row.strategy,
             custom_strategy=row.custom_strategy,
             strategy_params=row.strategy_params or {},
-            deployments=links[row.id],
+            models=links[row.id],
             retry=RetryPolicyOut(
                 max_attempts=row.retry_max_attempts,
                 retry_on_status=list(row.retry_on_status),
@@ -339,7 +333,7 @@ async def _routes_out(session: AsyncSession, rows: list[Route]) -> list[RouteOut
             )
             if row.retry_enabled
             else None,
-            fallback_route_ids=fallbacks[row.id],
+            fallback_router_ids=fallbacks[row.id],
             traffic_split=splits[row.id],
             sticky=row.sticky,
             sticky_header=row.sticky_header,
@@ -350,8 +344,8 @@ async def _routes_out(session: AsyncSession, rows: list[Route]) -> list[RouteOut
     ]
 
 
-async def _route_out(session: AsyncSession, row: Route) -> RouteOut:
-    return (await _routes_out(session, [row]))[0]
+async def _router_out(session: AsyncSession, row: Router) -> RouterOut:
+    return (await _routers_out(session, [row]))[0]
 
 
 # --------------------------------------------------------------------------- upstreams
@@ -477,11 +471,9 @@ async def delete_upstream(
         row = await session.get(Upstream, upstream_id)
         if row is None:
             raise not_found("upstream not found")
-        deployment = await session.scalar(
-            select(Deployment.id).where(Deployment.upstream_id == row.id).limit(1)
-        )
-        if deployment is not None:
-            raise conflict("upstream still has deployments")
+        model = await session.scalar(select(Model.id).where(Model.upstream_id == row.id).limit(1))
+        if model is not None:
+            raise conflict("upstream still has models")
         await session.delete(row)
         audit.record(
             session,
@@ -495,43 +487,43 @@ async def delete_upstream(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-# --------------------------------------------------------------------------- deployments
+# --------------------------------------------------------------------------- models
 
 
-@router.get("/deployments", response_model=Page[DeploymentOut], operation_id="listDeployments")
-async def list_deployments(
+@router.get("/models", response_model=Page[ModelOut], operation_id="listModels")
+async def list_models(
     authz: Authz,
     session: SessionDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
-) -> Page[DeploymentOut]:
+) -> Page[ModelOut]:
     await authz.require(Action.ROUTING_READ)
-    stmt = select(Deployment).order_by(Deployment.id)
-    rows, next_cursor = await uuid_page(session, stmt, Deployment.id, limit, cursor)
-    return Page[DeploymentOut](
-        items=[DeploymentOut.model_validate(row) for row in rows],
+    stmt = select(Model).order_by(Model.id)
+    rows, next_cursor = await uuid_page(session, stmt, Model.id, limit, cursor)
+    return Page[ModelOut](
+        items=[ModelOut.model_validate(row) for row in rows],
         next_cursor=next_cursor,
     )
 
 
 @router.post(
-    "/deployments",
-    response_model=DeploymentOut,
+    "/models",
+    response_model=ModelOut,
     status_code=status.HTTP_201_CREATED,
-    operation_id="createDeployment",
+    operation_id="createModel",
 )
-async def create_deployment(
-    body: DeploymentCreate,
+async def create_model(
+    body: ModelCreate,
     authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
-) -> DeploymentOut:
+) -> ModelOut:
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         upstream = await session.get(Upstream, body.upstream_id)
         if upstream is None:
             raise validation_error("upstream_id", "unknown upstream")
-        row = Deployment(
+        row = Model(
             name=body.name,
             upstream_id=upstream.id,
             upstream_model=body.upstream_model,
@@ -544,50 +536,48 @@ async def create_deployment(
         await session.refresh(row)
         audit.record(
             session,
-            action="deployment.create",
-            resource_type="deployment",
+            action="model.create",
+            resource_type="model",
             resource_id=row.id,
             principal=authz.principal,
             details={"name": row.name, "upstream": upstream.name},
         )
-        await enqueue_recompile(session, settings, "api.deployment.create")
-    return DeploymentOut.model_validate(row)
+        await enqueue_recompile(session, settings, "api.model.create")
+    return ModelOut.model_validate(row)
 
 
 @router.get(
-    "/deployments/{deployment_id}",
-    response_model=DeploymentOut,
-    operation_id="getDeployment",
+    "/models/{model_id}",
+    response_model=ModelOut,
+    operation_id="getModel",
 )
-async def get_deployment(
-    deployment_id: uuid.UUID, authz: Authz, session: SessionDep
-) -> DeploymentOut:
+async def get_model(model_id: uuid.UUID, authz: Authz, session: SessionDep) -> ModelOut:
     await authz.require(Action.ROUTING_READ)
-    row = await session.get(Deployment, deployment_id)
+    row = await session.get(Model, model_id)
     if row is None:
-        raise not_found("deployment not found")
-    return DeploymentOut.model_validate(row)
+        raise not_found("model not found")
+    return ModelOut.model_validate(row)
 
 
 @router.patch(
-    "/deployments/{deployment_id}",
-    response_model=DeploymentOut,
-    operation_id="updateDeployment",
+    "/models/{model_id}",
+    response_model=ModelOut,
+    operation_id="updateModel",
 )
-async def update_deployment(
-    deployment_id: uuid.UUID,
-    body: DeploymentUpdate,
+async def update_model(
+    model_id: uuid.UUID,
+    body: ModelUpdate,
     authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
-) -> DeploymentOut:
+) -> ModelOut:
     await authz.require(Action.ROUTING_MANAGE)
     _non_null(body, "name", "upstream_id", "upstream_model", "weight")
     async with mutation(session):
         await lock_scope(session, settings)
-        row = await session.get(Deployment, deployment_id)
+        row = await session.get(Model, model_id)
         if row is None:
-            raise not_found("deployment not found")
+            raise not_found("model not found")
         if body.upstream_id is not None:
             upstream = await session.get(Upstream, body.upstream_id)
             if upstream is None:
@@ -616,134 +606,132 @@ async def update_deployment(
         await session.flush()
         if "weight" in body.model_fields_set:
             starved = await session.scalar(
-                select(Route.name)
-                .join(RouteDeployment, RouteDeployment.route_id == Route.id)
-                .join(Deployment, Deployment.id == RouteDeployment.deployment_id)
+                select(Router.name)
+                .join(RouterModel, RouterModel.router_id == Router.id)
+                .join(Model, Model.id == RouterModel.model_id)
                 .where(
-                    Route.strategy == RoutingStrategy.WEIGHTED,
-                    Route.id.in_(
-                        select(RouteDeployment.route_id).where(
-                            RouteDeployment.deployment_id == row.id
-                        )
+                    Router.strategy == RoutingStrategy.WEIGHTED,
+                    Router.id.in_(
+                        select(RouterModel.router_id).where(RouterModel.model_id == row.id)
                     ),
                 )
-                .group_by(Route.id, Route.name)
-                .having(func.coalesce(func.sum(Deployment.weight), 0) == 0)
+                .group_by(Router.id, Router.name)
+                .having(func.coalesce(func.sum(Model.weight), 0) == 0)
                 .limit(1)
             )
             if starved is None:
                 starved = await session.scalar(
-                    select(Route.name)
-                    .join(RouteSplit, RouteSplit.route_id == Route.id)
-                    .join(RouteSplitDeployment, RouteSplitDeployment.split_id == RouteSplit.id)
-                    .join(Deployment, Deployment.id == RouteSplitDeployment.deployment_id)
+                    select(Router.name)
+                    .join(RouterSplit, RouterSplit.router_id == Router.id)
+                    .join(RouterSplitModel, RouterSplitModel.split_id == RouterSplit.id)
+                    .join(Model, Model.id == RouterSplitModel.model_id)
                     .where(
-                        Route.strategy == RoutingStrategy.WEIGHTED,
-                        RouteSplit.id.in_(
-                            select(RouteSplitDeployment.split_id).where(
-                                RouteSplitDeployment.deployment_id == row.id
+                        Router.strategy == RoutingStrategy.WEIGHTED,
+                        RouterSplit.id.in_(
+                            select(RouterSplitModel.split_id).where(
+                                RouterSplitModel.model_id == row.id
                             )
                         ),
                     )
-                    .group_by(RouteSplit.id, Route.name)
-                    .having(func.coalesce(func.sum(Deployment.weight), 0) == 0)
+                    .group_by(RouterSplit.id, Router.name)
+                    .having(func.coalesce(func.sum(Model.weight), 0) == 0)
                     .limit(1)
                 )
             if starved is not None:
                 raise validation_error(
-                    "weight", f"would leave weighted route {starved!r} with no positive weight"
+                    "weight", f"would leave weighted router {starved!r} with no positive weight"
                 )
         await session.refresh(row)
         audit.record(
             session,
-            action="deployment.update",
-            resource_type="deployment",
+            action="model.update",
+            resource_type="model",
             resource_id=row.id,
             principal=authz.principal,
             details={"name": row.name, "changes": body.model_dump(exclude_unset=True, mode="json")},
         )
-        await enqueue_recompile(session, settings, "api.deployment.update")
-    return DeploymentOut.model_validate(row)
+        await enqueue_recompile(session, settings, "api.model.update")
+    return ModelOut.model_validate(row)
 
 
 @router.delete(
-    "/deployments/{deployment_id}",
+    "/models/{model_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
-    operation_id="deleteDeployment",
+    operation_id="deleteModel",
 )
-async def delete_deployment(
-    deployment_id: uuid.UUID,
+async def delete_model(
+    model_id: uuid.UUID,
     authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
 ) -> Response:
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        row = await session.get(Deployment, deployment_id)
+        row = await session.get(Model, model_id)
         if row is None:
-            raise not_found("deployment not found")
+            raise not_found("model not found")
         link = await session.scalar(
-            select(RouteDeployment.route_id).where(RouteDeployment.deployment_id == row.id).limit(1)
+            select(RouterModel.router_id).where(RouterModel.model_id == row.id).limit(1)
         )
         if link is None:
             link = await session.scalar(
-                select(RouteSplitDeployment.split_id)
-                .where(RouteSplitDeployment.deployment_id == row.id)
+                select(RouterSplitModel.split_id)
+                .where(RouterSplitModel.model_id == row.id)
                 .limit(1)
             )
         if link is not None:
-            raise conflict("deployment is still used by a route")
+            raise conflict("model is still used by a router")
         await session.delete(row)
         audit.record(
             session,
-            action="deployment.delete",
-            resource_type="deployment",
+            action="model.delete",
+            resource_type="model",
             resource_id=row.id,
             principal=authz.principal,
             details={"name": row.name},
         )
-        await enqueue_recompile(session, settings, "api.deployment.delete")
+        await enqueue_recompile(session, settings, "api.model.delete")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-# --------------------------------------------------------------------------- routes
+# --------------------------------------------------------------------------- routers
 
 
-@router.get("/routes", response_model=Page[RouteOut], operation_id="listRoutes")
-async def list_routes(
+@router.get("/routers", response_model=Page[RouterOut], operation_id="listRoutes")
+async def list_routers(
     authz: Authz,
     session: SessionDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
-) -> Page[RouteOut]:
+) -> Page[RouterOut]:
     await authz.require(Action.ROUTING_READ)
-    stmt = select(Route).order_by(Route.id)
-    rows, next_cursor = await uuid_page(session, stmt, Route.id, limit, cursor)
-    return Page[RouteOut](items=await _routes_out(session, rows), next_cursor=next_cursor)
+    stmt = select(Router).order_by(Router.id)
+    rows, next_cursor = await uuid_page(session, stmt, Router.id, limit, cursor)
+    return Page[RouterOut](items=await _routers_out(session, rows), next_cursor=next_cursor)
 
 
 @router.post(
-    "/routes",
-    response_model=RouteOut,
+    "/routers",
+    response_model=RouterOut,
     status_code=status.HTTP_201_CREATED,
-    operation_id="createRoute",
+    operation_id="createRouter",
 )
-async def create_route(
-    body: RouteCreate,
+async def create_router(
+    body: RouterCreate,
     authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
-) -> RouteOut:
+) -> RouterOut:
     await authz.require(Action.ROUTING_MANAGE)
-    spec = RouteSpec(
+    spec = RouterSpec(
         name=body.name,
         strategy=body.strategy,
         custom_strategy=body.custom_strategy,
         strategy_params=body.strategy_params,
-        deployment_ids=list(body.deployment_ids),
+        model_ids=list(body.model_ids),
         retry=body.retry,
-        fallback_route_ids=list(body.fallback_route_ids),
+        fallback_router_ids=list(body.fallback_router_ids),
         traffic_split=list(body.traffic_split),
         sticky=body.sticky,
         sticky_header=body.sticky_header,
@@ -751,9 +739,9 @@ async def create_route(
     async with mutation(session):
         # Serializes routing writes so concurrent fallback edits cannot form a cycle.
         await lock_scope(session, settings)
-        # A new route has no incoming fallbacks, so it cannot close a cycle.
+        # A new router has no incoming fallbacks, so it cannot close a cycle.
         await _validate_spec(session, spec, None)
-        row = Route(name=spec.name)
+        row = Router(name=spec.name)
         _apply_scalars(row, spec)
         session.add(row)
         await session.flush()
@@ -761,54 +749,54 @@ async def create_route(
             session,
             row,
             spec,
-            {"deployment_ids", "fallback_route_ids", "traffic_split", "strategy"},
+            {"model_ids", "fallback_router_ids", "traffic_split", "strategy"},
         )
         await session.flush()
         await session.refresh(row)
         audit.record(
             session,
-            action="route.create",
-            resource_type="route",
+            action="router.create",
+            resource_type="router",
             resource_id=row.id,
             principal=authz.principal,
             details={
                 "name": row.name,
-                "deployments": [str(i) for i in spec.deployment_ids],
+                "models": [str(i) for i in spec.model_ids],
                 "settings": body.model_dump(
                     mode="json",
-                    exclude={"name", "deployment_ids", "strategy_params"},
+                    exclude={"name", "model_ids", "strategy_params"},
                     exclude_defaults=True,
                 ),
             },
         )
-        await enqueue_recompile(session, settings, "api.route.create")
-    return await _route_out(session, row)
+        await enqueue_recompile(session, settings, "api.router.create")
+    return await _router_out(session, row)
 
 
-@router.get("/routes/{route_id}", response_model=RouteOut, operation_id="getRoute")
-async def get_route(route_id: uuid.UUID, authz: Authz, session: SessionDep) -> RouteOut:
+@router.get("/routers/{router_id}", response_model=RouterOut, operation_id="getRouter")
+async def get_router(router_id: uuid.UUID, authz: Authz, session: SessionDep) -> RouterOut:
     await authz.require(Action.ROUTING_READ)
-    row = await session.get(Route, route_id)
+    row = await session.get(Router, router_id)
     if row is None:
-        raise not_found("route not found")
-    return await _route_out(session, row)
+        raise not_found("router not found")
+    return await _router_out(session, row)
 
 
-@router.patch("/routes/{route_id}", response_model=RouteOut, operation_id="updateRoute")
-async def update_route(
-    route_id: uuid.UUID,
-    body: RouteUpdate,
+@router.patch("/routers/{router_id}", response_model=RouterOut, operation_id="updateRouter")
+async def update_router(
+    router_id: uuid.UUID,
+    body: RouterUpdate,
     authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
-) -> RouteOut:
+) -> RouterOut:
     await authz.require(Action.ROUTING_MANAGE)
     _non_null(
         body,
         "name",
         "strategy",
-        "deployment_ids",
-        "fallback_route_ids",
+        "model_ids",
+        "fallback_router_ids",
         "traffic_split",
         "sticky",
         "strategy_params",
@@ -816,9 +804,9 @@ async def update_route(
     fields = body.model_fields_set
     async with mutation(session):
         await lock_scope(session, settings)
-        row = await session.get(Route, route_id)
+        row = await session.get(Router, router_id)
         if row is None:
-            raise not_found("route not found")
+            raise not_found("router not found")
         spec = await _load_spec(session, row)
         for name in fields:
             setattr(spec, name, getattr(body, name))
@@ -837,8 +825,8 @@ async def update_route(
         await session.refresh(row)
         audit.record(
             session,
-            action="route.update",
-            resource_type="route",
+            action="router.update",
+            resource_type="router",
             resource_id=row.id,
             principal=authz.principal,
             details={
@@ -848,18 +836,18 @@ async def update_route(
                 ),
             },
         )
-        await enqueue_recompile(session, settings, "api.route.update")
-    return await _route_out(session, row)
+        await enqueue_recompile(session, settings, "api.router.update")
+    return await _router_out(session, row)
 
 
 @router.delete(
-    "/routes/{route_id}",
+    "/routers/{router_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
-    operation_id="deleteRoute",
+    operation_id="deleteRouter",
 )
-async def delete_route(
-    route_id: uuid.UUID,
+async def delete_router(
+    router_id: uuid.UUID,
     authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
@@ -867,26 +855,26 @@ async def delete_route(
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         await lock_scope(session, settings)
-        row = await session.get(Route, route_id)
+        row = await session.get(Router, router_id)
         if row is None:
-            raise not_found("route not found")
+            raise not_found("router not found")
         user = await session.scalar(
-            select(Route.name)
-            .join(RouteFallback, RouteFallback.route_id == Route.id)
-            .where(RouteFallback.fallback_route_id == row.id)
-            .order_by(Route.name)
+            select(Router.name)
+            .join(RouterFallback, RouterFallback.router_id == Router.id)
+            .where(RouterFallback.fallback_router_id == row.id)
+            .order_by(Router.name)
             .limit(1)
         )
         if user is not None:
-            raise conflict(f"route is a fallback of route {user!r}")
+            raise conflict(f"router is a fallback of router {user!r}")
         await session.delete(row)
         audit.record(
             session,
-            action="route.delete",
-            resource_type="route",
+            action="router.delete",
+            resource_type="router",
             resource_id=row.id,
             principal=authz.principal,
             details={"name": row.name},
         )
-        await enqueue_recompile(session, settings, "api.route.delete")
+        await enqueue_recompile(session, settings, "api.router.delete")
     return Response(status_code=status.HTTP_204_NO_CONTENT)

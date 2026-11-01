@@ -1,5 +1,5 @@
 //! Process-lifetime state shared by every compiled `RoutingTable`. Snapshot swaps
-//! replace the router, never this: counters keyed by stable names/ids survive.
+//! replace the routing_table, never this: counters keyed by stable names/ids survive.
 
 use std::{
     collections::HashMap,
@@ -49,12 +49,12 @@ impl Runtime {
     }
 }
 
-/// Per-deployment in-flight counters keyed by deployment name. A recompiled
-/// deployment with the same name shares the counter, so streams still running
+/// Per-model in-flight counters keyed by model name. A recompiled
+/// model with the same name shares the counter, so streams still running
 /// on an old snapshot keep counting toward least-in-flight decisions.
 ///
-/// Entries are never removed: the set is bounded by the deployment names ever
-/// configured, and a removed deployment's counter drains to zero as its
+/// Entries are never removed: the set is bounded by the model names ever
+/// configured, and a removed model's counter drains to zero as its
 /// remaining requests finish.
 #[derive(Default)]
 pub struct InFlightRegistry {
@@ -62,14 +62,14 @@ pub struct InFlightRegistry {
 }
 
 impl InFlightRegistry {
-    /// Compile-time only; requests use the `Arc` cached in their deployment.
-    pub fn counter(&self, deployment: &str) -> Arc<AtomicUsize> {
+    /// Compile-time only; requests use the `Arc` cached in their model.
+    pub fn counter(&self, model: &str) -> Arc<AtomicUsize> {
         let mut counters = self.counters.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(counter) = counters.get(deployment) {
+        if let Some(counter) = counters.get(model) {
             return counter.clone();
         }
         let counter = Arc::new(AtomicUsize::new(0));
-        counters.insert(deployment.into(), counter.clone());
+        counters.insert(model.into(), counter.clone());
         counter
     }
 

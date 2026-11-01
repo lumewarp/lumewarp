@@ -12,9 +12,9 @@ from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.models import (
     ApiKey,
     ConfigVersion,
-    Deployment,
-    Route,
-    RouteDeployment,
+    Model,
+    Router,
+    RouterModel,
     RoutingStrategy,
     Scope,
     ServiceAccount,
@@ -56,27 +56,27 @@ async def add_key(
     return await factories.make_key(s, team, owner, name=name, **kw)
 
 
-async def add_route(
+async def add_router(
     s: AsyncSession,
     name: str,
-    deployments: list[tuple[str, int | None]],
+    models: list[tuple[str, int | None]],
     *,
     upstream: str = "vllm",
     strategy: RoutingStrategy = RoutingStrategy.WEIGHTED,
-) -> Route:
-    """deployments: (name, input price or None)."""
+) -> Router:
+    """models: (name, input price or None)."""
     up = await s.scalar(select(Upstream).where(Upstream.name == upstream))
     if up is None:
         up = Upstream(name=upstream, kind=UpstreamKind.VLLM, base_url=f"http://{upstream}/v1")
         s.add(up)
         await s.flush()
-    route = Route(name=name, strategy=strategy)
-    s.add(route)
+    router = Router(name=name, strategy=strategy)
+    s.add(router)
     await s.flush()
-    for pos, (name, price) in enumerate(deployments):
-        d = await s.scalar(select(Deployment).where(Deployment.name == name))
+    for pos, (name, price) in enumerate(models):
+        d = await s.scalar(select(Model).where(Model.name == name))
         if d is None:
-            d = Deployment(
+            d = Model(
                 name=name,
                 upstream_id=up.id,
                 upstream_model=f"{name}-name",
@@ -85,9 +85,9 @@ async def add_route(
             )
             s.add(d)
             await s.flush()
-        s.add(RouteDeployment(route_id=route.id, deployment_id=d.id, position=pos))
+        s.add(RouterModel(router_id=router.id, model_id=d.id, position=pos))
     await s.flush()
-    return route
+    return router
 
 
 async def load_version(factory: SessionFactory, version: int) -> snapshot_pb2.Snapshot:

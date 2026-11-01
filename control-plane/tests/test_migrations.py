@@ -78,21 +78,21 @@ async def test_enum_check_constraints_exist(engine) -> None:
         "ck_service_accounts_model_access",
         "ck_api_keys_owner_matches_kind",
         "ck_config_versions_compaction",
-        "ck_routes_routing_strategy",
-        "ck_routes_sticky_by",
-        "ck_routes_sticky_header_iff",
-        "ck_routes_retry_shape",
-        "ck_routes_retry_status_range",
+        "ck_routers_routing_strategy",
+        "ck_routers_sticky_by",
+        "ck_routers_sticky_header_iff",
+        "ck_routers_retry_shape",
+        "ck_routers_retry_status_range",
         "ck_upstreams_health_check_bounds",
         "ck_upstreams_circuit_breaker_shape",
-        "ck_route_fallbacks_no_self",
-        "ck_route_splits_name_charset",
+        "ck_router_fallbacks_no_self",
+        "ck_router_splits_name_charset",
     ):
         assert name in names
 
 
 async def test_downgrade_0003_maps_vllm_load() -> None:
-    """0003 -> 0002 drops the P2 routing settings and keeps routes valid for P1."""
+    """0003 -> 0002 drops the P2 routing settings and keeps routers valid for P1."""
     url = await create_database()
     engine = create_async_engine(url)
     try:
@@ -100,7 +100,7 @@ async def test_downgrade_0003_maps_vllm_load() -> None:
         async with engine.begin() as conn:
             await conn.execute(
                 text(
-                    "INSERT INTO routes (id, name, strategy, retry_enabled, retry_on_status)"
+                    "INSERT INTO routers (id, name, strategy, retry_enabled, retry_on_status)"
                     " VALUES (gen_random_uuid(), 'm', 'vllm_load', true, '{503}')"
                 )
             )

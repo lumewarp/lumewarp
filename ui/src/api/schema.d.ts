@@ -242,78 +242,78 @@ export interface paths {
         patch: operations["updateUpstream"];
         trace?: never;
     };
-    "/api/v1/deployments": {
+    "/api/v1/models": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List Deployments */
-        get: operations["listDeployments"];
+        /** List Models */
+        get: operations["listModels"];
         put?: never;
-        /** Create Deployment */
-        post: operations["createDeployment"];
+        /** Create Model */
+        post: operations["createModel"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/deployments/{deployment_id}": {
+    "/api/v1/models/{model_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Get Deployment */
-        get: operations["getDeployment"];
+        /** Get Model */
+        get: operations["getModel"];
         put?: never;
         post?: never;
-        /** Delete Deployment */
-        delete: operations["deleteDeployment"];
+        /** Delete Model */
+        delete: operations["deleteModel"];
         options?: never;
         head?: never;
-        /** Update Deployment */
-        patch: operations["updateDeployment"];
+        /** Update Model */
+        patch: operations["updateModel"];
         trace?: never;
     };
-    "/api/v1/routes": {
+    "/api/v1/routers": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List Routes */
+        /** List Routers */
         get: operations["listRoutes"];
         put?: never;
-        /** Create Route */
-        post: operations["createRoute"];
+        /** Create Router */
+        post: operations["createRouter"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/routes/{route_id}": {
+    "/api/v1/routers/{router_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Get Route */
-        get: operations["getRoute"];
+        /** Get Router */
+        get: operations["getRouter"];
         put?: never;
         post?: never;
-        /** Delete Route */
-        delete: operations["deleteRoute"];
+        /** Delete Router */
+        delete: operations["deleteRouter"];
         options?: never;
         head?: never;
-        /** Update Route */
-        patch: operations["updateRoute"];
+        /** Update Router */
+        patch: operations["updateRouter"];
         trace?: never;
     };
     "/api/v1/users": {
@@ -738,75 +738,6 @@ export interface components {
             /** Compacted At */
             compacted_at: string | null;
         };
-        /** DeploymentCreate */
-        DeploymentCreate: {
-            /** Name */
-            name: string;
-            /**
-             * Upstream Id
-             * Format: uuid
-             */
-            upstream_id: string;
-            /** Upstream Model */
-            upstream_model: string;
-            /**
-             * Weight
-             * @default 1
-             */
-            weight: number;
-            /** Price Input Nano Usd Per Mtok */
-            price_input_nano_usd_per_mtok?: number | null;
-            /** Price Output Nano Usd Per Mtok */
-            price_output_nano_usd_per_mtok?: number | null;
-        };
-        /** DeploymentOut */
-        DeploymentOut: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            id: string;
-            /** Name */
-            name: string;
-            /**
-             * Upstream Id
-             * Format: uuid
-             */
-            upstream_id: string;
-            /** Upstream Model */
-            upstream_model: string;
-            /** Weight */
-            weight: number;
-            /** Price Input Nano Usd Per Mtok */
-            price_input_nano_usd_per_mtok: number | null;
-            /** Price Output Nano Usd Per Mtok */
-            price_output_nano_usd_per_mtok: number | null;
-            /**
-             * Created At
-             * Format: date-time
-             */
-            created_at: string;
-            /**
-             * Updated At
-             * Format: date-time
-             */
-            updated_at: string;
-        };
-        /** DeploymentUpdate */
-        DeploymentUpdate: {
-            /** Name */
-            name?: string | null;
-            /** Upstream Id */
-            upstream_id?: string | null;
-            /** Upstream Model */
-            upstream_model?: string | null;
-            /** Weight */
-            weight?: number | null;
-            /** Price Input Nano Usd Per Mtok */
-            price_input_nano_usd_per_mtok?: number | null;
-            /** Price Output Nano Usd Per Mtok */
-            price_output_nano_usd_per_mtok?: number | null;
-        };
         /**
          * ErrorBody
          * @description The `{error: {code, message}}` shape every non-2xx response uses.
@@ -1158,6 +1089,75 @@ export interface components {
          * @enum {string}
          */
         ModelAccess: "inherit" | "all" | "list";
+        /** ModelCreate */
+        ModelCreate: {
+            /** Name */
+            name: string;
+            /**
+             * Upstream Id
+             * Format: uuid
+             */
+            upstream_id: string;
+            /** Upstream Model */
+            upstream_model: string;
+            /**
+             * Weight
+             * @default 1
+             */
+            weight: number;
+            /** Price Input Nano Usd Per Mtok */
+            price_input_nano_usd_per_mtok?: number | null;
+            /** Price Output Nano Usd Per Mtok */
+            price_output_nano_usd_per_mtok?: number | null;
+        };
+        /** ModelOut */
+        ModelOut: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /**
+             * Upstream Id
+             * Format: uuid
+             */
+            upstream_id: string;
+            /** Upstream Model */
+            upstream_model: string;
+            /** Weight */
+            weight: number;
+            /** Price Input Nano Usd Per Mtok */
+            price_input_nano_usd_per_mtok: number | null;
+            /** Price Output Nano Usd Per Mtok */
+            price_output_nano_usd_per_mtok: number | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** ModelUpdate */
+        ModelUpdate: {
+            /** Name */
+            name?: string | null;
+            /** Upstream Id */
+            upstream_id?: string | null;
+            /** Upstream Model */
+            upstream_model?: string | null;
+            /** Weight */
+            weight?: number | null;
+            /** Price Input Nano Usd Per Mtok */
+            price_input_nano_usd_per_mtok?: number | null;
+            /** Price Output Nano Usd Per Mtok */
+            price_output_nano_usd_per_mtok?: number | null;
+        };
         /** Page[AuditOut] */
         Page_AuditOut_: {
             /** Items */
@@ -1169,13 +1169,6 @@ export interface components {
         Page_ConfigVersionOut_: {
             /** Items */
             items: components["schemas"]["ConfigVersionOut"][];
-            /** Next Cursor */
-            next_cursor?: string | null;
-        };
-        /** Page[DeploymentOut] */
-        Page_DeploymentOut_: {
-            /** Items */
-            items: components["schemas"]["DeploymentOut"][];
             /** Next Cursor */
             next_cursor?: string | null;
         };
@@ -1200,10 +1193,17 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
-        /** Page[RouteOut] */
-        Page_RouteOut_: {
+        /** Page[ModelOut] */
+        Page_ModelOut_: {
             /** Items */
-            items: components["schemas"]["RouteOut"][];
+            items: components["schemas"]["ModelOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
+        /** Page[RouterOut] */
+        Page_RouterOut_: {
+            /** Items */
+            items: components["schemas"]["RouterOut"][];
             /** Next Cursor */
             next_cursor?: string | null;
         };
@@ -1290,8 +1290,8 @@ export interface components {
             /** Version */
             version: number;
         };
-        /** RouteCreate */
-        RouteCreate: {
+        /** RouterCreate */
+        RouterCreate: {
             /** Name */
             name: string;
             /** @default weighted */
@@ -1303,16 +1303,16 @@ export interface components {
                 [key: string]: unknown;
             };
             /**
-             * Deployment Ids
-             * @description Ordered deployments; may be empty only when traffic_split is set.
+             * Model Ids
+             * @description Ordered models; may be empty only when traffic_split is set.
              */
-            deployment_ids?: string[];
+            model_ids?: string[];
             retry?: components["schemas"]["RetryPolicyIn"] | null;
             /**
-             * Fallback Route Ids
-             * @description Routes tried in order once this route failed.
+             * Fallback Router Ids
+             * @description Routers tried in order once this router failed.
              */
-            fallback_route_ids?: string[];
+            fallback_router_ids?: string[];
             /** Traffic Split */
             traffic_split?: components["schemas"]["TrafficSplitIn"][];
             /** @default none */
@@ -1320,18 +1320,18 @@ export interface components {
             /** Sticky Header */
             sticky_header?: string | null;
         };
-        /** RouteDeploymentOut */
-        RouteDeploymentOut: {
+        /** RouterModelOut */
+        RouterModelOut: {
             /**
-             * Deployment Id
+             * Model Id
              * Format: uuid
              */
-            deployment_id: string;
+            model_id: string;
             /** Position */
             position: number;
         };
-        /** RouteOut */
-        RouteOut: {
+        /** RouterOut */
+        RouterOut: {
             /**
              * Id
              * Format: uuid
@@ -1346,11 +1346,11 @@ export interface components {
             strategy_params?: {
                 [key: string]: unknown;
             };
-            /** Deployments */
-            deployments: components["schemas"]["RouteDeploymentOut"][];
+            /** Models */
+            models: components["schemas"]["RouterModelOut"][];
             retry: components["schemas"]["RetryPolicyOut"] | null;
-            /** Fallback Route Ids */
-            fallback_route_ids: string[];
+            /** Fallback Router Ids */
+            fallback_router_ids: string[];
             /** Traffic Split */
             traffic_split: components["schemas"]["TrafficSplitOut"][];
             sticky: components["schemas"]["StickyBy"];
@@ -1368,11 +1368,11 @@ export interface components {
             updated_at: string;
         };
         /**
-         * RouteUpdate
+         * RouterUpdate
          * @description PATCH: omitted fields are unchanged; lists replace the stored list; `retry` and
          *     `sticky_header` accept null to remove the setting.
          */
-        RouteUpdate: {
+        RouterUpdate: {
             /** Name */
             name?: string | null;
             strategy?: components["schemas"]["RoutingStrategy"] | null;
@@ -1382,11 +1382,11 @@ export interface components {
             strategy_params?: {
                 [key: string]: unknown;
             } | null;
-            /** Deployment Ids */
-            deployment_ids?: string[] | null;
+            /** Model Ids */
+            model_ids?: string[] | null;
             retry?: components["schemas"]["RetryPolicyIn"] | null;
-            /** Fallback Route Ids */
-            fallback_route_ids?: string[] | null;
+            /** Fallback Router Ids */
+            fallback_router_ids?: string[] | null;
             /** Traffic Split */
             traffic_split?: components["schemas"]["TrafficSplitIn"][] | null;
             sticky?: components["schemas"]["StickyBy"] | null;
@@ -1652,8 +1652,8 @@ export interface components {
              * @description Share = weight / sum(weights).
              */
             weight: number;
-            /** Deployment Ids */
-            deployment_ids: string[];
+            /** Model Ids */
+            model_ids: string[];
         };
         /** TrafficSplitOut */
         TrafficSplitOut: {
@@ -1661,8 +1661,8 @@ export interface components {
             name: string;
             /** Weight */
             weight: number;
-            /** Deployment Ids */
-            deployment_ids: string[];
+            /** Model Ids */
+            model_ids: string[];
         };
         /** UpstreamCreate */
         UpstreamCreate: {
@@ -3695,7 +3695,7 @@ export interface operations {
             };
         };
     };
-    listDeployments: {
+    listModels: {
         parameters: {
             query?: {
                 limit?: number;
@@ -3713,7 +3713,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Page_DeploymentOut_"];
+                    "application/json": components["schemas"]["Page_ModelOut_"];
                 };
             };
             /** @description Missing or invalid credentials */
@@ -3763,7 +3763,7 @@ export interface operations {
             };
         };
     };
-    createDeployment: {
+    createModel: {
         parameters: {
             query?: never;
             header?: never;
@@ -3772,7 +3772,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["DeploymentCreate"];
+                "application/json": components["schemas"]["ModelCreate"];
             };
         };
         responses: {
@@ -3782,7 +3782,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["DeploymentOut"];
+                    "application/json": components["schemas"]["ModelOut"];
                 };
             };
             /** @description Missing or invalid credentials */
@@ -3832,12 +3832,12 @@ export interface operations {
             };
         };
     };
-    getDeployment: {
+    getModel: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                deployment_id: string;
+                model_id: string;
             };
             cookie?: never;
         };
@@ -3849,7 +3849,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["DeploymentOut"];
+                    "application/json": components["schemas"]["ModelOut"];
                 };
             };
             /** @description Missing or invalid credentials */
@@ -3899,12 +3899,12 @@ export interface operations {
             };
         };
     };
-    deleteDeployment: {
+    deleteModel: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                deployment_id: string;
+                model_id: string;
             };
             cookie?: never;
         };
@@ -3964,18 +3964,18 @@ export interface operations {
             };
         };
     };
-    updateDeployment: {
+    updateModel: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                deployment_id: string;
+                model_id: string;
             };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["DeploymentUpdate"];
+                "application/json": components["schemas"]["ModelUpdate"];
             };
         };
         responses: {
@@ -3985,7 +3985,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["DeploymentOut"];
+                    "application/json": components["schemas"]["ModelOut"];
                 };
             };
             /** @description Missing or invalid credentials */
@@ -4053,7 +4053,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Page_RouteOut_"];
+                    "application/json": components["schemas"]["Page_RouterOut_"];
                 };
             };
             /** @description Missing or invalid credentials */
@@ -4103,7 +4103,7 @@ export interface operations {
             };
         };
     };
-    createRoute: {
+    createRouter: {
         parameters: {
             query?: never;
             header?: never;
@@ -4112,7 +4112,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["RouteCreate"];
+                "application/json": components["schemas"]["RouterCreate"];
             };
         };
         responses: {
@@ -4122,7 +4122,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RouteOut"];
+                    "application/json": components["schemas"]["RouterOut"];
                 };
             };
             /** @description Missing or invalid credentials */
@@ -4172,12 +4172,12 @@ export interface operations {
             };
         };
     };
-    getRoute: {
+    getRouter: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                route_id: string;
+                router_id: string;
             };
             cookie?: never;
         };
@@ -4189,7 +4189,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RouteOut"];
+                    "application/json": components["schemas"]["RouterOut"];
                 };
             };
             /** @description Missing or invalid credentials */
@@ -4239,12 +4239,12 @@ export interface operations {
             };
         };
     };
-    deleteRoute: {
+    deleteRouter: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                route_id: string;
+                router_id: string;
             };
             cookie?: never;
         };
@@ -4304,18 +4304,18 @@ export interface operations {
             };
         };
     };
-    updateRoute: {
+    updateRouter: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                route_id: string;
+                router_id: string;
             };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["RouteUpdate"];
+                "application/json": components["schemas"]["RouterUpdate"];
             };
         };
         responses: {
@@ -4325,7 +4325,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RouteOut"];
+                    "application/json": components["schemas"]["RouterOut"];
                 };
             };
             /** @description Missing or invalid credentials */

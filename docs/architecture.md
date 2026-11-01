@@ -86,10 +86,10 @@ flowchart TB
 
 ### Router
 
-- 模型別名 → 路由 → 多個 deployment（上游 + 模型 + 憑證）。
+- 模型別名 → 路由 → 多個 model（上游 + 模型 + 憑證）。
 - 策略：加權、最低延遲（EWMA）、最少進行中請求、vLLM 負載感知（P2 已實作）；依 team、header、輸入 token 數條件分流（延後）。
 - 彈性：fallback 鏈、有上限的重試、circuit breaker、主動健康檢查、尊重 Retry-After（P2 已實作）。
-- cache 親和：相同 session 或 prompt 前綴黏在同一 deployment（延後）。
+- cache 親和：相同 session 或 prompt 前綴黏在同一 model（延後）。
 - 變更即設定版本，可回滾；路由層百分比切流（traffic split，可依 header／team／key sticky）已實作，設定版本 canary 延後。
 
 ### MCP / A2A gateway
@@ -125,20 +125,20 @@ gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control 
 
 | 指標 | 標籤 | 用途 |
 | --- | --- | --- |
-| `lumewarp_requests_total` | requested, endpoint, deployment, team, status | 流量與錯誤率 |
-| `lumewarp_request_duration_seconds` | requested, endpoint, deployment | 端到端延遲 |
+| `lumewarp_requests_total` | requested, endpoint, model, team, status | 流量與錯誤率 |
+| `lumewarp_request_duration_seconds` | requested, endpoint, model | 端到端延遲 |
 | `lumewarp_gateway_overhead_seconds` | endpoint | gateway 自身額外延遲 |
-| `lumewarp_ttft_seconds`、`lumewarp_tpot_seconds` | requested, deployment | 串流延遲 |
+| `lumewarp_ttft_seconds`、`lumewarp_tpot_seconds` | requested, model | 串流延遲 |
 | `lumewarp_tokens_total` | requested, team, direction | token 用量 |
 | `lumewarp_spend_total` | team | 花費 |
-| `lumewarp_upstream_circuit_state` | deployment | 熔斷與健康 |
-| `lumewarp_upstream_attempts_total` | requested, deployment, outcome | 每次上游嘗試；success / retryable_status / connect_error / timeout / circuit_open / non_retryable |
-| `lumewarp_fallbacks_total` | router, fallback_model | 切換至備援路由 |
+| `lumewarp_upstream_circuit_state` | model | 熔斷與健康 |
+| `lumewarp_upstream_attempts_total` | requested, model, outcome | 每次上游嘗試；success / retryable_status / connect_error / timeout / circuit_open / non_retryable |
+| `lumewarp_fallbacks_total` | router, model | 切換至備援路由 |
 | `lumewarp_retries_budget_exhausted_total` | router | 全域重試額度耗盡 |
 | `lumewarp_upstream_healthy` | upstream | 主動健康檢查狀態（1 正常、0 異常）；探測不計入請求與用量 |
-| `lumewarp_vllm_queue_depth`、`lumewarp_vllm_kv_cache_usage` | deployment | vLLM 負載（每秒背景抓取；`vllm_load` 路由使用） |
+| `lumewarp_vllm_queue_depth`、`lumewarp_vllm_kv_cache_usage` | model | vLLM 負載（每秒背景抓取；`vllm_load` 路由使用） |
 | `lumewarp_vllm_scrape_failures_total` | upstream | vLLM metrics 抓取失敗（失敗即退回 in-flight 比較） |
-| `lumewarp_upstream_latency_ewma_seconds` | deployment | `lowest_latency` 使用的回應標頭時間 EWMA（於 `/metrics` 抓取時計算） |
+| `lumewarp_upstream_latency_ewma_seconds` | model | `lowest_latency` 使用的回應標頭時間 EWMA（於 `/metrics` 抓取時計算） |
 | `lumewarp_split_requests_total` | router, split | 依 traffic split 分配的請求數（canary 比例） |
 | `lumewarp_mcp_tool_calls_total` | server, tool, team, status | MCP 使用 |
 | `lumewarp_config_version`、`lumewarp_config_apply_failures_total` | gateway | 設定同步 |
@@ -163,10 +163,10 @@ P1 的 control plane、設定串流、Team 模型與 Admin UI 第一版已實作
 
 - 單一 Python 程序：FastAPI（HTTP 8091）＋ gRPC（50051）的 ConfigService／UsageService／health，加上 compiler loop、月結 rollover 與 notifier outbox；`/readyz` 檢查 DB、migration head 與背景服務，`/healthz` 為 liveness，gRPC 意外停止會讓程序結束。
 - Postgres schema 由 Alembic 管理（單一 scope）；bootstrap token（安裝層 superuser）與每人 PAT；授權為 installation superuser 與 team admin／member，成員關係在 `team_members`，也可換成外部 `lumewarp.authz` 後端。
-- REST `/api/v1`：team／member／service account／key（含撤銷與輪替）、預算／限流／模型 allowlist、upstream／deployment／route（含價格）、使用者、usage 聚合、audit、gateway 狀態與 token、config versions 與 routing rollback。
+- REST `/api/v1`：team／member／service account／key（含撤銷與輪替）、預算／限流／模型 allowlist、upstream／model／router（含價格）、使用者、usage 聚合、audit、gateway 狀態與 token、config versions 與 routing rollback。
 - 設定發布：寫入交易內同時寫 outbox；compiler 以 advisory lock 序列化，產生不可變版本快照；gRPC 串流支援全量／delta、digest、ACK／NACK、base mismatch 重送全量、壞版本隔離與 persist 重試，舊版 payload 依保留策略壓縮。
 - 用量與預算：`UsageService.Report` 以 `request_id` 冪等寫入，同一交易累計 team 與 owner（member／service account）的 UTC 月總額並評估預算；超額把 key 翻成 `BUDGET_EXCEEDED` 並推新版本（eventual，約 5 秒內；不切斷進行中的串流）。soft limit 走 notifier outbox（內建 webhook，可換 plugin）。
-- Plugin：`lumewarp.router`（編譯期調整 deployment 權重，2 秒逾時，非法輸出整批丟棄）與 `lumewarp.notifier`（outbox 投遞）已接上；`lumewarp.auth` 只有 protocol，P1 不呼叫。
+- Plugin：`lumewarp.router`（編譯期調整 model 權重，2 秒逾時，非法輸出整批丟棄）與 `lumewarp.notifier`（outbox 投遞）已接上；`lumewarp.auth` 只有 protocol，P1 不呼叫。
 - Admin UI：Vite 靜態檔由 control plane 掛在 `/`，登入用 bootstrap token 或 PAT；API 文件在 `/docs`，OpenAPI 可離線輸出。UI 沒 build 時只有 API。
 
 **Gateway（`gateway/`）**
@@ -174,7 +174,7 @@ P1 的 control plane、設定串流、Team 模型與 Admin UI 第一版已實作
 - 新增 control-plane 模式：`--control-plane`、`--gateway-token-env`、`--state-dir`、`--scope`、`--gateway-id`、`--local-config`；standalone YAML 模式不變。
 - 開機先載入 `<state-dir>/snapshot.pb`（驗證 scope、長度與結尾 SHA-256）並立即服務，再背景連線；沒有可用快照時 `/v1/*` 與 `/readyz` 回 503，不會退回 open router。每次套用先持久化再 swap 再 ACK，重啟可回到最後 ACK 的版本。
 - CP 模式一律要求 key；status／expiry／allowlist 與預算狀態照舊（401／403／429）。rpm、tpm、max_parallel 在每個 gateway 行程本機累計（N 個實例可有 N 倍上限），429 帶 `Retry-After`。
-- 用量：串流在上游支援時注入 `stream_options.include_usage`，客戶端沒要求時剝除多出的 usage chunk；事件經有界佇列（100k）每 1 秒或 500 筆批次送出，滿了就丟並計數；token／spend 指標與 `deployment.price` 成本換算已接上。
+- 用量：串流在上游支援時注入 `stream_options.include_usage`，客戶端沒要求時剝除多出的 usage chunk；事件經有界佇列（100k）每 1 秒或 500 筆批次送出，滿了就丟並計數；token／spend 指標與 `model.price` 成本換算已接上。
 - 指標：config stream 連線／版本／NACK code、usage 佇列與 capture 狀態、tokens／spend 皆已輸出；`/metrics` 仍在 admin listener。
 
 **部署**
@@ -207,9 +207,9 @@ P2 把權限模型縮成 team → member／service account，加上 SSO、可抽
 - 快照與 standalone YAML 支援 `retry`、`fallbacks`、`health_check`、`circuit_breaker`、`traffic_split`、`lowest_latency`、`vllm_load` capability；control plane 只在欄位有用到時列出對應 capability，驗證規則與 gateway 一致（含 URI 文法）。fallback 需要至少 2 次 attempt 的 retry policy，且不能成環。
 - 重試僅限回應送出前，串流僅限收到上游 headers 前；最多五次，
   共用原路由 timeout 與全域重試額度（預設 20%，低流量允許三次 burst；
-  只有設定 `retry` 的路由請求會存入額度）。`Retry-After` 使用 deployment
-  cooldown（上限 60 秒與 breaker `open_ms`），重試跳過冷卻中的 deployment。
-  被路由 `total_timeout_ms` 截斷的 attempt 不算 deployment 失敗。
+  只有設定 `retry` 的路由請求會存入額度）。`Retry-After` 使用 model
+  cooldown（上限 60 秒與 breaker `open_ms`），重試跳過冷卻中的 model。
+  被路由 `total_timeout_ms` 截斷的 attempt 不算 model 失敗。
 - 部署熔斷狀態以名稱保存在 Runtime，跨快照保留；主動健康探測在背景執行，
   接受新快照後依 (upstream, URL, 設定, 憑證) 比對，只重啟有變動的探測。
   所有候選都異常或開路時仍嘗試一個，避免 fail closed；已進行中的
@@ -217,8 +217,8 @@ P2 把權限模型縮成 team → member／service account，加上 SSO、可抽
 - 每次 attempt 有獨立 OTel 子 span；請求指標與用量只記一次，歸屬實際產生
   回應的 attempt。primary 回應維持上游模型名（同 P1）；只有成功的 fallback
   JSON／SSE 回應改寫為原公開模型名。
-- `LOWEST_LATENCY`：每個 deployment 的回應標頭時間 EWMA，power of two choices。`VLLM_LOAD`：每秒背景抓取 vLLM `/metrics`（`num_requests_waiting`、KV cache 使用率），power of two choices；抓取失敗或超過 3 秒未更新就退回 in-flight 比較。
-- traffic split：依權重選 split，再在 split 內依策略選 deployment；sticky 依 header／team／key 的固定種子雜湊。重試先留在同一 split，再換其他 split，最後才走 fallback。
+- `LOWEST_LATENCY`：每個 model 的回應標頭時間 EWMA，power of two choices。`VLLM_LOAD`：每秒背景抓取 vLLM `/metrics`（`num_requests_waiting`、KV cache 使用率），power of two choices；抓取失敗或超過 3 秒未更新就退回 in-flight 比較。
+- traffic split：依權重選 split，再在 split 內依策略選 model；sticky 依 header／team／key 的固定種子雜湊。重試先留在同一 split，再換其他 split，最後才走 fallback。
 - Bench A6（quick ×3，1000 RPS，含認證）：非串流 overhead p99 −0.07 ms（雜訊範圍），串流 TTFT overhead p99 3.3 ms；LiteLLM 同機飽和。
   P2 收尾在 main 跑 full ×3（含認證）：1000 RPS 非串流 overhead p99 0.20 ms
   （A6 通過），300 RPS 0.28 ms；10000 RPS 時 lumewarp 與 direct 都達到目標速率。

@@ -43,10 +43,10 @@ server:
   admin_listen: 127.0.0.1:9464
 upstreams:
   - {name: local, kind: openai_compatible, base_url: 'http://127.0.0.1:9100/v1'}
-deployments:
+models:
   - {name: mock-local, upstream: local, upstream_model: mock}
-routes:
-  - {model: demo, deployments: [mock-local]}
+routers:
+  - {model: demo, models: [mock-local]}
 ```
 
 Run the gateway, then use another terminal for curl:
@@ -109,8 +109,8 @@ back to an open router. Open <http://127.0.0.1:8091/> and log in with `dev-admin
 then create:
 
 - an upstream for `http://127.0.0.1:9100/v1` (kind `openai_compatible`),
-- a deployment using upstream model `mock`,
-- a route with the public alias `demo`,
+- a model using upstream model `mock`,
+- a router with the public alias `demo`,
 - a team and an API key for a service account of that team (the `lw-...` secret is
   shown once).
 

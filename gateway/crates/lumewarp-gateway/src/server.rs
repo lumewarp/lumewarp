@@ -25,23 +25,23 @@ use crate::{
     usage::{RequestCtx, UsageEvent},
 };
 
-/// The active router, absent until the first snapshot is applied (control-
+/// The active routing_table, absent until the first snapshot is applied (control-
 /// plane cold boot without an on-disk snapshot). The config stream stores
 /// into it; every request loads it exactly once, so a request in progress
-/// keeps the router it started with across swaps.
+/// keeps the routing_table it started with across swaps.
 pub type Snapshot = Arc<ArcSwapOption<RoutingTable>>;
 
-/// Readiness: a router is loaded. Without one, `/v1/*` returns 503
+/// Readiness: a routing_table is loaded. Without one, `/v1/*` returns 503
 /// `not_ready` (before authentication) and the admin `/readyz` returns 503;
-/// nothing falls back to an open router.
+/// nothing falls back to an open routing_table.
 #[cfg(test)]
 pub fn ready(snapshot: &Snapshot) -> bool {
     snapshot.load().is_some()
 }
 
-/// Serves whatever router `snapshot` holds. `runtime` is the process-lifetime
-/// state (metrics, limiters, usage sink), usable while no router is loaded;
-/// every router stored in `snapshot` must be compiled with this `runtime`.
+/// Serves whatever routing_table `snapshot` holds. `runtime` is the process-lifetime
+/// state (metrics, limiters, usage sink), usable while no routing_table is loaded;
+/// every routing_table stored in `snapshot` must be compiled with this `runtime`.
 pub async fn serve(
     config: &lumewarp_config::LocalSettings,
     snapshot: Snapshot,
@@ -169,16 +169,16 @@ async fn handle(
     body_read_timeout: Duration,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let started = Instant::now();
-    let router = snapshot.load_full();
+    let routing_table = snapshot.load_full();
     let endpoint = metrics::endpoint_index(req.uri().path());
     let span = telemetry::request_span(otel, req.headers(), API_ENDPOINTS[endpoint]);
-    let handles = match &router {
-        Some(router) => router.rejected[endpoint].clone(),
+    let handles = match &routing_table {
+        Some(routing_table) => routing_table.rejected[endpoint].clone(),
         None => runtime.metrics.cached_handles(
             HandleKey {
                 team: 0,
                 requested: 0,
-                deployment: 0,
+                model: 0,
                 endpoint: endpoint as u8,
             },
             "",
@@ -189,7 +189,7 @@ async fn handle(
     let mut observation = Observation::new(handles, span.clone(), otel);
     observation.started = started;
     let response = dispatch(
-        router.as_deref(),
+        routing_table.as_deref(),
         &runtime,
         &client,
         req,
@@ -204,13 +204,13 @@ async fn handle(
 }
 
 fn admin_response(
-    router: Option<&RoutingTable>,
+    routing_table: Option<&RoutingTable>,
     runtime: &Runtime,
     req: &Request<Incoming>,
 ) -> Response<ProxyBody> {
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/healthz") => Response::new(full_body(Bytes::from_static(b"ok"))),
-        (&Method::GET, "/readyz") => match router {
+        (&Method::GET, "/readyz") => match routing_table {
             Some(_) => Response::new(full_body(Bytes::from_static(b"ready"))),
             None => error::json(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -239,7 +239,7 @@ fn admin_response(
 /// A known key was rejected before the request reached a model: report it so
 /// the control plane sees blocked traffic. Only runs on rejections.
 fn rejected_event(
-    router: &RoutingTable,
+    routing_table: &RoutingTable,
     key: &KeyContext,
     request: &RequestCtx,
     endpoint: usize,
@@ -254,14 +254,14 @@ fn rejected_event(
         team_id: key.team_id.to_string(),
         // The body is not read before authentication.
         requested: String::new(),
-        deployment: String::new(),
+        model: String::new(),
         endpoint: API_ENDPOINTS[endpoint].into(),
         status: status.as_u16().into(),
         stream: false,
         prompt_tokens: 0,
         completion_tokens: 0,
         duration_ms: request.started.elapsed().as_millis() as u32,
-        config_version: router.version,
+        config_version: routing_table.version,
         usage_state: UsageState::Missing as i32,
         outcome: RequestOutcome::Rejected as i32,
         started_at_unix_ms: request.started_at_unix_ms,
@@ -272,7 +272,7 @@ fn rejected_event(
 
 #[allow(clippy::too_many_arguments)]
 async fn dispatch(
-    router: Option<&RoutingTable>,
+    routing_table: Option<&RoutingTable>,
     runtime: &Runtime,
     client: &UpstreamClient,
     req: Request<Incoming>,
@@ -282,7 +282,7 @@ async fn dispatch(
     body_read_timeout: Duration,
 ) -> Response<ProxyBody> {
     if admin {
-        return admin_response(router, runtime, &req);
+        return admin_response(routing_table, runtime, &req);
     }
     let path = req.uri().path();
     if !path.starts_with("/v1/") {
@@ -295,8 +295,8 @@ async fn dispatch(
         };
     }
     // Checked before authentication: without a snapshot there are no keys,
-    // and serving anything would mean an open router.
-    let Some(router) = router else {
+    // and serving anything would mean an open routing_table.
+    let Some(routing_table) = routing_table else {
         return error::json(
             StatusCode::SERVICE_UNAVAILABLE,
             "not_ready",
@@ -304,12 +304,12 @@ async fn dispatch(
         );
     };
     let request = RequestCtx::new(observation.started);
-    let caller = match auth::authenticate(router, req.headers()) {
+    let caller = match auth::authenticate(routing_table, req.headers()) {
         Ok(caller) => caller,
         Err(rejection) => {
             if let Some(key) = &rejection.key {
                 runtime.usage.try_record(rejected_event(
-                    router,
+                    routing_table,
                     key,
                     &request,
                     endpoint,
@@ -322,16 +322,16 @@ async fn dispatch(
     // Authenticated traffic carries the caller's team even when it never
     // reaches a model (/v1/models, malformed bodies); failed auth stays "".
     if caller.team_label() != 0 {
-        observation.handles = router.caller_handles(&caller, endpoint);
+        observation.handles = routing_table.caller_handles(&caller, endpoint);
     }
     match (req.method(), path) {
         (&Method::GET, "/v1/models") => Response::builder()
             .header(header::CONTENT_TYPE, "application/json")
-            .body(full_body(router.models_for(&caller)))
+            .body(full_body(routing_table.models_for(&caller)))
             .expect("static response parts are valid"),
         (&Method::POST, "/v1/chat/completions" | "/v1/completions" | "/v1/embeddings") => {
             proxy::forward(
-                router,
+                routing_table,
                 client,
                 req,
                 observation,
@@ -428,7 +428,7 @@ mod tests {
     #[tokio::test]
     async fn cold_boot_is_not_ready_until_a_router_is_stored() {
         let (_, snapshot) = lumewarp_config::Config::parse(&format!(
-            "routes: []\nupstreams: []\nkeys: [{{key_id: k, key_sha256: '{}', allow_all_models: true}}]",
+            "routers: []\nupstreams: []\nkeys: [{{key_id: k, key_sha256: '{}', allow_all_models: true}}]",
             sha256("secret")
         ))
         .unwrap();
@@ -442,18 +442,18 @@ mod tests {
         let (status, body) = server.get(false, "/v1/models", None).await;
         assert_eq!(status, 503);
         assert!(String::from_utf8_lossy(&body).contains("not_ready"));
-        // Even with what would become a valid key: never an open router.
+        // Even with what would become a valid key: never an open routing_table.
         let auth = Some("Bearer secret");
         assert_eq!(server.get(false, "/v1/models", auth).await.0, 503);
         let (status, metrics) = server.get(true, "/metrics", None).await;
         assert_eq!(status, 200);
         assert!(String::from_utf8_lossy(&metrics).contains(
-            "lumewarp_requests_total{requested=\"\",endpoint=\"models\",deployment=\"\",team=\"\",status=\"503\"} 2"
+            "lumewarp_requests_total{requested=\"\",endpoint=\"models\",model=\"\",team=\"\",status=\"503\"} 2"
         ));
-        let router =
+        let routing_table =
             RoutingTable::compile(&snapshot, lumewarp_config::AuthMode::RequireKey, &runtime)
                 .unwrap();
-        slot.store(Some(Arc::new(router)));
+        slot.store(Some(Arc::new(routing_table)));
         assert!(ready(&slot));
         assert_eq!(server.get(true, "/readyz", None).await.0, 200);
         assert_eq!(server.get(false, "/v1/models", None).await.0, 401);
@@ -469,7 +469,7 @@ mod tests {
             )
         };
         let yaml = format!(
-            "routes: []\nupstreams: []\nteams: [{{id: t1}}]\nkeys:\n{}{}{}{}",
+            "routers: []\nupstreams: []\nteams: [{{id: t1}}]\nkeys:\n{}{}{}{}",
             key("ok", ""),
             key("revoked", ", status: revoked"),
             key("expired", ", expires_at_unix_ms: 1000"),
@@ -478,11 +478,11 @@ mod tests {
         let (_, snapshot) = lumewarp_config::Config::parse(&yaml).unwrap();
         let (sink, mut events) = UsageSink::for_test();
         let runtime = Runtime::with_usage(Arc::new(crate::metrics::Metrics::new()), sink);
-        let router =
+        let routing_table =
             RoutingTable::compile(&snapshot, lumewarp_config::AuthMode::RequireKey, &runtime)
                 .unwrap();
-        let version = router.version;
-        let slot: Snapshot = Arc::new(ArcSwapOption::from_pointee(router));
+        let version = routing_table.version;
+        let slot: Snapshot = Arc::new(ArcSwapOption::from_pointee(routing_table));
         let server = TestServer::start(slot, runtime);
 
         // Unknown, missing and accepted keys report nothing here.

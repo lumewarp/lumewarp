@@ -76,15 +76,15 @@ class ConfigUpdate(_message.Message):
     def __init__(self, full: _Optional[_Union[_snapshot_pb2.Snapshot, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., target_digest: _Optional[bytes] = ...) -> None: ...
 
 class Delta(_message.Message):
-    __slots__ = ("base_version", "version", "upsert_upstreams", "remove_upstreams", "upsert_deployments", "remove_deployments", "upsert_routes", "remove_routes", "upsert_api_keys", "remove_api_keys", "upsert_teams", "remove_teams", "created_at_unix_ms", "required_capabilities")
+    __slots__ = ("base_version", "version", "upsert_upstreams", "remove_upstreams", "upsert_models", "remove_models", "upsert_routers", "remove_routers", "upsert_api_keys", "remove_api_keys", "upsert_teams", "remove_teams", "created_at_unix_ms", "required_capabilities")
     BASE_VERSION_FIELD_NUMBER: _ClassVar[int]
     VERSION_FIELD_NUMBER: _ClassVar[int]
     UPSERT_UPSTREAMS_FIELD_NUMBER: _ClassVar[int]
     REMOVE_UPSTREAMS_FIELD_NUMBER: _ClassVar[int]
-    UPSERT_DEPLOYMENTS_FIELD_NUMBER: _ClassVar[int]
-    REMOVE_DEPLOYMENTS_FIELD_NUMBER: _ClassVar[int]
-    UPSERT_ROUTES_FIELD_NUMBER: _ClassVar[int]
-    REMOVE_ROUTES_FIELD_NUMBER: _ClassVar[int]
+    UPSERT_MODELS_FIELD_NUMBER: _ClassVar[int]
+    REMOVE_MODELS_FIELD_NUMBER: _ClassVar[int]
+    UPSERT_ROUTERS_FIELD_NUMBER: _ClassVar[int]
+    REMOVE_ROUTERS_FIELD_NUMBER: _ClassVar[int]
     UPSERT_API_KEYS_FIELD_NUMBER: _ClassVar[int]
     REMOVE_API_KEYS_FIELD_NUMBER: _ClassVar[int]
     UPSERT_TEAMS_FIELD_NUMBER: _ClassVar[int]
@@ -95,14 +95,14 @@ class Delta(_message.Message):
     version: int
     upsert_upstreams: _containers.RepeatedCompositeFieldContainer[_snapshot_pb2.Upstream]
     remove_upstreams: _containers.RepeatedScalarFieldContainer[str]
-    upsert_deployments: _containers.RepeatedCompositeFieldContainer[_snapshot_pb2.Deployment]
-    remove_deployments: _containers.RepeatedScalarFieldContainer[str]
-    upsert_routes: _containers.RepeatedCompositeFieldContainer[_snapshot_pb2.ModelRoute]
-    remove_routes: _containers.RepeatedScalarFieldContainer[str]
+    upsert_models: _containers.RepeatedCompositeFieldContainer[_snapshot_pb2.Model]
+    remove_models: _containers.RepeatedScalarFieldContainer[str]
+    upsert_routers: _containers.RepeatedCompositeFieldContainer[_snapshot_pb2.Router]
+    remove_routers: _containers.RepeatedScalarFieldContainer[str]
     upsert_api_keys: _containers.RepeatedCompositeFieldContainer[_snapshot_pb2.ApiKey]
     remove_api_keys: _containers.RepeatedScalarFieldContainer[str]
     upsert_teams: _containers.RepeatedCompositeFieldContainer[_snapshot_pb2.Team]
     remove_teams: _containers.RepeatedScalarFieldContainer[str]
     created_at_unix_ms: int
     required_capabilities: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, base_version: _Optional[int] = ..., version: _Optional[int] = ..., upsert_upstreams: _Optional[_Iterable[_Union[_snapshot_pb2.Upstream, _Mapping]]] = ..., remove_upstreams: _Optional[_Iterable[str]] = ..., upsert_deployments: _Optional[_Iterable[_Union[_snapshot_pb2.Deployment, _Mapping]]] = ..., remove_deployments: _Optional[_Iterable[str]] = ..., upsert_routes: _Optional[_Iterable[_Union[_snapshot_pb2.ModelRoute, _Mapping]]] = ..., remove_routes: _Optional[_Iterable[str]] = ..., upsert_api_keys: _Optional[_Iterable[_Union[_snapshot_pb2.ApiKey, _Mapping]]] = ..., remove_api_keys: _Optional[_Iterable[str]] = ..., upsert_teams: _Optional[_Iterable[_Union[_snapshot_pb2.Team, _Mapping]]] = ..., remove_teams: _Optional[_Iterable[str]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ...) -> None: ...
+    def __init__(self, base_version: _Optional[int] = ..., version: _Optional[int] = ..., upsert_upstreams: _Optional[_Iterable[_Union[_snapshot_pb2.Upstream, _Mapping]]] = ..., remove_upstreams: _Optional[_Iterable[str]] = ..., upsert_models: _Optional[_Iterable[_Union[_snapshot_pb2.Model, _Mapping]]] = ..., remove_models: _Optional[_Iterable[str]] = ..., upsert_routers: _Optional[_Iterable[_Union[_snapshot_pb2.Router, _Mapping]]] = ..., remove_routers: _Optional[_Iterable[str]] = ..., upsert_api_keys: _Optional[_Iterable[_Union[_snapshot_pb2.ApiKey, _Mapping]]] = ..., remove_api_keys: _Optional[_Iterable[str]] = ..., upsert_teams: _Optional[_Iterable[_Union[_snapshot_pb2.Team, _Mapping]]] = ..., remove_teams: _Optional[_Iterable[str]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ...) -> None: ...

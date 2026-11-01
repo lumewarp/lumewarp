@@ -90,7 +90,7 @@ def usage_event(
         owner_kind=key.owner_kind,
         owner_id=key.owner_id,
         requested=requested,
-        deployment="dep",
+        model="dep",
         endpoint=requested,
         status=200,
         stream=False,

@@ -11,8 +11,8 @@ export type Key = Schemas["KeyOut"];
 export type Member = Schemas["MemberOut"];
 export type ServiceAccount = Schemas["ServiceAccountOut"];
 export type Upstream = Schemas["UpstreamOut"];
-export type Deployment = Schemas["DeploymentOut"];
-export type Route = Schemas["RouteOut"];
+export type Model = Schemas["ModelOut"];
+export type Router = Schemas["RouterOut"];
 export type User = Schemas["UserOut"];
 export type Me = Schemas["MeOut"];
 export type ModelAccess = Schemas["ModelAccess"];
@@ -112,15 +112,15 @@ export const api = {
   updateUpstream: (id: string, body: Schemas["UpstreamUpdate"]) => unwrap(client.PATCH("/api/v1/upstreams/{upstream_id}", { params: { path: { upstream_id: id } }, body })),
   deleteUpstream: (id: string) => unwrap(client.DELETE("/api/v1/upstreams/{upstream_id}", { params: { path: { upstream_id: id } } })),
 
-  deployments: () => listAll((c) => unwrap(client.GET("/api/v1/deployments", { params: { query: q(c) } }))),
-  createDeployment: (body: Schemas["DeploymentCreate"]) => unwrap(client.POST("/api/v1/deployments", { body })),
-  updateDeployment: (id: string, body: Schemas["DeploymentUpdate"]) => unwrap(client.PATCH("/api/v1/deployments/{deployment_id}", { params: { path: { deployment_id: id } }, body })),
-  deleteDeployment: (id: string) => unwrap(client.DELETE("/api/v1/deployments/{deployment_id}", { params: { path: { deployment_id: id } } })),
+  models: () => listAll((c) => unwrap(client.GET("/api/v1/models", { params: { query: q(c) } }))),
+  createModel: (body: Schemas["ModelCreate"]) => unwrap(client.POST("/api/v1/models", { body })),
+  updateModel: (id: string, body: Schemas["ModelUpdate"]) => unwrap(client.PATCH("/api/v1/models/{model_id}", { params: { path: { model_id: id } }, body })),
+  deleteModel: (id: string) => unwrap(client.DELETE("/api/v1/models/{model_id}", { params: { path: { model_id: id } } })),
 
-  routes: () => listAll((c) => unwrap(client.GET("/api/v1/routes", { params: { query: q(c) } }))),
-  createRoute: (body: Schemas["RouteCreate"]) => unwrap(client.POST("/api/v1/routes", { body })),
-  updateRoute: (id: string, body: Schemas["RouteUpdate"]) => unwrap(client.PATCH("/api/v1/routes/{route_id}", { params: { path: { route_id: id } }, body })),
-  deleteRoute: (id: string) => unwrap(client.DELETE("/api/v1/routes/{route_id}", { params: { path: { route_id: id } } })),
+  routers: () => listAll((c) => unwrap(client.GET("/api/v1/routers", { params: { query: q(c) } }))),
+  createRouter: (body: Schemas["RouterCreate"]) => unwrap(client.POST("/api/v1/routers", { body })),
+  updateRouter: (id: string, body: Schemas["RouterUpdate"]) => unwrap(client.PATCH("/api/v1/routers/{router_id}", { params: { path: { router_id: id } }, body })),
+  deleteRouter: (id: string) => unwrap(client.DELETE("/api/v1/routers/{router_id}", { params: { path: { router_id: id } } })),
 
   users: () => listAll((c) => unwrap(client.GET("/api/v1/users", { params: { query: q(c) } }))),
   usersPage: (cursor?: string) =>
@@ -133,7 +133,7 @@ export const api = {
   createToken: (body: Schemas["TokenCreate"]) => unwrap(client.POST("/api/v1/users/me/tokens", { body })),
   revokeToken: (id: string) => unwrap(client.POST("/api/v1/users/me/tokens/{token_id}/revoke", { params: { path: { token_id: id } } })),
 
-  usage: (query: { from?: string; to?: string; group_by?: string; team_id?: string; user_id?: string; service_account_id?: string; key_id?: string; model?: string }) =>
+  usage: (query: { from?: string; to?: string; group_by?: string; team_id?: string; user_id?: string; service_account_id?: string; key_id?: string; requested?: string }) =>
     listAll((c) => unwrap(client.GET("/api/v1/usage", { params: { query: { ...query, ...q(c) } } }))),
   audit: (query: { team_id?: string; actor_id?: string; action?: string; resource_type?: string; resource_id?: string; from?: string; to?: string } = {}) =>
     listAll((c) => unwrap(client.GET("/api/v1/audit", { params: { query: { ...query, ...q(c) } } }))),

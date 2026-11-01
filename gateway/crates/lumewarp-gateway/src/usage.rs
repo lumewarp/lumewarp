@@ -37,7 +37,7 @@ use tracing::Instrument;
 use crate::{
     auth::Caller,
     metrics::{Metrics, RequestMetrics, API_ENDPOINTS},
-    router::Deployment,
+    router::Model,
     runtime::Runtime,
 };
 
@@ -556,10 +556,10 @@ pub struct UsageCapture {
     pub runtime: Arc<Runtime>,
     pub caller: Caller,
     pub request: RequestCtx,
-    /// Model label (route alias or `unknown`) and the caller's team.
+    /// Model label (router alias or `unknown`) and the caller's team.
     pub handles: Arc<RequestMetrics>,
-    /// The deployment (with the price) this request was served with.
-    pub deployment: Option<Arc<Deployment>>,
+    /// The model (with the price) this request was served with.
+    pub model: Option<Arc<Model>>,
     pub config_version: u64,
     /// Index into `API_ENDPOINTS`.
     pub endpoint: usize,
@@ -573,7 +573,7 @@ impl UsageCapture {
     pub fn finalize(self, outcome: RequestOutcome, state: UsageState, tokens: Option<Tokens>) {
         let tokens = tokens.filter(|_| state == UsageState::Reported);
         let cost = tokens.and_then(|tokens| {
-            let price = self.deployment.as_ref()?.price.as_ref()?;
+            let price = self.model.as_ref()?.price.as_ref()?;
             cost_nano_usd(price, tokens)
         });
         let metrics = &self.runtime.metrics;
@@ -612,8 +612,8 @@ impl UsageCapture {
             key_id,
             team_id: team.into(),
             requested: self.handles.requested.clone(),
-            deployment: self
-                .deployment
+            model: self
+                .model
                 .as_ref()
                 .map(|d| d.name.clone())
                 .unwrap_or_default(),
@@ -1287,7 +1287,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
             caller: Caller::Anonymous,
             request: RequestCtx::new(Instant::now()),
             handles: runtime.metrics.handles("m", "d", 0, ""),
-            deployment: None,
+            model: None,
             config_version: 1,
             endpoint: 0,
             stream: false,

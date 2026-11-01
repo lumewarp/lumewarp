@@ -316,7 +316,7 @@ async fn oversized_content_length_is_rejected_before_reading_body() {
 }
 
 #[tokio::test]
-async fn models_lists_route_aliases() {
+async fn models_lists_router_aliases() {
     let mut mock = Mock::start(Behavior::Json).await;
     let gateway = Gateway::start(&[mock.addr], false, 2000).await;
     let response = gateway
@@ -340,7 +340,7 @@ async fn models_lists_route_aliases() {
 }
 
 #[tokio::test]
-async fn least_in_flight_avoids_the_deployment_with_an_open_stream() {
+async fn least_in_flight_avoids_the_model_with_an_open_stream() {
     let mut a = Mock::start(Behavior::ControlledStream).await;
     let mut b = Mock::start(Behavior::ControlledStream).await;
     let gateway = Gateway::start(&[a.addr, b.addr], false, 2000).await;
@@ -352,7 +352,7 @@ async fn least_in_flight_avoids_the_deployment_with_an_open_stream() {
             &[],
         )
         .await;
-    // Ties are randomized: name the deployment selected first A for this test.
+    // Ties are randomized: name the model selected first A for this test.
     let (first_is_a, first) = bounded(async {
         tokio::select! {
             record = a.records.recv() => (true, record.unwrap()),
@@ -371,7 +371,7 @@ async fn least_in_flight_avoids_the_deployment_with_an_open_stream() {
         .await;
     assert_eq!(response.status(), 200);
     bytes(response).await;
-    // Waiting on the opposite record channel fails if the busy deployment is reused.
+    // Waiting on the opposite record channel fails if the busy model is reused.
     let second = if first_is_a {
         b.next().await
     } else {

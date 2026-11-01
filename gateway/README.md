@@ -31,13 +31,13 @@ upstreams:
   - name: local
     kind: openai_compatible
     base_url: http://127.0.0.1:9100/v1
-deployments:
+models:
   - name: mock-local
     upstream: local
     upstream_model: mock
-routes:
+routers:
   - name: demo
-    deployments: [mock-local]
+    models: [mock-local]
 ```
 
 In a second terminal:
@@ -64,7 +64,7 @@ curl -sS http://127.0.0.1:9464/metrics
 For a real upstream, change `base_url`, `upstream_model`, and optionally
 `api_key_env`. [config.example.yaml](config.example.yaml) includes OpenAI and
 vLLM examples; its `OPENAI_API_KEY` variable must be set even if only the vLLM
-route will be used.
+router will be used.
 
 ## Control-plane mode
 
@@ -96,7 +96,7 @@ the id the token was issued for. The Helm chart requires a non-empty
 are deferred in P1, so deploy one release per gateway identity instead. The
 chart runs the pod as UID/GID 65532 with `fsGroup: 65532` so the mounted state
 directory is writable. `--local-config` is a YAML file with only the `server:`
-block described below (listener, admin listener, timeouts); upstreams, routes,
+block described below (listener, admin listener, timeouts); upstreams, routers,
 teams and keys (including `server.api_keys`) are ignored in this mode.
 
 ### Flags
@@ -147,8 +147,8 @@ The admin listener stays unauthenticated; keep it private (see the auth section)
 
 Control-plane mode also enables usage reporting to the same URL with the same
 token. Each finalized proxied request (including a rejection for a known key)
-produces one event with a UUIDv7 `request_id`: tokens, requested/deployment/endpoint,
-status, config version and cost computed from `deployments[].price`. Events
+produces one event with a UUIDv7 `request_id`: tokens, requested/model/endpoint,
+status, config version and cost computed from `models[].price`. Events
 enter a bounded in-memory queue (100,000) and are reported every 1 s or every
 500 events. Failed batches retry from the queue with backoff; when the queue is
 full new events are dropped and `lumewarp_usage_events_dropped_total`
@@ -168,7 +168,7 @@ The complete schema is in
 [`lumewarp-config`](crates/lumewarp-config/src/lib.rs). Unknown YAML fields are
 rejected at every object level. The YAML is converted to a version-0 snapshot
 and validated exactly like a control-plane snapshot: names/ids are unique within
-each upstream, deployment, route, team and key list; references must resolve;
+each upstream, model, router, team and key list; references must resolve;
 key hashes must be unique. Environment-variable substitution inside arbitrary
 YAML strings is not implemented. P0 files load unchanged.
 
@@ -176,8 +176,8 @@ YAML strings is not implemented. P0 files load unchanged.
 | --- | --- | --- |
 | `server` | Defaults below | Local listener, authentication shorthand, and shutdown settings. |
 | `upstreams` | `[]` | List of upstream objects. |
-| `deployments` | `[]` | List of deployments binding an upstream to a model. |
-| `routes` | `[]` | List of public model aliases and their deployment choices. |
+| `models` | `[]` | List of models binding an upstream to a model. |
+| `routers` | `[]` | List of public model aliases and their model choices. |
 | `teams` | `[]` | Teams: the bounded `team` metric label and shared rate-limit scopes. |
 | `keys` | `[]` | Virtual keys with status, expiry, model allowlist and rate limits. |
 
@@ -191,7 +191,7 @@ YAML strings is not implemented. P0 files load unchanged.
 | `server.shutdown_grace_ms` | `25000` | Maximum connection drain time after shutdown begins; must be greater than zero. |
 | `server.header_read_timeout_ms` | `30000` | HTTP request-header read timeout on both listeners; must be greater than zero. |
 | `server.body_read_timeout_ms` | `30000` | Total time allowed to collect a proxied request body, not an idle timeout; must be greater than zero. |
-| `server.retry_budget_percent` | `20` | Process-wide retry allowance, `0..=20`; `0` disables retries. Each client request on a route **with a `retry` policy** funds this percentage of one retry, so retries stay at about this share of the traffic that may retry; routes without a retry policy neither fund nor touch the budget (no shared atomic on their request path). The token bucket holds about three retries (the cap is approximate under concurrent deposits) and restores that minimum after ten idle seconds. |
+| `server.retry_budget_percent` | `20` | Process-wide retry allowance, `0..=20`; `0` disables retries. Each client request on a router **with a `retry` policy** funds this percentage of one retry, so retries stay at about this share of the traffic that may retry; routers without a retry policy neither fund nor touch the budget (no shared atomic on their request path). The token bucket holds about three retries (the cap is approximate under concurrent deposits) and restores that minimum after ten idle seconds. |
 
 **Auth mode.** If neither `server.api_keys` nor `keys` configures any key, the
 gateway is open: every `/v1/*` request is anonymous and `Authorization` is
@@ -205,7 +205,7 @@ case-insensitive; leading whitespace before the token is trimmed. Duplicate
 Authorization headers are rejected. Expired, revoked and suspended keys are
 rejected like unknown keys (401) before a `budget_exceeded` status (429) is
 considered. The model allowlist is checked right after the request body's
-`model` is parsed and before any route lookup, so a key that may not use a model
+`model` is parsed and before any router lookup, so a key that may not use a model
 gets 403 whether or not the alias exists. `/v1/models` lists only the aliases
 the key may call.
 
@@ -240,8 +240,8 @@ the gateway.
 | `upstreams[].timeout_ms` | `600000` | Unsigned 32-bit millisecond timeout from issuing the upstream request through receipt of response headers, including connection establishment. Does not limit response-body or stream lifetime. (A snapshot value of 0 also means the default.) |
 | `upstreams[].stream_usage_mode` | `include_usage` | `include_usage` (the gateway may force `stream_options.include_usage` upstream for metering and strips the extra chunk if the client did not ask) or `passthrough` (upstream does not support it; no injection). |
 | `upstreams[].health_check` | Absent | Active GET probe: `{path, interval_ms, timeout_ms, unhealthy_threshold, healthy_threshold}`. `path` defaults to `/models`, appended to `base_url`. Interval must be at least 1000 ms; timeout must be positive and less than interval. Thresholds of zero mean 3 failures / 1 success. Uses the existing upstream client and credentials. |
-| `upstreams[].circuit_breaker` | Absent | Per-deployment `{failure_threshold, open_ms}`; zero values mean 5 consecutive retryable failures and 30000 ms open. One half-open trial is allowed after the open interval. Only that trial's result closes or re-opens a half-open breaker; late results of requests admitted while closed never move an open/half-open breaker or extend its deadline. Removing `circuit_breaker` from an upstream resets its deployments' breakers to closed (gauge 0) when the snapshot is activated. |
-| `upstreams[].metrics_url` | Empty | Prometheus endpoint scraped every second by `vllm_load` routes. Empty means `base_url` with a trailing `/v1` removed plus `/metrics` (`http://vllm:8000/v1` -> `http://vllm:8000/metrics`). Must be absolute http(s) without userinfo. The upstream bearer token is sent only when the metrics URL has the same host and port as `base_url`. Setting it requires capability `vllm_load`. |
+| `upstreams[].circuit_breaker` | Absent | Per-model `{failure_threshold, open_ms}`; zero values mean 5 consecutive retryable failures and 30000 ms open. One half-open trial is allowed after the open interval. Only that trial's result closes or re-opens a half-open breaker; late results of requests admitted while closed never move an open/half-open breaker or extend its deadline. Removing `circuit_breaker` from an upstream resets its models' breakers to closed (gauge 0) when the snapshot is activated. |
+| `upstreams[].metrics_url` | Empty | Prometheus endpoint scraped every second by `vllm_load` routers. Empty means `base_url` with a trailing `/v1` removed plus `/metrics` (`http://vllm:8000/v1` -> `http://vllm:8000/metrics`). Must be absolute http(s) without userinfo. The upstream bearer token is sent only when the metrics URL has the same host and port as `base_url`. Setting it requires capability `vllm_load`. |
 
 All upstreams are compiled at startup. A configured `api_key_env` must exist,
 contain a valid Unicode value, and produce a valid Authorization header;
@@ -256,28 +256,28 @@ appended to the base path after trimming its trailing slash. For example,
 preserved. Connections are pooled with keep-alive and TCP_NODELAY; HTTPS uses
 rustls with WebPKI roots.
 
-### Deployments
+### Models
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `deployments[].name` | Required | Unique deployment name; also used in metrics. |
-| `deployments[].upstream` | Required | Name of an existing upstream. |
-| `deployments[].upstream_model` | Required | Model string substituted for the client's public alias. |
-| `deployments[].weight` | `1` | Unsigned 32-bit relative weight for weighted routing. Zero is allowed, but a weighted route must have positive total weight. Ignored by least-in-flight routing. |
-| `deployments[].price` | Absent | `{input_usd_per_mtok, output_usd_per_mtok}`: USD per one million tokens as decimals, e.g. `"0.15"` (quoted or plain). Parsed from the YAML text, never through floating point, and converted exactly to integer nano-USD; at most 9 fractional digits, no exponent or sign. Absent means the price is unknown (usage is metered, cost reported as unknown); explicit zeros mean free. |
+| `models[].name` | Required | Unique model name; also used in metrics. |
+| `models[].upstream` | Required | Name of an existing upstream. |
+| `models[].upstream_model` | Required | Model string substituted for the client's public alias. |
+| `models[].weight` | `1` | Unsigned 32-bit relative weight for weighted routing. Zero is allowed, but a weighted router must have positive total weight. Ignored by least-in-flight routing. |
+| `models[].price` | Absent | `{input_usd_per_mtok, output_usd_per_mtok}`: USD per one million tokens as decimals, e.g. `"0.15"` (quoted or plain). Parsed from the YAML text, never through floating point, and converted exactly to integer nano-USD; at most 9 fractional digits, no exponent or sign. Absent means the price is unknown (usage is metered, cost reported as unknown); explicit zeros mean free. |
 
-### Routes
+### Routers
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `routes[].model` | Required | Unique public alias accepted in requests and listed by `/v1/models`. The literal alias `unknown` is reserved and rejected. |
-| `routes[].deployments` | Required without `traffic_split` | Nonempty list of existing deployment names. Ignored (may be empty) when `traffic_split` is set. |
-| `routes[].strategy` | `weighted` | `weighted`, `least_in_flight`, `lowest_latency` or `vllm_load`; see "Load-aware routing". With `traffic_split` it picks the deployment inside the chosen split. |
-| `routes[].retry` | Absent (one attempt) | `{max_attempts, retry_on_status, total_timeout_ms}`. An empty object enables two total attempts. `max_attempts` includes the first and is at most 5; `retry_on_status` defaults to `[429, 502, 503, 504]` and accepts only 400..599. `total_timeout_ms: 0` leaves only each upstream's header timeout. |
-| `routes[].fallbacks` | `[]` | Existing route aliases, in order, without self-reference. Uses the original route's attempt/deadline budget, not the fallback's retry policy. Fallbacks of fallbacks are never followed. Configure a retry budget of at least two attempts for failure-triggered fallback. |
-| `routes[].traffic_split` | `[]` | Canary split: `[{name, deployments, weight}]`. A request picks a split with probability `weight / sum(weights)`, then a deployment inside it with `strategy`. At most 16 splits; names unique, 1..=32 of `[A-Za-z0-9_.-]` (they are the `split` metric label); each split has a nonempty list of distinct existing deployments; weights must sum to more than 0 (a single split may have weight 0: it only receives retries). |
-| `routes[].sticky` | `none` | `none`, `header` (hash of the `sticky_header` value; requests without the header are not sticky), `team` (the key's team id) or `key` (the key id). Anonymous or team-less callers are not sticky for `team`/`key`. Requires `traffic_split`. |
-| `routes[].sticky_header` | Empty | Request header hashed for `sticky: header`; required there, rejected otherwise. |
+| `routers[].model` | Required | Unique public alias accepted in requests and listed by `/v1/models`. The literal alias `unknown` is reserved and rejected. |
+| `routers[].models` | Required without `traffic_split` | Nonempty list of existing model names. Ignored (may be empty) when `traffic_split` is set. |
+| `routers[].strategy` | `weighted` | `weighted`, `least_in_flight`, `lowest_latency` or `vllm_load`; see "Load-aware routing". With `traffic_split` it picks the model inside the chosen split. |
+| `routers[].retry` | Absent (one attempt) | `{max_attempts, retry_on_status, total_timeout_ms}`. An empty object enables two total attempts. `max_attempts` includes the first and is at most 5; `retry_on_status` defaults to `[429, 502, 503, 504]` and accepts only 400..599. `total_timeout_ms: 0` leaves only each upstream's header timeout. |
+| `routers[].fallbacks` | `[]` | Existing router aliases, in order, without self-reference. Uses the original router's attempt/deadline budget, not the fallback's retry policy. Fallbacks of fallbacks are never followed. Configure a retry budget of at least two attempts for failure-triggered fallback. |
+| `routers[].traffic_split` | `[]` | Canary split: `[{name, models, weight}]`. A request picks a split with probability `weight / sum(weights)`, then a model inside it with `strategy`. At most 16 splits; names unique, 1..=32 of `[A-Za-z0-9_.-]` (they are the `split` metric label); each split has a nonempty list of distinct existing models; weights must sum to more than 0 (a single split may have weight 0: it only receives retries). |
+| `routers[].sticky` | `none` | `none`, `header` (hash of the `sticky_header` value; requests without the header are not sticky), `team` (the key's team id) or `key` (the key id). Anonymous or team-less callers are not sticky for `team`/`key`. Requires `traffic_split`. |
+| `routers[].sticky_header` | Empty | Request header hashed for `sticky: header`; required there, rejected otherwise. |
 
 ### Retry and health behavior
 
@@ -285,38 +285,38 @@ Only connect failures, timeouts before headers, and configured statuses can caus
 another attempt. Streams **never** retry after upstream headers, even before the
 first event; no response-body error is retried. The buffered request body is
 reused; only model/usage splicing is repeated. Retry-enabled requests retain one
-copy of the request headers for replay; routes without retries move their headers
+copy of the request headers for replay; routers without retries move their headers
 directly and have no replay allocation.
 
-An attempt prefers an untried, healthy deployment with a closed (or available
-half-open) circuit, using the route's strategy. It then tries fallbacks in order
-with their own strategies. Already-tried deployments are reused only after the
+An attempt prefers an untried, healthy model with a closed (or available
+half-open) circuit, using the router's strategy. It then tries fallbacks in order
+with their own strategies. Already-tried models are reused only after the
 untried candidates are exhausted. `Retry-After` on 429/503 accepts integer seconds
-or an HTTP date and cools down that deployment across requests, for at most 60 s
+or an HTTP date and cools down that model across requests, for at most 60 s
 and never longer than its breaker's `open_ms` when one is configured. Retries skip
-cooling deployments rather than sleeping, including when the cooldown exceeds
+cooling models rather than sleeping, including when the cooldown exceeds
 the remaining total timeout. A new client request may still make its first
 attempt there if necessary. If later transport attempts fail, the last received
 upstream response is returned, and the request sample, usage capture and
 in-flight reservation belong to the attempt that produced it (the later failed
 attempt's reservation is released).
 
-An attempt cut short by the route's `total_timeout_ms` (the deadline, not the
-upstream's own `timeout_ms`, ended it) is not a deployment failure: it records no
+An attempt cut short by the router's `total_timeout_ms` (the deadline, not the
+upstream's own `timeout_ms`, ended it) is not a model failure: it records no
 breaker failure (an interrupted half-open trial is abandoned, not failed) and no
 latency penalty. It still counts as `outcome="timeout"` in
 `lumewarp_upstream_attempts_total` and `kind="timeout"` in
 `lumewarp_upstream_errors_total`, and the client gets 504.
 
-Breaker state is keyed by deployment name and survives snapshot swaps. Healthy
+Breaker state is keyed by model name and survives snapshot swaps. Healthy
 fallbacks can be selected immediately when every primary is unhealthy/open.
 If **every** candidate is unhealthy/open, routing deliberately fails open and
-tries a deployment anyway; it does not turn a total backend outage into a
+tries a model anyway; it does not turn a total backend outage into a
 permanent local rejection. An already-running half-open trial is never duplicated:
-fail-open selection skips that deployment and uses another candidate (503 if
+fail-open selection skips that model and uses another candidate (503 if
 there is none). `outcome="circuit_open"` counts each open/half-open candidate at
 most once per client request, labelled with the client's model (also for
-fallback deployments). Active probes are diffed on accepted snapshot swaps by
+fallback models). Active probes are diffed on accepted snapshot swaps by
 upstream, URL, settings and credentials: unchanged probes keep running with
 their consecutive failure/success counts and schedule (key-only deltas do not
 reset or re-probe them); only removed or changed probes are stopped and only new
@@ -324,21 +324,21 @@ or changed ones started. Probes never increment request/attempt/usage metrics.
 
 ### Load-aware routing and traffic splits
 
-- `lowest_latency`: each deployment keeps an EWMA of time to response headers
+- `lowest_latency`: each model keeps an EWMA of time to response headers
   (weight 1/5 per sample) of successful attempts. Connect errors, timeouts and
   5xx/429 responses add a penalty sample of `max(elapsed, 2 x current, 1 s)`;
   other 4xx are ignored. A pick is power-of-two-choices on
   `EWMA x (in_flight + 1)`, so concurrent load spreads roughly inversely to
-  latency instead of piling onto the fastest deployment. A deployment without
+  latency instead of piling onto the fastest model. A model without
   samples costs 0 (it is explored first), and 5% of picks are uniformly random
-  so a deployment that was slow once is re-measured. The EWMA is per deployment
+  so a model that was slow once is re-measured. The EWMA is per model
   across endpoints (a non-stream completion's headers arrive after generation,
   a stream's after the first token), keyed by name and kept across swaps.
-- `vllm_load`: one background task per upstream used by a `vllm_load` route
+- `vllm_load`: one background task per upstream used by a `vllm_load` router
   GETs its metrics URL every second (900 ms timeout, 8 MiB cap) and reads
   `vllm:num_requests_waiting` and `vllm:kv_cache_usage_perc` (or the older
   `vllm:gpu_cache_usage_perc`). Series whose `model_name` label equals the
-  deployment's `upstream_model` are used when present, else all series; queue
+  model's `upstream_model` are used when present, else all series; queue
   depth is summed and KV usage maximized across engines. A pick is
   power-of-two-choices on `(waiting, KV usage in 5% buckets, in_flight)`. If
   either candidate's last scrape failed or is older than 3 s, the two are
@@ -352,24 +352,24 @@ or changed ones started. Probes never increment request/attempt/usage metrics.
   cumulative weights, so the same session/team/key keeps its split across
   requests, gateway restarts and replicas while the weights stay unchanged
   (changing weights moves only part of the users). Without sticky input the
-  split is drawn at random. Retries first try the other deployments of the
+  split is drawn at random. Retries first try the other models of the
   chosen split, then the other splits in declaration order, then fallbacks.
-  If every deployment of the chosen split is unhealthy/open, the request moves
-  to another split before any fallback. A fallback route with its own splits
+  If every model of the chosen split is unhealthy/open, the request moves
+  to another split before any fallback. A fallback router with its own splits
   chooses its split the same way.
 
 Hot-path cost: picks read relaxed atomics only (no locks, no allocation; the
 regression tests assert zero allocations for warm `lowest_latency`, `vllm_load`
 and sticky-split picks and retries). `lowest_latency` adds one clock read and one
-CAS per attempt, only for deployments behind such a route. The EWMA gauge is
+CAS per attempt, only for models behind such a router. The EWMA gauge is
 computed when `/metrics` is scraped, not per request.
 
 Each client request records one request sample and one usage capture, attributed
-to its final deployment. Abandoned attempts release their in-flight reservations.
-Response `model` values: a response from a deployment of the requested route
+to its final model. Abandoned attempts release their in-flight reservations.
+Response `model` values: a response from a model of the requested router
 (primary, including its retries) is forwarded unchanged and carries the
-upstream model, as in P1. Only a successful response from a **fallback** route's
-deployment is rewritten: its top-level JSON `model` (or, for SSE, each event's
+upstream model, as in P1. Only a successful response from a **fallback** router's
+model is rewritten: its top-level JSON `model` (or, for SSE, each event's
 `data` JSON `model`) becomes the public alias the client requested, so clients
 do not observe which fallback served them. Error responses are never rewritten.
 Alias rewriting buffers one JSON response or SSE event, capped at 32 MiB;
@@ -394,7 +394,7 @@ line; comments and other fields are kept.
 | `keys[].team_id` | `""` | Existing team id, or empty for no team (`team=""` in metrics). |
 | `keys[].status` | `active` | `active`, `revoked`, `suspended` (401) or `budget_exceeded` (429 `insufficient_quota`). |
 | `keys[].expires_at_unix_ms` | `0` | Expiry in Unix milliseconds; `0` never expires. Expired keys get 401. |
-| `keys[].allow_all_models` | `false` | Allow every route alias, present and future. |
+| `keys[].allow_all_models` | `false` | Allow every router alias, present and future. |
 | `keys[].allowed_models` | `[]` | Public aliases the key may call when `allow_all_models` is false. **Fail-closed:** a key with neither may call nothing. |
 | `keys[].rate_limits` | Absent | Limits for this key alone (scope `key:<key_id>`). |
 
@@ -416,18 +416,18 @@ smallest atomic in-flight count, scanning from a random offset to spread ties.
 This is an approximate concurrent decision, not a global scheduling lock.
 Reservations last until the upstream response body ends/errors or is dropped,
 or the request fails/is cancelled before headers. Counters are keyed by
-deployment name for the life of the process: aliases referencing the same
-deployment share one, and a recompiled snapshot keeps counting requests still
+model name for the life of the process: aliases referencing the same
+model share one, and a recompiled snapshot keeps counting requests still
 running on the previous one.
 
 ## Endpoints and passthrough
 
 | Listener | Method and path | Behavior |
 | --- | --- | --- |
-| Primary | `POST /v1/chat/completions` | Proxy to the selected deployment; stream responses frame by frame. |
+| Primary | `POST /v1/chat/completions` | Proxy to the selected model; stream responses frame by frame. |
 | Primary | `POST /v1/completions` | Same routing and passthrough. |
 | Primary | `POST /v1/embeddings` | Same routing and passthrough. |
-| Primary | `GET /v1/models` | Local OpenAI-shaped model list from configured route aliases, not upstream discovery. |
+| Primary | `GET /v1/models` | Local OpenAI-shaped model list from configured router aliases, not upstream discovery. |
 | Primary and admin | `GET /healthz` | Local liveness response `ok`; does not probe upstreams. |
 | Admin only | `GET /readyz` | `ready` (200) once a router is loaded; 503 JSON `not_ready` in control-plane mode before the first snapshot is applied. |
 | Admin only | `GET /metrics` | Prometheus-scrapable OpenMetrics text. |
@@ -489,8 +489,8 @@ shape:
 | --- | --- | --- |
 | 400 | `invalid_request` | Invalid request object/model/stream, request-body read failure, or invalid upstream request URI. |
 | 401 | `invalid_api_key` | Missing, unknown, duplicate, revoked, suspended or expired client key when auth is enabled. |
-| 403 | `model_not_allowed` | The key's allowlist does not include the requested model (checked before route lookup). |
-| 404 | `model_not_found` | No configured route for the requested model. |
+| 403 | `model_not_allowed` | The key's allowlist does not include the requested model (checked before router lookup). |
+| 404 | `model_not_found` | No configured router for the requested model. |
 | 404 | `not_found` | Unsupported path or method. |
 | 408 | `request_timeout` | Proxied request body exceeded `body_read_timeout_ms`. |
 | 413 | `request_too_large` | Request body exceeds 32 MiB; oversized Content-Length can be rejected before reading it. |
@@ -518,23 +518,23 @@ the whole process, so counters are never reset by a config change.
 
 | Series | Type | Labels |
 | --- | --- | --- |
-| `lumewarp_requests_total` | Counter | `requested`, `endpoint`, `deployment`, `team`, `status` |
-| `lumewarp_request_duration_seconds` | Histogram | `requested`, `endpoint`, `deployment` |
+| `lumewarp_requests_total` | Counter | `requested`, `endpoint`, `model`, `team`, `status` |
+| `lumewarp_request_duration_seconds` | Histogram | `requested`, `endpoint`, `model` |
 | `lumewarp_gateway_overhead_seconds` | Histogram | `endpoint` |
 | `lumewarp_request_body_read_seconds` | Histogram | `endpoint` |
-| `lumewarp_ttft_seconds` | Histogram | `requested`, `deployment` |
-| `lumewarp_upstream_errors_total` | Counter | `deployment`, `kind` |
-| `lumewarp_upstream_attempts_total` | Counter | `requested`, `deployment`, `outcome`: `success`, `retryable_status`, `connect_error`, `timeout`, `circuit_open`, `non_retryable` |
-| `lumewarp_fallbacks_total` | Counter | `router`, `fallback_model` |
+| `lumewarp_ttft_seconds` | Histogram | `requested`, `model` |
+| `lumewarp_upstream_errors_total` | Counter | `model`, `kind` |
+| `lumewarp_upstream_attempts_total` | Counter | `requested`, `model`, `outcome`: `success`, `retryable_status`, `connect_error`, `timeout`, `circuit_open`, `non_retryable` |
+| `lumewarp_fallbacks_total` | Counter | `router`, `model` |
 | `lumewarp_retries_budget_exhausted_total` | Counter | `router` |
-| `lumewarp_upstream_circuit_state` | Gauge | `deployment`; 0 closed, 1 half-open, 2 open |
+| `lumewarp_upstream_circuit_state` | Gauge | `model`; 0 closed, 1 half-open, 2 open |
 | `lumewarp_upstream_healthy` | Gauge | `upstream`; 1 healthy, 0 unhealthy |
-| `lumewarp_in_flight_requests` | Gauge | `deployment` |
+| `lumewarp_in_flight_requests` | Gauge | `model` |
 | `lumewarp_split_requests_total` | Counter | `router`, `split`; requests assigned to a traffic split. |
-| `lumewarp_vllm_queue_depth` | Gauge | `deployment`; last scraped `vllm:num_requests_waiting`. |
-| `lumewarp_vllm_kv_cache_usage` | Gauge | `deployment`; last scraped KV-cache usage, 0..1. |
+| `lumewarp_vllm_queue_depth` | Gauge | `model`; last scraped `vllm:num_requests_waiting`. |
+| `lumewarp_vllm_kv_cache_usage` | Gauge | `model`; last scraped KV-cache usage, 0..1. |
 | `lumewarp_vllm_scrape_failures_total` | Counter | `upstream`; failed or incomplete vLLM metrics scrapes. |
-| `lumewarp_upstream_latency_ewma_seconds` | Gauge | `deployment`; `lowest_latency` EWMA (deployments with samples). |
+| `lumewarp_upstream_latency_ewma_seconds` | Gauge | `model`; `lowest_latency` EWMA (models with samples). |
 | `lumewarp_config_version` | Gauge | None; active snapshot version, standalone YAML is `0`. |
 | `lumewarp_config_info` | Gauge | `source="yaml"`, `sha256` (first 12 lowercase hex characters of the YAML file hash); value `1`. |
 | `lumewarp_config_apply_failures_total` | Counter | `code` (`base_mismatch`, `invalid_config`, `unsupported_feature`, `persist_failed`, `unspecified`) |
@@ -555,11 +555,11 @@ Label semantics:
 
 - `model` is the **public alias**, never `upstream_model`. Unknown requested
   models use the fixed label `unknown`; other pre-routing rejections and local
-  endpoints use `model=""` / `deployment=""`. Arbitrary client model names never
+  endpoints use `model=""` / `model=""`. Arbitrary client model names never
   become labels.
-- `route` is `chat_completions`, `completions`, `embeddings`, or `models`; local
+- `router` is `chat_completions`, `completions`, `embeddings`, or `models`; local
   health/admin/other paths use bounded `healthz`, `metrics`, or `other` labels.
-- `deployment` is the configured deployment name.
+- `model` is the configured model name.
 - `team` is the caller key's team id; `""` for anonymous callers, team-less
   keys, and requests rejected before authentication succeeds (401, and 429
   `insufficient_quota`).
@@ -571,7 +571,7 @@ Label semantics:
   (response headers), or `stream` (upstream body failure, including non-stream
   response bodies). A truncated 200 response increments `kind="stream"` while
   its request counter still records 200.
-- No API-key labels exist. In-flight gauges read the process-lifetime deployment
+- No API-key labels exist. In-flight gauges read the process-lifetime model
   counters at scrape time.
 
 ### Timing definitions
@@ -631,7 +631,7 @@ compiled exporter/SDK:
 | `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | Maximum batch size (SDK default 512 spans). |
 
 Use an HTTP/protobuf collector endpoint, not a gRPC-only endpoint. OTel-enabled
-request spans are INFO with `route`, `model`, `deployment`, `status`, and `stream`
+request spans are INFO with `router`, `model`, `model`, `status`, and `stream`
 attributes; the OTel layer accepts only `lumewarp` targets at INFO or above and
 disables code-location attributes. It does not enable/export dependency DEBUG /
 TRACE events. Explicit console verbosity is still controlled by `RUST_LOG`.

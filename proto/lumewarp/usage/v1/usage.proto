@@ -39,7 +39,7 @@ message UsageEvent {
   string team_id = 5;
   // Public alias.
   string requested = 7;
-  string deployment = 8;
+  string model = 8;
   // Endpoint: chat_completions | completions | embeddings.
   string endpoint = 9;
   uint32 status = 10;
@@ -49,13 +49,13 @@ message UsageEvent {
   reserved 14;
   reserved "cost_usd";
   uint32 duration_ms = 15;
-  // Snapshot version the request was served with; its deployment price is
+  // Snapshot version the request was served with; its model price is
   // the one used for cost.
   uint64 config_version = 16;
   UsageState usage_state = 17;
   RequestOutcome outcome = 18;
   int64 started_at_unix_ms = 19;
-  // nano-USD computed from the deployment price. Meaningful only when
+  // nano-USD computed from the model price. Meaningful only when
   // cost_known is true (price present and usage_state REPORTED).
   uint64 cost_nano_usd = 20;
   bool cost_known = 21;

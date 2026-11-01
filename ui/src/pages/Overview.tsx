@@ -8,7 +8,7 @@ export function Overview() {
   const perms = useCan();
   const teams = useTeams();
   const keys = useAllTeamKeys(teams.data);
-  const routes = useQuery({ queryKey: ["routes"], queryFn: () => api.routes() });
+  const routers = useQuery({ queryKey: ["routers"], queryFn: () => api.routers() });
   const gateways = useQuery({ queryKey: ["gateways"], queryFn: () => api.gateways(), enabled: perms.isSuper });
   const versions = useQuery({ queryKey: ["config-versions"], queryFn: () => api.configVersions(), enabled: perms.isSuper });
 
@@ -22,7 +22,7 @@ export function Overview() {
       <div className="stats">
         <Stat label="Teams" value={dash(teams.data?.length)} />
         <Stat label="Active keys" value={dash(active)} />
-        <Stat label="Routes" value={dash(routes.data?.length)} />
+        <Stat label="Routers" value={dash(routers.data?.length)} />
         {perms.isSuper && <Stat label="Config version" value={latest ? `v${latest}` : "…"} />}
         {perms.isSuper && <Stat label="Gateways connected" value={gateways.data ? `${gateways.data.filter((g) => g.connected).length} / ${gateways.data.length}` : "…"} />}
       </div>

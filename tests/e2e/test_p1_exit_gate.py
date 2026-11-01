@@ -44,7 +44,7 @@ def test_two_keys_serve_and_usage_lands(stack, owner_kind):
             assert str(r["team_id"]) == seeded.team_id
             assert r["owner_kind"] == owner_kind
             assert str(r["owner_id"]) == seeded.owner_id
-            assert (r["status"], r["requested"], r["deployment"]) == (200, "mock", "mock-a")
+            assert (r["status"], r["requested"], r["model"]) == (200, "mock", "mock-a")
             assert r["cost_known"] and r["prompt_tokens"] > 0 and r["completion_tokens"] > 0
             # price: 1000 / 2000 nano-USD per token
             assert r["cost_nano_usd"] == r["prompt_tokens"] * 1000 + r["completion_tokens"] * 2000
@@ -222,10 +222,10 @@ def test_authz_denials(stack):
     up = stack.ok("GET", "/upstreams")["items"][0]
     dep = stack.ok(
         "POST",
-        "/deployments",
+        "/models",
         json={"name": "mock-b", "upstream_id": up["id"], "upstream_model": "mock"},
     )
-    stack.ok("POST", "/routes", json={"name": "other-model", "deployment_ids": [dep["id"]]})
+    stack.ok("POST", "/routers", json={"name": "other-model", "model_ids": [dep["id"]]})
     other = stack.ok(
         "POST",
         f"/teams/{seeded.team_id}/service-accounts",

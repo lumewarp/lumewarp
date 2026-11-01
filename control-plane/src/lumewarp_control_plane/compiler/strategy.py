@@ -1,4 +1,4 @@
-"""Validation and serialization of compiled-in route strategy settings."""
+"""Validation and serialization of compiled-in router strategy settings."""
 
 import json
 import re

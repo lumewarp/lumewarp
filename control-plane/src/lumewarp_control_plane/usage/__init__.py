@@ -51,7 +51,7 @@ _EVENT_FIELDS = (
     "key_id",
     "team_id",
     "requested",
-    "deployment",
+    "model",
     "endpoint",
     "status",
     "stream",
@@ -120,12 +120,12 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
     key_id = _uuid(event.key_id, "key_id")
     team_id = _uuid(event.team_id, "team_id")
     # A rejected request may never reach routing: authentication runs before the body is
-    # read (no requested) and policy rejections happen before a deployment is chosen.
+    # read (no requested) and policy rejections happen before a model is chosen.
     rejected = event.outcome == usage_pb2.REQUEST_OUTCOME_REJECTED
     if len(event.requested) > 400 or not (event.requested or rejected):
         raise InvalidUsageBatch("invalid requested")
-    if len(event.deployment) > 200 or not (event.deployment or rejected):
-        raise InvalidUsageBatch("invalid deployment")
+    if len(event.model) > 200 or not (event.model or rejected):
+        raise InvalidUsageBatch("invalid model")
     if not event.endpoint or len(event.endpoint) > 64:
         raise InvalidUsageBatch("invalid endpoint")
     if event.status > 599:
@@ -169,7 +169,7 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
         "key_id": key_id,
         "team_id": team_id,
         "requested": event.requested,
-        "deployment": event.deployment,
+        "model": event.model,
         "endpoint": event.endpoint,
         "status": event.status,
         "stream": event.stream,

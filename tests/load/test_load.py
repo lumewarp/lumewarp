@@ -149,21 +149,21 @@ def test_churn_under_load(stack):
             pool.append(key)
             run.set_keys(pool)
 
-        # --- deployments and weights: a+b (1:1) -> b only (a weight 0) -> a only.
-        a = fleet.deployments["mock-a"]
+        # --- models and weights: a+b (1:1) -> b only (a weight 0) -> a only.
+        a = fleet.models["mock-a"]
         timeline["before_b"] = stack.current_version()
-        b = fleet.create_deployment("mock-b")
-        stack.ok("PATCH", f"/routes/{fleet.route_id}", json={"deployment_ids": [a, b]})
+        b = fleet.create_model("mock-b")
+        stack.ok("PATCH", f"/routers/{fleet.router_id}", json={"model_ids": [a, b]})
         timeline["ab"] = wait_acked(stack)
         time.sleep(6)
         timeline["ab_end"] = stack.current_version()
-        stack.ok("PATCH", f"/deployments/{a}", json={"weight": 0})
+        stack.ok("PATCH", f"/models/{a}", json={"weight": 0})
         timeline["b_only"] = wait_acked(stack)
         time.sleep(6)
         timeline["b_only_end"] = stack.current_version()
-        stack.ok("PATCH", f"/deployments/{a}", json={"weight": 1})
-        stack.ok("PATCH", f"/routes/{fleet.route_id}", json={"deployment_ids": [a]})
-        r = stack.api("DELETE", f"/deployments/{b}")
+        stack.ok("PATCH", f"/models/{a}", json={"weight": 1})
+        stack.ok("PATCH", f"/routers/{fleet.router_id}", json={"model_ids": [a]})
+        r = stack.api("DELETE", f"/models/{b}")
         assert r.status_code == 204, r.text
         timeline["a_only"] = wait_acked(stack)
         time.sleep(4)
@@ -222,7 +222,7 @@ def test_churn_under_load(stack):
     # Traffic shift, by the config version each request was served under.
     by_version = pg(
         stack.dsn,
-        "SELECT config_version AS v, deployment AS d, count(*) AS n FROM usage_events"
+        "SELECT config_version AS v, model AS d, count(*) AS n FROM usage_events"
         " WHERE status = 200 GROUP BY 1, 2",
     )
 
@@ -283,7 +283,7 @@ def test_churn_under_load(stack):
     # New keys.
     assert None not in new_latency, f"a new key was not accepted within 5 s: {new_latency}"
     assert max(new_latency) < NEW_KEY_BOUND, new_latency
-    # Deployments.
+    # Models.
     assert set(phases["a_before"]) == {"mock-a"}, phases
     ab = phases["a_and_b"]
     assert ab["mock-a"] > 0 and ab["mock-b"] > 0, phases

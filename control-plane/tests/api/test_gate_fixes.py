@@ -28,14 +28,14 @@ def _patch(client, path, **body):
     return client.patch(f"{API}{path}", json=body, headers=ADMIN_AUTH)
 
 
-def _deployment(client, *, weight=1, upstream_id=None):
+def _model(client, *, weight=1, upstream_id=None):
     if upstream_id is None:
         upstream_id = _post(
             client, "/upstreams", name=f"up-{suffix()}", kind="vllm", base_url="http://h:1/v1"
         ).json()["id"]
     resp = _post(
         client,
-        "/deployments",
+        "/models",
         name=f"dep-{suffix()}",
         upstream_id=upstream_id,
         upstream_model="m",
@@ -48,50 +48,50 @@ def _deployment(client, *, weight=1, upstream_id=None):
 # ------------------------------------------------------------------------------ B1
 
 
-def test_weighted_route_needs_positive_total_weight(client) -> None:
-    zero = _deployment(client, weight=0)
-    live = _deployment(client, weight=2, upstream_id=zero["upstream_id"])
+def test_weighted_router_needs_positive_total_weight(client) -> None:
+    zero = _model(client, weight=0)
+    live = _model(client, weight=2, upstream_id=zero["upstream_id"])
 
-    bad = _post(client, "/routes", name=f"m-{suffix()}", deployment_ids=[zero["id"]])
+    bad = _post(client, "/routers", name=f"m-{suffix()}", model_ids=[zero["id"]])
     assert bad.status_code == 422
-    assert "deployment_ids" in bad.json()["error"]["message"]
+    assert "model_ids" in bad.json()["error"]["message"]
 
-    # least_in_flight ignores weights, so an all-zero route is fine there.
+    # least_in_flight ignores weights, so an all-zero router is fine there.
     ok = _post(
         client,
-        "/routes",
+        "/routers",
         name=f"m-{suffix()}",
         strategy="least_in_flight",
-        deployment_ids=[zero["id"]],
+        model_ids=[zero["id"]],
     )
     assert ok.status_code == 201, ok.text
-    route_id = ok.json()["id"]
+    router_id = ok.json()["id"]
     # ...but switching it to weighted is not.
-    assert _patch(client, f"/routes/{route_id}", strategy="weighted").status_code == 422
-    assert _patch(client, f"/routes/{route_id}", deployment_ids=[live["id"]]).status_code == 200
-    assert _patch(client, f"/routes/{route_id}", strategy="weighted").status_code == 200
-    # Replacing the deployments of a weighted route with all-zero ones is rejected.
-    assert _patch(client, f"/routes/{route_id}", deployment_ids=[zero["id"]]).status_code == 422
+    assert _patch(client, f"/routers/{router_id}", strategy="weighted").status_code == 422
+    assert _patch(client, f"/routers/{router_id}", model_ids=[live["id"]]).status_code == 200
+    assert _patch(client, f"/routers/{router_id}", strategy="weighted").status_code == 200
+    # Replacing the models of a weighted router with all-zero ones is rejected.
+    assert _patch(client, f"/routers/{router_id}", model_ids=[zero["id"]]).status_code == 422
 
 
-def test_deployment_weight_update_cannot_starve_weighted_route(client) -> None:
-    dep = _deployment(client, weight=1)
-    spare = _deployment(client, weight=1, upstream_id=dep["upstream_id"])
-    route = _post(client, "/routes", name=f"m-{suffix()}", deployment_ids=[dep["id"]]).json()
+def test_model_weight_update_cannot_starve_weighted_router(client) -> None:
+    dep = _model(client, weight=1)
+    spare = _model(client, weight=1, upstream_id=dep["upstream_id"])
+    router = _post(client, "/routers", name=f"m-{suffix()}", model_ids=[dep["id"]]).json()
 
-    resp = _patch(client, f"/deployments/{dep['id']}", weight=0)
+    resp = _patch(client, f"/models/{dep['id']}", weight=0)
     assert resp.status_code == 422
     assert "weight" in resp.json()["error"]["message"]
-    assert client.get(f"{API}/deployments/{dep['id']}", headers=ADMIN_AUTH).json()["weight"] == 1
+    assert client.get(f"{API}/models/{dep['id']}", headers=ADMIN_AUTH).json()["weight"] == 1
 
-    # With another positive deployment in the route the weight may drop to 0.
-    _patch(client, f"/routes/{route['id']}", deployment_ids=[dep["id"], spare["id"]])
-    assert _patch(client, f"/deployments/{dep['id']}", weight=0).status_code == 200
+    # With another positive model in the router the weight may drop to 0.
+    _patch(client, f"/routers/{router['id']}", model_ids=[dep["id"], spare["id"]])
+    assert _patch(client, f"/models/{dep['id']}", weight=0).status_code == 200
     # Zeroing the last positive one is rejected again.
-    assert _patch(client, f"/deployments/{spare['id']}", weight=0).status_code == 422
-    # Weights on unrelated deployments are unaffected.
-    other = _deployment(client, weight=3, upstream_id=dep["upstream_id"])
-    assert _patch(client, f"/deployments/{other['id']}", weight=0).status_code == 200
+    assert _patch(client, f"/models/{spare['id']}", weight=0).status_code == 422
+    # Weights on unrelated models are unaffected.
+    other = _model(client, weight=3, upstream_id=dep["upstream_id"])
+    assert _patch(client, f"/models/{other['id']}", weight=0).status_code == 200
 
 
 # ------------------------------------------------------------------------------ S3
@@ -164,22 +164,20 @@ def test_openapi_documents_the_real_error_body(api_settings: Settings) -> None:
 # ------------------------------------------------------------------------------ S6
 
 
-def test_list_routes_returns_ordered_deployments_for_every_route(client) -> None:
-    deployments = [_deployment(client)]
-    deployments += [
-        _deployment(client, upstream_id=deployments[0]["upstream_id"]) for _ in range(2)
-    ]
+def test_list_routers_returns_ordered_models_for_every_router(client) -> None:
+    models = [_model(client)]
+    models += [_model(client, upstream_id=models[0]["upstream_id"]) for _ in range(2)]
     expected = {}
     for index in range(4):
-        order = [d["id"] for d in deployments[index % 3 :] + deployments[: index % 3]]
-        route = _post(client, "/routes", name=f"m-{suffix()}", deployment_ids=order)
-        assert route.status_code == 201
-        expected[route.json()["id"]] = order
-    items = client.get(f"{API}/routes?limit=500", headers=ADMIN_AUTH).json()["items"]
+        order = [d["id"] for d in models[index % 3 :] + models[: index % 3]]
+        router = _post(client, "/routers", name=f"m-{suffix()}", model_ids=order)
+        assert router.status_code == 201
+        expected[router.json()["id"]] = order
+    items = client.get(f"{API}/routers?limit=500", headers=ADMIN_AUTH).json()["items"]
     for item in items:
         if item["id"] in expected:
-            assert [d["deployment_id"] for d in item["deployments"]] == expected[item["id"]]
-            assert [d["position"] for d in item["deployments"]] == [0, 1, 2]
+            assert [d["model_id"] for d in item["models"]] == expected[item["id"]]
+            assert [d["position"] for d in item["models"]] == [0, 1, 2]
 
 
 # ------------------------------------------------------------------------------ N1-N2
@@ -204,10 +202,10 @@ def test_api_key_ref_is_ascii_only(client) -> None:
 
 
 def test_names_and_aliases_are_clean(client) -> None:
-    dep = _deployment(client)
-    resp = _post(client, "/routes", name="  spaced alias\n", deployment_ids=[dep["id"]])
+    dep = _model(client)
+    resp = _post(client, "/routers", name="  spaced alias\n", model_ids=[dep["id"]])
     assert resp.status_code == 422
-    resp = _post(client, "/routes", name="  padded  ", deployment_ids=[dep["id"]])
+    resp = _post(client, "/routers", name="  padded  ", model_ids=[dep["id"]])
     assert resp.status_code == 201
     assert resp.json()["name"] == "padded"
 
@@ -220,7 +218,7 @@ def test_names_and_aliases_are_clean(client) -> None:
         ).status_code
         == 422
     )
-    # Allowlist entries and route aliases share one normalisation.
+    # Allowlist entries and router aliases share one normalisation.
     ok = _patch(client, f"/teams/{team['id']}", allowed_models=[" padded "], model_access="list")
     assert ok.status_code == 200
     assert ok.json()["allowed_models"] == ["padded"]

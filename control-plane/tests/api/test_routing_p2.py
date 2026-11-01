@@ -14,11 +14,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane.api import routing
-from lumewarp_control_plane.api.schemas import DeploymentUpdate
+from lumewarp_control_plane.api.schemas import ModelUpdate
 from lumewarp_control_plane.authz import RequestAuthz
 from lumewarp_control_plane.compiler import compile_scope
 from lumewarp_control_plane.errors import ApiError
-from lumewarp_control_plane.models import AuditLog, ConfigOutbox, Deployment
+from lumewarp_control_plane.models import AuditLog, ConfigOutbox, Model
 from lumewarp_control_plane.security import Principal, PrincipalKind
 from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
 
@@ -30,23 +30,23 @@ def _upstream(client, **body):
     return client.post("/api/v1/upstreams", json=body, headers=H)
 
 
-def _deployment(client, upstream_id: str | None = None, **body) -> dict:
+def _model(client, upstream_id: str | None = None, **body) -> dict:
     if upstream_id is None:
         upstream_id = _upstream(client).json()["id"]
     body = {"name": f"dep-{suffix()}", "upstream_id": upstream_id, "upstream_model": "m", **body}
-    resp = client.post("/api/v1/deployments", json=body, headers=H)
+    resp = client.post("/api/v1/models", json=body, headers=H)
     assert resp.status_code == 201, resp.text
     return resp.json()
 
 
-def _route(client, **body):
-    if "deployment_ids" not in body and "traffic_split" not in body:
-        body["deployment_ids"] = [_deployment(client)["id"]]
-    if body.get("fallback_route_ids"):
+def _router(client, **body):
+    if "model_ids" not in body and "traffic_split" not in body:
+        body["model_ids"] = [_model(client)["id"]]
+    if body.get("fallback_router_ids"):
         # Fallbacks need at least two attempts.
         body.setdefault("retry", {})
     body = {"name": f"alias-{suffix()}", **body}
-    return client.post("/api/v1/routes", json=body, headers=H)
+    return client.post("/api/v1/routers", json=body, headers=H)
 
 
 def _ok(resp, code: int = 201) -> dict:
@@ -59,32 +59,34 @@ def _422(resp, needle: str) -> None:
     assert needle in resp.json()["error"]["message"], resp.json()
 
 
-def _patch(client, route_id: str, **body):
-    if body.get("fallback_route_ids"):
+def _patch(client, router_id: str, **body):
+    if body.get("fallback_router_ids"):
         body.setdefault("retry", {})
-    return client.patch(f"/api/v1/routes/{route_id}", json=body, headers=H)
+    return client.patch(f"/api/v1/routers/{router_id}", json=body, headers=H)
 
 
 # --------------------------------------------------------------------------- upstreams
 
 
-def test_custom_strategy_route_create_patch_and_clear(client):
-    route = _ok(
-        _route(
+def test_custom_strategy_router_create_patch_and_clear(client):
+    router = _ok(
+        _router(
             client,
             strategy="custom",
             custom_strategy="header_pin",
             strategy_params={"headers": ["x-pin"], "pin": 2},
         )
     )
-    assert route["strategy"] == "custom"
-    assert route["custom_strategy"] == "header_pin"
-    assert route["strategy_params"]["pin"] == 2
-    updated = _ok(_patch(client, route["id"], strategy_params={"pin": 3}), 200)
+    assert router["strategy"] == "custom"
+    assert router["custom_strategy"] == "header_pin"
+    assert router["strategy_params"]["pin"] == 2
+    updated = _ok(_patch(client, router["id"], strategy_params={"pin": 3}), 200)
     assert updated["strategy_params"] == {"pin": 3}
     assert updated["custom_strategy"] == "header_pin"
-    assert _ok(_patch(client, route["id"], name=f"renamed-{suffix()}"), 200)["strategy"] == "custom"
-    cleared = _ok(_patch(client, route["id"], strategy="least_in_flight"), 200)
+    assert (
+        _ok(_patch(client, router["id"], name=f"renamed-{suffix()}"), 200)["strategy"] == "custom"
+    )
+    cleared = _ok(_patch(client, router["id"], strategy="least_in_flight"), 200)
     assert cleared["custom_strategy"] is None and cleared["strategy_params"] == {}
     assert cleared["strategy"] == "least_in_flight"
 
@@ -107,8 +109,8 @@ def test_custom_strategy_route_create_patch_and_clear(client):
         {"strategy_params": {"x": 1}},
     ],
 )
-def test_custom_strategy_route_validation(client, body):
-    assert _route(client, **body).status_code == 422
+def test_custom_strategy_router_validation(client, body):
+    assert _router(client, **body).status_code == 422
 
 
 @pytest.mark.parametrize(
@@ -117,7 +119,7 @@ def test_custom_strategy_route_validation(client, body):
 )
 def test_custom_strategy_cannot_receive_credential_headers(client, header):
     assert (
-        _route(
+        _router(
             client,
             strategy="custom",
             custom_strategy="header_pin",
@@ -125,11 +127,11 @@ def test_custom_strategy_cannot_receive_credential_headers(client, header):
         ).status_code
         == 422
     )
-    route = _ok(_route(client))
+    router = _ok(_router(client))
     assert (
         _patch(
             client,
-            route["id"],
+            router["id"],
             strategy="custom",
             custom_strategy="header_pin",
             strategy_params={"headers": [header]},
@@ -139,11 +141,11 @@ def test_custom_strategy_cannot_receive_credential_headers(client, header):
 
 
 def test_custom_strategy_patch_requires_name_and_non_null_params(client):
-    route = _ok(_route(client))
-    assert _patch(client, route["id"], strategy="custom").status_code == 422
-    route = _ok(_patch(client, route["id"], strategy="custom", custom_strategy="ok"), 200)
-    assert _patch(client, route["id"], custom_strategy=None).status_code == 422
-    assert _patch(client, route["id"], strategy_params=None).status_code == 422
+    router = _ok(_router(client))
+    assert _patch(client, router["id"], strategy="custom").status_code == 422
+    router = _ok(_patch(client, router["id"], strategy="custom", custom_strategy="ok"), 200)
+    assert _patch(client, router["id"], custom_strategy=None).status_code == 422
+    assert _patch(client, router["id"], strategy_params=None).status_code == 422
 
 
 def test_upstream_health_breaker_metrics_roundtrip(client) -> None:
@@ -217,97 +219,97 @@ def test_upstream_validation(client, body, needle) -> None:
     _422(client.patch(f"/api/v1/upstreams/{up['id']}", json=body, headers=H), needle)
 
 
-# --------------------------------------------------------------------------- routes
+# --------------------------------------------------------------------------- routers
 
 
-def test_route_p2_roundtrip_and_audit(client) -> None:
+def test_router_p2_roundtrip_and_audit(client) -> None:
     upstream = _ok(_upstream(client))["id"]
-    a, b, c = (_deployment(client, upstream) for _ in range(3))
-    backup = _ok(_route(client, deployment_ids=[c["id"]]))
-    backup2 = _ok(_route(client, deployment_ids=[c["id"]]))
-    route = _ok(
-        _route(
+    a, b, c = (_model(client, upstream) for _ in range(3))
+    backup = _ok(_router(client, model_ids=[c["id"]]))
+    backup2 = _ok(_router(client, model_ids=[c["id"]]))
+    router = _ok(
+        _router(
             client,
             strategy="vllm_load",
-            deployment_ids=[],
+            model_ids=[],
             retry={"max_attempts": 3, "retry_on_status": [503, 500], "total_timeout_ms": 9000},
-            fallback_route_ids=[backup2["id"], backup["id"]],
+            fallback_router_ids=[backup2["id"], backup["id"]],
             traffic_split=[
-                {"name": "stable", "weight": 90, "deployment_ids": [a["id"]]},
-                {"name": "canary", "weight": 10, "deployment_ids": [b["id"], a["id"]]},
+                {"name": "stable", "weight": 90, "model_ids": [a["id"]]},
+                {"name": "canary", "weight": 10, "model_ids": [b["id"], a["id"]]},
             ],
             sticky="header",
             sticky_header="X-Session-Id",
         )
     )
-    assert route["strategy"] == "vllm_load"
-    assert route["deployments"] == []
-    assert route["retry"] == {
+    assert router["strategy"] == "vllm_load"
+    assert router["models"] == []
+    assert router["retry"] == {
         "max_attempts": 3,
         "retry_on_status": [500, 503],
         "total_timeout_ms": 9000,
     }
-    assert route["fallback_route_ids"] == [backup2["id"], backup["id"]]  # order kept
-    assert route["traffic_split"] == [
-        {"name": "stable", "weight": 90, "deployment_ids": [a["id"]]},
-        {"name": "canary", "weight": 10, "deployment_ids": [b["id"], a["id"]]},
+    assert router["fallback_router_ids"] == [backup2["id"], backup["id"]]  # order kept
+    assert router["traffic_split"] == [
+        {"name": "stable", "weight": 90, "model_ids": [a["id"]]},
+        {"name": "canary", "weight": 10, "model_ids": [b["id"], a["id"]]},
     ]
-    assert (route["sticky"], route["sticky_header"]) == ("header", "x-session-id")
-    assert _ok(client.get(f"/api/v1/routes/{route['id']}", headers=H), 200) == route
+    assert (router["sticky"], router["sticky_header"]) == ("header", "x-session-id")
+    assert _ok(client.get(f"/api/v1/routers/{router['id']}", headers=H), 200) == router
 
     # PATCH: omitted fields are kept; fallbacks keep needing a retry policy; leaving
     # header stickiness drops the header.
-    _422(_patch(client, route["id"], retry=None), "at least 2 attempts")
-    _422(_patch(client, route["id"], retry={"max_attempts": 1}), "at least 2 attempts")
-    patched = _ok(_patch(client, route["id"], retry={"max_attempts": 2}, sticky="team"), 200)
+    _422(_patch(client, router["id"], retry=None), "at least 2 attempts")
+    _422(_patch(client, router["id"], retry={"max_attempts": 1}), "at least 2 attempts")
+    patched = _ok(_patch(client, router["id"], retry={"max_attempts": 2}, sticky="team"), 200)
     assert patched["retry"]["max_attempts"] == 2
     assert (patched["sticky"], patched["sticky_header"]) == ("team", None)
-    assert patched["traffic_split"] == route["traffic_split"]
-    assert patched["fallback_route_ids"] == route["fallback_route_ids"]
+    assert patched["traffic_split"] == router["traffic_split"]
+    assert patched["fallback_router_ids"] == router["fallback_router_ids"]
     patched = _ok(
         _patch(
             client,
-            route["id"],
+            router["id"],
             traffic_split=[],
             sticky="none",
-            deployment_ids=[a["id"]],
-            fallback_route_ids=[],
+            model_ids=[a["id"]],
+            fallback_router_ids=[],
             retry={},
             strategy="lowest_latency",
         ),
         200,
     )
-    assert patched["traffic_split"] == [] and patched["fallback_route_ids"] == []
+    assert patched["traffic_split"] == [] and patched["fallback_router_ids"] == []
     assert patched["retry"] == {"max_attempts": None, "retry_on_status": [], "total_timeout_ms": 0}
     assert patched["strategy"] == "lowest_latency"
 
 
-async def test_route_writes_audit_and_recompile(client, committed) -> None:
+async def test_router_writes_audit_and_recompile(client, committed) -> None:
     outbox_before = await committed.scalar(select(func.count()).select_from(ConfigOutbox))
-    backup = _ok(_route(client))
-    route = _ok(_route(client, fallback_route_ids=[backup["id"]], retry={"max_attempts": 2}))
-    _ok(_patch(client, route["id"], retry={"max_attempts": 3}), 200)
+    backup = _ok(_router(client))
+    router = _ok(_router(client, fallback_router_ids=[backup["id"]], retry={"max_attempts": 2}))
+    _ok(_patch(client, router["id"], retry={"max_attempts": 3}), 200)
     outbox_after = await committed.scalar(select(func.count()).select_from(ConfigOutbox))
-    # Two deployments + two upstreams + two routes + one route update.
+    # Two models + two upstreams + two routers + one router update.
     assert outbox_after == outbox_before + 7
     rows = (
-        await committed.scalars(select(AuditLog).where(AuditLog.resource_id == route["id"]))
+        await committed.scalars(select(AuditLog).where(AuditLog.resource_id == router["id"]))
     ).all()
     actions = sorted(r.action for r in rows)
-    assert actions == ["route.create", "route.update"]
-    create = next(r for r in rows if r.action == "route.create")
-    assert create.details["settings"]["fallback_route_ids"] == [backup["id"]]
+    assert actions == ["router.create", "router.update"]
+    create = next(r for r in rows if r.action == "router.create")
+    assert create.details["settings"]["fallback_router_ids"] == [backup["id"]]
     assert create.details["settings"]["retry"]["max_attempts"] == 2
 
 
-async def test_route_writes_need_superuser(client, committed) -> None:
-    route = _ok(_route(client))
+async def test_router_writes_need_superuser(client, committed) -> None:
+    router = _ok(_router(client))
     _, secret = await user_with_token(committed)
     await committed.commit()
-    assert client.get(f"/api/v1/routes/{route['id']}", headers=auth(secret)).status_code == 200
+    assert client.get(f"/api/v1/routers/{router['id']}", headers=auth(secret)).status_code == 200
     assert (
         client.patch(
-            f"/api/v1/routes/{route['id']}", json={"retry": {}}, headers=auth(secret)
+            f"/api/v1/routers/{router['id']}", json={"retry": {}}, headers=auth(secret)
         ).status_code
         == 403
     )
@@ -322,12 +324,12 @@ async def test_route_writes_need_superuser(client, committed) -> None:
     )
 
 
-def _split(name: str, deployment_ids: list[str], weight: int = 1) -> dict:
-    return {"name": name, "weight": weight, "deployment_ids": deployment_ids}
+def _split(name: str, model_ids: list[str], weight: int = 1) -> dict:
+    return {"name": name, "weight": weight, "model_ids": model_ids}
 
 
-def test_route_validation_rules(client) -> None:
-    dep = _deployment(client)
+def test_router_validation_rules(client) -> None:
+    dep = _model(client)
     d = dep["id"]
     unknown = str(uuid.uuid4())
     cases = [
@@ -339,10 +341,10 @@ def test_route_validation_rules(client) -> None:
         ({"retry": {"retry_on_status": [503, 503]}}, "duplicates"),
         ({"retry": {"total_timeout_ms": -1}}, "total_timeout_ms"),
         # fallbacks
-        ({"fallback_route_ids": [unknown], "retry": {}}, "unknown routes"),
+        ({"fallback_router_ids": [unknown], "retry": {}}, "unknown routers"),
         # splits
-        ({"traffic_split": [_split("a", [unknown])]}, "unknown deployments"),
-        ({"traffic_split": [_split("a", [])]}, "deployment_ids"),
+        ({"traffic_split": [_split("a", [unknown])]}, "unknown models"),
+        ({"traffic_split": [_split("a", [])]}, "model_ids"),
         ({"traffic_split": [_split("a", [d, d])]}, "twice"),
         ({"traffic_split": [_split("bad name", [d])]}, "[A-Za-z0-9_.-]"),
         ({"traffic_split": [_split("x" * 33, [d])]}, "1..32"),
@@ -365,52 +367,52 @@ def test_route_validation_rules(client) -> None:
             {"traffic_split": [_split("a", [d])], "sticky": "header", "sticky_header": "x a"},
             "valid HTTP header name",
         ),
-        # strategy / deployments
+        # strategy / models
         ({"strategy": "fastest"}, "strategy"),
-        ({"deployment_ids": []}, "at least one deployment or define a traffic_split"),
-        ({"deployment_ids": [d, d]}, "duplicate"),
+        ({"model_ids": []}, "at least one model or define a traffic_split"),
+        ({"model_ids": [d, d]}, "duplicate"),
     ]
-    route = _ok(_route(client, deployment_ids=[d]))
+    router = _ok(_router(client, model_ids=[d]))
     for body, needle in cases:
-        create = {"deployment_ids": [d], **body}
-        _422(_route(client, **create), needle)
-        _422(_patch(client, route["id"], **body), needle)
+        create = {"model_ids": [d], **body}
+        _422(_router(client, **create), needle)
+        _422(_patch(client, router["id"], **body), needle)
     # 16 splits is the limit, not an error; names use the gateway's charset.
-    ok = _route(
+    ok = _router(
         client,
         traffic_split=[_split(f"S-{i}.x_", [d]) for i in range(16)],
         sticky="key",
     )
     assert ok.status_code == 201, ok.text
     # Nulls for list fields are not "remove".
-    _422(_patch(client, route["id"], traffic_split=None), "cannot be null")
-    _422(_patch(client, route["id"], fallback_route_ids=None), "cannot be null")
+    _422(_patch(client, router["id"], traffic_split=None), "cannot be null")
+    _422(_patch(client, router["id"], fallback_router_ids=None), "cannot be null")
 
 
 def test_weighted_splits_need_positive_weight(client) -> None:
-    zero = _deployment(client, weight=0)
-    one = _deployment(client)
+    zero = _model(client, weight=0)
+    one = _model(client)
     body = {"traffic_split": [_split("a", [one["id"]]), _split("b", [zero["id"]])]}
-    _422(_route(client, **body), "positive total weight")
-    route = _ok(_route(client, strategy="least_in_flight", **body))
-    # Switching such a route to weighted is refused too.
-    _422(_patch(client, route["id"], strategy="weighted"), "positive total weight")
+    _422(_router(client, **body), "positive total weight")
+    router = _ok(_router(client, strategy="least_in_flight", **body))
+    # Switching such a router to weighted is refused too.
+    _422(_patch(client, router["id"], strategy="weighted"), "positive total weight")
     # And a weight change that would starve a weighted split.
-    weighted = _ok(_route(client, traffic_split=[_split("a", [one["id"]])]))
-    resp = client.patch(f"/api/v1/deployments/{one['id']}", json={"weight": 0}, headers=H)
-    _422(resp, f"route {weighted['name']!r}")
+    weighted = _ok(_router(client, traffic_split=[_split("a", [one["id"]])]))
+    resp = client.patch(f"/api/v1/models/{one['id']}", json={"weight": 0}, headers=H)
+    _422(resp, f"router {weighted['name']!r}")
 
 
 @pytest.mark.parametrize("split", [False, True])
 async def test_concurrent_weight_zeroing_preserves_pool(
     client, api_engine, api_settings, monkeypatch, split
 ) -> None:
-    a, b = _deployment(client), _deployment(client)
+    a, b = _model(client), _model(client)
     ids = [a["id"], b["id"]]
-    route = _ok(
-        _route(
+    router = _ok(
+        _router(
             client,
-            **({"traffic_split": [_split("combined", ids)]} if split else {"deployment_ids": ids}),
+            **({"traffic_split": [_split("combined", ids)]} if split else {"model_ids": ids}),
         )
     )
     first_locked = asyncio.Event()
@@ -443,11 +445,11 @@ async def test_concurrent_weight_zeroing_preserves_pool(
 
             monkeypatch.setattr(session, "get", guarded_get)
 
-        async def zero(session, deployment_id):
+        async def zero(session, model_id):
             try:
-                return await routing.update_deployment(
-                    uuid.UUID(deployment_id),
-                    DeploymentUpdate(weight=0),
+                return await routing.update_model(
+                    uuid.UUID(model_id),
+                    ModelUpdate(weight=0),
                     authz,
                     session,
                     api_settings,
@@ -465,58 +467,58 @@ async def test_concurrent_weight_zeroing_preserves_pool(
     async with AsyncSession(api_engine) as check:
         weights = (
             await check.scalars(
-                select(Deployment.weight).where(Deployment.id.in_([uuid.UUID(i) for i in ids]))
+                select(Model.weight).where(Model.id.in_([uuid.UUID(i) for i in ids]))
             )
         ).all()
         assert sorted(weights) == [0, 1]
         compiled = await compile_scope(check, api_settings.scope, require_local_membership=True)
-        assert route["name"] in {r.name for r in compiled.snapshot.routes}
+        assert router["name"] in {r.name for r in compiled.snapshot.routers}
 
 
 def test_fallback_self_and_cycles(client) -> None:
-    a = _ok(_route(client))
-    b = _ok(_route(client, fallback_route_ids=[a["id"]]))
-    c = _ok(_route(client, fallback_route_ids=[b["id"]]))
-    _422(_patch(client, a["id"], fallback_route_ids=[a["id"]]), "itself")
+    a = _ok(_router(client))
+    b = _ok(_router(client, fallback_router_ids=[a["id"]]))
+    c = _ok(_router(client, fallback_router_ids=[b["id"]]))
+    _422(_patch(client, a["id"], fallback_router_ids=[a["id"]]), "itself")
     # a -> c -> b -> a
-    resp = _patch(client, a["id"], fallback_route_ids=[c["id"]])
+    resp = _patch(client, a["id"], fallback_router_ids=[c["id"]])
     _422(resp, "cycle")
     assert f"{a['name']} -> {c['name']} -> {b['name']} -> {a['name']}" in resp.text
-    _422(_patch(client, a["id"], fallback_route_ids=[b["id"]]), "cycle")
+    _422(_patch(client, a["id"], fallback_router_ids=[b["id"]]), "cycle")
     # Duplicates are refused; a DAG with shared fallbacks is fine.
-    _422(_patch(client, c["id"], fallback_route_ids=[a["id"], a["id"]]), "duplicate")
-    _ok(_patch(client, c["id"], fallback_route_ids=[b["id"], a["id"]]), 200)
+    _422(_patch(client, c["id"], fallback_router_ids=[a["id"], a["id"]]), "duplicate")
+    _ok(_patch(client, c["id"], fallback_router_ids=[b["id"], a["id"]]), 200)
 
 
 def test_delete_conflicts(client) -> None:
-    dep = _deployment(client)
-    split_only = _deployment(client)
-    backup = _ok(_route(client, deployment_ids=[dep["id"]]))
+    dep = _model(client)
+    split_only = _model(client)
+    backup = _ok(_router(client, model_ids=[dep["id"]]))
     main = _ok(
-        _route(
+        _router(
             client,
-            deployment_ids=[dep["id"]],
-            fallback_route_ids=[backup["id"]],
+            model_ids=[dep["id"]],
+            fallback_router_ids=[backup["id"]],
             traffic_split=[_split("a", [split_only["id"]])],
         )
     )
-    resp = client.delete(f"/api/v1/routes/{backup['id']}", headers=H)
+    resp = client.delete(f"/api/v1/routers/{backup['id']}", headers=H)
     assert resp.status_code == 409, resp.text
     assert main["name"] in resp.json()["error"]["message"]
-    # A deployment used only by a split cannot be deleted either.
-    resp = client.delete(f"/api/v1/deployments/{split_only['id']}", headers=H)
+    # A model used only by a split cannot be deleted either.
+    resp = client.delete(f"/api/v1/models/{split_only['id']}", headers=H)
     assert resp.status_code == 409
-    # Deleting the referencing route frees both.
-    assert client.delete(f"/api/v1/routes/{main['id']}", headers=H).status_code == 204
-    assert client.delete(f"/api/v1/routes/{backup['id']}", headers=H).status_code == 204
-    assert client.delete(f"/api/v1/deployments/{split_only['id']}", headers=H).status_code == 204
+    # Deleting the referencing router frees both.
+    assert client.delete(f"/api/v1/routers/{main['id']}", headers=H).status_code == 204
+    assert client.delete(f"/api/v1/routers/{backup['id']}", headers=H).status_code == 204
+    assert client.delete(f"/api/v1/models/{split_only['id']}", headers=H).status_code == 204
 
 
 def test_fallbacks_need_two_attempts(client) -> None:
-    backup = _ok(_route(client))
-    _422(_route(client, fallback_route_ids=[backup["id"]], retry=None), "at least 2 attempts")
-    resp = _route(client, fallback_route_ids=[backup["id"]], retry={"max_attempts": 1})
+    backup = _ok(_router(client))
+    _422(_router(client, fallback_router_ids=[backup["id"]], retry=None), "at least 2 attempts")
+    resp = _router(client, fallback_router_ids=[backup["id"]], retry={"max_attempts": 1})
     _422(resp, "at least 2 attempts")
-    route = _ok(_route(client))
-    _422(_patch(client, route["id"], fallback_route_ids=[backup["id"]], retry=None), "2 attempts")
-    _ok(_patch(client, route["id"], fallback_route_ids=[backup["id"]]), 200)
+    router = _ok(_router(client))
+    _422(_patch(client, router["id"], fallback_router_ids=[backup["id"]], retry=None), "2 attempts")
+    _ok(_patch(client, router["id"], fallback_router_ids=[backup["id"]]), 200)

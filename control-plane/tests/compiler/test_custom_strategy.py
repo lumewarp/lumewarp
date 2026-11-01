@@ -15,26 +15,26 @@ from lumewarp_control_plane.compiler import (
 )
 from lumewarp_control_plane.compiler.strategy import strategy_problem
 from lumewarp_control_plane.compiler.validate import SnapshotInvalid, validate_snapshot
-from lumewarp_control_plane.models import Deployment, GatewaySession, Route, RoutingStrategy
-from tests.compiler.helpers import OCT, SCOPE, add_route, load_version, seed_scope, touch
+from lumewarp_control_plane.models import GatewaySession, Model, Router, RoutingStrategy
+from tests.compiler.helpers import OCT, SCOPE, add_router, load_version, seed_scope, touch
 from tests.conftest import create_database, drop_database
 
 
 async def test_custom_strategy_compile_capability_warning_and_rollback(factory):
     await seed_scope(factory)
     async with factory() as s, s.begin():
-        route = await add_route(s, "custom", [("a", None)])
-        dep = await s.scalar(select(Deployment))
+        router = await add_router(s, "custom", [("a", None)])
+        dep = await s.scalar(select(Model))
         dep.weight = 0  # custom strategies, unlike weighted, can use zero-weight pools
-        route.strategy = RoutingStrategy.CUSTOM
-        route.custom_strategy = "header_pin"
-        route.strategy_params = {"headers": ["x-pin"]}
+        router.strategy = RoutingStrategy.CUSTOM
+        router.custom_strategy = "header_pin"
+        router.strategy_params = {"headers": ["x-pin"]}
     async with factory() as s:
         result = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
-    route = result.snapshot.routes[0]
-    assert route.strategy == pb.ROUTING_STRATEGY_CUSTOM
-    assert route.custom_strategy == "header_pin"
-    assert json.loads(route.strategy_params_json) == {"headers": ["x-pin"]}
+    router = result.snapshot.routers[0]
+    assert router.strategy == pb.ROUTING_STRATEGY_CUSTOM
+    assert router.custom_strategy == "header_pin"
+    assert json.loads(router.strategy_params_json) == {"headers": ["x-pin"]}
     assert list(result.snapshot.required_capabilities) == ["strategy:header_pin"]
     assert len(result.warnings) == 1 and "not advertised" in result.warnings[0]
     async with factory() as s, s.begin():
@@ -51,7 +51,7 @@ async def test_custom_strategy_compile_capability_warning_and_rollback(factory):
     await touch(factory)
     assert await publish_pending(factory, SCOPE, require_local_membership=True) == 1
     async with factory() as s, s.begin():
-        config = await s.scalar(select(Route))
+        config = await s.scalar(select(Router))
         assert config.strategy is RoutingStrategy.CUSTOM
         assert config.custom_strategy == "header_pin"
         config.strategy_params = {"headers": ["x-other"]}
@@ -59,10 +59,10 @@ async def test_custom_strategy_compile_capability_warning_and_rollback(factory):
     assert await publish_pending(factory, SCOPE, require_local_membership=True) == 2
     async with factory() as s, s.begin():
         assert await rollback_routing(s, SCOPE, 1, require_local_membership=True) == 3
-    assert (await load_version(factory, 3)).routes[0] == route
+    assert (await load_version(factory, 3)).routers[0] == router
     async with factory() as s:
         compiled = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
-        assert compiled.snapshot.routes[0] == route
+        assert compiled.snapshot.routers[0] == router
 
 
 @pytest.mark.parametrize(
@@ -78,8 +78,8 @@ async def test_custom_strategy_compile_capability_warning_and_rollback(factory):
 def test_custom_strategy_mirror_rejects_invalid_params(params):
     snap = pb.Snapshot(
         required_capabilities=["strategy:header_pin"],
-        routes=[
-            pb.ModelRoute(
+        routers=[
+            pb.Router(
                 name="m",
                 strategy=pb.ROUTING_STRATEGY_CUSTOM,
                 custom_strategy="header_pin",
@@ -97,20 +97,20 @@ async def test_custom_strategy_migration_up_down():
     try:
         await migrate.upgrade(engine, "0004")
         await migrate.upgrade(engine, "0005")
-        route_id = uuid.uuid4()
+        router_id = uuid.uuid4()
         async with engine.begin() as conn:
             await conn.execute(
                 text(
                     "INSERT INTO routes (id, model, strategy, custom_strategy, strategy_params)"
                     " VALUES (:id, 'custom', 'custom', 'header_pin', '{\"headers\":[\"x-pin\"]}')"
                 ),
-                {"id": route_id},
+                {"id": router_id},
             )
         await migrate.downgrade(engine, "0004")
         async with engine.connect() as conn:
             assert (
                 await conn.scalar(
-                    text("SELECT strategy FROM routes WHERE id = :id"), {"id": route_id}
+                    text("SELECT strategy FROM routes WHERE id = :id"), {"id": router_id}
                 )
                 == "least_in_flight"
             )
@@ -132,7 +132,7 @@ async def test_custom_strategy_migration_up_down():
                         "SELECT strategy, custom_strategy, strategy_params FROM routes"
                         " WHERE id = :id"
                     ),
-                    {"id": route_id},
+                    {"id": router_id},
                 )
             ).one()
             assert tuple(row) == ("least_in_flight", None, None)
@@ -151,11 +151,11 @@ async def test_custom_strategy_migration_up_down():
         (RoutingStrategy.WEIGHTED, None, {}),
     ],
 )
-async def test_route_custom_strategy_database_constraints(factory, strategy, name, params):
+async def test_router_custom_strategy_database_constraints(factory, strategy, name, params):
     with pytest.raises(IntegrityError):
         async with factory() as s, s.begin():
             s.add(
-                Route(
+                Router(
                     name="invalid", strategy=strategy, custom_strategy=name, strategy_params=params
                 )
             )
@@ -166,13 +166,13 @@ async def test_route_custom_strategy_database_constraints(factory, strategy, nam
 async def test_custom_strategy_nullable_params_compile_as_object(factory, params):
     await seed_scope(factory)
     async with factory() as s, s.begin():
-        route = await add_route(s, "custom", [("a", None)])
-        route.strategy = RoutingStrategy.CUSTOM
-        route.custom_strategy = "header_pin"
-        route.strategy_params = params
+        router = await add_router(s, "custom", [("a", None)])
+        router.strategy = RoutingStrategy.CUSTOM
+        router.custom_strategy = "header_pin"
+        router.strategy_params = params
     async with factory() as s:
         compiled = await compile_scope(s, SCOPE, require_local_membership=True)
-        assert json.loads(compiled.snapshot.routes[0].strategy_params_json) == {}
+        assert json.loads(compiled.snapshot.routers[0].strategy_params_json) == {}
 
 
 def test_custom_params_nesting_matches_gateway_recursion_budget():

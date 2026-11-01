@@ -1,9 +1,9 @@
-//! Load-aware selection state (W6): per-deployment latency EWMA for
+//! Load-aware selection state (W6): per-model latency EWMA for
 //! `LOWEST_LATENCY`, scraped vLLM load for `VLLM_LOAD`, and the fixed-seed
 //! hash used for sticky traffic splits.
 //!
 //! Everything a request touches here is a relaxed atomic on state cached in
-//! its `Deployment`; registries are keyed by deployment name (so state
+//! its `Model`; registries are keyed by model name (so state
 //! survives snapshot swaps) and are only locked at compile/activation time.
 //! Scraping runs in background tasks and never on the request path.
 
@@ -29,7 +29,7 @@ const EWMA_DIVISOR: u64 = 5;
 /// A failed or timed-out attempt counts as at least this slow (and at least
 /// twice the current average).
 const FAILURE_PENALTY_US: u64 = 1_000_000;
-/// vLLM load older than this is ignored (the deployment is compared by
+/// vLLM load older than this is ignored (the model is compared by
 /// in-flight requests instead).
 pub const LOAD_STALE_MS: u64 = 3_000;
 pub const SCRAPE_INTERVAL: Duration = Duration::from_secs(1);
@@ -89,7 +89,7 @@ impl Latency {
     }
 }
 
-/// Last scraped vLLM load of one deployment.
+/// Last scraped vLLM load of one model.
 pub struct VllmLoad {
     waiting: AtomicU64,
     /// KV-cache usage in basis points (0..=10000).
@@ -150,19 +150,19 @@ impl VllmLoad {
     }
 }
 
-/// One background scrape target: a metrics URL and the deployments it feeds.
+/// One background scrape target: a metrics URL and the models it feeds.
 #[derive(Clone)]
 pub struct Scrape {
     pub upstream: String,
     pub uri: Uri,
     pub authorization: Option<HeaderValue>,
-    /// (upstream_model, load) of each deployment on this upstream.
+    /// (upstream_model, load) of each model on this upstream.
     pub targets: Vec<(String, Arc<VllmLoad>)>,
     pub failures: Counter,
 }
 
 impl Scrape {
-    /// Same metrics URL, credentials and deployments fed. `load` and
+    /// Same metrics URL, credentials and models fed. `load` and
     /// `failures` are shared by name, so a kept task keeps feeding them.
     fn same_target(&self, other: &Scrape) -> bool {
         self.upstream == other.upstream
@@ -186,22 +186,22 @@ pub struct Registry {
 }
 
 impl Registry {
-    pub fn latency(&self, deployment: &str) -> Arc<Latency> {
+    pub fn latency(&self, model: &str) -> Arc<Latency> {
         self.latency
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .entry(deployment.into())
+            .entry(model.into())
             .or_default()
             .clone()
     }
 
-    pub fn load(&self, deployment: &str, metrics: &Metrics) -> Arc<VllmLoad> {
+    pub fn load(&self, model: &str, metrics: &Metrics) -> Arc<VllmLoad> {
         self.load
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .entry(deployment.into())
+            .entry(model.into())
             .or_insert_with(|| {
-                let (queue, kv) = metrics.vllm_gauges(deployment);
+                let (queue, kv) = metrics.vllm_gauges(model);
                 Arc::new(VllmLoad::new(queue, kv))
             })
             .clone()
@@ -479,7 +479,7 @@ mod tests {
         let slow = Latency::default();
         slow.success(Duration::from_secs(2));
         slow.failure(Duration::from_millis(1));
-        // Sample = 2 x 2 s, so a slow deployment is still penalized.
+        // Sample = 2 x 2 s, so a slow model is still penalized.
         assert_eq!(slow.get_us(), 2_000_000 + 2_000_000 / 5);
         // Never returns to "no sample" through decay.
         let l = Latency::default();

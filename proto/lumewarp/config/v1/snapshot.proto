@@ -10,8 +10,8 @@ message Snapshot {
   // new version.
   uint64 version = 1;
   repeated Upstream upstreams = 2;
-  repeated Deployment deployments = 3;
-  repeated ModelRoute routes = 4;
+  repeated Model models = 3;
+  repeated Router routers = 4;
   // Virtual API keys with their already-resolved effective policy.
   repeated ApiKey api_keys = 5;
   // Teams referenced by api_keys; source of the bounded `team` metric label.
@@ -38,7 +38,7 @@ message Upstream {
   // Active health probe of this upstream. Absent = no probing (passive
   // failures still feed the circuit breaker). Capability "health_check".
   HealthCheck health_check = 7;
-  // Per-deployment circuit breaker for deployments on this upstream. Absent =
+  // Per-model circuit breaker for models on this upstream. Absent =
   // never opens. Capability "circuit_breaker".
   CircuitBreaker circuit_breaker = 8;
   // Prometheus endpoint scraped for load by ROUTING_STRATEGY_VLLM_LOAD.
@@ -59,7 +59,7 @@ message HealthCheck {
 }
 
 // Opens after `failure_threshold` consecutive retryable failures (connect
-// error, timeout, 5xx/429 that would be retried); while open the deployment is
+// error, timeout, 5xx/429 that would be retried); while open the model is
 // skipped; after `open_ms` one trial request is let through (half-open) and its
 // outcome closes or re-opens the breaker.
 message CircuitBreaker {
@@ -89,7 +89,7 @@ enum UpstreamKind {
 }
 
 // A concrete model served by one upstream.
-message Deployment {
+message Model {
   string name = 1;
   string upstream = 2;
   // Model name sent upstream (may differ from the public alias).
@@ -107,22 +107,22 @@ message Price {
   uint64 output_nano_usd_per_mtok = 2;
 }
 
-// Public model alias -> deployments.
-message ModelRoute {
+// Public model alias -> models.
+message Router {
   string name = 1;
   // Ignored when traffic_split is non-empty.
-  repeated string deployments = 2;
+  repeated string models = 2;
   RoutingStrategy strategy = 3;
   // Absent = a single attempt. Capability "retry".
   RetryPolicy retry = 4;
-  // Other route aliases tried in order once every attempt on this route has
+  // Other router aliases tried in order once every attempt on this router has
   // failed retryably (before any response byte reached the client). Each
-  // fallback is tried with its own deployments and strategy but this route's
+  // fallback is tried with its own models and strategy but this router's
   // retry budget; fallbacks of fallbacks are not followed. The client-visible
   // model name is unchanged. Capability "fallbacks".
   repeated string fallbacks = 5;
-  // Percentage split between groups of deployments (canary). A request first
-  // picks a split by weight (sticky when `sticky` is set), then a deployment
+  // Percentage split between groups of models (canary). A request first
+  // picks a split by weight (sticky when `sticky` is set), then a model
   // inside it with `strategy`. Retries stay inside the chosen split, then fall
   // back to the other splits. Capability "traffic_split".
   repeated TrafficSplit traffic_split = 6;
@@ -139,12 +139,12 @@ enum RoutingStrategy {
   ROUTING_STRATEGY_UNSPECIFIED = 0;
   ROUTING_STRATEGY_WEIGHTED = 1;
   ROUTING_STRATEGY_LEAST_IN_FLIGHT = 2;
-  // EWMA of time to response headers per deployment. Capability
+  // EWMA of time to response headers per model. Capability
   // "lowest_latency".
   ROUTING_STRATEGY_LOWEST_LATENCY = 3;
   // Power of two choices on vLLM load (num_requests_waiting, then
   // kv_cache_usage_perc) scraped every second; falls back to in-flight when a
-  // deployment's metrics are stale. Capability "vllm_load".
+  // model's metrics are stale. Capability "vllm_load".
   ROUTING_STRATEGY_VLLM_LOAD = 4;
   ROUTING_STRATEGY_CUSTOM = 5;
 }
@@ -152,7 +152,7 @@ enum RoutingStrategy {
 // Retries happen only before any response byte is sent to the client: on
 // connect errors, upstream timeouts and the statuses below (for streams: only
 // before the upstream answered with headers). A retry picks another
-// deployment of the same route when one is available.
+// model of the same router when one is available.
 message RetryPolicy {
   // Total attempts including the first; 0 = 2.
   uint32 max_attempts = 1;
@@ -166,7 +166,7 @@ message RetryPolicy {
 message TrafficSplit {
   // Bounded label value for metrics (e.g. "stable", "canary").
   string name = 1;
-  repeated string deployments = 2;
+  repeated string models = 2;
   // Relative weight; the split's share is weight / sum(weights).
   uint32 weight = 3;
 }
@@ -217,7 +217,7 @@ enum KeyStatus {
 }
 
 message EffectivePolicy {
-  // When true every route is allowed and allowed_models is ignored.
+  // When true every router is allowed and allowed_models is ignored.
   bool allow_all_models = 1;
   // Public model aliases this key may call when allow_all_models is false.
   // Empty with allow_all_models=false means deny-all.

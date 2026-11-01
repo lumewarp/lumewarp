@@ -407,8 +407,8 @@ class Stack:
                 "price_input_nano_usd_per_mtok": 1_000_000_000,
                 "price_output_nano_usd_per_mtok": 2_000_000_000,
             }
-        dep = self.ok("POST", "/deployments", json=dep)
-        self.ok("POST", "/routes", json={"name": "mock", "deployment_ids": [dep["id"]]})
+        dep = self.ok("POST", "/models", json=dep)
+        self.ok("POST", "/routers", json={"name": "mock", "model_ids": [dep["id"]]})
         body = {"name": "ml", "model_access": "all"}
         if team_budget is not None:
             body["budget_nano_usd"] = team_budget

@@ -439,8 +439,8 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
 
   // Remaining pages still load without stale model references.
   for (const [link, heading] of [
-    ["Models / Routes", "Models / Routes"],
-    ["Deployments", "Deployments"],
+    ["Routers", "Routers"],
+    ["Models", "Models"],
     ["Upstreams", "Upstreams"],
     ["Gateways", "Gateways"],
     ["Config versions", "Config versions"],
@@ -464,7 +464,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await expect(page).toHaveURL(/\/login\?next=%2Fkeys$/);
 });
 
-test("route edit: retry, ordered fallback and a traffic split shown as percentages", async ({ page, request }) => {
+test("router edit: retry, ordered fallback and a traffic split shown as percentages", async ({ page, request }) => {
   const post = async (path: string, data: object) => {
     const r = await request.post(`/api/v1${path}`, { headers: admin, data });
     expect(r.status(), await r.text()).toBe(201);
@@ -473,13 +473,13 @@ test("route edit: retry, ordered fallback and a traffic split shown as percentag
   const upstream = await post("/upstreams", { name: "smoke-up", kind: "vllm", base_url: "http://127.0.0.1:9/v1" });
   const deps: Record<string, string> = {};
   for (const name of ["smoke-stable", "smoke-canary", "smoke-backup-dep"]) {
-    deps[name] = (await post("/deployments", { name, upstream_id: upstream.id, upstream_model: "m" })).id;
+    deps[name] = (await post("/models", { name, upstream_id: upstream.id, upstream_model: "m" })).id;
   }
-  const backup = await post("/routes", { name: "smoke-backup", deployment_ids: [deps["smoke-backup-dep"]] });
-  const main = await post("/routes", { name: "smoke-main", deployment_ids: [deps["smoke-stable"]] });
+  const backup = await post("/routers", { name: "smoke-backup", model_ids: [deps["smoke-backup-dep"]] });
+  const main = await post("/routers", { name: "smoke-main", model_ids: [deps["smoke-stable"]] });
 
   await login(page, BREAK_GLASS);
-  await page.getByRole("link", { name: "Models / Routes", exact: true }).click();
+  await page.getByRole("link", { name: "Routers", exact: true }).click();
   const row = page.getByRole("row").filter({ has: page.getByRole("cell", { name: "smoke-main", exact: true }) });
   await row.getByRole("button", { name: "Edit" }).click();
   const d = dialog(page);
@@ -487,7 +487,7 @@ test("route edit: retry, ordered fallback and a traffic split shown as percentag
   await d.getByLabel("Retry failed attempts").check();
   await d.getByLabel("Max attempts").fill("3");
   await d.getByLabel("Retry on status").fill("503, 502");
-  await d.getByLabel("Add fallback route").selectOption({ label: "smoke-backup" });
+  await d.getByLabel("Add fallback router").selectOption({ label: "smoke-backup" });
   await expect(d.locator(".order-row")).toHaveText([/1\. smoke-backup/]);
 
   await d.getByRole("button", { name: "Add split" }).click();
@@ -495,10 +495,10 @@ test("route edit: retry, ordered fallback and a traffic split shown as percentag
   const first = d.getByRole("group", { name: "Split 1" });
   const second = d.getByRole("group", { name: "Split 2" });
   await first.getByLabel("Weight", { exact: true }).fill("90");
-  await first.getByRole("group", { name: "Deployments of split 1" }).getByLabel(/smoke-stable/).check();
+  await first.getByRole("group", { name: "Models of split 1" }).getByLabel(/smoke-stable/).check();
   await second.getByLabel("Split name").fill("canary");
   await second.getByLabel("Weight", { exact: true }).fill("10");
-  await second.getByRole("group", { name: "Deployments of split 2" }).getByLabel(/smoke-canary/).check();
+  await second.getByRole("group", { name: "Models of split 2" }).getByLabel(/smoke-canary/).check();
   await expect(first.getByLabel("Share of split 1")).toHaveText("90%");
   await expect(second.getByLabel("Share of split 2")).toHaveText("10%");
   await second.getByLabel("Weight", { exact: true }).fill("30");
@@ -506,7 +506,7 @@ test("route edit: retry, ordered fallback and a traffic split shown as percentag
   await expect(second.getByLabel("Share of split 2")).toHaveText("25%");
   await d.getByLabel("Sticky", { exact: true }).selectOption("header");
   await d.getByLabel("Sticky header").fill("X-Session-Id");
-  await page.screenshot({ path: "/tmp/lumewarp-route-edit.png", fullPage: true });
+  await page.screenshot({ path: "/tmp/lumewarp-router-edit.png", fullPage: true });
   await d.getByRole("button", { name: "Save" }).click();
   await expect(d).toBeHidden();
 
@@ -514,13 +514,13 @@ test("route edit: retry, ordered fallback and a traffic split shown as percentag
   await expect(row).toContainText("canary 25%");
   await expect(row).toContainText("retry ×3");
   await expect(row).toContainText("→ smoke-backup");
-  const stored = await (await request.get(`/api/v1/routes/${main.id}`, { headers: admin })).json();
+  const stored = await (await request.get(`/api/v1/routers/${main.id}`, { headers: admin })).json();
   expect(stored.strategy).toBe("vllm_load");
   expect(stored.retry).toEqual({ max_attempts: 3, retry_on_status: [502, 503], total_timeout_ms: 0 });
-  expect(stored.fallback_route_ids).toEqual([backup.id]);
+  expect(stored.fallback_router_ids).toEqual([backup.id]);
   expect(stored.traffic_split).toEqual([
-    { name: "stable", weight: 90, deployment_ids: [deps["smoke-stable"]] },
-    { name: "canary", weight: 30, deployment_ids: [deps["smoke-canary"]] },
+    { name: "stable", weight: 90, model_ids: [deps["smoke-stable"]] },
+    { name: "canary", weight: 30, model_ids: [deps["smoke-canary"]] },
   ]);
   expect([stored.sticky, stored.sticky_header]).toEqual(["header", "x-session-id"]);
 
@@ -531,7 +531,7 @@ test("route edit: retry, ordered fallback and a traffic split shown as percentag
     .getByRole("button", { name: "Delete" })
     .click();
   await dialog(page).getByRole("button", { name: "Delete" }).click();
-  await expect(page.getByText(/fallback of route 'smoke-main'/)).toBeVisible();
+  await expect(page.getByText(/fallback of router 'smoke-main'/)).toBeVisible();
 
   // Upstream health check and circuit breaker.
   await page.getByRole("link", { name: "Upstreams", exact: true }).click();

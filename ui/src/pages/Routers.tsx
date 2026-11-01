@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api, type Route } from "../api";
+import { api, type Router } from "../api";
 import { Badge, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { CheckField, Field, FormDialog, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
@@ -8,8 +8,8 @@ import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { useCan, useMut, useNames } from "../hooks";
 
-type Strategy = Route["strategy"];
-type Sticky = Route["sticky"];
+type Strategy = Router["strategy"];
+type Sticky = Router["sticky"];
 
 const STRATEGIES: { value: Strategy; label: string }[] = [
   { value: "weighted", label: "Weighted" },
@@ -31,18 +31,18 @@ const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 interface Split {
   name: string;
   weight: number | null;
-  deployment_ids: string[];
+  model_ids: string[];
 }
 
 interface Values {
   name: string;
   strategy: Strategy;
-  deployment_ids: string[];
+  model_ids: string[];
   retry_enabled: boolean;
   retry_max_attempts: number | null;
   retry_statuses: string;
   retry_total_timeout_ms: number | null;
-  fallback_route_ids: string[];
+  fallback_router_ids: string[];
   splits: Split[];
   sticky: Sticky;
   sticky_header: string;
@@ -50,29 +50,29 @@ interface Values {
 const blank: Values = {
   name: "",
   strategy: "weighted",
-  deployment_ids: [],
+  model_ids: [],
   retry_enabled: false,
   retry_max_attempts: null,
   retry_statuses: "",
   retry_total_timeout_ms: null,
-  fallback_route_ids: [],
+  fallback_router_ids: [],
   splits: [],
   sticky: "none",
   sticky_header: "",
 };
 
-const ordered = (r: Route) => [...r.deployments].sort((a, b) => a.position - b.position).map((d) => d.deployment_id);
+const ordered = (r: Router) => [...r.models].sort((a, b) => a.position - b.position).map((d) => d.model_id);
 
-const fromRoute = (r: Route): Values => ({
+const fromRouter = (r: Router): Values => ({
   name: r.name,
   strategy: r.strategy,
-  deployment_ids: ordered(r),
+  model_ids: ordered(r),
   retry_enabled: !!r.retry,
   retry_max_attempts: r.retry?.max_attempts ?? null,
   retry_statuses: (r.retry?.retry_on_status ?? []).join(", "),
   retry_total_timeout_ms: r.retry?.total_timeout_ms || null,
-  fallback_route_ids: [...r.fallback_route_ids],
-  splits: r.traffic_split.map((s) => ({ name: s.name, weight: s.weight, deployment_ids: [...s.deployment_ids] })),
+  fallback_router_ids: [...r.fallback_router_ids],
+  splits: r.traffic_split.map((s) => ({ name: s.name, weight: s.weight, model_ids: [...s.model_ids] })),
   sticky: r.sticky,
   sticky_header: r.sticky_header ?? "",
 });
@@ -87,7 +87,7 @@ function parseStatuses(text: string): number[] | undefined {
 const body = (v: Values) => ({
   name: v.name,
   strategy: v.strategy,
-  deployment_ids: v.deployment_ids,
+  model_ids: v.model_ids,
   retry: v.retry_enabled
     ? {
         max_attempts: v.retry_max_attempts,
@@ -95,16 +95,16 @@ const body = (v: Values) => ({
         total_timeout_ms: v.retry_total_timeout_ms ?? 0,
       }
     : null,
-  fallback_route_ids: v.fallback_route_ids,
-  traffic_split: v.splits.map((s) => ({ name: s.name.trim(), weight: s.weight ?? 0, deployment_ids: s.deployment_ids })),
+  fallback_router_ids: v.fallback_router_ids,
+  traffic_split: v.splits.map((s) => ({ name: s.name.trim(), weight: s.weight ?? 0, model_ids: s.model_ids })),
   sticky: v.splits.length ? v.sticky : ("none" as const),
   sticky_header: v.splits.length && v.sticky === "header" ? v.sticky_header.trim() : null,
 });
 
 /** Leaf field names of 422 messages mapped to form fields. */
 const ALIAS = {
-  deployment_ids: "deployment_ids",
-  fallback_route_ids: "fallback_route_ids",
+  model_ids: "model_ids",
+  fallback_router_ids: "fallback_router_ids",
   traffic_split: "splits",
   name: "splits",
   weight: "splits",
@@ -125,7 +125,7 @@ function splitsError(splits: Split[]): string | undefined {
     if (names.has(name)) return `Split “${name}” is listed twice`;
     names.add(name);
     if ((s.weight ?? 0) < 0) return "Weights cannot be negative";
-    if (!s.deployment_ids.length) return `Split “${name}” needs at least one deployment`;
+    if (!s.model_ids.length) return `Split “${name}” needs at least one model`;
   }
   if (splits.length && !splits.some((s) => (s.weight ?? 0) > 0)) return "At least one split needs a weight above 0";
   return undefined;
@@ -141,7 +141,7 @@ function splitShares(weights: number[]): string[] {
   });
 }
 
-function DeploymentChecks({ id, invalid, options, selected, onToggle, label }: { id?: string; invalid?: boolean; options: { id: string; name: string; weight: number }[]; selected: string[]; onToggle: (id: string) => void; label?: string }) {
+function ModelChecks({ id, invalid, options, selected, onToggle, label }: { id?: string; invalid?: boolean; options: { id: string; name: string; weight: number }[]; selected: string[]; onToggle: (id: string) => void; label?: string }) {
   return (
     <div className="targets" id={id} aria-invalid={invalid} role="group" aria-label={label}>
       {options.map((d) => (
@@ -152,71 +152,71 @@ function DeploymentChecks({ id, invalid, options, selected, onToggle, label }: {
           </span>
         </label>
       ))}
-      {options.length === 0 && <p className="muted">Create a deployment first.</p>}
+      {options.length === 0 && <p className="muted">Create a model first.</p>}
     </div>
   );
 }
 
 const toggled = (ids: string[], id: string) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]);
 
-export function Routes() {
+export function Routers() {
   const perms = useCan();
-  const list = useQuery({ queryKey: ["routes"], queryFn: () => api.routes() });
-  const deployments = useQuery({ queryKey: ["deployments"], queryFn: () => api.deployments() });
-  const depName = useNames(deployments.data);
-  const routeName = useNames(list.data?.map((r) => ({ id: r.id, name: r.name })));
-  const [editing, setEditing] = useState<Route | "new" | null>(null);
-  const [deleting, setDeleting] = useState<Route | null>(null);
+  const list = useQuery({ queryKey: ["routers"], queryFn: () => api.routers() });
+  const models = useQuery({ queryKey: ["models"], queryFn: () => api.models() });
+  const depName = useNames(models.data);
+  const routerName = useNames(list.data?.map((r) => ({ id: r.id, name: r.name })));
+  const [editing, setEditing] = useState<Router | "new" | null>(null);
+  const [deleting, setDeleting] = useState<Router | null>(null);
   const form = useForm<Values>(blank, {
     name: required("Model alias"),
-    deployment_ids: (v, all) => (v.length || all.splits.length ? undefined : "Pick at least one deployment or add a traffic split"),
+    model_ids: (v, all) => (v.length || all.splits.length ? undefined : "Pick at least one model or add a traffic split"),
     splits: (v) => splitsError(v),
     retry_statuses: (v, all) => (all.retry_enabled && parseStatuses(v) === undefined ? "Comma-separated HTTP statuses in 400–599" : undefined),
     retry_max_attempts: (v, all) => (all.retry_enabled && v !== null && (v < 1 || v > 5) ? "Between 1 and 5" : undefined),
     sticky_header: (v, all) => (all.splits.length && all.sticky === "header" && !HEADER_NAME.test(v.trim()) ? "A header name such as x-session-id" : undefined),
   });
-  const create = useMut((v: Values) => api.createRoute(body(v)), "Route created");
-  const update = useMut(({ id, v }: { id: string; v: Values }) => api.updateRoute(id, body(v)), "Route saved");
-  const remove = useMut((id: string) => api.deleteRoute(id), "Route deleted");
+  const create = useMut((v: Values) => api.createRouter(body(v)), "Router created");
+  const update = useMut(({ id, v }: { id: string; v: Values }) => api.updateRouter(id, body(v)), "Router saved");
+  const remove = useMut((id: string) => api.deleteRouter(id), "Router deleted");
 
-  const open = (r: Route | "new") => {
-    form.reset(r === "new" ? blank : fromRoute(r));
+  const open = (r: Router | "new") => {
+    form.reset(r === "new" ? blank : fromRouter(r));
     setEditing(r);
   };
   const submit = async () => {
     if (!form.validate()) return false;
-    return form.run(() => (editing === "new" ? create.mutateAsync(form.values) : update.mutateAsync({ id: (editing as Route).id, v: form.values })), ALIAS);
+    return form.run(() => (editing === "new" ? create.mutateAsync(form.values) : update.mutateAsync({ id: (editing as Router).id, v: form.values })), ALIAS);
   };
 
   const v = form.values;
-  const depOptions = deployments.data ?? [];
+  const depOptions = models.data ?? [];
   const editingId = editing && editing !== "new" ? editing.id : null;
-  const fallbackOptions = (list.data ?? []).filter((r) => r.id !== editingId && !v.fallback_route_ids.includes(r.id));
+  const fallbackOptions = (list.data ?? []).filter((r) => r.id !== editingId && !v.fallback_router_ids.includes(r.id));
   const setSplit = (i: number, patch: Partial<Split>) => form.set("splits", v.splits.map((s, j) => (j === i ? { ...s, ...patch } : s)));
   const moveFallback = (i: number, delta: number) => {
-    const next = [...v.fallback_route_ids];
+    const next = [...v.fallback_router_ids];
     const [item] = next.splice(i, 1);
     next.splice(i + delta, 0, item);
-    form.set("fallback_route_ids", next);
+    form.set("fallback_router_ids", next);
   };
   const shares = splitShares(v.splits.map((s) => s.weight ?? 0));
 
   return (
     <>
-      <PageHeader title="Models / Routes" description="A name alias that clients request, mapped to one or more deployments, with optional retries, fallbacks and traffic splits." actions={<CreateButton can={perms.isSuper} onClick={() => open("new")}>New route</CreateButton>} />
+      <PageHeader title="Routers" description="A model alias that clients request, mapped to one or more models, with optional retries, fallbacks and traffic splits." actions={<CreateButton can={perms.isSuper} onClick={() => open("new")}>New router</CreateButton>} />
       <DataTable
         rows={list.data}
         loading={list.isPending}
         error={list.error}
         onRetry={() => void list.refetch()}
         rowKey={(r) => r.id}
-        empty="No routes yet."
+        empty="No routers yet."
         columns={[
           { key: "name", header: "Model alias", sort: (a, b) => a.name.localeCompare(b.name), cell: (r) => <strong>{r.name}</strong> },
           { key: "strategy", header: "Strategy", cell: (r) => STRATEGIES.find((s) => s.value === r.strategy)?.label ?? r.strategy },
           {
             key: "deps",
-            header: "Deployments",
+            header: "Models",
             cell: (r) => {
               if (!r.traffic_split.length) return ordered(r).map((id) => <Badge key={id} tone="info">{depName(id)}</Badge>);
               const pct = splitShares(r.traffic_split.map((s) => s.weight));
@@ -225,7 +225,7 @@ export function Routes() {
                   <Badge tone="ok">
                     {s.name} {pct[i]}
                   </Badge>
-                  {s.deployment_ids.map((id) => (
+                  {s.model_ids.map((id) => (
                     <Badge key={id} tone="info">
                       {depName(id)}
                     </Badge>
@@ -238,12 +238,12 @@ export function Routes() {
             key: "resilience",
             header: "Resilience",
             cell: (r) =>
-              r.retry || r.fallback_route_ids.length || r.sticky !== "none" ? (
+              r.retry || r.fallback_router_ids.length || r.sticky !== "none" ? (
                 <>
                   {r.retry && <Badge tone="info">retry ×{r.retry.max_attempts ?? 2}</Badge>}
-                  {r.fallback_route_ids.map((id, i) => (
+                  {r.fallback_router_ids.map((id, i) => (
                     <Badge key={id}>
-                      {i + 1}. → {routeName(id)}
+                      {i + 1}. → {routerName(id)}
                     </Badge>
                   ))}
                   {r.sticky !== "none" && <Badge>sticky: {r.sticky === "header" ? r.sticky_header : r.sticky}</Badge>}
@@ -255,11 +255,11 @@ export function Routes() {
           { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isSuper} canDelete={perms.isSuper} onEdit={() => open(r)} onDelete={() => setDeleting(r)} /> },
         ]}
       />
-      <FormDialog variant="drawer" open={!!editing} title={editing === "new" ? "New route" : "Edit route"} submitLabel={editing === "new" ? "Create" : "Save"} onClose={() => setEditing(null)} onSubmit={submit}>
+      <FormDialog variant="drawer" open={!!editing} title={editing === "new" ? "New router" : "Edit router"} submitLabel={editing === "new" ? "Create" : "Save"} onClose={() => setEditing(null)} onSubmit={submit}>
         <TextField label="Model alias" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus hint="The `model` value clients send." />
-        <SelectField label="Strategy" value={v.strategy} onChange={(x) => form.set("strategy", x as Strategy)} options={STRATEGIES} hint="How a deployment is picked (inside the chosen split when the route is split). vLLM load reads each upstream's metrics endpoint." />
-        <Field label="Deployments" error={form.errors.deployment_ids} hint={v.splits.length ? "Ignored while a traffic split is defined." : undefined}>
-          {(p) => <DeploymentChecks id={p.id} invalid={p["aria-invalid"]} options={depOptions} selected={v.deployment_ids} onToggle={(id) => form.set("deployment_ids", toggled(v.deployment_ids, id))} />}
+        <SelectField label="Strategy" value={v.strategy} onChange={(x) => form.set("strategy", x as Strategy)} options={STRATEGIES} hint="How a model is picked (inside the chosen split when the router is split). vLLM load reads each upstream's metrics endpoint." />
+        <Field label="Models" error={form.errors.model_ids} hint={v.splits.length ? "Ignored while a traffic split is defined." : undefined}>
+          {(p) => <ModelChecks id={p.id} invalid={p["aria-invalid"]} options={depOptions} selected={v.model_ids} onToggle={(id) => form.set("model_ids", toggled(v.model_ids, id))} />}
         </Field>
 
         <fieldset className="form-section">
@@ -276,27 +276,27 @@ export function Routes() {
           )}
         </fieldset>
 
-        <Field label="Fallback routes" error={form.errors.fallback_route_ids} hint="Tried in order once this route's deployments failed, within this route's attempt budget (enable retries with at least 2 attempts). Clients still see this route's name name.">
+        <Field label="Fallback routers" error={form.errors.fallback_router_ids} hint="Tried in order once this router's models failed, within this router's attempt budget (enable retries with at least 2 attempts). Clients still see this router's name.">
           {(p) => (
             <div className="targets" id={p.id} aria-invalid={p["aria-invalid"]}>
-              {v.fallback_route_ids.map((id, i) => (
+              {v.fallback_router_ids.map((id, i) => (
                 <div key={id} className="order-row">
                   <span>
-                    {i + 1}. {routeName(id)}
+                    {i + 1}. {routerName(id)}
                   </span>
-                  <button type="button" className="btn btn-sm" aria-label={`Move ${routeName(id)} up`} disabled={i === 0} onClick={() => moveFallback(i, -1)}>
+                  <button type="button" className="btn btn-sm" aria-label={`Move ${routerName(id)} up`} disabled={i === 0} onClick={() => moveFallback(i, -1)}>
                     ↑
                   </button>
-                  <button type="button" className="btn btn-sm" aria-label={`Move ${routeName(id)} down`} disabled={i === v.fallback_route_ids.length - 1} onClick={() => moveFallback(i, 1)}>
+                  <button type="button" className="btn btn-sm" aria-label={`Move ${routerName(id)} down`} disabled={i === v.fallback_router_ids.length - 1} onClick={() => moveFallback(i, 1)}>
                     ↓
                   </button>
-                  <button type="button" className="btn btn-sm btn-danger-ghost" aria-label={`Remove fallback ${routeName(id)}`} onClick={() => form.set("fallback_route_ids", v.fallback_route_ids.filter((x) => x !== id))}>
+                  <button type="button" className="btn btn-sm btn-danger-ghost" aria-label={`Remove fallback ${routerName(id)}`} onClick={() => form.set("fallback_router_ids", v.fallback_router_ids.filter((x) => x !== id))}>
                     ✕
                   </button>
                 </div>
               ))}
-              <select className="input" aria-label="Add fallback route" value="" disabled={!fallbackOptions.length} onChange={(e) => e.target.value && form.set("fallback_route_ids", [...v.fallback_route_ids, e.target.value])}>
-                <option value="">{fallbackOptions.length ? "Add a fallback route…" : "No other routes"}</option>
+              <select className="input" aria-label="Add fallback router" value="" disabled={!fallbackOptions.length} onChange={(e) => e.target.value && form.set("fallback_router_ids", [...v.fallback_router_ids, e.target.value])}>
+                <option value="">{fallbackOptions.length ? "Add a fallback router…" : "No other routers"}</option>
                 {fallbackOptions.map((r) => (
                   <option key={r.id} value={r.id}>
                     {r.name}
@@ -309,7 +309,7 @@ export function Routes() {
 
         <fieldset className="form-section">
           <legend>Traffic split</legend>
-          <p className="field-hint">Send a share of requests to each group of deployments (canary). A retry stays in the chosen split first, then tries the others.</p>
+          <p className="field-hint">Send a share of requests to each group of models (canary). A retry stays in the chosen split first, then tries the others.</p>
           {form.errors.splits && (
             <p className="field-error" role="alert">
               {form.errors.splits}
@@ -327,11 +327,11 @@ export function Routes() {
                   Remove
                 </button>
               </div>
-              <DeploymentChecks label={`Deployments of split ${i + 1}`} options={depOptions} selected={s.deployment_ids} onToggle={(id) => setSplit(i, { deployment_ids: toggled(s.deployment_ids, id) })} />
+              <ModelChecks label={`Models of split ${i + 1}`} options={depOptions} selected={s.model_ids} onToggle={(id) => setSplit(i, { model_ids: toggled(s.model_ids, id) })} />
             </div>
           ))}
           <div>
-            <button type="button" className="btn btn-sm" disabled={v.splits.length >= MAX_SPLITS} onClick={() => form.set("splits", [...v.splits, { name: v.splits.length ? `split-${v.splits.length + 1}` : "stable", weight: v.splits.length ? 0 : 100, deployment_ids: [] }])}>
+            <button type="button" className="btn btn-sm" disabled={v.splits.length >= MAX_SPLITS} onClick={() => form.set("splits", [...v.splits, { name: v.splits.length ? `split-${v.splits.length + 1}` : "stable", weight: v.splits.length ? 0 : 100, model_ids: [] }])}>
               Add split
             </button>
           </div>
@@ -343,7 +343,7 @@ export function Routes() {
           )}
         </fieldset>
       </FormDialog>
-      <ConfirmDialog open={!!deleting} title="Delete route" message={`Delete route “${deleting?.name}”? Clients requesting this name will get an error. A route used as another route's fallback cannot be deleted.`} onConfirm={() => remove.mutateAsync(deleting!.id)} onClose={() => setDeleting(null)} />
+      <ConfirmDialog open={!!deleting} title="Delete router" message={`Delete router “${deleting?.name}”? Clients requesting this name will get an error. A router used as another router's fallback cannot be deleted.`} onConfirm={() => remove.mutateAsync(deleting!.id)} onClose={() => setDeleting(null)} />
     </>
   );
 }

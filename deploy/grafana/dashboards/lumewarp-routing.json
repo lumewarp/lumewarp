@@ -1,7 +1,7 @@
 {
   "uid": "lumewarp-routing",
   "title": "Lumewarp / Routing",
-  "description": "Model filters apply to attempts, fallbacks, splits and exhausted retries. Deployment/upstream gauges intentionally cover all models. Routing metrics arrive with the parallel routing implementation.",
+  "description": "Requested-name filters apply to attempts, fallbacks, splits and exhausted retries. Model/upstream gauges intentionally cover all requested names. Routing metrics arrive with the parallel routing implementation.",
   "schemaVersion": 39,
   "version": 1,
   "editable": true,
@@ -75,7 +75,7 @@
   "panels": [
     {
       "id": 1,
-      "title": "Attempts by deployment and outcome",
+      "title": "Attempts by model and outcome",
       "description": "",
       "type": "timeseries",
       "datasource": {
@@ -131,12 +131,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (deployment, outcome) (rate(lumewarp_upstream_attempts_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\"}[$__rate_interval]))",
+          "expr": "sum by (model, outcome) (rate(lumewarp_upstream_attempts_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{deployment}} {{outcome}}",
+          "legendFormat": "{{model}} {{outcome}}",
           "range": true
         }
       ]
@@ -199,12 +199,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (requested, fallback_model) (rate(lumewarp_fallbacks_total{namespace=~\"${namespace:regex}\",router=~\"${requested:regex}\"}[$__rate_interval]))",
+          "expr": "sum by (router, model) (rate(lumewarp_fallbacks_total{namespace=~\"${namespace:regex}\",router=~\"${requested:regex}\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{requested}} -> {{fallback_model}}",
+          "legendFormat": "{{router}} -> {{model}}",
           "range": true
         }
       ]
@@ -267,12 +267,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (deployment) (lumewarp_upstream_circuit_state{namespace=~\"${namespace:regex}\"})",
+          "expr": "max by (model) (lumewarp_upstream_circuit_state{namespace=~\"${namespace:regex}\"})",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{deployment}}",
+          "legendFormat": "{{model}}",
           "range": true
         }
       ]
@@ -403,12 +403,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (deployment) (lumewarp_vllm_queue_depth{namespace=~\"${namespace:regex}\"})",
+          "expr": "max by (model) (lumewarp_vllm_queue_depth{namespace=~\"${namespace:regex}\"})",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{deployment}}",
+          "legendFormat": "{{model}}",
           "range": true
         }
       ]
@@ -471,12 +471,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (deployment) (lumewarp_vllm_kv_cache_usage{namespace=~\"${namespace:regex}\"})",
+          "expr": "max by (model) (lumewarp_vllm_kv_cache_usage{namespace=~\"${namespace:regex}\"})",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{deployment}}",
+          "legendFormat": "{{model}}",
           "range": true
         }
       ]
@@ -539,12 +539,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (requested, split) (rate(lumewarp_split_requests_total{namespace=~\"${namespace:regex}\",router=~\"${requested:regex}\"}[$__rate_interval]))",
+          "expr": "sum by (router, split) (rate(lumewarp_split_requests_total{namespace=~\"${namespace:regex}\",router=~\"${requested:regex}\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{requested}} {{split}}",
+          "legendFormat": "{{router}} {{split}}",
           "range": true
         }
       ]
@@ -552,7 +552,7 @@
     {
       "id": 8,
       "title": "In-flight requests",
-      "description": "All models: gauge only has deployment label.",
+      "description": "All models: gauge only has model label.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -607,12 +607,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (deployment) (lumewarp_in_flight_requests{namespace=~\"${namespace:regex}\"})",
+          "expr": "sum by (model) (lumewarp_in_flight_requests{namespace=~\"${namespace:regex}\"})",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{deployment}}",
+          "legendFormat": "{{model}}",
           "range": true
         }
       ]
@@ -675,12 +675,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (requested) (rate(lumewarp_retries_budget_exhausted_total{namespace=~\"${namespace:regex}\",router=~\"${requested:regex}\"}[$__rate_interval]))",
+          "expr": "sum by (router) (rate(lumewarp_retries_budget_exhausted_total{namespace=~\"${namespace:regex}\",router=~\"${requested:regex}\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{requested}}",
+          "legendFormat": "{{router}}",
           "range": true
         }
       ]

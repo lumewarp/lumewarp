@@ -44,8 +44,8 @@ PRICES = {
 }
 
 
-def cost(deployment: str, prompt: int, completion: int) -> int:
-    price_in, price_out = PRICES[deployment]
+def cost(model: str, prompt: int, completion: int) -> int:
+    price_in, price_out = PRICES[model]
     return (prompt * price_in + completion * price_out + 500_000) // 1_000_000
 
 
@@ -70,7 +70,7 @@ def dist(values: list[float], scale: float = 1.0, digits: int = 1) -> dict:
 
 
 class Fleet:
-    """Teams x mixed service-account/member owners x keys behind one priced mock route."""
+    """Teams x mixed service-account/member owners x keys behind one priced mock router."""
 
     def __init__(
         self,
@@ -92,11 +92,11 @@ class Fleet:
                 "base_url": f"http://127.0.0.1:{stack.mock_port}/v1",
             },
         )["id"]
-        self.deployments = {"mock-a": self.create_deployment("mock-a")}
-        self.route_id = stack.ok(
+        self.models = {"mock-a": self.create_model("mock-a")}
+        self.router_id = stack.ok(
             "POST",
-            "/routes",
-            json={"name": "mock", "deployment_ids": [self.deployments["mock-a"]]},
+            "/routers",
+            json={"name": "mock", "model_ids": [self.models["mock-a"]]},
         )["id"]
         self.teams: list[dict] = []
         self.owners: list[dict] = []
@@ -143,11 +143,11 @@ class Fleet:
                     self.keys.append(self.create_key(owner["id"]))
         self.wait_published()
 
-    def create_deployment(self, name: str, weight: int = 1) -> str:
+    def create_model(self, name: str, weight: int = 1) -> str:
         price_in, price_out = PRICES[name]
         return self.stack.ok(
             "POST",
-            "/deployments",
+            "/models",
             json={
                 "name": name,
                 "upstream_id": self.upstream_id,
@@ -533,14 +533,14 @@ def cost_check(stack: Stack) -> dict:
     rows = pg(
         stack.dsn,
         "SELECT team_id::text AS team, owner_kind, owner_id::text AS owner,"
-        " deployment, prompt_tokens, completion_tokens,"
+        " model, prompt_tokens, completion_tokens,"
         " cost_nano_usd, cost_known FROM usage_events WHERE status = 200",
     )
     expected: Counter = Counter()
     recorded: Counter = Counter()
     bad_rows = 0
     for r in rows:
-        want = cost(r["deployment"], r["prompt_tokens"], r["completion_tokens"])
+        want = cost(r["model"], r["prompt_tokens"], r["completion_tokens"])
         if not r["cost_known"] or r["cost_nano_usd"] != want or r["prompt_tokens"] <= 0:
             bad_rows += 1
         owner_scope = (

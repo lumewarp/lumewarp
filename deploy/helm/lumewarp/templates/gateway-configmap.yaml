@@ -7,7 +7,7 @@ metadata:
     {{- include "lumewarp.gateway.labels" . | nindent 4 }}
 data:
   # Control-plane mode only reads the `server:` block from --local-config; upstreams,
-  # deployments, routes, teams and keys come from the control-plane snapshot.
+  # models, routers, teams and keys come from the control-plane snapshot.
   config.yaml: |
     server:
       listen: {{ .Values.gateway.server.listen | quote }}

@@ -5,19 +5,19 @@ from sqlalchemy import delete, select
 
 from lumewarp_control_plane.compiler import compile_scope, publish_pending, rollback_routing
 from lumewarp_control_plane.models import (
-    Deployment,
-    Route,
-    RouteDeployment,
-    RouteFallback,
-    RouteSplit,
-    RouteSplitDeployment,
+    Model,
+    Router,
+    RouterFallback,
+    RouterModel,
+    RouterSplit,
+    RouterSplitModel,
     RoutingStrategy,
     StickyBy,
     StreamUsageMode,
     Upstream,
     UpstreamKind,
 )
-from tests.compiler.helpers import SCOPE, add_route, load_version, seed_scope, touch
+from tests.compiler.helpers import SCOPE, add_router, load_version, seed_scope, touch
 
 GROUPS = [
     "upstream",
@@ -26,7 +26,7 @@ GROUPS = [
     "circuit_breaker",
     "breaker_defaults",
     "metrics_url",
-    "deployment",
+    "model",
     "price",
     "free_price",
     "strategy",
@@ -45,16 +45,16 @@ GROUPS = [
 async def _seed(factory):
     await seed_scope(factory)
     async with factory() as session, session.begin():
-        await add_route(session, "public", [("a", None), ("b", None)], upstream="primary")
-        await add_route(session, "fallback-one", [("c", None)], upstream="secondary")
-        await add_route(session, "fallback-two", [("b", None)], upstream="primary")
+        await add_router(session, "public", [("a", None), ("b", None)], upstream="primary")
+        await add_router(session, "fallback-one", [("c", None)], upstream="secondary")
+        await add_router(session, "fallback-two", [("b", None)], upstream="primary")
 
 
 async def _set_group(session, group, configured):
     upstream = await session.scalar(select(Upstream).where(Upstream.name == "primary"))
-    route = await session.scalar(select(Route).where(Route.name == "public"))
-    deployments = {d.name: d for d in await session.scalars(select(Deployment))}
-    deployment = deployments["a"]
+    router = await session.scalar(select(Router).where(Router.name == "public"))
+    models = {d.name: d for d in await session.scalars(select(Model))}
+    model = models["a"]
     if group == "upstream":
         upstream.kind = UpstreamKind.OPENAI_COMPATIBLE if configured else UpstreamKind.VLLM
         upstream.base_url = "https://alternate/v1" if configured else "http://primary/v1"
@@ -77,83 +77,85 @@ async def _set_group(session, group, configured):
         upstream.circuit_open_ms = 12345 if explicit else None
     elif group == "metrics_url":
         upstream.metrics_url = "http://metrics:9000/custom" if configured else None
-    elif group == "deployment":
+    elif group == "model":
         secondary = await session.scalar(select(Upstream).where(Upstream.name == "secondary"))
-        deployment.upstream_id = secondary.id if configured else upstream.id
-        deployment.upstream_model = "alternate-name" if configured else "a-name"
-        deployment.weight = 7 if configured else 1
+        model.upstream_id = secondary.id if configured else upstream.id
+        model.upstream_model = "alternate-name" if configured else "a-name"
+        model.weight = 7 if configured else 1
     elif group in ("price", "free_price"):
-        deployment.price_input_nano_usd_per_mtok = (
+        model.price_input_nano_usd_per_mtok = (
             (0 if group == "free_price" else 123) if configured else None
         )
-        deployment.price_output_nano_usd_per_mtok = (
+        model.price_output_nano_usd_per_mtok = (
             (0 if group == "free_price" else 456) if configured else None
         )
     elif group == "strategy":
-        route.strategy = RoutingStrategy.LOWEST_LATENCY if configured else RoutingStrategy.WEIGHTED
+        router.strategy = RoutingStrategy.LOWEST_LATENCY if configured else RoutingStrategy.WEIGHTED
     elif group in ("custom_strategy", "custom_params"):
         custom = configured or group == "custom_params"
-        route.strategy = RoutingStrategy.CUSTOM if custom else RoutingStrategy.WEIGHTED
-        route.custom_strategy = (
+        router.strategy = RoutingStrategy.CUSTOM if custom else RoutingStrategy.WEIGHTED
+        router.custom_strategy = (
             ("header_pin" if configured else "first_healthy") if custom else None
         )
-        route.strategy_params = (
+        router.strategy_params = (
             {"headers": ["x-pin"], "pin": "a" if configured else "b"} if custom else None
         )
     elif group in ("retry", "retry_defaults"):
         explicit = configured and group == "retry"
-        route.retry_enabled = configured
-        route.retry_max_attempts = 4 if explicit else None
-        route.retry_on_status = [429, 500, 503] if explicit else []
-        route.retry_total_timeout_ms = 1234 if explicit else 0
+        router.retry_enabled = configured
+        router.retry_max_attempts = 4 if explicit else None
+        router.retry_on_status = [429, 500, 503] if explicit else []
+        router.retry_total_timeout_ms = 1234 if explicit else 0
     elif group == "fallbacks":
-        route.retry_enabled = True
-        route.retry_max_attempts = 3
-        await session.execute(delete(RouteFallback).where(RouteFallback.route_id == route.id))
+        router.retry_enabled = True
+        router.retry_max_attempts = 3
+        await session.execute(delete(RouterFallback).where(RouterFallback.router_id == router.id))
         if configured:
-            targets = {r.name: r for r in await session.scalars(select(Route))}
+            targets = {r.name: r for r in await session.scalars(select(Router))}
             for position, name in enumerate(("fallback-two", "fallback-one")):
                 session.add(
-                    RouteFallback(
-                        route_id=route.id,
-                        fallback_route_id=targets[name].id,
+                    RouterFallback(
+                        router_id=router.id,
+                        fallback_router_id=targets[name].id,
                         position=position,
                     )
                 )
     elif group in ("traffic_split", "sticky", "sticky_header"):
-        await session.execute(delete(RouteSplit).where(RouteSplit.route_id == route.id))
-        route.sticky = StickyBy.NONE
-        route.sticky_header = None
+        await session.execute(delete(RouterSplit).where(RouterSplit.router_id == router.id))
+        router.sticky = StickyBy.NONE
+        router.sticky_header = None
         if configured or group != "traffic_split":
             if group == "traffic_split":
-                route.sticky = StickyBy.HEADER
-                route.sticky_header = "x-session"
+                router.sticky = StickyBy.HEADER
+                router.sticky_header = "x-session"
             elif group == "sticky":
-                route.sticky = StickyBy.TEAM if configured else StickyBy.KEY
+                router.sticky = StickyBy.TEAM if configured else StickyBy.KEY
             else:
-                route.sticky = StickyBy.HEADER
-                route.sticky_header = "x-one" if configured else "x-two"
+                router.sticky = StickyBy.HEADER
+                router.sticky_header = "x-one" if configured else "x-two"
             for position, (name, weight, members) in enumerate(
                 (("canary", 1, ("b", "a")), ("stable", 9, ("a", "b")))
             ):
-                split = RouteSplit(route_id=route.id, name=name, weight=weight, position=position)
+                split = RouterSplit(
+                    router_id=router.id, name=name, weight=weight, position=position
+                )
                 session.add(split)
                 await session.flush()
                 for dep_position, member in enumerate(members):
                     session.add(
-                        RouteSplitDeployment(
+                        RouterSplitModel(
                             split_id=split.id,
-                            deployment_id=deployments[member].id,
+                            model_id=models[member].id,
                             position=dep_position,
                         )
                     )
     elif group == "members":
-        await session.execute(delete(RouteDeployment).where(RouteDeployment.route_id == route.id))
+        await session.execute(delete(RouterModel).where(RouterModel.router_id == router.id))
         for position, name in enumerate(("b", "a") if configured else ("a", "b")):
             session.add(
-                RouteDeployment(
-                    route_id=route.id,
-                    deployment_id=deployments[name].id,
+                RouterModel(
+                    router_id=router.id,
+                    model_id=models[name].id,
                     position=position,
                 )
             )
@@ -169,7 +171,7 @@ async def _publish(factory):
 async def _rollback_and_compare(factory):
     before = await load_version(factory, 1)
     changed = await load_version(factory, 2)
-    fields = ("upstreams", "deployments", "routes", "required_capabilities")
+    fields = ("upstreams", "models", "routers", "required_capabilities")
     assert any(list(getattr(before, f)) != list(getattr(changed, f)) for f in fields)
     async with factory() as session, session.begin():
         assert await rollback_routing(session, SCOPE, 1, require_local_membership=True) == 3
@@ -200,47 +202,41 @@ async def test_rollback_removes_new_routing_graph_without_restrict_conflicts(fac
     await _seed(factory)
     assert await _publish(factory) == 1
     async with factory() as session, session.begin():
-        late = await add_route(
-            session, "late", [("late-deployment", None)], upstream="late-upstream"
-        )
-        route = await session.scalar(select(Route).where(Route.name == "public"))
-        deployment = await session.scalar(
-            select(Deployment).where(Deployment.name == "late-deployment")
-        )
-        route.retry_enabled = True
-        route.retry_max_attempts = 2
-        session.add(RouteFallback(route_id=route.id, fallback_route_id=late.id, position=0))
-        split = RouteSplit(route_id=route.id, name="late", weight=1, position=0)
+        late = await add_router(session, "late", [("late-model", None)], upstream="late-upstream")
+        router = await session.scalar(select(Router).where(Router.name == "public"))
+        model = await session.scalar(select(Model).where(Model.name == "late-model"))
+        router.retry_enabled = True
+        router.retry_max_attempts = 2
+        session.add(RouterFallback(router_id=router.id, fallback_router_id=late.id, position=0))
+        split = RouterSplit(router_id=router.id, name="late", weight=1, position=0)
         session.add(split)
         await session.flush()
-        session.add(
-            RouteSplitDeployment(split_id=split.id, deployment_id=deployment.id, position=0)
-        )
+        session.add(RouterSplitModel(split_id=split.id, model_id=model.id, position=0))
     assert await _publish(factory) == 2
     await _rollback_and_compare(factory)
 
 
-async def test_rollback_recreates_removed_routes_before_fallback_edges(factory):
+async def test_rollback_recreates_removed_routers_before_fallback_edges(factory):
     await _seed(factory)
     async with factory() as session, session.begin():
         await _set_group(session, "fallbacks", True)
         await _set_group(session, "traffic_split", True)
         # Targets sort after public in the compiled snapshot and must be recreated
         # before its outgoing edges can satisfy the foreign keys.
-        for route in await session.scalars(select(Route).where(Route.name != "public")):
-            route.name = f"zz-{route.name}"
+        for router in await session.scalars(select(Router).where(Router.name != "public")):
+            router.name = f"zz-{router.name}"
     assert await _publish(factory) == 1
-    assert (await load_version(factory, 1)).routes[0].name == "public"
+    assert (await load_version(factory, 1)).routers[0].name == "public"
     async with factory() as session, session.begin():
-        await session.execute(delete(RouteFallback))
-        await session.execute(delete(RouteSplit))
-        await session.execute(delete(Route).where(Route.name != "public"))
-        await session.execute(delete(Deployment).where(Deployment.name == "c"))
+        await session.execute(delete(RouterFallback))
+        await session.execute(delete(RouterSplit))
+        await session.execute(delete(Router).where(Router.name != "public"))
+        await session.execute(delete(Model).where(Model.name == "c"))
         await session.execute(delete(Upstream).where(Upstream.name == "secondary"))
-        route = await session.scalar(select(Route))
-        route.sticky = StickyBy.NONE
-        route.sticky_header = None
-        route.retry_enabled = False
-        route.retry_max_attempts = None
+        router = await session.scalar(select(Router))
+        router.sticky = StickyBy.NONE
+        router.sticky_header = None
+        router.retry_enabled = False
+        router.retry_max_attempts = None
     assert await _publish(factory) == 2
     await _rollback_and_compare(factory)
