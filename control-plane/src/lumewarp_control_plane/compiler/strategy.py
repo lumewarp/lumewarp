@@ -1,42 +1,14 @@
-"""Custom route strategies, stored separately to keep the built-in route enum stable."""
+"""Validation and serialization of compiled-in route strategy settings."""
 
 import json
 import re
-import uuid
-from typing import Any, Literal
+from typing import Any
 
-from sqlalchemy import CheckConstraint, ForeignKey, String, text
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from lumewarp_control_plane.models import RoutingStrategy
 
-from lumewarp_control_plane.models import Base, RoutingStrategy
-
-RouteStrategy = RoutingStrategy | Literal["custom"]
 MAX_PARAMS_BYTES = 16 * 1024
 STRATEGY_NAME = re.compile(r"[a-z][a-z0-9_]{0,62}")
 HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
-
-
-class CustomRouteStrategy(Base):
-    """Presence replaces the route's built-in strategy; absent means built-in.
-
-    The route row retains weighted as its built-in default while custom is active.
-    API writes and rollback replace both records in the same transaction.
-    """
-
-    __tablename__ = "route_custom_strategies"
-    __table_args__ = (
-        CheckConstraint("name ~ '^[a-z][a-z0-9_]{0,62}$'", name="strategy_name"),
-        CheckConstraint("jsonb_typeof(params) = 'object'", name="params_object"),
-    )
-
-    route_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("routes.id", ondelete="CASCADE"), primary_key=True
-    )
-    name: Mapped[str] = mapped_column(String(63), nullable=False)
-    params: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
-    )
 
 
 def params_json(params: dict[str, Any]) -> str:
@@ -46,9 +18,9 @@ def params_json(params: dict[str, Any]) -> str:
 
 
 def strategy_problem(
-    strategy: RouteStrategy, name: str | None, params: dict[str, Any]
+    strategy: RoutingStrategy, name: str | None, params: dict[str, Any]
 ) -> str | None:
-    if strategy != "custom":
+    if strategy != RoutingStrategy.CUSTOM:
         return "custom strategy fields require strategy custom" if name or params else None
     if name is None or not STRATEGY_NAME.fullmatch(name):
         return "custom_strategy must match ^[a-z][a-z0-9_]{0,62}$"

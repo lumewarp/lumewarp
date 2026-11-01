@@ -20,8 +20,7 @@ from lumewarp_control_plane.compiler import compile_scope
 from lumewarp_control_plane.errors import ApiError
 from lumewarp_control_plane.models import AuditLog, ConfigOutbox, Deployment
 from lumewarp_control_plane.security import Principal, PrincipalKind
-from tests.api.helpers import ADMIN_AUTH
-from tests.api.helpers import auth, suffix, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
 
 H = ADMIN_AUTH
 

@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
-from lumewarp_control_plane.compiler.strategy import CustomRouteStrategy, params_json
+from lumewarp_control_plane.compiler.strategy import params_json
 from lumewarp_control_plane.compiler.validate import (
     RESERVED_ALIASES,
     SnapshotInvalid,
@@ -63,6 +63,7 @@ ROUTING_STRATEGY = {
     RoutingStrategy.LEAST_IN_FLIGHT: pb.ROUTING_STRATEGY_LEAST_IN_FLIGHT,
     RoutingStrategy.LOWEST_LATENCY: pb.ROUTING_STRATEGY_LOWEST_LATENCY,
     RoutingStrategy.VLLM_LOAD: pb.ROUTING_STRATEGY_VLLM_LOAD,
+    RoutingStrategy.CUSTOM: pb.ROUTING_STRATEGY_CUSTOM,
 }
 STICKY_BY = {
     StickyBy.NONE: pb.STICKY_BY_NONE,
@@ -214,7 +215,6 @@ async def compile_scope(
     deployments = (await session.scalars(select(Deployment).order_by(Deployment.name))).all()
     deployment_by_id = {d.id: d for d in deployments}
     routes = (await session.scalars(select(Route).order_by(Route.model))).all()
-    custom = {c.route_id: c for c in await session.scalars(select(CustomRouteStrategy))}
     advertised = {
         cap
         for caps in await session.scalars(
@@ -317,13 +317,11 @@ async def compile_scope(
         if not r.model or r.model in RESERVED_ALIASES:
             warnings.append(f"route {r.model!r} left out: alias is empty or reserved")
             continue
-        weighted = r.id not in custom and r.strategy is RoutingStrategy.WEIGHTED
+        weighted = r.strategy is RoutingStrategy.WEIGHTED
         route = pb.ModelRoute(model=r.model, strategy=ROUTING_STRATEGY[r.strategy])
-        if r.id in custom:
-            config = custom[r.id]
-            route.strategy = pb.ROUTING_STRATEGY_CUSTOM
-            route.custom_strategy = config.name
-            route.strategy_params_json = params_json(config.params)
+        if r.strategy is RoutingStrategy.CUSTOM:
+            route.custom_strategy = r.custom_strategy
+            route.strategy_params_json = params_json(r.strategy_params or {})
         route_splits = splits.get(r.id, [])
         if route_splits:
             bad = None

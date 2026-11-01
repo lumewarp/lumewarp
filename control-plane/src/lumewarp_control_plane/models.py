@@ -147,6 +147,7 @@ class RoutingStrategy(enum.StrEnum):
     LEAST_IN_FLIGHT = "least_in_flight"
     LOWEST_LATENCY = "lowest_latency"
     VLLM_LOAD = "vllm_load"
+    CUSTOM = "custom"
 
 
 class StickyBy(enum.StrEnum):
@@ -609,6 +610,19 @@ class Route(TimestampMixin, Base):
     __tablename__ = "routes"
     __table_args__ = (
         CheckConstraint(
+            "(strategy = 'custom') = (custom_strategy IS NOT NULL)"
+            " AND (strategy = 'custom' OR strategy_params IS NULL)",
+            name="custom_strategy_shape",
+        ),
+        CheckConstraint(
+            "custom_strategy IS NULL OR custom_strategy ~ '^[a-z][a-z0-9_]{0,62}$'",
+            name="custom_strategy_name",
+        ),
+        CheckConstraint(
+            "strategy_params IS NULL OR jsonb_typeof(strategy_params) = 'object'",
+            name="strategy_params_object",
+        ),
+        CheckConstraint(
             "retry_max_attempts IS NULL OR retry_max_attempts BETWEEN 1 AND 5",
             name="retry_max_attempts_range",
         ),
@@ -635,6 +649,8 @@ class Route(TimestampMixin, Base):
         default=RoutingStrategy.WEIGHTED,
         server_default=RoutingStrategy.WEIGHTED.value,
     )
+    custom_strategy: Mapped[str | None] = mapped_column(String(63))
+    strategy_params: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     # Retry policy (proto RetryPolicy). max_attempts NULL = gateway default (2, emitted
     # as 0); empty retry_on_status = gateway default (429, 502, 503, 504); timeout 0 =
     # no bound beyond each upstream's timeout_ms.

@@ -47,11 +47,7 @@ from lumewarp_control_plane.api.schemas import (
     UpstreamUpdate,
 )
 from lumewarp_control_plane.authz import Action, Authz
-from lumewarp_control_plane.compiler.strategy import (
-    CustomRouteStrategy,
-    RouteStrategy,
-    strategy_problem,
-)
+from lumewarp_control_plane.compiler.strategy import strategy_problem
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import (
     Deployment,
@@ -117,7 +113,7 @@ class RouteSpec:
     """The full desired state of a route (create body, or stored state + PATCH)."""
 
     model: str
-    strategy: RouteStrategy
+    strategy: RoutingStrategy
     deployment_ids: list[uuid.UUID]
     custom_strategy: str | None = None
     strategy_params: dict = field(default_factory=dict)
@@ -247,16 +243,6 @@ async def _write_children(
     session: AsyncSession, row: Route, spec: RouteSpec, fields: set[str]
 ) -> None:
     """Replace the child rows named in `fields` with `spec`'s lists."""
-    if {"strategy", "custom_strategy", "strategy_params"} & fields:
-        await session.execute(
-            delete(CustomRouteStrategy).where(CustomRouteStrategy.route_id == row.id)
-        )
-        if spec.strategy == "custom":
-            session.add(
-                CustomRouteStrategy(
-                    route_id=row.id, name=spec.custom_strategy, params=spec.strategy_params
-                )
-            )
     if "deployment_ids" in fields:
         await session.execute(delete(RouteDeployment).where(RouteDeployment.route_id == row.id))
         for position, deployment_id in enumerate(spec.deployment_ids):
@@ -288,7 +274,9 @@ async def _write_children(
 
 def _apply_scalars(row: Route, spec: RouteSpec) -> None:
     row.model = spec.model
-    row.strategy = RoutingStrategy.WEIGHTED if spec.strategy == "custom" else spec.strategy
+    row.strategy = spec.strategy
+    row.custom_strategy = spec.custom_strategy
+    row.strategy_params = spec.strategy_params if spec.strategy is RoutingStrategy.CUSTOM else None
     row.retry_enabled = spec.retry is not None
     row.retry_max_attempts = spec.retry.max_attempts if spec.retry else None
     row.retry_on_status = list(spec.retry.retry_on_status) if spec.retry else []
@@ -299,12 +287,6 @@ def _apply_scalars(row: Route, spec: RouteSpec) -> None:
 
 async def _routes_out(session: AsyncSession, rows: list[Route]) -> list[RouteOut]:
     ids = [row.id for row in rows]
-    custom = {
-        c.route_id: c
-        for c in await session.scalars(
-            select(CustomRouteStrategy).where(CustomRouteStrategy.route_id.in_(ids))
-        )
-    }
     links: dict[uuid.UUID, list[RouteDeploymentOut]] = {i: [] for i in ids}
     fallbacks: dict[uuid.UUID, list[uuid.UUID]] = {i: [] for i in ids}
     splits: dict[uuid.UUID, list[TrafficSplitOut]] = {i: [] for i in ids}
@@ -346,9 +328,9 @@ async def _routes_out(session: AsyncSession, rows: list[Route]) -> list[RouteOut
         RouteOut(
             id=row.id,
             model=row.model,
-            strategy="custom" if row.id in custom else row.strategy,
-            custom_strategy=custom[row.id].name if row.id in custom else None,
-            strategy_params=custom[row.id].params if row.id in custom else {},
+            strategy=row.strategy,
+            custom_strategy=row.custom_strategy,
+            strategy_params=row.strategy_params or {},
             deployments=links[row.id],
             retry=RetryPolicyOut(
                 max_attempts=row.retry_max_attempts,
@@ -840,7 +822,7 @@ async def update_route(
         spec = await _load_spec(session, row)
         for name in fields:
             setattr(spec, name, getattr(body, name))
-        if spec.strategy != "custom" and "strategy" in fields:
+        if spec.strategy is not RoutingStrategy.CUSTOM and "strategy" in fields:
             if "custom_strategy" not in fields:
                 spec.custom_strategy = None
             if "strategy_params" not in fields:
