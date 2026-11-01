@@ -37,8 +37,12 @@ message UsageEvent {
   reserved 4, 6;
   reserved "org_id", "project_id";
   string team_id = 5;
-  // Public alias.
+  // The name the client called (model, alias or router), also when rejected or
+  // not found. Empty only when authentication failed: the body was not read.
+  // At most 400 bytes.
   string requested = 7;
+  // The model that finally served the request; prices and cost follow it.
+  // Empty when no model was selected.
   string model = 8;
   // Endpoint: chat_completions | completions | embeddings.
   string endpoint = 9;
@@ -59,6 +63,18 @@ message UsageEvent {
   // cost_known is true (price present and usage_state REPORTED).
   uint64 cost_nano_usd = 20;
   bool cost_known = 21;
+  // The alias called, empty if the name called was not an alias.
+  string alias = 22;
+  // The router behind the name called, empty for a direct model.
+  string router = 23;
+  // Upstream and upstream model name of `model`, sent by the gateway so that a
+  // later catalog change cannot rewrite history.
+  string upstream = 24;
+  string upstream_model = 25;
+  // `model` is one of the router's fallbacks.
+  bool fallback = 26;
+  // Upstream attempts of this request, retries and fallbacks included.
+  uint32 attempts = 27;
 }
 
 enum UsageState {

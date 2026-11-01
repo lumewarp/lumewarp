@@ -20,15 +20,6 @@ class UpstreamKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     UPSTREAM_KIND_VLLM: _ClassVar[UpstreamKind]
     UPSTREAM_KIND_OPENAI_COMPATIBLE: _ClassVar[UpstreamKind]
 
-class RoutingStrategy(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
-    __slots__ = ()
-    ROUTING_STRATEGY_UNSPECIFIED: _ClassVar[RoutingStrategy]
-    ROUTING_STRATEGY_WEIGHTED: _ClassVar[RoutingStrategy]
-    ROUTING_STRATEGY_LEAST_IN_FLIGHT: _ClassVar[RoutingStrategy]
-    ROUTING_STRATEGY_LOWEST_LATENCY: _ClassVar[RoutingStrategy]
-    ROUTING_STRATEGY_VLLM_LOAD: _ClassVar[RoutingStrategy]
-    ROUTING_STRATEGY_CUSTOM: _ClassVar[RoutingStrategy]
-
 class StickyBy(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     STICKY_BY_NONE: _ClassVar[StickyBy]
@@ -50,12 +41,6 @@ UPSTREAM_KIND_UNSPECIFIED: UpstreamKind
 UPSTREAM_KIND_OPENAI: UpstreamKind
 UPSTREAM_KIND_VLLM: UpstreamKind
 UPSTREAM_KIND_OPENAI_COMPATIBLE: UpstreamKind
-ROUTING_STRATEGY_UNSPECIFIED: RoutingStrategy
-ROUTING_STRATEGY_WEIGHTED: RoutingStrategy
-ROUTING_STRATEGY_LEAST_IN_FLIGHT: RoutingStrategy
-ROUTING_STRATEGY_LOWEST_LATENCY: RoutingStrategy
-ROUTING_STRATEGY_VLLM_LOAD: RoutingStrategy
-ROUTING_STRATEGY_CUSTOM: RoutingStrategy
 STICKY_BY_NONE: StickyBy
 STICKY_BY_HEADER: StickyBy
 STICKY_BY_TEAM: StickyBy
@@ -67,7 +52,7 @@ KEY_STATUS_BUDGET_EXCEEDED: KeyStatus
 KEY_STATUS_SUSPENDED: KeyStatus
 
 class Snapshot(_message.Message):
-    __slots__ = ("version", "upstreams", "models", "routers", "api_keys", "teams", "created_at_unix_ms", "required_capabilities", "scope")
+    __slots__ = ("version", "upstreams", "models", "routers", "api_keys", "teams", "created_at_unix_ms", "required_capabilities", "scope", "aliases")
     VERSION_FIELD_NUMBER: _ClassVar[int]
     UPSTREAMS_FIELD_NUMBER: _ClassVar[int]
     MODELS_FIELD_NUMBER: _ClassVar[int]
@@ -77,6 +62,7 @@ class Snapshot(_message.Message):
     CREATED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
     REQUIRED_CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
     SCOPE_FIELD_NUMBER: _ClassVar[int]
+    ALIASES_FIELD_NUMBER: _ClassVar[int]
     version: int
     upstreams: _containers.RepeatedCompositeFieldContainer[Upstream]
     models: _containers.RepeatedCompositeFieldContainer[Model]
@@ -86,7 +72,8 @@ class Snapshot(_message.Message):
     created_at_unix_ms: int
     required_capabilities: _containers.RepeatedScalarFieldContainer[str]
     scope: str
-    def __init__(self, version: _Optional[int] = ..., upstreams: _Optional[_Iterable[_Union[Upstream, _Mapping]]] = ..., models: _Optional[_Iterable[_Union[Model, _Mapping]]] = ..., routers: _Optional[_Iterable[_Union[Router, _Mapping]]] = ..., api_keys: _Optional[_Iterable[_Union[ApiKey, _Mapping]]] = ..., teams: _Optional[_Iterable[_Union[Team, _Mapping]]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ...) -> None: ...
+    aliases: _containers.RepeatedCompositeFieldContainer[Alias]
+    def __init__(self, version: _Optional[int] = ..., upstreams: _Optional[_Iterable[_Union[Upstream, _Mapping]]] = ..., models: _Optional[_Iterable[_Union[Model, _Mapping]]] = ..., routers: _Optional[_Iterable[_Union[Router, _Mapping]]] = ..., api_keys: _Optional[_Iterable[_Union[ApiKey, _Mapping]]] = ..., teams: _Optional[_Iterable[_Union[Team, _Mapping]]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ..., aliases: _Optional[_Iterable[_Union[Alias, _Mapping]]] = ...) -> None: ...
 
 class Upstream(_message.Message):
     __slots__ = ("name", "kind", "base_url", "api_key_ref", "timeout_ms", "stream_usage_mode", "health_check", "circuit_breaker", "metrics_url")
@@ -133,18 +120,16 @@ class CircuitBreaker(_message.Message):
     def __init__(self, failure_threshold: _Optional[int] = ..., open_ms: _Optional[int] = ...) -> None: ...
 
 class Model(_message.Message):
-    __slots__ = ("name", "upstream", "upstream_model", "weight", "price")
+    __slots__ = ("name", "upstream", "upstream_model", "price")
     NAME_FIELD_NUMBER: _ClassVar[int]
     UPSTREAM_FIELD_NUMBER: _ClassVar[int]
     UPSTREAM_MODEL_FIELD_NUMBER: _ClassVar[int]
-    WEIGHT_FIELD_NUMBER: _ClassVar[int]
     PRICE_FIELD_NUMBER: _ClassVar[int]
     name: str
     upstream: str
     upstream_model: str
-    weight: int
     price: Price
-    def __init__(self, name: _Optional[str] = ..., upstream: _Optional[str] = ..., upstream_model: _Optional[str] = ..., weight: _Optional[int] = ..., price: _Optional[_Union[Price, _Mapping]] = ...) -> None: ...
+    def __init__(self, name: _Optional[str] = ..., upstream: _Optional[str] = ..., upstream_model: _Optional[str] = ..., price: _Optional[_Union[Price, _Mapping]] = ...) -> None: ...
 
 class Price(_message.Message):
     __slots__ = ("input_nano_usd_per_mtok", "output_nano_usd_per_mtok")
@@ -154,29 +139,45 @@ class Price(_message.Message):
     output_nano_usd_per_mtok: int
     def __init__(self, input_nano_usd_per_mtok: _Optional[int] = ..., output_nano_usd_per_mtok: _Optional[int] = ...) -> None: ...
 
-class Router(_message.Message):
-    __slots__ = ("name", "models", "strategy", "retry", "fallbacks", "traffic_split", "sticky", "sticky_header", "custom_strategy", "strategy_params_json")
+class Alias(_message.Message):
+    __slots__ = ("name", "target")
     NAME_FIELD_NUMBER: _ClassVar[int]
-    MODELS_FIELD_NUMBER: _ClassVar[int]
+    TARGET_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    target: str
+    def __init__(self, name: _Optional[str] = ..., target: _Optional[str] = ...) -> None: ...
+
+class RouterMember(_message.Message):
+    __slots__ = ("model", "weight", "params_json")
+    MODEL_FIELD_NUMBER: _ClassVar[int]
+    WEIGHT_FIELD_NUMBER: _ClassVar[int]
+    PARAMS_JSON_FIELD_NUMBER: _ClassVar[int]
+    model: str
+    weight: int
+    params_json: str
+    def __init__(self, model: _Optional[str] = ..., weight: _Optional[int] = ..., params_json: _Optional[str] = ...) -> None: ...
+
+class Router(_message.Message):
+    __slots__ = ("name", "members", "strategy", "params_json", "retry", "fallbacks", "traffic_split", "sticky", "sticky_header")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    MEMBERS_FIELD_NUMBER: _ClassVar[int]
     STRATEGY_FIELD_NUMBER: _ClassVar[int]
+    PARAMS_JSON_FIELD_NUMBER: _ClassVar[int]
     RETRY_FIELD_NUMBER: _ClassVar[int]
     FALLBACKS_FIELD_NUMBER: _ClassVar[int]
     TRAFFIC_SPLIT_FIELD_NUMBER: _ClassVar[int]
     STICKY_FIELD_NUMBER: _ClassVar[int]
     STICKY_HEADER_FIELD_NUMBER: _ClassVar[int]
-    CUSTOM_STRATEGY_FIELD_NUMBER: _ClassVar[int]
-    STRATEGY_PARAMS_JSON_FIELD_NUMBER: _ClassVar[int]
     name: str
-    models: _containers.RepeatedScalarFieldContainer[str]
-    strategy: RoutingStrategy
+    members: _containers.RepeatedCompositeFieldContainer[RouterMember]
+    strategy: str
+    params_json: str
     retry: RetryPolicy
     fallbacks: _containers.RepeatedScalarFieldContainer[str]
     traffic_split: _containers.RepeatedCompositeFieldContainer[TrafficSplit]
     sticky: StickyBy
     sticky_header: str
-    custom_strategy: str
-    strategy_params_json: str
-    def __init__(self, name: _Optional[str] = ..., models: _Optional[_Iterable[str]] = ..., strategy: _Optional[_Union[RoutingStrategy, str]] = ..., retry: _Optional[_Union[RetryPolicy, _Mapping]] = ..., fallbacks: _Optional[_Iterable[str]] = ..., traffic_split: _Optional[_Iterable[_Union[TrafficSplit, _Mapping]]] = ..., sticky: _Optional[_Union[StickyBy, str]] = ..., sticky_header: _Optional[str] = ..., custom_strategy: _Optional[str] = ..., strategy_params_json: _Optional[str] = ...) -> None: ...
+    def __init__(self, name: _Optional[str] = ..., members: _Optional[_Iterable[_Union[RouterMember, _Mapping]]] = ..., strategy: _Optional[str] = ..., params_json: _Optional[str] = ..., retry: _Optional[_Union[RetryPolicy, _Mapping]] = ..., fallbacks: _Optional[_Iterable[str]] = ..., traffic_split: _Optional[_Iterable[_Union[TrafficSplit, _Mapping]]] = ..., sticky: _Optional[_Union[StickyBy, str]] = ..., sticky_header: _Optional[str] = ...) -> None: ...
 
 class RetryPolicy(_message.Message):
     __slots__ = ("max_attempts", "retry_on_status", "total_timeout_ms")
@@ -189,14 +190,14 @@ class RetryPolicy(_message.Message):
     def __init__(self, max_attempts: _Optional[int] = ..., retry_on_status: _Optional[_Iterable[int]] = ..., total_timeout_ms: _Optional[int] = ...) -> None: ...
 
 class TrafficSplit(_message.Message):
-    __slots__ = ("name", "models", "weight")
+    __slots__ = ("name", "weight", "members")
     NAME_FIELD_NUMBER: _ClassVar[int]
-    MODELS_FIELD_NUMBER: _ClassVar[int]
     WEIGHT_FIELD_NUMBER: _ClassVar[int]
+    MEMBERS_FIELD_NUMBER: _ClassVar[int]
     name: str
-    models: _containers.RepeatedScalarFieldContainer[str]
     weight: int
-    def __init__(self, name: _Optional[str] = ..., models: _Optional[_Iterable[str]] = ..., weight: _Optional[int] = ...) -> None: ...
+    members: _containers.RepeatedCompositeFieldContainer[RouterMember]
+    def __init__(self, name: _Optional[str] = ..., weight: _Optional[int] = ..., members: _Optional[_Iterable[_Union[RouterMember, _Mapping]]] = ...) -> None: ...
 
 class Team(_message.Message):
     __slots__ = ("id", "name")

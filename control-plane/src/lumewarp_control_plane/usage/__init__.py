@@ -120,9 +120,12 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
     key_id = _uuid(event.key_id, "key_id")
     team_id = _uuid(event.team_id, "team_id")
     # A rejected request may never reach routing: authentication runs before the body is
-    # read (no requested name) and policy rejections happen before a model is chosen.
+    # read (no requested name) and policy rejections happen before a model is chosen. The
+    # provenance fields (alias, router, upstream, upstream_model, fallback, attempts) are
+    # stored by c5; they are ignored here until then.
     rejected = event.outcome == usage_pb2.REQUEST_OUTCOME_REJECTED
-    if len(event.requested) > 400 or not (event.requested or rejected):
+    # `requested` is client input on rejected requests; Postgres text cannot hold NUL.
+    if len(event.requested) > 400 or "\x00" in event.requested or not (event.requested or rejected):
         raise InvalidUsageBatch("invalid requested")
     if len(event.model) > 200 or not (event.model or rejected):
         raise InvalidUsageBatch("invalid model")

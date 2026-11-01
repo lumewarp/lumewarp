@@ -289,8 +289,8 @@ async def rollback_routing(
     now: datetime | None = None,
     require_local_membership: bool,
 ) -> int:
-    """Publish a new version whose routing content (upstreams, models, routers) comes
-    from `to_version` while keys, teams, policies and statuses come from current source
+    """Publish a new version whose routing content (upstreams, models, aliases, routers)
+    comes from `to_version` while keys, teams, policies and statuses come from current source
     state, so a revoked key is never revived. Returns the new version number.
 
     Runs in the caller's transaction (the caller writes the audit row and commits). The
@@ -323,7 +323,7 @@ async def rollback_routing(
         require_local_membership=require_local_membership,
     )
     snap = compiled.snapshot
-    for field in ("upstreams", "models", "routers"):
+    for field in ("upstreams", "models", "aliases", "routers"):
         del getattr(snap, field)[:]
         getattr(snap, field).extend(getattr(old, field))
 

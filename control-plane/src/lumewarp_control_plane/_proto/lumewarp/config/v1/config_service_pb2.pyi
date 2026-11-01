@@ -76,7 +76,7 @@ class ConfigUpdate(_message.Message):
     def __init__(self, full: _Optional[_Union[_snapshot_pb2.Snapshot, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., target_digest: _Optional[bytes] = ...) -> None: ...
 
 class Delta(_message.Message):
-    __slots__ = ("base_version", "version", "upsert_upstreams", "remove_upstreams", "upsert_models", "remove_models", "upsert_routers", "remove_routers", "upsert_api_keys", "remove_api_keys", "upsert_teams", "remove_teams", "created_at_unix_ms", "required_capabilities")
+    __slots__ = ("base_version", "version", "upsert_upstreams", "remove_upstreams", "upsert_models", "remove_models", "upsert_routers", "remove_routers", "upsert_api_keys", "remove_api_keys", "upsert_teams", "remove_teams", "created_at_unix_ms", "required_capabilities", "upsert_aliases", "remove_aliases")
     BASE_VERSION_FIELD_NUMBER: _ClassVar[int]
     VERSION_FIELD_NUMBER: _ClassVar[int]
     UPSERT_UPSTREAMS_FIELD_NUMBER: _ClassVar[int]
@@ -91,6 +91,8 @@ class Delta(_message.Message):
     REMOVE_TEAMS_FIELD_NUMBER: _ClassVar[int]
     CREATED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
     REQUIRED_CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
+    UPSERT_ALIASES_FIELD_NUMBER: _ClassVar[int]
+    REMOVE_ALIASES_FIELD_NUMBER: _ClassVar[int]
     base_version: int
     version: int
     upsert_upstreams: _containers.RepeatedCompositeFieldContainer[_snapshot_pb2.Upstream]
@@ -105,4 +107,6 @@ class Delta(_message.Message):
     remove_teams: _containers.RepeatedScalarFieldContainer[str]
     created_at_unix_ms: int
     required_capabilities: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, base_version: _Optional[int] = ..., version: _Optional[int] = ..., upsert_upstreams: _Optional[_Iterable[_Union[_snapshot_pb2.Upstream, _Mapping]]] = ..., remove_upstreams: _Optional[_Iterable[str]] = ..., upsert_models: _Optional[_Iterable[_Union[_snapshot_pb2.Model, _Mapping]]] = ..., remove_models: _Optional[_Iterable[str]] = ..., upsert_routers: _Optional[_Iterable[_Union[_snapshot_pb2.Router, _Mapping]]] = ..., remove_routers: _Optional[_Iterable[str]] = ..., upsert_api_keys: _Optional[_Iterable[_Union[_snapshot_pb2.ApiKey, _Mapping]]] = ..., remove_api_keys: _Optional[_Iterable[str]] = ..., upsert_teams: _Optional[_Iterable[_Union[_snapshot_pb2.Team, _Mapping]]] = ..., remove_teams: _Optional[_Iterable[str]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ...) -> None: ...
+    upsert_aliases: _containers.RepeatedCompositeFieldContainer[_snapshot_pb2.Alias]
+    remove_aliases: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, base_version: _Optional[int] = ..., version: _Optional[int] = ..., upsert_upstreams: _Optional[_Iterable[_Union[_snapshot_pb2.Upstream, _Mapping]]] = ..., remove_upstreams: _Optional[_Iterable[str]] = ..., upsert_models: _Optional[_Iterable[_Union[_snapshot_pb2.Model, _Mapping]]] = ..., remove_models: _Optional[_Iterable[str]] = ..., upsert_routers: _Optional[_Iterable[_Union[_snapshot_pb2.Router, _Mapping]]] = ..., remove_routers: _Optional[_Iterable[str]] = ..., upsert_api_keys: _Optional[_Iterable[_Union[_snapshot_pb2.ApiKey, _Mapping]]] = ..., remove_api_keys: _Optional[_Iterable[str]] = ..., upsert_teams: _Optional[_Iterable[_Union[_snapshot_pb2.Team, _Mapping]]] = ..., remove_teams: _Optional[_Iterable[str]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ..., upsert_aliases: _Optional[_Iterable[_Union[_snapshot_pb2.Alias, _Mapping]]] = ..., remove_aliases: _Optional[_Iterable[str]] = ...) -> None: ...

@@ -6,6 +6,7 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import config_service_pb2,
 ENTITIES = (
     ("upstreams", "upsert_upstreams", "remove_upstreams", "name"),
     ("models", "upsert_models", "remove_models", "name"),
+    ("aliases", "upsert_aliases", "remove_aliases", "name"),
     ("routers", "upsert_routers", "remove_routers", "name"),
     ("api_keys", "upsert_api_keys", "remove_api_keys", "key_id"),
     ("teams", "upsert_teams", "remove_teams", "id"),

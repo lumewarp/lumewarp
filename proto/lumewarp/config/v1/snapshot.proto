@@ -23,6 +23,8 @@ message Snapshot {
   // Identifies the control-plane installation; a gateway never boots from an
   // on-disk snapshot whose scope differs from the one it is configured for.
   string scope = 9;
+  // Other callable names. Models, aliases and routers share one name space.
+  repeated Alias aliases = 10;
 }
 
 // An OpenAI-compatible endpoint (vLLM, OpenAI, or anything speaking the API).
@@ -41,7 +43,7 @@ message Upstream {
   // Per-model circuit breaker for models on this upstream. Absent =
   // never opens. Capability "circuit_breaker".
   CircuitBreaker circuit_breaker = 8;
-  // Prometheus endpoint scraped for load by ROUTING_STRATEGY_VLLM_LOAD.
+  // Prometheus endpoint scraped for load by the "vllm_load" strategy.
   // Empty = base_url with a trailing "/v1" removed, plus "/metrics".
   string metrics_url = 9;
 }
@@ -88,13 +90,15 @@ enum UpstreamKind {
   UPSTREAM_KIND_OPENAI_COMPATIBLE = 3;
 }
 
-// A concrete model served by one upstream.
+// A callable name mapped to one model on one upstream. Calling it directly is
+// a single attempt: retries, fallbacks, splits and strategies live on routers.
 message Model {
+  reserved 4;
+  reserved "weight";
   string name = 1;
   string upstream = 2;
-  // Model name sent upstream (may differ from the public alias).
+  // Model name sent upstream (may differ from the public name).
   string upstream_model = 3;
-  uint32 weight = 4;
   // Price used to compute spend from upstream-reported usage. Absent = price
   // unknown: usage is still metered but cost is reported as unknown, never 0.
   Price price = 5;
@@ -107,19 +111,46 @@ message Price {
   uint64 output_nano_usd_per_mtok = 2;
 }
 
-// Public model alias -> models.
+// Another callable name for a model or a router (never another alias). It is
+// authorized on its own name and shares the target's pool at run time.
+message Alias {
+  string name = 1;
+  // Name of a Model or a Router in this snapshot.
+  string target = 2;
+}
+
+// One model of a router (or of a traffic split), with this router's settings.
+message RouterMember {
+  // Name of a Model in this snapshot.
+  string model = 1;
+  // Relative share for the "weighted" strategy; independent per router.
+  uint32 weight = 2;
+  // Strategy-specific member settings: a JSON object, at most 16 KiB UTF-8.
+  // Empty means {}.
+  string params_json = 3;
+}
+
+// A callable name that distributes requests over models.
 message Router {
+  reserved 2, 3, 9, 10;
+  reserved "models", "custom_strategy", "strategy_params_json";
   string name = 1;
   // Ignored when traffic_split is non-empty.
-  repeated string models = 2;
-  RoutingStrategy strategy = 3;
+  repeated RouterMember members = 11;
+  // Compiled-in strategy name, built-ins included: "weighted",
+  // "least_in_flight", "lowest_latency" (EWMA of time to response headers per
+  // model), "vllm_load" (power of two choices on num_requests_waiting, then
+  // kv_cache_usage_perc, scraped every second; in-flight when stale), or a
+  // registered custom strategy. Required capability: "strategy:<name>". A
+  // gateway without it NACKs UNSUPPORTED_FEATURE.
+  string strategy = 12;
+  // Strategy settings: a JSON object, at most 16 KiB UTF-8. Empty means {}.
+  string params_json = 13;
   // Absent = a single attempt. Capability "retry".
   RetryPolicy retry = 4;
-  // Other router aliases tried in order once every attempt on this router has
-  // failed retryably (before any response byte reached the client). Each
-  // fallback is tried with its own models and strategy but this router's
-  // retry budget; fallbacks of fallbacks are not followed. The client-visible
-  // model name is unchanged. Capability "fallbacks".
+  // Names of Models tried in order once every attempt on this router has
+  // failed retryably (before any response byte reached the client). They use
+  // this router's retry budget. Capability "fallbacks".
   repeated string fallbacks = 5;
   // Percentage split between groups of models (canary). A request first
   // picks a split by weight (sticky when `sticky` is set), then a model
@@ -129,24 +160,6 @@ message Router {
   StickyBy sticky = 7;
   // Request header hashed when sticky = STICKY_BY_HEADER.
   string sticky_header = 8;
-  // Compiled-in strategy name. Required capability: "strategy:<name>".
-  string custom_strategy = 9;
-  // JSON object, at most 16 KiB UTF-8. Empty means {}.
-  string strategy_params_json = 10;
-}
-
-enum RoutingStrategy {
-  ROUTING_STRATEGY_UNSPECIFIED = 0;
-  ROUTING_STRATEGY_WEIGHTED = 1;
-  ROUTING_STRATEGY_LEAST_IN_FLIGHT = 2;
-  // EWMA of time to response headers per model. Capability
-  // "lowest_latency".
-  ROUTING_STRATEGY_LOWEST_LATENCY = 3;
-  // Power of two choices on vLLM load (num_requests_waiting, then
-  // kv_cache_usage_perc) scraped every second; falls back to in-flight when a
-  // model's metrics are stale. Capability "vllm_load".
-  ROUTING_STRATEGY_VLLM_LOAD = 4;
-  ROUTING_STRATEGY_CUSTOM = 5;
 }
 
 // Retries happen only before any response byte is sent to the client: on
@@ -164,11 +177,13 @@ message RetryPolicy {
 }
 
 message TrafficSplit {
+  reserved 2;
+  reserved "models";
   // Bounded label value for metrics (e.g. "stable", "canary").
   string name = 1;
-  repeated string models = 2;
   // Relative weight; the split's share is weight / sum(weights).
   uint32 weight = 3;
+  repeated RouterMember members = 4;
 }
 
 enum StickyBy {
@@ -217,9 +232,10 @@ enum KeyStatus {
 }
 
 message EffectivePolicy {
-  // When true every router is allowed and allowed_models is ignored.
+  // When true every name is allowed and allowed_models is ignored.
   bool allow_all_models = 1;
-  // Public model aliases this key may call when allow_all_models is false.
+  // Names (of any kind) this key may call when allow_all_models is false,
+  // expanded by the compiler to their current spelling.
   // Empty with allow_all_models=false means deny-all.
   repeated string allowed_models = 2;
   // One entry per level that sets a limit (team, then the key's owner),

@@ -97,4 +97,6 @@ message Delta {
   // Target snapshot metadata, replaced wholesale.
   int64 created_at_unix_ms = 13;
   repeated string required_capabilities = 14;
+  repeated Alias upsert_aliases = 15;
+  repeated string remove_aliases = 16;
 }

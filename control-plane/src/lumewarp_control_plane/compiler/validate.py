@@ -9,14 +9,21 @@ Not checkable here: `Upstream.api_key_ref` must name an env var that exists on e
 gateway (deployment environment configuration, not snapshot content).
 """
 
+import json
 import re
 from ipaddress import IPv6Address
 from urllib.parse import urlsplit
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
-from lumewarp_control_plane.compiler.strategy import STRATEGY_NAME, params_problem
+from lumewarp_control_plane.compiler.strategy import (
+    BUILTIN_STRATEGIES,
+    MAX_PARAMS_BYTES,
+    STRATEGY_NAME,
+    params_problem,
+)
 
-# Capabilities the P2 gateway supports (snapshot.rs SUPPORTED_CAPABILITIES).
+# Capabilities every gateway supports (snapshot.rs SUPPORTED_CAPABILITIES). Strategies are
+# `strategy:<name>`; a custom one is supported where its crate is compiled in.
 SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
     {
         "retry",
@@ -24,8 +31,8 @@ SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
         "health_check",
         "circuit_breaker",
         "traffic_split",
-        "lowest_latency",
         "vllm_load",
+        *(f"strategy:{name}" for name in BUILTIN_STRATEGIES),
     }
 )
 MAX_SPLITS = 16
@@ -44,13 +51,6 @@ STREAM_USAGE_MODES = {
     pb.STREAM_USAGE_MODE_UNSPECIFIED,
     pb.STREAM_USAGE_MODE_INCLUDE_USAGE,
     pb.STREAM_USAGE_MODE_PASSTHROUGH,
-}
-SERVABLE_STRATEGIES = {
-    pb.ROUTING_STRATEGY_WEIGHTED,
-    pb.ROUTING_STRATEGY_LEAST_IN_FLIGHT,
-    pb.ROUTING_STRATEGY_LOWEST_LATENCY,
-    pb.ROUTING_STRATEGY_VLLM_LOAD,
-    pb.ROUTING_STRATEGY_CUSTOM,
 }
 STICKY_BY = {pb.STICKY_BY_NONE, pb.STICKY_BY_HEADER, pb.STICKY_BY_TEAM, pb.STICKY_BY_KEY}
 KEY_STATUSES = {
@@ -172,17 +172,41 @@ def capabilities_used(snap: pb.Snapshot) -> list[str]:
             used.add("fallbacks")
         if r.traffic_split or r.sticky != pb.STICKY_BY_NONE or r.sticky_header:
             used.add("traffic_split")
-        if r.strategy == pb.ROUTING_STRATEGY_LOWEST_LATENCY:
-            used.add("lowest_latency")
-        if r.strategy == pb.ROUTING_STRATEGY_VLLM_LOAD:
-            used.add("vllm_load")
-        if r.strategy == pb.ROUTING_STRATEGY_CUSTOM:
-            used.add(f"strategy:{r.custom_strategy}")
+        used.add(f"strategy:{r.strategy}")
     return sorted(used)
 
 
-def _validate_split(r: pb.Router, models: set[str], weight: dict[str, int]) -> None:
-    """snapshot.rs::validate_split, plus RoutingTable::compile's positive weight per pool."""
+def _params_object(text: str, field: str) -> dict:
+    """A wire params field: empty or a JSON object within the size limit."""
+    if len(text.encode("utf-8")) > MAX_PARAMS_BYTES:
+        raise SnapshotInvalid(f"{field} exceed 16 KiB")
+    try:
+        params = json.loads(text or "{}")
+    except (ValueError, RecursionError) as exc:
+        raise SnapshotInvalid(f"{field} must be a JSON object") from exc
+    if not isinstance(params, dict):
+        raise SnapshotInvalid(f"{field} must be a JSON object")
+    return params
+
+
+def _validate_members(r: pb.Router, where: str, members, models: set[str]) -> None:
+    """snapshot.rs::validate_members, plus RoutingTable::compile's positive weight per pool."""
+    if not members:
+        raise SnapshotInvalid(f"router {r.name!r}{where} has no models")
+    seen: set[str] = set()
+    for m in members:
+        if m.model not in models:
+            raise SnapshotInvalid(f"router {r.name!r}{where} references unknown model {m.model!r}")
+        if m.model in seen:
+            raise SnapshotInvalid(f"router {r.name!r}{where} repeats model {m.model!r}")
+        seen.add(m.model)
+        _params_object(m.params_json, f"router {r.name!r}{where} member params")
+    if r.strategy == "weighted" and not sum(m.weight for m in members):
+        raise SnapshotInvalid(f"router {r.name!r}{where} has zero total weight")
+
+
+def _validate_split(r: pb.Router, models: set[str]) -> None:
+    """snapshot.rs::validate_split."""
     if r.sticky == pb.STICKY_BY_HEADER:
         if not r.sticky_header or not _HEADER_NAME.fullmatch(r.sticky_header):
             raise SnapshotInvalid(f"router {r.name!r}: sticky=header needs a valid sticky_header")
@@ -204,17 +228,7 @@ def _validate_split(r: pb.Router, models: set[str], weight: dict[str, int]) -> N
         if split.name in names:
             raise SnapshotInvalid(f"router {r.name!r}: duplicate split {split.name!r}")
         names.add(split.name)
-        if not split.models:
-            raise SnapshotInvalid(f"router {r.name!r}: split {split.name!r} has no models")
-        if len(set(split.models)) != len(split.models):
-            raise SnapshotInvalid(f"router {r.name!r}: split {split.name!r} repeats a model")
-        missing = [d for d in split.models if d not in models]
-        if missing:
-            raise SnapshotInvalid(
-                f"router {r.name!r}: split {split.name!r} references unknown model {missing[0]!r}"
-            )
-        if r.strategy == pb.ROUTING_STRATEGY_WEIGHTED and not sum(weight[d] for d in split.models):
-            raise SnapshotInvalid(f"router {r.name!r} split {split.name!r} has zero total weight")
+        _validate_members(r, f" split {split.name!r}", split.members, models)
     if not sum(s.weight for s in r.traffic_split):
         raise SnapshotInvalid(f"router {r.name!r}: traffic split weights sum to 0")
 
@@ -266,36 +280,38 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
             raise SnapshotInvalid(f"upstream {u.name!r} metrics_url {problem}")
 
     models = _unique([d.name for d in snap.models], "model")
-    weight = {d.name: d.weight for d in snap.models}
     for d in snap.models:
         if d.upstream not in upstreams:
             raise SnapshotInvalid(f"model {d.name!r} references unknown upstream")
         if not d.upstream_model:
             raise SnapshotInvalid(f"model {d.name!r} has an empty upstream_model")
 
-    routers = _unique([r.name for r in snap.routers], "router")
+    # Models, aliases and routers share one name space.
+    names = _unique(
+        [
+            *(d.name for d in snap.models),
+            *(a.name for a in snap.aliases),
+            *(r.name for r in snap.routers),
+        ],
+        "name",
+    )
+    reserved = names & RESERVED_ALIASES
+    if reserved:
+        raise SnapshotInvalid(f"name {sorted(reserved)[0]!r} is reserved")
+    routers = {r.name for r in snap.routers}
+    for a in snap.aliases:
+        if a.target not in models and a.target not in routers:
+            raise SnapshotInvalid(f"alias {a.name!r} targets {a.target!r}, not a model or router")
     for r in snap.routers:
-        if r.name in RESERVED_ALIASES:
-            raise SnapshotInvalid(f"router alias {r.name!r} is reserved")
-        if r.strategy not in SERVABLE_STRATEGIES:
-            raise SnapshotInvalid(f"router {r.name!r} has unsupported strategy {r.strategy}")
-        if r.strategy == pb.ROUTING_STRATEGY_CUSTOM:
-            import json
-
-            if len(r.strategy_params_json.encode("utf-8")) > 16 * 1024:
-                raise SnapshotInvalid("strategy params exceed 16 KiB")
-            try:
-                params = json.loads(r.strategy_params_json or "{}")
-            except (ValueError, RecursionError) as exc:
-                raise SnapshotInvalid("strategy params must be a JSON object") from exc
-            if not isinstance(params, dict):
-                raise SnapshotInvalid("strategy params must be a JSON object")
-            if not STRATEGY_NAME.fullmatch(r.custom_strategy):
-                raise SnapshotInvalid("custom_strategy must match ^[a-z][a-z0-9_]{0,62}$")
-            if problem := params_problem(params, "strategy_params"):
-                raise SnapshotInvalid(problem)
-        elif r.custom_strategy or r.strategy_params_json:
-            raise SnapshotInvalid("custom strategy fields require CUSTOM")
+        if not STRATEGY_NAME.fullmatch(r.strategy):
+            raise SnapshotInvalid(
+                f"router {r.name!r}: strategy must match ^[a-z][a-z0-9_]{{0,62}}$"
+            )
+        params = _params_object(r.params_json, f"router {r.name!r} params")
+        if r.strategy in BUILTIN_STRATEGIES and params:
+            raise SnapshotInvalid(f"router {r.name!r}: built-in {r.strategy!r} takes no params")
+        if problem := params_problem(params, f"router {r.name!r} params"):
+            raise SnapshotInvalid(problem)
         if r.sticky not in STICKY_BY:
             raise SnapshotInvalid(f"router {r.name!r} has sticky {r.sticky}")
         if r.HasField("retry") and (
@@ -307,21 +323,12 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
                 " and statuses in 400..=599"
             )
         for fallback in r.fallbacks:
-            if fallback == r.name or fallback not in routers:
-                raise SnapshotInvalid(
-                    f"router {r.name!r} has a self or unknown fallback {fallback!r}"
-                )
-        _validate_split(r, models, weight)
-        # With traffic_split the router's own model list is ignored.
-        if r.traffic_split:
-            continue
-        if not r.models:
-            raise SnapshotInvalid(f"router {r.name!r} has no models")
-        missing = [d for d in r.models if d not in models]
-        if missing:
-            raise SnapshotInvalid(f"router {r.name!r} references unknown model {missing[0]!r}")
-        if r.strategy == pb.ROUTING_STRATEGY_WEIGHTED and not sum(weight[d] for d in r.models):
-            raise SnapshotInvalid(f"router {r.name!r} has zero total weight")
+            if fallback not in models:
+                raise SnapshotInvalid(f"router {r.name!r} fallback {fallback!r} is not a model")
+        _validate_split(r, models)
+        # With traffic_split the router's own member list is ignored.
+        if not r.traffic_split:
+            _validate_members(r, "", r.members, models)
 
     _unique([t.id for t in snap.teams], "team")
     teams = {t.id for t in snap.teams}
