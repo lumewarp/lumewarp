@@ -25,9 +25,18 @@ def test_unregistered_custom_strategy_nacks_and_keeps_last_snapshot(stack):
             what="initial snapshot ACK",
         )
         previous = stack.gateway_status()["acked_version"]
-        assert not any(
-            c.startswith("strategy:") for c in stack.gateway_status()["capabilities"]
-        )
+        # Built-ins are advertised too; a strategy that is not compiled in is not.
+        strategies = {
+            c.removeprefix("strategy:")
+            for c in stack.gateway_status()["capabilities"]
+            if c.startswith("strategy:")
+        }
+        assert strategies == {
+            "weighted",
+            "least_in_flight",
+            "lowest_latency",
+            "vllm_load",
+        }
         upstream = _upstream_id(stack, "mock")
         dep = _model(stack, "custom-model", upstream)
         stack.ok(
@@ -60,6 +69,36 @@ def test_unregistered_custom_strategy_nacks_and_keeps_last_snapshot(stack):
         assert status["last_nack_code"] == "NACK_CODE_UNSUPPORTED_FEATURE"
         assert previous <= status["acked_version"] < version
     assert gw.chat(seeded.a.secret).status_code == 200
+
+
+def test_alias_and_direct_model_through_the_control_plane(stack):
+    seeded = stack.seed()
+    gw = stack.start_gateway()
+    wait_for(lambda: gw.chat(seeded.a.secret).status_code == 200, 10, "router served")
+    router = next(r for r in stack.ok("GET", "/routers")["items"] if r["name"] == "mock")
+    alias = stack.ok("POST", "/aliases", json={"name": "nick", "target": router["id"]})
+    wait_for(lambda: gw.chat(seeded.a.secret, model="nick").status_code == 200, 10, "alias served")
+
+    response = gw.chat(seeded.a.secret, model="nick")
+    assert response.status_code == 200
+    request_id = response.headers["x-lumewarp-request-id"]
+    direct = gw.chat(seeded.a.secret, model="mock-a")
+    assert direct.status_code == 200, "a model is callable by its own name"
+
+    def row(wanted: str):
+        return next((r for r in stack.usage_rows() if str(r["request_id"]) == wanted), None)
+
+    wait_for(lambda: row(request_id), 10, "usage row with the response's request id")
+    found = row(request_id)
+    assert (found["requested"], found["model"]) == ("nick", "mock-a")
+    wait_for(lambda: row(direct.headers["x-lumewarp-request-id"]), 10, "direct usage row")
+    found = row(direct.headers["x-lumewarp-request-id"])
+    assert (found["requested"], found["model"]) == ("mock-a", "mock-a")
+
+    # A rename reaches the gateway as a delta and the old name stops working.
+    stack.ok("PATCH", f"/aliases/{alias['id']}", json={"name": "nick2"})
+    wait_for(lambda: gw.chat(seeded.a.secret, model="nick2").status_code == 200, 10, "new name")
+    assert gw.chat(seeded.a.secret, model="nick").status_code == 404
 
 
 def _upstream_id(stack, name: str) -> str:
