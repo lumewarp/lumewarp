@@ -8,7 +8,6 @@ every version published before it got the lock. Rollback takes it transaction-le
 
 import asyncio
 import hashlib
-import json
 import logging
 import random
 import time
@@ -16,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, func, literal, or_, select, update
+from sqlalchemy import func, literal, or_, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -26,14 +25,7 @@ from lumewarp_control_plane.compiler.catalog_state import (
     capture_catalog_state,
     restore_catalog_state,
 )
-from lumewarp_control_plane.compiler.compile import (
-    ROUTING_STRATEGY,
-    STICKY_BY,
-    STREAM_USAGE_MODE,
-    UPSTREAM_KIND,
-    CompileError,
-    compile_scope,
-)
+from lumewarp_control_plane.compiler.compile import CompileError, compile_scope
 from lumewarp_control_plane.compiler.validate import SnapshotInvalid, validate_snapshot
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.metrics import DISCARD, Metrics
@@ -42,16 +34,8 @@ from lumewarp_control_plane.models import (
     ConfigVersion,
     ConfigVersionKind,
     GatewaySession,
-    Model,
     OutboxStatus,
-    Router,
-    RouterFallback,
-    RouterModel,
-    RouterSplit,
-    RouterSplitModel,
     Scope,
-    StreamUsageMode,
-    Upstream,
 )
 from lumewarp_control_plane.settings import get_settings
 
@@ -297,129 +281,6 @@ async def publish_pending(
 # --------------------------------------------------------------------------- rollback
 
 
-async def _restore_routing(session: AsyncSession, old: pb.Snapshot) -> None:
-    """Restore every routing field, clearing absent settings and stale graph edges."""
-    kind = {v: k for k, v in UPSTREAM_KIND.items()}
-    mode = {v: k for k, v in STREAM_USAGE_MODE.items()}
-    strategy = {v: k for k, v in ROUTING_STRATEGY.items()}
-    sticky = {v: k for k, v in STICKY_BY.items()}
-
-    upstreams = {u.name: u for u in await session.scalars(select(Upstream))}
-    models = {d.name: d for d in await session.scalars(select(Model))}
-    routers = {r.name: r for r in await session.scalars(select(Router))}
-    want_routers = {r.name for r in old.routers}
-    want_models = {d.name for d in old.models}
-    want_upstreams = {u.name for u in old.upstreams}
-
-    # RESTRICT edges must disappear before their router/model targets do.
-    # Deleting splits cascades to their model memberships.
-    for table in (RouterFallback, RouterModel, RouterSplit):
-        await session.execute(delete(table))
-    for name, row in routers.items():
-        if name not in want_routers:
-            await session.delete(row)
-    await session.flush()
-
-    for u in old.upstreams:
-        row = upstreams.get(u.name) or Upstream(name=u.name)
-        row.kind = kind[u.kind]
-        row.base_url = u.base_url
-        row.api_key_ref = u.api_key_ref or None
-        row.timeout_ms = u.timeout_ms
-        row.stream_usage_mode = mode.get(u.stream_usage_mode, StreamUsageMode.INCLUDE_USAGE)
-        health = u.health_check if u.HasField("health_check") else None
-        row.health_check_path = health.path or None if health else None
-        row.health_check_interval_ms = health.interval_ms if health else None
-        row.health_check_timeout_ms = health.timeout_ms if health else None
-        row.health_check_unhealthy_threshold = (
-            health.unhealthy_threshold or None if health else None
-        )
-        row.health_check_healthy_threshold = health.healthy_threshold or None if health else None
-        breaker = u.circuit_breaker if u.HasField("circuit_breaker") else None
-        row.circuit_breaker_enabled = breaker is not None
-        row.circuit_failure_threshold = breaker.failure_threshold or None if breaker else None
-        row.circuit_open_ms = breaker.open_ms or None if breaker else None
-        row.metrics_url = u.metrics_url or None
-        session.add(row)
-        upstreams[u.name] = row
-    await session.flush()
-
-    for name, row in models.items():
-        if name not in want_models:
-            await session.delete(row)
-    await session.flush()
-    for d in old.models:
-        row = models.get(d.name) or Model(name=d.name)
-        row.upstream_id = upstreams[d.upstream].id
-        row.upstream_model = d.upstream_model
-        row.weight = d.weight
-        has_price = d.HasField("price")
-        row.price_input_nano_usd_per_mtok = d.price.input_nano_usd_per_mtok if has_price else None
-        row.price_output_nano_usd_per_mtok = d.price.output_nano_usd_per_mtok if has_price else None
-        session.add(row)
-        models[d.name] = row
-    await session.flush()
-
-    for name, row in upstreams.items():
-        if name not in want_upstreams:
-            await session.delete(row)
-    # Create every router before inserting fallbacks, whose targets may come later.
-    for r in old.routers:
-        row = routers.get(r.name) or Router(name=r.name)
-        row.strategy = strategy[r.strategy]
-        row.custom_strategy = r.custom_strategy or None
-        row.strategy_params = (
-            json.loads(r.strategy_params_json or "{}") if r.custom_strategy else None
-        )
-        retry = r.retry if r.HasField("retry") else None
-        row.retry_enabled = retry is not None
-        row.retry_max_attempts = retry.max_attempts or None if retry else None
-        row.retry_on_status = list(retry.retry_on_status) if retry else []
-        row.retry_total_timeout_ms = retry.total_timeout_ms if retry else 0
-        row.sticky = sticky[r.sticky]
-        row.sticky_header = r.sticky_header or None
-        session.add(row)
-        routers[r.name] = row
-    await session.flush()
-
-    for r in old.routers:
-        row = routers[r.name]
-        for position, name in enumerate(r.models):
-            session.add(
-                RouterModel(
-                    router_id=row.id,
-                    model_id=models[name].id,
-                    position=position,
-                )
-            )
-        for position, name in enumerate(r.fallbacks):
-            session.add(
-                RouterFallback(
-                    router_id=row.id,
-                    fallback_router_id=routers[name].id,
-                    position=position,
-                )
-            )
-        for position, split in enumerate(r.traffic_split):
-            split_row = RouterSplit(
-                router_id=row.id,
-                name=split.name,
-                weight=split.weight,
-                position=position,
-            )
-            session.add(split_row)
-            await session.flush()
-            for dep_position, name in enumerate(split.models):
-                session.add(
-                    RouterSplitModel(
-                        split_id=split_row.id,
-                        model_id=models[name].id,
-                        position=dep_position,
-                    )
-                )
-    await session.flush()
-
-
 async def rollback_routing(
     session: AsyncSession,
     scope: str,
@@ -433,34 +294,21 @@ async def rollback_routing(
     state, so a revoked key is never revived. Returns the new version number.
 
     Runs in the caller's transaction (the caller writes the audit row and commits). The
-    routing source tables are rewritten to match `to_version`, so later compiles keep the
-    rolled-back routing instead of silently reverting it. The published routing is exactly
-    `to_version`'s.
+    catalog source tables are restored by id from the version's `catalog_state`, so later
+    compiles keep the rolled-back routing and grants keep following their names across
+    renames. The published routing is exactly `to_version`'s.
     Raises LookupError if `to_version` is unknown or compacted, CompileError if the
     resulting snapshot is invalid.
     """
     await session.execute(select(func.pg_advisory_xact_lock(lock_key(scope))))
     row = await session.get(ConfigVersion, (scope, to_version))
-    if row is None or row.payload is None:
+    if row is None or row.payload is None or row.catalog_state is None:
         raise LookupError(f"config version {to_version} of scope {scope!r} is not retained")
     old = pb.Snapshot.FromString(row.payload)
-    # models.weight is a Postgres INTEGER; versions published before plugin weights
-    # were capped could carry larger uint32 weights. Refuse cleanly instead of a DB error.
-    too_heavy = [d.name for d in old.models if d.weight > (2**31 - 1)]
-    if too_heavy:
-        raise CompileError(
-            f"version {to_version} has model weights above {(2**31 - 1)} "
-            f"({', '.join(too_heavy)}); it cannot be restored"
-        )
-
-    if row.catalog_state is not None:
-        try:
-            await restore_catalog_state(session, row.catalog_state)
-        except ValueError as exc:
-            raise CompileError(str(exc)) from exc
-    else:
-        # TODO(c1): remove once the catalog conversion clears pre-sidecar versions.
-        await _restore_routing(session, old)
+    try:
+        await restore_catalog_state(session, row.catalog_state)
+    except ValueError as exc:
+        raise CompileError(str(exc)) from exc
     revision = await outbox.enqueue_recompile(session, scope, f"rollback to {to_version}")
     compiled = await compile_scope(
         session,

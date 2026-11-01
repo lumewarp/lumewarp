@@ -1,11 +1,14 @@
-"""Validation and serialization of compiled-in router strategy settings."""
+"""Validation and serialization of router strategy settings.
+
+Full schema validation arrives with the strategy descriptors (c8). Until then: built-in
+names take no params, any other well-shaped name is a compiled-in custom strategy.
+"""
 
 import json
 import re
 from typing import Any
 
-from lumewarp_control_plane.models import RoutingStrategy
-
+BUILTIN_STRATEGIES = frozenset({"weighted", "least_in_flight", "lowest_latency", "vllm_load"})
 MAX_PARAMS_BYTES = 16 * 1024
 STRATEGY_NAME = re.compile(r"[a-z][a-z0-9_]{0,62}")
 HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
@@ -17,28 +20,23 @@ def params_json(params: dict[str, Any]) -> str:
     )
 
 
-def strategy_problem(
-    strategy: RoutingStrategy, name: str | None, params: dict[str, Any]
-) -> str | None:
-    if strategy != RoutingStrategy.CUSTOM:
-        return "custom strategy fields require strategy custom" if name or params else None
-    if name is None or not STRATEGY_NAME.fullmatch(name):
-        return "custom_strategy must match ^[a-z][a-z0-9_]{0,62}$"
+def params_problem(params: dict[str, Any], field: str = "params") -> str | None:
+    """Limits every params object must meet, and the platform's `headers` rule."""
     # serde_json's default recursion budget accepts at most 127 nested containers.
     pending = [(params, 1)]
     while pending:
         value, depth = pending.pop()
         if depth > 127:
-            return "strategy_params exceeds the gateway JSON nesting limit"
+            return f"{field} exceeds the gateway JSON nesting limit"
         children = value.values() if isinstance(value, dict) else value
         pending.extend((child, depth + 1) for child in children if isinstance(child, (dict, list)))
     try:
         encoded = params_json(params)
         size = len(encoded.encode("utf-8"))
     except (ValueError, TypeError, UnicodeError):
-        return "strategy_params must be a JSON object with finite values"
+        return f"{field} must be a JSON object with finite values"
     if size > MAX_PARAMS_BYTES:
-        return "strategy_params exceeds 16 KiB"
+        return f"{field} exceeds 16 KiB"
     if "headers" in params:
         headers = params["headers"]
         if not isinstance(headers, list) or any(
@@ -48,5 +46,13 @@ def strategy_problem(
             in {"authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key"}
             for h in headers
         ):
-            return "strategy_params.headers must be an array of HTTP header names"
+            return f"{field}.headers must be an array of HTTP header names"
     return None
+
+
+def strategy_problem(strategy: str, params: dict[str, Any]) -> str | None:
+    if not STRATEGY_NAME.fullmatch(strategy):
+        return "strategy must match ^[a-z][a-z0-9_]{0,62}$"
+    if strategy in BUILTIN_STRATEGIES and params:
+        return f"built-in strategy {strategy!r} takes no params"
+    return params_problem(params)

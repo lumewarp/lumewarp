@@ -14,13 +14,9 @@ from lumewarp_control_plane.models import (
     ConfigVersion,
     Model,
     Router,
-    RouterModel,
-    RoutingStrategy,
     Scope,
     ServiceAccount,
     Team,
-    Upstream,
-    UpstreamKind,
     User,
 )
 from tests import factories
@@ -62,32 +58,23 @@ async def add_router(
     models: list[tuple[str, int | None]],
     *,
     upstream: str = "vllm",
-    strategy: RoutingStrategy = RoutingStrategy.WEIGHTED,
+    strategy: str = "weighted",
 ) -> Router:
-    """models: (name, input price or None)."""
-    up = await s.scalar(select(Upstream).where(Upstream.name == upstream))
-    if up is None:
-        up = Upstream(name=upstream, kind=UpstreamKind.VLLM, base_url=f"http://{upstream}/v1")
-        s.add(up)
-        await s.flush()
-    router = Router(name=name, strategy=strategy)
-    s.add(router)
-    await s.flush()
-    for pos, (name, price) in enumerate(models):
-        d = await s.scalar(select(Model).where(Model.name == name))
-        if d is None:
-            d = Model(
-                name=name,
-                upstream_id=up.id,
-                upstream_model=f"{name}-name",
+    """models: (name, input price or None), created on `upstream` unless they exist."""
+    up = await factories.make_upstream(s, upstream)
+    members = []
+    for model_name, price in models:
+        model = await s.scalar(select(Model).where(Model.name == model_name))
+        if model is None:
+            model = await factories.make_model(
+                s,
+                model_name,
+                up,
                 price_input_nano_usd_per_mtok=price,
                 price_output_nano_usd_per_mtok=price,
             )
-            s.add(d)
-            await s.flush()
-        s.add(RouterModel(router_id=router.id, model_id=d.id, position=pos))
-    await s.flush()
-    return router
+        members.append(model)
+    return await factories.make_router(s, name, members, strategy=strategy)
 
 
 async def load_version(factory: SessionFactory, version: int) -> snapshot_pb2.Snapshot:

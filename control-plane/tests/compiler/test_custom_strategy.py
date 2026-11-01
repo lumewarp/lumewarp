@@ -15,23 +15,27 @@ from lumewarp_control_plane.compiler import (
 )
 from lumewarp_control_plane.compiler.strategy import strategy_problem
 from lumewarp_control_plane.compiler.validate import SnapshotInvalid, validate_snapshot
-from lumewarp_control_plane.models import GatewaySession, Model, Router, RoutingStrategy
+from lumewarp_control_plane.models import CatalogKind, CatalogName, GatewaySession, Router
+from tests import factories
 from tests.compiler.helpers import OCT, SCOPE, add_router, load_version, seed_scope, touch
 from tests.conftest import create_database, drop_database
+
+
+def _wire_router(snapshot: pb.Snapshot, name: str = "custom") -> pb.Router:
+    return next(r for r in snapshot.routers if r.name == name)
 
 
 async def test_custom_strategy_compile_capability_warning_and_rollback(factory):
     await seed_scope(factory)
     async with factory() as s, s.begin():
-        router = await add_router(s, "custom", [("a", None)])
-        dep = await s.scalar(select(Model))
-        dep.weight = 0  # custom strategies, unlike weighted, can use zero-weight pools
-        router.strategy = RoutingStrategy.CUSTOM
-        router.custom_strategy = "header_pin"
-        router.strategy_params = {"headers": ["x-pin"]}
+        # Custom strategies, unlike weighted, can use zero-weight pools.
+        a = await factories.make_model(s, "a")
+        await factories.make_router(
+            s, "custom", [(a, 0)], strategy="header_pin", params={"headers": ["x-pin"]}
+        )
     async with factory() as s:
         result = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
-    router = result.snapshot.routers[0]
+    router = _wire_router(result.snapshot)
     assert router.strategy == pb.ROUTING_STRATEGY_CUSTOM
     assert router.custom_strategy == "header_pin"
     assert json.loads(router.strategy_params_json) == {"headers": ["x-pin"]}
@@ -52,17 +56,16 @@ async def test_custom_strategy_compile_capability_warning_and_rollback(factory):
     assert await publish_pending(factory, SCOPE, require_local_membership=True) == 1
     async with factory() as s, s.begin():
         config = await s.scalar(select(Router))
-        assert config.strategy is RoutingStrategy.CUSTOM
-        assert config.custom_strategy == "header_pin"
-        config.strategy_params = {"headers": ["x-other"]}
+        assert config.strategy == "header_pin"
+        config.params = {"headers": ["x-other"]}
     await touch(factory)
     assert await publish_pending(factory, SCOPE, require_local_membership=True) == 2
     async with factory() as s, s.begin():
         assert await rollback_routing(s, SCOPE, 1, require_local_membership=True) == 3
-    assert (await load_version(factory, 3)).routers[0] == router
+    assert _wire_router(await load_version(factory, 3)) == router
     async with factory() as s:
         compiled = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
-        assert compiled.snapshot.routers[0] == router
+        assert _wire_router(compiled.snapshot) == router
 
 
 @pytest.mark.parametrize(
@@ -142,42 +145,51 @@ async def test_custom_strategy_migration_up_down():
 
 
 @pytest.mark.parametrize(
-    ("strategy", "name", "params"),
-    [
-        (RoutingStrategy.CUSTOM, None, {}),
-        (RoutingStrategy.CUSTOM, "Bad", {}),
-        (RoutingStrategy.CUSTOM, "ok", []),
-        (RoutingStrategy.WEIGHTED, "ok", None),
-        (RoutingStrategy.WEIGHTED, None, {}),
-    ],
+    ("strategy", "params"),
+    [("Bad", {}), ("ok", []), ("9lives", {})],
 )
-async def test_router_custom_strategy_database_constraints(factory, strategy, name, params):
+async def test_router_strategy_database_constraints(factory, strategy, params):
     with pytest.raises(IntegrityError):
         async with factory() as s, s.begin():
-            s.add(
-                Router(
-                    name="invalid", strategy=strategy, custom_strategy=name, strategy_params=params
-                )
-            )
+            name = CatalogName(name="invalid", kind=CatalogKind.ROUTER)
+            s.add(name)
+            await s.flush()
+            s.add(Router(name_id=name.id, strategy=strategy, params=params))
             await s.flush()
 
 
-@pytest.mark.parametrize("params", [None, {}])
-async def test_custom_strategy_nullable_params_compile_as_object(factory, params):
+async def test_custom_strategy_empty_params_compile_as_object(factory):
     await seed_scope(factory)
     async with factory() as s, s.begin():
-        router = await add_router(s, "custom", [("a", None)])
-        router.strategy = RoutingStrategy.CUSTOM
-        router.custom_strategy = "header_pin"
-        router.strategy_params = params
+        await add_router(s, "custom", [("a", None)], strategy="header_pin")
     async with factory() as s:
         compiled = await compile_scope(s, SCOPE, require_local_membership=True)
-        assert json.loads(compiled.snapshot.routers[0].strategy_params_json) == {}
+        assert json.loads(_wire_router(compiled.snapshot).strategy_params_json) == {}
 
 
-def test_custom_params_nesting_matches_gateway_recursion_budget():
+def test_params_nesting_matches_gateway_recursion_budget():
     params = {}
     for _ in range(126):
         params = {"x": params}
-    assert strategy_problem("custom", "ok", params) is None
-    assert "nesting" in strategy_problem("custom", "ok", {"x": params})
+    assert strategy_problem("ok", params) is None
+    assert "nesting" in strategy_problem("ok", {"x": params})
+
+
+@pytest.mark.parametrize(
+    ("strategy", "params", "needle"),
+    [
+        ("Bad", {}, "must match"),
+        ("weighted", {"x": 1}, "takes no params"),
+        ("header_pin", {"headers": ["authorization"]}, "headers"),
+    ],
+)
+def test_strategy_problem(strategy, params, needle):
+    assert needle in strategy_problem(strategy, params)
+
+
+@pytest.mark.parametrize(
+    ("strategy", "params"),
+    [("weighted", {}), ("vllm_load", {}), ("header_pin", {"headers": ["x-pin"]})],
+)
+def test_strategy_accepted(strategy, params):
+    assert strategy_problem(strategy, params) is None

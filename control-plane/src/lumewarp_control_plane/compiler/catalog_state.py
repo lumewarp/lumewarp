@@ -1,11 +1,8 @@
-"""ID-preserving routing source state for rollback.
+"""ID-preserving catalog source state for rollback.
 
 This deliberately excludes teams, keys, grants and all other policy state. The wire
 snapshot remains the authority for published routing; this sidecar preserves database
 identities and source-only fields that cannot be reconstructed from protobuf names.
-
-TODO(c1): extend TABLES with catalog_names, aliases and member-local settings when the
-catalog schema lands. This preparatory implementation uses the current routing schema.
 """
 
 import uuid
@@ -15,29 +12,27 @@ from typing import Any
 from sqlalchemy import DateTime, Uuid, delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumewarp_control_plane import catalog
 from lumewarp_control_plane.models import (
+    Alias,
+    CatalogKind,
+    CatalogName,
     Model,
     Router,
     RouterFallback,
-    RouterModel,
+    RouterMember,
     RouterSplit,
-    RouterSplitModel,
+    RouterSplitMember,
     Upstream,
 )
 
+_ENTITY_TYPES = (Upstream, CatalogName, Model, Router)
+_EDGE_TYPES = (Alias, RouterMember, RouterFallback, RouterSplit, RouterSplitMember)
 # Parent-before-child insertion order; deletion runs in reverse. No policy tables.
-TABLES = (
-    Upstream.__table__,
-    Model.__table__,
-    Router.__table__,
-    RouterModel.__table__,
-    RouterFallback.__table__,
-    RouterSplit.__table__,
-    RouterSplitModel.__table__,
-)
-ENTITY_TABLES = TABLES[:3]
-EDGE_TABLES = TABLES[3:]
-FORMAT_VERSION = 1
+ENTITY_TABLES = tuple(cls.__table__ for cls in _ENTITY_TYPES)
+EDGE_TABLES = tuple(cls.__table__ for cls in _EDGE_TYPES)
+TABLES = (*ENTITY_TABLES, *EDGE_TABLES)
+FORMAT_VERSION = 2
 
 
 def _encode(value: Any) -> Any:
@@ -87,64 +82,75 @@ def _decode_state(state: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     return result
 
 
-async def restore_catalog_state(session: AsyncSession, state: dict[str, Any]) -> None:
-    """Restore routing by ID, retaining identities across renames and recreating deletions.
+def _pk(table) -> Any:
+    return next(iter(table.primary_key.columns))
 
-    Existing entity rows are updated, not deleted/reinserted. Policy is never read or
-    written here. The caller holds the scope/advisory locks and owns the transaction.
+
+async def _vacate_names(session: AsyncSession, table, rows: list[dict[str, Any]]) -> None:
+    """A rename may have swapped or reused names, so free every current one before
+    assigning historical names. Generated names cannot collide with one another.
+    """
+    occupied = set(await session.scalars(select(table.c.name)))
+    occupied.update(row["name"] for row in rows)
+    for identity in list(await session.scalars(select(table.c.id))):
+        temporary = f"__rollback_{uuid.uuid4().hex}"
+        while temporary in occupied:
+            temporary = f"__rollback_{uuid.uuid4().hex}"
+        occupied.add(temporary)
+        await session.execute(update(table).where(table.c.id == identity).values(name=temporary))
+
+
+async def restore_catalog_state(session: AsyncSession, state: dict[str, Any]) -> None:
+    """Restore the catalog by ID, keeping identities across renames and recreating deletions.
+
+    Existing entity rows are updated, not deleted/reinserted, so grants on them survive.
+    Names absent from the state are deleted and their grants (cascade) are audited; grants
+    of recreated names do not come back. Names the restore changes get a history row. The
+    caller holds the scope/advisory locks and owns the transaction.
     """
     rows = _decode_state(state)
     await session.flush()
+    names = CatalogName.__table__
+    upstreams = Upstream.__table__
+    wanted_names = {row["id"]: row["name"] for row in rows[names.name]}
+    current = (await session.execute(select(names.c.id, names.c.name, names.c.kind))).all()
+
     # Release all RESTRICT graph edges before deleting absent entities.
     for table in reversed(EDGE_TABLES):
         await session.execute(delete(table))
 
-    # A rename may have swapped/reused names. Vacate every current entity name before
-    # assigning historical names; generated UUID names cannot collide with one another.
-    for table in ENTITY_TABLES:
-        ids = list(await session.scalars(select(table.c.id)))
-        occupied = set(await session.scalars(select(table.c.name)))
-        occupied.update(row["name"] for row in rows[table.name])
-        for identity in ids:
-            temporary = f"__rollback_{uuid.uuid4().hex}"
-            while temporary in occupied:
-                temporary = f"__rollback_{uuid.uuid4().hex}"
-            occupied.add(temporary)
-            await session.execute(
-                update(table).where(table.c.id == identity).values(name=temporary)
-            )
-
-    # Remove stale models and routers first. A retained model may currently point at
-    # an upstream absent from the old state; keep that upstream until its FK is moved.
-    for table in reversed(ENTITY_TABLES[1:]):
-        wanted = [row["id"] for row in rows[table.name]]
-        await session.execute(delete(table).where(table.c.id.not_in(wanted)))
+    stale = [(i, name) for i, name, _ in current if i not in wanted_names]
+    await catalog.audit_grant_removal(session, stale)
+    for table in (upstreams, names):
+        await _vacate_names(session, table, rows[table.name])
+    # Cascades to models, routers and grants. A retained model may still point at an
+    # upstream absent from the state, so stale upstreams go once models have moved.
+    await session.execute(delete(names).where(names.c.id.not_in(list(wanted_names))))
 
     for table in ENTITY_TABLES:
-        existing = set(await session.scalars(select(table.c.id)))
+        key = _pk(table)
+        existing = set(await session.scalars(select(key)))
         for row in rows[table.name]:
-            if row["id"] in existing:
-                await session.execute(update(table).where(table.c.id == row["id"]).values(**row))
+            if row[key.name] in existing:
+                await session.execute(update(table).where(key == row[key.name]).values(**row))
             else:
                 await session.execute(insert(table).values(**row))
-    upstreams = Upstream.__table__
     await session.execute(
         delete(upstreams).where(upstreams.c.id.not_in([row["id"] for row in rows[upstreams.name]]))
     )
     for table in EDGE_TABLES:
         if rows[table.name]:
             await session.execute(insert(table), rows[table.name])
-    # Core writes bypass identity-map synchronization. Callers may already have loaded
-    # routing rows, so don't allow a later compiler read to reuse stale ORM attributes.
-    routing_types = (
-        Upstream,
-        Model,
-        Router,
-        RouterModel,
-        RouterFallback,
-        RouterSplit,
-        RouterSplitModel,
+    await catalog.record_renames(
+        session,
+        [
+            (i, CatalogKind(kind), name)
+            for i, name, kind in current
+            if i in wanted_names and wanted_names[i] != name
+        ],
     )
+    # Core writes bypass identity-map synchronization. Callers may already have loaded
+    # catalog rows, so don't allow a later compiler read to reuse stale ORM attributes.
     for instance in list(session.identity_map.values()):
-        if isinstance(instance, routing_types):
+        if isinstance(instance, (*_ENTITY_TYPES, *_EDGE_TYPES)):
             session.expire(instance)

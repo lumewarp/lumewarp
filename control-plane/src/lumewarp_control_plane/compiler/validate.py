@@ -14,7 +14,7 @@ from ipaddress import IPv6Address
 from urllib.parse import urlsplit
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
-from lumewarp_control_plane.compiler.strategy import STRATEGY_NAME, strategy_problem
+from lumewarp_control_plane.compiler.strategy import STRATEGY_NAME, params_problem
 
 # Capabilities the P2 gateway supports (snapshot.rs SUPPORTED_CAPABILITIES).
 SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
@@ -290,7 +290,9 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
                 raise SnapshotInvalid("strategy params must be a JSON object") from exc
             if not isinstance(params, dict):
                 raise SnapshotInvalid("strategy params must be a JSON object")
-            if problem := strategy_problem("custom", r.custom_strategy, params):
+            if not STRATEGY_NAME.fullmatch(r.custom_strategy):
+                raise SnapshotInvalid("custom_strategy must match ^[a-z][a-z0-9_]{0,62}$")
+            if problem := params_problem(params, "strategy_params"):
                 raise SnapshotInvalid(problem)
         elif r.custom_strategy or r.strategy_params_json:
             raise SnapshotInvalid("custom strategy fields require CUSTOM")

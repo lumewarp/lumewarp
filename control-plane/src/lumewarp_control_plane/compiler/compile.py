@@ -2,7 +2,8 @@
 
 import logging
 import uuid
-from collections.abc import Sequence
+from collections import Counter, defaultdict
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -20,18 +21,20 @@ from lumewarp_control_plane.compiler.validate import (
     validate_snapshot,
 )
 from lumewarp_control_plane.models import (
+    Alias,
     ApiKey,
+    CatalogName,
     GatewaySession,
     KeyLifecycle,
     KeyOwnerKind,
     Model,
     ModelAccess,
+    PolicyGrant,
     Router,
     RouterFallback,
-    RouterModel,
+    RouterMember,
     RouterSplit,
-    RouterSplitModel,
-    RoutingStrategy,
+    RouterSplitMember,
     Scope,
     ScopeType,
     ServiceAccount,
@@ -58,12 +61,12 @@ STREAM_USAGE_MODE = {
     StreamUsageMode.INCLUDE_USAGE: pb.STREAM_USAGE_MODE_INCLUDE_USAGE,
     StreamUsageMode.PASSTHROUGH: pb.STREAM_USAGE_MODE_PASSTHROUGH,
 }
+# TODO(c2): remove with the enum; any other name is emitted as CUSTOM.
 ROUTING_STRATEGY = {
-    RoutingStrategy.WEIGHTED: pb.ROUTING_STRATEGY_WEIGHTED,
-    RoutingStrategy.LEAST_IN_FLIGHT: pb.ROUTING_STRATEGY_LEAST_IN_FLIGHT,
-    RoutingStrategy.LOWEST_LATENCY: pb.ROUTING_STRATEGY_LOWEST_LATENCY,
-    RoutingStrategy.VLLM_LOAD: pb.ROUTING_STRATEGY_VLLM_LOAD,
-    RoutingStrategy.CUSTOM: pb.ROUTING_STRATEGY_CUSTOM,
+    "weighted": pb.ROUTING_STRATEGY_WEIGHTED,
+    "least_in_flight": pb.ROUTING_STRATEGY_LEAST_IN_FLIGHT,
+    "lowest_latency": pb.ROUTING_STRATEGY_LOWEST_LATENCY,
+    "vllm_load": pb.ROUTING_STRATEGY_VLLM_LOAD,
 }
 STICKY_BY = {
     StickyBy.NONE: pb.STICKY_BY_NONE,
@@ -130,6 +133,67 @@ def rate_limit_scope(level: ScopeType, scope_id: uuid.UUID, entity) -> pb.RateLi
     )
 
 
+class _WeightProjection:
+    """TODO(c2): remove. The current proto holds weight on `Model`, the catalog on router
+    members. Each model keeps its most used positive weight among weighted routers (1 if
+    none); a member with another weight points at a synthetic internal `Model` per
+    (model, weight), a copy that only differs in name and weight. Until c2 such a member's
+    usage and metrics carry the synthetic name. Whitespace keeps it out of the API's names.
+    """
+
+    def __init__(
+        self, models: Sequence[Model], weighted_members: Iterable[tuple[uuid.UUID, int]]
+    ) -> None:
+        self._models = {m.id: m for m in models}
+        seen: dict[uuid.UUID, Counter[int]] = defaultdict(Counter)
+        for model_id, weight in weighted_members:
+            seen[model_id][weight] += 1
+        self._canonical = {
+            m.id: min(
+                (w for w in seen[m.id] if w > 0), key=lambda w: (-seen[m.id][w], w), default=1
+            )
+            for m in models
+        }
+        self._taken = {m.name for m in models}
+        self._synthetic: dict[tuple[uuid.UUID, int], str] = {}
+
+    def member(self, model_id: uuid.UUID, weight: int, weighted: bool) -> str:
+        """The wire model name of a member. Only `weighted` pools read the weight."""
+        model = self._models[model_id]
+        if not weighted or weight == self._canonical[model_id]:
+            return model.name
+        key = (model_id, weight)
+        if key not in self._synthetic:
+            name = f"{model.name} [weight {weight}]"
+            while name in self._taken:
+                name += "~"
+            self._taken.add(name)
+            self._synthetic[key] = name
+        return self._synthetic[key]
+
+    def wire_models(self, upstream_name: dict[uuid.UUID, str]) -> list[pb.Model]:
+        def wire(model: Model, name: str, weight: int) -> pb.Model:
+            out = pb.Model(
+                name=name,
+                upstream=upstream_name[model.upstream_id],
+                upstream_model=model.upstream_model,
+                weight=weight,
+            )
+            if model.price_input_nano_usd_per_mtok is not None:
+                out.price.CopyFrom(
+                    pb.Price(
+                        input_nano_usd_per_mtok=model.price_input_nano_usd_per_mtok,
+                        output_nano_usd_per_mtok=model.price_output_nano_usd_per_mtok or 0,
+                    )
+                )
+            return out
+
+        return [
+            *(wire(m, m.name, self._canonical[i]) for i, m in self._models.items()),
+            *(wire(self._models[i], n, w) for (i, w), n in self._synthetic.items()),
+        ]
+
+
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 ONE_MS = timedelta(milliseconds=1)
 
@@ -182,17 +246,21 @@ async def compile_scope(
       else ACTIVE. Revoked keys are left out (the gateway answers 401 for them either
       way), so revocation is a key removal in deltas. Expiry is passed through as
       `expires_at_unix_ms` and enforced by the gateway.
+    - TODO(c2): remove the projection. The catalog is projected onto the current proto: a
+      model is a `Model` plus a single-member `Router` of the same name, a router is a
+      `Router` (member weights via `_WeightProjection`), an alias is a `Router` copying its
+      target under the alias name, a fallback model is that model's own `Router`.
     - Source rows the gateway would reject are left out and reported in `warnings`:
       upstreams with an invalid base URL (and their models), models with an
-      empty upstream_model, and routers that end up without models (or with an
-      empty traffic split), use a reserved alias, or are weighted with zero total weight
-      (per split when split).
+      empty upstream_model, routers that end up without models (or with an empty traffic
+      split), or are weighted with zero total weight (per split when split), aliases of
+      those, and any name that is empty or reserved.
       Expiry: NULL -> 0 (never); at or before the epoch -> 1 ms (expired).
     - P2 routing: upstream health_check / circuit_breaker / metrics_url and router retry /
       fallbacks / traffic_split / sticky are emitted when set; `required_capabilities`
       lists exactly the capabilities those fields need (validate.capabilities_used, the
       gateway's rule). A retry policy with max_attempts NULL is emitted as 0, which the
-      gateway reads as its default (2). Fallbacks to routers that are left out are
+      gateway reads as its default (2). Fallbacks to models that are left out are
       dropped (warning); a split whose models are all left out leaves the router out.
     - The result is checked against every gateway invariant (`validate.validate_snapshot`,
       mirroring snapshot.rs::validate and RoutingTable::compile); a violation is a CompileError.
@@ -209,12 +277,16 @@ async def compile_scope(
     if revision is None:
         raise CompileError(f"unknown config scope {scope!r}")
 
-    # Routing.
+    # Routing. Rename and rollback may have run in this session, hence populate_existing.
     upstreams = (await session.scalars(select(Upstream).order_by(Upstream.name))).all()
     upstream_name = {u.id: u.name for u in upstreams}
-    models = (await session.scalars(select(Model).order_by(Model.name))).all()
+    catalog_rows = select(Model).order_by(Model.name).execution_options(populate_existing=True)
+    models = (await session.scalars(catalog_rows)).all()
+    catalog_rows = select(Router).order_by(Router.name).execution_options(populate_existing=True)
+    routers = (await session.scalars(catalog_rows)).all()
+    catalog_rows = select(Alias).order_by(Alias.name).execution_options(populate_existing=True)
+    aliases = (await session.scalars(catalog_rows)).all()
     model_by_id = {d.id: d for d in models}
-    routers = (await session.scalars(select(Router).order_by(Router.name))).all()
     advertised = {
         cap
         for caps in await session.scalars(
@@ -224,27 +296,26 @@ async def compile_scope(
         )
         for cap in caps
     }
-    router_name = {r.id: r.name for r in routers}
-    members: dict[uuid.UUID, list[uuid.UUID]] = {}
-    for rd in await session.scalars(
-        select(RouterModel).order_by(RouterModel.router_id, RouterModel.position)
+    router_members: dict[uuid.UUID, list[RouterMember]] = {}
+    for rm in await session.scalars(
+        select(RouterMember).order_by(RouterMember.router_id, RouterMember.position)
     ):
-        members.setdefault(rd.router_id, []).append(rd.model_id)
+        router_members.setdefault(rm.router_id, []).append(rm)
     fallbacks: dict[uuid.UUID, list[uuid.UUID]] = {}
     for rf in await session.scalars(
         select(RouterFallback).order_by(RouterFallback.router_id, RouterFallback.position)
     ):
-        fallbacks.setdefault(rf.router_id, []).append(rf.fallback_router_id)
+        fallbacks.setdefault(rf.router_id, []).append(rf.model_id)
     split_rows = (
         await session.scalars(
             select(RouterSplit).order_by(RouterSplit.router_id, RouterSplit.position)
         )
     ).all()
-    split_members: dict[uuid.UUID, list[uuid.UUID]] = {}
-    for sd in await session.scalars(
-        select(RouterSplitModel).order_by(RouterSplitModel.split_id, RouterSplitModel.position)
+    split_members: dict[uuid.UUID, list[RouterSplitMember]] = {}
+    for sm in await session.scalars(
+        select(RouterSplitMember).order_by(RouterSplitMember.split_id, RouterSplitMember.position)
     ):
-        split_members.setdefault(sd.split_id, []).append(sd.model_id)
+        split_members.setdefault(sm.split_id, []).append(sm)
     splits: dict[uuid.UUID, list[RouterSplit]] = {}
     for sr in split_rows:
         splits.setdefault(sr.router_id, []).append(sr)
@@ -303,33 +374,67 @@ async def compile_scope(
             valid_models.append(d)
     valid_model_ids = {d.id for d in valid_models}
 
-    def positive(ids: list[uuid.UUID]) -> bool:
-        return sum(model_by_id[i].weight for i in ids) > 0
+    def weighted_pools():
+        for r in routers:
+            if r.strategy == "weighted":
+                yield router_members.get(r.id, [])
+                for sr in splits.get(r.id, []):
+                    yield split_members.get(sr.id, [])
 
-    # First pass: which routers are emitted (fallbacks may only name emitted routers).
-    emitted: list[tuple[Router, pb.Router]] = []
+    weights = _WeightProjection(
+        valid_models,
+        (
+            (m.model_id, m.weight)
+            for pool in weighted_pools()
+            for m in pool
+            if m.model_id in valid_model_ids
+        ),
+    )
+
+    # By name id: what fallbacks and aliases can point at.
+    projected: dict[uuid.UUID, pb.Router] = {}
+    for d in valid_models:
+        if d.name in RESERVED_ALIASES:
+            warnings.append(f"model {d.name!r} not callable: the name is reserved")
+            continue
+        projected[d.id] = pb.Router(
+            name=d.name, strategy=pb.ROUTING_STRATEGY_WEIGHTED, models=[d.name]
+        )
+    model_routers = dict(projected)
+
     for r in routers:
-        member_ids = members.get(r.id, [])
-        dropped = [model_by_id[i].name for i in member_ids if i not in valid_model_ids]
-        member_ids = [i for i in member_ids if i in valid_model_ids]
+        members_of_router = router_members.get(r.id, [])
+        dropped = [
+            model_by_id[m.model_id].name
+            for m in members_of_router
+            if m.model_id not in valid_model_ids
+        ]
+        members_of_router = [m for m in members_of_router if m.model_id in valid_model_ids]
         if dropped:
             warnings.append(f"router {r.name!r}: left-out models {dropped} removed")
         if not r.name or r.name in RESERVED_ALIASES:
             warnings.append(f"router {r.name!r} left out: alias is empty or reserved")
             continue
-        weighted = r.strategy is RoutingStrategy.WEIGHTED
-        router = pb.Router(name=r.name, strategy=ROUTING_STRATEGY[r.strategy])
-        if r.strategy is RoutingStrategy.CUSTOM:
-            router.custom_strategy = r.custom_strategy
-            router.strategy_params_json = params_json(r.strategy_params or {})
+        weighted = r.strategy == "weighted"
+        router = pb.Router(
+            name=r.name, strategy=ROUTING_STRATEGY.get(r.strategy, pb.ROUTING_STRATEGY_CUSTOM)
+        )
+        if router.strategy == pb.ROUTING_STRATEGY_CUSTOM:
+            router.custom_strategy = r.strategy
+            router.strategy_params_json = params_json(r.params)
+            capability = f"strategy:{r.strategy}"
+            if capability not in advertised:
+                warnings.append(
+                    f"router {r.name!r}: {capability} is not advertised by any connected gateway"
+                )
         router_splits = splits.get(r.id, [])
         if router_splits:
             bad = None
             for sr in router_splits:
-                ids = [i for i in split_members.get(sr.id, []) if i in valid_model_ids]
-                if not ids:
+                pool = [m for m in split_members.get(sr.id, []) if m.model_id in valid_model_ids]
+                if not pool:
                     bad = f"split {sr.name!r} has no models"
-                elif weighted and not positive(ids):
+                elif weighted and not sum(m.weight for m in pool):
                     bad = f"split {sr.name!r} is weighted with zero total weight"
                 if bad:
                     break
@@ -337,7 +442,7 @@ async def compile_scope(
                     pb.TrafficSplit(
                         name=sr.name,
                         weight=sr.weight,
-                        models=[model_by_id[i].name for i in ids],
+                        models=[weights.member(m.model_id, m.weight, weighted) for m in pool],
                     )
                 )
             if bad is None and not sum(sr.weight for sr in router_splits):
@@ -349,15 +454,17 @@ async def compile_scope(
             if r.sticky is StickyBy.HEADER:
                 router.sticky_header = r.sticky_header or ""
         else:
-            if not member_ids:
+            if not members_of_router:
                 warnings.append(f"router {r.name!r} left out: no models")
                 continue
-            if weighted and not positive(member_ids):
+            if weighted and not sum(m.weight for m in members_of_router):
                 warnings.append(f"router {r.name!r} left out: weighted with zero total weight")
                 continue
             if r.sticky is not StickyBy.NONE:
                 warnings.append(f"router {r.name!r}: sticky without a traffic split ignored")
-        router.models.extend(model_by_id[i].name for i in member_ids)
+        router.models.extend(
+            weights.member(m.model_id, m.weight, weighted) for m in members_of_router
+        )
         if r.retry_enabled:
             router.retry.CopyFrom(
                 pb.RetryPolicy(
@@ -367,44 +474,51 @@ async def compile_scope(
                     total_timeout_ms=r.retry_total_timeout_ms,
                 )
             )
-        emitted.append((r, router))
-
-    emitted_ids = {r.id for r, _ in emitted}
-    for r, router in emitted:
         for fallback in fallbacks.get(r.id, []):
-            if fallback in emitted_ids and fallback != r.id:
-                router.fallbacks.append(router_name[fallback])
+            if fallback in model_routers:
+                router.fallbacks.append(model_routers[fallback].name)
             else:
                 warnings.append(
-                    f"router {r.name!r}: fallback {router_name.get(fallback)!r} is left out,"
+                    f"router {r.name!r}: fallback {model_by_id[fallback].name!r} is left out,"
                     " dropped"
                 )
-        snap.routers.append(router)
-        if router.strategy == pb.ROUTING_STRATEGY_CUSTOM:
-            capability = f"strategy:{router.custom_strategy}"
-            if capability not in advertised:
-                warnings.append(
-                    f"router {r.name!r}: {capability} is not advertised by any connected gateway"
-                )
+        projected[r.id] = router
 
-    for d in valid_models:
-        dep = pb.Model(
-            name=d.name,
-            upstream=upstream_name[d.upstream_id],
-            upstream_model=d.upstream_model,
-            weight=d.weight,
-        )
-        if d.price_input_nano_usd_per_mtok is not None:
-            dep.price.CopyFrom(
-                pb.Price(
-                    input_nano_usd_per_mtok=d.price_input_nano_usd_per_mtok,
-                    output_nano_usd_per_mtok=d.price_output_nano_usd_per_mtok or 0,
-                )
-            )
-        snap.models.append(dep)
+    wire_routers = list(projected.values())
+    for a in aliases:
+        target = projected.get(a.target_name_id)
+        if not a.name or a.name in RESERVED_ALIASES:
+            warnings.append(f"alias {a.name!r} left out: name is empty or reserved")
+        elif target is None:
+            warnings.append(f"alias {a.name!r} left out: {a.target_name!r} is left out")
+        else:
+            copy = pb.Router()
+            copy.CopyFrom(target)
+            copy.name = a.name
+            wire_routers.append(copy)
+    snap.routers.extend(sorted(wire_routers, key=lambda r: r.name))
+    snap.models.extend(sorted(weights.wire_models(upstream_name), key=lambda m: m.name))
 
     # Teams, key owners and keys.
     teams = {t.id: t for t in await session.scalars(select(Team))}
+    granted: dict[tuple[uuid.UUID, uuid.UUID | None, uuid.UUID | None], list[str]] = {}
+    for team_id, user_id, account_id, name in await session.execute(
+        select(
+            PolicyGrant.team_id,
+            PolicyGrant.user_id,
+            PolicyGrant.service_account_id,
+            CatalogName.name,
+        ).join(CatalogName, CatalogName.id == PolicyGrant.name_id)
+    ):
+        granted.setdefault((team_id, user_id, account_id), []).append(name)
+
+    def allowed_names(entity: Team | TeamMember | ServiceAccount) -> list[str]:
+        if isinstance(entity, Team):
+            return granted.get((entity.id, None, None), [])
+        if isinstance(entity, TeamMember):
+            return granted.get((entity.team_id, entity.user_id, None), [])
+        return granted.get((entity.team_id, None, entity.id), [])
+
     members = {(m.team_id, m.user_id): m for m in await session.scalars(select(TeamMember))}
     service_accounts = {a.id: a for a in await session.scalars(select(ServiceAccount))}
     active_users = set(await session.scalars(select(User.id).where(User.is_active.is_(True))))
@@ -448,12 +562,12 @@ async def compile_scope(
         levels = [(ScopeType.TEAM, team.id, team)]
         if owner is not None:
             levels.append((owner_level, owner_scope_id, owner))
-        models: ModelSet = None
+        allowed: ModelSet = None
         for _, _, entity in levels:
-            models = narrow(models, entity.model_access, entity.allowed_models)
+            allowed = narrow(allowed, entity.model_access, allowed_names(entity))
         policy = pb.EffectivePolicy(
-            allow_all_models=models is None,
-            allowed_models=sorted(models or ()),
+            allow_all_models=allowed is None,
+            allowed_models=sorted(allowed or ()),
         )
         for level, scope_id, entity in levels:
             if (rl := rate_limit_scope(level, scope_id, entity)) is not None:

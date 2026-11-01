@@ -158,7 +158,7 @@ async def test_end_to_end(cp: ControlPlane) -> None:
             "price_output_nano_usd_per_mtok": 2_000,
         },
     )
-    await cp.post("/routers", {"name": "llama", "model_ids": [dep["id"]]})
+    await cp.post("/routers", {"name": "llama", "members": [{"model_id": dep["id"]}]})
     team = await cp.post("/teams", {"name": "ml"})
     account = await cp.post(
         f"/teams/{team['id']}/service-accounts", {"name": "chat", "budget_nano_usd": 1_000}
@@ -184,7 +184,7 @@ async def test_end_to_end(cp: ControlPlane) -> None:
         first = await a.next_update()
         assert first.WhichOneof("update") == "full"
         await a.until(lambda s: a.key(k1["id"]) is not None and a.key(k2["id"]) is not None)
-        assert [r.name for r in a.snapshot.routers] == ["llama"]
+        assert [r.name for r in a.snapshot.routers] == ["llama", "llama-a"]
         assert a.key(k1["id"]).status == pb.KEY_STATUS_ACTIVE
         before_revoke = a.snapshot.version
 

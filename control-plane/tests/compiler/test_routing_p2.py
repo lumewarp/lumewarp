@@ -21,11 +21,11 @@ from lumewarp_control_plane.models import (
     Router,
     RouterFallback,
     RouterSplit,
-    RouterSplitModel,
-    RoutingStrategy,
+    RouterSplitMember,
     StickyBy,
     Upstream,
 )
+from tests import factories
 from tests.compiler.helpers import OCT, SCOPE, add_router, seed_scope
 
 
@@ -42,13 +42,23 @@ async def _dep(s, name: str) -> Model:
     return await s.scalar(select(Model).where(Model.name == name))
 
 
-async def _split(s, router: Router, name: str, weight: int, deps: list[str], position: int):
+async def _split(
+    s,
+    router: Router,
+    name: str,
+    weight: int,
+    deps: list[str],
+    position: int,
+    member_weight: int = 1,
+):
     split = RouterSplit(router_id=router.id, name=name, weight=weight, position=position)
     s.add(split)
     await s.flush()
     for pos, dep in enumerate(deps):
         d = await _dep(s, dep)
-        s.add(RouterSplitModel(split_id=split.id, model_id=d.id, position=pos))
+        s.add(
+            RouterSplitMember(split_id=split.id, model_id=d.id, weight=member_weight, position=pos)
+        )
     await s.flush()
 
 
@@ -70,7 +80,7 @@ async def test_plain_routing_needs_no_capability(factory) -> None:
         await add_router(s, "llama", [("a", None)])
     snap = (await compile_(factory)).snapshot
     assert list(snap.required_capabilities) == []
-    up, router = snap.upstreams[0], snap.routers[0]
+    up, router = snap.upstreams[0], router_of(snap, "llama")
     assert not up.HasField("health_check") and not up.HasField("circuit_breaker")
     assert up.metrics_url == ""
     assert not router.HasField("retry") and not router.fallbacks and not router.traffic_split
@@ -137,10 +147,10 @@ async def test_invalid_metrics_url_is_left_out(factory) -> None:
 @pytest.mark.parametrize(
     ("strategy", "wire", "caps"),
     [
-        (RoutingStrategy.WEIGHTED, pb.ROUTING_STRATEGY_WEIGHTED, []),
-        (RoutingStrategy.LEAST_IN_FLIGHT, pb.ROUTING_STRATEGY_LEAST_IN_FLIGHT, []),
-        (RoutingStrategy.LOWEST_LATENCY, pb.ROUTING_STRATEGY_LOWEST_LATENCY, ["lowest_latency"]),
-        (RoutingStrategy.VLLM_LOAD, pb.ROUTING_STRATEGY_VLLM_LOAD, ["vllm_load"]),
+        ("weighted", pb.ROUTING_STRATEGY_WEIGHTED, []),
+        ("least_in_flight", pb.ROUTING_STRATEGY_LEAST_IN_FLIGHT, []),
+        ("lowest_latency", pb.ROUTING_STRATEGY_LOWEST_LATENCY, ["lowest_latency"]),
+        ("vllm_load", pb.ROUTING_STRATEGY_VLLM_LOAD, ["vllm_load"]),
     ],
 )
 async def test_strategies(factory, strategy, wire, caps) -> None:
@@ -148,7 +158,7 @@ async def test_strategies(factory, strategy, wire, caps) -> None:
     async with factory() as s, s.begin():
         await add_router(s, "llama", [("a", None)], strategy=strategy)
     snap = (await compile_(factory)).snapshot
-    assert snap.routers[0].strategy == wire
+    assert router_of(snap, "llama").strategy == wire
     assert list(snap.required_capabilities) == caps
 
 
@@ -176,26 +186,29 @@ async def test_fallbacks_ordered(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
         main = await add_router(s, "main", [("a", None)])
-        b = await add_router(s, "zzz-backup", [("b", None)])
-        c = await add_router(s, "aaa-backup", [("c", None)])
-        s.add(RouterFallback(router_id=main.id, fallback_router_id=b.id, position=0))
-        s.add(RouterFallback(router_id=main.id, fallback_router_id=c.id, position=1))
+        b = await factories.make_model(s, "zzz-backup")
+        c = await factories.make_model(s, "aaa-backup")
+        s.add(RouterFallback(router_id=main.id, model_id=b.id, position=0))
+        s.add(RouterFallback(router_id=main.id, model_id=c.id, position=1))
     snap = (await compile_(factory)).snapshot
+    # Each fallback model is served by its own single-member router.
     assert list(router_of(snap, "main").fallbacks) == ["zzz-backup", "aaa-backup"]
+    assert list(router_of(snap, "zzz-backup").models) == ["zzz-backup"]
     assert list(snap.required_capabilities) == ["fallbacks"]
 
 
-async def test_fallback_to_left_out_router_is_dropped(factory) -> None:
+async def test_fallback_to_left_out_model_is_dropped(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
         main = await add_router(s, "main", [("a", None)])
-        empty = await add_router(s, "empty", [])
-        s.add(RouterFallback(router_id=main.id, fallback_router_id=empty.id, position=0))
+        broken = await factories.make_upstream(s, "broken", base_url="ftp://broken")
+        bad = await factories.make_model(s, "bad", broken)
+        s.add(RouterFallback(router_id=main.id, model_id=bad.id, position=0))
     c = await compile_(factory)
-    assert [r.name for r in c.snapshot.routers] == ["main"]
-    assert list(c.snapshot.routers[0].fallbacks) == []
+    assert [r.name for r in c.snapshot.routers] == ["a", "main"]
+    assert list(router_of(c.snapshot, "main").fallbacks) == []
     assert list(c.snapshot.required_capabilities) == []
-    assert any("fallback 'empty'" in w for w in c.warnings)
+    assert any("fallback 'bad'" in w for w in c.warnings)
 
 
 async def test_traffic_split_and_sticky(factory) -> None:
@@ -245,7 +258,7 @@ async def test_split_without_valid_models_leaves_router_out(factory) -> None:
         broken = await s.scalar(select(Upstream).where(Upstream.name == "broken"))
         broken.base_url = "ftp://broken"
     c = await compile_(factory)
-    assert [r.name for r in c.snapshot.routers] == []
+    assert [r.name for r in c.snapshot.routers] == ["a"]
     assert any("split 'two' has no models" in w for w in c.warnings)
 
 
@@ -253,22 +266,22 @@ async def test_weighted_split_with_zero_weight_leaves_router_out(factory) -> Non
     await seed_scope(factory)
     async with factory() as s, s.begin():
         router = await add_router(s, "llama", [("a", None)])
-        await add_router(s, "zero", [("z", None)], strategy=RoutingStrategy.LEAST_IN_FLIGHT)
-        (await _dep(s, "z")).weight = 0
+        await add_router(s, "zero", [("z", None)], strategy="least_in_flight")
         await _split(s, router, "one", 1, ["a"], 0)
-        await _split(s, router, "two", 1, ["z"], 1)
+        await _split(s, router, "two", 1, ["z"], 1, member_weight=0)
     c = await compile_(factory)
-    assert [r.name for r in c.snapshot.routers] == ["zero"]
+    assert [r.name for r in c.snapshot.routers] == ["a", "z", "zero"]
     assert any("zero total weight" in w for w in c.warnings)
 
 
 async def test_all_capabilities_together(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
-        main = await add_router(s, "main", [("a", None)], strategy=RoutingStrategy.VLLM_LOAD)
-        fb = await add_router(s, "fb", [("b", None)], strategy=RoutingStrategy.LOWEST_LATENCY)
+        main = await add_router(s, "main", [("a", None)], strategy="vllm_load")
+        await add_router(s, "fast", [("b", None)], strategy="lowest_latency")
         main.retry_enabled = True
-        s.add(RouterFallback(router_id=main.id, fallback_router_id=fb.id, position=0))
+        b = await _dep(s, "b")
+        s.add(RouterFallback(router_id=main.id, model_id=b.id, position=0))
         await _split(s, main, "only", 1, ["a"], 0)
         up = await s.scalar(select(Upstream))
         up.health_check_interval_ms = 2000

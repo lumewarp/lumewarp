@@ -11,7 +11,6 @@ from lumewarp_control_plane.compiler import (
     compact_versions,
     compile_scope,
     publish_pending,
-    rollback_routing,
     store_version,
 )
 from lumewarp_control_plane.compiler.compile import expiry_ms
@@ -27,9 +26,9 @@ from lumewarp_control_plane.models import (
     GatewaySession,
     KeyLifecycle,
     Model,
-    RoutingStrategy,
     Upstream,
 )
+from tests import factories
 from tests.compiler.helpers import (
     OCT,
     SCOPE,
@@ -66,16 +65,17 @@ async def test_source_zero_weight_weighted_router_is_left_out(factory) -> None:
     async with factory() as s, s.begin():
         t, u = await add_hierarchy(s)
         key = await add_key(s, t, u)
-        await add_router(s, "zero", [("z1", None), ("z2", None)])
+        z1 = await factories.make_model(s, "z1")
+        z2 = await factories.make_model(s, "z2")
+        await factories.make_router(s, "zero", [(z1, 0), (z2, 0)])
         await add_router(s, "fine", [("ok", None)])
-        await add_router(s, "lif", [("z1", None)], strategy=RoutingStrategy.LEAST_IN_FLIGHT)
-        await s.execute(update(Model).where(Model.name.in_(["z1", "z2"])).values(weight=0))
+        await factories.make_router(s, "lif", [(z1, 0)], strategy="least_in_flight")
     await _revoke(factory, key)
     await touch(factory)
     assert await publish_pending(factory, SCOPE, require_local_membership=True) == 1
     snap = await load_version(factory, 1)
     # least_in_flight ignores weights, so only the weighted router is dropped.
-    assert [r.name for r in snap.routers] == ["fine", "lif"]
+    assert [r.name for r in snap.routers] == ["fine", "lif", "ok", "z1", "z2"]
     assert list(snap.api_keys) == []
     async with factory() as s:
         c = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
@@ -117,7 +117,7 @@ async def test_invalid_upstream_url_left_out_with_its_routers(factory) -> None:
     snap = c.snapshot
     assert [u.name for u in snap.upstreams] == ["vllm"]
     assert [d.name for d in snap.models] == ["fine-d"]
-    assert [r.name for r in snap.routers] == ["good"]
+    assert [r.name for r in snap.routers] == ["fine-d", "good"]
     assert len(c.warnings) >= 4
 
 
@@ -246,20 +246,6 @@ async def test_epoch_expiry_is_not_never(factory) -> None:
         c = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
     wire = {k.key_id: k.expires_at_unix_ms for k in c.snapshot.api_keys}
     assert wire == {str(epoch.id): 1, str(old.id): 1}
-
-
-async def test_rollback_to_overweight_version_is_a_compile_error(factory) -> None:
-    await seed_scope(factory)
-    snap = _valid_snapshot()
-    snap.scope = SCOPE
-    snap.ClearField("api_keys")
-    snap.ClearField("teams")
-    snap.models[0].weight = 2**31  # valid uint32, as older versions could carry
-    async with factory() as s, s.begin():
-        await store_version(s, SCOPE, snap, version=1, source_revision=0)
-    async with factory() as s, s.begin():
-        with pytest.raises(CompileError, match="cannot be restored"):
-            await rollback_routing(s, SCOPE, 1, require_local_membership=True)
 
 
 # --------------------------------------------------------------------------- 5

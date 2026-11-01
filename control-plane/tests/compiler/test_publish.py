@@ -193,7 +193,7 @@ async def test_rollback_restores_routing_not_security(factory) -> None:
 
     # Change routing and revoke k1.
     async with factory() as s, s.begin():
-        await s.execute(update(Model).values(upstream_model="llama-new", weight=7))
+        await s.execute(update(Model).values(upstream_model="llama-new"))
         await add_router(s, "qwen", [("qwen-a", None)])
         await s.execute(
             update(ApiKey)
@@ -276,7 +276,7 @@ async def test_diff_roundtrip_over_published_versions(factory) -> None:
     assert (d.base_version, d.version, d.created_at_unix_ms) == (1, 2, b.created_at_unix_ms)
     assert list(d.remove_api_keys) == [str(k1.id)]
     assert {k.key_id for k in d.upsert_api_keys} >= {str(k2.id)}
-    assert [r.name for r in d.upsert_routers] == ["qwen"]
+    assert [r.name for r in d.upsert_routers] == ["qwen", "qwen-a"]
     assert apply_delta(a, d) == b
     # Reverse direction and identity.
     assert apply_delta(b, diff(b, a)) == a

@@ -5,18 +5,20 @@ from sqlalchemy import delete, select
 
 from lumewarp_control_plane.compiler import compile_scope, publish_pending, rollback_routing
 from lumewarp_control_plane.models import (
+    Alias,
+    CatalogName,
     Model,
     Router,
     RouterFallback,
-    RouterModel,
+    RouterMember,
     RouterSplit,
-    RouterSplitModel,
-    RoutingStrategy,
+    RouterSplitMember,
     StickyBy,
     StreamUsageMode,
     Upstream,
     UpstreamKind,
 )
+from tests import factories
 from tests.compiler.helpers import SCOPE, add_router, load_version, seed_scope, touch
 
 GROUPS = [
@@ -39,6 +41,9 @@ GROUPS = [
     "sticky",
     "sticky_header",
     "members",
+    "member_weights",
+    "alias",
+    "model_name",
 ]
 
 
@@ -54,7 +59,7 @@ async def _set_group(session, group, configured):
     upstream = await session.scalar(select(Upstream).where(Upstream.name == "primary"))
     router = await session.scalar(select(Router).where(Router.name == "public"))
     models = {d.name: d for d in await session.scalars(select(Model))}
-    model = models["a"]
+    model = models.get("a") or models["a-renamed"]
     if group == "upstream":
         upstream.kind = UpstreamKind.OPENAI_COMPATIBLE if configured else UpstreamKind.VLLM
         upstream.base_url = "https://alternate/v1" if configured else "http://primary/v1"
@@ -81,7 +86,6 @@ async def _set_group(session, group, configured):
         secondary = await session.scalar(select(Upstream).where(Upstream.name == "secondary"))
         model.upstream_id = secondary.id if configured else upstream.id
         model.upstream_model = "alternate-name" if configured else "a-name"
-        model.weight = 7 if configured else 1
     elif group in ("price", "free_price"):
         model.price_input_nano_usd_per_mtok = (
             (0 if group == "free_price" else 123) if configured else None
@@ -90,16 +94,12 @@ async def _set_group(session, group, configured):
             (0 if group == "free_price" else 456) if configured else None
         )
     elif group == "strategy":
-        router.strategy = RoutingStrategy.LOWEST_LATENCY if configured else RoutingStrategy.WEIGHTED
+        router.strategy = "lowest_latency" if configured else "weighted"
     elif group in ("custom_strategy", "custom_params"):
         custom = configured or group == "custom_params"
-        router.strategy = RoutingStrategy.CUSTOM if custom else RoutingStrategy.WEIGHTED
-        router.custom_strategy = (
-            ("header_pin" if configured else "first_healthy") if custom else None
-        )
-        router.strategy_params = (
-            {"headers": ["x-pin"], "pin": "a" if configured else "b"} if custom else None
-        )
+        name = "header_pin" if configured else "first_healthy"
+        router.strategy = name if custom else "weighted"
+        router.params = {"headers": ["x-pin"], "pin": "a" if configured else "b"} if custom else {}
     elif group in ("retry", "retry_defaults"):
         explicit = configured and group == "retry"
         router.retry_enabled = configured
@@ -111,14 +111,9 @@ async def _set_group(session, group, configured):
         router.retry_max_attempts = 3
         await session.execute(delete(RouterFallback).where(RouterFallback.router_id == router.id))
         if configured:
-            targets = {r.name: r for r in await session.scalars(select(Router))}
-            for position, name in enumerate(("fallback-two", "fallback-one")):
+            for position, name in enumerate(("c", "b")):
                 session.add(
-                    RouterFallback(
-                        router_id=router.id,
-                        fallback_router_id=targets[name].id,
-                        position=position,
-                    )
+                    RouterFallback(router_id=router.id, model_id=models[name].id, position=position)
                 )
     elif group in ("traffic_split", "sticky", "sticky_header"):
         await session.execute(delete(RouterSplit).where(RouterSplit.router_id == router.id))
@@ -143,22 +138,32 @@ async def _set_group(session, group, configured):
                 await session.flush()
                 for dep_position, member in enumerate(members):
                     session.add(
-                        RouterSplitModel(
+                        RouterSplitMember(
                             split_id=split.id,
                             model_id=models[member].id,
                             position=dep_position,
                         )
                     )
     elif group == "members":
-        await session.execute(delete(RouterModel).where(RouterModel.router_id == router.id))
+        await session.execute(delete(RouterMember).where(RouterMember.router_id == router.id))
         for position, name in enumerate(("b", "a") if configured else ("a", "b")):
             session.add(
-                RouterModel(
-                    router_id=router.id,
-                    model_id=models[name].id,
-                    position=position,
-                )
+                RouterMember(router_id=router.id, model_id=models[name].id, position=position)
             )
+    elif group == "member_weights":
+        member = await session.get(RouterMember, (router.id, model.id))
+        member.weight = 7 if configured else 1
+    elif group == "alias":
+        alias = await session.scalar(select(Alias))
+        target = router if configured else model
+        if alias is None:
+            await factories.make_alias(session, "coder", target)
+        else:
+            alias.target_name_id, alias.target_kind = target.id, target.kind
+    elif group == "model_name":
+        name = await session.get(CatalogName, model.id)
+        # Compared by id across both directions: `models` above is keyed by the old name.
+        name.name = "a-renamed" if configured else "a"
     else:
         raise AssertionError(group)
 
@@ -202,16 +207,16 @@ async def test_rollback_removes_new_routing_graph_without_restrict_conflicts(fac
     await _seed(factory)
     assert await _publish(factory) == 1
     async with factory() as session, session.begin():
-        late = await add_router(session, "late", [("late-model", None)], upstream="late-upstream")
+        await add_router(session, "late", [("late-model", None)], upstream="late-upstream")
         router = await session.scalar(select(Router).where(Router.name == "public"))
         model = await session.scalar(select(Model).where(Model.name == "late-model"))
         router.retry_enabled = True
         router.retry_max_attempts = 2
-        session.add(RouterFallback(router_id=router.id, fallback_router_id=late.id, position=0))
+        session.add(RouterFallback(router_id=router.id, model_id=model.id, position=0))
         split = RouterSplit(router_id=router.id, name="late", weight=1, position=0)
         session.add(split)
         await session.flush()
-        session.add(RouterSplitModel(split_id=split.id, model_id=model.id, position=0))
+        session.add(RouterSplitMember(split_id=split.id, model_id=model.id, position=0))
     assert await _publish(factory) == 2
     await _rollback_and_compare(factory)
 
@@ -221,17 +226,14 @@ async def test_rollback_recreates_removed_routers_before_fallback_edges(factory)
     async with factory() as session, session.begin():
         await _set_group(session, "fallbacks", True)
         await _set_group(session, "traffic_split", True)
-        # Targets sort after public in the compiled snapshot and must be recreated
-        # before its outgoing edges can satisfy the foreign keys.
-        for router in await session.scalars(select(Router).where(Router.name != "public")):
-            router.name = f"zz-{router.name}"
     assert await _publish(factory) == 1
-    assert (await load_version(factory, 1)).routers[0].name == "public"
     async with factory() as session, session.begin():
         await session.execute(delete(RouterFallback))
         await session.execute(delete(RouterSplit))
-        await session.execute(delete(Router).where(Router.name != "public"))
-        await session.execute(delete(Model).where(Model.name == "c"))
+        await session.execute(
+            delete(CatalogName).where(CatalogName.name.in_(["fallback-one", "fallback-two"]))
+        )
+        await session.execute(delete(CatalogName).where(CatalogName.name == "c"))
         await session.execute(delete(Upstream).where(Upstream.name == "secondary"))
         router = await session.scalar(select(Router))
         router.sticky = StickyBy.NONE

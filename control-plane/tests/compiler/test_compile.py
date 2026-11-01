@@ -8,7 +8,6 @@ from lumewarp_control_plane.compiler import CompileError, compile_scope, narrow
 from lumewarp_control_plane.models import (
     KeyLifecycle,
     ModelAccess,
-    RoutingStrategy,
     ScopeType,
     UsageTotal,
     member_scope_id,
@@ -57,8 +56,8 @@ def key_of(compiled, key) -> pb.ApiKey:
         # Explicit empty list is deny-all at either level.
         (lvl(ALL), lvl(LIST), False, []),
         (lvl(LIST), lvl(ALL), False, []),
-        # Empty names are dropped; order and duplicates normalized.
-        (lvl(LIST, "z", "a", "", "a"), {}, False, ["a", "z"]),
+        # Order is normalized.
+        (lvl(LIST, "z", "a"), {}, False, ["a", "z"]),
     ],
 )
 async def test_two_level_allowlist_narrowing(
@@ -349,14 +348,17 @@ async def test_routing(factory) -> None:
     async with factory() as s, s.begin():
         await add_router(s, "llama", [("llama-b", 5), ("llama-a", None)])
         await add_router(s, "empty", [])
-        await add_router(s, "fast", [("llama-a", None)], strategy=RoutingStrategy.LOWEST_LATENCY)
+        await add_router(s, "fast", [("llama-a", None)], strategy="lowest_latency")
         await add_router(s, "unknown", [("llama-a", None)])
     c = await compile_(factory)
     snap = c.snapshot
-    assert [r.name for r in snap.routers] == ["fast", "llama"]
-    assert snap.routers[0].strategy == pb.ROUTING_STRATEGY_LOWEST_LATENCY
-    assert list(snap.routers[1].models) == ["llama-b", "llama-a"]  # position order kept
-    assert snap.routers[1].strategy == pb.ROUTING_STRATEGY_WEIGHTED
+    # Each model is also callable through its own single-member router.
+    routers = {r.name: r for r in snap.routers}
+    assert list(routers) == ["fast", "llama", "llama-a", "llama-b"]
+    assert routers["fast"].strategy == pb.ROUTING_STRATEGY_LOWEST_LATENCY
+    assert list(routers["llama"].models) == ["llama-b", "llama-a"]  # position order kept
+    assert routers["llama"].strategy == pb.ROUTING_STRATEGY_WEIGHTED
+    assert list(routers["llama-a"].models) == ["llama-a"]
     assert len(c.warnings) == 2
     deps = {d.name: d for d in snap.models}
     assert not deps["llama-a"].HasField("price")  # unknown, not free
