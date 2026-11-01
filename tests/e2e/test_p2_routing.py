@@ -35,10 +35,9 @@ def test_unregistered_custom_strategy_nacks_and_keeps_last_snapshot(stack):
             "/routers",
             json={
                 "name": "custom-test",
-                "model_ids": [dep],
-                "strategy": "custom",
-                "custom_strategy": "header_pin",
-                "strategy_params": {"headers": ["x-pin"]},
+                "members": [{"model_id": dep}],
+                "strategy": "header_pin",
+                "params": {"headers": ["x-pin"]},
             },
         )
         revision = pg(
@@ -83,7 +82,7 @@ def _bad_upstream(stack, **settings) -> str:
     )["id"]
 
 
-def _model(stack, name: str, upstream_id: str, weight: int = 1) -> str:
+def _model(stack, name: str, upstream_id: str) -> str:
     return stack.ok(
         "POST",
         "/models",
@@ -91,7 +90,6 @@ def _model(stack, name: str, upstream_id: str, weight: int = 1) -> str:
             "name": name,
             "upstream_id": upstream_id,
             "upstream_model": "mock",
-            "weight": weight,
             "price_input_nano_usd_per_mtok": 1_000_000_000,
             "price_output_nano_usd_per_mtok": 2_000_000_000,
         },
@@ -158,14 +156,14 @@ def test_retry_to_second_model_records_one_usage_event(stack):
     seeded = stack.seed()
     bad = _bad_upstream(stack)
     good = _upstream_id(stack, "mock")
-    ids = [
-        _model(stack, "bad-a", bad, BAD_WEIGHT),
-        _model(stack, "good-a", good),
+    members = [
+        {"model_id": _model(stack, "bad-a", bad), "weight": BAD_WEIGHT},
+        {"model_id": _model(stack, "good-a", good)},
     ]
     stack.ok(
         "POST",
         "/routers",
-        json={"name": "retry", "model_ids": ids, "retry": {"max_attempts": 2}},
+        json={"name": "retry", "members": members, "retry": {"max_attempts": 2}},
     )
     gw = stack.start_gateway()
     _wait_served(gw, seeded.a.secret, "retry")
@@ -186,7 +184,7 @@ def test_retry_to_second_model_records_one_usage_event(stack):
         assert row["cost_known"] and row["prompt_tokens"] > 0
 
 
-def test_fallback_router_serves_with_original_model(stack):
+def test_fallback_model_serves_with_original_model(stack):
     seeded = stack.seed()
     bad = _bad_upstream(stack)
     good = _upstream_id(stack, "mock")
@@ -201,14 +199,7 @@ def test_fallback_router_serves_with_original_model(stack):
             "base_url": f"http://127.0.0.1:{free_port()}/v1",
         },
     )["id"]
-    backup = stack.ok(
-        "POST",
-        "/routers",
-        json={
-            "name": "backup",
-            "model_ids": [_model(stack, "good-a", good)],
-        },
-    )
+    backup = _model(stack, "good-a", good)
     primaries = {}
     for model, upstream in (("primary", bad), ("primary-down", down)):
         primaries[model] = stack.ok(
@@ -216,16 +207,16 @@ def test_fallback_router_serves_with_original_model(stack):
             "/routers",
             json={
                 "name": model,
-                "model_ids": [_model(stack, f"{model}-a", upstream)],
+                "members": [{"model_id": _model(stack, f"{model}-a", upstream)}],
                 # Fallbacks share the router's attempt budget: primary + fallback.
                 "retry": {"max_attempts": 2},
-                "fallback_router_ids": [backup["id"]],
+                "fallback_model_ids": [backup],
             },
         )
     # The backup cannot be deleted while it is a fallback.
-    assert stack.api("DELETE", f"/routers/{backup['id']}").status_code == 409
+    assert stack.api("DELETE", f"/models/{backup}").status_code == 409
     gw = stack.start_gateway()
-    _wait_served(gw, seeded.a.secret, "primary", "primary-down", "backup")
+    _wait_served(gw, seeded.a.secret, "primary", "primary-down", "good-a")
 
     for model in ("primary", "primary-down"):
         r = gw.chat(seeded.a.secret, model=model)
@@ -241,8 +232,8 @@ def test_fallback_router_serves_with_original_model(stack):
     assert events and all(e["model"] == "primary-down" for e in events)
 
     fallbacks = _series(gw, "lumewarp_fallbacks_total")
-    assert fallbacks.get('{router="primary",model="backup"}') == 1, fallbacks
-    assert fallbacks.get('{router="primary-down",model="backup"}') == 2, (
+    assert fallbacks.get('{router="primary",model="good-a"}') == 1, fallbacks
+    assert fallbacks.get('{router="primary-down",model="good-a"}') == 2, (
         fallbacks
     )
     assert _attempts(gw, "primary-a", "retryable_status") == 1
@@ -254,7 +245,7 @@ def test_fallback_router_serves_with_original_model(stack):
         ("primary-down", "good-a", 200),
         ("primary-down", "good-a", 200),
     ]
-    assert primaries["primary"]["fallback_router_ids"] == [backup["id"]]
+    assert primaries["primary"]["fallback_model_ids"] == [backup]
 
 
 def test_uri_contract_snapshot_is_accepted_by_gateway(stack):
@@ -340,11 +331,11 @@ def test_circuit_breaker_opens_and_stops_traffic(stack):
         stack, circuit_breaker={"failure_threshold": threshold, "open_ms": 60000}
     )
     good = _upstream_id(stack, "mock")
-    ids = [
-        _model(stack, "bad-a", bad, BAD_WEIGHT),
-        _model(stack, "good-a", good),
+    members = [
+        {"model_id": _model(stack, "bad-a", bad), "weight": BAD_WEIGHT},
+        {"model_id": _model(stack, "good-a", good)},
     ]
-    stack.ok("POST", "/routers", json={"name": "cb", "model_ids": ids})
+    stack.ok("POST", "/routers", json={"name": "cb", "members": members})
     gw = stack.start_gateway()
     _wait_served(gw, seeded.a.secret, "cb")
     state = 'lumewarp_upstream_circuit_state{model="bad-a"}'

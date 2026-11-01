@@ -96,7 +96,7 @@ class Fleet:
         self.router_id = stack.ok(
             "POST",
             "/routers",
-            json={"name": "mock", "model_ids": [self.models["mock-a"]]},
+            json={"name": "mock", "members": [{"model_id": self.models["mock-a"]}]},
         )["id"]
         self.teams: list[dict] = []
         self.owners: list[dict] = []
@@ -143,7 +143,7 @@ class Fleet:
                     self.keys.append(self.create_key(owner["id"]))
         self.wait_published()
 
-    def create_model(self, name: str, weight: int = 1) -> str:
+    def create_model(self, name: str) -> str:
         price_in, price_out = PRICES[name]
         return self.stack.ok(
             "POST",
@@ -152,7 +152,6 @@ class Fleet:
                 "name": name,
                 "upstream_id": self.upstream_id,
                 "upstream_model": "mock",
-                "weight": weight,
                 "price_input_nano_usd_per_mtok": price_in,
                 "price_output_nano_usd_per_mtok": price_out,
             },

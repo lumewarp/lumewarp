@@ -133,7 +133,7 @@ seed() {
   local up dep team sa
   up="$(api POST /upstreams '{"name":"mock","kind":"openai_compatible","base_url":"http://127.0.0.1:9100/v1"}' | jq -r .id)"
   dep="$(api POST /models "{\"name\":\"mock-local\",\"upstream_id\":\"$up\",\"upstream_model\":\"mock\"}" | jq -r .id)"
-  api POST /routers "{\"name\":\"demo\",\"model_ids\":[\"$dep\"]}" >/dev/null
+  api POST /routers "{\"name\":\"demo\",\"members\":[{\"model_id\":\"$dep\"}]}" >/dev/null
   team="$(api POST /teams '{"name":"demo","model_access":"all"}' | jq -r .id)"
   sa="$(api POST "/teams/$team/service-accounts" '{"name":"chat"}' | jq -r .id)"
   api POST "/teams/$team/keys" "{\"name\":\"demo\",\"service_account_id\":\"$sa\"}" \

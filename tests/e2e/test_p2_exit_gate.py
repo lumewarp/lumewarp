@@ -207,7 +207,7 @@ def traffic(keys):
             "price_output_nano_usd_per_mtok": 2_000_000_000,
         },
     )
-    stack.ok("POST", "/routers", json={"name": "mock", "model_ids": [model["id"]]})
+    stack.ok("POST", "/routers", json={"name": "mock", "members": [{"model_id": model["id"]}]})
 
     def published():
         rows = pg(stack.dsn, "SELECT payload FROM config_versions ORDER BY version DESC LIMIT 1")

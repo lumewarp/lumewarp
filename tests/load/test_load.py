@@ -153,16 +153,19 @@ def test_churn_under_load(stack):
         a = fleet.models["mock-a"]
         timeline["before_b"] = stack.current_version()
         b = fleet.create_model("mock-b")
-        stack.ok("PATCH", f"/routers/{fleet.router_id}", json={"model_ids": [a, b]})
+        def set_weights(a_weight: int, b_weight: int) -> None:
+            members = [{"model_id": a, "weight": a_weight}, {"model_id": b, "weight": b_weight}]
+            stack.ok("PATCH", f"/routers/{fleet.router_id}", json={"members": members})
+
+        set_weights(1, 1)
         timeline["ab"] = wait_acked(stack)
         time.sleep(6)
         timeline["ab_end"] = stack.current_version()
-        stack.ok("PATCH", f"/models/{a}", json={"weight": 0})
+        set_weights(0, 1)
         timeline["b_only"] = wait_acked(stack)
         time.sleep(6)
         timeline["b_only_end"] = stack.current_version()
-        stack.ok("PATCH", f"/models/{a}", json={"weight": 1})
-        stack.ok("PATCH", f"/routers/{fleet.router_id}", json={"model_ids": [a]})
+        stack.ok("PATCH", f"/routers/{fleet.router_id}", json={"members": [{"model_id": a}]})
         r = stack.api("DELETE", f"/models/{b}")
         assert r.status_code == 204, r.text
         timeline["a_only"] = wait_acked(stack)

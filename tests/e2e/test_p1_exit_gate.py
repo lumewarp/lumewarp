@@ -225,7 +225,7 @@ def test_authz_denials(stack):
         "/models",
         json={"name": "mock-b", "upstream_id": up["id"], "upstream_model": "mock"},
     )
-    stack.ok("POST", "/routers", json={"name": "other-model", "model_ids": [dep["id"]]})
+    stack.ok("POST", "/routers", json={"name": "other-model", "members": [{"model_id": dep["id"]}]})
     other = stack.ok(
         "POST",
         f"/teams/{seeded.team_id}/service-accounts",
