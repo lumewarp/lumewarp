@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 import httpx
-from stack import ADMIN_TOKEN, ROOT, SCOPE, Gateway, Proc, Stack, free_port, pg, wait_for
+from stack import ROOT, SCOPE, Gateway, Proc, Stack, free_port, pg, wait_for
 
 
 def env_int(name: str, default: int) -> int:
@@ -133,7 +133,7 @@ class Fleet:
                     )
                     owner |= {
                         "owner_kind": "service_account",
-                        "token": ADMIN_TOKEN,
+                        "token": None,
                         "policy_path": f"/service-accounts/{owner['id']}",
                         "scope_type": "service_account",
                         "scope_id": owner["id"],

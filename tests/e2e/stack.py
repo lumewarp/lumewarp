@@ -19,7 +19,7 @@ import asyncpg
 import httpx
 
 ROOT = Path(__file__).resolve().parents[2]
-ADMIN_TOKEN = "e2e-bootstrap-token"
+BREAK_GLASS_PASSWORD = "e2e-break-glass-password"
 SCOPE = "e2e"
 GATEWAY_ID = "gw-e2e"
 FORBIDDEN_PORTS = {9000, 5432, 8080, 8081}
@@ -235,7 +235,9 @@ class Stack:
         self.cp_env = {
             **self.base_env,
             "LUMEWARP_DATABASE_URL": self.sa_url,
-            "LUMEWARP_BOOTSTRAP_TOKEN": ADMIN_TOKEN,
+            "LUMEWARP_BREAK_GLASS_PASSWORD": BREAK_GLASS_PASSWORD,
+            "LUMEWARP_SESSION_COOKIE_SECURE": "false",
+            "LUMEWARP_ADMIN_GROUP": "lumewarp-admins",
             "LUMEWARP_SCOPE": SCOPE,
             "LUMEWARP_HTTP_BIND": f"127.0.0.1:{self.http_port}",
             "LUMEWARP_GRPC_BIND": f"127.0.0.1:{self.grpc_port}",
@@ -301,6 +303,12 @@ class Stack:
             )
 
         wait_for(up, 30, "control plane /readyz")
+        response = self.admin.post(
+            self.api_url + "/session/break-glass", json={"password": BREAK_GLASS_PASSWORD}
+        )
+        assert response.status_code == 204, response.text
+        info = self.admin.get(self.api_url + "/session").json()
+        self.admin.headers["X-Lumewarp-CSRF"] = info["csrf_token"]
 
     def start_mock(self, tag: str, *args: str) -> int:
         """Start another mock upstream (e.g. with fault injection); returns its port."""
@@ -363,12 +371,14 @@ class Stack:
 
     # REST --------------------------------------------------------------------------
 
-    def api(self, method: str, path: str, token: str = ADMIN_TOKEN, **kwargs) -> httpx.Response:
+    def api(self, method: str, path: str, token: str | None = None, **kwargs) -> httpx.Response:
         return self.admin.request(
-            method, self.api_url + path, headers={"authorization": f"Bearer {token}"}, **kwargs
+            method, self.api_url + path,
+            headers={"authorization": f"Bearer {token}"} if token is not None else {},
+            **kwargs
         )
 
-    def ok(self, method: str, path: str, token: str = ADMIN_TOKEN, **kwargs) -> dict:
+    def ok(self, method: str, path: str, token: str | None = None, **kwargs) -> dict:
         r = self.api(method, path, token, **kwargs)
         assert r.status_code in (200, 201), (method, path, r.status_code, r.text)
         return r.json()
@@ -405,7 +415,7 @@ class Stack:
         body = {}
         if owner_budget is not None:
             body["budget_nano_usd"] = owner_budget
-        token = ADMIN_TOKEN
+        token = None
         if owner_kind == "user":
             token = self.create_pat("owner@e2e.test", team["id"], "member")
             owner_id = self.ok("GET", "/users/me", token)["user_id"]
@@ -431,7 +441,7 @@ class Stack:
         return Seeded(team["id"], owner_id, keys["a"], keys["b"])
 
     def create_pat(self, email: str, team_id: str, role: str) -> str:
-        """User + membership via REST; the PAT row is inserted directly (the bootstrap
+        """User + membership via REST; the PAT row is inserted directly (the break-glass
         principal cannot own tokens)."""
         from lumewarp_control_plane.security import SecretKind, generate_secret
 

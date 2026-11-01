@@ -78,13 +78,12 @@ def _whoami_app(settings: Settings) -> FastAPI:
 async def _user_with_pat(
     session: AsyncSession,
     *,
-    superuser: bool = False,
     active: bool = True,
     expires_at: datetime | None = None,
     revoked: bool = False,
     last_used_at: datetime | None = None,
 ) -> tuple[User, str]:
-    user = User(email=f"{uuid.uuid4().hex}@example.com", is_superuser=superuser, is_active=active)
+    user = User(email=f"{uuid.uuid4().hex}@example.com", is_active=active)
     session.add(user)
     await session.flush()
     new = generate_secret(SecretKind.PAT)
@@ -116,7 +115,7 @@ async def test_current_principal(settings: Settings, committed: AsyncSession) ->
     team = await factories.make_team(committed)
     user, pat = await _user_with_pat(committed)
     await factories.make_member(committed, team, user)
-    _, su_pat = await _user_with_pat(committed, superuser=True)
+    _, su_pat = await _user_with_pat(committed)
     _, inactive = await _user_with_pat(committed, active=False)
     _, expired = await _user_with_pat(committed, expires_at=datetime.now(UTC) - timedelta(1))
     _, revoked = await _user_with_pat(committed, revoked=True)
@@ -135,8 +134,7 @@ async def test_current_principal(settings: Settings, committed: AsyncSession) ->
             "user_id": str(user.id),
         }
         assert call(su_pat).json()["kind"] == PrincipalKind.USER.value
-        boot = call("test-bootstrap-token").json()
-        assert boot == {"kind": "bootstrap", "user_id": None}
+        assert call("test-bootstrap-token").status_code == 401
 
         for bad in (None, inactive, expired, revoked, "lwp-unknown", "test-bootstrap-tokenx"):
             r = call(bad)
@@ -195,7 +193,7 @@ async def test_auth_leaves_request_session_to_handler(
     await committed.commit()
 
     with TestClient(_transactional_app(settings)) as client:
-        for token in (never, recent, stale, "test-bootstrap-token"):
+        for token in (never, recent, stale):
             # Twice: the second call sees last_used_at freshly set by the first.
             for _ in range(2):
                 r = client.post("/write", headers={"Authorization": f"Bearer {token}"})

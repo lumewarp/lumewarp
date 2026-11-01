@@ -10,7 +10,7 @@ from lumewarp_control_plane.api import keys, members
 from lumewarp_control_plane.api.schemas import KeyUpdate
 from lumewarp_control_plane.authz import RequestAuthz
 from lumewarp_control_plane.models import ApiKey, KeyLifecycle, TeamMember
-from lumewarp_control_plane.security import Principal
+from lumewarp_control_plane.security import Principal, PrincipalKind
 from tests.factories import make_key, make_member, make_team, make_user
 
 
@@ -49,7 +49,7 @@ async def test_key_mutation_and_member_removal_do_not_deadlock(
     monkeypatch.setattr(keys, "lock_scope", key_scope)
     monkeypatch.setattr(keys, "_get_key", get_key)
     monkeypatch.setattr(members, "lock_scope", member_scope)
-    authz = RequestAuthz(Principal.bootstrap(), client.app.state.authorizer)
+    authz = RequestAuthz(Principal(kind=PrincipalKind.BREAK_GLASS), client.app.state.authorizer)
     request = SimpleNamespace(app=client.app)
     async with (
         AsyncSession(api_engine, expire_on_commit=False) as key_session,

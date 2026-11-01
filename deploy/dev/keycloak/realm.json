@@ -5,6 +5,7 @@
   "sslRequired": "none",
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,
+  "groups": [{"name": "lumewarp-admins"}],
   "clients": [
     {
       "clientId": "lumewarp-cp",
@@ -18,6 +19,21 @@
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "false",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ],
       "redirectUris": [
         "http://localhost:8091/api/v1/session/oidc/callback",
         "http://127.0.0.1:8091/api/v1/session/oidc/callback",
@@ -39,6 +55,7 @@
   "users": [
     {
       "username": "alice@example.com",
+      "groups": ["lumewarp-admins"],
       "email": "alice@example.com",
       "emailVerified": true,
       "enabled": true,

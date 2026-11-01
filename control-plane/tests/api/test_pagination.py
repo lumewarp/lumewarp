@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.api.helpers import BOOTSTRAP_AUTH
+from tests.api.helpers import ADMIN_AUTH
 from tests.factories import make_key, make_member, make_service_account, make_team
 
 
@@ -28,7 +28,7 @@ async def test_entity_pagination(client, committed, group) -> None:
         params = {"limit": 2}
         if cursor is not None:
             params["cursor"] = cursor
-        response = client.get(path, params=params, headers=BOOTSTRAP_AUTH)
+        response = client.get(path, params=params, headers=ADMIN_AUTH)
         assert response.status_code == 200, response.text
         page = response.json()
         assert len(page["items"]) <= 2
@@ -41,6 +41,6 @@ async def test_entity_pagination(client, committed, group) -> None:
     assert len(seen) == len(set(seen))
     assert seen == sorted(seen)
     assert expected <= set(seen)
-    assert client.get(path, params={"cursor": "nope"}, headers=BOOTSTRAP_AUTH).status_code == 422
+    assert client.get(path, params={"cursor": "nope"}, headers=ADMIN_AUTH).status_code == 422
     for limit in (0, 501):
-        assert client.get(path, params={"limit": limit}, headers=BOOTSTRAP_AUTH).status_code == 422
+        assert client.get(path, params={"limit": limit}, headers=ADMIN_AUTH).status_code == 422

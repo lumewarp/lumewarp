@@ -32,11 +32,13 @@ controlPlane:
   databaseUrl:
     secretName: lumewarp-control-plane
     key: database-url
-  # Optional existing Secret holding LUMEWARP_BOOTSTRAP_TOKEN (installation superuser).
-  # Without it, log in with a personal access token created out of band.
-  bootstrapToken:
-    secretName: ""
-    key: bootstrap-token
+  # IAM group allowed to manage installation settings. Empty = emergency access only.
+  adminGroup: ""
+  # Optional existing Secret containing an argon2id password hash.
+  breakGlass:
+    passwordHashSecret:
+      name: ""
+      key: password-hash
   # Snapshot scope this installation publishes; gateways must use the same value.
   scope: default
   service:

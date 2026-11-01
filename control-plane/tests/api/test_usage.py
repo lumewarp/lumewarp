@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 import pytest
 
 from lumewarp_control_plane.models import ScopeType
-from tests.api.helpers import BOOTSTRAP_AUTH, auth, usage_event, usage_total, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, usage_event, usage_total, user_with_token
 from tests.factories import make_key, make_member, make_service_account, make_team
 
 START = datetime(2026, 3, 1, tzinfo=UTC)
@@ -14,7 +14,7 @@ END = datetime(2026, 4, 1, tzinfo=UTC)
 TS = datetime(2026, 3, 10, 23, 30, tzinfo=UTC)
 
 
-def query(client, headers=BOOTSTRAP_AUTH, **params):
+def query(client, headers=ADMIN_AUTH, **params):
     return client.get(
         "/api/v1/usage",
         params={"from": START.isoformat(), "to": END.isoformat(), **params},

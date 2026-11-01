@@ -8,18 +8,22 @@ That keeps committed audit/outbox rows out of tests that assert on a pristine da
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from lumewarp_control_plane.app import create_app
-from lumewarp_control_plane.models import Scope
+from lumewarp_control_plane.auth.sessions import csrf_token
+from lumewarp_control_plane.models import Scope, UserSession
+from lumewarp_control_plane.security import PrincipalKind, hash_secret
 from lumewarp_control_plane.settings import Settings
 from tests.conftest import migrated_database
 
 API_SCOPE = "api-test"
-BOOTSTRAP_TOKEN = "test-bootstrap-token"
+ADMIN_PASSWORD = "test-break-glass-password"
 
 
 @pytest.fixture(scope="session")
@@ -41,15 +45,37 @@ async def api_scope(api_engine: AsyncEngine) -> str:
         if await session.get(Scope, API_SCOPE) is None:
             session.add(Scope(name=API_SCOPE))
             await session.commit()
+        credential = await session.scalar(
+            select(UserSession).where(UserSession.token_hash == hash_secret("test-admin-session"))
+        )
+        if credential is None:
+            session.add(
+                UserSession(
+                    user_id=None,
+                    kind=PrincipalKind.BREAK_GLASS.value,
+                    token_hash=hash_secret("test-admin-session"),
+                    csrf_hash=hash_secret(csrf_token("test-admin-session")),
+                    expires_at=datetime.now(UTC) + timedelta(days=1),
+                )
+            )
+            await session.commit()
     return API_SCOPE
 
 
 @pytest.fixture
-def api_settings(api_database_url: str, api_scope: str) -> Settings:
+async def api_settings(api_database_url: str, api_scope: str, api_engine: AsyncEngine) -> Settings:
+    async with AsyncSession(api_engine) as session, session.begin():
+        await session.execute(
+            update(UserSession)
+            .where(UserSession.token_hash == hash_secret("test-admin-session"))
+            .values(revoked_at=None)
+        )
     return Settings(
         database_url=api_database_url,
         background_enabled=False,
-        bootstrap_token=BOOTSTRAP_TOKEN,
+        break_glass_password=ADMIN_PASSWORD,
+        admin_group="lumewarp-admins",
+        session_cookie_secure=False,
         scope=api_scope,
     )
 

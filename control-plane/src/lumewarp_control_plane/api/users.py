@@ -113,7 +113,6 @@ async def create_user(body: UserCreate, authz: Authz, session: SessionDep) -> Us
         row = User(
             email=body.email,
             display_name=body.display_name,
-            is_superuser=body.is_superuser,
             is_active=body.is_active,
         )
         session.add(row)
@@ -139,8 +138,8 @@ async def get_current_user(request: Request, authz: Authz, session: SessionDep) 
             kind=principal.kind.value,
             user_id=None,
             email=None,
-            display_name="bootstrap",
-            is_superuser=True,
+            display_name="break-glass",
+            is_admin=True,
             manages_grants=manages_grants,
             teams=[],
         )
@@ -152,7 +151,7 @@ async def get_current_user(request: Request, authz: Authz, session: SessionDep) 
         user_id=user.id,
         email=user.email,
         display_name=user.display_name,
-        is_superuser=await authz.is_superuser(),
+        is_admin=await authz.is_admin(),
         manages_grants=manages_grants,
         teams=await _my_teams(authz, session, user.id),
     )
@@ -190,7 +189,7 @@ async def create_own_token(
     session: SessionDep,
 ) -> TokenCreated:
     if authz.user_id is None:
-        raise ApiError(400, "bad_request", "the bootstrap token cannot own personal tokens")
+        raise ApiError(400, "bad_request", "break-glass sessions cannot own personal tokens")
     return await _issue_token(body, authz.principal, session, authz.user_id)
 
 
@@ -207,7 +206,7 @@ async def create_user_token(
     session: SessionDep,
     response: Response,
 ) -> TokenCreated:
-    """Issue a PAT on behalf of a user; only installation superusers may do so."""
+    """Issue a PAT on behalf of a user; requires admin group membership."""
     await authz.require(Action.USER_MANAGE)
     response.headers["Cache-Control"] = "no-store"
     return await _issue_token(body, authz.principal, session, user_id)
@@ -290,16 +289,16 @@ async def update_user(
     metrics: MetricsDep,
 ) -> UserOut:
     await authz.require(Action.USER_MANAGE)
-    _check_not_null(body, "email", "display_name", "is_superuser", "is_active")
+    _check_not_null(body, "email", "display_name", "is_active")
     async with mutation(session):
         await lock_scope(session, settings)
         row = await session.get(User, user_id)
         if row is None:
             raise not_found("user not found")
-        if row.id == authz.user_id and (body.is_superuser is False or body.is_active is False):
-            raise conflict("you cannot remove your own superuser or active status")
+        if row.id == authz.user_id and body.is_active is False:
+            raise conflict("you cannot remove your own active status")
         was_active = row.is_active
-        for name in ("email", "display_name", "is_superuser", "is_active"):
+        for name in ("email", "display_name", "is_active"):
             if name in body.model_fields_set:
                 setattr(row, name, getattr(body, name))
         suspended = 0

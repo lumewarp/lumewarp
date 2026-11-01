@@ -11,7 +11,7 @@ export function useMe() {
  * disable actions. Purely cosmetic: the server enforces every request.
  */
 export function can(me: Me | undefined) {
-  const isSuper = !!me?.is_superuser;
+  const isSuper = !!me?.is_admin || me?.kind === "break_glass";
   const teamRole = (teamId: string) => me?.teams.find((t) => t.team_id === teamId)?.role;
   const canManageKey = (key: Key) =>
     isSuper ||

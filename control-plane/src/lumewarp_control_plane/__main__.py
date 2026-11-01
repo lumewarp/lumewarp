@@ -111,6 +111,7 @@ def _bootstrap(settings: Settings, args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lumewarp-control-plane")
     sub = parser.add_subparsers(dest="command")
+    sub.add_parser("hash-password", help="read a password from stdin or prompt and print argon2id")
 
     p = sub.add_parser("serve", help="run the HTTP API, gRPC services and background loops")
     p.add_argument("--http-bind", help="host:port (default LUMEWARP_HTTP_BIND)")
@@ -133,7 +134,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-COMMANDS = {"serve": _serve, "migrate": _migrate, "openapi": _openapi, "bootstrap": _bootstrap}
+def _hash_password(settings: Settings, args: argparse.Namespace) -> None:
+    import getpass
+
+    from lumewarp_control_plane.auth.break_glass import PASSWORD_HASHER
+
+    password = (
+        getpass.getpass("Password: ") if sys.stdin.isatty() else sys.stdin.readline().rstrip("\r\n")
+    )
+    if not password:
+        raise SystemExit("password must not be empty")
+    print(PASSWORD_HASHER.hash(password))
+
+
+COMMANDS = {
+    "serve": _serve,
+    "migrate": _migrate,
+    "openapi": _openapi,
+    "bootstrap": _bootstrap,
+    "hash-password": _hash_password,
+}
 
 
 def main(argv: list[str] | None = None) -> None:

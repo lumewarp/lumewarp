@@ -1,4 +1,4 @@
-"""Gateway fleet status and gateway tokens (installation-level, superuser only)."""
+"""Gateway fleet status and gateway tokens (installation-level, admin group member only)."""
 
 from __future__ import annotations
 

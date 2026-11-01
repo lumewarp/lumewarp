@@ -1,14 +1,14 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
-import { api } from "../api";
-import { clearToken, setToken } from "../auth";
+import { api, client } from "../api";
+import { clearToken } from "../auth";
 import { TextField } from "../components/Form";
 
 const SSO_ERRORS: Record<string, string> = {
   invalid_state: "Your SSO sign-in expired or was already used. Please try again.",
   access_denied: "Your account was not granted access. Contact your administrator.",
-  oidc_error: "Single sign-on failed. Please try again or use an access token.",
+  oidc_error: "Single sign-on failed. Please try again or use emergency sign-in.",
 };
 
 function intendedPath() {
@@ -18,7 +18,7 @@ function intendedPath() {
 }
 
 export function Login() {
-  const [token, setTok] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const navigate = useNavigate();
@@ -34,17 +34,23 @@ export function Login() {
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!token.trim()) return setError("Token is required");
+    if (!password) return setError("Password is required");
     setBusy(true);
     setError(undefined);
-    setToken(token.trim());
+    clearToken();
     try {
+      const result = await client.POST("/api/v1/session/break-glass", { body: { password } });
+      if (!result.response.ok) {
+        throw new Error(result.response.status === 429 ? "Too many login attempts. Try again later." : "Invalid password");
+      }
+      setPassword("");
+      await api.session();
       await api.me();
       qc.clear();
       await navigate({ href: next });
     } catch (err) {
       clearToken();
-      setError(err instanceof Error && err.message !== "Session expired" ? err.message : "Invalid token");
+      setError(err instanceof Error ? err.message : "Sign-in failed");
     } finally {
       setBusy(false);
     }
@@ -60,8 +66,8 @@ export function Login() {
         <h1>Sign in</h1>
         <p className="muted">
           {session.data?.oidc_enabled
-            ? "Sign in with your identity provider or use an access token."
-            : "Use a personal access token or the bootstrap admin token."}
+            ? "Sign in with your identity provider."
+            : "Single sign-on is not configured."}
         </p>
         {ssoError && <p className="form-error" role="alert">{ssoError}</p>}
         {session.data?.oidc_enabled && (
@@ -76,10 +82,16 @@ export function Login() {
             Sign in with SSO
           </button>
         )}
-        <TextField label="Access token" type="password" value={token} onChange={setTok} error={error} autoFocus />
-        <button className={`btn${session.data?.oidc_enabled ? "" : " btn-primary"}`} disabled={busy}>
-          {busy ? "Signing in…" : "Sign in"}
-        </button>
+        {session.data?.break_glass_enabled && (
+          <>
+            <p className="muted">Emergency sign-in · break-glass</p>
+            <TextField label="Break-glass password" type="password" value={password} onChange={setPassword} error={error} autoFocus />
+            <button className={`btn${session.data?.oidc_enabled ? "" : " btn-primary"}`} disabled={busy}>
+              {busy ? "Signing in…" : "Sign in"}
+            </button>
+          </>
+        )}
+        {session.error && <p className="form-error" role="alert">{session.error.message}</p>}
       </form>
     </div>
   );

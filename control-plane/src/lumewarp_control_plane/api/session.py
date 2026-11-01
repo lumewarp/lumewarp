@@ -1,5 +1,6 @@
 """Browser login, session discovery and local logout."""
 
+import asyncio
 import hmac
 import logging
 import secrets
@@ -9,13 +10,14 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy import delete, or_, select, update
 
-from lumewarp_control_plane.auth import oidc, sessions
-from lumewarp_control_plane.authz import INSTALLATION, Decision, Relation
+from lumewarp_control_plane import audit
+from lumewarp_control_plane.auth import break_glass, oidc, sessions
+from lumewarp_control_plane.authz import RequestAuthz
 from lumewarp_control_plane.errors import ApiError, not_found
-from lumewarp_control_plane.models import OIDCLoginState, User, UserSession
+from lumewarp_control_plane.models import ActorType, OIDCLoginState, User, UserSession
 from lumewarp_control_plane.security import (
     CurrentPrincipal,
     PrincipalKind,
@@ -32,12 +34,14 @@ class SessionUser(BaseModel):
     id: uuid.UUID
     email: str
     display_name: str
-    is_superuser: bool
+    is_admin: bool
 
 
 class SessionInfo(BaseModel):
     oidc_enabled: bool
+    break_glass_enabled: bool
     authenticated: bool
+    is_break_glass: bool = False
     user: SessionUser | None = None
     csrf_token: str | None = None
 
@@ -46,7 +50,9 @@ class SessionInfo(BaseModel):
 async def session_info(request: Request, response: Response) -> SessionInfo:
     response.headers["Cache-Control"] = "no-store"
     info = SessionInfo(
-        oidc_enabled=bool(request.app.state.settings.oidc_issuer), authenticated=False
+        oidc_enabled=bool(request.app.state.settings.oidc_issuer),
+        break_glass_enabled=break_glass.enabled(request.app.state.settings),
+        authenticated=False,
     )
     try:
         principal = await current_principal(request)
@@ -55,23 +61,75 @@ async def session_info(request: Request, response: Response) -> SessionInfo:
             raise
         return info
     info.authenticated = True
+    info.is_break_glass = principal.is_break_glass
     if principal.user_id is not None:
         async with request.app.state.session_factory() as session:
             user = await session.get(User, principal.user_id)
-            decision = await request.app.state.authorizer.check(
-                str(user.id), Relation.SUPERUSER, INSTALLATION
+            authz = RequestAuthz(
+                principal, request.app.state.authorizer, request.app.state.settings.admin_group
             )
             info.user = SessionUser(
                 id=user.id,
                 email=user.email,
                 display_name=user.display_name,
-                is_superuser=(
-                    user.is_superuser if decision is Decision.ERROR else decision is Decision.ALLOW
-                ),
+                is_admin=await authz.is_admin(),
             )
-    if principal.kind is PrincipalKind.SESSION:
+    if principal.kind in (PrincipalKind.SESSION, PrincipalKind.BREAK_GLASS):
         info.csrf_token = sessions.csrf_token(request.cookies[sessions.COOKIE_NAME])
     return info
+
+
+class BreakGlassLogin(BaseModel):
+    password: SecretStr = Field(max_length=4096)
+
+
+@router.post("/break-glass", operation_id="loginBreakGlass")
+async def login_break_glass(body: BreakGlassLogin, request: Request) -> Response:
+    settings = request.app.state.settings
+    if not break_glass.enabled(settings):
+        raise not_found()
+    # Never trust forwarded headers for the rate-limit identity.
+    ip = request.client.host if request.client else "unknown"
+    limiter = request.app.state.break_glass_limiter
+    result = "rate_limited"
+    secret = None
+    if limiter.reserve(ip):
+        valid = await asyncio.to_thread(
+            break_glass.verify, body.password.get_secret_value(), settings
+        )
+        result = "success" if valid else "failure"
+    async with request.app.state.session_factory() as session, session.begin():
+        if result == "success":
+            secret = await sessions.create_session(
+                session,
+                None,
+                settings.break_glass_session_ttl_seconds,
+                kind=PrincipalKind.BREAK_GLASS,
+            )
+        audit.record(
+            session,
+            action="session.break_glass.login",
+            resource_type="session",
+            actor_type=ActorType.BREAK_GLASS,
+            details={"result": result},
+        )
+    request.app.state.metrics.break_glass_logins.labels(result).inc()
+    if result == "rate_limited":
+        raise ApiError(429, "rate_limited", "too many login attempts")
+    if result == "failure":
+        raise ApiError(401, "invalid_credentials", "invalid password")
+    limiter.success(ip)
+    response = Response(status_code=204, headers={"Cache-Control": "no-store"})
+    response.set_cookie(
+        sessions.COOKIE_NAME,
+        secret,
+        max_age=settings.break_glass_session_ttl_seconds,
+        httponly=True,
+        secure=settings.session_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+    return response
 
 
 def require_oidc(request: Request) -> None:
@@ -199,9 +257,19 @@ async def callback(request: Request) -> RedirectResponse:
         )
         if not claims or not isinstance(claims.get("sub"), str) or not claims["sub"]:
             raise ValueError("missing subject")
+        if settings.oidc_groups_claim not in claims:
+            userinfo = await remote.userinfo(token=token)
+            if userinfo.get("sub") != claims["sub"]:
+                raise ValueError("userinfo subject mismatch")
+            claims = {
+                **claims,
+                settings.oidc_groups_claim: userinfo.get(settings.oidc_groups_claim, []),
+            }
         async with request.app.state.session_factory() as session, session.begin():
             user = await oidc.resolve_user(session, claims, request)
-            secret = await sessions.create_session(session, user.id, settings.session_ttl_seconds)
+            secret = await sessions.create_session(
+                session, user.id, settings.session_ttl_seconds, groups=oidc.groups(claims, request)
+            )
     except oidc.LoginDenied as exc:
         return callback_failure(response, "access_denied", exc)
     except Exception as exc:
@@ -221,7 +289,7 @@ async def callback(request: Request) -> RedirectResponse:
 
 @router.post("/logout", status_code=204, operation_id="logoutSession")
 async def logout(request: Request, principal: CurrentPrincipal) -> Response:
-    if principal.kind is PrincipalKind.SESSION:
+    if principal.kind in (PrincipalKind.SESSION, PrincipalKind.BREAK_GLASS):
         async with request.app.state.session_factory() as session, session.begin():
             await session.execute(
                 update(UserSession)
@@ -229,7 +297,7 @@ async def logout(request: Request, principal: CurrentPrincipal) -> Response:
                 .values(revoked_at=datetime.now(UTC))
             )
     response = Response(status_code=204, headers={"Cache-Control": "no-store"})
-    if principal.kind is PrincipalKind.SESSION:
+    if principal.kind in (PrincipalKind.SESSION, PrincipalKind.BREAK_GLASS):
         response.delete_cookie(
             sessions.COOKIE_NAME,
             path="/",

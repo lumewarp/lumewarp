@@ -19,8 +19,9 @@ from lumewarp_control_plane.authz import RequestAuthz
 from lumewarp_control_plane.compiler import compile_scope
 from lumewarp_control_plane.errors import ApiError
 from lumewarp_control_plane.models import AuditLog, ConfigOutbox, Deployment
-from lumewarp_control_plane.security import Principal
-from tests.api.helpers import BOOTSTRAP_AUTH, auth, suffix, user_with_token
+from lumewarp_control_plane.security import Principal, PrincipalKind
+from tests.api.helpers import ADMIN_AUTH as BOOTSTRAP_AUTH
+from tests.api.helpers import auth, suffix, user_with_token
 
 H = BOOTSTRAP_AUTH
 
@@ -338,7 +339,7 @@ async def test_concurrent_weight_zeroing_preserves_pool(
     first_locked = asyncio.Event()
     second_attempted = asyncio.Event()
     original_lock = routing.lock_scope
-    authz = RequestAuthz(Principal.bootstrap(), client.app.state.authorizer)
+    authz = RequestAuthz(Principal(kind=PrincipalKind.BREAK_GLASS), client.app.state.authorizer)
     async with (
         AsyncSession(api_engine, expire_on_commit=False) as first,
         AsyncSession(api_engine, expire_on_commit=False) as second,

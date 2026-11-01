@@ -53,6 +53,14 @@ class Metrics:
     def __init__(self) -> None:
         self.registry = CollectorRegistry(auto_describe=True)
         r = self.registry
+        self.break_glass_logins = Counter(
+            "lumewarp_cp_break_glass_logins",
+            "Emergency password login attempts.",
+            ["result"],
+            registry=r,
+        )
+        for result in ("success", "failure", "rate_limited"):
+            self.break_glass_logins.labels(result)
         self.compile_duration = Histogram(
             "lumewarp_cp_compile_duration_seconds",
             "Duration of compiling and validating a config snapshot.",

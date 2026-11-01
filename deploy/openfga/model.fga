@@ -1,20 +1,17 @@
 # OpenFGA authorization model for Lumewarp.
 #
-# The relations mirror `authz.Relation` in the control plane: `superuser` on the
-# installation, and `admin` / `member` on a team. `admin` implies `member`, and an
-# installation `superuser` is an admin of every team through its `installation`
-# relation. The IdP is authentication only; grants live here.
+# IAM manages group membership. The control plane applies the configured admin
+# group to installation and team-admin actions. Team admin implies member.
 model
   schema 1.1
 
 type user
 
-type installation
+type group
   relations
-    define superuser: [user]
+    define member: [user]
 
 type team
   relations
-    define installation: [installation]
-    define admin: [user] or superuser from installation
+    define admin: [user]
     define member: [user] or admin

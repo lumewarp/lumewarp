@@ -6,7 +6,7 @@ import pytest
 
 from lumewarp_control_plane.authz import Authorizer, Decision, Relation
 from lumewarp_control_plane.models import TeamRole
-from tests.api.helpers import BOOTSTRAP_AUTH, auth, suffix, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
 from tests.factories import (
     make_key,
     make_member,
@@ -15,7 +15,7 @@ from tests.factories import (
     make_user,
 )
 
-ROLES = ("superuser", "admin", "member", "other_team", "bootstrap")
+ROLES = ("group_admin", "admin", "member", "other_team", "bootstrap")
 READ = (200, 200, 200, 404, 200)
 ADMIN = (200, 200, 403, 404, 200)
 INSTALLATION = (200, 403, 403, 403, 200)
@@ -99,7 +99,7 @@ CASES = [
 async def test_endpoint_authorization_matrix(client, committed, role, case) -> None:
     name, method, path, body, statuses = case
     team = await make_team(committed)
-    caller, token = await user_with_token(committed, superuser=role == "superuser")
+    caller, token = await user_with_token(committed, group_admin=role == "group_admin")
     if role in ("admin", "member"):
         await make_member(committed, team, caller, role=TeamRole(role))
     elif role == "other_team":
@@ -127,7 +127,7 @@ async def test_endpoint_authorization_matrix(client, committed, role, case) -> N
         json={k: v.format(**ids) if isinstance(v, str) else v for k, v in body.items()}
         if body is not None
         else None,
-        headers=BOOTSTRAP_AUTH if role == "bootstrap" else auth(token),
+        headers=ADMIN_AUTH if role == "bootstrap" else auth(token),
     )
     assert response.status_code == statuses[ROLES.index(role)], (
         name,
@@ -185,7 +185,7 @@ async def test_backend_error_is_503_not_a_deny(client, committed, monkeypatch, p
     response = client.get("/api/v1" + path, headers=auth(token))
     assert response.status_code == 503, response.text
     assert response.json()["error"]["code"] == "authz_unavailable"
-    assert client.get("/api/v1" + path, headers=BOOTSTRAP_AUTH).status_code == 200
+    assert client.get("/api/v1" + path, headers=ADMIN_AUTH).status_code == 200
 
 
 async def test_backend_error_during_team_visibility_is_503(client, committed, monkeypatch) -> None:
@@ -194,7 +194,7 @@ async def test_backend_error_during_team_visibility_is_503(client, committed, mo
     await committed.commit()
 
     async def check(user_id, relation, resource):
-        return Decision.DENY if relation is Relation.SUPERUSER else Decision.ERROR
+        return Decision.DENY if resource.type == "group" else Decision.ERROR
 
     monkeypatch.setattr(client.app.state, "authorizer", Authorizer(check, "unavailable"))
     for path in ("/teams", "/usage", "/audit", f"/teams/{team.id}"):
@@ -273,7 +273,7 @@ async def test_mutation_backend_error_is_503_and_preserves_state(
     await committed.commit()
 
     async def check(user_id, relation, resource):
-        if relation is Relation.SUPERUSER:
+        if resource.type == "group":
             return Decision.DENY
         if resource.id == str(team.id):
             return Decision.ERROR if relation is failed_relation else Decision.ALLOW
@@ -288,15 +288,11 @@ async def test_mutation_backend_error_is_503_and_preserves_state(
     )
     assert response.status_code == 503, response.text
     assert response.json()["error"]["code"] == "authz_unavailable"
-    stored = client.get(f"/api/v1/keys/{key.id}", headers=BOOTSTRAP_AUTH).json()
+    stored = client.get(f"/api/v1/keys/{key.id}", headers=ADMIN_AUTH).json()
     assert (stored["name"], stored["lifecycle"]) == ("unchanged", "active")
-    member_rows = client.get(f"/api/v1/teams/{team.id}/members", headers=BOOTSTRAP_AUTH).json()[
-        "items"
-    ]
+    member_rows = client.get(f"/api/v1/teams/{team.id}/members", headers=ADMIN_AUTH).json()["items"]
     assert [(r["user_id"], r["role"]) for r in member_rows] == [(str(target.id), "member")]
     assert (
-        client.get(f"/api/v1/teams/{team.id}/service-accounts", headers=BOOTSTRAP_AUTH).json()[
-            "items"
-        ]
+        client.get(f"/api/v1/teams/{team.id}/service-accounts", headers=ADMIN_AUTH).json()["items"]
         == []
     )

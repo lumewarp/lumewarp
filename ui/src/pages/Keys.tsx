@@ -81,7 +81,7 @@ export function Keys() {
         description="Keys you own across your teams. Secrets are shown once when created or rotated."
         actions={<CreateButton can={!!me.data?.user_id && teams.length > 0} onClick={() => open("new")}>New key</CreateButton>}
       />
-      {!me.data?.user_id && <p className="muted">The bootstrap principal does not own API keys.</p>}
+      {!me.data?.user_id && <p className="muted">The break-glass session does not own API keys.</p>}
       <DataTable
         rows={list.data}
         loading={list.isPending}

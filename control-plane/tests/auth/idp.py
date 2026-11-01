@@ -23,12 +23,14 @@ class FakeIdP:
             "email": f"{uuid.uuid4().hex}@example.com",
             "email_verified": True,
             "name": "OIDC User",
+            "groups": [],
         }
         self.overrides = {}
         self.authorization = {}
         self.requests = []
         self.token_error = False
         self.signing_key = self.key
+        self.userinfo = {"sub": self.claims["sub"], "groups": []}
 
     def handle(self, request):
         self.requests.append(request)
@@ -40,11 +42,14 @@ class FakeIdP:
                     "authorization_endpoint": ISSUER + "/authorize",
                     "token_endpoint": ISSUER + "/token",
                     "jwks_uri": ISSUER + "/jwks",
+                    "userinfo_endpoint": ISSUER + "/userinfo",
                     "id_token_signing_alg_values_supported": ["RS256"],
                 },
             )
         if request.url.path.endswith("/jwks"):
             return httpx.Response(200, json={"keys": [self.key.as_dict(private=False)]})
+        if request.url.path.endswith("/userinfo"):
+            return httpx.Response(200, json=self.userinfo)
         if request.url.path.endswith("/token"):
             if self.token_error:
                 return httpx.Response(400, json={"error": "invalid_grant"})

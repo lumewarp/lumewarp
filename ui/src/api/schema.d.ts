@@ -380,7 +380,7 @@ export interface paths {
         put?: never;
         /**
          * Create User Token
-         * @description Issue a PAT on behalf of a user; only installation superusers may do so.
+         * @description Issue a PAT on behalf of a user; requires admin group membership.
          */
         post: operations["createUserToken"];
         delete?: never;
@@ -545,6 +545,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/session/break-glass": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Login Break Glass */
+        post: operations["loginBreakGlass"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/session/oidc/login": {
         parameters: {
             query?: never;
@@ -666,6 +683,14 @@ export interface components {
             details: {
                 [key: string]: unknown;
             };
+        };
+        /** BreakGlassLogin */
+        BreakGlassLogin: {
+            /**
+             * Password
+             * Format: password
+             */
+            password: string;
         };
         /** CircuitBreakerIn */
         CircuitBreakerIn: {
@@ -995,8 +1020,8 @@ export interface components {
             email: string | null;
             /** Display Name */
             display_name: string;
-            /** Is Superuser */
-            is_superuser: boolean;
+            /** Is Admin */
+            is_admin: boolean;
             /** Manages Grants */
             manages_grants: boolean;
             /** Teams */
@@ -1439,8 +1464,15 @@ export interface components {
         SessionInfo: {
             /** Oidc Enabled */
             oidc_enabled: boolean;
+            /** Break Glass Enabled */
+            break_glass_enabled: boolean;
             /** Authenticated */
             authenticated: boolean;
+            /**
+             * Is Break Glass
+             * @default false
+             */
+            is_break_glass: boolean;
             user?: components["schemas"]["SessionUser"] | null;
             /** Csrf Token */
             csrf_token?: string | null;
@@ -1456,8 +1488,8 @@ export interface components {
             email: string;
             /** Display Name */
             display_name: string;
-            /** Is Superuser */
-            is_superuser: boolean;
+            /** Is Admin */
+            is_admin: boolean;
         };
         /**
          * StickyBy
@@ -1719,11 +1751,6 @@ export interface components {
              */
             display_name: string;
             /**
-             * Is Superuser
-             * @default false
-             */
-            is_superuser: boolean;
-            /**
              * Is Active
              * @default true
              */
@@ -1740,8 +1767,6 @@ export interface components {
             email: string;
             /** Display Name */
             display_name: string;
-            /** Is Superuser */
-            is_superuser: boolean;
             /** Is Active */
             is_active: boolean;
             /**
@@ -1761,8 +1786,6 @@ export interface components {
             email?: string | null;
             /** Display Name */
             display_name?: string | null;
-            /** Is Superuser */
-            is_superuser?: boolean | null;
             /** Is Active */
             is_active?: boolean | null;
         };
@@ -5513,6 +5536,75 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SessionInfo"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    loginBreakGlass: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BreakGlassLogin"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Missing or invalid credentials */

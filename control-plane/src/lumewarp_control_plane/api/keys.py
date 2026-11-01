@@ -99,7 +99,7 @@ async def _is_member(
     session: AsyncSession, authz: RequestAuthz, team_id: uuid.UUID, user_id: uuid.UUID
 ) -> bool:
     """Whether the user holds a membership of the team itself. `authz.has` is not enough:
-    it is true for every superuser, who may not be a member and so cannot own keys.
+    it is true for every admin group member, who may not be a member and so cannot own keys.
     """
     if authz.authorizer.manages_grants:
         return await session.get(TeamMember, (team_id, user_id)) is not None

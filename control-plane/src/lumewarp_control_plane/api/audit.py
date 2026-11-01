@@ -1,6 +1,6 @@
 """Scoped audit log reads.
 
-Audit rows carry an optional `team_id`. Superusers read everything (including
+Audit rows carry an optional `team_id`. Admin group members read everything (including
 installation-wide rows with no team); everyone else reads the rows of the teams they are
 a member of.
 """
@@ -54,8 +54,8 @@ async def list_audit(
     stmt = select(AuditLog).order_by(AuditLog.id.desc())
     if team_id is not None:
         if await session.get(Team, team_id) is None:
-            # A deleted team's rows stay readable to superusers only.
-            if not await authz.is_superuser():
+            # A deleted team's rows stay readable to admin group members only.
+            if not await authz.is_admin():
                 raise not_found("team not found")
         else:
             await ensure_team_read(authz, team_id)

@@ -1,4 +1,5 @@
 import importlib
+import io
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -49,10 +50,10 @@ def test_month_window() -> None:
 
 def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LUMEWARP_HTTP_BIND", "0.0.0.0:9999")
-    monkeypatch.setenv("LUMEWARP_BOOTSTRAP_TOKEN", "s3cret")
+    monkeypatch.setenv("LUMEWARP_BREAK_GLASS_PASSWORD", "s3cret")
     s = Settings()
     assert s.http_host_port == ("0.0.0.0", 9999)
-    assert s.bootstrap_token is not None and "s3cret" not in repr(s)
+    assert s.break_glass_password is not None and "s3cret" not in repr(s)
     assert s.grpc_bind == "127.0.0.1:50051"
 
 
@@ -60,3 +61,14 @@ def test_split_bind() -> None:
     assert split_bind("[::1]:8091") == ("::1", 8091)
     with pytest.raises(ValueError):
         split_bind("8091")
+
+
+def test_hash_password_cli_reads_stdin_and_prints_argon2id(monkeypatch, capsys) -> None:
+    from lumewarp_control_plane.__main__ import main
+    from lumewarp_control_plane.auth.break_glass import PASSWORD_HASHER
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("cli-test-password\n"))
+    main(["hash-password"])
+    encoded = capsys.readouterr().out.strip()
+    assert encoded.startswith("$argon2id$")
+    assert PASSWORD_HASHER.verify(encoded, "cli-test-password")

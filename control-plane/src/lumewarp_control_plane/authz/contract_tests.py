@@ -2,8 +2,8 @@
 
 Subclass ``AuthzContract`` in a pytest test module and supply ``authz_backend`` (a
 backend object or a plain async check function) and ``authz_seed`` fixtures.
-The seed contains active superuser/admin/member users, an inactive user with both
-superuser and admin grants, an unknown user, and two existing teams. Only the first
+The seed contains active outsider/admin/member users, an inactive user with
+admin grants, an unknown user, and two existing teams. Only the first
 team grants the admin and member their respective relations.
 """
 
@@ -13,7 +13,6 @@ from uuid import UUID
 import pytest
 
 from lumewarp_control_plane.authz import (
-    INSTALLATION,
     Authorizer,
     Decision,
     Relation,
@@ -23,7 +22,7 @@ from lumewarp_control_plane.authz import (
 
 @dataclass(frozen=True)
 class AuthzSeed:
-    superuser: str
+    outsider: str
     admin: str
     member: str
     inactive: str
@@ -35,13 +34,6 @@ class AuthzContract:
     async def test_implied_relations(self, authz_backend, authz_seed: AuthzSeed) -> None:
         authz = Authorizer(authz_backend)
         seed = authz_seed
-        assert await authz.check(seed.superuser, Relation.SUPERUSER, INSTALLATION) is Decision.ALLOW
-        for team in seed.teams:
-            for relation in (Relation.ADMIN, Relation.MEMBER):
-                assert (
-                    await authz.check(seed.superuser, relation, team_resource(team))
-                    is Decision.ALLOW
-                )
         for relation in (Relation.ADMIN, Relation.MEMBER):
             assert (
                 await authz.check(seed.admin, relation, team_resource(seed.teams[0]))
@@ -56,7 +48,6 @@ class AuthzContract:
             is Decision.DENY
         )
         for user in (seed.admin, seed.member):
-            assert await authz.check(user, Relation.SUPERUSER, INSTALLATION) is Decision.DENY
             for relation in (Relation.ADMIN, Relation.MEMBER):
                 assert (
                     await authz.check(user, relation, team_resource(seed.teams[1])) is Decision.DENY
@@ -65,7 +56,6 @@ class AuthzContract:
     async def test_inactive_and_unknown_denied(self, authz_backend, authz_seed: AuthzSeed) -> None:
         authz = Authorizer(authz_backend)
         for user in (authz_seed.inactive, authz_seed.unknown):
-            assert await authz.check(user, Relation.SUPERUSER, INSTALLATION) is Decision.DENY
             for team in authz_seed.teams:
                 for relation in (Relation.ADMIN, Relation.MEMBER):
                     assert await authz.check(user, relation, team_resource(team)) is Decision.DENY
@@ -78,7 +68,7 @@ class AuthzContract:
             (seed.member, Relation.ADMIN, team),
             (seed.admin, Relation.MEMBER, team),
             (seed.unknown, Relation.MEMBER, team),
-            (seed.superuser, Relation.SUPERUSER, INSTALLATION),
+            (seed.outsider, Relation.MEMBER, team),
             (seed.inactive, Relation.ADMIN, team),
             (seed.member, Relation.MEMBER, team),
         ]
@@ -86,7 +76,7 @@ class AuthzContract:
             Decision.DENY,
             Decision.ALLOW,
             Decision.DENY,
-            Decision.ALLOW,
+            Decision.DENY,
             Decision.DENY,
             Decision.ALLOW,
         ]
@@ -98,7 +88,7 @@ class AuthzContract:
     ) -> None:
         authz = Authorizer(authz_backend)
         seed = authz_seed
-        for user in (seed.superuser, seed.admin, seed.member, seed.inactive, seed.unknown):
+        for user in (seed.outsider, seed.admin, seed.member, seed.inactive, seed.unknown):
             expected = {
                 team
                 for team in seed.teams

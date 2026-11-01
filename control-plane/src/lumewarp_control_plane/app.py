@@ -23,9 +23,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from lumewarp_control_plane import __version__, compiler, migrate, notifier, usage
+from lumewarp_control_plane import __version__, audit, compiler, migrate, notifier, usage
 from lumewarp_control_plane import grpc as grpc_services
 from lumewarp_control_plane.api import router as api_router
+from lumewarp_control_plane.auth.break_glass import LoginLimiter, enabled
 from lumewarp_control_plane.authz import load_authorizer
 from lumewarp_control_plane.db import create_engine, create_session_factory
 from lumewarp_control_plane.errors import error_body, install_handlers
@@ -224,6 +225,11 @@ def create_app(
     settings = settings or get_settings()
     app = FastAPI(title="Lumewarp control plane", version=__version__, lifespan=lifespan)
     app.state.settings = settings
+    app.state.break_glass_limiter = LoginLimiter()
+    if enabled(settings):
+        log.warning("Break-glass password login is enabled")
+    if settings.break_glass_password:
+        log.warning("Break-glass uses a plaintext environment password; use a hash in production")
     app.state.metrics = Metrics()
     for reason in usage.SKIP_REASONS:
         app.state.metrics.usage_skipped.labels(reason)
@@ -238,6 +244,29 @@ def create_app(
     app.state.fatal_handler = fatal_handler or _terminate_process
     install_handlers(app)
     app.include_router(api_router)
+
+    @app.middleware("http")
+    async def audit_emergency_action(request: Request, call_next):
+        status = 500
+        try:
+            response = await call_next(request)
+            status = response.status_code
+        finally:
+            principal = getattr(request.state, "principal", None)
+            if principal is not None and principal.is_break_glass:
+                async with app.state.session_factory() as session, session.begin():
+                    audit.record(
+                        session,
+                        action="session.break_glass.request",
+                        resource_type="http",
+                        principal=principal,
+                        details={
+                            "method": request.method,
+                            "path": request.url.path,
+                            "status": status,
+                        },
+                    )
+        return response
 
     @app.get("/healthz", tags=["health"])
     async def healthz() -> dict[str, str]:

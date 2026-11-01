@@ -25,13 +25,13 @@ export function Settings() {
           <dd>{me.data?.email ?? "—"}</dd>
           <dt>Teams and roles</dt>
           <dd>
-            {me.data?.is_superuser && <Badge tone="info">superuser</Badge>}
+            {me.data?.is_admin && <Badge tone="info">admin group</Badge>}
             {me.data?.teams.map((team) => (
               <Badge key={team.team_id} tone="info">
                 {team.team_name} · {team.role}
               </Badge>
             ))}
-            {me.data && !me.data.is_superuser && me.data.teams.length === 0 && <span className="muted">No team memberships.</span>}
+            {me.data && !me.data.is_admin && me.data.teams.length === 0 && <span className="muted">No team memberships.</span>}
           </dd>
         </dl>
       </section>
@@ -49,7 +49,7 @@ export function Settings() {
 
 function Tokens() {
   const me = useMe();
-  const list = useQuery({ queryKey: ["tokens"], queryFn: () => api.tokens(), enabled: me.data?.kind !== "bootstrap" && !!me.data?.user_id });
+  const list = useQuery({ queryKey: ["tokens"], queryFn: () => api.tokens(), enabled: me.data?.kind !== "break_glass" && !!me.data?.user_id });
   const [creating, setCreating] = useState(false);
   const [secret, setSecret] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
@@ -57,7 +57,7 @@ function Tokens() {
   const create = useMut((name: string) => api.createToken({ name }), (r) => setSecret(r.secret));
   const revoke = useMut((id: string) => api.revokeToken(id), "Token revoked");
 
-  if (me.data && !me.data.user_id) return <p className="muted">The bootstrap token is not tied to a user, so it has no personal access tokens.</p>;
+  if (me.data && !me.data.user_id) return <p className="muted">The break-glass session is not tied to a user, so it has no personal access tokens.</p>;
   return (
     <>
       <div className="page-actions toolbar">

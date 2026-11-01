@@ -1,4 +1,4 @@
-"""OIDC client and claim-to-user mapping. Authorization never comes from claims."""
+"""OIDC client and claim-to-user mapping, including session-scoped IAM groups."""
 
 from datetime import UTC, datetime
 from urllib.parse import unquote, urlsplit
@@ -13,6 +13,13 @@ from lumewarp_control_plane.models import User, UserIdentity
 
 STATE_COOKIE = "lumewarp_oidc_state"
 STATE_TTL = 600
+
+
+def groups(claims: dict, request: Request) -> tuple[str, ...]:
+    value = claims.get(request.app.state.settings.oidc_groups_claim, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return ()
+    return tuple(value)
 
 
 class LoginDenied(Exception):
@@ -101,10 +108,13 @@ async def resolve_user(session: AsyncSession, claims: dict, request: Request) ->
                     UserIdentity.user_id == user.id, UserIdentity.issuer == claims["iss"]
                 )
             )
-            if user.is_superuser or linked is not None:
+            if (
+                request.app.state.settings.admin_group in groups(claims, request)
+                or linked is not None
+            ):
                 raise LoginDenied()
         elif request.app.state.settings.oidc_jit_users:
-            user = User(email=mapping.email, display_name=mapping.display_name, is_superuser=False)
+            user = User(email=mapping.email, display_name=mapping.display_name)
             session.add(user)
             await session.flush()
         else:

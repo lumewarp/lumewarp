@@ -13,7 +13,7 @@ from lumewarp_control_plane.models import (
     ConfigVersionKind,
     GatewaySession,
 )
-from tests.api.helpers import BOOTSTRAP_AUTH, auth, suffix, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
 
 
 def _version(scope: str, version: int, *, kind=ConfigVersionKind.COMPILE, rollback_of=None):
@@ -35,7 +35,7 @@ async def test_gateway_tokens(client, committed, api_scope) -> None:
     resp = client.post(
         "/api/v1/gateways",
         json={"gateway_id": gateway_id, "name": "primary"},
-        headers=BOOTSTRAP_AUTH,
+        headers=ADMIN_AUTH,
     )
     assert resp.status_code == 201, resp.text
     created = resp.json()
@@ -44,7 +44,7 @@ async def test_gateway_tokens(client, committed, api_scope) -> None:
     assert "hash" not in token
     assert token["gateway_id"] == gateway_id
 
-    listed = client.get("/api/v1/gateways", headers=BOOTSTRAP_AUTH)
+    listed = client.get("/api/v1/gateways", headers=ADMIN_AUTH)
     assert listed.status_code == 200
     row = next(item for item in listed.json()["items"] if item["gateway_id"] == gateway_id)
     assert row["connected"] is False
@@ -62,14 +62,14 @@ async def test_gateway_tokens(client, committed, api_scope) -> None:
         )
     )
     await committed.commit()
-    listed = client.get("/api/v1/gateways?limit=500", headers=BOOTSTRAP_AUTH)
+    listed = client.get("/api/v1/gateways?limit=500", headers=ADMIN_AUTH)
     row = next(item for item in listed.json()["items"] if item["gateway_id"] == gateway_id)
     assert row["connected"] is True
     assert row["acked_version"] == 3
 
     revoked = client.post(
         f"/api/v1/gateways/{gateway_id}/tokens/{token['id']}/revoke",
-        headers=BOOTSTRAP_AUTH,
+        headers=ADMIN_AUTH,
     )
     assert revoked.status_code == 200
     assert revoked.json()["revoked_at"] is not None
@@ -77,7 +77,7 @@ async def test_gateway_tokens(client, committed, api_scope) -> None:
     assert (
         client.post(
             f"/api/v1/gateways/other/tokens/{token['id']}/revoke",
-            headers=BOOTSTRAP_AUTH,
+            headers=ADMIN_AUTH,
         ).status_code
         == 404
     )
@@ -91,14 +91,14 @@ async def test_config_versions_and_rollback(client, committed, api_scope, monkey
     committed.add_all([_version(api_scope, 1), _version(api_scope, 2)])
     await committed.commit()
 
-    listed = client.get("/api/v1/config/versions?limit=1", headers=BOOTSTRAP_AUTH)
+    listed = client.get("/api/v1/config/versions?limit=1", headers=ADMIN_AUTH)
     assert listed.status_code == 200, listed.text
     body = listed.json()
     assert body["items"][0]["version"] == 2
     assert body["next_cursor"] == "2"
     second = client.get(
         f"/api/v1/config/versions?limit=1&cursor={body['next_cursor']}",
-        headers=BOOTSTRAP_AUTH,
+        headers=ADMIN_AUTH,
     )
     assert second.status_code == 200
     assert second.json()["items"][0]["version"] == 1
@@ -123,12 +123,12 @@ async def test_config_versions_and_rollback(client, committed, api_scope, monkey
         return 999
 
     monkeypatch.setattr(compiler, "rollback_routing", fake_rollback)
-    resp = client.post("/api/v1/config/rollback", json={"version": 1}, headers=BOOTSTRAP_AUTH)
+    resp = client.post("/api/v1/config/rollback", json={"version": 1}, headers=ADMIN_AUTH)
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"version": 999}
     assert (
         client.post(
-            "/api/v1/config/rollback", json={"version": 404}, headers=BOOTSTRAP_AUTH
+            "/api/v1/config/rollback", json={"version": 404}, headers=ADMIN_AUTH
         ).status_code
         == 404
     )

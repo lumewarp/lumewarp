@@ -27,7 +27,7 @@ from lumewarp_control_plane.models import (
     ConfigVersion,
     KeyLifecycle,
 )
-from lumewarp_control_plane.security import Principal
+from lumewarp_control_plane.security import Principal, PrincipalKind
 from lumewarp_control_plane.settings import Settings
 from tests.conftest import migrated_database
 from tests.factories import make_key, make_member, make_service_account, make_team, make_user, scope
@@ -500,7 +500,7 @@ async def test_concurrent_revoke_does_not_deadlock_or_overwrite_state(store, mon
     monkeypatch.setattr(keys, "lock_scope", key_scope)
     monkeypatch.setattr(reconciler, "lock_scope", reconcile_scope)
     authorizer = Authorizer(BuiltinBackend(factory))
-    authz = RequestAuthz(Principal.bootstrap(), authorizer)
+    authz = RequestAuthz(Principal(kind=PrincipalKind.BREAK_GLASS), authorizer)
     async with factory() as key_session, asyncio.timeout(10), asyncio.TaskGroup() as tasks:
         tasks.create_task(keys.revoke_key(rows["owned"].id, authz, key_session, settings))
         tasks.create_task(

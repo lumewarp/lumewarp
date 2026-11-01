@@ -25,7 +25,7 @@ from tests.conftest import migrated_database
 from tests.integration.grpc_probe import probe
 
 SCOPE = "default"
-ADMIN = {"Authorization": "Bearer itest-admin"}
+ADMIN: dict[str, str] = {}
 
 
 @dataclass
@@ -47,7 +47,9 @@ async def cp() -> AsyncIterator[ControlPlane]:
         settings = Settings(
             database_url=url,
             grpc_bind="127.0.0.1:0",
-            bootstrap_token="itest-admin",
+            metrics_bind="127.0.0.1:0",
+            break_glass_password="itest-admin",
+            session_cookie_secure=False,
             scope=SCOPE,
             background_enabled=True,
         )
@@ -58,6 +60,12 @@ async def cp() -> AsyncIterator[ControlPlane]:
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://cp") as http:
+                login = await http.post(
+                    "/api/v1/session/break-glass", json={"password": "itest-admin"}
+                )
+                assert login.status_code == 204
+                info = await http.get("/api/v1/session")
+                ADMIN["X-Lumewarp-CSRF"] = info.json()["csrf_token"]
                 port = app.state.runtime.grpc_port
                 yield ControlPlane(app, http, f"127.0.0.1:{port}", fatal)
         # Graceful shutdown leaves no background tasks behind.

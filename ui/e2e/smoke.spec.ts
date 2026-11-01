@@ -1,12 +1,24 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const BOOTSTRAP = "e2e-bootstrap-token";
+const BREAK_GLASS = "e2e-break-glass-password";
 const VIEWER = "lwp-e2e-viewer-token-0123456789abcdef";
-const admin = { Authorization: `Bearer ${BOOTSTRAP}` };
+const admin: Record<string, string> = {};
+
+test.beforeEach(async ({ request }) => {
+  const response = await request.post("/api/v1/session/break-glass", { data: { password: BREAK_GLASS } });
+  expect(response.status()).toBe(204);
+  const session = await (await request.get("/api/v1/session")).json();
+  admin["X-Lumewarp-CSRF"] = session.csrf_token;
+});
 
 async function login(page: Page, token: string) {
   await page.goto("/login");
-  await page.getByLabel("Access token").fill(token);
+  if (token === VIEWER) {
+    await page.evaluate((pat) => sessionStorage.setItem("lumewarp.token", pat), token);
+    await page.goto("/");
+    return;
+  }
+  await page.getByLabel("Break-glass password").fill(token);
   await page.getByRole("button", { name: "Sign in" }).click();
 }
 
@@ -14,19 +26,21 @@ const dialog = (page: Page) => page.getByRole("dialog");
 
 test("SSO availability and login errors follow session discovery", async ({ page }) => {
   let oidcEnabled = false;
+  let breakGlassEnabled = false;
   await page.route("**/api/v1/session", (route) =>
-    route.fulfill({ json: { oidc_enabled: oidcEnabled, authenticated: false } }),
+    route.fulfill({ json: { oidc_enabled: oidcEnabled, break_glass_enabled: breakGlassEnabled, authenticated: false } }),
   );
   const sessionLoaded = () => page.waitForResponse((r) => new URL(r.url()).pathname === "/api/v1/session");
 
   let discovered = sessionLoaded();
   await page.goto("/login");
   await discovered;
-  await expect(page.getByLabel("Access token")).toBeVisible();
+  await expect(page.getByLabel("Break-glass password")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Sign in with SSO" })).toHaveCount(0);
   await page.evaluate(() => sessionStorage.setItem("lumewarp.token", "stale-token"));
 
   oidcEnabled = true;
+  breakGlassEnabled = true;
   for (const [code, message] of [
     ["invalid_state", /SSO sign-in expired/i],
     ["access_denied", /not granted access/i],
@@ -38,8 +52,13 @@ test("SSO availability and login errors follow session discovery", async ({ page
     await expect(page.getByRole("button", { name: "Sign in with SSO" })).toBeVisible();
     await expect(page.getByRole("alert")).toContainText(message);
   }
-  // The token form stays available as the secondary option.
-  await expect(page.getByLabel("Access token")).toBeVisible();
+  // The emergency password form stays available as the secondary option.
+  await expect(page.getByLabel("Break-glass password")).toBeVisible();
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.screenshot({ path: "/tmp/lumewarp-admin-login-desktop.png", fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
+  await page.screenshot({ path: "/tmp/lumewarp-admin-login-mobile.png", fullPage: true });
 
   await page.route("**/api/v1/session/oidc/login**", (route) =>
     route.fulfill({ status: 200, body: "Authorization request intercepted." }),
@@ -66,7 +85,7 @@ test("cookie session: CSRF on writes, inline member errors, key owner state, log
         ? {
             oidc_enabled: true,
             authenticated: true,
-            user: { id: userId, email, display_name: "Cookie Admin", is_superuser: false },
+            user: { id: userId, email, display_name: "Cookie Admin", is_admin: false },
             csrf_token: csrfToken,
           }
         : { oidc_enabled: true, authenticated: false },
@@ -79,7 +98,7 @@ test("cookie session: CSRF on writes, inline member errors, key owner state, log
         user_id: userId,
         email,
         display_name: "Cookie Admin",
-        is_superuser: false,
+        is_admin: false,
         manages_grants: true,
         teams: [{ team_id: teamId, team_name: "Cookie Team", role: "admin" }],
       },
@@ -194,9 +213,9 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await login(page, "not-a-token");
   await expect(page.getByRole("alert")).toBeVisible();
 
-  await login(page, BOOTSTRAP);
+  await login(page, BREAK_GLASS);
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
-  await expect(page.locator(".principal")).toContainText("superuser");
+  await expect(page.locator(".principal")).toContainText("break-glass");
   await expect(page.getByRole("link", { name: "Organizations" })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Projects" })).toHaveCount(0);
 
@@ -256,7 +275,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
       body: JSON.stringify({ ...body, manages_grants: false }),
     });
   });
-  await login(managedPage, BOOTSTRAP);
+  await login(managedPage, BREAK_GLASS);
   await managedPage.goto(`/teams/${team.id}`);
   await expect(managedPage.getByRole("button", { name: "Add member" })).toBeDisabled();
   await expect(managedPage.getByRole("status").filter({ hasText: /managed by your identity provider \/ IAM/i })).toBeVisible();
@@ -337,7 +356,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await expect(viewerPage.getByRole("heading", { name: "Overview" })).toBeVisible();
   await expect(viewerPage.getByRole("link", { name: "Users", exact: true })).toHaveCount(0);
   await viewerPage.goto("/users");
-  await expect(viewerPage.getByRole("alert")).toContainText("Superuser access is required");
+  await expect(viewerPage.getByRole("alert")).toContainText("Admin group access is required");
   await viewerPage.goto(`/teams/${team.id}`);
   await expect(viewerPage.getByRole("heading", { name: "Research" })).toBeVisible();
   await expect(viewerPage.getByRole("button", { name: "Add member" })).toBeDisabled();
@@ -460,7 +479,7 @@ test("route edit: retry, ordered fallback and a traffic split shown as percentag
   const backup = await post("/routes", { model: "smoke-backup", deployment_ids: [deps["smoke-backup-dep"]] });
   const main = await post("/routes", { model: "smoke-main", deployment_ids: [deps["smoke-stable"]] });
 
-  await login(page, BOOTSTRAP);
+  await login(page, BREAK_GLASS);
   await page.getByRole("link", { name: "Models / Routes", exact: true }).click();
   const row = page.getByRole("row").filter({ has: page.getByRole("cell", { name: "smoke-main", exact: true }) });
   await row.getByRole("button", { name: "Edit" }).click();

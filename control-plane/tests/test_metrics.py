@@ -10,10 +10,10 @@ from pydantic import ValidationError
 
 from lumewarp_control_plane.app import create_app, start_background, stop_background
 from lumewarp_control_plane.authz import (
-    INSTALLATION,
     Authorizer,
     Decision,
     Relation,
+    Resource,
     team_resource,
 )
 from lumewarp_control_plane.metrics import Metrics, start_metrics_server
@@ -21,6 +21,7 @@ from lumewarp_control_plane.settings import Settings
 
 # The contract with deploy/prometheus/rules.yaml and the Grafana dashboards.
 CONTRACT = {
+    "lumewarp_cp_break_glass_logins": ("counter", {"result"}),
     "lumewarp_cp_compile_duration_seconds": ("histogram", set()),
     "lumewarp_cp_compile_failures": ("counter", set()),
     "lumewarp_cp_config_version": ("gauge", set()),
@@ -198,7 +199,7 @@ async def test_authorizer_check_counts_every_decision() -> None:
     authorizer = Authorizer(backend, "custom", timeout=0.01, metrics=metrics)
     assert _authz(metrics, "custom", "error") == 0
     for user in ("a", "a", "d", "e", "s", "x"):
-        await authorizer.check(user, Relation.SUPERUSER, INSTALLATION)
+        await authorizer.check(user, Relation.MEMBER, Resource("group", "lumewarp-admins"))
     assert _authz(metrics, "custom", "allow") == 2
     assert _authz(metrics, "custom", "deny") == 1
     # Exception, timeout and an invalid decision are all errors.
