@@ -756,7 +756,8 @@ class RouterSplitModel(Base):
 
 class ConfigVersion(Base):
     """A published snapshot. Immutable: a DB trigger rejects any UPDATE except compaction
-    (payload -> NULL with compacted_at set). Rollbacks are new rows of kind ROLLBACK.
+    (payload and catalog_state -> NULL with compacted_at set). Rollbacks are new rows
+    of kind ROLLBACK.
     """
 
     __tablename__ = "config_versions"
@@ -765,6 +766,9 @@ class ConfigVersion(Base):
         _hash32("digest"),
         CheckConstraint("version > 0", name="version_positive"),
         CheckConstraint("(payload IS NULL) = (compacted_at IS NOT NULL)", name="compaction"),
+        CheckConstraint(
+            "payload IS NOT NULL OR catalog_state IS NULL", name="catalog_state_compaction"
+        ),
         CheckConstraint(
             "(kind = 'rollback') = (rollback_of_version IS NOT NULL)", name="rollback_ref"
         ),
@@ -777,6 +781,9 @@ class ConfigVersion(Base):
     version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # Serialized lumewarp.config.v1.Snapshot.
     payload: Mapped[bytes | None] = mapped_column(LargeBinary)
+    # Source-only routing state, including IDs; NULL for pre-sidecar versions.
+    # Compacted together with payload. Policy and grants are never included.
+    catalog_state: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     # sha256(payload), kept after compaction.
     digest: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)

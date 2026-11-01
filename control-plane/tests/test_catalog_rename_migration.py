@@ -98,7 +98,7 @@ async def test_0006_rows_survive_rename_roundtrip_and_legacy_rollback():
             }
 
         for _ in range(2):
-            await migrate.upgrade(engine)
+            await migrate.upgrade(engine, "0008")
             async with engine.connect() as conn:
                 constraints, indexes = await _constraint_and_index_names(conn)
                 assert all(

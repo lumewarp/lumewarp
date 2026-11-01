@@ -236,7 +236,11 @@ async def test_rollback_unknown_or_compacted(factory) -> None:
         with pytest.raises(LookupError):
             await rollback_routing(s, SCOPE, 9, require_local_membership=True)
     async with factory() as s, s.begin():
-        await s.execute(update(ConfigVersion).values(payload=None, compacted_at=datetime.now(UTC)))
+        await s.execute(
+            update(ConfigVersion).values(
+                payload=None, catalog_state=None, compacted_at=datetime.now(UTC)
+            )
+        )
     async with factory() as s, s.begin():
         with pytest.raises(LookupError):
             await rollback_routing(s, SCOPE, 1, require_local_membership=True)
@@ -332,6 +336,8 @@ async def test_compaction(factory) -> None:
     kept = {v for v, row in vs.items() if row.payload is not None}
     assert kept == {3, 5, 7, *range(11, 61)}
     assert all(vs[v].compacted_at is not None for v in set(vs) - kept)
+    assert all(vs[v].catalog_state is None for v in set(vs) - kept)
+    assert all(vs[v].catalog_state is not None for v in kept)
     assert all(len(row.digest) == 32 for row in vs.values())
     async with factory() as s, s.begin():
         assert await compact_versions(s, SCOPE, retain=50) == 0

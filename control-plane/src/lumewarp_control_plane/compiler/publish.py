@@ -22,6 +22,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from lumewarp_control_plane import outbox
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
+from lumewarp_control_plane.compiler.catalog_state import (
+    capture_catalog_state,
+    restore_catalog_state,
+)
 from lumewarp_control_plane.compiler.compile import (
     ROUTING_STRATEGY,
     STICKY_BY,
@@ -146,6 +150,7 @@ async def store_version(
             scope=scope,
             version=version,
             payload=payload,
+            catalog_state=await capture_catalog_state(session),
             digest=hashlib.sha256(payload).digest(),
             size_bytes=len(payload),
             key_count=len(snapshot.api_keys),
@@ -207,7 +212,10 @@ async def _publish_locked(
                 compiled.snapshot.version = old.version
                 compiled.snapshot.created_at_unix_ms = old.created_at_unix_ms
                 payload = compiled.snapshot.SerializeToString(deterministic=True)
-                if hashlib.sha256(payload).digest() == previous.digest:
+                if (
+                    hashlib.sha256(payload).digest() == previous.digest
+                    and await capture_catalog_state(session) == previous.catalog_state
+                ):
                     outcome.duration = time.perf_counter() - started
                     await _mark(session, scope, revision, OutboxStatus.DONE, version=latest[0])
                     return None
@@ -445,7 +453,14 @@ async def rollback_routing(
             f"({', '.join(too_heavy)}); it cannot be restored"
         )
 
-    await _restore_routing(session, old)
+    if row.catalog_state is not None:
+        try:
+            await restore_catalog_state(session, row.catalog_state)
+        except ValueError as exc:
+            raise CompileError(str(exc)) from exc
+    else:
+        # TODO(c1): remove once the catalog conversion clears pre-sidecar versions.
+        await _restore_routing(session, old)
     revision = await outbox.enqueue_recompile(session, scope, f"rollback to {to_version}")
     compiled = await compile_scope(
         session,
@@ -516,7 +531,7 @@ async def compact_versions(session: AsyncSession, scope: str, *, retain: int | N
             ConfigVersion.version.not_in(recent.scalar_subquery()),
             ~pinned,
         )
-        .values(payload=None, compacted_at=func.now())
+        .values(payload=None, catalog_state=None, compacted_at=func.now())
         .execution_options(synchronize_session=False)
     )
     return result.rowcount or 0
