@@ -1,6 +1,8 @@
 import { useState } from "react";
+
 import { Dialog } from "./Dialog";
 import { useToast } from "./Toast";
+import { Button } from "./ui/button";
 
 interface Props {
   open: boolean;
@@ -32,16 +34,16 @@ export function ConfirmDialog({ open, title, message, confirmLabel = "Delete", o
       title={title}
       footer={
         <>
-          <button className="btn" onClick={onClose} autoFocus>
+          <Button type="button" variant="outline" onClick={onClose} autoFocus>
             Cancel
-          </button>
-          <button className="btn btn-danger" disabled={busy} onClick={run}>
+          </Button>
+          <Button type="button" variant="destructive" disabled={busy} onClick={run}>
             {busy ? "Working…" : confirmLabel}
-          </button>
+          </Button>
         </>
       }
     >
-      <p>{message}</p>
+      <p className="text-sm text-muted-foreground">{message}</p>
     </Dialog>
   );
 }

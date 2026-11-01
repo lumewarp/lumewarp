@@ -1,27 +1,49 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
+import {
+  BarChart3,
+  Boxes,
+  History,
+  KeyRound,
+  LayoutDashboard,
+  LogOut,
+  Menu,
+  Monitor,
+  Moon,
+  Radio,
+  Route,
+  ScrollText,
+  Server,
+  Settings,
+  ShieldCheck,
+  Sun,
+  Users,
+} from "lucide-react";
 import { useState } from "react";
+
 import { api } from "../api";
 import { clearCsrfToken, clearToken, getToken } from "../auth";
 import type { Me } from "../api";
 import { useCan, useMe } from "../hooks";
+import { cn } from "../lib/utils";
 import { useTheme } from "../theme";
 import { Badge } from "./Bits";
 import { useToast } from "./Toast";
+import { Button } from "./ui/button";
 
 const NAV = [
-  { to: "/", label: "Overview" },
-  { to: "/teams", label: "Teams" },
-  { to: "/users", label: "Users", superOnly: true },
-  { to: "/keys", label: "My keys" },
-  { to: "/routes", label: "Models / Routes" },
-  { to: "/deployments", label: "Deployments" },
-  { to: "/upstreams", label: "Upstreams" },
-  { to: "/usage", label: "Usage" },
-  { to: "/audit", label: "Audit log" },
-  { to: "/gateways", label: "Gateways", superOnly: true },
-  { to: "/config", label: "Config versions", superOnly: true },
-  { to: "/settings", label: "Settings" },
+  { to: "/", label: "Overview", icon: LayoutDashboard },
+  { to: "/teams", label: "Teams", icon: Users },
+  { to: "/users", label: "Users", icon: ShieldCheck, superOnly: true },
+  { to: "/keys", label: "My keys", icon: KeyRound },
+  { to: "/routes", label: "Models / Routes", icon: Route },
+  { to: "/deployments", label: "Deployments", icon: Boxes },
+  { to: "/upstreams", label: "Upstreams", icon: Server },
+  { to: "/usage", label: "Usage", icon: BarChart3 },
+  { to: "/audit", label: "Audit log", icon: ScrollText },
+  { to: "/gateways", label: "Gateways", icon: Radio, superOnly: true },
+  { to: "/config", label: "Config versions", icon: History, superOnly: true },
+  { to: "/settings", label: "Settings", icon: Settings },
 ] as const;
 
 function roleLabel(me: Me) {
@@ -31,6 +53,7 @@ function roleLabel(me: Me) {
 }
 
 const THEME_LABEL = { system: "Auto", light: "Light", dark: "Dark" } as const;
+const THEME_ICON = { system: Monitor, light: Sun, dark: Moon } as const;
 
 export function Layout() {
   const me = useMe();
@@ -40,6 +63,7 @@ export function Layout() {
   const navigate = useNavigate();
   const toast = useToast();
   const [navOpen, setNavOpen] = useState(false);
+  const ThemeIcon = THEME_ICON[theme];
 
   const logout = async () => {
     try {
@@ -55,43 +79,82 @@ export function Layout() {
   };
 
   return (
-    <div className="shell">
-      <a className="skip" href="#main">
+    <div className="flex min-h-screen bg-background">
+      <a
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:rounded-md focus:border focus:bg-background focus:px-3 focus:py-2 focus:shadow"
+        href="#main"
+      >
         Skip to content
       </a>
-      <aside className={`sidebar ${navOpen ? "open" : ""}`}>
-        <div className="brand">
+      {navOpen && (
+        <button
+          type="button"
+          aria-hidden="true"
+          tabIndex={-1}
+          className="fixed inset-0 z-30 bg-black/40 md:hidden"
+          onClick={() => setNavOpen(false)}
+        />
+      )}
+      <aside
+        className={cn(
+          "fixed inset-y-0 left-0 z-40 flex w-60 flex-col border-r bg-sidebar px-3 pt-16 pb-4 text-sidebar-foreground shadow-lg transition-transform duration-200 md:sticky md:top-0 md:z-30 md:h-screen md:translate-x-0 md:pt-4 md:shadow-none",
+          navOpen ? "translate-x-0" : "-translate-x-full",
+        )}
+      >
+        <div className="flex items-center gap-2.5 px-2 pb-5 text-base font-bold">
           <span className="brand-mark" aria-hidden="true" />
           Lumewarp
         </div>
-        <nav aria-label="Main">
-          {NAV.filter((n) => !("superOnly" in n) || perms.isSuper).map((n) => (
-            <Link key={n.to} to={n.to} className="nav-link" activeProps={{ className: "nav-link active", "aria-current": "page" }} activeOptions={{ exact: n.to === "/" }} onClick={() => setNavOpen(false)}>
-              {n.label}
-            </Link>
-          ))}
+        <nav aria-label="Main" className="flex flex-col gap-1">
+          {NAV.filter((n) => !("superOnly" in n) || perms.isSuper).map((n) => {
+            const Icon = n.icon;
+            return (
+              <Link
+                key={n.to}
+                to={n.to}
+                className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/50 data-[status=active]:bg-sidebar-primary data-[status=active]:text-sidebar-primary-foreground data-[status=active]:hover:bg-sidebar-primary data-[status=active]:hover:text-sidebar-primary-foreground"
+                activeProps={{
+                  "aria-current": "page",
+                }}
+                activeOptions={{ exact: n.to === "/" }}
+                onClick={() => setNavOpen(false)}
+              >
+                <Icon className="size-4 opacity-80" aria-hidden="true" />
+                {n.label}
+              </Link>
+            );
+          })}
         </nav>
       </aside>
-      <div className="main-col">
-        <header className={`topbar ${navOpen ? "nav-open" : ""}`}>
-          <button className="btn btn-sm menu-btn" aria-label="Toggle navigation" aria-expanded={navOpen} onClick={() => setNavOpen((o) => !o)}>
-            ☰
-          </button>
-          <span className="spacer" />
-          <button className="btn btn-sm" onClick={cycle} title="Cycle theme">
-            Theme: {THEME_LABEL[theme]}
-          </button>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="sticky top-0 z-50 flex items-center gap-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur md:px-6">
+          <Button
+            variant="outline"
+            size="icon"
+            className="size-8 md:hidden"
+            aria-label="Toggle navigation"
+            aria-expanded={navOpen}
+            onClick={() => setNavOpen((o) => !o)}
+          >
+            <Menu className="size-4" aria-hidden="true" />
+          </Button>
+          <span className="flex-1" />
+          <Button variant="outline" size="sm" onClick={cycle} title="Cycle theme">
+            <ThemeIcon className="size-4" aria-hidden="true" />
+            <span>Theme: {THEME_LABEL[theme]}</span>
+          </Button>
           {me.data && (
-            <span className="principal" title={me.data.email ?? undefined}>
-              <span>{me.data.display_name || me.data.email || "Bootstrap admin"}</span>
+            <span className="principal flex min-w-0 items-center gap-2" title={me.data.email ?? undefined} data-testid="principal">
+              <span className="hidden max-w-[180px] truncate sm:inline">{me.data.display_name || me.data.email || "Bootstrap admin"}</span>
               <Badge tone="info">{roleLabel(me.data)}</Badge>
             </span>
           )}
-          <button className="btn btn-sm" onClick={() => void logout()}>
-            Sign out
-          </button>
+          <Button variant="outline" size="sm" onClick={() => void logout()}>
+            <LogOut className="size-4 sm:hidden" aria-hidden="true" />
+            <span className="sr-only sm:not-sr-only">Sign out</span>
+          </Button>
         </header>
-        <main id="main" className="content" tabIndex={-1}>
+        <main id="main" className="mx-auto w-full max-w-[1200px] flex-1 px-4 py-6 outline-none md:px-6" tabIndex={-1}>
           <Outlet />
         </main>
       </div>

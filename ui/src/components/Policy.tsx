@@ -93,12 +93,12 @@ export function PolicySummary({ p }: { p: PolicyOut }) {
     p.tpm_limit !== null && `${p.tpm_limit} tpm`,
     p.max_parallel !== null && `${p.max_parallel} parallel`,
   ].filter(Boolean);
-  return <span className="muted">{parts.join(" · ")}</span>;
+  return <span className="text-muted-foreground">{parts.join(" · ")}</span>;
 }
 
 export const Budget = ({ p }: { p: PolicyOut }) => (
-  <span>
+  <span className="tabular-nums">
     {fmtUsd(p.budget_nano_usd, "no limit")}
-    {p.soft_budget_nano_usd !== null && <span className="muted"> (soft {fmtUsd(p.soft_budget_nano_usd)})</span>}
+    {p.soft_budget_nano_usd !== null && <span className="text-muted-foreground"> (soft {fmtUsd(p.soft_budget_nano_usd)})</span>}
   </span>
 );

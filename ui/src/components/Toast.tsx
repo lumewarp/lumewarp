@@ -1,37 +1,39 @@
-import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
+import { toast as sonner } from "sonner";
+
+import { Toaster } from "./ui/sonner";
 
 type Kind = "success" | "error";
-interface Toast {
-  id: number;
-  kind: Kind;
-  message: string;
-}
 
 const Ctx = createContext<(kind: Kind, message: string) => void>(() => {});
 export const useToast = () => useContext(Ctx);
 
-let nextId = 1;
+/** Follows the `.dark` class so toasts match an explicit light/dark choice, not only the OS. */
+function useResolvedTheme(): "light" | "dark" {
+  const [mode, setMode] = useState<"light" | "dark">(() =>
+    document.documentElement.classList.contains("dark") ? "dark" : "light",
+  );
+  useEffect(() => {
+    const root = document.documentElement;
+    const sync = () => setMode(root.classList.contains("dark") ? "dark" : "light");
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(root, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, []);
+  return mode;
+}
 
 export function ToastProvider({ children }: { children: ReactNode }) {
-  const [toasts, setToasts] = useState<Toast[]>([]);
+  const theme = useResolvedTheme();
   const push = useCallback((kind: Kind, message: string) => {
-    const id = nextId++;
-    setToasts((t) => [...t, { id, kind, message }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 5000);
+    if (kind === "success") sonner.success(message);
+    else sonner.error(message);
   }, []);
   return (
     <Ctx.Provider value={push}>
       {children}
-      <div className="toasts" role="status" aria-live="polite">
-        {toasts.map((t) => (
-          <div key={t.id} className={`toast toast-${t.kind}`}>
-            {t.message}
-            <button className="icon-btn" aria-label="Dismiss" onClick={() => setToasts((l) => l.filter((x) => x.id !== t.id))}>
-              ×
-            </button>
-          </div>
-        ))}
-      </div>
+      <Toaster theme={theme} position="bottom-right" duration={5000} closeButton />
     </Ctx.Provider>
   );
 }

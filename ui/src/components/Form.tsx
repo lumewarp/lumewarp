@@ -1,6 +1,12 @@
 import { useId, useState, type FormEvent, type ReactNode } from "react";
+
 import { ApiError } from "../api/errors";
+import { cn } from "../lib/utils";
 import { Dialog } from "./Dialog";
+import { Button } from "./ui/button";
+import { Checkbox } from "./ui/checkbox";
+import { Input } from "./ui/input";
+import { Label } from "./ui/label";
 
 type Validators<V> = { [K in keyof V]?: (value: V[K], all: V) => string | undefined };
 
@@ -59,8 +65,10 @@ export function Field({ label, error, hint, children }: { label: string; error?:
   const id = useId();
   const descId = error || hint ? `${id}-d` : undefined;
   return (
-    <div className="field">
-      <label htmlFor={id}>{label}</label>
+    <div className="field flex min-w-0 flex-col gap-1.5">
+      <Label htmlFor={id} className="font-semibold">
+        {label}
+      </Label>
       {children({ id, "aria-invalid": !!error, "aria-describedby": descId })}
       {error ? (
         <p id={descId} className="field-error" role="alert">
@@ -90,7 +98,7 @@ interface TextProps {
 export function TextField({ label, value, onChange, error, hint, type = "text", placeholder, autoFocus }: TextProps) {
   return (
     <Field label={label} error={error} hint={hint}>
-      {(p) => <input {...p} className="input" type={type} value={value} placeholder={placeholder} autoFocus={autoFocus} onChange={(e) => onChange(e.target.value)} />}
+      {(p) => <Input {...p} type={type} value={value} placeholder={placeholder} autoFocus={autoFocus} onChange={(e) => onChange(e.target.value)} />}
     </Field>
   );
 }
@@ -100,7 +108,7 @@ export function NumberField({ label, value, onChange, error, hint, min = 0, step
   return (
     <Field label={label} error={error} hint={hint}>
       {(p) => (
-        <input {...p} className="input" type="number" min={min} step={step} value={value ?? ""} placeholder={placeholder} onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))} />
+        <Input {...p} type="number" min={min} step={step} value={value ?? ""} placeholder={placeholder} onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))} />
       )}
     </Field>
   );
@@ -110,7 +118,15 @@ export function SelectField({ label, value, onChange, options, error, hint }: { 
   return (
     <Field label={label} error={error} hint={hint}>
       {(p) => (
-        <select {...p} className="input" value={value} onChange={(e) => onChange(e.target.value)}>
+        <select
+          {...p}
+          className={cn(
+            "flex h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-input/30",
+            error && "border-destructive ring-destructive/20",
+          )}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        >
           {options.map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}
@@ -124,13 +140,21 @@ export function SelectField({ label, value, onChange, options, error, hint }: { 
 
 /** A labelled checkbox (switches an optional settings group on or off). */
 export function CheckField({ label, checked, onChange, hint }: { label: string; checked: boolean; onChange: (v: boolean) => void; hint?: string }) {
+  const id = useId();
+  const descId = hint ? `${id}-d` : undefined;
   return (
-    <div className="field">
-      <label className="check-row">
-        <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-        <span>{label}</span>
-      </label>
-      {hint && <p className="field-hint">{hint}</p>}
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-2">
+        <Checkbox id={id} checked={checked} aria-describedby={descId} onCheckedChange={(value) => onChange(value === true)} />
+        <Label htmlFor={id} className="cursor-pointer font-normal">
+          {label}
+        </Label>
+      </div>
+      {hint && (
+        <p id={descId} className="field-hint">
+          {hint}
+        </p>
+      )}
     </div>
   );
 }
@@ -139,7 +163,7 @@ export function CheckField({ label, checked, onChange, hint }: { label: string; 
 export function ListField({ label, value, onChange, hint, error }: { label: string; value: string[]; onChange: (v: string[]) => void; hint?: string; error?: string }) {
   return (
     <Field label={label} hint={hint} error={error}>
-      {(p) => <input {...p} className="input" value={value.join(", ")} placeholder="model aliases" onChange={(e) => onChange(e.target.value.split(",").map((s) => s.trim()).filter(Boolean))} />}
+      {(p) => <Input {...p} value={value.join(", ")} placeholder="model aliases" onChange={(e) => onChange(e.target.value.split(",").map((s) => s.trim()).filter(Boolean))} />}
     </Field>
   );
 }
@@ -180,12 +204,12 @@ export function FormDialog({ open, title, submitLabel = "Save", submitDisabled =
       variant={variant}
       footer={
         <>
-          <button type="button" className="btn" onClick={onClose}>
+          <Button type="button" variant="outline" onClick={onClose}>
             Cancel
-          </button>
-          <button type="submit" form={formId} className="btn btn-primary" disabled={busy || submitDisabled}>
+          </Button>
+          <Button type="submit" form={formId} disabled={busy || submitDisabled}>
             {busy ? "Saving…" : submitLabel}
-          </button>
+          </Button>
         </>
       }
     >

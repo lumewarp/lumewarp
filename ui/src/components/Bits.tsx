@@ -1,15 +1,20 @@
 import { useState, type ReactNode } from "react";
+
 import type { Key } from "../api";
+import { Badge as ShadcnBadge } from "./ui/badge";
+import { Button } from "./ui/button";
+
+type Tone = "ok" | "warn" | "danger" | "muted" | "info";
 
 export function KeyBadge({ k }: { k: Key }) {
-  if (k.lifecycle === "revoked") return <span className="badge badge-muted">Revoked</span>;
-  if (k.lifecycle === "suspended") return <span className="badge badge-warn">Suspended</span>;
-  if (k.expires_at && new Date(k.expires_at) < new Date()) return <span className="badge badge-danger">Expired</span>;
-  return <span className="badge badge-ok">Active</span>;
+  if (k.lifecycle === "revoked") return <ShadcnBadge variant="muted">Revoked</ShadcnBadge>;
+  if (k.lifecycle === "suspended") return <ShadcnBadge variant="warn">Suspended</ShadcnBadge>;
+  if (k.expires_at && new Date(k.expires_at) < new Date()) return <ShadcnBadge variant="danger">Expired</ShadcnBadge>;
+  return <ShadcnBadge variant="ok">Active</ShadcnBadge>;
 }
 
-export function Badge({ children, tone = "muted" }: { children: ReactNode; tone?: "ok" | "warn" | "danger" | "muted" | "info" }) {
-  return <span className={`badge badge-${tone}`}>{children}</span>;
+export function Badge({ children, tone = "muted" }: { children: ReactNode; tone?: Tone }) {
+  return <ShadcnBadge variant={tone}>{children}</ShadcnBadge>;
 }
 
 const SUSPENDED_REASONS: Record<string, string> = {
@@ -22,7 +27,7 @@ const SUSPENDED_REASONS: Record<string, string> = {
 /** Human-readable `suspended_reason` shown next to a key's lifecycle badge. */
 export function SuspendedReason({ reason }: { reason: string | null }) {
   if (!reason) return null;
-  return <span className="muted"> {SUSPENDED_REASONS[reason] ?? reason.replaceAll("_", " ")}</span>;
+  return <span className="text-muted-foreground"> {SUSPENDED_REASONS[reason] ?? reason.replaceAll("_", " ")}</span>;
 }
 
 /** Money is stored as integer nano-USD (1 USD = 1e9). */
@@ -44,17 +49,21 @@ export function SecretOnce({ secret }: { secret: string }) {
     }
   };
   return (
-    <div className="secret">
-      <p className="form-warn" role="alert">
+    <div className="flex flex-col gap-3">
+      <p className="rounded-md bg-warning-bg px-3 py-2 text-sm text-warning" role="alert">
         Copy this secret now. It is stored only as a hash and will never be shown again.
       </p>
-      <div className="secret-row">
-        <code className="secret-value" tabIndex={0}>
+      <div className="flex items-stretch gap-2">
+        <code
+          className="secret-value min-w-0 flex-1 select-all break-all rounded-md border bg-secondary px-2.5 py-2 font-mono"
+          data-testid="secret-value"
+          tabIndex={0}
+        >
           {secret}
         </code>
-        <button type="button" className="btn" onClick={copy}>
+        <Button type="button" variant="outline" onClick={copy}>
           {copied ? "Copied" : "Copy"}
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -62,12 +71,12 @@ export function SecretOnce({ secret }: { secret: string }) {
 
 export function PageHeader({ title, description, actions }: { title: string; description?: string; actions?: ReactNode }) {
   return (
-    <header className="page-head">
-      <div>
+    <header className="mb-5 flex flex-wrap items-start justify-between gap-4">
+      <div className="min-w-0">
         <h1>{title}</h1>
-        {description && <p className="muted">{description}</p>}
+        {description && <p className="mt-1 text-sm text-muted-foreground">{description}</p>}
       </div>
-      {actions && <div className="page-actions">{actions}</div>}
+      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
     </header>
   );
 }

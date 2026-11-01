@@ -1,5 +1,11 @@
-import clsx from "clsx";
+import { ArrowDown, ArrowUp } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
+
+import { cn } from "../lib/utils";
+import { Card } from "./ui/card";
+import { Skeleton } from "./ui/skeleton";
+import { Button } from "./ui/button";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 
 export interface Column<T> {
   key: string;
@@ -41,12 +47,12 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
   let body: ReactNode;
   if (error) {
     body = (
-      <div className="state state-error" role="alert">
+      <div className="state state-error" role="alert" data-testid="state-error">
         <p>{error.message}</p>
         {onRetry && (
-          <button className="btn" onClick={onRetry}>
+          <Button variant="outline" size="sm" onClick={onRetry}>
             Retry
-          </button>
+          </Button>
         )}
       </div>
     );
@@ -54,7 +60,7 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
     body = (
       <div className="state" aria-busy="true">
         {[0, 1, 2].map((i) => (
-          <div key={i} className="skeleton" />
+          <Skeleton key={i} className="mx-auto mb-3 h-4 w-full" />
         ))}
       </div>
     );
@@ -63,56 +69,54 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
   }
 
   return (
-    <div className="card table-card">
+    <Card className="gap-0 overflow-hidden py-0">
       {body ?? (
-        <div className="table-scroll">
-          <table className="table">
-            <thead>
-              <tr>
-                {columns.map((c) => {
-                  const active = sort?.key === c.key;
-                  return (
-                    <th key={c.key} scope="col" className={clsx(c.align === "right" && "num")} aria-sort={active ? (sort.dir === 1 ? "ascending" : "descending") : undefined}>
-                      {c.sort ? (
-                        <button className="th-btn" onClick={() => toggle(c.key)}>
-                          {c.header}
-                          <span aria-hidden="true">{active ? (sort.dir === 1 ? " ▲" : " ▼") : ""}</span>
-                        </button>
-                      ) : (
-                        c.header
-                      )}
-                    </th>
-                  );
-                })}
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map((row) => (
-                <tr key={rowKey(row)}>
-                  {columns.map((c) => (
-                    <td key={c.key} className={clsx(c.align === "right" && "num")}>
-                      {c.cell(row)}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              {columns.map((c) => {
+                const active = sort?.key === c.key;
+                return (
+                  <TableHead key={c.key} scope="col" className={cn(c.align === "right" && "text-right")} aria-sort={active ? (sort.dir === 1 ? "ascending" : "descending") : undefined}>
+                    {c.sort ? (
+                      <button type="button" className="inline-flex items-center gap-1 rounded-sm text-left uppercase tracking-[0.04em] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50" onClick={() => toggle(c.key)}>
+                        {c.header}
+                        {active && (sort.dir === 1 ? <ArrowUp className="size-3" aria-hidden="true" /> : <ArrowDown className="size-3" aria-hidden="true" />)}
+                      </button>
+                    ) : (
+                      c.header
+                    )}
+                  </TableHead>
+                );
+              })}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {visible.map((row) => (
+              <TableRow key={rowKey(row)}>
+                {columns.map((c) => (
+                  <TableCell key={c.key} className={cn(c.align === "right" && "text-right tabular-nums")}>
+                    {c.cell(row)}
+                  </TableCell>
+                ))}
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
       )}
       {!body && pages > 1 && (
-        <div className="pager">
+        <div className="pager border-t">
           <span>
             {cur * pageSize + 1}–{Math.min((cur + 1) * pageSize, sorted.length)} of {sorted.length}
           </span>
-          <button className="btn btn-sm" disabled={cur === 0} onClick={() => setPage(cur - 1)}>
+          <Button variant="outline" size="sm" disabled={cur === 0} onClick={() => setPage(cur - 1)}>
             Previous
-          </button>
-          <button className="btn btn-sm" disabled={cur >= pages - 1} onClick={() => setPage(cur + 1)}>
+          </Button>
+          <Button variant="outline" size="sm" disabled={cur >= pages - 1} onClick={() => setPage(cur + 1)}>
             Next
-          </button>
+          </Button>
         </div>
       )}
-    </div>
+    </Card>
   );
 }
