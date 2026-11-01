@@ -26,7 +26,7 @@ use crate::{
     router::Router,
     runtime::Runtime,
     server,
-    snapshot::{self, ApplyError, SUPPORTED_CAPABILITIES},
+    snapshot::{self, ApplyError},
 };
 
 const MAX_MESSAGE_BYTES: usize = snapshot::MAX_SNAPSHOT_BYTES;
@@ -143,10 +143,7 @@ impl Client {
                 gateway_id: self.config.gateway_id.clone(),
                 have_version: have,
                 gateway_version: env!("CARGO_PKG_VERSION").into(),
-                supported_capabilities: SUPPORTED_CAPABILITIES
-                    .iter()
-                    .map(|c| c.to_string())
-                    .collect(),
+                supported_capabilities: snapshot::supported_capabilities(),
                 have_digest: if have > 0 {
                     self.digest.clone()
                 } else {

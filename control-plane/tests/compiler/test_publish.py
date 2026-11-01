@@ -41,7 +41,7 @@ from tests.factories import make_key, make_team, make_user
 
 async def publish(factory, **kw):
     kw.setdefault("require_local_membership", True)
-    return await publish_pending(factory, SCOPE, router_plugins=[], **kw)
+    return await publish_pending(factory, SCOPE, **kw)
 
 
 async def outbox_rows(factory) -> list[tuple[int, str, int | None]]:

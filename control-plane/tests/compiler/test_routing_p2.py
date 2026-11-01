@@ -26,15 +26,12 @@ from lumewarp_control_plane.models import (
     StickyBy,
     Upstream,
 )
-from lumewarp_control_plane.plugins import LoadedPlugin, WeightOverride
 from tests.compiler.helpers import OCT, SCOPE, add_route, seed_scope
 
 
 async def compile_(factory):
     async with factory() as s:
-        return await compile_scope(
-            s, SCOPE, now=OCT, router_plugins=[], require_local_membership=True
-        )
+        return await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
 
 
 def route_of(snap: pb.Snapshot, model: str) -> pb.ModelRoute:
@@ -263,45 +260,6 @@ async def test_weighted_split_with_zero_weight_leaves_route_out(factory) -> None
     c = await compile_(factory)
     assert [r.model for r in c.snapshot.routes] == ["zero"]
     assert any("zero total weight" in w for w in c.warnings)
-
-
-@pytest.mark.parametrize("split", [False, True])
-async def test_plugin_starving_one_pool_is_discarded_whole(factory, caplog, split) -> None:
-    await seed_scope(factory)
-    async with factory() as s, s.begin():
-        route = await add_route(s, "main", [("a", None), ("b", None)])
-        # Avoid another weighted route masking a broken split in the plugin check.
-        await add_route(s, "other", [("c", None)], strategy=RoutingStrategy.LEAST_IN_FLIGHT)
-        if split:
-            await _split(s, route, "one", 1, ["a"], 0)
-            await _split(s, route, "two", 1, ["b"], 1)
-
-    class Fixed:
-        def __init__(self, *overrides):
-            self.overrides = overrides
-
-        def adjust(self, routes):
-            return self.overrides
-
-    plugins = [
-        LoadedPlugin("prior", Fixed(WeightOverride("a", 2))),
-        LoadedPlugin(
-            "broken",
-            Fixed(
-                WeightOverride("a", 0),
-                WeightOverride("b", 7 if split else 0),
-                WeightOverride("c", 9),
-            ),
-        ),
-        LoadedPlugin("later", Fixed(WeightOverride("b", 3))),
-    ]
-    async with factory() as s:
-        compiled = await compile_scope(
-            s, SCOPE, now=OCT, router_plugins=plugins, require_local_membership=True
-        )
-    assert {d.name: d.weight for d in compiled.snapshot.deployments} == {"a": 2, "b": 3, "c": 1}
-    assert "router plugin broken skipped" in caplog.text
-    assert {r.model for r in compiled.snapshot.routes} == {"main", "other"}
 
 
 async def test_all_capabilities_together(factory) -> None:

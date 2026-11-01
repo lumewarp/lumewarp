@@ -884,6 +884,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inventory"
+version = "0.3.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6928282826c822ad91bf1c9a1cb90a30ba1c26770749929b4656cd6be829cd7c"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1038,6 +1047,7 @@ version = "0.1.0"
 dependencies = [
  "lumewarp-proto",
  "serde",
+ "serde_json",
  "serde_yaml",
  "thiserror",
 ]
@@ -1059,6 +1069,7 @@ dependencies = [
  "hyper-util",
  "lumewarp-config",
  "lumewarp-proto",
+ "lumewarp-router-api",
  "memchr",
  "mock-upstream",
  "opentelemetry",
@@ -1091,6 +1102,16 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "lumewarp-router-api"
+version = "0.1.0"
+dependencies = [
+ "fastrand",
+ "inventory",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

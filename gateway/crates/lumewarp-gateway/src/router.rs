@@ -17,6 +17,9 @@ use lumewarp_proto::config::v1::{
     CircuitBreaker, KeyStatus, Price, RateLimit, RetryPolicy, RoutingStrategy, Snapshot, StickyBy,
     StreamUsageMode,
 };
+use lumewarp_router_api::{
+    Builtin, CandidateSource, Candidates, Load, Needs, RequestInfo, RouteInfo, Strategy, ThreadRng,
+};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 
 use crate::{
@@ -82,6 +85,101 @@ struct Pool {
     total_weight: u64,
 }
 
+struct PoolSource<'a> {
+    pool: &'a Pool,
+    now: u64,
+}
+
+impl CandidateSource for PoolSource<'_> {
+    fn len(&self) -> usize {
+        self.pool.deployments.len()
+    }
+    fn name(&self, i: usize) -> &str {
+        &self.pool.deployments[i].name
+    }
+    fn weight(&self, i: usize) -> u64 {
+        self.pool.cumulative_weights[i]
+            - if i == 0 {
+                0
+            } else {
+                self.pool.cumulative_weights[i - 1]
+            }
+    }
+    fn in_flight(&self, i: usize) -> usize {
+        self.pool.deployments[i].in_flight.load(Ordering::Relaxed)
+    }
+    fn latency_ewma_us(&self, i: usize) -> Option<u64> {
+        let us = self.pool.deployments[i].latency.get_us();
+        (us != 0).then_some(us)
+    }
+    fn load(&self, i: usize) -> Load {
+        self.pool.deployments[i].load.view(self.now)
+    }
+    fn total_weight(&self) -> u64 {
+        self.pool.total_weight
+    }
+    fn weighted_index(&self, draw: u64) -> usize {
+        self.pool.weighted_index(draw)
+    }
+}
+
+enum CompiledStrategy {
+    Builtin(Builtin),
+    Custom(Box<dyn Strategy>),
+}
+
+impl CompiledStrategy {
+    fn configure(r: &lumewarp_proto::config::v1::ModelRoute) -> Result<Self, ApplyError> {
+        let builtin = match RoutingStrategy::try_from(r.strategy).expect("validated strategy") {
+            RoutingStrategy::Weighted => Builtin::Weighted,
+            RoutingStrategy::LeastInFlight => Builtin::LeastInFlight,
+            RoutingStrategy::LowestLatency => Builtin::LowestLatency,
+            RoutingStrategy::VllmLoad => Builtin::VllmLoad,
+            RoutingStrategy::Custom => {
+                let factory = lumewarp_router_api::lookup(&r.custom_strategy)
+                    .map_err(|_| invalid("duplicate strategy registration".into()))?
+                    .ok_or_else(|| ApplyError::unsupported("unregistered custom strategy"))?;
+                let deployments: Vec<_> = route_deployment_names(r).collect();
+                let info = RouteInfo {
+                    model: &r.model,
+                    deployments: &deployments,
+                };
+                let params = snapshot::strategy_params(r)?;
+                // Do not propagate plugin error text: params may contain private data.
+                return (factory.create)(&info, &params)
+                    .map(Self::Custom)
+                    .map_err(|_| {
+                        invalid(format!("route {:?} strategy configuration failed", r.model))
+                    });
+            }
+            RoutingStrategy::Unspecified => unreachable!("validated strategy"),
+        };
+        Ok(Self::Builtin(builtin))
+    }
+
+    fn needs(&self) -> Needs {
+        match self {
+            Self::Builtin(s) => s.needs(),
+            Self::Custom(s) => s.needs(),
+        }
+    }
+
+    fn pick<S: CandidateSource, E: Fn(usize) -> bool>(
+        &self,
+        req: &RequestInfo<'_>,
+        c: &Candidates<'_, S, E>,
+        rng: &mut ThreadRng,
+    ) -> Option<usize> {
+        match self {
+            Self::Builtin(s) => s.pick_from(c, rng),
+            Self::Custom(s) => {
+                let picked = s.pick(req, &c.erased(), rng)?;
+                c.get(picked).map(|d| d.index)
+            }
+        }
+    }
+}
+
 pub struct Route {
     model: Box<str>,
     model_label: LabelId,
@@ -94,7 +192,8 @@ pub struct Route {
     split_requests: Vec<Counter>,
     sticky: StickyBy,
     sticky_header: Option<HeaderName>,
-    strategy: RoutingStrategy,
+    strategy: CompiledStrategy,
+    strategy_headers: Vec<String>,
     pub retry: Option<RetryPolicy>,
     pub fallbacks: Vec<(String, Counter)>,
     pub budget_exhausted: Counter,
@@ -161,7 +260,8 @@ impl Route {
 impl Pool {
     fn pick(
         &self,
-        strategy: RoutingStrategy,
+        strategy: &CompiledStrategy,
+        req: &RequestInfo<'_>,
         excluded: Option<&[LabelId]>,
         now: u64,
         strict: bool,
@@ -179,107 +279,9 @@ impl Pool {
                     d.circuit.is_none() || !d.breaker.trial_in_progress()
                 }
         };
-        let in_flight = |i: usize| self.deployments[i].in_flight.load(Ordering::Relaxed);
-        match strategy {
-            RoutingStrategy::LeastInFlight => {
-                let len = self.deployments.len();
-                let start = fastrand::usize(0..len);
-                (0..len)
-                    .map(|offset| (start + offset) % len)
-                    .filter(|&i| eligible(i))
-                    .min_by_key(|&i| in_flight(i))
-            }
-            RoutingStrategy::LowestLatency => {
-                if fastrand::u32(0..100) < balance::EXPLORE_PERCENT {
-                    return self.random_eligible(&eligible);
-                }
-                // Peak-EWMA style cost: latency scaled by queued work here.
-                // No samples yet = cost 0, so new deployments get explored.
-                let cost = |i: usize| {
-                    u128::from(self.deployments[i].latency.get_us()) * (in_flight(i) as u128 + 1)
-                };
-                self.two_choices(&eligible, |a, b| cost(a) < cost(b))
-            }
-            RoutingStrategy::VllmLoad => self.two_choices(&eligible, |a, b| {
-                let (da, db) = (&self.deployments[a], &self.deployments[b]);
-                match (da.load.score(now), db.load.score(now)) {
-                    (Some((wa, ka)), Some((wb, kb))) => {
-                        (wa, ka, in_flight(a)) < (wb, kb, in_flight(b))
-                    }
-                    // Stale or failed scrape on either side: in-flight only.
-                    _ => in_flight(a) < in_flight(b),
-                }
-            }),
-            _ => {
-                let weight = |i: usize| {
-                    self.cumulative_weights[i]
-                        - if i == 0 {
-                            0
-                        } else {
-                            self.cumulative_weights[i - 1]
-                        }
-                };
-                let total: u64 = (0..self.deployments.len())
-                    .filter(|&i| eligible(i))
-                    .map(weight)
-                    .sum();
-                if total == 0 {
-                    return None;
-                }
-                // Keep the original fast cumulative draw when nothing is filtered.
-                if total == self.total_weight {
-                    return Some(self.weighted_index(fastrand::u64(0..total)));
-                }
-                let mut draw = fastrand::u64(0..total);
-                (0..self.deployments.len()).find(|&i| {
-                    if !eligible(i) {
-                        return false;
-                    }
-                    let w = weight(i);
-                    if draw < w {
-                        return true;
-                    }
-                    draw -= w;
-                    false
-                })
-            }
-        }
-    }
-
-    fn nth_eligible(&self, eligible: &impl Fn(usize) -> bool, n: usize) -> Option<usize> {
-        (0..self.deployments.len()).filter(|&i| eligible(i)).nth(n)
-    }
-
-    fn random_eligible(&self, eligible: &impl Fn(usize) -> bool) -> Option<usize> {
-        let count = (0..self.deployments.len()).filter(|&i| eligible(i)).count();
-        if count == 0 {
-            return None;
-        }
-        self.nth_eligible(eligible, fastrand::usize(0..count))
-    }
-
-    /// Power of two choices: two distinct random eligible deployments, keep
-    /// the one `better` prefers (ties keep the first, itself random).
-    fn two_choices(
-        &self,
-        eligible: &impl Fn(usize) -> bool,
-        better: impl Fn(usize, usize) -> bool,
-    ) -> Option<usize> {
-        let count = (0..self.deployments.len()).filter(|&i| eligible(i)).count();
-        match count {
-            0 => None,
-            1 => self.nth_eligible(eligible, 0),
-            _ => {
-                let a = fastrand::usize(0..count);
-                let mut b = fastrand::usize(0..count - 1);
-                if b >= a {
-                    b += 1;
-                }
-                let a = self.nth_eligible(eligible, a)?;
-                let b = self.nth_eligible(eligible, b)?;
-                Some(if better(b, a) { b } else { a })
-            }
-        }
+        let source = PoolSource { pool: self, now };
+        let candidates = Candidates::new(&source, &eligible);
+        strategy.pick(req, &candidates, &mut ThreadRng)
     }
 
     fn weighted_index(&self, draw: u64) -> usize {
@@ -347,7 +349,13 @@ impl Router {
         auth_mode: AuthMode,
         runtime: &Arc<Runtime>,
     ) -> Result<Self, ApplyError> {
-        snapshot::validate(snapshot, snapshot::SUPPORTED_CAPABILITIES)?;
+        let capabilities = snapshot::supported_capabilities();
+        let caps: Vec<_> = capabilities.iter().map(String::as_str).collect();
+        snapshot::validate(snapshot, &caps)?;
+        let mut strategies = HashMap::new();
+        for route in &snapshot.routes {
+            strategies.insert(route.model.as_str(), CompiledStrategy::configure(route)?);
+        }
         let mut upstreams = HashMap::new();
         let mut probes = Vec::new();
         let mut unprobed = Vec::new();
@@ -362,12 +370,12 @@ impl Router {
         let mut scraped_upstreams = HashSet::new();
         for r in &snapshot.routes {
             let names = route_deployment_names(r);
-            match RoutingStrategy::try_from(r.strategy) {
-                Ok(RoutingStrategy::LowestLatency) => latency_tracked.extend(names),
-                Ok(RoutingStrategy::VllmLoad) => {
-                    scraped_upstreams.extend(names.filter_map(|d| upstream_of.get(d).copied()))
-                }
-                _ => {}
+            let needs = strategies[r.model.as_str()].needs();
+            if needs.latency {
+                latency_tracked.extend(route_deployment_names(r));
+            }
+            if needs.vllm_load {
+                scraped_upstreams.extend(names.filter_map(|d| upstream_of.get(d).copied()));
             }
         }
         for upstream in &snapshot.upstreams {
@@ -538,7 +546,10 @@ impl Router {
 
         let mut routes = HashMap::new();
         for r in &snapshot.routes {
-            let strategy = RoutingStrategy::try_from(r.strategy).expect("validated strategy");
+            let strategy = strategies
+                .remove(r.model.as_str())
+                .expect("configured strategy");
+            let strategy_headers = snapshot::strategy_headers(r)?;
             let groups: Vec<(&str, &[String], u32)> = if r.traffic_split.is_empty() {
                 vec![("", r.deployments.as_slice(), 1)]
             } else {
@@ -562,7 +573,7 @@ impl Router {
                         .ok_or_else(|| invalid(format!("route {:?} weights overflow", r.model)))?;
                     cumulative_weights.push(total_weight);
                 }
-                if strategy == RoutingStrategy::Weighted && total_weight == 0 {
+                if r.strategy == RoutingStrategy::Weighted as i32 && total_weight == 0 {
                     return Err(invalid(format!(
                         "route {:?}{}{split} must have deployments with positive total weight",
                         r.model,
@@ -623,6 +634,7 @@ impl Router {
                             .expect("validated sticky_header")
                     }),
                     strategy,
+                    strategy_headers,
                     retry: r.retry.clone(),
                     fallbacks: r
                         .fallbacks
@@ -789,22 +801,24 @@ impl Router {
         if let Some(counter) = route.split_requests.get(split) {
             counter.inc();
         }
-        if let Some(guard) =
-            self.acquire_from(route, route, split, endpoint, caller, None, false, skipped)
-        {
+        if let Some(guard) = self.acquire_from(
+            route, route, split, endpoint, caller, headers, None, false, skipped,
+        ) {
             return Some((guard, None, split));
         }
         for (name, counter) in &route.fallbacks {
             let fallback = &self.routes[name];
             let first = fallback.split_for(headers, caller);
             if let Some(guard) = self.acquire_from(
-                route, fallback, first, endpoint, caller, None, false, skipped,
+                route, fallback, first, endpoint, caller, headers, None, false, skipped,
             ) {
                 return Some((guard, Some(counter), split));
             }
         }
-        self.acquire_from(route, route, split, endpoint, caller, None, true, skipped)
-            .map(|guard| (guard, None, split))
+        self.acquire_from(
+            route, route, split, endpoint, caller, headers, None, true, skipped,
+        )
+        .map(|guard| (guard, None, split))
     }
 
     /// First exhaust untried deployments (the chosen split, then the other
@@ -829,6 +843,7 @@ impl Router {
                     split,
                     endpoint,
                     caller,
+                    headers,
                     Some(excluded),
                     !strict,
                     skipped,
@@ -843,6 +858,7 @@ impl Router {
                         fallback.split_for(headers, caller),
                         endpoint,
                         caller,
+                        headers,
                         Some(excluded),
                         !strict,
                         skipped,
@@ -863,6 +879,7 @@ impl Router {
         split: usize,
         endpoint: usize,
         caller: &Caller,
+        headers: &HeaderMap,
         excluded: Option<&[LabelId]>,
         fail_open: bool,
         skipped: &mut Skipped,
@@ -875,9 +892,22 @@ impl Router {
                 }
             }
         }
+        let (team_id, key_id) = match caller {
+            Caller::Key(key) => (key.team_id.as_ref(), key.key_id.as_ref()),
+            _ => ("", ""),
+        };
+        let lookup = |name: &str| headers.get(name).map(HeaderValue::as_bytes);
+        let req = RequestInfo::new(
+            &root.model,
+            team_id,
+            key_id,
+            None,
+            &route.strategy_headers,
+            &lookup,
+        );
         let pick = |strict: bool| {
             route.pool_order(split).find_map(|pool| {
-                pool.pick(route.strategy, excluded, now, strict)
+                pool.pick(&route.strategy, &req, excluded, now, strict)
                     .map(|i| &pool.deployments[i])
             })
         };
@@ -998,6 +1028,137 @@ mod tests {
     use crate::snapshot::tests::{base, deployment, key, route, upstream};
     use lumewarp_proto::config::v1 as pb;
 
+    fn empty_request() -> RequestInfo<'static> {
+        RequestInfo::new("public", "", "", None, &[], &|_| None)
+    }
+
+    struct HeaderPin;
+
+    impl Strategy for HeaderPin {
+        fn name(&self) -> &'static str {
+            "header_pin"
+        }
+        fn needs(&self) -> Needs {
+            Needs {
+                latency: true,
+                vllm_load: true,
+            }
+        }
+        fn configure(
+            _: &RouteInfo<'_>,
+            params: &lumewarp_router_api::Params,
+        ) -> Result<Self, lumewarp_router_api::ConfigError> {
+            if params.get("reject").is_some() {
+                return Err(lumewarp_router_api::ConfigError("private params".into()));
+            }
+            Ok(Self)
+        }
+        fn pick(
+            &self,
+            req: &RequestInfo<'_>,
+            c: &Candidates<'_>,
+            _: &mut dyn lumewarp_router_api::RngCore,
+        ) -> Option<usize> {
+            assert!(req.header("authorization").is_none());
+            let pin = req.header("x-pin");
+            c.iter()
+                .find(|d| Some(d.name().as_bytes()) == pin)
+                .or_else(|| c.iter().next())
+                .map(|d| d.index)
+        }
+    }
+    lumewarp_router_api::register!("header_pin", HeaderPin);
+
+    #[test]
+    fn custom_strategy_snapshot_apply_headers_needs_and_allocations() {
+        let mut s = snapshot(RoutingStrategy::Custom);
+        s.upstreams.push(upstream("second"));
+        s.deployments[1].upstream = "second".into();
+        s.routes[0].custom_strategy = "header_pin".into();
+        s.routes[0].strategy_params_json = r#"{"headers":["x-pin"]}"#.into();
+        s.required_capabilities = vec!["strategy:header_pin".into()];
+        assert!(snapshot::supported_capabilities().contains(&"strategy:header_pin".into()));
+        assert!(lumewarp_router_api::lookup("header_pin").unwrap().is_some());
+        assert!(lumewarp_router_api::lookup("missing").unwrap().is_none());
+        let update = pb::ConfigUpdate {
+            update: Some(pb::config_update::Update::Full(s.clone())),
+            ..Default::default()
+        };
+        let applied = snapshot::apply(&Snapshot::default(), update).unwrap();
+        let router = compile(&applied);
+        let route = &router.routes["public"];
+        assert!(route.pools[0].deployments.iter().all(|d| d.track_latency));
+        assert_eq!(router.scrapes.len(), 2);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-pin", HeaderValue::from_static("b"));
+        headers.insert("authorization", HeaderValue::from_static("secret"));
+        let pick = || {
+            router
+                .acquire_initial(
+                    route,
+                    0,
+                    &Caller::Anonymous,
+                    &headers,
+                    &mut Skipped::default(),
+                )
+                .unwrap()
+                .0
+        };
+        drop(pick()); // warm metric handles
+        let (allocations, guard) = crate::test_alloc::count(pick);
+        assert_eq!(allocations, (0, 0));
+        assert_eq!(guard.deployment.name, "b");
+        drop(guard);
+        route.pools[0].deployments[1]
+            .healthy
+            .store(false, Ordering::Release);
+        assert_eq!(
+            pick().deployment.name,
+            "a",
+            "custom sees only eligible candidates"
+        );
+        s.routes[0].strategy_params_json = r#"{"reject":"private"}"#.into();
+        let err = Router::compile(&s, AuthMode::Open, &Runtime::new())
+            .err()
+            .unwrap();
+        assert_eq!(err.code, pb::NackCode::InvalidConfig);
+        assert!(!err.reason.contains("private"));
+    }
+
+    #[test]
+    fn custom_strategy_unknown_and_missing_capability_nacks() {
+        let mut s = snapshot(RoutingStrategy::Custom);
+        s.routes[0].custom_strategy = "not_compiled".into();
+        s.required_capabilities = vec!["strategy:not_compiled".into()];
+        assert_eq!(
+            Router::compile(&s, AuthMode::Open, &Runtime::new())
+                .err()
+                .unwrap()
+                .code,
+            pb::NackCode::UnsupportedFeature
+        );
+        s.routes[0].custom_strategy = "header_pin".into();
+        s.required_capabilities.clear();
+        assert_eq!(
+            Router::compile(&s, AuthMode::Open, &Runtime::new())
+                .err()
+                .unwrap()
+                .code,
+            pb::NackCode::InvalidConfig
+        );
+    }
+
+    #[test]
+    fn custom_params_nesting_budget() {
+        let mut r = pb::ModelRoute {
+            strategy_params_json: format!("{}{{}}{}", r#"{"x":"#.repeat(126), "}".repeat(126)),
+            ..Default::default()
+        };
+        assert!(snapshot::strategy_params(&r).is_ok());
+        r.strategy_params_json = format!(r#"{{"x":{}}}"#, r.strategy_params_json);
+        assert!(snapshot::strategy_params(&r).is_err());
+    }
+
     fn snapshot(strategy: RoutingStrategy) -> Snapshot {
         let mut a = deployment("a", "u");
         a.weight = 1;
@@ -1021,6 +1182,96 @@ mod tests {
 
     fn compile(s: &Snapshot) -> Router {
         Router::compile(s, AuthMode::Open, &Runtime::new()).unwrap()
+    }
+
+    /// Golden traces recorded before introducing the strategy interface. Covers
+    /// weights, ties, load, stale load, exclusions and strict/fail-open eligibility.
+    #[test]
+    fn pinned_strategy_traces() {
+        for strategy in [
+            RoutingStrategy::Weighted,
+            RoutingStrategy::LeastInFlight,
+            RoutingStrategy::LowestLatency,
+            RoutingStrategy::VllmLoad,
+        ] {
+            let router = compile(&snapshot(strategy));
+            let pool = &router.routes["public"].pools[0];
+            let mut trace = 0u64;
+            fastrand::seed(0x1234);
+            for step in 0..4096 {
+                let now = 10_000;
+                pool.deployments[0]
+                    .in_flight
+                    .store(step % 3, Ordering::Relaxed);
+                pool.deployments[1]
+                    .in_flight
+                    .store(step % 5, Ordering::Relaxed);
+                pool.deployments[0]
+                    .latency
+                    .success(Duration::from_micros(10));
+                pool.deployments[1]
+                    .latency
+                    .success(Duration::from_micros(20));
+                pool.deployments[0].load.set((step % 7) as f64, 0.45, now);
+                pool.deployments[1].load.set((step % 4) as f64, 0.10, now);
+                if step % 11 == 0 {
+                    pool.deployments[0].load.fail();
+                }
+                pool.deployments[0]
+                    .healthy
+                    .store(step % 13 != 0, Ordering::Release);
+                let excluded = [pool.deployments[1].label];
+                let picked = pool.pick(
+                    &router.routes["public"].strategy,
+                    &empty_request(),
+                    (step % 17 == 0).then_some(excluded.as_slice()),
+                    now,
+                    step % 19 != 0,
+                );
+                trace = trace
+                    .wrapping_mul(31)
+                    .wrapping_add(picked.map_or(3, |i| i as u64));
+            }
+            let expected = match strategy {
+                RoutingStrategy::Weighted => 18345758516063820545,
+                RoutingStrategy::LeastInFlight => 425016045968590066,
+                RoutingStrategy::LowestLatency => 8882522843359636763,
+                RoutingStrategy::VllmLoad => 18199678790619655580,
+                _ => unreachable!(),
+            };
+            assert_eq!(trace, expected, "{strategy:?}");
+        }
+    }
+
+    /// Run explicitly in release mode; measures selection only, without metrics,
+    /// compilation or upstream traffic. Keep the same harness across the refactor.
+    #[test]
+    #[ignore = "pick microbenchmark"]
+    fn pick_timing() {
+        for strategy in [
+            RoutingStrategy::Weighted,
+            RoutingStrategy::LeastInFlight,
+            RoutingStrategy::LowestLatency,
+            RoutingStrategy::VllmLoad,
+        ] {
+            let router = compile(&snapshot(strategy));
+            let pool = &router.routes["public"].pools[0];
+            fastrand::seed(42);
+            let start = std::time::Instant::now();
+            for _ in 0..1_000_000 {
+                std::hint::black_box(pool.pick(
+                    &router.routes["public"].strategy,
+                    &empty_request(),
+                    None,
+                    10_000,
+                    true,
+                ));
+            }
+            println!(
+                "PICK {strategy:?}: {:.2} ns/pick (1000000 iterations, two deployments)",
+                start.elapsed().as_nanos() as f64 / 1_000_000.0
+            );
+        }
     }
 
     #[test]

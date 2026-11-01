@@ -10,7 +10,7 @@ import re
 import uuid
 from datetime import UTC, datetime
 from datetime import date as date_type
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     AfterValidator,
@@ -584,7 +584,9 @@ Splits = Annotated[list[TrafficSplitIn], AfterValidator(_check_splits)]
 
 class RouteCreate(ApiModel):
     model: ModelName
-    strategy: RoutingStrategy = RoutingStrategy.WEIGHTED
+    strategy: RoutingStrategy | Literal["custom"] = RoutingStrategy.WEIGHTED
+    custom_strategy: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,62}$")
+    strategy_params: dict[str, Any] = Field(default_factory=dict)
     deployment_ids: list[uuid.UUID] = Field(
         default_factory=list,
         description="Ordered deployments; may be empty only when traffic_split is set.",
@@ -609,7 +611,9 @@ class RouteUpdate(ApiModel):
     """
 
     model: ModelName | None = None
-    strategy: RoutingStrategy | None = None
+    strategy: RoutingStrategy | Literal["custom"] | None = None
+    custom_strategy: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,62}$")
+    strategy_params: dict[str, Any] | None = None
     deployment_ids: list[uuid.UUID] | None = None
     retry: RetryPolicyIn | None = None
     fallback_route_ids: list[uuid.UUID] | None = None
@@ -631,7 +635,9 @@ class RouteDeploymentOut(ReadModel):
 class RouteOut(ReadModel):
     id: uuid.UUID
     model: str
-    strategy: RoutingStrategy
+    strategy: RoutingStrategy | Literal["custom"]
+    custom_strategy: str | None = None
+    strategy_params: dict[str, Any] = Field(default_factory=dict)
     deployments: list[RouteDeploymentOut]
     retry: RetryPolicyOut | None
     fallback_route_ids: list[uuid.UUID]

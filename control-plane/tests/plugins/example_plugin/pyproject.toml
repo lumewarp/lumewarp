@@ -6,9 +6,6 @@ name = "lumewarp-example-plugin"
 version = "0.1.0"
 requires-python = ">=3.12"
 
-[project.entry-points."lumewarp.router"]
-example = "lumewarp_example_plugin:CheapestFirstRouter"
-
 [project.entry-points."lumewarp.notifier"]
 example = "lumewarp_example_plugin:RecordingNotifier"
 
