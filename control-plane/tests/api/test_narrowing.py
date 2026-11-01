@@ -3,7 +3,12 @@
 import pytest
 
 from tests.api.helpers import ADMIN_AUTH
-from tests.factories import make_member, make_service_account, make_team, make_user
+from tests.factories import catalog_name, make_member, make_service_account, make_team, make_user
+
+
+async def grant_names(session) -> None:
+    for name in ("a", "b"):
+        await catalog_name(session, name)
 
 
 @pytest.mark.parametrize("owner", ["member", "service_account"])
@@ -60,11 +65,6 @@ async def test_owner_cannot_widen_team(client, committed, owner, policy, field) 
     "owner_policy, team_update, field",
     [
         ({"rpm_limit": 50}, {"rpm_limit": 40}, "rpm_limit"),
-        (
-            {"model_access": "list", "allowed_models": ["b"]},
-            {"model_access": "list", "allowed_models": ["a"]},
-            "allowed_models",
-        ),
     ],
 )
 async def test_team_narrowing_names_conflicting_owner(
@@ -104,6 +104,40 @@ def test_team_policy_validation(client, body) -> None:
         "/api/v1/teams", json={"name": f"policy-{suffix()}", **body}, headers=ADMIN_AUTH
     )
     assert response.status_code == 422, response.text
+
+
+@pytest.mark.parametrize("owner", ["member", "service_account"])
+async def test_team_narrowing_keeps_owner_models_and_effective_is_intersection(
+    client, committed, owner
+) -> None:
+    team = await make_team(committed)
+    await grant_names(committed)
+    if owner == "member":
+        row = await make_member(committed, team, model_access="list", allowed_models=["a", "b"])
+        path = f"/api/v1/teams/{team.id}/members/{row.user_id}"
+        listing = f"/api/v1/teams/{team.id}/members"
+    else:
+        row = await make_service_account(
+            committed, team, model_access="list", allowed_models=["a", "b"]
+        )
+        path = f"/api/v1/service-accounts/{row.id}"
+        listing = f"/api/v1/teams/{team.id}/service-accounts"
+    await committed.commit()
+    response = client.patch(
+        f"/api/v1/teams/{team.id}",
+        json={"model_access": "list", "allowed_models": ["a"]},
+        headers=ADMIN_AUTH,
+    )
+    assert response.status_code == 200, response.text
+    # The owner's stored setting survives; `narrow` applies at compile time.
+    stored = client.get(listing, headers=ADMIN_AUTH).json()["items"][0]
+    assert stored["allowed_models"] == ["a", "b"]
+    # Saving unrelated fields does not force the owner to re-narrow.
+    assert client.patch(path, json={"rpm_limit": 5}, headers=ADMIN_AUTH).status_code == 200
+    # A list that changes must be inside the team's scope.
+    widened = client.patch(path, json={"allowed_models": ["b"]}, headers=ADMIN_AUTH)
+    assert widened.status_code == 422
+    assert "allowed_models" in widened.json()["error"]["message"]
 
 
 async def test_team_locks_scope_before_validating_owners(client, committed, monkeypatch) -> None:

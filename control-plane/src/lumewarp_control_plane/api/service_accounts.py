@@ -22,10 +22,10 @@ from lumewarp_control_plane.api.common import (
 )
 from lumewarp_control_plane.api.policy import (
     apply_policy,
-    check_narrowing,
     policy_from_fields,
     policy_of,
-    team_effective,
+    save_grants,
+    validate_owner_policy,
 )
 from lumewarp_control_plane.api.schemas import (
     Page,
@@ -94,7 +94,7 @@ async def create_service_account(
         team = await get_team_or_404(session, authz, team_id)
         await authz.require(Action.SERVICE_ACCOUNT_MANAGE, team.id)
         policy = policy_from_fields(body, default_mode=ModelAccess.INHERIT)
-        check_narrowing(team_effective(team), policy)
+        await validate_owner_policy(session, team, policy)
         row = ServiceAccount(
             team_id=team.id,
             name=body.name,
@@ -104,6 +104,7 @@ async def create_service_account(
         apply_policy(row, policy)
         session.add(row)
         await session.flush()
+        await save_grants(session, row, policy)
         await session.refresh(row)
         audit.record(
             session,
@@ -149,10 +150,11 @@ async def update_service_account(
         await authz.require(Action.SERVICE_ACCOUNT_MANAGE, row.team_id)
         base = policy_of(row)
         proposed = policy_from_fields(body, default_mode=ModelAccess.INHERIT, base=base)
-        check_narrowing(team_effective(team), proposed)
+        await validate_owner_policy(session, team, proposed, base)
         changed = proposed != base
         if changed:
             apply_policy(row, proposed)
+            await save_grants(session, row, proposed)
         if body.name is not None:
             row.name = body.name
         if body.description is not None:

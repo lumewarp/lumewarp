@@ -26,10 +26,10 @@ from lumewarp_control_plane.api.common import (
 )
 from lumewarp_control_plane.api.policy import (
     apply_policy,
-    check_narrowing,
     policy_from_fields,
     policy_of,
-    team_effective,
+    save_grants,
+    validate_owner_policy,
 )
 from lumewarp_control_plane.api.schemas import (
     MemberCreate,
@@ -202,8 +202,10 @@ async def _save_member(
             raise conflict("user is not active")
         user_id = user.id
         policy = policy_from_fields(body, default_mode=ModelAccess.INHERIT)
-        check_narrowing(team_effective(team), policy)
         row = await session.get(TeamMember, (team.id, user_id), with_for_update=True)
+        await validate_owner_policy(
+            session, team, policy, policy_of(row) if row is not None else None
+        )
         created = row is None
         if create_only and not created:
             raise conflict("user is already a member of this team")
@@ -216,6 +218,7 @@ async def _save_member(
             row.role = body.role
         apply_policy(row, policy)
         await session.flush()
+        await save_grants(session, row, policy)
         await session.refresh(row)
         audit.record(
             session,
@@ -257,10 +260,11 @@ async def update_member(
             raise validation_error("role", "cannot be null")
         base = policy_of(row)
         proposed = policy_from_fields(body, default_mode=ModelAccess.INHERIT, base=base)
-        check_narrowing(team_effective(team), proposed)
+        await validate_owner_policy(session, team, proposed, base)
         changed = proposed != base
         if changed:
             apply_policy(row, proposed)
+            await save_grants(session, row, proposed)
         if body.role is not None and body.role is not row.role:
             if row.role is TeamRole.ADMIN:
                 await _ensure_other_admin(session, team.id, user_id)

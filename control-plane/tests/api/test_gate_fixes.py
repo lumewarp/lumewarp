@@ -28,7 +28,11 @@ def _patch(client, path, **body):
     return client.patch(f"{API}{path}", json=body, headers=ADMIN_AUTH)
 
 
-def _model(client, *, weight=1, upstream_id=None):
+def _members(*ids, weight=1):
+    return [{"model_id": i, "weight": weight} for i in ids]
+
+
+def _model(client, *, upstream_id=None):
     if upstream_id is None:
         upstream_id = _post(
             client, "/upstreams", name=f"up-{suffix()}", kind="vllm", base_url="http://h:1/v1"
@@ -39,7 +43,6 @@ def _model(client, *, weight=1, upstream_id=None):
         name=f"dep-{suffix()}",
         upstream_id=upstream_id,
         upstream_model="m",
-        weight=weight,
     )
     assert resp.status_code == 201, resp.text
     return resp.json()
@@ -49,12 +52,11 @@ def _model(client, *, weight=1, upstream_id=None):
 
 
 def test_weighted_router_needs_positive_total_weight(client) -> None:
-    zero = _model(client, weight=0)
-    live = _model(client, weight=2, upstream_id=zero["upstream_id"])
+    dep = _model(client)
 
-    bad = _post(client, "/routers", name=f"m-{suffix()}", model_ids=[zero["id"]])
+    bad = _post(client, "/routers", name=f"m-{suffix()}", members=_members(dep["id"], weight=0))
     assert bad.status_code == 422
-    assert "model_ids" in bad.json()["error"]["message"]
+    assert "members" in bad.json()["error"]["message"]
 
     # least_in_flight ignores weights, so an all-zero router is fine there.
     ok = _post(
@@ -62,36 +64,18 @@ def test_weighted_router_needs_positive_total_weight(client) -> None:
         "/routers",
         name=f"m-{suffix()}",
         strategy="least_in_flight",
-        model_ids=[zero["id"]],
+        members=_members(dep["id"], weight=0),
     )
     assert ok.status_code == 201, ok.text
     router_id = ok.json()["id"]
     # ...but switching it to weighted is not.
     assert _patch(client, f"/routers/{router_id}", strategy="weighted").status_code == 422
-    assert _patch(client, f"/routers/{router_id}", model_ids=[live["id"]]).status_code == 200
+    live = _members(dep["id"], weight=2)
+    assert _patch(client, f"/routers/{router_id}", members=live).status_code == 200
     assert _patch(client, f"/routers/{router_id}", strategy="weighted").status_code == 200
-    # Replacing the models of a weighted router with all-zero ones is rejected.
-    assert _patch(client, f"/routers/{router_id}", model_ids=[zero["id"]]).status_code == 422
-
-
-def test_model_weight_update_cannot_starve_weighted_router(client) -> None:
-    dep = _model(client, weight=1)
-    spare = _model(client, weight=1, upstream_id=dep["upstream_id"])
-    router = _post(client, "/routers", name=f"m-{suffix()}", model_ids=[dep["id"]]).json()
-
-    resp = _patch(client, f"/models/{dep['id']}", weight=0)
-    assert resp.status_code == 422
-    assert "weight" in resp.json()["error"]["message"]
-    assert client.get(f"{API}/models/{dep['id']}", headers=ADMIN_AUTH).json()["weight"] == 1
-
-    # With another positive model in the router the weight may drop to 0.
-    _patch(client, f"/routers/{router['id']}", model_ids=[dep["id"], spare["id"]])
-    assert _patch(client, f"/models/{dep['id']}", weight=0).status_code == 200
-    # Zeroing the last positive one is rejected again.
-    assert _patch(client, f"/models/{spare['id']}", weight=0).status_code == 422
-    # Weights on unrelated models are unaffected.
-    other = _model(client, weight=3, upstream_id=dep["upstream_id"])
-    assert _patch(client, f"/models/{other['id']}", weight=0).status_code == 200
+    # Replacing the members of a weighted router with all-zero ones is rejected.
+    zeroed = _members(dep["id"], weight=0)
+    assert _patch(client, f"/routers/{router_id}", members=zeroed).status_code == 422
 
 
 # ------------------------------------------------------------------------------ S3
@@ -170,14 +154,13 @@ def test_list_routers_returns_ordered_models_for_every_router(client) -> None:
     expected = {}
     for index in range(4):
         order = [d["id"] for d in models[index % 3 :] + models[: index % 3]]
-        router = _post(client, "/routers", name=f"m-{suffix()}", model_ids=order)
+        router = _post(client, "/routers", name=f"m-{suffix()}", members=_members(*order))
         assert router.status_code == 201
         expected[router.json()["id"]] = order
     items = client.get(f"{API}/routers?limit=500", headers=ADMIN_AUTH).json()["items"]
     for item in items:
         if item["id"] in expected:
-            assert [d["model_id"] for d in item["models"]] == expected[item["id"]]
-            assert [d["position"] for d in item["models"]] == [0, 1, 2]
+            assert [d["model_id"] for d in item["members"]] == expected[item["id"]]
 
 
 # ------------------------------------------------------------------------------ N1-N2
@@ -203,11 +186,12 @@ def test_api_key_ref_is_ascii_only(client) -> None:
 
 def test_names_and_aliases_are_clean(client) -> None:
     dep = _model(client)
-    resp = _post(client, "/routers", name="  spaced alias\n", model_ids=[dep["id"]])
+    resp = _post(client, "/routers", name="  spaced alias\n", members=_members(dep["id"]))
     assert resp.status_code == 422
-    resp = _post(client, "/routers", name="  padded  ", model_ids=[dep["id"]])
+    padded = f"padded-{suffix()}"
+    resp = _post(client, "/routers", name=f"  {padded}  ", members=_members(dep["id"]))
     assert resp.status_code == 201
-    assert resp.json()["name"] == "padded"
+    assert resp.json()["name"] == padded
 
     assert _post(client, "/teams", name="   ").status_code == 422
     team = _post(client, "/teams", name=f"team-{suffix()}").json()
@@ -219,9 +203,9 @@ def test_names_and_aliases_are_clean(client) -> None:
         == 422
     )
     # Allowlist entries and router aliases share one normalisation.
-    ok = _patch(client, f"/teams/{team['id']}", allowed_models=[" padded "], model_access="list")
+    ok = _patch(client, f"/teams/{team['id']}", allowed_models=[f" {padded} "], model_access="list")
     assert ok.status_code == 200
-    assert ok.json()["allowed_models"] == ["padded"]
+    assert ok.json()["allowed_models"] == [padded]
 
 
 # ------------------------------------------------------------------------------ N3-N6

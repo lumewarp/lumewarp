@@ -13,11 +13,18 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane.errors import ApiError
-from lumewarp_control_plane.models import ModelAccess, ServiceAccount, Team, TeamMember
+from lumewarp_control_plane.models import (
+    CatalogName,
+    ModelAccess,
+    PolicyGrant,
+    ServiceAccount,
+    Team,
+    TeamMember,
+)
 
 if TYPE_CHECKING:
     from lumewarp_control_plane.api.schemas import PolicyFields
@@ -69,13 +76,57 @@ def policy_of(row: Team | TeamMember | ServiceAccount) -> Policy:
 
 
 def apply_policy(row: Team | TeamMember | ServiceAccount, policy: Policy) -> None:
+    """Scalar policy columns; `save_grants` writes the list once the row has its id."""
     row.model_access = policy.model_access
-    row.allowed_models = list(policy.allowed_models)
     row.rpm_limit = policy.rpm_limit
     row.tpm_limit = policy.tpm_limit
     row.max_parallel = policy.max_parallel
     row.budget_nano_usd = policy.budget_nano_usd
     row.soft_budget_nano_usd = policy.soft_budget_nano_usd
+
+
+async def grant_ids(session: AsyncSession, names: tuple[str, ...]) -> dict[str, uuid.UUID]:
+    """Current id of every name; 422 listing the names that do not exist."""
+    if not names:
+        return {}
+    rows = await session.execute(
+        select(CatalogName.name, CatalogName.id).where(CatalogName.name.in_(names))
+    )
+    found = {name: name_id for name, name_id in rows}
+    missing = sorted(set(names) - set(found))
+    if missing:
+        raise violation("allowed_models", f"unknown names: {', '.join(missing)}")
+    return found
+
+
+def _owner(row: Team | TeamMember | ServiceAccount) -> dict[str, uuid.UUID | None]:
+    if isinstance(row, Team):
+        return {"team_id": row.id, "user_id": None, "service_account_id": None}
+    if isinstance(row, TeamMember):
+        return {"team_id": row.team_id, "user_id": row.user_id, "service_account_id": None}
+    return {"team_id": row.team_id, "user_id": None, "service_account_id": row.id}
+
+
+async def save_grants(
+    session: AsyncSession, row: Team | TeamMember | ServiceAccount, policy: Policy
+) -> None:
+    """Replace the row's grants. The row must be flushed; refresh it to read them back."""
+    ids = await grant_ids(session, policy.allowed_models)
+    owner = _owner(row)
+    await session.execute(
+        delete(PolicyGrant).where(
+            *(
+                column.is_(None) if value is None else column == value
+                for column, value in (
+                    (PolicyGrant.team_id, owner["team_id"]),
+                    (PolicyGrant.user_id, owner["user_id"]),
+                    (PolicyGrant.service_account_id, owner["service_account_id"]),
+                )
+            )
+        )
+    )
+    session.add_all(PolicyGrant(name_id=name_id, **owner) for name_id in ids.values())
+    await session.flush()
 
 
 def _limit(parent: int | None, own: int | None) -> int | None:
@@ -130,7 +181,7 @@ def policy_from_fields(
             raise violation("model_access", "teams cannot inherit")
         if fields.allowed_models and mode is not ModelAccess.LIST:
             raise violation("allowed_models", "only allowed when model_access is 'list'")
-        allowed = tuple(fields.allowed_models or ()) if mode is ModelAccess.LIST else ()
+        allowed = tuple(sorted(fields.allowed_models or ())) if mode is ModelAccess.LIST else ()
         return _validated(
             Policy(
                 model_access=mode,
@@ -149,7 +200,7 @@ def policy_from_fields(
     if "allowed_models" in supplied:
         if mode is not ModelAccess.LIST and fields.allowed_models:
             raise violation("allowed_models", "only allowed when model_access is 'list'")
-        allowed = tuple(fields.allowed_models or ())
+        allowed = tuple(sorted(fields.allowed_models or ()))
     elif mode is ModelAccess.LIST:
         allowed = base.allowed_models if base.model_access is ModelAccess.LIST else ()
     else:
@@ -185,13 +236,17 @@ def _validated(policy: Policy) -> Policy:
     return policy
 
 
-def check_narrowing(parent: Effective, policy: Policy, prefix: str = "") -> None:
-    """Raise 422 if `policy` is not a subset of `parent` (or widens a limit)."""
+def check_narrowing(
+    parent: Effective, policy: Policy, prefix: str = "", *, check_models: bool = True
+) -> None:
+    """Raise 422 if `policy` widens a limit or, with `check_models`, exceeds the parent's
+    names.
+    """
     field = (lambda name: f"{prefix}.{name}") if prefix else (lambda name: name)
 
-    if policy.model_access is ModelAccess.ALL and parent.models is not None:
+    if check_models and policy.model_access is ModelAccess.ALL and parent.models is not None:
         raise violation(field("model_access"), "cannot widen to all under a restricted parent")
-    if policy.model_access is ModelAccess.LIST and parent.models is not None:
+    if check_models and policy.model_access is ModelAccess.LIST and parent.models is not None:
         own = set(policy.allowed_models)
         if not own <= set(parent.models):
             extra = sorted(own - set(parent.models))
@@ -217,10 +272,28 @@ def team_effective(team: Team) -> Effective:
     return effective(None, policy_of(team))
 
 
+async def validate_owner_policy(
+    session: AsyncSession, team: Team, proposed: Policy, base: Policy | None = None
+) -> None:
+    """Names exist and stay within the team, limits narrow it. A list the write leaves
+    unchanged is not rechecked: it may legitimately exceed a team that shrank later.
+    """
+    models_changed = base is None or (base.model_access, base.allowed_models) != (
+        proposed.model_access,
+        proposed.allowed_models,
+    )
+    if models_changed:
+        await grant_ids(session, proposed.allowed_models)
+    check_narrowing(team_effective(team), proposed, check_models=models_changed)
+
+
 async def validate_owners_after_team_update(
     session: AsyncSession, team: Team, proposed: Policy
 ) -> None:
-    """Every member and service account must still narrow the proposed team policy."""
+    """Limits must still narrow the proposed team policy. Model lists are left alone when
+    the team shrinks: owners keep their settings and the effective set is the intersection
+    (`compiler.narrow`).
+    """
     team_eff = effective(None, proposed)
     members = (
         await session.scalars(
@@ -228,7 +301,9 @@ async def validate_owners_after_team_update(
         )
     ).all()
     for member in members:
-        check_narrowing(team_eff, policy_of(member), f"members.{member.user_id}")
+        check_narrowing(
+            team_eff, policy_of(member), f"members.{member.user_id}", check_models=False
+        )
     accounts = (
         await session.scalars(
             select(ServiceAccount)
@@ -237,7 +312,9 @@ async def validate_owners_after_team_update(
         )
     ).all()
     for account in accounts:
-        check_narrowing(team_eff, policy_of(account), f"service_accounts.{account.id}")
+        check_narrowing(
+            team_eff, policy_of(account), f"service_accounts.{account.id}", check_models=False
+        )
 
 
 def ensure_unique_ids(ids: list[uuid.UUID], field: str = "model_ids") -> None:

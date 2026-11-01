@@ -49,23 +49,23 @@ def test_upstream_model_router_crud(client) -> None:
         json={
             "name": f"alias-{suffix()}",
             "strategy": "weighted",
-            "model_ids": [model["id"]],
+            "members": [{"model_id": model["id"]}],
         },
         headers=ADMIN_AUTH,
     )
     assert router.status_code == 201, router.text
     router_body = router.json()
-    assert router_body["models"] == [{"model_id": model["id"], "position": 0}]
+    assert router_body["members"] == [{"model_id": model["id"], "weight": 1, "params": {}}]
 
-    # Updating a router replaces the ordered model list.
+    # Updating a router replaces the ordered member list.
     dep2 = _model(client, upstream["id"]).json()
     resp = client.patch(
         f"/api/v1/routers/{router_body['id']}",
-        json={"model_ids": [dep2["id"], model["id"]]},
+        json={"members": [{"model_id": dep2["id"]}, {"model_id": model["id"]}]},
         headers=ADMIN_AUTH,
     )
     assert resp.status_code == 200, resp.text
-    assert [d["model_id"] for d in resp.json()["models"]] == [
+    assert [d["model_id"] for d in resp.json()["members"]] == [
         dep2["id"],
         model["id"],
     ]
@@ -139,20 +139,20 @@ def test_routing_validation(client) -> None:
 
     router_body = {
         "name": f"alias-{suffix()}",
-        "strategy": "no_such_strategy",
-        "model_ids": [dep["id"]],
+        "strategy": "no such strategy",
+        "members": [{"model_id": dep["id"]}],
     }
     resp = client.post("/api/v1/routers", json=router_body, headers=ADMIN_AUTH)
     assert resp.status_code == 422
     assert "strategy" in resp.json()["error"]["message"]
 
     router_body["strategy"] = "weighted"
-    router_body["model_ids"] = [str(uuid.uuid4())]
+    router_body["members"] = [{"model_id": str(uuid.uuid4())}]
     resp = client.post("/api/v1/routers", json=router_body, headers=ADMIN_AUTH)
     assert resp.status_code == 422
-    assert "model_ids" in resp.json()["error"]["message"]
+    assert "members" in resp.json()["error"]["message"]
 
-    router_body["model_ids"] = [dep["id"], dep["id"]]
+    router_body["members"] = [{"model_id": dep["id"]}, {"model_id": dep["id"]}]
     resp = client.post("/api/v1/routers", json=router_body, headers=ADMIN_AUTH)
     assert resp.status_code == 422
     assert "duplicate" in resp.json()["error"]["message"]

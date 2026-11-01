@@ -10,6 +10,12 @@ from lumewarp_control_plane.settings import Settings
 from tests.api.helpers import ADMIN_AUTH, suffix
 
 EXPECTED_OPERATION_IDS = {
+    "createAlias",
+    "deleteAlias",
+    "getAlias",
+    "listAliases",
+    "listCatalog",
+    "updateAlias",
     "completeOidcLogin",
     "createModel",
     "createGatewayToken",

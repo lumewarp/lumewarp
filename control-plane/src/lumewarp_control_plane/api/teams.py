@@ -22,8 +22,10 @@ from lumewarp_control_plane.api.common import (
 )
 from lumewarp_control_plane.api.policy import (
     apply_policy,
+    grant_ids,
     policy_from_fields,
     policy_of,
+    save_grants,
     validate_owners_after_team_update,
 )
 from lumewarp_control_plane.api.schemas import Page, TeamCreate, TeamOut, TeamUpdate
@@ -73,6 +75,7 @@ async def create_team(
         apply_policy(row, policy)
         session.add(row)
         await session.flush()
+        await save_grants(session, row, policy)
         await session.refresh(row)
         audit.record(
             session,
@@ -110,8 +113,10 @@ async def update_team(
         proposed = policy_from_fields(body, default_mode=ModelAccess.ALL, base=base)
         changed = proposed != base
         if changed:
+            await grant_ids(session, proposed.allowed_models)
             await validate_owners_after_team_update(session, row, proposed)
             apply_policy(row, proposed)
+            await save_grants(session, row, proposed)
         if body.name is not None:
             row.name = body.name
         await session.flush()

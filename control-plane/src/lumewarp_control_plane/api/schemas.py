@@ -27,11 +27,11 @@ from lumewarp_control_plane.compiler.validate import (
     upstream_url_problem,
 )
 from lumewarp_control_plane.models import (
+    CatalogKind,
     KeyLifecycle,
     KeyOwnerKind,
     ModelAccess,
     RequestOutcome,
-    RoutingStrategy,
     StickyBy,
     StreamUsageMode,
     TeamRole,
@@ -460,10 +460,9 @@ class UpstreamOut(ReadModel):
 
 
 class ModelCreate(ApiModel):
-    name: Name
+    name: ModelName
     upstream_id: uuid.UUID
     upstream_model: str = Field(min_length=1, max_length=400)
-    weight: int = Field(default=1, ge=0)
     price_input_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
     price_output_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
 
@@ -477,12 +476,15 @@ class ModelCreate(ApiModel):
 
 
 class ModelUpdate(ApiModel):
-    name: Name | None = None
+    name: ModelName | None = None
     upstream_id: uuid.UUID | None = None
     upstream_model: str | None = Field(default=None, min_length=1, max_length=400)
-    weight: int | None = Field(default=None, ge=0)
     price_input_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
     price_output_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
+    keep_old_name_as_alias: bool = Field(
+        default=False,
+        description="With a new name: add an alias under the old name, with its grants.",
+    )
 
 
 class ModelOut(ReadModel):
@@ -490,11 +492,36 @@ class ModelOut(ReadModel):
     name: str
     upstream_id: uuid.UUID
     upstream_model: str
-    weight: int
     price_input_nano_usd_per_mtok: int | None
     price_output_nano_usd_per_mtok: int | None
     created_at: datetime
     updated_at: datetime
+
+
+class AliasCreate(ApiModel):
+    name: ModelName
+    target: uuid.UUID = Field(description="Id of a model or a router, not another alias.")
+
+
+class AliasUpdate(ApiModel):
+    name: ModelName | None = None
+    target: uuid.UUID | None = None
+
+
+class AliasOut(ReadModel):
+    id: uuid.UUID
+    name: str
+    target: uuid.UUID = Field(validation_alias="target_name_id")
+    target_kind: CatalogKind
+    target_name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CatalogEntryOut(ReadModel):
+    id: uuid.UUID
+    name: str
+    kind: CatalogKind
 
 
 class RetryPolicyIn(ApiModel):
@@ -531,10 +558,25 @@ class RetryPolicyOut(ReadModel):
     total_timeout_ms: int
 
 
+Params = Annotated[dict[str, Any], Field(description="Strategy-defined settings.")]
+
+
+class RouterMemberIn(ApiModel):
+    model_id: uuid.UUID
+    weight: int = Field(default=1, ge=0, le=INT32_MAX, description="Share under `weighted`.")
+    params: Params = Field(default_factory=dict)
+
+
+class RouterMemberOut(ReadModel):
+    model_id: uuid.UUID
+    weight: int
+    params: dict[str, Any]
+
+
 class TrafficSplitIn(ApiModel):
     name: str = Field(description="1..32 of [A-Za-z0-9_.-]; a metric label.")
     weight: int = Field(ge=0, le=INT32_MAX, description="Share = weight / sum(weights).")
-    model_ids: list[uuid.UUID] = Field(min_length=1)
+    members: list[RouterMemberIn] = Field(min_length=1)
 
     @field_validator("name")
     @classmethod
@@ -543,10 +585,11 @@ class TrafficSplitIn(ApiModel):
             raise ValueError("split name must be 1..32 characters of [A-Za-z0-9_.-]")
         return value
 
-    @field_validator("model_ids")
+    @field_validator("members")
     @classmethod
-    def _unique(cls, value: list[uuid.UUID]) -> list[uuid.UUID]:
-        if len(set(value)) != len(value):
+    def _unique(cls, value: list[RouterMemberIn]) -> list[RouterMemberIn]:
+        ids = [member.model_id for member in value]
+        if len(set(ids)) != len(ids):
             raise ValueError("a split lists a model twice")
         return value
 
@@ -554,7 +597,7 @@ class TrafficSplitIn(ApiModel):
 class TrafficSplitOut(ReadModel):
     name: str
     weight: int
-    model_ids: list[uuid.UUID]
+    members: list[RouterMemberOut]
 
 
 def _check_splits(value: list[TrafficSplitIn] | None) -> list[TrafficSplitIn] | None:
@@ -582,18 +625,20 @@ StickyHeader = Annotated[str, Field(max_length=200)]
 Splits = Annotated[list[TrafficSplitIn], AfterValidator(_check_splits)]
 
 
+StrategyName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")]
+
+
 class RouterCreate(ApiModel):
     name: ModelName
-    strategy: RoutingStrategy = RoutingStrategy.WEIGHTED
-    custom_strategy: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,62}$")
-    strategy_params: dict[str, Any] = Field(default_factory=dict)
-    model_ids: list[uuid.UUID] = Field(
+    strategy: StrategyName = "weighted"
+    params: Params = Field(default_factory=dict)
+    members: list[RouterMemberIn] = Field(
         default_factory=list,
-        description="Ordered models; may be empty only when traffic_split is set.",
+        description="Ordered models; empty exactly when traffic_split is set.",
     )
     retry: RetryPolicyIn | None = None
-    fallback_router_ids: list[uuid.UUID] = Field(
-        default_factory=list, description="Routers tried in order once this router failed."
+    fallback_model_ids: list[uuid.UUID] = Field(
+        default_factory=list, description="Models tried in order once the members failed."
     )
     traffic_split: Splits = Field(default_factory=list)
     sticky: StickyBy = StickyBy.NONE
@@ -611,12 +656,11 @@ class RouterUpdate(ApiModel):
     """
 
     name: ModelName | None = None
-    strategy: RoutingStrategy | None = None
-    custom_strategy: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,62}$")
-    strategy_params: dict[str, Any] | None = None
-    model_ids: list[uuid.UUID] | None = None
+    strategy: StrategyName | None = None
+    params: Params | None = None
+    members: list[RouterMemberIn] | None = None
     retry: RetryPolicyIn | None = None
-    fallback_router_ids: list[uuid.UUID] | None = None
+    fallback_model_ids: list[uuid.UUID] | None = None
     traffic_split: Splits | None = None
     sticky: StickyBy | None = None
     sticky_header: StickyHeader | None = None
@@ -627,20 +671,14 @@ class RouterUpdate(ApiModel):
         return _sticky_header(value)
 
 
-class RouterModelOut(ReadModel):
-    model_id: uuid.UUID
-    position: int
-
-
 class RouterOut(ReadModel):
     id: uuid.UUID
     name: str
-    strategy: RoutingStrategy
-    custom_strategy: str | None = None
-    strategy_params: dict[str, Any] = Field(default_factory=dict)
-    models: list[RouterModelOut]
+    strategy: str
+    params: dict[str, Any]
+    members: list[RouterMemberOut]
     retry: RetryPolicyOut | None
-    fallback_router_ids: list[uuid.UUID]
+    fallback_model_ids: list[uuid.UUID]
     traffic_split: list[TrafficSplitOut]
     sticky: StickyBy
     sticky_header: str | None
