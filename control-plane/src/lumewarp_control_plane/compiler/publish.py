@@ -300,7 +300,13 @@ async def rollback_routing(
     Raises LookupError if `to_version` is unknown or compacted, CompileError if the
     resulting snapshot is invalid.
     """
+    # Lock order: advisory lock, then the scope row lock, before any source read or write.
+    # Catalog writers take only the scope row lock, so this serializes with them and no
+    # lock cycle can form between rollback and a rename, delete or upstream change.
     await session.execute(select(func.pg_advisory_xact_lock(lock_key(scope))))
+    locked = await session.scalar(select(Scope.name).where(Scope.name == scope).with_for_update())
+    if locked is None:
+        raise LookupError(f"unknown config scope {scope!r}")
     row = await session.get(ConfigVersion, (scope, to_version))
     if row is None or row.payload is None or row.catalog_state is None:
         raise LookupError(f"config version {to_version} of scope {scope!r} is not retained")

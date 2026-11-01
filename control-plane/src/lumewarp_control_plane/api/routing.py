@@ -358,6 +358,7 @@ async def create_upstream(
 ) -> UpstreamOut:
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
+        await lock_scope(session, settings)
         row = Upstream(
             name=body.name,
             kind=body.kind,
@@ -404,6 +405,7 @@ async def update_upstream(
     await authz.require(Action.ROUTING_MANAGE)
     _non_null(body, "name", "kind", "base_url", "timeout_ms", "stream_usage_mode")
     async with mutation(session):
+        await lock_scope(session, settings)
         row = await session.get(Upstream, upstream_id)
         if row is None:
             raise not_found("upstream not found")
@@ -446,6 +448,7 @@ async def delete_upstream(
 ) -> Response:
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
+        await lock_scope(session, settings)
         row = await session.get(Upstream, upstream_id)
         if row is None:
             raise not_found("upstream not found")

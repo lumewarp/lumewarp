@@ -54,8 +54,13 @@ async def capture_catalog_state(session: AsyncSession) -> dict[str, Any]:
     return {"format_version": FORMAT_VERSION, "tables": tables}
 
 
-def _decode_state(state: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-    """Validate the complete sidecar before modifying any source row."""
+def _decode_state(state: Any) -> dict[str, list[dict[str, Any]]]:
+    """Validate the complete sidecar before modifying any source row.
+
+    Errors never include data content from the sidecar.
+    """
+    if not isinstance(state, dict):
+        raise ValueError("catalog_state must be an object")
     if state.get("format_version") != FORMAT_VERSION:
         raise ValueError("unsupported catalog_state format")
     source = state.get("tables")
@@ -73,10 +78,25 @@ def _decode_state(state: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
             values = dict(row)
             for column in table.columns:
                 value = values[column.name]
-                if value is not None and isinstance(column.type, Uuid):
-                    values[column.name] = uuid.UUID(value)
-                elif value is not None and isinstance(column.type, DateTime):
-                    values[column.name] = datetime.fromisoformat(value)
+                if value is None:
+                    if not column.nullable:
+                        raise ValueError(
+                            f"catalog_state {table.name}.{column.name} must not be null"
+                        )
+                    continue
+                try:
+                    if isinstance(column.type, Uuid):
+                        if not isinstance(value, str):
+                            raise TypeError
+                        values[column.name] = uuid.UUID(value)
+                    elif isinstance(column.type, DateTime):
+                        if not isinstance(value, str):
+                            raise TypeError
+                        values[column.name] = datetime.fromisoformat(value)
+                except (TypeError, ValueError, AttributeError):
+                    raise ValueError(
+                        f"catalog_state {table.name}.{column.name} has an invalid value"
+                    ) from None
             decoded.append(values)
         result[table.name] = decoded
     return result
