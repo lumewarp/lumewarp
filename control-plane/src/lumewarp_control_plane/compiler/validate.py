@@ -14,6 +14,7 @@ from ipaddress import IPv6Address
 from urllib.parse import urlsplit
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
+from lumewarp_control_plane.compiler.strategy import STRATEGY_NAME, strategy_problem
 
 # Capabilities the P2 gateway supports (snapshot.rs SUPPORTED_CAPABILITIES).
 SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
@@ -49,6 +50,7 @@ SERVABLE_STRATEGIES = {
     pb.ROUTING_STRATEGY_LEAST_IN_FLIGHT,
     pb.ROUTING_STRATEGY_LOWEST_LATENCY,
     pb.ROUTING_STRATEGY_VLLM_LOAD,
+    pb.ROUTING_STRATEGY_CUSTOM,
 }
 STICKY_BY = {pb.STICKY_BY_NONE, pb.STICKY_BY_HEADER, pb.STICKY_BY_TEAM, pb.STICKY_BY_KEY}
 KEY_STATUSES = {
@@ -174,6 +176,8 @@ def capabilities_used(snap: pb.Snapshot) -> list[str]:
             used.add("lowest_latency")
         if r.strategy == pb.ROUTING_STRATEGY_VLLM_LOAD:
             used.add("vllm_load")
+        if r.strategy == pb.ROUTING_STRATEGY_CUSTOM:
+            used.add(f"strategy:{r.custom_strategy}")
     return sorted(used)
 
 
@@ -231,7 +235,11 @@ def _unique(names: list[str], kind: str) -> set[str]:
 
 def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> None:
     """Raise SnapshotInvalid with the first problem a gateway would reject."""
-    unsupported = set(snap.required_capabilities) - SUPPORTED_CAPABILITIES
+    unsupported = {
+        cap
+        for cap in set(snap.required_capabilities) - SUPPORTED_CAPABILITIES
+        if not (cap.startswith("strategy:") and STRATEGY_NAME.fullmatch(cap[9:]))
+    }
     if unsupported:
         raise SnapshotInvalid(f"unsupported capabilities {sorted(unsupported)}")
     missing_caps = set(capabilities_used(snap)) - set(snap.required_capabilities)
@@ -274,6 +282,21 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
             raise SnapshotInvalid(f"route alias {r.model!r} is reserved")
         if r.strategy not in SERVABLE_STRATEGIES:
             raise SnapshotInvalid(f"route {r.model!r} has unsupported strategy {r.strategy}")
+        if r.strategy == pb.ROUTING_STRATEGY_CUSTOM:
+            import json
+
+            if len(r.strategy_params_json.encode("utf-8")) > 16 * 1024:
+                raise SnapshotInvalid("strategy params exceed 16 KiB")
+            try:
+                params = json.loads(r.strategy_params_json or "{}")
+            except (ValueError, RecursionError) as exc:
+                raise SnapshotInvalid("strategy params must be a JSON object") from exc
+            if not isinstance(params, dict):
+                raise SnapshotInvalid("strategy params must be a JSON object")
+            if problem := strategy_problem("custom", r.custom_strategy, params):
+                raise SnapshotInvalid(problem)
+        elif r.custom_strategy or r.strategy_params_json:
+            raise SnapshotInvalid("custom strategy fields require CUSTOM")
         if r.sticky not in STICKY_BY:
             raise SnapshotInvalid(f"route {r.model!r} has sticky {r.sticky}")
         if r.HasField("retry") and (

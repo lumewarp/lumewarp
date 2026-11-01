@@ -47,6 +47,11 @@ from lumewarp_control_plane.api.schemas import (
     UpstreamUpdate,
 )
 from lumewarp_control_plane.authz import Action, Authz
+from lumewarp_control_plane.compiler.strategy import (
+    CustomRouteStrategy,
+    RouteStrategy,
+    strategy_problem,
+)
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import (
     Deployment,
@@ -112,8 +117,10 @@ class RouteSpec:
     """The full desired state of a route (create body, or stored state + PATCH)."""
 
     model: str
-    strategy: RoutingStrategy
+    strategy: RouteStrategy
     deployment_ids: list[uuid.UUID]
+    custom_strategy: str | None = None
+    strategy_params: dict = field(default_factory=dict)
     retry: RetryPolicyIn | None = None
     fallback_route_ids: list[uuid.UUID] = field(default_factory=list)
     traffic_split: list[TrafficSplitIn] = field(default_factory=list)
@@ -125,7 +132,9 @@ async def _load_spec(session: AsyncSession, row: Route) -> RouteSpec:
     out = (await _routes_out(session, [row]))[0]
     return RouteSpec(
         model=row.model,
-        strategy=row.strategy,
+        strategy=out.strategy,
+        custom_strategy=out.custom_strategy,
+        strategy_params=out.strategy_params,
         deployment_ids=[d.deployment_id for d in out.deployments],
         retry=RetryPolicyIn(**out.retry.model_dump()) if out.retry else None,
         fallback_route_ids=list(out.fallback_route_ids),
@@ -168,6 +177,8 @@ async def _validate_spec(
     session: AsyncSession, spec: RouteSpec, route_id: uuid.UUID | None
 ) -> None:
     """422 for anything the gateway would reject, plus fallback cycles."""
+    if problem := strategy_problem(spec.strategy, spec.custom_strategy, spec.strategy_params):
+        raise validation_error("strategy", problem)
     ensure_unique_ids(spec.deployment_ids)
     await _existing_deployments(session, spec.deployment_ids, "deployment_ids")
     for split in spec.traffic_split:
@@ -236,6 +247,16 @@ async def _write_children(
     session: AsyncSession, row: Route, spec: RouteSpec, fields: set[str]
 ) -> None:
     """Replace the child rows named in `fields` with `spec`'s lists."""
+    if {"strategy", "custom_strategy", "strategy_params"} & fields:
+        await session.execute(
+            delete(CustomRouteStrategy).where(CustomRouteStrategy.route_id == row.id)
+        )
+        if spec.strategy == "custom":
+            session.add(
+                CustomRouteStrategy(
+                    route_id=row.id, name=spec.custom_strategy, params=spec.strategy_params
+                )
+            )
     if "deployment_ids" in fields:
         await session.execute(delete(RouteDeployment).where(RouteDeployment.route_id == row.id))
         for position, deployment_id in enumerate(spec.deployment_ids):
@@ -267,7 +288,7 @@ async def _write_children(
 
 def _apply_scalars(row: Route, spec: RouteSpec) -> None:
     row.model = spec.model
-    row.strategy = spec.strategy
+    row.strategy = RoutingStrategy.WEIGHTED if spec.strategy == "custom" else spec.strategy
     row.retry_enabled = spec.retry is not None
     row.retry_max_attempts = spec.retry.max_attempts if spec.retry else None
     row.retry_on_status = list(spec.retry.retry_on_status) if spec.retry else []
@@ -278,6 +299,12 @@ def _apply_scalars(row: Route, spec: RouteSpec) -> None:
 
 async def _routes_out(session: AsyncSession, rows: list[Route]) -> list[RouteOut]:
     ids = [row.id for row in rows]
+    custom = {
+        c.route_id: c
+        for c in await session.scalars(
+            select(CustomRouteStrategy).where(CustomRouteStrategy.route_id.in_(ids))
+        )
+    }
     links: dict[uuid.UUID, list[RouteDeploymentOut]] = {i: [] for i in ids}
     fallbacks: dict[uuid.UUID, list[uuid.UUID]] = {i: [] for i in ids}
     splits: dict[uuid.UUID, list[TrafficSplitOut]] = {i: [] for i in ids}
@@ -319,7 +346,9 @@ async def _routes_out(session: AsyncSession, rows: list[Route]) -> list[RouteOut
         RouteOut(
             id=row.id,
             model=row.model,
-            strategy=row.strategy,
+            strategy="custom" if row.id in custom else row.strategy,
+            custom_strategy=custom[row.id].name if row.id in custom else None,
+            strategy_params=custom[row.id].params if row.id in custom else {},
             deployments=links[row.id],
             retry=RetryPolicyOut(
                 max_attempts=row.retry_max_attempts,
@@ -728,6 +757,8 @@ async def create_route(
     spec = RouteSpec(
         model=body.model,
         strategy=body.strategy,
+        custom_strategy=body.custom_strategy,
+        strategy_params=body.strategy_params,
         deployment_ids=list(body.deployment_ids),
         retry=body.retry,
         fallback_route_ids=list(body.fallback_route_ids),
@@ -740,12 +771,15 @@ async def create_route(
         await lock_scope(session, settings)
         # A new route has no incoming fallbacks, so it cannot close a cycle.
         await _validate_spec(session, spec, None)
-        row = Route(model=spec.model, strategy=spec.strategy)
+        row = Route(model=spec.model)
         _apply_scalars(row, spec)
         session.add(row)
         await session.flush()
         await _write_children(
-            session, row, spec, {"deployment_ids", "fallback_route_ids", "traffic_split"}
+            session,
+            row,
+            spec,
+            {"deployment_ids", "fallback_route_ids", "traffic_split", "strategy"},
         )
         await session.flush()
         await session.refresh(row)
@@ -759,7 +793,9 @@ async def create_route(
                 "model": row.model,
                 "deployments": [str(i) for i in spec.deployment_ids],
                 "settings": body.model_dump(
-                    mode="json", exclude={"model", "deployment_ids"}, exclude_defaults=True
+                    mode="json",
+                    exclude={"model", "deployment_ids", "strategy_params"},
+                    exclude_defaults=True,
                 ),
             },
         )
@@ -786,7 +822,14 @@ async def update_route(
 ) -> RouteOut:
     await authz.require(Action.ROUTING_MANAGE)
     _non_null(
-        body, "model", "strategy", "deployment_ids", "fallback_route_ids", "traffic_split", "sticky"
+        body,
+        "model",
+        "strategy",
+        "deployment_ids",
+        "fallback_route_ids",
+        "traffic_split",
+        "sticky",
+        "strategy_params",
     )
     fields = body.model_fields_set
     async with mutation(session):
@@ -797,6 +840,11 @@ async def update_route(
         spec = await _load_spec(session, row)
         for name in fields:
             setattr(spec, name, getattr(body, name))
+        if spec.strategy != "custom" and "strategy" in fields:
+            if "custom_strategy" not in fields:
+                spec.custom_strategy = None
+            if "strategy_params" not in fields:
+                spec.strategy_params = {}
         # Leaving header stickiness drops the header unless the body names one.
         if spec.sticky is not StickyBy.HEADER and "sticky_header" not in fields:
             spec.sticky_header = None
@@ -813,7 +861,9 @@ async def update_route(
             principal=authz.principal,
             details={
                 "model": row.model,
-                "changes": body.model_dump(exclude_unset=True, mode="json"),
+                "changes": body.model_dump(
+                    exclude_unset=True, mode="json", exclude={"strategy_params"}
+                ),
             },
         )
         await enqueue_recompile(session, settings, "api.route.update")

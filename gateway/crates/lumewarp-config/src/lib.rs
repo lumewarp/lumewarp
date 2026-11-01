@@ -228,6 +228,10 @@ pub struct ModelRoute {
     #[serde(default)]
     pub strategy: RoutingStrategy,
     #[serde(default)]
+    pub custom_strategy: String,
+    #[serde(default)]
+    pub strategy_params: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
     pub retry: Option<RetryPolicy>,
     #[serde(default)]
     pub fallbacks: Vec<String>,
@@ -276,6 +280,7 @@ pub enum RoutingStrategy {
     LeastInFlight,
     LowestLatency,
     VllmLoad,
+    Custom,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -508,7 +513,14 @@ impl Config {
                     RoutingStrategy::LeastInFlight => pb::RoutingStrategy::LeastInFlight,
                     RoutingStrategy::LowestLatency => pb::RoutingStrategy::LowestLatency,
                     RoutingStrategy::VllmLoad => pb::RoutingStrategy::VllmLoad,
+                    RoutingStrategy::Custom => pb::RoutingStrategy::Custom,
                 } as i32,
+                custom_strategy: r.custom_strategy.clone(),
+                strategy_params_json: if r.strategy_params.is_empty() {
+                    String::new()
+                } else {
+                    serde_json::to_string(&r.strategy_params).expect("JSON object")
+                },
                 retry: r.retry.as_ref().map(|p| pb::RetryPolicy {
                     max_attempts: p.max_attempts,
                     retry_on_status: p.retry_on_status.clone(),
@@ -646,6 +658,14 @@ impl Config {
                         caps.push(cap.into());
                     }
                 }
+                for r in &self.routes {
+                    if r.strategy == RoutingStrategy::Custom {
+                        let cap = format!("strategy:{}", r.custom_strategy);
+                        if !caps.contains(&cap) {
+                            caps.push(cap);
+                        }
+                    }
+                }
                 caps
             },
             scope: String::new(),
@@ -659,6 +679,25 @@ mod tests {
 
     const EXAMPLE: &str = include_str!("../../../config.example.yaml");
     const BENCH: &str = include_str!("../../../../bench/lumewarp/config.yaml");
+
+    #[test]
+    fn custom_strategy_yaml_preserves_object_and_emits_capability() {
+        let (_, snapshot) = Config::parse(
+            "routes:\n  - model: custom\n    strategy: custom\n    custom_strategy: header_pin\n    strategy_params: {headers: [x-pin], value: 2}\n",
+        ).unwrap();
+        assert_eq!(
+            snapshot.routes[0].strategy,
+            pb::RoutingStrategy::Custom as i32
+        );
+        assert_eq!(snapshot.routes[0].custom_strategy, "header_pin");
+        assert_eq!(snapshot.required_capabilities, ["strategy:header_pin"]);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&snapshot.routes[0].strategy_params_json)
+                .unwrap(),
+            serde_json::json!({"headers": ["x-pin"], "value": 2})
+        );
+        assert!(Config::parse("routes: [{model: custom, strategy_params: [1]}]").is_err());
+    }
 
     #[test]
     fn resilience_yaml_compiles_presence_based_capabilities() {

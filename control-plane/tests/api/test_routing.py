@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from tests.api.helpers import ADMIN_AUTH as BOOTSTRAP_AUTH
+from tests.api.helpers import ADMIN_AUTH
 from tests.api.helpers import suffix
 
 
@@ -15,7 +15,7 @@ def _upstream(client, **body):
         "base_url": "http://127.0.0.1:9000/v1",
         **body,
     }
-    return client.post("/api/v1/upstreams", json=body, headers=BOOTSTRAP_AUTH)
+    return client.post("/api/v1/upstreams", json=body, headers=ADMIN_AUTH)
 
 
 def _deployment(client, upstream_id, **body):
@@ -25,7 +25,7 @@ def _deployment(client, upstream_id, **body):
         "upstream_model": "model",
         **body,
     }
-    return client.post("/api/v1/deployments", json=body, headers=BOOTSTRAP_AUTH)
+    return client.post("/api/v1/deployments", json=body, headers=ADMIN_AUTH)
 
 
 def test_upstream_deployment_route_crud(client) -> None:
@@ -52,7 +52,7 @@ def test_upstream_deployment_route_crud(client) -> None:
             "strategy": "weighted",
             "deployment_ids": [deployment["id"]],
         },
-        headers=BOOTSTRAP_AUTH,
+        headers=ADMIN_AUTH,
     )
     assert route.status_code == 201, route.text
     route_body = route.json()
@@ -63,7 +63,7 @@ def test_upstream_deployment_route_crud(client) -> None:
     resp = client.patch(
         f"/api/v1/routes/{route_body['id']}",
         json={"deployment_ids": [dep2["id"], deployment["id"]]},
-        headers=BOOTSTRAP_AUTH,
+        headers=ADMIN_AUTH,
     )
     assert resp.status_code == 200, resp.text
     assert [d["deployment_id"] for d in resp.json()["deployments"]] == [
@@ -72,33 +72,33 @@ def test_upstream_deployment_route_crud(client) -> None:
     ]
 
     # Read aliases are available to every authenticated principal.
-    resp = client.get("/api/v1/routes", headers=BOOTSTRAP_AUTH)
+    resp = client.get("/api/v1/routes", headers=ADMIN_AUTH)
     assert resp.status_code == 200
     assert any(item["id"] == route_body["id"] for item in resp.json()["items"])
 
     # Dependency conflicts are 409, not cascades.
     assert (
-        client.delete(f"/api/v1/upstreams/{upstream['id']}", headers=BOOTSTRAP_AUTH).status_code
+        client.delete(f"/api/v1/upstreams/{upstream['id']}", headers=ADMIN_AUTH).status_code
         == 409
     )
     assert (
-        client.delete(f"/api/v1/deployments/{deployment['id']}", headers=BOOTSTRAP_AUTH).status_code
+        client.delete(f"/api/v1/deployments/{deployment['id']}", headers=ADMIN_AUTH).status_code
         == 409
     )
     assert (
-        client.delete(f"/api/v1/routes/{route_body['id']}", headers=BOOTSTRAP_AUTH).status_code
+        client.delete(f"/api/v1/routes/{route_body['id']}", headers=ADMIN_AUTH).status_code
         == 204
     )
     assert (
-        client.delete(f"/api/v1/deployments/{deployment['id']}", headers=BOOTSTRAP_AUTH).status_code
+        client.delete(f"/api/v1/deployments/{deployment['id']}", headers=ADMIN_AUTH).status_code
         == 204
     )
     assert (
-        client.delete(f"/api/v1/deployments/{dep2['id']}", headers=BOOTSTRAP_AUTH).status_code
+        client.delete(f"/api/v1/deployments/{dep2['id']}", headers=ADMIN_AUTH).status_code
         == 204
     )
     assert (
-        client.delete(f"/api/v1/upstreams/{upstream['id']}", headers=BOOTSTRAP_AUTH).status_code
+        client.delete(f"/api/v1/upstreams/{upstream['id']}", headers=ADMIN_AUTH).status_code
         == 204
     )
 
@@ -130,7 +130,7 @@ def test_routing_validation(client) -> None:
     resp = client.patch(
         f"/api/v1/deployments/{dep['id']}",
         json={"price_input_nano_usd_per_mtok": None},
-        headers=BOOTSTRAP_AUTH,
+        headers=ADMIN_AUTH,
     )
     assert resp.status_code == 422
     resp = client.patch(
@@ -139,13 +139,13 @@ def test_routing_validation(client) -> None:
             "price_input_nano_usd_per_mtok": 5,
             "price_output_nano_usd_per_mtok": 6,
         },
-        headers=BOOTSTRAP_AUTH,
+        headers=ADMIN_AUTH,
     )
     assert resp.status_code == 200
     resp = client.patch(
         f"/api/v1/deployments/{dep['id']}",
         json={"price_input_nano_usd_per_mtok": None, "price_output_nano_usd_per_mtok": None},
-        headers=BOOTSTRAP_AUTH,
+        headers=ADMIN_AUTH,
     )
     assert resp.status_code == 200
     assert resp.json()["price_input_nano_usd_per_mtok"] is None
@@ -155,18 +155,18 @@ def test_routing_validation(client) -> None:
         "strategy": "no_such_strategy",
         "deployment_ids": [dep["id"]],
     }
-    resp = client.post("/api/v1/routes", json=route_body, headers=BOOTSTRAP_AUTH)
+    resp = client.post("/api/v1/routes", json=route_body, headers=ADMIN_AUTH)
     assert resp.status_code == 422
     assert "strategy" in resp.json()["error"]["message"]
 
     route_body["strategy"] = "weighted"
     route_body["deployment_ids"] = [str(uuid.uuid4())]
-    resp = client.post("/api/v1/routes", json=route_body, headers=BOOTSTRAP_AUTH)
+    resp = client.post("/api/v1/routes", json=route_body, headers=ADMIN_AUTH)
     assert resp.status_code == 422
     assert "deployment_ids" in resp.json()["error"]["message"]
 
     route_body["deployment_ids"] = [dep["id"], dep["id"]]
-    resp = client.post("/api/v1/routes", json=route_body, headers=BOOTSTRAP_AUTH)
+    resp = client.post("/api/v1/routes", json=route_body, headers=ADMIN_AUTH)
     assert resp.status_code == 422
     assert "duplicate" in resp.json()["error"]["message"]
 

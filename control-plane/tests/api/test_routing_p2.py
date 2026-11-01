@@ -20,10 +20,10 @@ from lumewarp_control_plane.compiler import compile_scope
 from lumewarp_control_plane.errors import ApiError
 from lumewarp_control_plane.models import AuditLog, ConfigOutbox, Deployment
 from lumewarp_control_plane.security import Principal, PrincipalKind
-from tests.api.helpers import ADMIN_AUTH as BOOTSTRAP_AUTH
+from tests.api.helpers import ADMIN_AUTH
 from tests.api.helpers import auth, suffix, user_with_token
 
-H = BOOTSTRAP_AUTH
+H = ADMIN_AUTH
 
 
 def _upstream(client, **body):
@@ -67,6 +67,59 @@ def _patch(client, route_id: str, **body):
 
 
 # --------------------------------------------------------------------------- upstreams
+
+
+def test_custom_strategy_route_create_patch_and_clear(client):
+    route = _ok(
+        _route(
+            client,
+            strategy="custom",
+            custom_strategy="header_pin",
+            strategy_params={"headers": ["x-pin"], "pin": 2},
+        )
+    )
+    assert route["strategy"] == "custom"
+    assert route["custom_strategy"] == "header_pin"
+    assert route["strategy_params"]["pin"] == 2
+    updated = _ok(_patch(client, route["id"], strategy_params={"pin": 3}), 200)
+    assert updated["strategy_params"] == {"pin": 3}
+    assert updated["custom_strategy"] == "header_pin"
+    assert (
+        _ok(_patch(client, route["id"], model=f"renamed-{suffix()}"), 200)["strategy"] == "custom"
+    )
+    cleared = _ok(_patch(client, route["id"], strategy="least_in_flight"), 200)
+    assert cleared["custom_strategy"] is None and cleared["strategy_params"] == {}
+    assert cleared["strategy"] == "least_in_flight"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"strategy": "custom"},
+        {"strategy": "custom", "custom_strategy": "Bad"},
+        {"strategy": "custom", "custom_strategy": "a-b"},
+        {"strategy": "custom", "custom_strategy": "a" * 64},
+        {"strategy": "custom", "custom_strategy": "ok", "strategy_params": []},
+        {"strategy": "custom", "custom_strategy": "ok", "strategy_params": {"x": "a" * 16384}},
+        {
+            "strategy": "custom",
+            "custom_strategy": "ok",
+            "strategy_params": {"headers": ["bad name"]},
+        },
+        {"custom_strategy": "ok"},
+        {"strategy_params": {"x": 1}},
+    ],
+)
+def test_custom_strategy_route_validation(client, body):
+    assert _route(client, **body).status_code == 422
+
+
+def test_custom_strategy_patch_requires_name_and_non_null_params(client):
+    route = _ok(_route(client))
+    assert _patch(client, route["id"], strategy="custom").status_code == 422
+    route = _ok(_patch(client, route["id"], strategy="custom", custom_strategy="ok"), 200)
+    assert _patch(client, route["id"], custom_strategy=None).status_code == 422
+    assert _patch(client, route["id"], strategy_params=None).status_code == 422
 
 
 def test_upstream_health_breaker_metrics_roundtrip(client) -> None:
@@ -392,9 +445,7 @@ async def test_concurrent_weight_zeroing_preserves_pool(
             )
         ).all()
         assert sorted(weights) == [0, 1]
-        compiled = await compile_scope(
-            check, api_settings.scope, router_plugins=[], require_local_membership=True
-        )
+        compiled = await compile_scope(check, api_settings.scope, require_local_membership=True)
         assert route["model"] in {r.model for r in compiled.snapshot.routes}
 
 

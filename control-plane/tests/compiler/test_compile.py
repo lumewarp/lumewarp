@@ -26,7 +26,7 @@ def lvl(mode: ModelAccess, *models: str) -> dict:
 async def compile_(factory, **kw):
     async with factory() as s:
         kw.setdefault("require_local_membership", True)
-        return await compile_scope(s, SCOPE, now=kw.pop("now", OCT), router_plugins=[], **kw)
+        return await compile_scope(s, SCOPE, now=kw.pop("now", OCT), **kw)
 
 
 def key_of(compiled, key) -> pb.ApiKey:

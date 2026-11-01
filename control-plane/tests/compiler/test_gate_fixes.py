@@ -1,7 +1,5 @@
 """Regressions for the R2-C3 gate findings and R2-C2 B1."""
 
-import asyncio
-import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -32,14 +30,6 @@ from lumewarp_control_plane.models import (
     RoutingStrategy,
     Upstream,
 )
-from lumewarp_control_plane.plugins import (
-    MAX_WEIGHT,
-    DeploymentView,
-    LoadedPlugin,
-    RouteView,
-    WeightOverride,
-    apply_router_plugins,
-)
 from tests.compiler.helpers import (
     OCT,
     SCOPE,
@@ -50,20 +40,6 @@ from tests.compiler.helpers import (
     seed_scope,
     touch,
 )
-
-
-class Fixed:
-    api_version = 1
-
-    def __init__(self, weight: int, deployment: str = "d") -> None:
-        self.out = [WeightOverride(deployment, weight)]
-
-    def adjust(self, routes):
-        return self.out
-
-
-def lp(plugin, name: str = "p") -> LoadedPlugin:
-    return LoadedPlugin(name=name, plugin=plugin)
 
 
 async def _outbox(factory) -> list[str]:
@@ -85,32 +61,6 @@ async def _revoke(factory, key) -> None:
 # --------------------------------------------------------------------------- 1 / B1
 
 
-async def test_zero_weight_plugin_does_not_block_revocation(factory) -> None:
-    await seed_scope(factory)
-    async with factory() as s, s.begin():
-        t, u = await add_hierarchy(s)
-        key = await add_key(s, t, u)
-        await add_route(s, "m", [("d", None)])
-    await touch(factory)
-    assert (
-        await publish_pending(factory, SCOPE, router_plugins=[], require_local_membership=True) == 1
-    )
-
-    await _revoke(factory, key)
-    await touch(factory)
-    assert (
-        await publish_pending(
-            factory, SCOPE, router_plugins=[lp(Fixed(0))], require_local_membership=True
-        )
-        == 2
-    )
-    snap = await load_version(factory, 2)
-    assert [d.weight for d in snap.deployments] == [1]  # plugin output discarded
-    assert [r.model for r in snap.routes] == ["m"]
-    assert list(snap.api_keys) == []  # the revocation went out
-    assert await _outbox(factory) == ["done", "done"]
-
-
 async def test_source_zero_weight_weighted_route_is_left_out(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
@@ -124,32 +74,14 @@ async def test_source_zero_weight_weighted_route_is_left_out(factory) -> None:
         )
     await _revoke(factory, key)
     await touch(factory)
-    assert (
-        await publish_pending(factory, SCOPE, router_plugins=[], require_local_membership=True) == 1
-    )
+    assert await publish_pending(factory, SCOPE, require_local_membership=True) == 1
     snap = await load_version(factory, 1)
     # least_in_flight ignores weights, so only the weighted route is dropped.
     assert [r.model for r in snap.routes] == ["fine", "lif"]
     assert list(snap.api_keys) == []
     async with factory() as s:
-        c = await compile_scope(s, SCOPE, now=OCT, router_plugins=[], require_local_membership=True)
+        c = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
     assert any("zero total weight" in w for w in c.warnings)
-
-
-async def test_plugin_cannot_zero_a_weighted_route_but_may_zero_one_member() -> None:
-    routes = [
-        RouteView(
-            "m",
-            "weighted",
-            (
-                DeploymentView("a", "u", "x", 1, None, None),
-                DeploymentView("b", "u", "x", 1, None, None),
-            ),
-        )
-    ]
-    assert await apply_router_plugins(routes, [lp(Fixed(0, "a"))]) == {"a": 0}
-    both = [lp(Fixed(0, "a"), "1"), lp(Fixed(0, "b"), "2")]
-    assert await apply_router_plugins(routes, both) == {"a": 0}  # second would zero the route
 
 
 @pytest.mark.parametrize(
@@ -185,7 +117,7 @@ async def test_invalid_upstream_url_left_out_with_its_routes(factory) -> None:
         )
         await add_route(s, "good", [("fine-d", None)])
     async with factory() as s:
-        c = await compile_scope(s, SCOPE, now=OCT, router_plugins=[], require_local_membership=True)
+        c = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
     snap = c.snapshot
     assert [u.name for u in snap.upstreams] == ["vllm"]
     assert [d.name for d in snap.deployments] == ["fine-d"]
@@ -315,129 +247,9 @@ async def test_epoch_expiry_is_not_never(factory) -> None:
         epoch = await add_key(s, t, u, name="epoch", expires_at=datetime(1970, 1, 1, tzinfo=UTC))
         old = await add_key(s, t, u, name="old", expires_at=datetime(1900, 1, 1, tzinfo=UTC))
     async with factory() as s:
-        c = await compile_scope(s, SCOPE, now=OCT, router_plugins=[], require_local_membership=True)
+        c = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
     wire = {k.key_id: k.expires_at_unix_ms for k in c.snapshot.api_keys}
     assert wire == {str(epoch.id): 1, str(old.id): 1}
-
-
-# --------------------------------------------------------------------------- 3
-
-ROUTES = [RouteView("m", "weighted", (DeploymentView("d", "u", "x", 1, None, None),))]
-
-
-class SlowSequence:
-    """A Sequence whose element access is slow; iteration happens via __getitem__."""
-
-    def __init__(self, delay: float) -> None:
-        self.delay = delay
-
-    def __len__(self) -> int:
-        return 1
-
-    def __getitem__(self, i: int):
-        if i >= 1:
-            raise IndexError
-        time.sleep(self.delay)
-        return WeightOverride("d", 9)
-
-
-class Endless:
-    """An iterator that never finishes and never yields."""
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        time.sleep(0.05)
-        return self.__next__()
-
-
-class EndlessValid:
-    def __iter__(self):
-        while True:
-            yield WeightOverride("d", 2)
-
-
-class ReturnsSlow:
-    api_version = 1
-
-    def __init__(self, result) -> None:
-        self.result = result
-
-    def adjust(self, routes):
-        return self.result
-
-
-class AsyncReturnsSlow(ReturnsSlow):
-    async def adjust(self, routes):
-        return self.result
-
-
-async def _timed(plugins, timeout: float = 0.05) -> tuple[dict, float, int]:
-    """Run plugins while counting event-loop ticks to prove the loop is not blocked."""
-    ticks = 0
-    stop = asyncio.Event()
-
-    async def ticker() -> None:
-        nonlocal ticks
-        while not stop.is_set():
-            ticks += 1
-            await asyncio.sleep(0.005)
-
-    t = asyncio.create_task(ticker())
-    start = time.monotonic()
-    result = await apply_router_plugins(ROUTES, plugins, timeout_seconds=timeout)
-    elapsed = time.monotonic() - start
-    stop.set()
-    await t
-    return result, elapsed, ticks
-
-
-@pytest.mark.parametrize("cls", [ReturnsSlow, AsyncReturnsSlow])
-async def test_slow_result_iteration_is_under_the_deadline(cls) -> None:
-    result, elapsed, ticks = await _timed([lp(cls(SlowSequence(0.3)))])
-    assert result == {}
-    assert elapsed < 0.2
-    assert ticks >= 3  # the event loop kept running
-
-
-@pytest.mark.parametrize("cls", [ReturnsSlow, AsyncReturnsSlow])
-async def test_endless_iterators_are_isolated(cls) -> None:
-    result, elapsed, _ = await _timed([lp(cls(Endless()), "a"), lp(cls(EndlessValid()), "b")])
-    assert result == {} and elapsed < 0.5
-
-
-async def test_subclassed_values_rejected() -> None:
-    class Sneaky(str):
-        pass
-
-    plugin = ReturnsSlow([WeightOverride(Sneaky("d"), 2)])
-    assert await apply_router_plugins(ROUTES, [lp(plugin)]) == {}
-    assert await apply_router_plugins(ROUTES, [lp(ReturnsSlow([WeightOverride("d", True)]))]) == {}
-
-
-# --------------------------------------------------------------------------- 4
-
-
-async def test_max_plugin_weight_round_trips_through_rollback(factory) -> None:
-    await seed_scope(factory)
-    async with factory() as s, s.begin():
-        await add_route(s, "m", [("d", None)])
-    await touch(factory)
-    assert (
-        await publish_pending(
-            factory, SCOPE, router_plugins=[lp(Fixed(MAX_WEIGHT))], require_local_membership=True
-        )
-        == 1
-    )
-    assert (await load_version(factory, 1)).deployments[0].weight == MAX_WEIGHT
-    async with factory() as s, s.begin():
-        assert await rollback_routing(s, SCOPE, 1, require_local_membership=True) == 2
-    async with factory() as s:
-        assert await s.scalar(select(Deployment.weight)) == MAX_WEIGHT
-
-    # One past the column range is not accepted from plugins.
-    assert await apply_router_plugins(ROUTES, [lp(Fixed(MAX_WEIGHT + 1))]) == {}
 
 
 async def test_rollback_to_overweight_version_is_a_compile_error(factory) -> None:

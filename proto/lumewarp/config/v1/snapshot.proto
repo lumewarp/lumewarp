@@ -129,6 +129,10 @@ message ModelRoute {
   StickyBy sticky = 7;
   // Request header hashed when sticky = STICKY_BY_HEADER.
   string sticky_header = 8;
+  // Compiled-in strategy name. Required capability: "strategy:<name>".
+  string custom_strategy = 9;
+  // JSON object, at most 16 KiB UTF-8. Empty means {}.
+  string strategy_params_json = 10;
 }
 
 enum RoutingStrategy {
@@ -142,6 +146,7 @@ enum RoutingStrategy {
   // kv_cache_usage_perc) scraped every second; falls back to in-flight when a
   // deployment's metrics are stale. Capability "vllm_load".
   ROUTING_STRATEGY_VLLM_LOAD = 4;
+  ROUTING_STRATEGY_CUSTOM = 5;
 }
 
 // Retries happen only before any response byte is sent to the client: on

@@ -9,8 +9,8 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumewarp_control_plane import plugins as plugin_api
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
+from lumewarp_control_plane.compiler.strategy import CustomRouteStrategy, params_json
 from lumewarp_control_plane.compiler.validate import (
     RESERVED_ALIASES,
     SnapshotInvalid,
@@ -22,6 +22,7 @@ from lumewarp_control_plane.compiler.validate import (
 from lumewarp_control_plane.models import (
     ApiKey,
     Deployment,
+    GatewaySession,
     KeyLifecycle,
     KeyOwnerKind,
     ModelAccess,
@@ -152,15 +153,14 @@ async def compile_scope(
     scope: str,
     *,
     now: datetime | None = None,
-    router_plugins: Sequence[plugin_api.LoadedPlugin] | None = None,
     max_snapshot_bytes: int | None = None,
     max_snapshot_keys: int | None = None,
     require_local_membership: bool,
 ) -> CompiledSnapshot:
     """Compile the current source state of `scope` into a snapshot.
 
-    Pure over source state read in `session` (plus `now` for the budget window and the
-    router plugins); the caller runs it in one REPEATABLE READ transaction, or holds the
+    Pure over source state read in `session` (plus `now` for the budget window);
+    the caller runs it in one REPEATABLE READ transaction, or holds the
     scope row lock, so every table is read at one consistent point and `source_revision`
     is `scopes.source_revision` as seen there.
 
@@ -195,8 +195,6 @@ async def compile_scope(
       dropped (warning); a split whose deployments are all left out leaves the route out.
     - The result is checked against every gateway invariant (`validate.validate_snapshot`,
       mirroring snapshot.rs::validate and Router::compile); a violation is a CompileError.
-    - Router plugins (default: discovered `lumewarp.router` plugins) may override
-      deployment weights; a failing plugin is skipped.
     - Enforces settings.max_snapshot_bytes / max_snapshot_keys (CompileError).
     - Deterministic: same source state -> byte-identical serialization (sorted entities).
     """
@@ -216,6 +214,16 @@ async def compile_scope(
     deployments = (await session.scalars(select(Deployment).order_by(Deployment.name))).all()
     deployment_by_id = {d.id: d for d in deployments}
     routes = (await session.scalars(select(Route).order_by(Route.model))).all()
+    custom = {c.route_id: c for c in await session.scalars(select(CustomRouteStrategy))}
+    advertised = {
+        cap
+        for caps in await session.scalars(
+            select(GatewaySession.capabilities).where(
+                GatewaySession.scope == scope, GatewaySession.connected.is_(True)
+            )
+        )
+        for cap in caps
+    }
     route_model = {r.id: r.model for r in routes}
     members: dict[uuid.UUID, list[uuid.UUID]] = {}
     for rd in await session.scalars(
@@ -299,7 +307,7 @@ async def compile_scope(
         return sum(deployment_by_id[i].weight for i in ids) > 0
 
     # First pass: which routes are emitted (fallbacks may only name emitted routes).
-    emitted: list[tuple[Route, pb.ModelRoute, list[uuid.UUID]]] = []
+    emitted: list[tuple[Route, pb.ModelRoute]] = []
     for r in routes:
         member_ids = members.get(r.id, [])
         dropped = [deployment_by_id[i].name for i in member_ids if i not in valid_deployment_ids]
@@ -309,10 +317,14 @@ async def compile_scope(
         if not r.model or r.model in RESERVED_ALIASES:
             warnings.append(f"route {r.model!r} left out: alias is empty or reserved")
             continue
-        weighted = r.strategy is RoutingStrategy.WEIGHTED
+        weighted = r.id not in custom and r.strategy is RoutingStrategy.WEIGHTED
         route = pb.ModelRoute(model=r.model, strategy=ROUTING_STRATEGY[r.strategy])
+        if r.id in custom:
+            config = custom[r.id]
+            route.strategy = pb.ROUTING_STRATEGY_CUSTOM
+            route.custom_strategy = config.name
+            route.strategy_params_json = params_json(config.params)
         route_splits = splits.get(r.id, [])
-        pool_ids: list[uuid.UUID] = []
         if route_splits:
             bad = None
             for sr in route_splits:
@@ -330,7 +342,6 @@ async def compile_scope(
                         deployments=[deployment_by_id[i].name for i in ids],
                     )
                 )
-                pool_ids.extend(i for i in ids if i not in pool_ids)
             if bad is None and not sum(sr.weight for sr in route_splits):
                 bad = "traffic split weights sum to 0"
             if bad is not None:
@@ -348,7 +359,6 @@ async def compile_scope(
                 continue
             if r.sticky is not StickyBy.NONE:
                 warnings.append(f"route {r.model!r}: sticky without a traffic split ignored")
-            pool_ids = member_ids
         route.deployments.extend(deployment_by_id[i].name for i in member_ids)
         if r.retry_enabled:
             route.retry.CopyFrom(
@@ -359,11 +369,10 @@ async def compile_scope(
                     total_timeout_ms=r.retry_total_timeout_ms,
                 )
             )
-        emitted.append((r, route, pool_ids))
+        emitted.append((r, route))
 
-    emitted_ids = {r.id for r, _, _ in emitted}
-    route_views: list[plugin_api.RouteView] = []
-    for r, route, pool_ids in emitted:
+    emitted_ids = {r.id for r, _ in emitted}
+    for r, route in emitted:
         for fallback in fallbacks.get(r.id, []):
             if fallback in emitted_ids and fallback != r.id:
                 route.fallbacks.append(route_model[fallback])
@@ -373,38 +382,19 @@ async def compile_scope(
                     " dropped"
                 )
         snap.routes.append(route)
-        route_views.append(
-            plugin_api.RouteView(
-                model=r.model,
-                strategy=r.strategy.value,
-                deployment_pools=tuple(tuple(s.deployments) for s in route.traffic_split),
-                deployments=tuple(
-                    plugin_api.DeploymentView(
-                        name=d.name,
-                        upstream=upstream_name[d.upstream_id],
-                        upstream_model=d.upstream_model,
-                        weight=d.weight,
-                        price_input_nano_usd_per_mtok=d.price_input_nano_usd_per_mtok,
-                        price_output_nano_usd_per_mtok=d.price_output_nano_usd_per_mtok,
-                    )
-                    for d in (deployment_by_id[i] for i in pool_ids)
-                ),
-            )
-        )
+        if route.strategy == pb.ROUTING_STRATEGY_CUSTOM:
+            capability = f"strategy:{route.custom_strategy}"
+            if capability not in advertised:
+                warnings.append(
+                    f"route {r.model!r}: {capability} is not advertised by any connected gateway"
+                )
 
-    if router_plugins is None:
-        router_plugins = plugin_api.load_router_plugins()
-    overrides = (
-        await plugin_api.apply_router_plugins(route_views, router_plugins)
-        if router_plugins and route_views
-        else {}
-    )
     for d in valid_deployments:
         dep = pb.Deployment(
             name=d.name,
             upstream=upstream_name[d.upstream_id],
             upstream_model=d.upstream_model,
-            weight=overrides.get(d.name, d.weight),
+            weight=d.weight,
         )
         if d.price_input_nano_usd_per_mtok is not None:
             dep.price.CopyFrom(

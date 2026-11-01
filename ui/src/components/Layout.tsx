@@ -47,7 +47,8 @@ const NAV = [
 ] as const;
 
 function roleLabel(me: Me) {
-  if (me.is_superuser) return "superuser";
+  if (me.kind === "break_glass") return "break-glass";
+  if (me.is_admin) return "admin";
   if (me.teams.some((team) => team.role === "admin")) return "team admin";
   return me.teams.length ? "member" : "no team access";
 }

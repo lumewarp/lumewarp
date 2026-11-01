@@ -21,10 +21,7 @@ async def test_restart_and_noop_recompile_keep_version(factory) -> None:
     await touch(factory)
     now = datetime(2026, 10, 10, tzinfo=UTC)
     assert (
-        await publisher.publish_pending(
-            factory, SCOPE, now=now, router_plugins=[], require_local_membership=True
-        )
-        == 1
+        await publisher.publish_pending(factory, SCOPE, now=now, require_local_membership=True) == 1
     )
     async with factory() as s:
         before = await s.get(ConfigVersion, (SCOPE, 1))
@@ -38,17 +35,11 @@ async def test_restart_and_noop_recompile_keep_version(factory) -> None:
             factory,
             SCOPE,
             now=now + timedelta(days=1),
-            router_plugins=[],
             require_local_membership=True,
         )
         is None
     )
-    assert (
-        await publisher.publish_pending(
-            factory, SCOPE, router_plugins=[], require_local_membership=True
-        )
-        is None
-    )
+    assert await publisher.publish_pending(factory, SCOPE, require_local_membership=True) is None
     async with factory() as s:
         assert await s.scalar(select(func.count()).select_from(ConfigVersion)) == 1
         after = await s.get(ConfigVersion, (SCOPE, 1))
@@ -60,12 +51,7 @@ async def test_restart_and_noop_recompile_keep_version(factory) -> None:
     async with factory() as s, s.begin():
         await s.execute(update(Deployment).values(weight=3))
     await touch(factory)
-    assert (
-        await publisher.publish_pending(
-            factory, SCOPE, router_plugins=[], require_local_membership=True
-        )
-        == 2
-    )
+    assert await publisher.publish_pending(factory, SCOPE, require_local_membership=True) == 2
 
 
 async def test_config_insert_serialization_conflict_retries_fresh_snapshot(
@@ -109,12 +95,7 @@ async def test_config_insert_serialization_conflict_retries_fresh_snapshot(
             raise
 
     monkeypatch.setattr(publisher, "store_version", conflicting_insert)
-    assert (
-        await publisher.publish_pending(
-            factory, SCOPE, router_plugins=[], require_local_membership=True
-        )
-        == 1
-    )
+    assert await publisher.publish_pending(factory, SCOPE, require_local_membership=True) == 1
     assert attempts == 2
     assert conflicts == ["40001"]
     assert not any(r.exc_info for r in caplog.records)
@@ -126,12 +107,7 @@ async def test_config_insert_serialization_conflict_retries_fresh_snapshot(
         assert [r.model for r in pb.Snapshot.FromString(version.payload).routes] == ["new"]
         assert all(r.status == OutboxStatus.DONE for r in await s.scalars(select(ConfigOutbox)))
     # The session advisory lock was released, and no work is left.
-    assert (
-        await publisher.publish_pending(
-            factory, SCOPE, router_plugins=[], require_local_membership=True
-        )
-        is None
-    )
+    assert await publisher.publish_pending(factory, SCOPE, require_local_membership=True) is None
 
 
 @pytest.mark.parametrize("sqlstate, attempts", [("40001", 5), ("23514", 1)])
@@ -155,9 +131,7 @@ async def test_retry_is_bounded_and_only_for_serialization(
 
     monkeypatch.setattr(publisher, "store_version", fail)
     with pytest.raises(DBAPIError):
-        await publisher.publish_pending(
-            factory, SCOPE, router_plugins=[], require_local_membership=True
-        )
+        await publisher.publish_pending(factory, SCOPE, require_local_membership=True)
     assert calls == attempts
     async with factory() as s:
         assert await s.scalar(select(func.count()).select_from(ConfigVersion)) == 0

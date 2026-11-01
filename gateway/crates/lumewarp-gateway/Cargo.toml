@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 lumewarp-config.workspace = true
 lumewarp-proto.workspace = true
+lumewarp-router-api = { path = "../lumewarp-router-api" }
 
 anyhow.workspace = true
 arc-swap.workspace = true

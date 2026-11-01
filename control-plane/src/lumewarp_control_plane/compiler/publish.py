@@ -8,19 +8,19 @@ every version published before it got the lock. Rollback takes it transaction-le
 
 import asyncio
 import hashlib
+import json
 import logging
 import random
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import func, literal, or_, select, update
+from sqlalchemy import delete, func, literal, or_, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from lumewarp_control_plane import outbox
-from lumewarp_control_plane import plugins as plugin_api
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 from lumewarp_control_plane.compiler.compile import (
     ROUTING_STRATEGY,
@@ -29,6 +29,7 @@ from lumewarp_control_plane.compiler.compile import (
     CompileError,
     compile_scope,
 )
+from lumewarp_control_plane.compiler.strategy import CustomRouteStrategy
 from lumewarp_control_plane.compiler.validate import SnapshotInvalid, validate_snapshot
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.metrics import DISCARD, Metrics
@@ -41,6 +42,7 @@ from lumewarp_control_plane.models import (
     OutboxStatus,
     Route,
     RouteDeployment,
+    RoutingStrategy,
     Scope,
     StreamUsageMode,
     Upstream,
@@ -167,7 +169,6 @@ async def _publish_locked(
     session: AsyncSession,
     scope: str,
     now: datetime | None,
-    router_plugins: Sequence[plugin_api.LoadedPlugin] | None,
     require_local_membership: bool,
     outcome: _CompileOutcome,
 ) -> int | None:
@@ -193,7 +194,6 @@ async def _publish_locked(
             session,
             scope,
             now=now,
-            router_plugins=router_plugins,
             require_local_membership=require_local_membership,
         )
         if latest is not None:
@@ -233,7 +233,6 @@ async def publish_pending(
     scope: str | None = None,
     *,
     now: datetime | None = None,
-    router_plugins: Sequence[plugin_api.LoadedPlugin] | None = None,
     require_local_membership: bool,
     metrics: Metrics = DISCARD,
 ) -> int | None:
@@ -265,7 +264,6 @@ async def publish_pending(
                                 session,
                                 scope,
                                 now,
-                                router_plugins,
                                 require_local_membership,
                                 outcome,
                             )
@@ -294,6 +292,7 @@ async def _restore_routing(session: AsyncSession, old: pb.Snapshot) -> None:
     kind = {v: k for k, v in UPSTREAM_KIND.items()}
     mode = {v: k for k, v in STREAM_USAGE_MODE.items()}
     strategy = {v: k for k, v in ROUTING_STRATEGY.items()}
+    await session.execute(delete(CustomRouteStrategy))
 
     upstreams = {u.name: u for u in await session.scalars(select(Upstream))}
     deployments = {d.name: d for d in await session.scalars(select(Deployment))}
@@ -341,9 +340,21 @@ async def _restore_routing(session: AsyncSession, old: pb.Snapshot) -> None:
             await session.delete(u)
     for r in old.routes:
         row = routes.get(r.model) or Route(model=r.model)
-        row.strategy = strategy[r.strategy]
+        row.strategy = (
+            RoutingStrategy.WEIGHTED
+            if r.strategy == pb.ROUTING_STRATEGY_CUSTOM
+            else strategy[r.strategy]
+        )
         session.add(row)
         await session.flush()
+        if r.strategy == pb.ROUTING_STRATEGY_CUSTOM:
+            session.add(
+                CustomRouteStrategy(
+                    route_id=row.id,
+                    name=r.custom_strategy,
+                    params=json.loads(r.strategy_params_json or "{}"),
+                )
+            )
         for position, name in enumerate(r.deployments):
             session.add(
                 RouteDeployment(
@@ -359,7 +370,6 @@ async def rollback_routing(
     to_version: int,
     *,
     now: datetime | None = None,
-    router_plugins: Sequence[plugin_api.LoadedPlugin] | None = None,
     require_local_membership: bool,
 ) -> int:
     """Publish a new version whose routing content (upstreams, deployments, routes) comes
@@ -369,7 +379,7 @@ async def rollback_routing(
     Runs in the caller's transaction (the caller writes the audit row and commits). The
     routing source tables are rewritten to match `to_version`, so later compiles keep the
     rolled-back routing instead of silently reverting it. The published routing is exactly
-    `to_version`'s (router plugins are not re-applied to it).
+    `to_version`'s.
     Raises LookupError if `to_version` is unknown or compacted, CompileError if the
     resulting snapshot is invalid.
     """
@@ -380,10 +390,10 @@ async def rollback_routing(
     old = pb.Snapshot.FromString(row.payload)
     # deployments.weight is a Postgres INTEGER; versions published before plugin weights
     # were capped could carry larger uint32 weights. Refuse cleanly instead of a DB error.
-    too_heavy = [d.name for d in old.deployments if d.weight > plugin_api.MAX_WEIGHT]
+    too_heavy = [d.name for d in old.deployments if d.weight > (2**31 - 1)]
     if too_heavy:
         raise CompileError(
-            f"version {to_version} has deployment weights above {plugin_api.MAX_WEIGHT} "
+            f"version {to_version} has deployment weights above {(2**31 - 1)} "
             f"({', '.join(too_heavy)}); it cannot be restored"
         )
 
@@ -393,7 +403,6 @@ async def rollback_routing(
         session,
         scope,
         now=now,
-        router_plugins=router_plugins or [],
         require_local_membership=require_local_membership,
     )
     snap = compiled.snapshot
@@ -485,14 +494,12 @@ async def run_compiler_loop(
     retried with backoff (up to 5 s); the loop only returns when stopped.
     """
     scope = scope or get_settings().scope
-    router_plugins = plugin_api.load_router_plugins()
     backoff = interval_seconds
     while not stop_event.is_set():
         try:
             version = await publish_pending(
                 session_factory,
                 scope,
-                router_plugins=router_plugins,
                 require_local_membership=require_local_membership,
                 metrics=metrics,
             )

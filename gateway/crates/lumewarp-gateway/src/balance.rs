@@ -29,9 +29,6 @@ const EWMA_DIVISOR: u64 = 5;
 /// A failed or timed-out attempt counts as at least this slow (and at least
 /// twice the current average).
 const FAILURE_PENALTY_US: u64 = 1_000_000;
-/// Share of `LOWEST_LATENCY` picks made uniformly at random, so a deployment
-/// that got slow once is re-measured.
-pub const EXPLORE_PERCENT: u32 = 5;
 /// vLLM load older than this is ignored (the deployment is compared by
 /// in-flight requests instead).
 pub const LOAD_STALE_MS: u64 = 3_000;
@@ -40,6 +37,7 @@ const SCRAPE_TIMEOUT: Duration = Duration::from_millis(900);
 const MAX_METRICS_BYTES: usize = 8 * 1024 * 1024;
 /// KV-cache usage is compared in 5% buckets so noise falls through to
 /// in-flight requests.
+#[cfg(test)]
 const KV_BUCKET_BP: u32 = 500;
 
 /// Time-to-response-headers EWMA in microseconds; 0 = no sample yet.
@@ -103,6 +101,15 @@ pub struct VllmLoad {
 }
 
 impl VllmLoad {
+    pub fn view(&self, now: u64) -> lumewarp_router_api::Load {
+        let updated = self.updated.load(Ordering::Acquire);
+        lumewarp_router_api::Load {
+            waiting: self.waiting.load(Ordering::Relaxed),
+            kv_usage_bp: self.kv_bp.load(Ordering::Relaxed),
+            fresh: updated != 0 && now.saturating_sub(updated - 1) <= LOAD_STALE_MS,
+        }
+    }
+
     fn new(queue_gauge: Gauge, kv_gauge: Gauge<f64, AtomicU64>) -> Self {
         Self {
             waiting: AtomicU64::new(0),
@@ -114,6 +121,7 @@ impl VllmLoad {
     }
 
     /// `(waiting, kv bucket)` when the last scrape is fresh at `now`.
+    #[cfg(test)]
     pub fn score(&self, now: u64) -> Option<(u64, u32)> {
         let updated = self.updated.load(Ordering::Acquire);
         if updated == 0 || now.saturating_sub(updated - 1) > LOAD_STALE_MS {

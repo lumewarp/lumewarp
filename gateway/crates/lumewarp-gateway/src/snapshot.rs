@@ -26,6 +26,62 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     "lowest_latency",
     "vllm_load",
 ];
+
+pub fn supported_capabilities() -> Vec<String> {
+    let mut caps: Vec<_> = SUPPORTED_CAPABILITIES
+        .iter()
+        .map(|c| c.to_string())
+        .collect();
+    caps.extend(lumewarp_router_api::registered().map(|f| format!("strategy:{}", f.name)));
+    caps.sort();
+    caps.dedup();
+    caps
+}
+
+pub fn valid_strategy_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (1..=63).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+}
+
+pub fn strategy_params(r: &pb::ModelRoute) -> Result<serde_json::Value, ApplyError> {
+    if r.strategy_params_json.len() > 16 * 1024 {
+        return Err(ApplyError::invalid("strategy params exceed 16 KiB"));
+    }
+    if r.strategy_params_json.is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    let params: serde_json::Value = serde_json::from_str(&r.strategy_params_json)
+        .map_err(|_| ApplyError::invalid("strategy params must be a JSON object"))?;
+    if !params.is_object() {
+        return Err(ApplyError::invalid("strategy params must be a JSON object"));
+    }
+    Ok(params)
+}
+
+pub fn strategy_headers(r: &pb::ModelRoute) -> Result<Vec<String>, ApplyError> {
+    let params = strategy_params(r)?;
+    let Some(headers) = params.get("headers") else {
+        return Ok(Vec::new());
+    };
+    let headers = headers
+        .as_array()
+        .ok_or_else(|| ApplyError::invalid("params.headers must be an array"))?;
+    headers
+        .iter()
+        .map(|header| {
+            let name = header
+                .as_str()
+                .ok_or_else(|| ApplyError::invalid("params.headers must contain header names"))?;
+            hyper::header::HeaderName::from_bytes(name.as_bytes())
+                .map(|name| name.as_str().to_owned())
+                .map_err(|_| ApplyError::invalid("params.headers contains an invalid header name"))
+        })
+        .collect()
+}
 /// Upper bounds that keep split labels and per-request work bounded.
 pub const MAX_SPLITS: usize = 16;
 pub const MAX_SPLIT_NAME: usize = 32;
@@ -54,7 +110,7 @@ impl ApplyError {
         }
     }
 
-    fn unsupported(reason: impl Into<String>) -> Self {
+    pub fn unsupported(reason: impl Into<String>) -> Self {
         Self {
             code: NackCode::UnsupportedFeature,
             reason: reason.into(),
@@ -212,6 +268,21 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             "lowest_latency",
         )?;
         require(strategy == pb::RoutingStrategy::VllmLoad, "vllm_load")?;
+        if strategy == pb::RoutingStrategy::Custom {
+            if !valid_strategy_name(&r.custom_strategy) {
+                return Err(ApplyError::invalid("invalid custom strategy name"));
+            }
+            require(true, &format!("strategy:{}", r.custom_strategy))?;
+            if lumewarp_router_api::lookup(&r.custom_strategy)
+                .map_err(|_| ApplyError::invalid("duplicate strategy registration"))?
+                .is_none()
+            {
+                return Err(ApplyError::unsupported("unregistered custom strategy"));
+            }
+            strategy_headers(r)?;
+        } else if !r.custom_strategy.is_empty() || !r.strategy_params_json.is_empty() {
+            return Err(ApplyError::invalid("custom strategy fields require CUSTOM"));
+        }
         // With traffic_split the route's own deployment list is ignored.
         if !r.traffic_split.is_empty() {
             continue;

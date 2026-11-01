@@ -1,0 +1,76 @@
+"""Custom route strategies, stored separately to keep the built-in route enum stable."""
+
+import json
+import re
+import uuid
+from typing import Any, Literal
+
+from sqlalchemy import CheckConstraint, ForeignKey, String, text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
+from lumewarp_control_plane.models import Base, RoutingStrategy
+
+RouteStrategy = RoutingStrategy | Literal["custom"]
+MAX_PARAMS_BYTES = 16 * 1024
+STRATEGY_NAME = re.compile(r"[a-z][a-z0-9_]{0,62}")
+HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+
+class CustomRouteStrategy(Base):
+    """Presence replaces the route's built-in strategy; absent means built-in.
+
+    The route row retains weighted as its built-in default while custom is active.
+    API writes and rollback replace both records in the same transaction.
+    """
+
+    __tablename__ = "route_custom_strategies"
+    __table_args__ = (
+        CheckConstraint("name ~ '^[a-z][a-z0-9_]{0,62}$'", name="strategy_name"),
+        CheckConstraint("jsonb_typeof(params) = 'object'", name="params_object"),
+    )
+
+    route_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("routes.id", ondelete="CASCADE"), primary_key=True
+    )
+    name: Mapped[str] = mapped_column(String(63), nullable=False)
+    params: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+
+
+def params_json(params: dict[str, Any]) -> str:
+    return json.dumps(
+        params, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+    )
+
+
+def strategy_problem(
+    strategy: RouteStrategy, name: str | None, params: dict[str, Any]
+) -> str | None:
+    if strategy != "custom":
+        return "custom strategy fields require strategy custom" if name or params else None
+    if name is None or not STRATEGY_NAME.fullmatch(name):
+        return "custom_strategy must match ^[a-z][a-z0-9_]{0,62}$"
+    # serde_json's default recursion budget accepts at most 127 nested containers.
+    pending = [(params, 1)]
+    while pending:
+        value, depth = pending.pop()
+        if depth > 127:
+            return "strategy_params exceeds the gateway JSON nesting limit"
+        children = value.values() if isinstance(value, dict) else value
+        pending.extend((child, depth + 1) for child in children if isinstance(child, (dict, list)))
+    try:
+        encoded = params_json(params)
+        size = len(encoded.encode("utf-8"))
+    except (ValueError, TypeError, UnicodeError):
+        return "strategy_params must be a JSON object with finite values"
+    if size > MAX_PARAMS_BYTES:
+        return "strategy_params exceeds 16 KiB"
+    if "headers" in params:
+        headers = params["headers"]
+        if not isinstance(headers, list) or any(
+            not isinstance(h, str) or not HEADER_NAME.fullmatch(h) for h in headers
+        ):
+            return "strategy_params.headers must be an array of HTTP header names"
+    return None
