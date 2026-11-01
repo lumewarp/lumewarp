@@ -276,7 +276,8 @@ async def test_diff_roundtrip_over_published_versions(factory) -> None:
     assert (d.base_version, d.version, d.created_at_unix_ms) == (1, 2, b.created_at_unix_ms)
     assert list(d.remove_api_keys) == [str(k1.id)]
     assert {k.key_id for k in d.upsert_api_keys} >= {str(k2.id)}
-    assert [r.name for r in d.upsert_routers] == ["qwen", "qwen-a"]
+    assert [r.name for r in d.upsert_routers] == ["qwen"]
+    assert [m.name for m in d.upsert_models] == ["qwen-a"]
     assert apply_delta(a, d) == b
     # Reverse direction and identity.
     assert apply_delta(b, diff(b, a)) == a
@@ -291,8 +292,9 @@ def test_diff_unit_roundtrip() -> None:
         version=4,
         scope="s",
         upstreams=[pb.Upstream(name="u1"), pb.Upstream(name="u2")],
-        models=[pb.Model(name="d1", upstream="u1", weight=1)],
-        routers=[pb.Router(name="m1", models=["d1"])],
+        models=[pb.Model(name="d1", upstream="u1")],
+        routers=[pb.Router(name="m1", members=[pb.RouterMember(model="d1", weight=1)])],
+        aliases=[pb.Alias(name="a1", target="d1"), pb.Alias(name="a2", target="m1")],
         teams=[pb.Team(id="t1", name="a")],
         api_keys=[pb.ApiKey(key_id="k1"), pb.ApiKey(key_id="k2", status=1)],
         required_capabilities=["x"],
@@ -303,16 +305,19 @@ def test_diff_unit_roundtrip() -> None:
         created_at_unix_ms=123,
         upstreams=[pb.Upstream(name="u2", base_url="changed")],
         models=[
-            pb.Model(name="d1", upstream="u2", weight=1),
+            pb.Model(name="d1", upstream="u2"),
             pb.Model(name="d2", upstream="u2"),
         ],
         routers=[],
+        aliases=[pb.Alias(name="a1", target="d2"), pb.Alias(name="a3", target="d1")],
         teams=[pb.Team(id="t1", name="a")],
         api_keys=[pb.ApiKey(key_id="k2", status=3), pb.ApiKey(key_id="k3")],
     )
     d = diff(old, new)
     assert list(d.remove_upstreams) == ["u1"] and list(d.remove_routers) == ["m1"]
     assert list(d.remove_api_keys) == ["k1"] and not d.upsert_teams
+    assert [a.name for a in d.upsert_aliases] == ["a1", "a3"]
+    assert list(d.remove_aliases) == ["a2"]
     assert list(d.required_capabilities) == []
     assert apply_delta(old, d) == new
     with pytest.raises(ValueError):

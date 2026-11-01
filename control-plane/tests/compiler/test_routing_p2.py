@@ -29,6 +29,10 @@ from tests import factories
 from tests.compiler.helpers import OCT, SCOPE, add_router, seed_scope
 
 
+def _m(*names: str) -> list[pb.RouterMember]:
+    return [pb.RouterMember(model=name, weight=1) for name in names]
+
+
 async def compile_(factory):
     async with factory() as s:
         return await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
@@ -69,17 +73,20 @@ def test_supported_capabilities_match_gateway() -> None:
         "health_check",
         "circuit_breaker",
         "traffic_split",
-        "lowest_latency",
         "vllm_load",
+        "strategy:weighted",
+        "strategy:least_in_flight",
+        "strategy:lowest_latency",
+        "strategy:vllm_load",
     } == SUPPORTED_CAPABILITIES
 
 
-async def test_plain_routing_needs_no_capability(factory) -> None:
+async def test_plain_routing_needs_only_its_strategy(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
         await add_router(s, "llama", [("a", None)])
     snap = (await compile_(factory)).snapshot
-    assert list(snap.required_capabilities) == []
+    assert list(snap.required_capabilities) == ["strategy:weighted"]
     up, router = snap.upstreams[0], router_of(snap, "llama")
     assert not up.HasField("health_check") and not up.HasField("circuit_breaker")
     assert up.metrics_url == ""
@@ -105,7 +112,7 @@ async def test_health_check(factory) -> None:
     )
     # NULL path / thresholds are the gateway defaults (0 / "").
     assert ups["openai"].health_check == pb.HealthCheck(interval_ms=5000, timeout_ms=1000)
-    assert list(snap.required_capabilities) == ["health_check"]
+    assert list(snap.required_capabilities) == ["health_check", "strategy:weighted"]
 
 
 async def test_circuit_breaker(factory) -> None:
@@ -118,7 +125,7 @@ async def test_circuit_breaker(factory) -> None:
     snap = (await compile_(factory)).snapshot
     assert snap.upstreams[0].HasField("circuit_breaker")
     assert snap.upstreams[0].circuit_breaker == pb.CircuitBreaker(failure_threshold=3)
-    assert list(snap.required_capabilities) == ["circuit_breaker"]
+    assert list(snap.required_capabilities) == ["circuit_breaker", "strategy:weighted"]
 
 
 async def test_metrics_url_needs_vllm_load(factory) -> None:
@@ -129,7 +136,7 @@ async def test_metrics_url_needs_vllm_load(factory) -> None:
         up.metrics_url = "http://vllm:8000/metrics"
     snap = (await compile_(factory)).snapshot
     assert snap.upstreams[0].metrics_url == "http://vllm:8000/metrics"
-    assert list(snap.required_capabilities) == ["vllm_load"]
+    assert list(snap.required_capabilities) == ["strategy:weighted", "vllm_load"]
 
 
 async def test_invalid_metrics_url_is_left_out(factory) -> None:
@@ -140,26 +147,21 @@ async def test_invalid_metrics_url_is_left_out(factory) -> None:
         up.metrics_url = "http://user:pw@vllm/metrics"
     c = await compile_(factory)
     assert c.snapshot.upstreams[0].metrics_url == ""
-    assert list(c.snapshot.required_capabilities) == []
+    assert list(c.snapshot.required_capabilities) == ["strategy:weighted"]
     assert any("metrics_url" in w for w in c.warnings)
 
 
 @pytest.mark.parametrize(
-    ("strategy", "wire", "caps"),
-    [
-        ("weighted", pb.ROUTING_STRATEGY_WEIGHTED, []),
-        ("least_in_flight", pb.ROUTING_STRATEGY_LEAST_IN_FLIGHT, []),
-        ("lowest_latency", pb.ROUTING_STRATEGY_LOWEST_LATENCY, ["lowest_latency"]),
-        ("vllm_load", pb.ROUTING_STRATEGY_VLLM_LOAD, ["vllm_load"]),
-    ],
+    "strategy",
+    ["weighted", "least_in_flight", "lowest_latency", "vllm_load"],
 )
-async def test_strategies(factory, strategy, wire, caps) -> None:
+async def test_strategies(factory, strategy) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
         await add_router(s, "llama", [("a", None)], strategy=strategy)
     snap = (await compile_(factory)).snapshot
-    assert router_of(snap, "llama").strategy == wire
-    assert list(snap.required_capabilities) == caps
+    assert router_of(snap, "llama").strategy == strategy
+    assert list(snap.required_capabilities) == [f"strategy:{strategy}"]
 
 
 async def test_retry_policy(factory) -> None:
@@ -179,7 +181,7 @@ async def test_retry_policy(factory) -> None:
     assert router_of(snap, "tuned").retry == pb.RetryPolicy(
         max_attempts=3, retry_on_status=[500, 503], total_timeout_ms=9000
     )
-    assert list(snap.required_capabilities) == ["retry"]
+    assert list(snap.required_capabilities) == ["retry", "strategy:weighted"]
 
 
 async def test_fallbacks_ordered(factory) -> None:
@@ -191,10 +193,11 @@ async def test_fallbacks_ordered(factory) -> None:
         s.add(RouterFallback(router_id=main.id, model_id=b.id, position=0))
         s.add(RouterFallback(router_id=main.id, model_id=c.id, position=1))
     snap = (await compile_(factory)).snapshot
-    # Each fallback model is served by its own single-member router.
+    # Fallbacks are models, in the snapshot on their own, with no router around them.
     assert list(router_of(snap, "main").fallbacks) == ["zzz-backup", "aaa-backup"]
-    assert list(router_of(snap, "zzz-backup").models) == ["zzz-backup"]
-    assert list(snap.required_capabilities) == ["fallbacks"]
+    assert [r.name for r in snap.routers] == ["main"]
+    assert {"zzz-backup", "aaa-backup"} <= {m.name for m in snap.models}
+    assert list(snap.required_capabilities) == ["fallbacks", "strategy:weighted"]
 
 
 async def test_fallback_to_left_out_model_is_dropped(factory) -> None:
@@ -205,9 +208,9 @@ async def test_fallback_to_left_out_model_is_dropped(factory) -> None:
         bad = await factories.make_model(s, "bad", broken)
         s.add(RouterFallback(router_id=main.id, model_id=bad.id, position=0))
     c = await compile_(factory)
-    assert [r.name for r in c.snapshot.routers] == ["a", "main"]
+    assert [r.name for r in c.snapshot.routers] == ["main"]
     assert list(router_of(c.snapshot, "main").fallbacks) == []
-    assert list(c.snapshot.required_capabilities) == []
+    assert list(c.snapshot.required_capabilities) == ["strategy:weighted"]
     assert any("fallback 'bad'" in w for w in c.warnings)
 
 
@@ -223,11 +226,11 @@ async def test_traffic_split_and_sticky(factory) -> None:
     snap = (await compile_(factory)).snapshot
     r = router_of(snap, "llama")
     assert list(r.traffic_split) == [
-        pb.TrafficSplit(name="stable", weight=90, models=["stable-a"]),
-        pb.TrafficSplit(name="canary", weight=10, models=["canary-a"]),
+        pb.TrafficSplit(name="stable", weight=90, members=_m("stable-a")),
+        pb.TrafficSplit(name="canary", weight=10, members=_m("canary-a")),
     ]
     assert r.sticky == pb.STICKY_BY_HEADER and r.sticky_header == "x-session-id"
-    assert list(snap.required_capabilities) == ["traffic_split"]
+    assert list(snap.required_capabilities) == ["strategy:weighted", "traffic_split"]
 
 
 @pytest.mark.parametrize(
@@ -244,8 +247,8 @@ async def test_sticky_team_key(factory, sticky, wire) -> None:
     snap = (await compile_(factory)).snapshot
     r = router_of(snap, "llama")
     # A split router may have no own models.
-    assert list(r.models) == [] and r.sticky == wire and r.sticky_header == ""
-    assert list(snap.required_capabilities) == ["traffic_split"]
+    assert list(r.members) == [] and r.sticky == wire and r.sticky_header == ""
+    assert list(snap.required_capabilities) == ["strategy:weighted", "traffic_split"]
 
 
 async def test_split_without_valid_models_leaves_router_out(factory) -> None:
@@ -258,7 +261,7 @@ async def test_split_without_valid_models_leaves_router_out(factory) -> None:
         broken = await s.scalar(select(Upstream).where(Upstream.name == "broken"))
         broken.base_url = "ftp://broken"
     c = await compile_(factory)
-    assert [r.name for r in c.snapshot.routers] == ["a"]
+    assert [r.name for r in c.snapshot.routers] == []
     assert any("split 'two' has no models" in w for w in c.warnings)
 
 
@@ -270,7 +273,7 @@ async def test_weighted_split_with_zero_weight_leaves_router_out(factory) -> Non
         await _split(s, router, "one", 1, ["a"], 0)
         await _split(s, router, "two", 1, ["z"], 1, member_weight=0)
     c = await compile_(factory)
-    assert [r.name for r in c.snapshot.routers] == ["a", "z", "zero"]
+    assert [r.name for r in c.snapshot.routers] == ["zero"]
     assert any("zero total weight" in w for w in c.warnings)
 
 
@@ -287,8 +290,11 @@ async def test_all_capabilities_together(factory) -> None:
         up.health_check_interval_ms = 2000
         up.health_check_timeout_ms = 500
         up.circuit_breaker_enabled = True
+        up.metrics_url = "http://vllm:8000/metrics"
     snap = (await compile_(factory)).snapshot
-    assert list(snap.required_capabilities) == sorted(SUPPORTED_CAPABILITIES)
+    assert list(snap.required_capabilities) == sorted(
+        SUPPORTED_CAPABILITIES - {"strategy:weighted", "strategy:least_in_flight"}
+    )
 
 
 # --------------------------------------------------------------------------- validate mirror
@@ -298,12 +304,12 @@ def _base() -> pb.Snapshot:
     return pb.Snapshot(
         upstreams=[pb.Upstream(name="u", kind=pb.UPSTREAM_KIND_VLLM, base_url="http://u/v1")],
         models=[
-            pb.Model(name="a", upstream="u", upstream_model="m", weight=1),
-            pb.Model(name="b", upstream="u", upstream_model="m", weight=1),
+            pb.Model(name="a", upstream="u", upstream_model="m"),
+            pb.Model(name="b", upstream="u", upstream_model="m"),
         ],
         routers=[
-            pb.Router(name="r", models=["a"], strategy=pb.ROUTING_STRATEGY_WEIGHTED),
-            pb.Router(name="s", models=["b"], strategy=pb.ROUTING_STRATEGY_WEIGHTED),
+            pb.Router(name="r", members=_m("a"), strategy="weighted"),
+            pb.Router(name="s", members=_m("b"), strategy="weighted"),
         ],
     )
 
@@ -338,45 +344,69 @@ INVALID = {
     "retry attempts": lambda s: s.routers[0].retry.CopyFrom(pb.RetryPolicy(max_attempts=6)),
     "retry status": lambda s: s.routers[0].retry.CopyFrom(pb.RetryPolicy(retry_on_status=[600])),
     "self fallback": lambda s: s.routers[0].fallbacks.append("r"),
+    "fallback is a router": lambda s: s.routers[0].fallbacks.append("s"),
+    "fallback is an alias": lambda s: (
+        s.aliases.append(pb.Alias(name="al", target="a")),
+        s.routers[0].fallbacks.append("al"),
+    ),
+    "member is a router": lambda s: s.routers[0].members.append(pb.RouterMember(model="s")),
+    "member is an alias": lambda s: (
+        s.aliases.append(pb.Alias(name="al", target="a")),
+        s.routers[0].members.append(pb.RouterMember(model="al", weight=1)),
+    ),
+    "member repeated": lambda s: s.routers[0].members.append(pb.RouterMember(model="a", weight=1)),
+    "member params not an object": lambda s: setattr(s.routers[0].members[0], "params_json", "[]"),
+    "alias to an alias": lambda s: s.aliases.extend(
+        [pb.Alias(name="x", target="a"), pb.Alias(name="y", target="x")]
+    ),
+    "alias to nothing": lambda s: s.aliases.append(pb.Alias(name="x", target="nope")),
+    "alias named like a model": lambda s: s.aliases.append(pb.Alias(name="a", target="r")),
+    "alias named like a router": lambda s: s.aliases.append(pb.Alias(name="r", target="a")),
+    "router named like a model": lambda s: setattr(s.routers[0], "name", "a"),
+    "duplicate alias": lambda s: s.aliases.extend(
+        [pb.Alias(name="x", target="a"), pb.Alias(name="x", target="b")]
+    ),
+    "built-in with params": lambda s: setattr(s.routers[0], "params_json", '{"x":1}'),
+    "strategy name": lambda s: setattr(s.routers[0], "strategy", "Has Space"),
     "unknown fallback": lambda s: s.routers[0].fallbacks.append("nope"),
     "sticky without split": lambda s: setattr(s.routers[0], "sticky", pb.STICKY_BY_TEAM),
     "header without name": lambda s: (
-        _split_router(s, pb.TrafficSplit(name="x", weight=1, models=["a"])),
+        _split_router(s, pb.TrafficSplit(name="x", weight=1, members=_m("a"))),
         setattr(s.routers[0], "sticky", pb.STICKY_BY_HEADER),
     ),
     "header with other sticky": lambda s: (
-        _split_router(s, pb.TrafficSplit(name="x", weight=1, models=["a"])),
+        _split_router(s, pb.TrafficSplit(name="x", weight=1, members=_m("a"))),
         setattr(s.routers[0], "sticky", pb.STICKY_BY_KEY),
         setattr(s.routers[0], "sticky_header", "x-a"),
     ),
     "bad header name": lambda s: (
-        _split_router(s, pb.TrafficSplit(name="x", weight=1, models=["a"])),
+        _split_router(s, pb.TrafficSplit(name="x", weight=1, members=_m("a"))),
         setattr(s.routers[0], "sticky", pb.STICKY_BY_HEADER),
         setattr(s.routers[0], "sticky_header", "x a"),
     ),
     "split name charset": lambda s: _split_router(
-        s, pb.TrafficSplit(name="no space", weight=1, models=["a"])
+        s, pb.TrafficSplit(name="no space", weight=1, members=_m("a"))
     ),
     "split name length": lambda s: _split_router(
-        s, pb.TrafficSplit(name="x" * 33, weight=1, models=["a"])
+        s, pb.TrafficSplit(name="x" * 33, weight=1, members=_m("a"))
     ),
     "split duplicate": lambda s: _split_router(
         s,
-        pb.TrafficSplit(name="x", weight=1, models=["a"]),
-        pb.TrafficSplit(name="x", weight=1, models=["b"]),
+        pb.TrafficSplit(name="x", weight=1, members=_m("a")),
+        pb.TrafficSplit(name="x", weight=1, members=_m("b")),
     ),
     "split empty": lambda s: _split_router(s, pb.TrafficSplit(name="x", weight=1)),
     "split unknown model": lambda s: _split_router(
-        s, pb.TrafficSplit(name="x", weight=1, models=["zz"])
+        s, pb.TrafficSplit(name="x", weight=1, members=_m("zz"))
     ),
     "split repeats model": lambda s: _split_router(
-        s, pb.TrafficSplit(name="x", weight=1, models=["a", "a"])
+        s, pb.TrafficSplit(name="x", weight=1, members=_m("a", "a"))
     ),
     "split weights zero": lambda s: _split_router(
-        s, pb.TrafficSplit(name="x", weight=0, models=["a"])
+        s, pb.TrafficSplit(name="x", weight=0, members=_m("a"))
     ),
     "too many splits": lambda s: _split_router(
-        s, *(pb.TrafficSplit(name=f"s{i}", weight=1, models=["a"]) for i in range(17))
+        s, *(pb.TrafficSplit(name=f"s{i}", weight=1, members=_m("a")) for i in range(17))
     ),
 }
 
@@ -396,15 +426,17 @@ def test_validate_accepts_full_p2_snapshot() -> None:
     snap.upstreams[0].metrics_url = "http://u/metrics"
     r = _split_router(
         snap,
-        *(pb.TrafficSplit(name=f"s-{i}.x_", weight=i, models=["a", "b"]) for i in range(16)),
+        *(pb.TrafficSplit(name=f"s-{i}.x_", weight=i, members=_m("a", "b")) for i in range(16)),
     )
     r.sticky = pb.STICKY_BY_HEADER
     r.sticky_header = "x-session"
     r.retry.CopyFrom(pb.RetryPolicy(max_attempts=5, retry_on_status=[400, 599]))
-    r.fallbacks.append("s")
-    snap.routers[1].strategy = pb.ROUTING_STRATEGY_VLLM_LOAD
+    r.fallbacks.append("b")
+    snap.routers[1].strategy = "vllm_load"
     _check(snap)
-    assert list(snap.required_capabilities) == sorted(SUPPORTED_CAPABILITIES - {"lowest_latency"})
+    assert list(snap.required_capabilities) == sorted(
+        SUPPORTED_CAPABILITIES - {"strategy:least_in_flight", "strategy:lowest_latency"}
+    )
 
 
 @pytest.mark.parametrize(
@@ -419,22 +451,24 @@ def test_validate_accepts_full_p2_snapshot() -> None:
         (lambda s: s.upstreams[0].circuit_breaker.CopyFrom(pb.CircuitBreaker()), "circuit_breaker"),
         (lambda s: setattr(s.upstreams[0], "metrics_url", "http://u/m"), "vllm_load"),
         (lambda s: s.routers[0].retry.CopyFrom(pb.RetryPolicy()), "retry"),
-        (lambda s: s.routers[0].fallbacks.append("s"), "fallbacks"),
+        (lambda s: s.routers[0].fallbacks.append("b"), "fallbacks"),
         (
-            lambda s: _split_router(s, pb.TrafficSplit(name="x", weight=1, models=["a"])),
+            lambda s: _split_router(s, pb.TrafficSplit(name="x", weight=1, members=_m("a"))),
             "traffic_split",
         ),
         (
-            lambda s: setattr(s.routers[0], "strategy", pb.ROUTING_STRATEGY_LOWEST_LATENCY),
-            "lowest_latency",
+            lambda s: setattr(s.routers[0], "strategy", "lowest_latency"),
+            "strategy:lowest_latency",
         ),
-        (lambda s: setattr(s.routers[0], "strategy", pb.ROUTING_STRATEGY_VLLM_LOAD), "vllm_load"),
+        (lambda s: setattr(s.routers[0], "strategy", "vllm_load"), "strategy:vllm_load"),
     ],
 )
 def test_field_without_capability_is_invalid(mutate, cap) -> None:
     snap = _base()
     mutate(snap)
-    assert capabilities_used(snap) == [cap]
+    assert cap in capabilities_used(snap)
+    del snap.required_capabilities[:]
+    snap.required_capabilities.extend(c for c in capabilities_used(snap) if c != cap)
     with pytest.raises(SnapshotInvalid, match="require capabilities"):
         _check(snap, caps=False)
     _check(snap)
@@ -442,6 +476,6 @@ def test_field_without_capability_is_invalid(mutate, cap) -> None:
 
 def test_unknown_capability_is_invalid() -> None:
     snap = _base()
-    snap.required_capabilities.append("jwt")
+    snap.required_capabilities.extend(["jwt", "strategy:weighted"])
     with pytest.raises(SnapshotInvalid, match="unsupported"):
         _check(snap, caps=False)

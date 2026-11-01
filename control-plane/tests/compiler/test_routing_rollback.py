@@ -176,7 +176,7 @@ async def _publish(factory):
 async def _rollback_and_compare(factory):
     before = await load_version(factory, 1)
     changed = await load_version(factory, 2)
-    fields = ("upstreams", "models", "routers", "required_capabilities")
+    fields = ("upstreams", "models", "aliases", "routers", "required_capabilities")
     assert any(list(getattr(before, f)) != list(getattr(changed, f)) for f in fields)
     async with factory() as session, session.begin():
         assert await rollback_routing(session, SCOPE, 1, require_local_membership=True) == 3

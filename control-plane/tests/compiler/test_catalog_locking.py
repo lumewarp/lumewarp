@@ -143,6 +143,7 @@ async def _assert_rolled_back_state(factory, version_before: int, new_version: i
     old, new = await load_version(factory, version_before), await load_version(factory, new_version)
     assert list(new.models) == list(old.models)
     assert list(new.routers) == list(old.routers)
+    assert list(new.aliases) == list(old.aliases)
     assert list(new.upstreams) == list(old.upstreams)
 
 
@@ -404,7 +405,7 @@ async def test_diff_after_rename_keep_old_alias_reuse_and_rollback(factory):
     delta = diff(b, c)
     assert "m3" in {m.name for m in delta.upsert_models}
     assert "m2" in delta.remove_models
-    assert "m2" in {r.name for r in delta.upsert_routers}  # the alias keeps the old name
+    assert ("m2", "m3") in {(a.name, a.target) for a in delta.upsert_aliases}  # keeps the old name
     _changed(b, c, delta)
 
     # 3. The old name m is free again: reuse it for a different model.

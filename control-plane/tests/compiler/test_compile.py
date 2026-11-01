@@ -352,20 +352,20 @@ async def test_routing(factory) -> None:
         await add_router(s, "unknown", [("llama-a", None)])
     c = await compile_(factory)
     snap = c.snapshot
-    # Each model is also callable through its own single-member router.
+    # A model is callable by its own name, with no router around it.
     routers = {r.name: r for r in snap.routers}
-    assert list(routers) == ["fast", "llama", "llama-a", "llama-b"]
-    assert routers["fast"].strategy == pb.ROUTING_STRATEGY_LOWEST_LATENCY
-    assert list(routers["llama"].models) == ["llama-b", "llama-a"]  # position order kept
-    assert routers["llama"].strategy == pb.ROUTING_STRATEGY_WEIGHTED
-    assert list(routers["llama-a"].models) == ["llama-a"]
+    assert list(routers) == ["fast", "llama"]
+    assert [m.name for m in snap.models] == ["llama-a", "llama-b"]
+    assert routers["fast"].strategy == "lowest_latency"
+    assert [m.model for m in routers["llama"].members] == ["llama-b", "llama-a"]  # position kept
+    assert routers["llama"].strategy == "weighted"
     assert len(c.warnings) == 2
     deps = {d.name: d for d in snap.models}
     assert not deps["llama-a"].HasField("price")  # unknown, not free
     assert deps["llama-b"].price == pb.Price(input_nano_usd_per_mtok=5, output_nano_usd_per_mtok=5)
     assert [(u.name, u.kind) for u in snap.upstreams] == [("vllm", pb.UPSTREAM_KIND_VLLM)]
     assert snap.upstreams[0].stream_usage_mode == pb.STREAM_USAGE_MODE_INCLUDE_USAGE
-    assert list(snap.required_capabilities) == ["lowest_latency"]
+    assert list(snap.required_capabilities) == ["strategy:lowest_latency", "strategy:weighted"]
 
 
 async def test_deterministic(factory) -> None:

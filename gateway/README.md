@@ -124,9 +124,11 @@ The admin listener stays unauthenticated; keep it private (see the auth section)
 
 ### Boot and readiness
 
-- On start the gateway reads `<state-dir>/snapshot.pb`. The file has a trailing
-  SHA-256, is size-capped and must carry the configured scope; a corrupt,
-  truncated or wrong-scope file is never served.
+- On start the gateway reads `<state-dir>/snapshot.pb`. The file starts with a
+  format marker, has a trailing SHA-256, is size-capped and must carry the
+  configured scope; a corrupt, truncated, wrong-scope or older-format file is
+  never served and never offered as a delta base. The next full snapshot
+  replaces it.
 - With a valid snapshot it serves `/v1/*` immediately and connects to the
   control plane in the background. Without one it stays not ready: `/v1/*`
   returns 503 `not_ready` **before authentication**, the admin `/readyz` returns
@@ -148,8 +150,12 @@ The admin listener stays unauthenticated; keep it private (see the auth section)
 
 Control-plane mode also enables usage reporting to the same URL with the same
 token. Each finalized proxied request (including a rejection for a known key)
-produces one event with a UUIDv7 `request_id`: tokens, requested/model/endpoint,
-status, config version and cost computed from `models[].price`. Events
+produces one event with a UUIDv7 `request_id`, returned to the client in the
+`x-lumewarp-request-id` response header: tokens, status, config version, cost
+computed from `models[].price`, the name the client called (`requested`), the
+model that served it (`model`), how it got there (`alias`, `router`, `fallback`),
+what the final attempt used (`upstream`, `upstream_model`) and `attempts`; see
+[the table](../docs/config-protocol.md). Events
 enter a bounded in-memory queue (100,000) and are reported every 1 s or every
 500 events. Failed batches retry from the queue with backoff; when the queue is
 full new events are dropped and `lumewarp_usage_events_dropped_total`
@@ -261,22 +267,29 @@ rustls with WebPKI roots.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `models[].name` | Required | Unique model name; also used in metrics. |
+| `models[].name` | Required | Unique name across models, aliases and routers; callable directly, listed by `/v1/models`, and used in metrics. A direct call is one attempt, with no retry and no fallback. `unknown` is reserved. |
 | `models[].upstream` | Required | Name of an existing upstream. |
-| `models[].upstream_model` | Required | Model string substituted for the client's public alias. |
-| `models[].weight` | `1` | Unsigned 32-bit relative weight for weighted routing. Zero is allowed, but a weighted router must have positive total weight. Ignored by least-in-flight routing. |
+| `models[].upstream_model` | Required | Model string substituted for the name the client called. |
 | `models[].price` | Absent | `{input_usd_per_mtok, output_usd_per_mtok}`: USD per one million tokens as decimals, e.g. `"0.15"` (quoted or plain). Parsed from the YAML text, never through floating point, and converted exactly to integer nano-USD; at most 9 fractional digits, no exponent or sign. Absent means the price is unknown (usage is metered, cost reported as unknown); explicit zeros mean free. |
+
+### Aliases
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `aliases[].name` | Required | Unique name across models, aliases and routers; callable and listed by `/v1/models`. `unknown` is reserved. |
+| `aliases[].target` | Required | An existing model or router, never another alias. The alias shares its pool: same retries, fallbacks and breakers. |
 
 ### Routers
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `routers[].name` | Required | Unique public alias accepted in requests and listed by `/v1/models`. The literal alias `unknown` is reserved and rejected. |
-| `routers[].models` | Required without `traffic_split` | Nonempty list of existing model names. Ignored (may be empty) when `traffic_split` is set. |
-| `routers[].strategy` | `weighted` | `weighted`, `least_in_flight`, `lowest_latency` or `vllm_load`; see "Load-aware routing". With `traffic_split` it picks the model inside the chosen split. |
+| `routers[].name` | Required | Unique name across models, aliases and routers; callable and listed by `/v1/models`. `unknown` is reserved. |
+| `routers[].members` | Required without `traffic_split` | Nonempty list of `{model, weight, params}` on distinct existing models. `weight` defaults to `1`, is an unsigned 32-bit relative weight and belongs to this router, so a model can weigh differently in two routers. Zero is allowed, but a weighted router must have positive total weight; other built-in strategies ignore it. `params` is an object read only by a strategy that declares it. Ignored (may be empty) when `traffic_split` is set. |
+| `routers[].strategy` | `weighted` | `weighted`, `least_in_flight`, `lowest_latency`, `vllm_load` or a compiled-in strategy; see "Load-aware routing". With `traffic_split` it picks the model inside the chosen split. An unknown name is refused. |
+| `routers[].params` | `{}` | Object for a compiled-in strategy, at most 16 KiB. Built-in strategies take none. |
 | `routers[].retry` | Absent (one attempt) | `{max_attempts, retry_on_status, total_timeout_ms}`. An empty object enables two total attempts. `max_attempts` includes the first and is at most 5; `retry_on_status` defaults to `[429, 502, 503, 504]` and accepts only 400..599. `total_timeout_ms: 0` leaves only each upstream's header timeout. |
-| `routers[].fallbacks` | `[]` | Existing router aliases, in order, without self-reference. Uses the original router's attempt/deadline budget, not the fallback's retry policy. Fallbacks of fallbacks are never followed. Configure a retry budget of at least two attempts for failure-triggered fallback. |
-| `routers[].traffic_split` | `[]` | Canary split: `[{name, models, weight}]`. A request picks a split with probability `weight / sum(weights)`, then a model inside it with `strategy`. At most 16 splits; names unique, 1..=32 of `[A-Za-z0-9_.-]` (they are the `split` metric label); each split has a nonempty list of distinct existing models; weights must sum to more than 0 (a single split may have weight 0: it only receives retries). |
+| `routers[].fallbacks` | `[]` | Existing model names, in order; never routers or aliases. Uses the router's attempt/deadline budget. Configure a retry budget of at least two attempts for failure-triggered fallback. |
+| `routers[].traffic_split` | `[]` | Canary split: `[{name, members, weight}]`. A request picks a split with probability `weight / sum(weights)`, then a model inside it with `strategy`. At most 16 splits; names unique, 1..=32 of `[A-Za-z0-9_.-]` (they are the `split` metric label); each split has a nonempty list of members (`{model, weight, params}`) on distinct existing models; weights must sum to more than 0 (a single split may have weight 0: it only receives retries). |
 | `routers[].sticky` | `none` | `none`, `header` (hash of the `sticky_header` value; requests without the header are not sticky), `team` (the key's team id) or `key` (the key id). Anonymous or team-less callers are not sticky for `team`/`key`. Requires `traffic_split`. |
 | `routers[].sticky_header` | Empty | Request header hashed for `sticky: header`; required there, rejected otherwise. |
 
@@ -356,8 +369,7 @@ or changed ones started. Probes never increment request/attempt/usage metrics.
   split is drawn at random. Retries first try the other models of the
   chosen split, then the other splits in declaration order, then fallbacks.
   If every model of the chosen split is unhealthy/open, the request moves
-  to another split before any fallback. A fallback router with its own splits
-  chooses its split the same way.
+  to another split before any fallback.
 
 Hot-path cost: picks read relaxed atomics only (no locks, no allocation; the
 regression tests assert zero allocations for warm `lowest_latency`, `vllm_load`
@@ -367,12 +379,11 @@ computed when `/metrics` is scraped, not per request.
 
 Each client request records one request sample and one usage capture, attributed
 to its final model. Abandoned attempts release their in-flight reservations.
-Response `model` values: a response from a model of the requested router
-(primary, including its retries) is forwarded unchanged and carries the
-upstream model, as in P1. Only a successful response from a **fallback** router's
-model is rewritten: its top-level JSON `model` (or, for SSE, each event's
-`data` JSON `model`) becomes the public alias the client requested, so clients
-do not observe which fallback served them. Error responses are never rewritten.
+Response `model` values: a response from the called name's own models
+(including retries) is forwarded unchanged and carries the upstream model, as in
+P1. Only a successful response from a **fallback** model is rewritten: its
+top-level JSON `model` (or, for SSE, each event's `data` JSON `model`) becomes the
+name the client called, so clients do not observe which fallback served them. Error responses are never rewritten.
 Alias rewriting buffers one JSON response or SSE event, capped at 32 MiB;
 exceeding that limit terminates the response rather than exposing the fallback
 model. A multiline SSE `data` payload is re-emitted with one `data:` field per
@@ -395,8 +406,8 @@ line; comments and other fields are kept.
 | `keys[].team_id` | `""` | Existing team id, or empty for no team (`team=""` in metrics). |
 | `keys[].status` | `active` | `active`, `revoked`, `suspended` (401) or `budget_exceeded` (429 `insufficient_quota`). |
 | `keys[].expires_at_unix_ms` | `0` | Expiry in Unix milliseconds; `0` never expires. Expired keys get 401. |
-| `keys[].allow_all_models` | `false` | Allow every router alias, present and future. |
-| `keys[].allowed_models` | `[]` | Public aliases the key may call when `allow_all_models` is false. **Fail-closed:** a key with neither may call nothing. |
+| `keys[].allow_all_models` | `false` | Allow every name, present and future. |
+| `keys[].allowed_models` | `[]` | Names of any kind the key may call when `allow_all_models` is false. A grant covers exactly that name: a router's members and an alias's target need their own. **Fail-closed:** a key with neither may call nothing. |
 | `keys[].rate_limits` | Absent | Limits for this key alone (scope `key:<key_id>`). |
 
 `rate_limits` objects have `requests_per_minute`, `tokens_per_minute` and
@@ -417,8 +428,8 @@ smallest atomic in-flight count, scanning from a random offset to spread ties.
 This is an approximate concurrent decision, not a global scheduling lock.
 Reservations last until the upstream response body ends/errors or is dropped,
 or the request fails/is cancelled before headers. Counters are keyed by
-model name for the life of the process: aliases referencing the same
-model share one, and a recompiled snapshot keeps counting requests still
+model name for the life of the process: every router holding the same
+model shares one, and a recompiled snapshot keeps counting requests still
 running on the previous one.
 
 ## Endpoints and passthrough
@@ -428,7 +439,7 @@ running on the previous one.
 | Primary | `POST /v1/chat/completions` | Proxy to the selected model; stream responses frame by frame. |
 | Primary | `POST /v1/completions` | Same routing and passthrough. |
 | Primary | `POST /v1/embeddings` | Same routing and passthrough. |
-| Primary | `GET /v1/models` | Local OpenAI-shaped model list from configured router aliases, not upstream discovery. |
+| Primary | `GET /v1/models` | Local OpenAI-shaped list of every name the caller may call (models, aliases, routers), sorted; not upstream discovery. |
 | Primary and admin | `GET /healthz` | Local liveness response `ok`; does not probe upstreams. |
 | Admin only | `GET /readyz` | `ready` (200) once a router is loaded; 503 JSON `not_ready` in control-plane mode before the first snapshot is applied. |
 | Admin only | `GET /metrics` | Prometheus-scrapable OpenMetrics text. |
@@ -455,7 +466,7 @@ event is the usage-only chunk the gateway itself requested, and only when the
 client did not ask for it. SSE works without waiting for the final event. HTTP
 framing/chunk boundaries are managed by hyper; they are not a byte-for-byte
 wire-format guarantee. Response JSON `model` values remain the upstream model,
-not the public alias, except for successful fallback responses (see "Load-aware routing and traffic splits" above).
+not the name the client called, except for successful fallback responses (see "Load-aware routing and traffic splits" above).
 
 ### Headers
 
@@ -491,7 +502,7 @@ shape:
 | 400 | `invalid_request` | Invalid request object/model/stream, request-body read failure, or invalid upstream request URI. |
 | 401 | `invalid_api_key` | Missing, unknown, duplicate, revoked, suspended or expired client key when auth is enabled. |
 | 403 | `model_not_allowed` | The key's allowlist does not include the requested model (checked before router lookup). |
-| 404 | `model_not_found` | No configured router for the requested model. |
+| 404 | `model_not_found` | No model, alias or router has the requested name. |
 | 404 | `not_found` | Unsupported path or method. |
 | 408 | `request_timeout` | Proxied request body exceeded `body_read_timeout_ms`. |
 | 413 | `request_too_large` | Request body exceeds 32 MiB; oversized Content-Length can be rejected before reading it. |
@@ -554,13 +565,14 @@ upstream supports it.
 
 Label semantics:
 
-- `requested` is the **public alias**, never `upstream_model`. Unknown requested
-  models use the fixed label `unknown`; other pre-routing rejections and local
-  endpoints use `requested=""` / `model=""`. Arbitrary client model names never
-  become labels.
+- `requested` is the **name the client called**, of any kind, never
+  `upstream_model`. Unknown requested names use the fixed label `unknown`; other pre-routing rejections and local
+  endpoints use `requested=""` / `model=""`. Arbitrary client names never become
+  labels; they are kept only in the usage event.
 - `endpoint` is `chat_completions`, `completions`, `embeddings`, or `models`; local
   health/admin/other paths use bounded `healthz`, `metrics`, or `other` labels.
-- `model` is the configured model name.
+- `model` is the configured model name, also in `lumewarp_fallbacks_total`, where
+  `router` is the router whose fallback was used, whatever name the client called.
 - `team` is the caller key's team id; `""` for anonymous callers, team-less
   keys, and requests rejected before authentication succeeds (401, and 429
   `insufficient_quota`).
@@ -631,9 +643,40 @@ compiled exporter/SDK:
 | `OTEL_BSP_MAX_QUEUE_SIZE` | Batch queue capacity (SDK default 2048 spans). |
 | `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | Maximum batch size (SDK default 512 spans). |
 
-Use an HTTP/protobuf collector endpoint, not a gRPC-only endpoint. OTel-enabled
-request spans are INFO with `endpoint`, `requested`, `model`, `status`, and `stream`
-attributes; the OTel layer accepts only `lumewarp` targets at INFO or above and
+Use an HTTP/protobuf collector endpoint, not a gRPC-only endpoint.
+
+The gateway writes no access log: OTel is where a single request is looked up,
+starting from the `x-lumewarp-request-id` response header. The `request` span has
+`request_id`, `endpoint`, `team_id`, `key_id`, `requested`, `alias`, `router`,
+`model`, `upstream`, `upstream_model`, `attempts`, `fallback`, `config_version`,
+`status` and `stream`. Each `upstream_attempt` child has `model`, `upstream`,
+`upstream_model`, `attempt`, `fallback`, `outcome` and `upstream_status`. Prompts,
+responses and keys are never span attributes; `key_id` is the public id.
+
+This only works under these conditions:
+
+- Without `OTEL_EXPORTER_OTLP_ENDPOINT` there is no record at all.
+- Sampling below 100%, or a full export queue, loses records. The SDK drops spans
+  when the queue is full, and the default queue of 2048 spans with a 5 s schedule
+  **will** drop at 1000 RPS (2 spans or more per request). To use OTel as an access
+  log keep the 100% default and size the queue for your rate, e.g.
+  `OTEL_BSP_MAX_QUEUE_SIZE=65536`, `OTEL_BSP_SCHEDULE_DELAY=200`,
+  `OTEL_BSP_MAX_EXPORT_BATCH_SIZE=2048`.
+- How long records are kept is decided by the OTel backend.
+
+Usage events do not depend on any of this; they just have no per-attempt detail.
+
+Sampling is decided by the gateway, not by the client. The SDK's default sampler
+is `ParentBased(AlwaysOn)`, which obeys `traceparent` sampled=0 and would let a
+client erase its own record (`default_sdk_sampler_lets_a_client_suppress_its_record`
+pins this). The gateway therefore installs a parent-ignoring sampler: a span is
+exported in the client's trace, as a child of its parent, whatever that flag says,
+and the flag sent upstream is the gateway's decision.
+`OTEL_TRACES_SAMPLER` keeps its standard names (`always_on`, `always_off`,
+`traceidratio` with `OTEL_TRACES_SAMPLER_ARG`), with `parentbased_*` meaning the
+same as the plain name. Anything else logs a warning and samples everything.
+
+OTel-enabled spans are INFO; the OTel layer accepts only `lumewarp` targets at INFO or above and
 disables code-location attributes. It does not enable/export dependency DEBUG /
 TRACE events. Explicit console verbosity is still controlled by `RUST_LOG`.
 

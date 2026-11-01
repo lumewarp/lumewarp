@@ -67,11 +67,40 @@ receive → apply to a private copy → validate (capabilities, references, hash
   counts. Removing `Upstream.circuit_breaker` resets the breakers of its
   models to closed on activation.
 
+### Names: models, aliases, routers
+
+A snapshot has three kinds of callable name, unique across all three. `unknown`
+is reserved in every kind.
+
+- `Model { name, upstream, upstream_model, price }`: callable directly, as a
+  single-attempt pool with no retry and no fallback.
+- `Alias { name, target }`: a second name for a model or a router, one level
+  only. It shares the target's pool and has no settings of its own.
+- `Router { name, members, strategy, params_json, retry, fallbacks,
+  traffic_split, sticky, sticky_header }`: a strategy pool.
+  `RouterMember { model, weight, params_json }` holds a model and its weight in
+  this router, so one model can have different weights in different routers.
+  Members and `fallbacks` are always models, never routers or aliases. With
+  `traffic_split`, members live in the splits and `Router.members` is ignored
+  and may be empty.
+
+`params_json` is empty or a JSON object, at most 16 KiB; empty means `{}`. A
+built-in strategy takes no router params. `Router.strategy` is a name:
+`weighted`, `least_in_flight`, `lowest_latency`, `vllm_load`, or a strategy
+compiled into the gateway.
+
+`ApiKey.policy.allowed_models` holds expanded names. A grant covers exactly the
+named entry: a key allowed a router cannot call its members by name, and a key
+allowed an alias cannot call its target by name, unless those names are granted
+too. A rename therefore changes affected keys, which go out in the same delta
+with the upserts and removes of the renamed entry and of whatever references it.
+`GET /v1/models` lists every name the key may call, of any kind, sorted.
+
 ### Routing capabilities
 
 The gateway advertises `retry`, `fallbacks`, `health_check`, `circuit_breaker`,
-`traffic_split`, `lowest_latency` and `vllm_load`. Compilers add a capability
-only when its field is set:
+`traffic_split`, `vllm_load` and `strategy:<name>` for each strategy it has,
+built-ins included. Compilers add a capability only when it is used:
 
 | Capability | Fields |
 | --- | --- |
@@ -80,25 +109,28 @@ only when its field is set:
 | `health_check` | Present `Upstream.health_check` |
 | `circuit_breaker` | Present `Upstream.circuit_breaker`, including an empty message |
 | `traffic_split` | Nonempty split, non-NONE sticky, or nonempty sticky header |
-| `lowest_latency` | LOWEST_LATENCY strategy |
-| `vllm_load` | VLLM_LOAD strategy or nonempty metrics URL |
+| `vllm_load` | Nonempty `Upstream.metrics_url` |
+| `strategy:<name>` | Any router with `Router.strategy = <name>`, including `strategy:weighted` |
 
 Using a field without its capability is `INVALID_CONFIG`; requiring an
-unsupported capability is `UNSUPPORTED_FEATURE`. No field can bypass the gate
-by omitting its capability. Standalone YAML emits the same presence-based
-capabilities. Retry attempts are capped at five; statuses must be 400..599;
-fallback references must exist and cannot name the original router. Health
-intervals must be at least 1000 ms with a positive timeout below the interval.
-Fallbacks do not recurse. If all candidates are unhealthy/open, routing tries one
-anyway, except that a half-open trial already in progress is never duplicated
-(another candidate is used instead).
+unsupported capability is `UNSUPPORTED_FEATURE`, and so is a `Router.strategy`
+this gateway does not have, whatever the snapshot lists. No field can bypass the
+gate by omitting its capability. A snapshot with no routers requires no strategy
+capability. Standalone YAML emits the same presence-based capabilities. Retry
+attempts are capped at five; statuses must be 400..599; fallbacks must name
+existing models. Health intervals must be at least 1000 ms with a positive
+timeout below the interval. Fallbacks do not recurse: a model has none. If all
+candidates are unhealthy/open, routing tries one anyway, except that a half-open
+trial already in progress is never duplicated (another candidate is used
+instead). Circuit breaker state belongs to the model and is shared by every
+router that holds it; its configuration comes from the upstream.
 
-Response `model` contract: responses from the requested router's own
-models (`Router.models` / splits, including retries) are
-forwarded unchanged and carry `Model.upstream_model`. Successful responses
-served by a model of a `Router.fallbacks` router have their top-level
-`model` (JSON body, or each SSE event's `data` JSON) rewritten to the public
-`Router.name` the client requested. Error responses are not rewritten.
+Response `model` contract: responses from the called name's own models
+(members or splits, including retries) are forwarded unchanged and carry
+`Model.upstream_model`. Successful responses served by a `Router.fallbacks`
+model have their top-level `model` (JSON body, or each SSE event's `data` JSON)
+rewritten to the name the client called, which may be an alias. Error responses
+are not rewritten.
 
 The retry budget (`retry_budget_percent`, gateway-local) is funded only by
 requests on routers with `Router.retry` set. A `Retry-After` cooldown is
@@ -107,8 +139,8 @@ short by `RetryPolicy.total_timeout_ms` is not a breaker failure.
 
 Traffic split validation (`INVALID_CONFIG` otherwise): at most 16 splits; names
 unique and 1..=32 characters of `[A-Za-z0-9_.-]` (they are a metric label); each
-split names a nonempty list of distinct existing models; split weights sum
-to more than 0. With splits, `Router.models` is ignored and may be
+split has a nonempty list of members on distinct existing models; split weights sum
+to more than 0. With splits, `Router.members` is ignored and may be
 empty. `STICKY_BY_HEADER` requires a valid `sticky_header`; `sticky_header` with
 any other `sticky` is rejected, as is a non-NONE `sticky` without splits. A
 nonempty `Upstream.metrics_url` must be an absolute http(s) URL without
@@ -121,7 +153,7 @@ swaps; scrapers, like probes, are diffed only after a snapshot is accepted.
 
 - CP mode always requires keys: zero keys means every `/v1/*` request is 401.
 - With a valid on-disk snapshot of the configured scope: serve it immediately, then connect in the background.
-- Without one (missing, wrong scope, corrupt — file has a trailing sha256 and is size-capped): do not serve `/v1/*` (503 `not_ready`, readiness false) until the first full snapshot is applied. Never fall back to an open router.
+- Without one (missing, wrong scope, corrupt, or written in an older format — the file starts with the format marker `LWSNAP02`, has a trailing sha256 and is size-capped): do not serve `/v1/*` (503 `not_ready`, readiness false) until the first full snapshot is applied. Never fall back to an open router. A file without the marker is not decoded: protobuf skips unknown fields, so an older file would otherwise decode into a snapshot with empty routers. `Hello` then offers version 0, the control plane sends a full, and the file is replaced.
 - The gateway token is read from the environment and never written to disk. The state dir is created `0700`, the file `0600`.
 
 ## Usage reporting and attribution
@@ -139,6 +171,17 @@ swaps; scrapers, like probes, are diffed only after a snapshot is accepted.
 - Events are produced off the request path into a bounded queue (default 100k events). Batches go out every 1 s or at 500 events. Failed reports retry with backoff from the same queue; when the queue is full, new events are dropped and `lumewarp_usage_events_dropped_total` increments.
 - `request_id` is a UUIDv7 generated by the gateway at request start and reused for retries.
 - `Report` validates per event and is idempotent (`ON CONFLICT (request_id) DO NOTHING`). An invalid event (malformed field, unknown or mismatched key hierarchy, a `request_id` reused for different content) is skipped and logged by the control plane; the rest of the batch is recorded and `ReportResponse.accepted` counts what was kept, so one bad event never drops billable usage. Only batch-level errors (gateway identity, more than the configured maximum events) fail the call with `INVALID_ARGUMENT`. Per new event the control plane adds the cost once to the team total and once to the owner total for the event's UTC calendar month, in the same transaction, then evaluates budgets.
-- `requested` and `model` are required except for `REQUEST_OUTCOME_REJECTED` events: a request rejected at authentication has no requested name yet (the body is not read), and one rejected by policy (403/429) has no selected model. They are stored as empty strings.
+- `requested` and `model` are required except for `REQUEST_OUTCOME_REJECTED` events: a request rejected at authentication has no requested name yet (the body is not read; this is the only case where `requested` is empty), and one rejected by policy or for an unknown name (403/404/429) has no selected model. They are stored as empty strings.
+- `requested` is the name the client sent, kept even when it does not exist, cut to 400 bytes on a character boundary with NUL replaced. `model` is the model that finally served the request. `alias` and `router` say how the request got there:
+
+  | Call | `model` | `alias` | `router` | `fallback` |
+  | --- | --- | --- | --- | --- |
+  | Model `gpt-4o` | `gpt-4o` | | | false |
+  | Alias `gpt-4` → model `gpt-4o` | `gpt-4o` | `gpt-4` | | false |
+  | Router `coder`, a member serves | the member | | `coder` | false |
+  | Alias `latest` → router `coder` | the member | `latest` | `coder` | false |
+  | Same, members failed, fallback serves | the fallback | `latest` | `coder` | true |
+
+  `upstream` and `upstream_model` are what the final attempt used, sent by the gateway so a later catalog change cannot misattribute them. `attempts` counts all upstream attempts of the request; 0 means none was made. A rejected request with a known name carries its `alias` and `router`.
 - Budget enforcement is **eventual**: once usage is ingested, an exhausted scope flips affected keys to `BUDGET_EXCEEDED` and a new version is published within 5 s. Lost events (gateway crash, full queue) are not recovered in P1, and streams in flight when a budget runs out are not cut.
 - Month rollover is driven by a scheduler (runs at startup and at each UTC month boundary), not by incoming usage. While the control plane is down, blocked keys stay blocked.

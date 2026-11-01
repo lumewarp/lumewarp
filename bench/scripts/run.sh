@@ -54,6 +54,9 @@ Environment overrides (defaults):
   BENCH_AUTH=0                client auth: 1 generates one random key per run,
                               configures it on both gateways and sends it as a
                               bearer (the direct mock target stays open)
+  BENCH_OTEL=0                1 exports Lumewarp's traces to a local OTLP sink on
+                              OTLP_SINK_PORT (default 4318), at 100% sampling with
+                              a queue sized not to drop; report it separately
   LITELLM_VERSION=1.106.2     litellm[proxy] pin (must match bench/litellm/config.yaml)
   LITELLM_WORKERS=$(nproc)    LiteLLM --num_workers
   DURATION_SECS               measured duration per scenario (profile default)
@@ -105,6 +108,8 @@ MOCK_STREAM_CHUNKS="${MOCK_STREAM_CHUNKS:-20}"
 MOCK_CHUNK_INTERVAL_MS="${MOCK_CHUNK_INTERVAL_MS:-10}"
 MOCK_HEADERS_FIRST="${MOCK_HEADERS_FIRST:-0}"
 BENCH_AUTH="${BENCH_AUTH:-0}"
+BENCH_OTEL="${BENCH_OTEL:-0}"
+OTLP_SINK_PORT="${OTLP_SINK_PORT:-4318}"
 LITELLM_VERSION="${LITELLM_VERSION:-1.106.2}"
 LITELLM_WORKERS="${LITELLM_WORKERS:-$(nproc)}"
 HEALTH_TIMEOUT_SECS="${HEALTH_TIMEOUT_SECS:-180}"
@@ -151,6 +156,10 @@ case "$BENCH_AUTH" in
   0) AUTH=0 ;;
   1) AUTH=1 ;;
   *) die "BENCH_AUTH must be 0 or 1 (got: $BENCH_AUTH)" ;;
+esac
+case "$BENCH_OTEL" in
+  0|1) ;;
+  *) die "BENCH_OTEL must be 0 or 1 (got: $BENCH_OTEL)" ;;
 esac
 AUTH_MODE="off"
 BENCH_API_KEY=""
@@ -399,8 +408,43 @@ else
     die "server.api_keys should stay empty without BENCH_AUTH=1 in $LUMEWARP_CONFIG"
 fi
 
+LUMEWARP_OTEL_ENV=()
+if [[ "$BENCH_OTEL" == 1 ]]; then
+  require_port_free "$OTLP_SINK_PORT"
+  log "starting OTLP sink on 127.0.0.1:$OTLP_SINK_PORT"
+  # Replies 200 to any POST and keeps a running count, so a run shows spans arrived.
+  python3 -I -c '
+import http.server, pathlib, sys
+stats = pathlib.Path(sys.argv[2])
+requests = size = 0
+class Sink(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def do_POST(self):
+        global requests, size
+        body = self.rfile.read(int(self.headers.get("content-length", 0)))
+        requests += 1
+        size += len(body)
+        stats.write_text(f"export_requests={requests} bytes={size}\n")
+        self.send_response(200)
+        self.send_header("content-length", "0")
+        self.end_headers()
+    def log_message(self, *args):
+        pass
+http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Sink).serve_forever()
+' "$OTLP_SINK_PORT" "$RUN_DIR/otlp-sink.txt" >"$RUN_DIR/logs/otlp-sink.log" 2>&1 &
+  SERVER_PIDS+=("$!")
+  LUMEWARP_OTEL_ENV=(
+    "OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:$OTLP_SINK_PORT"
+    "OTEL_BSP_MAX_QUEUE_SIZE=65536"
+    "OTEL_BSP_SCHEDULE_DELAY=200"
+    "OTEL_BSP_MAX_EXPORT_BATCH_SIZE=2048"
+  )
+  printf '%s\n' "${LUMEWARP_OTEL_ENV[@]}" >"$RUN_DIR/otel-env.txt"
+fi
+
 log "starting lumewarp on 127.0.0.1:$LUMEWARP_PORT"
-"$LUMEWARP_BIN" --config "$LUMEWARP_CONFIG" >"$RUN_DIR/logs/lumewarp.log" 2>&1 &
+env ${LUMEWARP_OTEL_ENV[@]+"${LUMEWARP_OTEL_ENV[@]}"} \
+  "$LUMEWARP_BIN" --config "$LUMEWARP_CONFIG" >"$RUN_DIR/logs/lumewarp.log" 2>&1 &
 LUMEWARP_PID=$!
 SERVER_PIDS+=("$LUMEWARP_PID")
 wait_for_http "lumewarp" "http://127.0.0.1:$LUMEWARP_PORT/healthz" "$HEALTH_TIMEOUT_SECS" "$LUMEWARP_PID" "$RUN_DIR/logs/lumewarp.log"

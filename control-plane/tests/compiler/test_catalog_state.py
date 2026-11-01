@@ -204,7 +204,9 @@ async def test_rollback_before_rename_keeps_grants_and_references(factory):
         assert await rollback_routing(session, SCOPE, 1, require_local_membership=True) == 3
     restored = await load_version(factory, 3)
     assert list(restored.api_keys[0].policy.allowed_models) == ["m"]
-    assert {r.name for r in restored.routers} == {"m", "r", "al"}
+    assert [m.name for m in restored.models] == ["m"]
+    assert [r.name for r in restored.routers] == ["r"]
+    assert [(a.name, a.target) for a in restored.aliases] == [("al", "r")]
     async with factory() as session:
         assert await session.get(Model, ids[0]) is not None
         assert await session.scalar(select(Alias.target_name_id)) == ids[1]

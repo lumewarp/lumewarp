@@ -184,7 +184,8 @@ async def test_end_to_end(cp: ControlPlane) -> None:
         first = await a.next_update()
         assert first.WhichOneof("update") == "full"
         await a.until(lambda s: a.key(k1["id"]) is not None and a.key(k2["id"]) is not None)
-        assert [r.name for r in a.snapshot.routers] == ["llama", "llama-a"]
+        assert [r.name for r in a.snapshot.routers] == ["llama"]
+        assert [m.name for m in a.snapshot.models] == ["llama-a"]
         assert a.key(k1["id"]).status == pb.KEY_STATUS_ACTIVE
         before_revoke = a.snapshot.version
 

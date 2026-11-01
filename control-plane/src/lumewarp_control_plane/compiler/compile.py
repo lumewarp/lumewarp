@@ -349,9 +349,15 @@ async def compile_scope(
             warnings.append(f"router {r.name!r} left out: name is empty or reserved")
             continue
         weighted = r.strategy == "weighted"
-        router = pb.Router(name=r.name, strategy=r.strategy, params_json=_params_json(r.params))
+        builtin = r.strategy in BUILTIN_STRATEGIES
+        router = pb.Router(
+            name=r.name,
+            strategy=r.strategy,
+            # A strategy plugin always gets an object; a built-in takes no params.
+            params_json=_params_json(r.params) if builtin else params_json(r.params),
+        )
         capability = f"strategy:{r.strategy}"
-        if r.strategy not in BUILTIN_STRATEGIES and capability not in advertised:
+        if not builtin and capability not in advertised:
             warnings.append(
                 f"router {r.name!r}: {capability} is not advertised by any connected gateway"
             )

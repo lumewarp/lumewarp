@@ -137,7 +137,6 @@ async def test_0006_rows_survive_rename_roundtrip():
                 snapshot = pb.Snapshot.FromString(payload)
                 assert snapshot.models[0].name == "d"
                 assert snapshot.routers[0].name == "public"
-                assert list(snapshot.routers[0].models) == ["d"]
             await migrate.downgrade(engine, "0006")
             async with engine.connect() as conn:
                 assert await _constraint_and_index_names(conn) == (

@@ -75,7 +75,7 @@ async def test_source_zero_weight_weighted_router_is_left_out(factory) -> None:
     assert await publish_pending(factory, SCOPE, require_local_membership=True) == 1
     snap = await load_version(factory, 1)
     # least_in_flight ignores weights, so only the weighted router is dropped.
-    assert [r.name for r in snap.routers] == ["fine", "lif", "ok", "z1", "z2"]
+    assert [r.name for r in snap.routers] == ["fine", "lif"]
     assert list(snap.api_keys) == []
     async with factory() as s:
         c = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
@@ -117,7 +117,7 @@ async def test_invalid_upstream_url_left_out_with_its_routers(factory) -> None:
     snap = c.snapshot
     assert [u.name for u in snap.upstreams] == ["vllm"]
     assert [d.name for d in snap.models] == ["fine-d"]
-    assert [r.name for r in snap.routers] == ["fine-d", "good"]
+    assert [r.name for r in snap.routers] == ["good"]
     assert len(c.warnings) >= 4
 
 
@@ -125,8 +125,15 @@ def _valid_snapshot() -> pb.Snapshot:
     return pb.Snapshot(
         scope="s",
         upstreams=[pb.Upstream(name="u", kind=pb.UPSTREAM_KIND_VLLM, base_url="http://u/v1")],
-        models=[pb.Model(name="d", upstream="u", upstream_model="m", weight=1)],
-        routers=[pb.Router(name="a", models=["d"], strategy=pb.ROUTING_STRATEGY_WEIGHTED)],
+        models=[pb.Model(name="d", upstream="u", upstream_model="m")],
+        routers=[
+            pb.Router(
+                name="a",
+                members=[pb.RouterMember(model="d", weight=1)],
+                strategy="weighted",
+            )
+        ],
+        required_capabilities=["strategy:weighted"],
         teams=[pb.Team(id="t")],
         api_keys=[
             pb.ApiKey(
@@ -157,11 +164,11 @@ def _mutations():
         "empty name": lambda s: setattr(s.models[0], "upstream_model", ""),
         "dup model": lambda s: s.models.append(s.models[0]),
         "reserved alias": lambda s: setattr(s.routers[0], "name", "unknown"),
-        "strategy 0": lambda s: setattr(s.routers[0], "strategy", 0),
-        "lowest latency": lambda s: setattr(s.routers[0], "strategy", 3),
-        "no models": lambda s: s.routers[0].ClearField("models"),
-        "unknown model": lambda s: s.routers[0].models.append("x"),
-        "zero weight": lambda s: setattr(s.models[0], "weight", 0),
+        "no strategy": lambda s: setattr(s.routers[0], "strategy", ""),
+        "lowest latency": lambda s: setattr(s.routers[0], "strategy", "lowest_latency"),
+        "no members": lambda s: s.routers[0].ClearField("members"),
+        "unknown model": lambda s: s.routers[0].members.append(pb.RouterMember(model="x")),
+        "zero weight": lambda s: setattr(s.routers[0].members[0], "weight", 0),
         "dup router": lambda s: s.routers.append(s.routers[0]),
         "dup team": lambda s: s.teams.append(s.teams[0]),
         "empty team": lambda s: setattr(s.teams[0], "id", ""),
@@ -211,7 +218,7 @@ async def test_store_version_refuses_invalid_snapshot(factory) -> None:
     await seed_scope(factory)
     snap = _valid_snapshot()
     snap.scope = SCOPE
-    snap.models[0].weight = 0
+    snap.routers[0].members[0].weight = 0
     async with factory() as s, s.begin():
         with pytest.raises(CompileError, match="zero total weight"):
             await store_version(s, SCOPE, snap, version=1, source_revision=1)

@@ -36,9 +36,8 @@ async def test_custom_strategy_compile_capability_warning_and_rollback(factory):
     async with factory() as s:
         result = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
     router = _wire_router(result.snapshot)
-    assert router.strategy == pb.ROUTING_STRATEGY_CUSTOM
-    assert router.custom_strategy == "header_pin"
-    assert json.loads(router.strategy_params_json) == {"headers": ["x-pin"]}
+    assert router.strategy == "header_pin"
+    assert json.loads(router.params_json) == {"headers": ["x-pin"]}
     assert list(result.snapshot.required_capabilities) == ["strategy:header_pin"]
     assert len(result.warnings) == 1 and "not advertised" in result.warnings[0]
     async with factory() as s, s.begin():
@@ -84,13 +83,12 @@ def test_custom_strategy_mirror_rejects_invalid_params(params):
         routers=[
             pb.Router(
                 name="m",
-                strategy=pb.ROUTING_STRATEGY_CUSTOM,
-                custom_strategy="header_pin",
-                strategy_params_json=params,
+                strategy="header_pin",
+                params_json=params,
             )
         ],
     )
-    with pytest.raises(SnapshotInvalid, match="strategy|headers"):
+    with pytest.raises(SnapshotInvalid, match="strategy|headers|params"):
         validate_snapshot(snap, max_bytes=64 * 1024 * 1024, max_keys=200_000)
 
 
@@ -164,7 +162,7 @@ async def test_custom_strategy_empty_params_compile_as_object(factory):
         await add_router(s, "custom", [("a", None)], strategy="header_pin")
     async with factory() as s:
         compiled = await compile_scope(s, SCOPE, require_local_membership=True)
-        assert json.loads(_wire_router(compiled.snapshot).strategy_params_json) == {}
+        assert json.loads(_wire_router(compiled.snapshot).params_json) == {}
 
 
 def test_params_nesting_matches_gateway_recursion_budget():

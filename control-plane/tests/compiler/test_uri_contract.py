@@ -77,7 +77,8 @@ async def test_invalid_uri_rejected_by_api_and_compiler(factory, url, field) -> 
         assert not compiled.snapshot.routers
     else:
         assert compiled.snapshot.upstreams[0].metrics_url == ""
-        assert len(compiled.snapshot.routers) == 2
+        assert len(compiled.snapshot.routers) == 1
+        assert len(compiled.snapshot.models) == 1
 
 
 @pytest.mark.parametrize("url", VALID_URLS)

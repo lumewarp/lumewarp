@@ -104,7 +104,9 @@ async def test_config_insert_serialization_conflict_retries_fresh_snapshot(
         assert version.source_revision == 2
         from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 
-        assert [r.name for r in pb.Snapshot.FromString(version.payload).routers] == ["new", "new-d"]
+        snapshot = pb.Snapshot.FromString(version.payload)
+        assert [r.name for r in snapshot.routers] == ["new"]
+        assert [m.name for m in snapshot.models] == ["new-d"]
         assert all(r.status == OutboxStatus.DONE for r in await s.scalars(select(ConfigOutbox)))
     # The session advisory lock was released, and no work is left.
     assert await publisher.publish_pending(factory, SCOPE, require_local_membership=True) is None

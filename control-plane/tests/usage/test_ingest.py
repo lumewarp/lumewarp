@@ -659,3 +659,27 @@ async def test_usage_report_metrics_count_committed_events(
         )
     assert metrics.value("lumewarp_cp_usage_events_ingested_total") == 2
     assert skipped("invalid_event") == 2
+
+
+async def test_provenance_fields_are_accepted_and_ignored_until_they_are_stored(
+    session_factory: SessionFactory,
+):
+    scope_name, key = await _seed(session_factory)
+    event = _event(key)
+    event.alias = "nick"
+    event.router = "pool"
+    event.upstream = "up"
+    event.upstream_model = "real"
+    event.fallback = True
+    event.attempts = 2
+    # Rejected events name what the client sent, however odd, within bounds.
+    rejected = _event(key, cost=0, requested="n" * 400)
+    rejected.model = ""
+    rejected.status = 404
+    rejected.prompt_tokens = rejected.completion_tokens = 0
+    rejected.cost_known = False
+    rejected.usage_state = usage_pb2.USAGE_STATE_MISSING
+    rejected.outcome = usage_pb2.REQUEST_OUTCOME_REJECTED
+    batch = [event, rejected]
+    async with session_factory() as session, session.begin():
+        assert await ingest(session, "gateway-a", batch, scope_name=scope_name) == 2
