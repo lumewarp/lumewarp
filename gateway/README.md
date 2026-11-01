@@ -656,12 +656,15 @@ responses and keys are never span attributes; `key_id` is the public id.
 This only works under these conditions:
 
 - Without `OTEL_EXPORTER_OTLP_ENDPOINT` there is no record at all.
-- Sampling below 100%, or a full export queue, loses records. The SDK drops spans
-  when the queue is full, and the default queue of 2048 spans with a 5 s schedule
-  **will** drop at 1000 RPS (2 spans or more per request). To use OTel as an access
-  log keep the 100% default and size the queue for your rate, e.g.
-  `OTEL_BSP_MAX_QUEUE_SIZE=65536`, `OTEL_BSP_SCHEDULE_DELAY=200`,
-  `OTEL_BSP_MAX_EXPORT_BATCH_SIZE=2048`.
+- Sampling below 100%, or a full export queue, loses records, and the gateway
+  neither logs nor counts that loss. A request produces at least 2 spans, so at
+  1000 RPS the default queue of 2048 spans holds about one second. Measured at
+  1000 RPS for 30 s (60000 spans): with a collector answering at once the defaults
+  lost nothing; with a collector taking 1 s per export the defaults delivered 17408
+  (71% lost), while `OTEL_BSP_MAX_QUEUE_SIZE=65536`, `OTEL_BSP_SCHEDULE_DELAY=200`
+  and `OTEL_BSP_MAX_EXPORT_BATCH_SIZE=2048` delivered all 60000. To use OTel as an
+  access log keep the 100% default and size the queue for your rate and for how long
+  the collector may stall.
 - How long records are kept is decided by the OTel backend.
 
 Usage events do not depend on any of this; they just have no per-attempt detail.
