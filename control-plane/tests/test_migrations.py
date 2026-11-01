@@ -168,6 +168,38 @@ async def _database_exists(url: str) -> bool:
         await engine.dispose()
 
 
+async def test_0006_revokes_sessions_and_discards_unneeded_claims():
+    url = await create_database()
+    engine = create_async_engine(url)
+    try:
+        await migrate.upgrade(engine, "0005")
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO user_sessions "
+                    "(id, kind, groups, token_hash, csrf_hash, expires_at) "
+                    "VALUES (gen_random_uuid(), 'break_glass', '[\"private-iam-group\"]', "
+                    "decode(repeat('01',32),'hex'), decode(repeat('02',32),'hex'), "
+                    "now() + interval '1 hour')"
+                )
+            )
+        await migrate.upgrade(engine, "0006")
+        async with engine.connect() as conn:
+            assert await conn.scalar(text("SELECT revoked_at IS NOT NULL FROM user_sessions"))
+            assert await conn.scalar(text("SELECT admin_group FROM user_sessions")) is None
+            assert (
+                await conn.scalar(text("SELECT credential_fingerprint FROM user_sessions")) is None
+            )
+        await migrate.downgrade(engine, "0005")
+        async with engine.connect() as conn:
+            assert await conn.scalar(text("SELECT groups FROM user_sessions")) == []
+            assert await conn.scalar(text("SELECT revoked_at IS NOT NULL FROM user_sessions"))
+        await migrate.upgrade(engine, "0006")
+    finally:
+        await engine.dispose()
+        await drop_database(url)
+
+
 async def test_fixture_drops_database_when_migration_fails(monkeypatch) -> None:
     created = []
 

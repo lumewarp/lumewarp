@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from tests.api.helpers import ADMIN_AUTH
-from tests.api.helpers import suffix
+from tests.api.helpers import ADMIN_AUTH, suffix
 
 
 def _upstream(client, **body):
@@ -78,28 +77,22 @@ def test_upstream_deployment_route_crud(client) -> None:
 
     # Dependency conflicts are 409, not cascades.
     assert (
-        client.delete(f"/api/v1/upstreams/{upstream['id']}", headers=ADMIN_AUTH).status_code
-        == 409
+        client.delete(f"/api/v1/upstreams/{upstream['id']}", headers=ADMIN_AUTH).status_code == 409
     )
     assert (
         client.delete(f"/api/v1/deployments/{deployment['id']}", headers=ADMIN_AUTH).status_code
         == 409
     )
     assert (
-        client.delete(f"/api/v1/routes/{route_body['id']}", headers=ADMIN_AUTH).status_code
-        == 204
+        client.delete(f"/api/v1/routes/{route_body['id']}", headers=ADMIN_AUTH).status_code == 204
     )
     assert (
         client.delete(f"/api/v1/deployments/{deployment['id']}", headers=ADMIN_AUTH).status_code
         == 204
     )
+    assert client.delete(f"/api/v1/deployments/{dep2['id']}", headers=ADMIN_AUTH).status_code == 204
     assert (
-        client.delete(f"/api/v1/deployments/{dep2['id']}", headers=ADMIN_AUTH).status_code
-        == 204
-    )
-    assert (
-        client.delete(f"/api/v1/upstreams/{upstream['id']}", headers=ADMIN_AUTH).status_code
-        == 204
+        client.delete(f"/api/v1/upstreams/{upstream['id']}", headers=ADMIN_AUTH).status_code == 204
     )
 
 

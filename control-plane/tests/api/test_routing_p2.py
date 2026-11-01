@@ -20,8 +20,7 @@ from lumewarp_control_plane.compiler import compile_scope
 from lumewarp_control_plane.errors import ApiError
 from lumewarp_control_plane.models import AuditLog, ConfigOutbox, Deployment
 from lumewarp_control_plane.security import Principal, PrincipalKind
-from tests.api.helpers import ADMIN_AUTH
-from tests.api.helpers import auth, suffix, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
 
 H = ADMIN_AUTH
 
@@ -112,6 +111,33 @@ def test_custom_strategy_route_create_patch_and_clear(client):
 )
 def test_custom_strategy_route_validation(client, body):
     assert _route(client, **body).status_code == 422
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["authorization", "Authorization", "proxy-authorization", "cookie", "Set-Cookie", "X-API-Key"],
+)
+def test_custom_strategy_cannot_receive_credential_headers(client, header):
+    assert (
+        _route(
+            client,
+            strategy="custom",
+            custom_strategy="header_pin",
+            strategy_params={"headers": [header]},
+        ).status_code
+        == 422
+    )
+    route = _ok(_route(client))
+    assert (
+        _patch(
+            client,
+            route["id"],
+            strategy="custom",
+            custom_strategy="header_pin",
+            strategy_params={"headers": [header]},
+        ).status_code
+        == 422
+    )
 
 
 def test_custom_strategy_patch_requires_name_and_non_null_params(client):

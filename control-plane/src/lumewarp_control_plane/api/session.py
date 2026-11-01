@@ -15,7 +15,7 @@ from sqlalchemy import delete, or_, select, update
 
 from lumewarp_control_plane import audit
 from lumewarp_control_plane.auth import break_glass, oidc, sessions
-from lumewarp_control_plane.authz import RequestAuthz
+from lumewarp_control_plane.authz import AuthzUnavailable, RequestAuthz
 from lumewarp_control_plane.errors import ApiError, not_found
 from lumewarp_control_plane.models import ActorType, OIDCLoginState, User, UserSession
 from lumewarp_control_plane.security import (
@@ -42,6 +42,7 @@ class SessionInfo(BaseModel):
     break_glass_enabled: bool
     authenticated: bool
     is_break_glass: bool = False
+    authz_unavailable: bool = False
     user: SessionUser | None = None
     csrf_token: str | None = None
 
@@ -68,11 +69,16 @@ async def session_info(request: Request, response: Response) -> SessionInfo:
             authz = RequestAuthz(
                 principal, request.app.state.authorizer, request.app.state.settings.admin_group
             )
+            try:
+                is_admin = await authz.is_admin()
+            except AuthzUnavailable:
+                is_admin = False
+                info.authz_unavailable = True
             info.user = SessionUser(
                 id=user.id,
                 email=user.email,
                 display_name=user.display_name,
-                is_admin=await authz.is_admin(),
+                is_admin=is_admin,
             )
     if principal.kind in (PrincipalKind.SESSION, PrincipalKind.BREAK_GLASS):
         info.csrf_token = sessions.csrf_token(request.cookies[sessions.COOKIE_NAME])
@@ -88,31 +94,41 @@ async def login_break_glass(body: BreakGlassLogin, request: Request) -> Response
     settings = request.app.state.settings
     if not break_glass.enabled(settings):
         raise not_found()
-    # Never trust forwarded headers for the rate-limit identity.
-    ip = request.client.host if request.client else "unknown"
+    ip = break_glass.client_ip(request, settings)
+    if not break_glass.client_allowed(ip, settings):
+        raise not_found()
     limiter = request.app.state.break_glass_limiter
     result = "rate_limited"
     secret = None
     if limiter.reserve(ip):
+        delay = limiter.delay()
+        if delay:
+            await asyncio.sleep(delay)
         valid = await asyncio.to_thread(
             break_glass.verify, body.password.get_secret_value(), settings
         )
         result = "success" if valid else "failure"
-    async with request.app.state.session_factory() as session, session.begin():
-        if result == "success":
-            secret = await sessions.create_session(
+    if result != "rate_limited" or limiter.summarize_rejection():
+        async with request.app.state.session_factory() as session, session.begin():
+            if result == "success":
+                secret = await sessions.create_session(
+                    session,
+                    None,
+                    settings.break_glass_session_ttl_seconds,
+                    kind=PrincipalKind.BREAK_GLASS,
+                    credential_fingerprint=break_glass.fingerprint(settings),
+                )
+            audit.record(
                 session,
-                None,
-                settings.break_glass_session_ttl_seconds,
-                kind=PrincipalKind.BREAK_GLASS,
+                action="session.break_glass.login",
+                resource_type="session",
+                actor_type=ActorType.BREAK_GLASS,
+                details=(
+                    {"result": result, "window_seconds": break_glass.WINDOW_SECONDS}
+                    if result == "rate_limited"
+                    else {"result": result}
+                ),
             )
-        audit.record(
-            session,
-            action="session.break_glass.login",
-            resource_type="session",
-            actor_type=ActorType.BREAK_GLASS,
-            details={"result": result},
-        )
     request.app.state.metrics.break_glass_logins.labels(result).inc()
     if result == "rate_limited":
         raise ApiError(429, "rate_limited", "too many login attempts")
@@ -257,18 +273,18 @@ async def callback(request: Request) -> RedirectResponse:
         )
         if not claims or not isinstance(claims.get("sub"), str) or not claims["sub"]:
             raise ValueError("missing subject")
-        if settings.oidc_groups_claim not in claims:
+        if oidc.group_claim(claims, settings.oidc_groups_claim) is oidc.MISSING:
             userinfo = await remote.userinfo(token=token)
             if userinfo.get("sub") != claims["sub"]:
                 raise ValueError("userinfo subject mismatch")
-            claims = {
-                **claims,
-                settings.oidc_groups_claim: userinfo.get(settings.oidc_groups_claim, []),
-            }
+            claims = oidc.with_group_claim(claims, userinfo, settings.oidc_groups_claim)
         async with request.app.state.session_factory() as session, session.begin():
             user = await oidc.resolve_user(session, claims, request)
             secret = await sessions.create_session(
-                session, user.id, settings.session_ttl_seconds, groups=oidc.groups(claims, request)
+                session,
+                user.id,
+                settings.session_ttl_seconds,
+                admin_group=oidc.admin_group(claims, request),
             )
     except oidc.LoginDenied as exc:
         return callback_failure(response, "access_denied", exc)

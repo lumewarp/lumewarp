@@ -86,6 +86,7 @@ prepare() {
   token="$(cd "$root/control-plane" && uv run -q lumewarp-control-plane bootstrap \
     --gateway-id "$gateway_id" 2>/dev/null)"
   {
+    echo "export LUMEWARP_DEV_MODE=true"
     printf 'export LUMEWARP_BREAK_GLASS_PASSWORD=%q\n' "$break_glass_password"
     echo "export LUMEWARP_ADMIN_GROUP=lumewarp-admins"
     echo "export LUMEWARP_GATEWAY_TOKEN=$token"

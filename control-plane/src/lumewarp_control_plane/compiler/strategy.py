@@ -70,7 +70,11 @@ def strategy_problem(
     if "headers" in params:
         headers = params["headers"]
         if not isinstance(headers, list) or any(
-            not isinstance(h, str) or not HEADER_NAME.fullmatch(h) for h in headers
+            not isinstance(h, str)
+            or not HEADER_NAME.fullmatch(h)
+            or h.lower()
+            in {"authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key"}
+            for h in headers
         ):
             return "strategy_params.headers must be an array of HTTP header names"
     return None

@@ -686,6 +686,7 @@ class MeOut(ApiModel):
     email: str | None
     display_name: str
     is_admin: bool
+    authz_unavailable: bool = False
     manages_grants: bool
     teams: list[MeTeamOut]
 

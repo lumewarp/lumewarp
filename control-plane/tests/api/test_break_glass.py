@@ -55,16 +55,15 @@ async def test_failures_rate_limit_audit_and_metrics(client, committed):
     )
 
 
-def test_global_backoff_and_ip_limit_are_independent(monkeypatch):
+def test_global_backoff_delays_but_never_rejects_other_identities(monkeypatch):
     now = [100.0]
     monkeypatch.setattr(break_glass.time, "monotonic", lambda: now[0])
     limiter = break_glass.LoginLimiter()
     for index in range(20):
         assert limiter.reserve(str(index))
-    assert not limiter.reserve("new-ip")
-    now[0] += 1
     assert limiter.reserve("new-ip")
-    assert not limiter.reserve("another-ip")
+    assert 0 < limiter.delay() <= break_glass.MAX_GLOBAL_DELAY_SECONDS
+    assert limiter.reserve("another-ip")
     now[0] += 60
     assert limiter.reserve("another-ip")
     for _ in range(4):
@@ -90,7 +89,7 @@ async def test_success_is_hashed_cookie_session_with_csrf_and_no_user(
     row = await committed.scalar(
         select(UserSession).where(UserSession.token_hash == hash_secret(secret))
     )
-    assert row.user_id is None and row.kind == "break_glass" and row.groups == []
+    assert row.user_id is None and row.kind == "break_glass" and row.admin_group is None
     assert row.csrf_hash == hash_secret(info["csrf_token"])
     assert 3500 < (row.expires_at - datetime.now(UTC)).total_seconds() <= 3600
     assert client.post("/api/v1/teams", json={"name": "no-csrf"}).status_code == 403
@@ -192,7 +191,7 @@ async def test_oidc_admin_claim_and_userinfo_fallback(client, idp, committed):
     assert client.get("/api/v1/users").status_code == 200
     user_id = uuid.UUID(info["user"]["id"])
     row = await committed.scalar(select(UserSession).where(UserSession.user_id == user_id))
-    assert row.groups == ["lumewarp-admins"]
+    assert row.admin_group == "lumewarp-admins"
 
 
 @pytest.mark.parametrize(

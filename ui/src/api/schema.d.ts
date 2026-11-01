@@ -1022,6 +1022,11 @@ export interface components {
             display_name: string;
             /** Is Admin */
             is_admin: boolean;
+            /**
+             * Authz Unavailable
+             * @default false
+             */
+            authz_unavailable: boolean;
             /** Manages Grants */
             manages_grants: boolean;
             /** Teams */
@@ -1289,8 +1294,17 @@ export interface components {
         RouteCreate: {
             /** Model */
             model: string;
-            /** @default weighted */
-            strategy: components["schemas"]["RoutingStrategy"];
+            /**
+             * Strategy
+             * @default weighted
+             */
+            strategy: components["schemas"]["RoutingStrategy"] | "custom";
+            /** Custom Strategy */
+            custom_strategy?: string | null;
+            /** Strategy Params */
+            strategy_params?: {
+                [key: string]: unknown;
+            };
             /**
              * Deployment Ids
              * @description Ordered deployments; may be empty only when traffic_split is set.
@@ -1328,7 +1342,14 @@ export interface components {
             id: string;
             /** Model */
             model: string;
-            strategy: components["schemas"]["RoutingStrategy"];
+            /** Strategy */
+            strategy: components["schemas"]["RoutingStrategy"] | "custom";
+            /** Custom Strategy */
+            custom_strategy?: string | null;
+            /** Strategy Params */
+            strategy_params?: {
+                [key: string]: unknown;
+            };
             /** Deployments */
             deployments: components["schemas"]["RouteDeploymentOut"][];
             retry: components["schemas"]["RetryPolicyOut"] | null;
@@ -1358,7 +1379,14 @@ export interface components {
         RouteUpdate: {
             /** Model */
             model?: string | null;
-            strategy?: components["schemas"]["RoutingStrategy"] | null;
+            /** Strategy */
+            strategy?: components["schemas"]["RoutingStrategy"] | "custom" | null;
+            /** Custom Strategy */
+            custom_strategy?: string | null;
+            /** Strategy Params */
+            strategy_params?: {
+                [key: string]: unknown;
+            } | null;
             /** Deployment Ids */
             deployment_ids?: string[] | null;
             retry?: components["schemas"]["RetryPolicyIn"] | null;
@@ -1473,6 +1501,11 @@ export interface components {
              * @default false
              */
             is_break_glass: boolean;
+            /**
+             * Authz Unavailable
+             * @default false
+             */
+            authz_unavailable: boolean;
             user?: components["schemas"]["SessionUser"] | null;
             /** Csrf Token */
             csrf_token?: string | null;

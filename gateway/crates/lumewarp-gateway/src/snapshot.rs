@@ -76,9 +76,18 @@ pub fn strategy_headers(r: &pb::ModelRoute) -> Result<Vec<String>, ApplyError> {
             let name = header
                 .as_str()
                 .ok_or_else(|| ApplyError::invalid("params.headers must contain header names"))?;
-            hyper::header::HeaderName::from_bytes(name.as_bytes())
-                .map(|name| name.as_str().to_owned())
-                .map_err(|_| ApplyError::invalid("params.headers contains an invalid header name"))
+            let name = hyper::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                ApplyError::invalid("params.headers contains an invalid header name")
+            })?;
+            if matches!(
+                name.as_str(),
+                "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key"
+            ) {
+                return Err(ApplyError::invalid(
+                    "params.headers must not expose credential headers",
+                ));
+            }
+            Ok(name.as_str().to_owned())
         })
         .collect()
 }
@@ -663,6 +672,35 @@ pub fn load_with_digest(dir: &Path, scope: &str) -> Result<Option<(Snapshot, Vec
 pub(crate) mod tests {
     use super::*;
     use pb::Delta;
+
+    #[test]
+    fn strategy_headers_reject_credentials_case_insensitively() {
+        for header in [
+            "authorization",
+            "Authorization",
+            "proxy-authorization",
+            "Cookie",
+            "set-cookie",
+            "X-API-Key",
+        ] {
+            let route = pb::ModelRoute {
+                strategy_params_json: serde_json::json!({"headers": [header]}).to_string(),
+                ..Default::default()
+            };
+            assert_eq!(
+                strategy_headers(&route).unwrap_err().code,
+                NackCode::InvalidConfig
+            );
+        }
+        let route = pb::ModelRoute {
+            strategy_params_json: r#"{"headers":["X-Tenant","x-request-id"]}"#.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            strategy_headers(&route).unwrap(),
+            vec!["x-tenant", "x-request-id"]
+        );
+    }
 
     pub fn upstream(name: &str) -> pb::Upstream {
         pb::Upstream {

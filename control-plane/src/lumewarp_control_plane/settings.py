@@ -1,9 +1,11 @@
 """Process settings, read from `LUMEWARP_*` environment variables."""
 
 from functools import lru_cache
+from ipaddress import ip_network
+from typing import Annotated
 
-from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, IPvAnyNetwork, SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 DEV_DATABASE_URL = "postgresql+asyncpg://lumewarp:lumewarp@127.0.0.1:55432/lumewarp"
 
@@ -38,7 +40,12 @@ class Settings(BaseSettings):
     admin_group: str | None = None
     break_glass_password_hash: SecretStr | None = None
     break_glass_password: SecretStr | None = None
-    break_glass_session_ttl_seconds: int = Field(default=3600, ge=60)
+    dev_mode: bool = False
+    break_glass_session_ttl_seconds: int = Field(default=3600, ge=60, le=14400)
+    trusted_proxies: Annotated[list[IPvAnyNetwork], NoDecode] = Field(default_factory=list)
+    break_glass_allowed_cidrs: Annotated[list[IPvAnyNetwork], NoDecode] = Field(
+        default_factory=list
+    )
     # Authorization backend: "builtin" or a `lumewarp.authz` entry point name (authz/).
     authz_backend: str = "builtin"
     # Every authorization backend call is bounded; a timeout is Decision.ERROR (503).
@@ -89,6 +96,13 @@ class Settings(BaseSettings):
 
     # Run the gRPC server and background loops in `serve`. Tests turn it off.
     background_enabled: bool = True
+
+    @field_validator("trusted_proxies", "break_glass_allowed_cidrs", mode="before")
+    @classmethod
+    def _cidrs(cls, value):
+        if isinstance(value, str):
+            value = [item.strip() for item in value.split(",") if item.strip()]
+        return [ip_network(item) for item in value]
 
     @field_validator("http_bind", "grpc_bind")
     @classmethod

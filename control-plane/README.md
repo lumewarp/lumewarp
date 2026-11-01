@@ -30,7 +30,7 @@ uv run --no-sync lumewarp-control-plane migrate  # alembic upgrade head
 # Creates the config scope and prints one `lwg-...` gateway token (shown once).
 uv run --no-sync lumewarp-control-plane bootstrap --gateway-id gw-local
 
-LUMEWARP_BOOTSTRAP_TOKEN=dev-admin \
+LUMEWARP_DEV_MODE=true LUMEWARP_BREAK_GLASS_PASSWORD=dev-break-glass \
   uv run --no-sync lumewarp-control-plane serve  # HTTP :8091, gRPC :50051
 ```
 
@@ -58,6 +58,36 @@ lumewarp --control-plane http://127.0.0.1:50051 \
 
 The same token authenticates the config stream and usage reports. The control plane stores
 only its SHA-256 hash.
+
+## Emergency login and trusted proxies
+
+Use `lumewarp-control-plane hash-password` to generate an argon2id hash, then set
+`LUMEWARP_BREAK_GLASS_PASSWORD_HASH`. Invalid or non-argon2id hashes prevent startup.
+Plaintext `LUMEWARP_BREAK_GLASS_PASSWORD` is accepted only with `LUMEWARP_DEV_MODE=true`.
+Emergency sessions expire after 3600 seconds by default; the configurable
+`LUMEWARP_BREAK_GLASS_SESSION_TTL_SECONDS` is capped at 14400 seconds. Disabling or
+changing the configured credential invalidates existing emergency sessions.
+
+`LUMEWARP_TRUSTED_PROXIES` is a comma-separated list of proxy CIDRs, empty by default.
+For example, `LUMEWARP_TRUSTED_PROXIES=10.20.0.0/24,2001:db8:1234::/64` trusts only
+those socket peers to supply `X-Forwarded-For`. The control plane walks the chain
+from right to left and stops at the first untrusted address. Configure only actual
+proxy networks, and have the edge proxy overwrite or append the real client address.
+Untrusted peers and malformed forwarding chains cannot select a forwarded identity.
+The CLI disables Uvicorn's own proxy-header rewriting so this policy sees the socket
+peer; alternate ASGI deployments must also disable upstream rewriting of `scope.client`.
+
+`LUMEWARP_BREAK_GLASS_ALLOWED_CIDRS` optionally restricts the resolved client addresses
+allowed to attempt emergency login, using the same comma-separated CIDR syntax.
+Other addresses receive 404. This restriction bypasses neither password verification
+nor per-client limiting. Keep proxy trust separate from allowed client networks.
+
+The per-client limiter tracks at most 4096 addresses and allows five verification
+attempts per 60-second window. A successful verification clears that client's attempts.
+Global pressure adds at most one second of asynchronous delay, never a global deny:
+one attacking identity cannot lock out another identity's correct password.
+Every verified success/failure is audited; rate-limited attempts increment metrics and
+produce at most one summary audit row per 60 seconds per CP process.
 
 ## Ports and endpoints
 

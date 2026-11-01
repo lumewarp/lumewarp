@@ -1,5 +1,5 @@
 import createClient from "openapi-fetch";
-import { getCsrfToken, getToken, handleUnauthorized, setCsrfToken } from "../auth";
+import { getCsrfToken, handleUnauthorized, setCsrfToken } from "../auth";
 import { ApiError, fieldOf } from "./errors";
 import type { components, paths } from "./schema";
 
@@ -22,16 +22,10 @@ export const client = createClient<paths>({ baseUrl: "", credentials: "same-orig
 
 client.use({
   onRequest({ request }) {
-    const token = getToken();
-    if (token) {
-      request.headers.set("Authorization", `Bearer ${token}`);
-      request.headers.delete("X-Lumewarp-CSRF");
-    } else {
-      request.headers.delete("Authorization");
-      if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method.toUpperCase())) {
-        const csrfToken = getCsrfToken();
-        if (csrfToken) request.headers.set("X-Lumewarp-CSRF", csrfToken);
-      }
+    request.headers.delete("Authorization");
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method.toUpperCase())) {
+      const csrfToken = getCsrfToken();
+      if (csrfToken) request.headers.set("X-Lumewarp-CSRF", csrfToken);
     }
     return request;
   },

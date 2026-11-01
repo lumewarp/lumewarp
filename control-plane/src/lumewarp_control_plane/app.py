@@ -26,7 +26,7 @@ from sqlalchemy import text
 from lumewarp_control_plane import __version__, audit, compiler, migrate, notifier, usage
 from lumewarp_control_plane import grpc as grpc_services
 from lumewarp_control_plane.api import router as api_router
-from lumewarp_control_plane.auth.break_glass import LoginLimiter, enabled
+from lumewarp_control_plane.auth.break_glass import LoginLimiter, enabled, validate_credentials
 from lumewarp_control_plane.authz import load_authorizer
 from lumewarp_control_plane.db import create_engine, create_session_factory
 from lumewarp_control_plane.errors import error_body, install_handlers
@@ -223,6 +223,7 @@ def create_app(
     fatal_handler: Callable[[str], None] | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
+    validate_credentials(settings)
     app = FastAPI(title="Lumewarp control plane", version=__version__, lifespan=lifespan)
     app.state.settings = settings
     app.state.break_glass_limiter = LoginLimiter()

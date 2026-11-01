@@ -44,9 +44,7 @@ async def test_external_member_key_create_compile_and_rollback(
         assert list(wire.policy.allowed_models) == ["a"]
         assert [r.id for r in wire.policy.rate_limit_scopes] == [f"team:{team.id}"]
         assert await publish_pending(factory, settings.scope, require_local_membership=False) == 1
-        rollback = client.post(
-            "/api/v1/config/rollback", json={"version": 1}, headers=ADMIN_AUTH
-        )
+        rollback = client.post("/api/v1/config/rollback", json={"version": 1}, headers=ADMIN_AUTH)
         assert rollback.status_code == 200, rollback.text
         async with AsyncSession(api_engine) as session:
             version = await session.get(ConfigVersion, (settings.scope, rollback.json()["version"]))

@@ -2,7 +2,7 @@
 
 Run via `uv run --project ../control-plane python e2e/serve.py` (see playwright.config.ts). Creates
 `lumewarp_test_e2e_<hex>` on the dev Postgres (or LUMEWARP_TEST_DATABASE_URL), migrates and
-bootstraps it, seeds a viewer user with a known personal access token, serves until signalled, then
+bootstraps it, seeds a viewer user with a known cookie session, serves until signalled, then
 drops the database.
 """
 
@@ -12,20 +12,21 @@ import signal
 import subprocess
 import sys
 import uuid
+from datetime import UTC, datetime, timedelta
 
+from lumewarp_control_plane.auth.sessions import csrf_token
+from lumewarp_control_plane.models import User, UserSession
+from lumewarp_control_plane.security import hash_secret
+from lumewarp_control_plane.settings import DEV_DATABASE_URL
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
-
-from lumewarp_control_plane.models import PersonalAccessToken, User
-from lumewarp_control_plane.security import SecretKind, hash_secret
-from lumewarp_control_plane.settings import DEV_DATABASE_URL
 
 HTTP_PORT = os.environ.get("E2E_HTTP_PORT", "8992")
 GRPC_PORT = os.environ.get("E2E_GRPC_PORT", "50952")
 BREAK_GLASS_PASSWORD = "e2e-break-glass-password"
 VIEWER_EMAIL = "viewer@e2e.test"
-VIEWER_TOKEN = SecretKind.PAT.value + "e2e-viewer-token-0123456789abcdef"
+VIEWER_TOKEN = "e2e-viewer-session-0123456789abcdef"
 SERVER_URL = os.environ.get("LUMEWARP_TEST_DATABASE_URL", DEV_DATABASE_URL)
 
 
@@ -48,11 +49,11 @@ async def seed_viewer(url: str) -> None:
             session.add(user)
             await session.flush()
             session.add(
-                PersonalAccessToken(
+                UserSession(
                     user_id=user.id,
-                    name="e2e",
                     token_hash=hash_secret(VIEWER_TOKEN),
-                    display_prefix=VIEWER_TOKEN[:10],
+                    csrf_hash=hash_secret(csrf_token(VIEWER_TOKEN)),
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
                 )
             )
     finally:
@@ -60,7 +61,9 @@ async def seed_viewer(url: str) -> None:
 
 
 def cp(*args: str, env: dict[str, str]) -> None:
-    subprocess.run([sys.executable, "-m", "lumewarp_control_plane", *args], env=env, check=True)
+    subprocess.run(
+        [sys.executable, "-m", "lumewarp_control_plane", *args], env=env, check=True
+    )
 
 
 def main() -> None:
@@ -71,6 +74,7 @@ def main() -> None:
         **os.environ,
         "LUMEWARP_DATABASE_URL": url,
         "LUMEWARP_BREAK_GLASS_PASSWORD": BREAK_GLASS_PASSWORD,
+        "LUMEWARP_DEV_MODE": "true",
         "LUMEWARP_SESSION_COOKIE_SECURE": "false",
         "LUMEWARP_METRICS_BIND": "",
         "LUMEWARP_HTTP_BIND": f"127.0.0.1:{HTTP_PORT}",
@@ -81,7 +85,9 @@ def main() -> None:
         cp("migrate", env=env)
         cp("bootstrap", "--gateway-id", "e2e-gw", env=env)
         asyncio.run(seed_viewer(url))
-        server = subprocess.Popen([sys.executable, "-m", "lumewarp_control_plane", "serve"], env=env)
+        server = subprocess.Popen(
+            [sys.executable, "-m", "lumewarp_control_plane", "serve"], env=env
+        )
         signal.signal(signal.SIGTERM, lambda *_: server and server.terminate())
         signal.signal(signal.SIGINT, lambda *_: server and server.terminate())
         server.wait()

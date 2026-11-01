@@ -9,6 +9,7 @@ from fastapi import Request
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumewarp_control_plane.auth import break_glass
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.errors import ApiError
 from lumewarp_control_plane.models import User, UserSession
@@ -33,14 +34,16 @@ async def create_session(
     ttl: int,
     *,
     kind: PrincipalKind = PrincipalKind.SESSION,
-    groups: tuple[str, ...] = (),
+    admin_group: str | None = None,
+    credential_fingerprint: bytes | None = None,
 ) -> str:
     token = secrets.token_urlsafe(32)
     session.add(
         UserSession(
             user_id=user_id,
             kind=kind.value,
-            groups=list(groups),
+            admin_group=admin_group,
+            credential_fingerprint=credential_fingerprint,
             token_hash=hash_secret(token),
             csrf_hash=hash_secret(csrf_token(token)),
             expires_at=datetime.now(UTC) + timedelta(seconds=ttl),
@@ -66,13 +69,21 @@ async def authenticate_session(
         credential, user = row
         if credential.revoked_at or credential.expires_at <= now:
             return None
+        if credential.kind == PrincipalKind.BREAK_GLASS:
+            current_fingerprint = break_glass.fingerprint(request.app.state.settings)
+            if (
+                current_fingerprint is None
+                or credential.credential_fingerprint is None
+                or not hmac.compare_digest(current_fingerprint, credential.credential_fingerprint)
+            ):
+                return None
         if credential.kind != PrincipalKind.BREAK_GLASS and (user is None or not user.is_active):
             return None
         principal = Principal(
             kind=PrincipalKind(credential.kind),
             user_id=user.id if user else None,
             token_id=credential.id,
-            groups=tuple(credential.groups),
+            groups=(credential.admin_group,) if credential.admin_group else (),
         )
         # Preserve the validated actor for auditing even when the CSRF check fails.
         request.state.principal = principal

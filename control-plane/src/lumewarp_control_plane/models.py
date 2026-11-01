@@ -311,7 +311,8 @@ class UserSession(Base):
         ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
     )
     kind: Mapped[str] = mapped_column(String(20), nullable=False, server_default="session")
-    groups: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    admin_group: Mapped[str | None] = mapped_column(Text)
+    credential_fingerprint: Mapped[bytes | None] = mapped_column(LargeBinary)
     token_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
     csrf_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     created_at: Mapped[datetime] = _now()

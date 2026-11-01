@@ -1,5 +1,6 @@
 """OIDC client and claim-to-user mapping, including session-scoped IAM groups."""
 
+import logging
 from datetime import UTC, datetime
 from urllib.parse import unquote, urlsplit
 
@@ -9,17 +10,57 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import plugins
+from lumewarp_control_plane.authz import Decision, Relation, Resource
 from lumewarp_control_plane.models import User, UserIdentity
 
 STATE_COOKIE = "lumewarp_oidc_state"
 STATE_TTL = 600
+MISSING = object()
+log = logging.getLogger(__name__)
+
+
+def group_claim(claims: dict, path: str):
+    value = claims
+    for part in path.split("."):
+        if not isinstance(value, dict):
+            return None
+        if part not in value:
+            return MISSING
+        value = value[part]
+    return value
+
+
+def with_group_claim(claims: dict, userinfo: dict, path: str) -> dict:
+    claims = dict(claims)
+    current = claims
+    parts = path.split(".")
+    for part in parts[:-1]:
+        current[part] = dict(current.get(part, {})) if isinstance(current.get(part), dict) else {}
+        current = current[part]
+    value = group_claim(userinfo, path)
+    current[parts[-1]] = [] if value is MISSING else value
+    return claims
 
 
 def groups(claims: dict, request: Request) -> tuple[str, ...]:
-    value = claims.get(request.app.state.settings.oidc_groups_claim, [])
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+    value = group_claim(claims, request.app.state.settings.oidc_groups_claim)
+    if value is MISSING:
         return ()
-    return tuple(value)
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        log.debug("OIDC groups claim is present but unusable")
+        return ()
+    return tuple(item.removeprefix("/") for item in value)
+
+
+def admin_group(claims: dict, request: Request) -> str | None:
+    configured = request.app.state.settings.admin_group
+    return (
+        configured
+        if configured and configured.removeprefix("/") in groups(claims, request)
+        else None
+    )
 
 
 class LoginDenied(Exception):
@@ -108,11 +149,15 @@ async def resolve_user(session: AsyncSession, claims: dict, request: Request) ->
                     UserIdentity.user_id == user.id, UserIdentity.issuer == claims["iss"]
                 )
             )
-            if (
-                request.app.state.settings.admin_group in groups(claims, request)
-                or linked is not None
-            ):
+            if admin_group(claims, request) or linked is not None:
                 raise LoginDenied()
+            configured = request.app.state.settings.admin_group
+            if configured:
+                decision = await request.app.state.authorizer.check(
+                    str(user.id), Relation.MEMBER, Resource("group", configured)
+                )
+                if decision is not Decision.DENY:
+                    raise LoginDenied()
         elif request.app.state.settings.oidc_jit_users:
             user = User(email=mapping.email, display_name=mapping.display_name)
             session.add(user)

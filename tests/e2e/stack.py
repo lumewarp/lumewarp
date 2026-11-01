@@ -236,6 +236,7 @@ class Stack:
             **self.base_env,
             "LUMEWARP_DATABASE_URL": self.sa_url,
             "LUMEWARP_BREAK_GLASS_PASSWORD": BREAK_GLASS_PASSWORD,
+            "LUMEWARP_DEV_MODE": "true",
             "LUMEWARP_SESSION_COOKIE_SECURE": "false",
             "LUMEWARP_ADMIN_GROUP": "lumewarp-admins",
             "LUMEWARP_SCOPE": SCOPE,

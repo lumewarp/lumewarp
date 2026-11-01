@@ -48,6 +48,7 @@ async def cp() -> AsyncIterator[ControlPlane]:
             database_url=url,
             grpc_bind="127.0.0.1:0",
             metrics_bind="127.0.0.1:0",
+            dev_mode=True,
             break_glass_password="itest-admin",
             session_cookie_secure=False,
             scope=SCOPE,

@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const BREAK_GLASS = "e2e-break-glass-password";
-const VIEWER = "lwp-e2e-viewer-token-0123456789abcdef";
+const VIEWER = "e2e-viewer-session-0123456789abcdef";
 const admin: Record<string, string> = {};
 
 test.beforeEach(async ({ request }) => {
@@ -14,7 +14,7 @@ test.beforeEach(async ({ request }) => {
 async function login(page: Page, token: string) {
   await page.goto("/login");
   if (token === VIEWER) {
-    await page.evaluate((pat) => sessionStorage.setItem("lumewarp.token", pat), token);
+    await page.context().addCookies([{ name: "lumewarp_session", value: token, url: new URL(page.url()).origin }]);
     await page.goto("/");
     return;
   }
@@ -37,7 +37,6 @@ test("SSO availability and login errors follow session discovery", async ({ page
   await discovered;
   await expect(page.getByLabel("Break-glass password")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Sign in with SSO" })).toHaveCount(0);
-  await page.evaluate(() => sessionStorage.setItem("lumewarp.token", "stale-token"));
 
   oidcEnabled = true;
   breakGlassEnabled = true;
@@ -69,7 +68,7 @@ test("SSO availability and login errors follow session discovery", async ({ page
   await page.getByRole("button", { name: "Sign in with SSO" }).click();
   const request = await loginRequest;
   expect(new URL(request.url()).searchParams.get("next")).toBe("/teams/return-here");
-  expect(await page.evaluate(() => sessionStorage.getItem("lumewarp.token"))).toBeNull();
+  expect(request.headers().authorization).toBeUndefined();
 });
 
 test("cookie session: CSRF on writes, inline member errors, key owner state, logout", async ({ page }) => {
