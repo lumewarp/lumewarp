@@ -653,6 +653,15 @@ starting from the `x-lumewarp-request-id` response header. The `request` span ha
 `upstream_model`, `attempt`, `fallback`, `outcome` and `upstream_status`. Prompts,
 responses and keys are never span attributes; `key_id` is the public id.
 
+Every `/v1/*` response has the header, including a 503 `not_ready` before any
+snapshot is loaded (`config_version` 0 and no `key_id`; there is no usage event,
+since the key is unknown). A request that made no upstream attempt has `attempts`
+0 and `fallback` false. A client that goes away while an attempt waits for upstream
+headers leaves that attempt's `upstream`, `upstream_model`, `attempts` and
+`fallback`, matching the usage event. A 403 span has the `alias` and `router` of a
+known name, which the response does not reveal. Authentication rejections have no
+`requested`: the body is not read for them.
+
 This only works under these conditions:
 
 - Without `OTEL_EXPORTER_OTLP_ENDPOINT` there is no record at all.

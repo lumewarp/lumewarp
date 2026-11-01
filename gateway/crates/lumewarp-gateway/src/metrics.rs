@@ -28,6 +28,7 @@ use tracing::Span;
 
 use crate::{
     proxy::{BoxError, ProxyBody},
+    router::Model,
     runtime::InFlightRegistry,
 };
 
@@ -800,6 +801,19 @@ pub struct Observation {
     first_frame_forwarding: Duration,
     body_read_started: Option<Instant>,
     handler_finished: Option<Instant>,
+    // What `finish` writes to the span. The SDK appends every record instead of
+    // replacing the value, and exports duplicate keys, so a field that changes
+    // during a request is held here and recorded once. Only set with OTel on.
+    identified: bool,
+    routed: bool,
+    attempt: Option<Attempt>,
+}
+
+/// The upstream attempt the request span reports.
+struct Attempt {
+    model: Arc<Model>,
+    attempts: usize,
+    fallback: bool,
 }
 
 /// Gateway overhead excludes client uploads and all upstream waiting, including prefill.
@@ -842,6 +856,9 @@ impl Observation {
             first_frame_forwarding: Duration::ZERO,
             body_read_started: None,
             handler_finished: None,
+            identified: false,
+            routed: false,
+            attempt: None,
         }
     }
 
@@ -865,15 +882,13 @@ impl Observation {
     pub fn routed(&mut self, handles: Arc<RequestMetrics>, stream: bool) {
         self.handles = handles;
         self.stream = stream;
-        if self.otel {
-            self.span.record("model", &self.handles.model);
-            self.span.record("stream", stream);
-        }
+        self.routed = true;
     }
 
     /// Identifiers known once the request entered `/v1/*`.
-    pub fn identified(&self, request_id: &uuid::Uuid, config_version: u64) {
+    pub fn identified(&mut self, request_id: &uuid::Uuid, config_version: u64) {
         if self.otel {
+            self.identified = true;
             self.span
                 .record("request_id", tracing::field::display(request_id));
             self.span.record("config_version", config_version);
@@ -906,13 +921,15 @@ impl Observation {
         }
     }
 
-    /// What finally served (or last failed) the request.
-    pub fn served(&self, upstream: &str, upstream_model: &str, attempts: usize, fallback: bool) {
+    /// The attempt about to wait on an upstream, so a request cancelled during
+    /// that wait still reports it; called again with what finally served.
+    pub fn served(&mut self, model: &Arc<Model>, attempts: usize, fallback: bool) {
         if self.otel {
-            self.span.record("upstream", upstream);
-            self.span.record("upstream_model", upstream_model);
-            self.span.record("attempts", attempts);
-            self.span.record("fallback", fallback);
+            self.attempt = Some(Attempt {
+                model: model.clone(),
+                attempts,
+                fallback,
+            });
         }
     }
 
@@ -976,6 +993,24 @@ impl Observation {
         }
         if self.otel {
             self.span.record("status", self.status.as_u16());
+            self.span.record("stream", self.stream);
+            if self.routed {
+                self.span.record("model", &self.handles.model);
+            }
+            match &self.attempt {
+                Some(attempt) => {
+                    self.span.record("upstream", &*attempt.model.upstream);
+                    self.span
+                        .record("upstream_model", &*attempt.model.upstream_model);
+                    self.span.record("attempts", attempt.attempts);
+                    self.span.record("fallback", attempt.fallback);
+                }
+                None if self.identified => {
+                    self.span.record("attempts", 0);
+                    self.span.record("fallback", false);
+                }
+                None => {}
+            }
         }
     }
 

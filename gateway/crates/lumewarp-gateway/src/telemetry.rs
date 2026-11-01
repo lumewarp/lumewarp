@@ -119,7 +119,7 @@ pub fn request_span(enabled: bool, headers: &HeaderMap, endpoint: &'static str) 
         fallback = empty,
         config_version = empty,
         status = empty,
-        stream = false
+        stream = empty
     );
     let context = TraceContextPropagator::new().extract(&Headers(headers));
     let _ = span.set_parent(context);

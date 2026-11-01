@@ -358,6 +358,10 @@ pub async fn forward(
     observation.requested(&model);
     // Before the name lookup, so denied callers cannot probe which names exist.
     if let Err(err) = auth::check_model(&caller, &model) {
+        // Only for the trace: the response stays the same whether the name exists.
+        if let Some(called) = routing_table.lookup(&model) {
+            observation.provenance(called.alias.as_deref(), called.router.as_deref());
+        }
         let handles = routing_table.rejected_model(&caller, &model, endpoint);
         observation.routed(handles.clone(), stream);
         report_rejection(
@@ -561,6 +565,7 @@ pub async fn forward(
             .get_or_insert_with(Instant::now);
         // Only models behind a LOWEST_LATENCY router pay for a clock read.
         let attempt_started = model.track_latency.then(Instant::now);
+        observation.served(model, attempt, used_fallback);
         let result = tokio::time::timeout(timeout, client.request(upstream_request))
             .instrument(span.clone())
             .await;
@@ -696,12 +701,6 @@ pub async fn forward(
                 break (response, fallback, inject);
             }
             None => {
-                observation.served(
-                    &guard.model.upstream,
-                    &guard.model.upstream_model,
-                    attempt,
-                    used_fallback,
-                );
                 let mut capture = pending.take();
                 capture.status = error_status.as_u16();
                 capture.finalize(RequestOutcome::UpstreamError, UsageState::Missing, None);
@@ -718,12 +717,7 @@ pub async fn forward(
         }
     };
     observation.headers_received = Some(Instant::now());
-    observation.served(
-        &guard.model.upstream,
-        &guard.model.upstream_model,
-        attempt,
-        fallback_response,
-    );
+    observation.served(&guard.model, attempt, fallback_response);
     let (mut parts, body) = response.into_parts();
     strip_response_headers(&mut parts.headers);
     let meter = Meter::select(&parts, stream, inject, include_usage.requested());

@@ -308,28 +308,32 @@ async fn dispatch(
             _ => error::json(StatusCode::NOT_FOUND, "not_found", "Not found"),
         };
     }
-    // Checked before authentication: without a snapshot there are no keys,
-    // and serving anything would mean an open routing table.
-    let Some(routing_table) = routing_table else {
-        return error::json(
+    let request = RequestCtx::new(observation.started);
+    // Version 0: nothing loaded yet.
+    observation.identified(&request.request_id, routing_table.map_or(0, |t| t.version));
+    let mut response = match routing_table {
+        Some(routing_table) => {
+            serve_api(
+                routing_table,
+                runtime,
+                client,
+                req,
+                observation,
+                endpoint,
+                request,
+                body_read_timeout,
+            )
+            .await
+        }
+        // Checked before authentication: without a snapshot there are no keys,
+        // and serving anything would mean an open routing table. For the same
+        // reason there is no usage event: the key is unidentified.
+        None => error::json(
             StatusCode::SERVICE_UNAVAILABLE,
             "not_ready",
             "Gateway has no config snapshot yet",
-        );
+        ),
     };
-    let request = RequestCtx::new(observation.started);
-    observation.identified(&request.request_id, routing_table.version);
-    let mut response = serve_api(
-        routing_table,
-        runtime,
-        client,
-        req,
-        observation,
-        endpoint,
-        request,
-        body_read_timeout,
-    )
-    .await;
     // Replaces whatever an upstream may have sent under this name.
     response
         .headers_mut()
