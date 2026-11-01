@@ -97,5 +97,6 @@ def settings(database_url: str) -> Settings:
     return Settings(
         database_url=database_url,
         background_enabled=False,
+        dev_mode=True,
         break_glass_password="test-bootstrap-token",
     )

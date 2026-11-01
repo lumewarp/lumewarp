@@ -41,6 +41,7 @@ async def test_current_user_and_pats(client, committed) -> None:
         "email": None,
         "display_name": "break-glass",
         "is_admin": True,
+        "authz_unavailable": False,
         "manages_grants": True,
         "teams": [],
     }
@@ -127,7 +128,7 @@ def test_bootstrap_reports_backend_grant_management(client, monkeypatch, manages
 
 
 @pytest.mark.parametrize("failed_relation", [Relation.MEMBER, Relation.ADMIN])
-async def test_current_user_team_listing_errors_are_503(
+async def test_current_user_team_listing_errors_keep_identity_available(
     client, committed, monkeypatch, failed_relation
 ) -> None:
     _, token = await user_with_token(committed)
@@ -143,8 +144,10 @@ async def test_current_user_team_listing_errors_are_503(
 
     monkeypatch.setattr(client.app.state, "authorizer", Authorizer(check, "external"))
     response = client.get("/api/v1/users/me", headers=auth(token))
-    assert response.status_code == 503, response.text
-    assert response.json()["error"]["code"] == "authz_unavailable"
+    assert response.status_code == 200, response.text
+    assert response.json()["authz_unavailable"] is True
+    assert response.json()["is_admin"] is False
+    assert response.json()["teams"] == []
 
 
 async def test_deactivation_suspends_non_revoked_user_keys_everywhere(client, committed) -> None:

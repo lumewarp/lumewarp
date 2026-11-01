@@ -54,7 +54,7 @@ async def user_with_token(
         is_active=active,
     )
     if group_admin:
-        token = await sessions.create_session(session, user.id, 3600, groups=("lumewarp-admins",))
+        token = await sessions.create_session(session, user.id, 3600, admin_group="lumewarp-admins")
         await session.flush()
         return user, "session:" + token
     new = generate_secret(SecretKind.PAT)

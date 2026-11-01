@@ -2,7 +2,6 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
 import { api, client } from "../api";
-import { clearToken } from "../auth";
 import { TextField } from "../components/Form";
 
 const SSO_ERRORS: Record<string, string> = {
@@ -37,7 +36,6 @@ export function Login() {
     if (!password) return setError("Password is required");
     setBusy(true);
     setError(undefined);
-    clearToken();
     try {
       const result = await client.POST("/api/v1/session/break-glass", { body: { password } });
       if (!result.response.ok) {
@@ -49,7 +47,6 @@ export function Login() {
       qc.clear();
       await navigate({ href: next });
     } catch (err) {
-      clearToken();
       setError(err instanceof Error ? err.message : "Sign-in failed");
     } finally {
       setBusy(false);
@@ -75,7 +72,6 @@ export function Login() {
             type="button"
             className="btn btn-primary"
             onClick={() => {
-              clearToken();
               window.location.assign(`/api/v1/session/oidc/login?next=${encodeURIComponent(next)}`);
             }}
           >

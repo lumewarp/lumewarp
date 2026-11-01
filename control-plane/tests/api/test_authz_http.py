@@ -174,7 +174,9 @@ async def test_unknown_and_unreadable_resources_are_both_404(client, committed, 
         "/users/me",
     ],
 )
-async def test_backend_error_is_503_not_a_deny(client, committed, monkeypatch, path) -> None:
+async def test_backend_error_preserves_identity_but_rejects_admin_actions(
+    client, committed, monkeypatch, path
+) -> None:
     _, token = await user_with_token(committed)
     await committed.commit()
 
@@ -183,8 +185,13 @@ async def test_backend_error_is_503_not_a_deny(client, committed, monkeypatch, p
 
     monkeypatch.setattr(client.app.state, "authorizer", Authorizer(error, "unavailable"))
     response = client.get("/api/v1" + path, headers=auth(token))
-    assert response.status_code == 503, response.text
-    assert response.json()["error"]["code"] == "authz_unavailable"
+    if path == "/users/me":
+        assert response.status_code == 200, response.text
+        assert response.json()["authz_unavailable"] is True
+        assert response.json()["is_admin"] is False
+    else:
+        assert response.status_code == 503, response.text
+        assert response.json()["error"]["code"] == "authz_unavailable"
     assert client.get("/api/v1" + path, headers=ADMIN_AUTH).status_code == 200
 
 

@@ -146,14 +146,23 @@ async def get_current_user(request: Request, authz: Authz, session: SessionDep) 
     user = await session.get(User, principal.user_id)
     if user is None:
         raise not_found("user not found")
+    unavailable = False
+    try:
+        is_admin = await authz.is_admin()
+        teams = await _my_teams(authz, session, user.id)
+    except AuthzUnavailable:
+        is_admin = False
+        teams = []
+        unavailable = True
     return MeOut(
         kind=principal.kind.value,
         user_id=user.id,
         email=user.email,
         display_name=user.display_name,
-        is_admin=await authz.is_admin(),
+        is_admin=is_admin,
+        authz_unavailable=unavailable,
         manages_grants=manages_grants,
-        teams=await _my_teams(authz, session, user.id),
+        teams=teams,
     )
 
 

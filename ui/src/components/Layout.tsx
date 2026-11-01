@@ -22,7 +22,7 @@ import {
 import { useState } from "react";
 
 import { api } from "../api";
-import { clearCsrfToken, clearToken, getToken } from "../auth";
+import { clearCsrfToken } from "../auth";
 import type { Me } from "../api";
 import { useCan, useMe } from "../hooks";
 import { cn } from "../lib/utils";
@@ -68,12 +68,11 @@ export function Layout() {
 
   const logout = async () => {
     try {
-      if (!getToken()) await api.logoutSession();
+      await api.logoutSession();
     } catch (error) {
       toast("error", error instanceof Error ? error.message : "Unable to sign out");
       return;
     }
-    clearToken();
     clearCsrfToken();
     qc.clear();
     void navigate({ to: "/login" });

@@ -16,6 +16,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from lumewarp_control_plane.app import create_app
+from lumewarp_control_plane.auth.break_glass import fingerprint
 from lumewarp_control_plane.auth.sessions import csrf_token
 from lumewarp_control_plane.models import Scope, UserSession
 from lumewarp_control_plane.security import PrincipalKind, hash_secret
@@ -53,6 +54,9 @@ async def api_scope(api_engine: AsyncEngine) -> str:
                 UserSession(
                     user_id=None,
                     kind=PrincipalKind.BREAK_GLASS.value,
+                    credential_fingerprint=fingerprint(
+                        Settings(break_glass_password=ADMIN_PASSWORD, dev_mode=True)
+                    ),
                     token_hash=hash_secret("test-admin-session"),
                     csrf_hash=hash_secret(csrf_token("test-admin-session")),
                     expires_at=datetime.now(UTC) + timedelta(days=1),
@@ -74,6 +78,7 @@ async def api_settings(api_database_url: str, api_scope: str, api_engine: AsyncE
         database_url=api_database_url,
         background_enabled=False,
         break_glass_password=ADMIN_PASSWORD,
+        dev_mode=True,
         admin_group="lumewarp-admins",
         session_cookie_secure=False,
         scope=api_scope,

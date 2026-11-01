@@ -30,6 +30,7 @@ def _serve(settings: Settings, args: argparse.Namespace) -> None:
         host=host,
         port=port,
         workers=1,
+        proxy_headers=False,
         timeout_graceful_shutdown=int(SHUTDOWN_GRACE_SECONDS) + 5,
     )
 

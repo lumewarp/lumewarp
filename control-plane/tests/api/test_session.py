@@ -50,6 +50,7 @@ def test_disabled_and_anonymous(client):
         "break_glass_enabled": True,
         "authenticated": False,
         "is_break_glass": False,
+        "authz_unavailable": False,
     }
     assert response.headers["cache-control"] == "no-store"
     assert client.get("/api/v1/session/oidc/login").status_code == 404
@@ -545,6 +546,7 @@ def test_invalid_bearer_takes_precedence_over_cookie(client, idp):
         "break_glass_enabled": True,
         "is_break_glass": False,
         "authenticated": False,
+        "authz_unavailable": False,
     }
     assert client.get("/api/v1/session").json()["authenticated"] is True
 
@@ -565,14 +567,11 @@ async def test_session_group_admin_uses_backend_with_local_error_fallback(
     monkeypatch.setattr(client.app.state, "authorizer", Authorizer(check, "external"))
     info = client.get("/api/v1/session", headers=auth(token))
     expected = decision is Decision.ALLOW
-    assert info.status_code == (503 if decision is Decision.ERROR else 200)
-    if decision is not Decision.ERROR:
-        assert info.json()["user"]["is_admin"] is expected
+    assert info.status_code == 200
+    assert info.json()["user"]["is_admin"] is expected
+    assert info.json()["authz_unavailable"] is (decision is Decision.ERROR)
     assert calls == [(str(user.id), Relation.MEMBER, Resource("group", "lumewarp-admins"))]
     me = client.get("/api/v1/users/me", headers=auth(token))
-    if decision is Decision.ERROR:
-        assert me.status_code == 503
-        assert me.json()["error"]["code"] == "authz_unavailable"
-    else:
-        assert me.status_code == 200
-        assert me.json()["is_admin"] is expected
+    assert me.status_code == 200
+    assert me.json()["is_admin"] is expected
+    assert me.json()["authz_unavailable"] is (decision is Decision.ERROR)
