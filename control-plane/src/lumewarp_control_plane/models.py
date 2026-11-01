@@ -35,11 +35,20 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    cast,
     func,
+    select,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
-from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, aggregate_order_by
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    column_property,
+    declared_attr,
+    mapped_column,
+    synonym,
+)
 
 from lumewarp_control_plane.ids import uuid7
 
@@ -91,7 +100,8 @@ class ModelAccess(enum.StrEnum):
 
     INHERIT: take the team's effective set unchanged (not allowed on teams).
     ALL: no restriction at this level (effective set = the team's; universal on a team).
-    LIST: exactly `allowed_models`, intersected with the parent; an empty list is deny-all.
+    LIST: exactly the `policy_grants` of this level, intersected with the parent; an empty
+    list is deny-all.
     Resolve INHERIT first; a key whose effective set is still universal gets
     allow_all_models (see compiler.compile_scope).
     """
@@ -142,12 +152,12 @@ class StreamUsageMode(enum.StrEnum):
     PASSTHROUGH = "passthrough"
 
 
-class RoutingStrategy(enum.StrEnum):
-    WEIGHTED = "weighted"
-    LEAST_IN_FLIGHT = "least_in_flight"
-    LOWEST_LATENCY = "lowest_latency"
-    VLLM_LOAD = "vllm_load"
-    CUSTOM = "custom"
+class CatalogKind(enum.StrEnum):
+    """What a public name refers to. Model, alias and router share one namespace."""
+
+    MODEL = "model"
+    ALIAS = "alias"
+    ROUTER = "router"
 
 
 class StickyBy(enum.StrEnum):
@@ -203,7 +213,8 @@ class PolicyMixin:
     otherwise): allowlist subset of the team's, limits <= the team's, budget <= the team's.
     Keys carry no policy of their own.
 
-    - Model access: see `ModelAccess`; `allowed_models` must be empty unless mode is LIST.
+    - Model access: see `ModelAccess`. The list lives in `policy_grants` (by name id, so a
+      rename keeps it); `allowed_models` is its read-only expansion to current names.
     - Rate limits: NULL = no limit at this level. Each set level becomes one shared
       `RateLimitScope` ("team:<id>", "member:<scope id>", "sa:<id>") in the snapshot.
     - Budget: monthly (UTC calendar) hard limit and soft (notify) threshold in nano-USD,
@@ -221,9 +232,6 @@ class PolicyMixin:
             server_default=default.value,
         )
 
-    allowed_models: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, default=list, server_default=text("'{}'")
-    )
     rpm_limit: Mapped[int | None] = mapped_column(Integer)
     tpm_limit: Mapped[int | None] = mapped_column(BigInteger)
     max_parallel: Mapped[int | None] = mapped_column(Integer)
@@ -233,9 +241,6 @@ class PolicyMixin:
     @staticmethod
     def policy_constraints() -> tuple[CheckConstraint, ...]:
         return (
-            CheckConstraint(
-                "model_access = 'list' OR cardinality(allowed_models) = 0", name="allowlist_mode"
-            ),
             CheckConstraint("rpm_limit IS NULL OR rpm_limit > 0", name="rpm_positive"),
             CheckConstraint("tpm_limit IS NULL OR tpm_limit > 0", name="tpm_positive"),
             CheckConstraint("max_parallel IS NULL OR max_parallel > 0", name="parallel_positive"),
@@ -571,12 +576,52 @@ class Upstream(TimestampMixin, Base):
     metrics_url: Mapped[str | None] = mapped_column(Text)
 
 
+class CatalogName(Base):
+    """A public name. Everything else refers to the id, so renaming touches only this row."""
+
+    __tablename__ = "catalog_names"
+    __table_args__ = (
+        # Target of the composite FKs that pin a row to the kind of its name.
+        UniqueConstraint("id", "kind"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    name: Mapped[str] = mapped_column(String(400), nullable=False, unique=True)
+    kind: Mapped[CatalogKind] = mapped_column(_enum(CatalogKind, "catalog_kind"), nullable=False)
+
+
+class CatalogNameHistory(Base):
+    """Names an id has given up. No FK: history outlives the item, and a name may be reused
+    by another item, so lookups go by `kind` and time.
+    """
+
+    __tablename__ = "catalog_name_history"
+    __table_args__ = (
+        PrimaryKeyConstraint("name_id", "old_name", "renamed_at"),
+        Index(None, "old_name", "kind"),
+    )
+
+    name_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    kind: Mapped[CatalogKind] = mapped_column(_enum(CatalogKind, "catalog_kind"), nullable=False)
+    old_name: Mapped[str] = mapped_column(String(400), nullable=False)
+    renamed_at: Mapped[datetime] = _now()
+
+
+def _name_fk() -> ForeignKeyConstraint:
+    return ForeignKeyConstraint(
+        ["name_id", "kind"], ["catalog_names.id", "catalog_names.kind"], ondelete="CASCADE"
+    )
+
+
 class Model(TimestampMixin, Base):
-    """A concrete model on one upstream. Price NULL = unknown (not free); both or neither."""
+    """One public name -> one model on one upstream. Price NULL = unknown (not free); both
+    or neither. Calling it directly is a single attempt; weights live on router members.
+    """
 
     __tablename__ = "models"
     __table_args__ = (
-        CheckConstraint("weight >= 0", name="weight_nonneg"),
+        _name_fk(),
+        CheckConstraint("kind = 'model'", name="kind_model"),
         CheckConstraint(
             "(price_input_nano_usd_per_mtok IS NULL) = (price_output_nano_usd_per_mtok IS NULL)",
             name="price_both_or_neither",
@@ -588,41 +633,62 @@ class Model(TimestampMixin, Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    name_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="model", server_default="model"
+    )
     upstream_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("upstreams.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     upstream_model: Mapped[str] = mapped_column(String(400), nullable=False)
-    weight: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     price_input_nano_usd_per_mtok: Mapped[int | None] = mapped_column(BigInteger)
     price_output_nano_usd_per_mtok: Mapped[int | None] = mapped_column(BigInteger)
 
+    id = synonym("name_id")
+
+
+class Alias(TimestampMixin, Base):
+    """Another name for a model or a router: one level, authorized on its own."""
+
+    __tablename__ = "aliases"
+    __table_args__ = (
+        _name_fk(),
+        ForeignKeyConstraint(
+            ["target_name_id", "target_kind"],
+            ["catalog_names.id", "catalog_names.kind"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("kind = 'alias'", name="kind_alias"),
+        CheckConstraint("target_kind IN ('model', 'router')", name="target_not_alias"),
+        Index(None, "target_name_id"),
+    )
+
+    name_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="alias", server_default="alias"
+    )
+    target_name_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    target_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    id = synonym("name_id")
+
 
 class Router(TimestampMixin, Base):
-    """Public model alias -> ordered models (`router_models`).
+    """A callable name that distributes requests over models (`router_members`).
 
-    Resilience (P2): an optional retry policy (scalar columns, `retry_enabled` = policy
-    present), ordered fallback routers (`router_fallbacks`) and an optional traffic split
-    (`router_splits` + `router_split_models`, sticky by header/team/key). With a
-    traffic split the gateway ignores the router's own model list.
+    Retry, fallback, traffic split and strategy exist only here. Resilience (P2): an
+    optional retry policy (scalar columns, `retry_enabled` = policy present), ordered
+    fallback models (`router_fallbacks`) and an optional traffic split (`router_splits` +
+    `router_split_members`, sticky by header/team/key). With a traffic split the members
+    are listed under each split.
     """
 
     __tablename__ = "routers"
     __table_args__ = (
-        CheckConstraint(
-            "(strategy = 'custom') = (custom_strategy IS NOT NULL)"
-            " AND (strategy = 'custom' OR strategy_params IS NULL)",
-            name="custom_strategy_shape",
-        ),
-        CheckConstraint(
-            "custom_strategy IS NULL OR custom_strategy ~ '^[a-z][a-z0-9_]{0,62}$'",
-            name="custom_strategy_name",
-        ),
-        CheckConstraint(
-            "strategy_params IS NULL OR jsonb_typeof(strategy_params) = 'object'",
-            name="strategy_params_object",
-        ),
+        _name_fk(),
+        CheckConstraint("kind = 'router'", name="kind_router"),
+        CheckConstraint("strategy ~ '^[a-z][a-z0-9_]{0,62}$'", name="strategy_name"),
+        CheckConstraint("jsonb_typeof(params) = 'object'", name="params_object"),
         CheckConstraint(
             "retry_max_attempts IS NULL OR retry_max_attempts BETWEEN 1 AND 5",
             name="retry_max_attempts_range",
@@ -642,16 +708,17 @@ class Router(TimestampMixin, Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    name: Mapped[str] = mapped_column(String(400), nullable=False, unique=True)
-    strategy: Mapped[RoutingStrategy] = mapped_column(
-        _enum(RoutingStrategy, "routing_strategy"),
-        nullable=False,
-        default=RoutingStrategy.WEIGHTED,
-        server_default=RoutingStrategy.WEIGHTED.value,
+    name_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="router", server_default="router"
     )
-    custom_strategy: Mapped[str | None] = mapped_column(String(63))
-    strategy_params: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    # A built-in name or a compiled-in strategy's name (see compiler/strategy.py).
+    strategy: Mapped[str] = mapped_column(
+        String(63), nullable=False, default="weighted", server_default="weighted"
+    )
+    params: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     # Retry policy (proto RetryPolicy). max_attempts NULL = gateway default (2, emitted
     # as 0); empty retry_on_status = gateway default (429, 502, 503, 504); timeout 0 =
     # no bound beyond each upstream's timeout_ms.
@@ -674,9 +741,40 @@ class Router(TimestampMixin, Base):
     # Request header hashed when sticky = header (lower-case HTTP token).
     sticky_header: Mapped[str | None] = mapped_column(String(200))
 
+    id = synonym("name_id")
 
-class RouterModel(Base):
-    __tablename__ = "router_models"
+
+class RouterMember(Base):
+    """A model of a router, with this router's weight and strategy-specific settings."""
+
+    __tablename__ = "router_members"
+    __table_args__ = (
+        PrimaryKeyConstraint("router_id", "model_id"),
+        UniqueConstraint("router_id", "position"),
+        Index(None, "model_id"),
+        CheckConstraint("weight >= 0", name="weight_nonneg"),
+        CheckConstraint("jsonb_typeof(params) = 'object'", name="params_object"),
+    )
+
+    router_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("routers.name_id", ondelete="CASCADE"), nullable=False
+    )
+    model_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("models.name_id", ondelete="RESTRICT"), nullable=False
+    )
+    weight: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    params: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class RouterFallback(Base):
+    """Ordered fallback models of a router. A model referenced as a fallback cannot be
+    deleted (RESTRICT; the API answers 409).
+    """
+
+    __tablename__ = "router_fallbacks"
     __table_args__ = (
         PrimaryKeyConstraint("router_id", "model_id"),
         UniqueConstraint("router_id", "position"),
@@ -684,32 +782,10 @@ class RouterModel(Base):
     )
 
     router_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("routers.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("routers.name_id", ondelete="CASCADE"), nullable=False
     )
     model_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("models.id", ondelete="RESTRICT"), nullable=False
-    )
-    position: Mapped[int] = mapped_column(Integer, nullable=False)
-
-
-class RouterFallback(Base):
-    """Ordered fallback routers of a router. A router referenced as a fallback cannot be
-    deleted (RESTRICT; the API answers 409). The API also rejects cycles.
-    """
-
-    __tablename__ = "router_fallbacks"
-    __table_args__ = (
-        PrimaryKeyConstraint("router_id", "fallback_router_id"),
-        UniqueConstraint("router_id", "position"),
-        Index(None, "fallback_router_id"),
-        CheckConstraint("router_id <> fallback_router_id", name="no_self"),
-    )
-
-    router_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("routers.id", ondelete="CASCADE"), nullable=False
-    )
-    fallback_router_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("routers.id", ondelete="RESTRICT"), nullable=False
+        ForeignKey("models.name_id", ondelete="RESTRICT"), nullable=False
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
 
@@ -727,28 +803,138 @@ class RouterSplit(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     router_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("routers.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("routers.name_id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(32), nullable=False)
     weight: Mapped[int] = mapped_column(Integer, nullable=False)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
-class RouterSplitModel(Base):
-    __tablename__ = "router_split_models"
+class RouterSplitMember(Base):
+    __tablename__ = "router_split_members"
     __table_args__ = (
         PrimaryKeyConstraint("split_id", "model_id"),
         UniqueConstraint("split_id", "position"),
         Index(None, "model_id"),
+        CheckConstraint("weight >= 0", name="weight_nonneg"),
+        CheckConstraint("jsonb_typeof(params) = 'object'", name="params_object"),
     )
 
     split_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("router_splits.id", ondelete="CASCADE"), nullable=False
     )
     model_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("models.id", ondelete="RESTRICT"), nullable=False
+        ForeignKey("models.name_id", ondelete="RESTRICT"), nullable=False
+    )
+    weight: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    params: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class PolicyGrant(Base):
+    """A name in the `allowed_models` of a team (user and service account NULL), a member
+    (user set) or a service account. By name id, so a rename keeps it.
+    """
+
+    __tablename__ = "policy_grants"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["team_id", "user_id"],
+            ["team_members.team_id", "team_members.user_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["service_account_id", "team_id"],
+            ["service_accounts.id", "service_accounts.team_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("user_id IS NULL OR service_account_id IS NULL", name="one_owner"),
+        Index(
+            "uq_policy_grants_team",
+            "team_id",
+            "name_id",
+            unique=True,
+            postgresql_where=text("user_id IS NULL AND service_account_id IS NULL"),
+        ),
+        Index(
+            "uq_policy_grants_member",
+            "team_id",
+            "user_id",
+            "name_id",
+            unique=True,
+            postgresql_where=text("user_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_policy_grants_service_account",
+            "service_account_id",
+            "name_id",
+            unique=True,
+            postgresql_where=text("service_account_id IS NOT NULL"),
+        ),
+        Index(None, "name_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    name_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("catalog_names.id", ondelete="CASCADE"), nullable=False
+    )
+    team_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column()
+    service_account_id: Mapped[uuid.UUID | None] = mapped_column()
+
+
+def _current_name(id_column) -> Any:
+    return (
+        select(CatalogName.name)
+        .where(CatalogName.id == id_column)
+        .correlate_except(CatalogName)
+        .scalar_subquery()
+    )
+
+
+# Read-only: a rename writes `catalog_names`.
+Model.name = column_property(_current_name(Model.name_id))
+Alias.name = column_property(_current_name(Alias.name_id))
+Alias.target_name = column_property(_current_name(Alias.target_name_id))
+Router.name = column_property(_current_name(Router.name_id))
+
+
+def _granted_names(*owner) -> Any:
+    """The owner's grants as current names, sorted (empty array, not NULL, when none)."""
+    return (
+        select(
+            func.coalesce(
+                func.array_agg(aggregate_order_by(cast(CatalogName.name, Text), CatalogName.name)),
+                cast(text("'{}'"), ARRAY(Text)),
+            )
+        )
+        .select_from(PolicyGrant)
+        .join(CatalogName, CatalogName.id == PolicyGrant.name_id)
+        .where(*owner)
+        .correlate_except(PolicyGrant, CatalogName)
+        .scalar_subquery()
+    )
+
+
+Team.allowed_models = column_property(
+    _granted_names(
+        PolicyGrant.team_id == Team.id,
+        PolicyGrant.user_id.is_(None),
+        PolicyGrant.service_account_id.is_(None),
+    )
+)
+TeamMember.allowed_models = column_property(
+    _granted_names(
+        PolicyGrant.team_id == TeamMember.team_id, PolicyGrant.user_id == TeamMember.user_id
+    )
+)
+ServiceAccount.allowed_models = column_property(
+    _granted_names(PolicyGrant.service_account_id == ServiceAccount.id)
+)
 
 
 # --------------------------------------------------------------------------- config stream
@@ -781,8 +967,8 @@ class ConfigVersion(Base):
     version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # Serialized lumewarp.config.v1.Snapshot.
     payload: Mapped[bytes | None] = mapped_column(LargeBinary)
-    # Source-only routing state, including IDs; NULL for pre-sidecar versions.
-    # Compacted together with payload. Policy and grants are never included.
+    # Catalog source rows at publish, including IDs (compiler/catalog_state.py). Compacted
+    # together with payload. Policy and grants are never included.
     catalog_state: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     # sha256(payload), kept after compaction.
     digest: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

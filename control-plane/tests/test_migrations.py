@@ -34,6 +34,17 @@ async def test_upgrade_downgrade_upgrade() -> None:
         async with engine.connect() as conn:
             assert await migrate.current_revision(conn) == migrate.head_revision()
 
+        # 0010 is irreversible: everything below it still goes down.
+        with pytest.raises(NotImplementedError, match="irreversible"):
+            await migrate.downgrade(engine, "0009")
+        async with engine.connect() as conn:
+            assert await migrate.current_revision(conn) == migrate.head_revision()
+        await drop_database(url)
+        url = await create_database()
+        await engine.dispose()
+        engine = create_async_engine(url)
+        await migrate.upgrade(engine, "0009")
+
         await migrate.downgrade(engine, "base")
         assert await _tables(engine) == {"alembic_version"}
         async with engine.connect() as conn:
@@ -78,14 +89,15 @@ async def test_enum_check_constraints_exist(engine) -> None:
         "ck_service_accounts_model_access",
         "ck_api_keys_owner_matches_kind",
         "ck_config_versions_compaction",
-        "ck_routers_routing_strategy",
+        "ck_routers_strategy_name",
+        "ck_catalog_names_catalog_kind",
+        "ck_aliases_target_not_alias",
         "ck_routers_sticky_by",
         "ck_routers_sticky_header_iff",
         "ck_routers_retry_shape",
         "ck_routers_retry_status_range",
         "ck_upstreams_health_check_bounds",
         "ck_upstreams_circuit_breaker_shape",
-        "ck_router_fallbacks_no_self",
         "ck_router_splits_name_charset",
     ):
         assert name in names
@@ -96,7 +108,7 @@ async def test_downgrade_0003_maps_vllm_load() -> None:
     url = await create_database()
     engine = create_async_engine(url)
     try:
-        await migrate.upgrade(engine)
+        await migrate.upgrade(engine, "0009")
         async with engine.begin() as conn:
             await conn.execute(
                 text(

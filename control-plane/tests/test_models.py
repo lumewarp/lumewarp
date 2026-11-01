@@ -132,9 +132,7 @@ async def test_team_cannot_inherit(session: AsyncSession) -> None:
 
 async def test_allowlist_modes(session: AsyncSession) -> None:
     # Explicit empty list = deny-all is representable and distinct from inherit/all.
-    t = Team(name="deny", model_access=ModelAccess.LIST, allowed_models=[])
-    session.add(t)
-    await session.flush()
+    t = await factories.make_team(session, model_access=ModelAccess.LIST)
     assert (t.model_access, t.allowed_models) == (ModelAccess.LIST, [])
     team = await factories.make_team(session)
     assert team.model_access is ModelAccess.ALL
@@ -142,8 +140,6 @@ async def test_allowlist_modes(session: AsyncSession) -> None:
     assert inherit.model_access is ModelAccess.INHERIT
     account = await factories.make_service_account(session, team)
     assert account.model_access is ModelAccess.INHERIT
-
-    await _fails(session, Team(name="bad", model_access=ModelAccess.ALL, allowed_models=["m"]))
 
 
 async def test_budget_and_limit_checks(session: AsyncSession) -> None:

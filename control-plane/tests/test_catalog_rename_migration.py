@@ -3,13 +3,11 @@
 import hashlib
 import uuid
 
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, create_async_engine
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from lumewarp_control_plane import migrate
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
-from lumewarp_control_plane.compiler.publish import _restore_routing
-from lumewarp_control_plane.models import Model, Router
 from tests.conftest import create_database, drop_database
 
 # Serialized with main's pre-rename snapshot.proto, not the renamed generated types.
@@ -34,7 +32,7 @@ async def _constraint_and_index_names(conn: AsyncConnection) -> tuple[set[str], 
     return constraints, indexes
 
 
-async def test_0006_rows_survive_rename_roundtrip_and_legacy_rollback():
+async def test_0006_rows_survive_rename_roundtrip():
     url = await create_database()
     engine = create_async_engine(url)
     ids = {name: uuid.uuid4() for name in ("upstream", "model", "router", "fallback", "split")}
@@ -155,12 +153,6 @@ async def test_0006_rows_survive_rename_roundtrip_and_legacy_rollback():
                 assert await conn.scalar(text("SELECT id FROM deployments")) == ids["model"]
                 assert await conn.scalar(text("SELECT count(*) FROM route_deployments")) == 2
 
-        await migrate.upgrade(engine)
-        async with AsyncSession(engine) as session, session.begin():
-            await _restore_routing(session, pb.Snapshot.FromString(LEGACY_SNAPSHOT))
-            assert await session.scalar(select(Model.id)) == ids["model"]
-            assert await session.scalar(select(Router.id)) == ids["router"]
-            assert (await session.scalars(select(Router.name))).all() == ["public"]
     finally:
         await engine.dispose()
         await drop_database(url)

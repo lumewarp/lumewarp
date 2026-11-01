@@ -38,7 +38,7 @@ async def test_populated_0008_upgrade_and_downgrade():
                 ),
                 {"payload": payload, "digest": digest, "size": len(payload)},
             )
-        await migrate.upgrade(engine)
+        await migrate.upgrade(engine, "0009")
         async with engine.connect() as conn:
             assert (
                 await conn.execute(
@@ -58,7 +58,7 @@ async def test_populated_0008_upgrade_and_downgrade():
             assert (
                 await conn.execute(text("SELECT payload, digest FROM config_versions"))
             ).one() == (payload, digest)
-        await migrate.upgrade(engine)
+        await migrate.upgrade(engine, "0009")
     finally:
         await engine.dispose()
         await drop_database(url)
