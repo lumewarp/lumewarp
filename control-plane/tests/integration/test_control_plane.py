@@ -158,7 +158,7 @@ async def test_end_to_end(cp: ControlPlane) -> None:
             "price_output_nano_usd_per_mtok": 2_000,
         },
     )
-    await cp.post("/routes", {"model": "llama", "deployment_ids": [dep["id"]]})
+    await cp.post("/routes", {"name": "llama", "deployment_ids": [dep["id"]]})
     team = await cp.post("/teams", {"name": "ml"})
     account = await cp.post(
         f"/teams/{team['id']}/service-accounts", {"name": "chat", "budget_nano_usd": 1_000}
@@ -184,7 +184,7 @@ async def test_end_to_end(cp: ControlPlane) -> None:
         first = await a.next_update()
         assert first.WhichOneof("update") == "full"
         await a.until(lambda s: a.key(k1["id"]) is not None and a.key(k2["id"]) is not None)
-        assert [r.model for r in a.snapshot.routes] == ["llama"]
+        assert [r.name for r in a.snapshot.routes] == ["llama"]
         assert a.key(k1["id"]).status == pb.KEY_STATUS_ACTIVE
         before_revoke = a.snapshot.version
 
@@ -213,9 +213,9 @@ async def test_end_to_end(cp: ControlPlane) -> None:
             started_at_unix_ms=now_ms - 100,
             key_id=k2["id"],
             team_id=team["id"],
-            model="llama",
+            requested="llama",
             deployment="llama-a",
-            route="chat_completions",
+            endpoint="chat_completions",
             status=200,
             prompt_tokens=1_000_000,
             completion_tokens=500_000,

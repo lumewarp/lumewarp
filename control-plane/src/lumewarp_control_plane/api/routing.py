@@ -1,4 +1,4 @@
-"""Routing: upstreams, deployments and public model routes.
+"""Routing: upstreams, deployments and public name routes.
 
 Route validation mirrors the gateway (snapshot.rs::validate / validate_split and
 router.rs::Router::compile) so a write the API accepts never makes the gateway NACK, plus
@@ -112,7 +112,7 @@ def _apply_breaker(row: Upstream, breaker: CircuitBreakerIn | None) -> None:
 class RouteSpec:
     """The full desired state of a route (create body, or stored state + PATCH)."""
 
-    model: str
+    name: str
     strategy: RoutingStrategy
     deployment_ids: list[uuid.UUID]
     custom_strategy: str | None = None
@@ -127,7 +127,7 @@ class RouteSpec:
 async def _load_spec(session: AsyncSession, row: Route) -> RouteSpec:
     out = (await _routes_out(session, [row]))[0]
     return RouteSpec(
-        model=row.model,
+        name=row.name,
         strategy=out.strategy,
         custom_strategy=out.custom_strategy,
         strategy_params=out.strategy_params,
@@ -217,7 +217,7 @@ async def _validate_spec(
         found = dict(
             (
                 await session.execute(
-                    select(Route.id, Route.model).where(Route.id.in_(spec.fallback_route_ids))
+                    select(Route.id, Route.name).where(Route.id.in_(spec.fallback_route_ids))
                 )
             ).all()
         )
@@ -227,16 +227,16 @@ async def _validate_spec(
         if route_id is not None:
             cycle = await _fallback_cycle(session, route_id, spec.fallback_route_ids)
             if cycle is not None:
-                names = [spec.model]
+                names = [spec.name]
                 for node in cycle:
-                    names.append(found.get(node) or await _model_of(session, node))
+                    names.append(found.get(node) or await _name_of(session, node))
                 raise validation_error(
                     "fallback_route_ids", f"fallbacks form a cycle: {' -> '.join(names)}"
                 )
 
 
-async def _model_of(session: AsyncSession, route_id: uuid.UUID) -> str:
-    return await session.scalar(select(Route.model).where(Route.id == route_id)) or str(route_id)
+async def _name_of(session: AsyncSession, route_id: uuid.UUID) -> str:
+    return await session.scalar(select(Route.name).where(Route.id == route_id)) or str(route_id)
 
 
 async def _write_children(
@@ -273,7 +273,7 @@ async def _write_children(
 
 
 def _apply_scalars(row: Route, spec: RouteSpec) -> None:
-    row.model = spec.model
+    row.name = spec.name
     row.strategy = spec.strategy
     row.custom_strategy = spec.custom_strategy
     row.strategy_params = spec.strategy_params if spec.strategy is RoutingStrategy.CUSTOM else None
@@ -327,7 +327,7 @@ async def _routes_out(session: AsyncSession, rows: list[Route]) -> list[RouteOut
     return [
         RouteOut(
             id=row.id,
-            model=row.model,
+            name=row.name,
             strategy=row.strategy,
             custom_strategy=row.custom_strategy,
             strategy_params=row.strategy_params or {},
@@ -616,7 +616,7 @@ async def update_deployment(
         await session.flush()
         if "weight" in body.model_fields_set:
             starved = await session.scalar(
-                select(Route.model)
+                select(Route.name)
                 .join(RouteDeployment, RouteDeployment.route_id == Route.id)
                 .join(Deployment, Deployment.id == RouteDeployment.deployment_id)
                 .where(
@@ -627,13 +627,13 @@ async def update_deployment(
                         )
                     ),
                 )
-                .group_by(Route.id, Route.model)
+                .group_by(Route.id, Route.name)
                 .having(func.coalesce(func.sum(Deployment.weight), 0) == 0)
                 .limit(1)
             )
             if starved is None:
                 starved = await session.scalar(
-                    select(Route.model)
+                    select(Route.name)
                     .join(RouteSplit, RouteSplit.route_id == Route.id)
                     .join(RouteSplitDeployment, RouteSplitDeployment.split_id == RouteSplit.id)
                     .join(Deployment, Deployment.id == RouteSplitDeployment.deployment_id)
@@ -645,7 +645,7 @@ async def update_deployment(
                             )
                         ),
                     )
-                    .group_by(RouteSplit.id, Route.model)
+                    .group_by(RouteSplit.id, Route.name)
                     .having(func.coalesce(func.sum(Deployment.weight), 0) == 0)
                     .limit(1)
                 )
@@ -737,7 +737,7 @@ async def create_route(
 ) -> RouteOut:
     await authz.require(Action.ROUTING_MANAGE)
     spec = RouteSpec(
-        model=body.model,
+        name=body.name,
         strategy=body.strategy,
         custom_strategy=body.custom_strategy,
         strategy_params=body.strategy_params,
@@ -753,7 +753,7 @@ async def create_route(
         await lock_scope(session, settings)
         # A new route has no incoming fallbacks, so it cannot close a cycle.
         await _validate_spec(session, spec, None)
-        row = Route(model=spec.model)
+        row = Route(name=spec.name)
         _apply_scalars(row, spec)
         session.add(row)
         await session.flush()
@@ -772,11 +772,11 @@ async def create_route(
             resource_id=row.id,
             principal=authz.principal,
             details={
-                "model": row.model,
+                "name": row.name,
                 "deployments": [str(i) for i in spec.deployment_ids],
                 "settings": body.model_dump(
                     mode="json",
-                    exclude={"model", "deployment_ids", "strategy_params"},
+                    exclude={"name", "deployment_ids", "strategy_params"},
                     exclude_defaults=True,
                 ),
             },
@@ -805,7 +805,7 @@ async def update_route(
     await authz.require(Action.ROUTING_MANAGE)
     _non_null(
         body,
-        "model",
+        "name",
         "strategy",
         "deployment_ids",
         "fallback_route_ids",
@@ -842,7 +842,7 @@ async def update_route(
             resource_id=row.id,
             principal=authz.principal,
             details={
-                "model": row.model,
+                "name": row.name,
                 "changes": body.model_dump(
                     exclude_unset=True, mode="json", exclude={"strategy_params"}
                 ),
@@ -871,10 +871,10 @@ async def delete_route(
         if row is None:
             raise not_found("route not found")
         user = await session.scalar(
-            select(Route.model)
+            select(Route.name)
             .join(RouteFallback, RouteFallback.route_id == Route.id)
             .where(RouteFallback.fallback_route_id == row.id)
-            .order_by(Route.model)
+            .order_by(Route.name)
             .limit(1)
         )
         if user is not None:
@@ -886,7 +886,7 @@ async def delete_route(
             resource_type="route",
             resource_id=row.id,
             principal=authz.principal,
-            details={"model": row.model},
+            details={"name": row.name},
         )
         await enqueue_recompile(session, settings, "api.route.delete")
     return Response(status_code=status.HTTP_204_NO_CONTENT)

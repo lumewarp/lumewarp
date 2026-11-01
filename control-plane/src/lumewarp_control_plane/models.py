@@ -643,7 +643,7 @@ class Route(TimestampMixin, Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    model: Mapped[str] = mapped_column(String(400), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(400), nullable=False, unique=True)
     strategy: Mapped[RoutingStrategy] = mapped_column(
         _enum(RoutingStrategy, "routing_strategy"),
         nullable=False,
@@ -912,9 +912,9 @@ class UsageEvent(Base):
         _enum(KeyOwnerKind, "key_owner_kind"), nullable=False
     )
     owner_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
-    model: Mapped[str] = mapped_column(String(400), nullable=False)
+    requested: Mapped[str] = mapped_column(String(400), nullable=False)
     deployment: Mapped[str] = mapped_column(String(200), nullable=False)
-    route: Mapped[str] = mapped_column(String(64), nullable=False)
+    endpoint: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     stream: Mapped[bool] = mapped_column(Boolean, nullable=False)
     prompt_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)

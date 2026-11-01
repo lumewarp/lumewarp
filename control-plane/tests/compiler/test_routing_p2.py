@@ -34,8 +34,8 @@ async def compile_(factory):
         return await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
 
 
-def route_of(snap: pb.Snapshot, model: str) -> pb.ModelRoute:
-    return next(r for r in snap.routes if r.model == model)
+def route_of(snap: pb.Snapshot, name: str) -> pb.ModelRoute:
+    return next(r for r in snap.routes if r.name == name)
 
 
 async def _dep(s, name: str) -> Deployment:
@@ -192,7 +192,7 @@ async def test_fallback_to_left_out_route_is_dropped(factory) -> None:
         empty = await add_route(s, "empty", [])
         s.add(RouteFallback(route_id=main.id, fallback_route_id=empty.id, position=0))
     c = await compile_(factory)
-    assert [r.model for r in c.snapshot.routes] == ["main"]
+    assert [r.name for r in c.snapshot.routes] == ["main"]
     assert list(c.snapshot.routes[0].fallbacks) == []
     assert list(c.snapshot.required_capabilities) == []
     assert any("fallback 'empty'" in w for w in c.warnings)
@@ -245,7 +245,7 @@ async def test_split_without_valid_deployments_leaves_route_out(factory) -> None
         broken = await s.scalar(select(Upstream).where(Upstream.name == "broken"))
         broken.base_url = "ftp://broken"
     c = await compile_(factory)
-    assert [r.model for r in c.snapshot.routes] == []
+    assert [r.name for r in c.snapshot.routes] == []
     assert any("split 'two' has no deployments" in w for w in c.warnings)
 
 
@@ -258,7 +258,7 @@ async def test_weighted_split_with_zero_weight_leaves_route_out(factory) -> None
         await _split(s, route, "one", 1, ["a"], 0)
         await _split(s, route, "two", 1, ["z"], 1)
     c = await compile_(factory)
-    assert [r.model for r in c.snapshot.routes] == ["zero"]
+    assert [r.name for r in c.snapshot.routes] == ["zero"]
     assert any("zero total weight" in w for w in c.warnings)
 
 
@@ -289,8 +289,8 @@ def _base() -> pb.Snapshot:
             pb.Deployment(name="b", upstream="u", upstream_model="m", weight=1),
         ],
         routes=[
-            pb.ModelRoute(model="r", deployments=["a"], strategy=pb.ROUTING_STRATEGY_WEIGHTED),
-            pb.ModelRoute(model="s", deployments=["b"], strategy=pb.ROUTING_STRATEGY_WEIGHTED),
+            pb.ModelRoute(name="r", deployments=["a"], strategy=pb.ROUTING_STRATEGY_WEIGHTED),
+            pb.ModelRoute(name="s", deployments=["b"], strategy=pb.ROUTING_STRATEGY_WEIGHTED),
         ],
     )
 

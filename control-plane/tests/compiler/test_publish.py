@@ -218,7 +218,7 @@ async def test_rollback_restores_routing_not_security(factory) -> None:
     async with factory() as s, s.begin():
         t2, u2 = await add_hierarchy(s, name="later")
         k2 = await add_key(s, t2, u2)
-        assert await s.scalar(select(Route.model).where(Route.model == "qwen")) is None
+        assert await s.scalar(select(Route.name).where(Route.name == "qwen")) is None
     await touch(factory)
     assert await publish(factory) == 4
     s4 = await load_version(factory, 4)
@@ -272,7 +272,7 @@ async def test_diff_roundtrip_over_published_versions(factory) -> None:
     assert (d.base_version, d.version, d.created_at_unix_ms) == (1, 2, b.created_at_unix_ms)
     assert list(d.remove_api_keys) == [str(k1.id)]
     assert {k.key_id for k in d.upsert_api_keys} >= {str(k2.id)}
-    assert [r.model for r in d.upsert_routes] == ["qwen"]
+    assert [r.name for r in d.upsert_routes] == ["qwen"]
     assert apply_delta(a, d) == b
     # Reverse direction and identity.
     assert apply_delta(b, diff(b, a)) == a
@@ -288,7 +288,7 @@ def test_diff_unit_roundtrip() -> None:
         scope="s",
         upstreams=[pb.Upstream(name="u1"), pb.Upstream(name="u2")],
         deployments=[pb.Deployment(name="d1", upstream="u1", weight=1)],
-        routes=[pb.ModelRoute(model="m1", deployments=["d1"])],
+        routes=[pb.ModelRoute(name="m1", deployments=["d1"])],
         teams=[pb.Team(id="t1", name="a")],
         api_keys=[pb.ApiKey(key_id="k1"), pb.ApiKey(key_id="k2", status=1)],
         required_capabilities=["x"],

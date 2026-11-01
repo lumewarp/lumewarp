@@ -298,8 +298,8 @@ async def _restore_routing(session: AsyncSession, old: pb.Snapshot) -> None:
 
     upstreams = {u.name: u for u in await session.scalars(select(Upstream))}
     deployments = {d.name: d for d in await session.scalars(select(Deployment))}
-    routes = {r.model: r for r in await session.scalars(select(Route))}
-    want_routes = {r.model for r in old.routes}
+    routes = {r.name: r for r in await session.scalars(select(Route))}
+    want_routes = {r.name for r in old.routes}
     want_deployments = {d.name for d in old.deployments}
     want_upstreams = {u.name for u in old.upstreams}
 
@@ -307,8 +307,8 @@ async def _restore_routing(session: AsyncSession, old: pb.Snapshot) -> None:
     # Deleting splits cascades to their deployment memberships.
     for table in (RouteFallback, RouteDeployment, RouteSplit):
         await session.execute(delete(table))
-    for model, row in routes.items():
-        if model not in want_routes:
+    for name, row in routes.items():
+        if name not in want_routes:
             await session.delete(row)
     await session.flush()
 
@@ -357,7 +357,7 @@ async def _restore_routing(session: AsyncSession, old: pb.Snapshot) -> None:
             await session.delete(row)
     # Create every route before inserting fallbacks, whose targets may come later.
     for r in old.routes:
-        row = routes.get(r.model) or Route(model=r.model)
+        row = routes.get(r.name) or Route(name=r.name)
         row.strategy = strategy[r.strategy]
         row.custom_strategy = r.custom_strategy or None
         row.strategy_params = (
@@ -371,11 +371,11 @@ async def _restore_routing(session: AsyncSession, old: pb.Snapshot) -> None:
         row.sticky = sticky[r.sticky]
         row.sticky_header = r.sticky_header or None
         session.add(row)
-        routes[r.model] = row
+        routes[r.name] = row
     await session.flush()
 
     for r in old.routes:
-        row = routes[r.model]
+        row = routes[r.name]
         for position, name in enumerate(r.deployments):
             session.add(
                 RouteDeployment(
@@ -384,11 +384,11 @@ async def _restore_routing(session: AsyncSession, old: pb.Snapshot) -> None:
                     position=position,
                 )
             )
-        for position, model in enumerate(r.fallbacks):
+        for position, name in enumerate(r.fallbacks):
             session.add(
                 RouteFallback(
                     route_id=row.id,
-                    fallback_route_id=routes[model].id,
+                    fallback_route_id=routes[name].id,
                     position=position,
                 )
             )

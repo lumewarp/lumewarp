@@ -52,7 +52,7 @@ def test_weighted_route_needs_positive_total_weight(client) -> None:
     zero = _deployment(client, weight=0)
     live = _deployment(client, weight=2, upstream_id=zero["upstream_id"])
 
-    bad = _post(client, "/routes", model=f"m-{suffix()}", deployment_ids=[zero["id"]])
+    bad = _post(client, "/routes", name=f"m-{suffix()}", deployment_ids=[zero["id"]])
     assert bad.status_code == 422
     assert "deployment_ids" in bad.json()["error"]["message"]
 
@@ -60,7 +60,7 @@ def test_weighted_route_needs_positive_total_weight(client) -> None:
     ok = _post(
         client,
         "/routes",
-        model=f"m-{suffix()}",
+        name=f"m-{suffix()}",
         strategy="least_in_flight",
         deployment_ids=[zero["id"]],
     )
@@ -77,7 +77,7 @@ def test_weighted_route_needs_positive_total_weight(client) -> None:
 def test_deployment_weight_update_cannot_starve_weighted_route(client) -> None:
     dep = _deployment(client, weight=1)
     spare = _deployment(client, weight=1, upstream_id=dep["upstream_id"])
-    route = _post(client, "/routes", model=f"m-{suffix()}", deployment_ids=[dep["id"]]).json()
+    route = _post(client, "/routes", name=f"m-{suffix()}", deployment_ids=[dep["id"]]).json()
 
     resp = _patch(client, f"/deployments/{dep['id']}", weight=0)
     assert resp.status_code == 422
@@ -172,7 +172,7 @@ def test_list_routes_returns_ordered_deployments_for_every_route(client) -> None
     expected = {}
     for index in range(4):
         order = [d["id"] for d in deployments[index % 3 :] + deployments[: index % 3]]
-        route = _post(client, "/routes", model=f"m-{suffix()}", deployment_ids=order)
+        route = _post(client, "/routes", name=f"m-{suffix()}", deployment_ids=order)
         assert route.status_code == 201
         expected[route.json()["id"]] = order
     items = client.get(f"{API}/routes?limit=500", headers=ADMIN_AUTH).json()["items"]
@@ -205,11 +205,11 @@ def test_api_key_ref_is_ascii_only(client) -> None:
 
 def test_names_and_aliases_are_clean(client) -> None:
     dep = _deployment(client)
-    resp = _post(client, "/routes", model="  spaced alias\n", deployment_ids=[dep["id"]])
+    resp = _post(client, "/routes", name="  spaced alias\n", deployment_ids=[dep["id"]])
     assert resp.status_code == 422
-    resp = _post(client, "/routes", model="  padded  ", deployment_ids=[dep["id"]])
+    resp = _post(client, "/routes", name="  padded  ", deployment_ids=[dep["id"]])
     assert resp.status_code == 201
-    assert resp.json()["model"] == "padded"
+    assert resp.json()["name"] == "padded"
 
     assert _post(client, "/teams", name="   ").status_code == 422
     team = _post(client, "/teams", name=f"team-{suffix()}").json()

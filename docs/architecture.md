@@ -125,21 +125,21 @@ gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control 
 
 | 指標 | 標籤 | 用途 |
 | --- | --- | --- |
-| `lumewarp_requests_total` | model, route, deployment, team, status | 流量與錯誤率 |
-| `lumewarp_request_duration_seconds` | model, route, deployment | 端到端延遲 |
-| `lumewarp_gateway_overhead_seconds` | route | gateway 自身額外延遲 |
-| `lumewarp_ttft_seconds`、`lumewarp_tpot_seconds` | model, deployment | 串流延遲 |
-| `lumewarp_tokens_total` | model, team, direction | token 用量 |
+| `lumewarp_requests_total` | requested, endpoint, deployment, team, status | 流量與錯誤率 |
+| `lumewarp_request_duration_seconds` | requested, endpoint, deployment | 端到端延遲 |
+| `lumewarp_gateway_overhead_seconds` | endpoint | gateway 自身額外延遲 |
+| `lumewarp_ttft_seconds`、`lumewarp_tpot_seconds` | requested, deployment | 串流延遲 |
+| `lumewarp_tokens_total` | requested, team, direction | token 用量 |
 | `lumewarp_spend_total` | team | 花費 |
 | `lumewarp_upstream_circuit_state` | deployment | 熔斷與健康 |
-| `lumewarp_upstream_attempts_total` | model, deployment, outcome | 每次上游嘗試；success / retryable_status / connect_error / timeout / circuit_open / non_retryable |
-| `lumewarp_fallbacks_total` | model, fallback_model | 切換至備援路由 |
-| `lumewarp_retries_budget_exhausted_total` | model | 全域重試額度耗盡 |
+| `lumewarp_upstream_attempts_total` | requested, deployment, outcome | 每次上游嘗試；success / retryable_status / connect_error / timeout / circuit_open / non_retryable |
+| `lumewarp_fallbacks_total` | router, fallback_model | 切換至備援路由 |
+| `lumewarp_retries_budget_exhausted_total` | router | 全域重試額度耗盡 |
 | `lumewarp_upstream_healthy` | upstream | 主動健康檢查狀態（1 正常、0 異常）；探測不計入請求與用量 |
 | `lumewarp_vllm_queue_depth`、`lumewarp_vllm_kv_cache_usage` | deployment | vLLM 負載（每秒背景抓取；`vllm_load` 路由使用） |
 | `lumewarp_vllm_scrape_failures_total` | upstream | vLLM metrics 抓取失敗（失敗即退回 in-flight 比較） |
 | `lumewarp_upstream_latency_ewma_seconds` | deployment | `lowest_latency` 使用的回應標頭時間 EWMA（於 `/metrics` 抓取時計算） |
-| `lumewarp_split_requests_total` | model, split | 依 traffic split 分配的請求數（canary 比例） |
+| `lumewarp_split_requests_total` | router, split | 依 traffic split 分配的請求數（canary 比例） |
 | `lumewarp_mcp_tool_calls_total` | server, tool, team, status | MCP 使用 |
 | `lumewarp_config_version`、`lumewarp_config_apply_failures_total` | gateway | 設定同步 |
 | `lumewarp_cp_compile_duration_seconds`、`lumewarp_cp_compile_failures_total` | — | 設定編譯（CP） |

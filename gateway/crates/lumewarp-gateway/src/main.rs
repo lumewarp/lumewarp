@@ -112,8 +112,9 @@ fn standalone(
         std::fs::read_to_string(path).with_context(|| format!("loading {}", path.display()))?;
     let (settings, snapshot) = Config::parse(&yaml)?;
     let runtime = runtime::Runtime::new();
-    let router = router::Router::compile(&snapshot, AuthMode::standalone(&snapshot), &runtime)
-        .context("compiling router snapshot")?;
+    let router =
+        router::RoutingTable::compile(&snapshot, AuthMode::standalone(&snapshot), &runtime)
+            .context("compiling router snapshot")?;
     runtime
         .metrics
         .set_yaml_hash(&hex::encode(Sha256::digest(yaml.as_bytes()))[..12]);

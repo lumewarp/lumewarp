@@ -461,7 +461,7 @@ fn snapshot(upstream: SocketAddr) -> Snapshot {
         price,
     };
     let route = |model: &str, deployment: &str| ModelRoute {
-        model: model.into(),
+        name: model.into(),
         deployments: vec![deployment.into()],
         strategy: 1,
         ..Default::default()
@@ -671,13 +671,13 @@ async fn retried_request_reports_only_final_deployment_usage() {
     upstream.received().await;
     upstream.received().await;
     let event = cp.event().await;
-    assert_eq!(event.model, "public");
+    assert_eq!(event.requested, "public");
     assert_eq!((event.prompt_tokens, event.completion_tokens), (5, 3));
     assert!(["d", "second"].contains(&event.deployment.as_str()));
     let metrics = gateway.metrics().await;
     assert_eq!(metrics.sum("lumewarp_usage_capture_total", &[]), 1.);
     assert_eq!(
-        metrics.sum("lumewarp_requests_total", &[("model", "public")]),
+        metrics.sum("lumewarp_requests_total", &[("requested", "public")]),
         1.
     );
     assert_eq!(
@@ -761,9 +761,9 @@ async fn injected_usage_is_stripped_from_the_stream_and_reported() {
     );
     assert_eq!(
         (
-            event.model.as_str(),
+            event.requested.as_str(),
             event.deployment.as_str(),
-            event.route.as_str()
+            event.endpoint.as_str()
         ),
         ("public", "d", "chat_completions")
     );
@@ -811,7 +811,7 @@ async fn injected_usage_is_stripped_from_the_stream_and_reported() {
         metrics.value(
             "lumewarp_tokens_total",
             &[
-                ("model", "public"),
+                ("requested", "public"),
                 ("team", "t1"),
                 ("direction", direction),
             ],
@@ -976,7 +976,7 @@ async fn non_stream_and_embeddings_usage() {
         (
             event.prompt_tokens,
             event.completion_tokens,
-            event.route.as_str()
+            event.endpoint.as_str()
         ),
         (8, 0, "embeddings")
     );
@@ -1034,7 +1034,7 @@ async fn keyed_rejections_are_reported_without_spam() {
     assert_eq!(
         (
             event.status,
-            event.model.as_str(),
+            event.requested.as_str(),
             event.deployment.as_str()
         ),
         (403, "secret", "")
@@ -1044,7 +1044,7 @@ async fn keyed_rejections_are_reported_without_spam() {
         .post("/v1/chat/completions", KEY, r#"{"model":"client-made-up"}"#)
         .await;
     assert_eq!(response.status(), 403);
-    assert_eq!(cp.event().await.model, "unknown");
+    assert_eq!(cp.event().await.requested, "unknown");
 
     // 429: the second request in the minute.
     upstream.respond(200, "application/json", &[CHAT_JSON]);
@@ -1143,7 +1143,7 @@ async fn client_abort_before_upstream_headers_is_reported_once() {
     assert_eq!(
         (
             event.status,
-            event.model.as_str(),
+            event.requested.as_str(),
             event.deployment.as_str()
         ),
         (499, "public", "d")

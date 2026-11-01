@@ -599,7 +599,7 @@ function TeamUsage({ team }: { team: Team }) {
             options={[
               { value: "owner", label: "Owner" },
               { value: "key", label: "Key" },
-              { value: "day,model", label: "Day × model" },
+              { value: "day,requested", label: "Day × requested" },
             ]}
           />
         </div>
@@ -609,11 +609,11 @@ function TeamUsage({ team }: { team: Team }) {
         loading={usage.isPending || members.isPending || accounts.isPending}
         error={usage.error ?? members.error ?? accounts.error}
         onRetry={() => void usage.refetch()}
-        rowKey={(row) => [row.date, row.model, row.owner_kind, row.owner_id, row.key_id].join("|")}
+        rowKey={(row) => [row.date, row.requested, row.owner_kind, row.owner_id, row.key_id].join("|")}
         empty="No usage for this team."
         columns={[
           { key: "date", header: "Date", cell: (row) => row.date ?? "—" },
-          { key: "model", header: "Model", cell: (row) => row.model ?? "—" },
+          { key: "requested", header: "Requested", cell: (row) => row.requested ?? "—" },
           { key: "owner", header: "Owner", cell: (row) => ownerName(row.owner_kind, row.owner_id) },
           { key: "key", header: "Key", cell: (row) => row.key_id?.slice(0, 8) ?? "—" },
           { key: "requests", header: "Requests", align: "right", cell: (row) => row.requests.toLocaleString() },

@@ -18,7 +18,7 @@ use crate::{
     error,
     proxy::ProxyBody,
     ratelimit::clock,
-    router::{KeyContext, Router},
+    router::{KeyContext, RoutingTable},
 };
 
 /// Who is calling. Passed by value into the proxy (request extensions are
@@ -124,7 +124,7 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 
 /// One sha256 and one map lookup; no allocation besides the `Arc` clone.
 /// Expiry uses the coarse clock (an atomic load, at most a few ms stale).
-pub fn authenticate(router: &Router, headers: &HeaderMap) -> Result<Caller, AuthRejection> {
+pub fn authenticate(router: &RoutingTable, headers: &HeaderMap) -> Result<Caller, AuthRejection> {
     if router.auth_mode == AuthMode::Open {
         return Ok(Caller::Anonymous);
     }
@@ -178,8 +178,8 @@ mod tests {
         headers
     }
 
-    fn router(snapshot: &pb::Snapshot, mode: AuthMode) -> Router {
-        Router::compile(snapshot, mode, &Runtime::new()).unwrap()
+    fn router(snapshot: &pb::Snapshot, mode: AuthMode) -> RoutingTable {
+        RoutingTable::compile(snapshot, mode, &Runtime::new()).unwrap()
     }
 
     #[test]

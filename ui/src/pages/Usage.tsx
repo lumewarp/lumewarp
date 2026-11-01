@@ -8,9 +8,9 @@ import { useNames, useTeamDirectory, useTeams } from "../hooks";
 
 const n = (x: number) => x.toLocaleString();
 const GROUPS = [
-  { value: "day,model", label: "Day × model" },
+  { value: "day,requested", label: "Day × requested" },
   { value: "day", label: "Day" },
-  { value: "model", label: "Model" },
+  { value: "requested", label: "Model" },
   { value: "team", label: "Team" },
   { value: "owner", label: "Owner" },
   { value: "key", label: "API key" },
@@ -35,7 +35,7 @@ export function Stat({ label, value }: { label: string; value: string }) {
 export function Usage() {
   const [from, setFrom] = useState(isoDay(daysAgo(29)));
   const [to, setTo] = useState(isoDay(today));
-  const [groupBy, setGroupBy] = useState("day,model");
+  const [groupBy, setGroupBy] = useState("day,requested");
   const [teamId, setTeamId] = useState("");
   const teams = useTeams();
   const directory = useTeamDirectory(teams.data);
@@ -75,7 +75,7 @@ export function Usage() {
   };
   const dimCols: Record<string, Column<Row>> = {
     day: { key: "day", header: "Date", sort: (a, b) => (a.date ?? "").localeCompare(b.date ?? ""), cell: (row) => row.date ?? "—" },
-    model: { key: "model", header: "Model", sort: (a, b) => (a.model ?? "").localeCompare(b.model ?? ""), cell: (row) => row.model ?? "—" },
+    requested: { key: "requested", header: "Model", sort: (a, b) => (a.requested ?? "").localeCompare(b.requested ?? ""), cell: (row) => row.requested ?? "—" },
     team: { key: "team", header: "Team", cell: (row) => teamName(row.team_id) },
     owner: { key: "owner", header: "Owner", cell: (row) => ownerLabel(row.owner_kind, row.owner_id) },
     key: { key: "key", header: "API key", cell: (row) => row.key_id?.slice(0, 8) ?? "—" },
@@ -101,7 +101,7 @@ export function Usage() {
         loading={query.isPending || teams.isPending || directory.isPending}
         error={query.error ?? teams.error ?? directory.error}
         onRetry={() => void query.refetch()}
-        rowKey={(row) => [row.date, row.model, row.team_id, row.owner_kind, row.owner_id, row.key_id].join("|")}
+        rowKey={(row) => [row.date, row.requested, row.team_id, row.owner_kind, row.owner_id, row.key_id].join("|")}
         empty="No usage in this period."
         columns={[
           ...dims.map((dimension) => dimCols[dimension]),

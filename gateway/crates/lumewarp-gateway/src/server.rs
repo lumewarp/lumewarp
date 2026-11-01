@@ -17,9 +17,9 @@ use tracing::Instrument;
 
 use crate::{
     auth, error,
-    metrics::{self, HandleKey, Observation, ROUTES},
+    metrics::{self, HandleKey, Observation, API_ENDPOINTS},
     proxy::{self, full_body, ProxyBody, UpstreamClient},
-    router::{KeyContext, Router},
+    router::{KeyContext, RoutingTable},
     runtime::Runtime,
     telemetry,
     usage::{RequestCtx, UsageEvent},
@@ -29,7 +29,7 @@ use crate::{
 /// plane cold boot without an on-disk snapshot). The config stream stores
 /// into it; every request loads it exactly once, so a request in progress
 /// keeps the router it started with across swaps.
-pub type Snapshot = Arc<ArcSwapOption<Router>>;
+pub type Snapshot = Arc<ArcSwapOption<RoutingTable>>;
 
 /// Readiness: a router is loaded. Without one, `/v1/*` returns 503
 /// `not_ready` (before authentication) and the admin `/readyz` returns 503;
@@ -170,16 +170,16 @@ async fn handle(
 ) -> Result<Response<ProxyBody>, Infallible> {
     let started = Instant::now();
     let router = snapshot.load_full();
-    let endpoint = metrics::route_index(req.uri().path());
-    let span = telemetry::request_span(otel, req.headers(), ROUTES[endpoint]);
+    let endpoint = metrics::endpoint_index(req.uri().path());
+    let span = telemetry::request_span(otel, req.headers(), API_ENDPOINTS[endpoint]);
     let handles = match &router {
         Some(router) => router.rejected[endpoint].clone(),
         None => runtime.metrics.cached_handles(
             HandleKey {
                 team: 0,
-                model: 0,
+                requested: 0,
                 deployment: 0,
-                route: endpoint as u8,
+                endpoint: endpoint as u8,
             },
             "",
             "",
@@ -204,7 +204,7 @@ async fn handle(
 }
 
 fn admin_response(
-    router: Option<&Router>,
+    router: Option<&RoutingTable>,
     runtime: &Runtime,
     req: &Request<Incoming>,
 ) -> Response<ProxyBody> {
@@ -239,7 +239,7 @@ fn admin_response(
 /// A known key was rejected before the request reached a model: report it so
 /// the control plane sees blocked traffic. Only runs on rejections.
 fn rejected_event(
-    router: &Router,
+    router: &RoutingTable,
     key: &KeyContext,
     request: &RequestCtx,
     endpoint: usize,
@@ -253,9 +253,9 @@ fn rejected_event(
         key_id: key.key_id.to_string(),
         team_id: key.team_id.to_string(),
         // The body is not read before authentication.
-        model: String::new(),
+        requested: String::new(),
         deployment: String::new(),
-        route: ROUTES[endpoint].into(),
+        endpoint: API_ENDPOINTS[endpoint].into(),
         status: status.as_u16().into(),
         stream: false,
         prompt_tokens: 0,
@@ -272,7 +272,7 @@ fn rejected_event(
 
 #[allow(clippy::too_many_arguments)]
 async fn dispatch(
-    router: Option<&Router>,
+    router: Option<&RoutingTable>,
     runtime: &Runtime,
     client: &UpstreamClient,
     req: Request<Incoming>,
@@ -448,10 +448,11 @@ mod tests {
         let (status, metrics) = server.get(true, "/metrics", None).await;
         assert_eq!(status, 200);
         assert!(String::from_utf8_lossy(&metrics).contains(
-            "lumewarp_requests_total{model=\"\",route=\"models\",deployment=\"\",team=\"\",status=\"503\"} 2"
+            "lumewarp_requests_total{requested=\"\",endpoint=\"models\",deployment=\"\",team=\"\",status=\"503\"} 2"
         ));
         let router =
-            Router::compile(&snapshot, lumewarp_config::AuthMode::RequireKey, &runtime).unwrap();
+            RoutingTable::compile(&snapshot, lumewarp_config::AuthMode::RequireKey, &runtime)
+                .unwrap();
         slot.store(Some(Arc::new(router)));
         assert!(ready(&slot));
         assert_eq!(server.get(true, "/readyz", None).await.0, 200);
@@ -478,7 +479,8 @@ mod tests {
         let (sink, mut events) = UsageSink::for_test();
         let runtime = Runtime::with_usage(Arc::new(crate::metrics::Metrics::new()), sink);
         let router =
-            Router::compile(&snapshot, lumewarp_config::AuthMode::RequireKey, &runtime).unwrap();
+            RoutingTable::compile(&snapshot, lumewarp_config::AuthMode::RequireKey, &runtime)
+                .unwrap();
         let version = router.version;
         let slot: Snapshot = Arc::new(ArcSwapOption::from_pointee(router));
         let server = TestServer::start(slot, runtime);
@@ -511,8 +513,8 @@ mod tests {
             assert_eq!(event.usage_state, UsageState::Missing as i32);
             assert_eq!(event.key_id, secret);
             assert_eq!(event.team_id, "t1");
-            assert_eq!(event.model, "");
-            assert_eq!(event.route, "models");
+            assert_eq!(event.requested, "");
+            assert_eq!(event.endpoint, "models");
             assert_eq!(event.config_version, version);
             assert_eq!((event.prompt_tokens, event.completion_tokens), (0, 0));
             let id = uuid::Uuid::parse_str(&event.request_id).unwrap();

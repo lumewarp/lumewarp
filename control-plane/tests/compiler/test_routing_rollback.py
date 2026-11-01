@@ -52,7 +52,7 @@ async def _seed(factory):
 
 async def _set_group(session, group, configured):
     upstream = await session.scalar(select(Upstream).where(Upstream.name == "primary"))
-    route = await session.scalar(select(Route).where(Route.model == "public"))
+    route = await session.scalar(select(Route).where(Route.name == "public"))
     deployments = {d.name: d for d in await session.scalars(select(Deployment))}
     deployment = deployments["a"]
     if group == "upstream":
@@ -80,7 +80,7 @@ async def _set_group(session, group, configured):
     elif group == "deployment":
         secondary = await session.scalar(select(Upstream).where(Upstream.name == "secondary"))
         deployment.upstream_id = secondary.id if configured else upstream.id
-        deployment.upstream_model = "alternate-model" if configured else "a-model"
+        deployment.upstream_model = "alternate-name" if configured else "a-name"
         deployment.weight = 7 if configured else 1
     elif group in ("price", "free_price"):
         deployment.price_input_nano_usd_per_mtok = (
@@ -111,12 +111,12 @@ async def _set_group(session, group, configured):
         route.retry_max_attempts = 3
         await session.execute(delete(RouteFallback).where(RouteFallback.route_id == route.id))
         if configured:
-            targets = {r.model: r for r in await session.scalars(select(Route))}
-            for position, model in enumerate(("fallback-two", "fallback-one")):
+            targets = {r.name: r for r in await session.scalars(select(Route))}
+            for position, name in enumerate(("fallback-two", "fallback-one")):
                 session.add(
                     RouteFallback(
                         route_id=route.id,
-                        fallback_route_id=targets[model].id,
+                        fallback_route_id=targets[name].id,
                         position=position,
                     )
                 )
@@ -203,7 +203,7 @@ async def test_rollback_removes_new_routing_graph_without_restrict_conflicts(fac
         late = await add_route(
             session, "late", [("late-deployment", None)], upstream="late-upstream"
         )
-        route = await session.scalar(select(Route).where(Route.model == "public"))
+        route = await session.scalar(select(Route).where(Route.name == "public"))
         deployment = await session.scalar(
             select(Deployment).where(Deployment.name == "late-deployment")
         )
@@ -227,14 +227,14 @@ async def test_rollback_recreates_removed_routes_before_fallback_edges(factory):
         await _set_group(session, "traffic_split", True)
         # Targets sort after public in the compiled snapshot and must be recreated
         # before its outgoing edges can satisfy the foreign keys.
-        for route in await session.scalars(select(Route).where(Route.model != "public")):
-            route.model = f"zz-{route.model}"
+        for route in await session.scalars(select(Route).where(Route.name != "public")):
+            route.name = f"zz-{route.name}"
     assert await _publish(factory) == 1
-    assert (await load_version(factory, 1)).routes[0].model == "public"
+    assert (await load_version(factory, 1)).routes[0].name == "public"
     async with factory() as session, session.begin():
         await session.execute(delete(RouteFallback))
         await session.execute(delete(RouteSplit))
-        await session.execute(delete(Route).where(Route.model != "public"))
+        await session.execute(delete(Route).where(Route.name != "public"))
         await session.execute(delete(Deployment).where(Deployment.name == "c"))
         await session.execute(delete(Upstream).where(Upstream.name == "secondary"))
         route = await session.scalar(select(Route))

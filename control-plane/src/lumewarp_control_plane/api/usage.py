@@ -1,7 +1,7 @@
 """Usage aggregation: monthly `usage_totals` fast path plus recent `usage_events`.
 
 `from`/`to` are a half-open UTC range. `group_by` is a comma-separated subset of
-`day,model,team,owner,key`; the default is `day,model`. `owner` groups by the key owner
+`day,requested,team,owner,key`; the default is `day,requested`. `owner` groups by the key owner
 (`owner_kind`, `owner_id`: a user or a service account). A admin group member's single `team`
 dimension over whole UTC months is served from the pre-aggregated `usage_totals` table;
 everything else is aggregated from `usage_events`, limited to the caller's readable teams.
@@ -43,11 +43,11 @@ from lumewarp_control_plane.models import (
 
 router = APIRouter(tags=["usage"])
 
-DIMENSIONS = ("day", "model", "team", "owner", "key")
+DIMENSIONS = ("day", "requested", "team", "owner", "key")
 # Output columns behind each dimension, in cursor order.
 COLUMNS = {
     "day": ("day",),
-    "model": ("model",),
+    "requested": ("requested",),
     "team": ("team",),
     "owner": ("owner_kind", "owner_id"),
     "key": ("key",),
@@ -60,7 +60,7 @@ ToQuery = Annotated[datetime | None, Query(alias="to")]
 
 def _parse_group_by(value: str | None) -> list[str]:
     if value is None:
-        return ["day", "model"]
+        return ["day", "requested"]
     groups: list[str] = []
     for raw in value.split(","):
         name = raw.strip()
@@ -200,7 +200,7 @@ async def _events_page(
 ) -> Page[UsageRowOut]:
     fields = {
         "day": func.date_trunc("day", func.timezone("UTC", UsageEvent.ts)),
-        "model": UsageEvent.model,
+        "requested": UsageEvent.requested,
         "team": UsageEvent.team_id,
         "owner_kind": UsageEvent.owner_kind,
         "owner_id": UsageEvent.owner_id,
@@ -249,7 +249,7 @@ async def _events_page(
         items.append(
             UsageRowOut(
                 date=values["day"].date() if "day" in values else None,
-                model=values.get("model"),
+                requested=values.get("requested"),
                 team_id=values.get("team"),
                 owner_kind=values.get("owner_kind"),
                 owner_id=values.get("owner_id"),
@@ -286,7 +286,7 @@ async def get_usage(
     user_id: uuid.UUID | None = None,
     service_account_id: uuid.UUID | None = None,
     key_id: uuid.UUID | None = None,
-    model: str | None = None,
+    requested: str | None = None,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[UsageRowOut]:
@@ -309,7 +309,7 @@ async def get_usage(
     use_totals = (
         is_admin
         and groups == ["team"]
-        and model is None
+        and requested is None
         and user_id is None
         and service_account_id is None
         and key_id is None
@@ -319,8 +319,8 @@ async def get_usage(
         return await _totals_page(session, start, end, team_id, limit, cursor)
     ensure_range(start, end)
     filters: list[Any] = []
-    if model is not None:
-        filters.append(UsageEvent.model == model)
+    if requested is not None:
+        filters.append(UsageEvent.requested == requested)
     if scoped_team is not None:
         filters.append(UsageEvent.team_id == scoped_team)
     if user_id is not None:

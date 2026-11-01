@@ -1,7 +1,7 @@
 {
   "uid": "lumewarp-overview",
   "title": "Lumewarp / Overview",
-  "description": "Traffic and accounting follow team/model filters. Histograms have no team label; overhead and upstream errors have no model label. Spend is team-only.",
+  "description": "Traffic and accounting follow team/requested filters. Histograms have no team label; overhead and upstream errors have no requested label. Spend is team-only.",
   "schemaVersion": 39,
   "version": 1,
   "editable": true,
@@ -47,7 +47,7 @@
         }
       },
       {
-        "name": "model",
+        "name": "requested",
         "label": "Model",
         "type": "query",
         "datasource": {
@@ -55,8 +55,8 @@
           "uid": "${datasource}"
         },
         "query": {
-          "query": "label_values(lumewarp_requests_total{namespace=~\"${namespace:regex}\"}, model)",
-          "refId": "model"
+          "query": "label_values(lumewarp_requests_total{namespace=~\"${namespace:regex}\"}, requested)",
+          "refId": "requested"
         },
         "refresh": 1,
         "includeAll": true,
@@ -152,12 +152,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (model) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\",team=~\"${team:regex}\",route=~\"chat_completions|completions|embeddings|models\"}[$__rate_interval]))",
+          "expr": "sum by (requested) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\",endpoint=~\"chat_completions|completions|embeddings|models\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{model}}",
+          "legendFormat": "{{requested}}",
           "range": true
         }
       ]
@@ -220,12 +220,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (model) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\",team=~\"${team:regex}\",status=~\"5..\",route=~\"chat_completions|completions|embeddings|models\"}[$__rate_interval])) / sum by (model) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\",team=~\"${team:regex}\",route=~\"chat_completions|completions|embeddings|models\"}[$__rate_interval]))",
+          "expr": "sum by (requested) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\",status=~\"5..\",endpoint=~\"chat_completions|completions|embeddings|models\"}[$__rate_interval])) / sum by (requested) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\",endpoint=~\"chat_completions|completions|embeddings|models\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{model}}",
+          "legendFormat": "{{requested}}",
           "range": true
         }
       ]
@@ -288,12 +288,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.99, sum by (model, le) (rate(lumewarp_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (requested, le) (rate(lumewarp_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\"}[$__rate_interval])))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{model}}",
+          "legendFormat": "{{requested}}",
           "range": true
         }
       ]
@@ -301,7 +301,7 @@
     {
       "id": 4,
       "title": "Gateway overhead p99",
-      "description": "All models and teams: overhead histogram only has route labels. Operational alert budget: 10 ms.",
+      "description": "All models and teams: overhead histogram only has endpoint labels. Operational alert budget: 10 ms.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -356,12 +356,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.99, sum by (route, le) (rate(lumewarp_gateway_overhead_seconds_bucket{namespace=~\"${namespace:regex}\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (endpoint, le) (rate(lumewarp_gateway_overhead_seconds_bucket{namespace=~\"${namespace:regex}\"}[$__rate_interval])))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{route}}",
+          "legendFormat": "{{endpoint}}",
           "range": true
         }
       ]
@@ -424,12 +424,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.99, sum by (model, le) (rate(lumewarp_ttft_seconds_bucket{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (requested, le) (rate(lumewarp_ttft_seconds_bucket{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\"}[$__rate_interval])))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{model}}",
+          "legendFormat": "{{requested}}",
           "range": true
         }
       ]
@@ -492,12 +492,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (model, direction) (rate(lumewarp_tokens_total{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\",team=~\"${team:regex}\"}[$__rate_interval]))",
+          "expr": "sum by (requested, direction) (rate(lumewarp_tokens_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{model}} {{direction}}",
+          "legendFormat": "{{requested}} {{direction}}",
           "range": true
         }
       ]
@@ -505,7 +505,7 @@
     {
       "id": 7,
       "title": "Spend / hour (all models)",
-      "description": "Spend has only a team label; model selection cannot filter spend.",
+      "description": "Spend has only a team label; requested selection cannot filter spend.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",

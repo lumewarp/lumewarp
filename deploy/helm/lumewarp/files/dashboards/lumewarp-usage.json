@@ -1,7 +1,7 @@
 {
   "uid": "lumewarp-usage",
   "title": "Lumewarp / Usage",
-  "description": "Token usage by team/model. Spend is team-only because the gateway does not export model-level cost. Pipeline metrics are global and unfiltered by team/model.",
+  "description": "Token usage by team/requested. Spend is team-only because the gateway does not export requested-level cost. Pipeline metrics are global and unfiltered by team/requested.",
   "schemaVersion": 39,
   "version": 1,
   "editable": true,
@@ -47,7 +47,7 @@
         }
       },
       {
-        "name": "model",
+        "name": "requested",
         "label": "Model",
         "type": "query",
         "datasource": {
@@ -55,8 +55,8 @@
           "uid": "${datasource}"
         },
         "query": {
-          "query": "label_values(lumewarp_requests_total{namespace=~\"${namespace:regex}\"}, model)",
-          "refId": "model"
+          "query": "label_values(lumewarp_requests_total{namespace=~\"${namespace:regex}\"}, requested)",
+          "refId": "requested"
         },
         "refresh": 1,
         "includeAll": true,
@@ -96,7 +96,7 @@
   "panels": [
     {
       "id": 1,
-      "title": "Tokens by team, model and direction",
+      "title": "Tokens by team, requested and direction",
       "description": "",
       "type": "timeseries",
       "datasource": {
@@ -152,12 +152,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (team, model, direction) (rate(lumewarp_tokens_total{namespace=~\"${namespace:regex}\",team=~\"${team:regex}\",model=~\"${model:regex}\"}[$__rate_interval]))",
+          "expr": "sum by (team, requested, direction) (rate(lumewarp_tokens_total{namespace=~\"${namespace:regex}\",team=~\"${team:regex}\",requested=~\"${requested:regex}\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{team}} {{model}} {{direction}}",
+          "legendFormat": "{{team}} {{requested}} {{direction}}",
           "range": true
         }
       ]
@@ -220,12 +220,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (team, model) (increase(lumewarp_tokens_total{namespace=~\"${namespace:regex}\",team=~\"${team:regex}\",model=~\"${model:regex}\"}[$__range]))",
+          "expr": "sum by (team, requested) (increase(lumewarp_tokens_total{namespace=~\"${namespace:regex}\",team=~\"${team:regex}\",requested=~\"${requested:regex}\"}[$__range]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{team}} {{model}}",
+          "legendFormat": "{{team}} {{requested}}",
           "range": true
         }
       ]
@@ -233,7 +233,7 @@
     {
       "id": 3,
       "title": "Spend / hour by team (all models)",
-      "description": "The metric has no model dimension. Do not attribute team spend to the selected model.",
+      "description": "The metric has no requested dimension. Do not attribute team spend to the selected requested.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -369,7 +369,7 @@
     {
       "id": 5,
       "title": "Usage delivery / second",
-      "description": "Queries A reported, B failed attempts (retried), C dropped (lost). Global pipeline, not filtered by team/model.",
+      "description": "Queries A reported, B failed attempts (retried), C dropped (lost). Global pipeline, not filtered by team/requested.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",

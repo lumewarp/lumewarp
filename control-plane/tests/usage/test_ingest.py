@@ -37,7 +37,7 @@ def _event(
     request_id: uuid.UUID | None = None,
     timestamp: datetime | None = None,
     cost: int = 1,
-    model: str = "test-model",
+    requested: str = "test-requested",
 ) -> usage_pb2.UsageEvent:
     timestamp = timestamp or datetime.now(UTC)
     return usage_pb2.UsageEvent(
@@ -45,9 +45,9 @@ def _event(
         timestamp_unix_ms=int(timestamp.timestamp() * 1000),
         key_id=str(key.id),
         team_id=str(key.team_id),
-        model=model,
+        requested=requested,
         deployment="test-deployment",
-        route="chat_completions",
+        endpoint="chat_completions",
         status=200,
         prompt_tokens=10,
         completion_tokens=5,
@@ -163,7 +163,7 @@ async def test_conflicting_replay_skips_only_that_event(session_factory: Session
         await ingest(session, "gateway-a", [existing], scope_name=scope_name)
 
     changed = usage_pb2.UsageEvent.FromString(existing.SerializeToString())
-    changed.model = "different-model"
+    changed.requested = "different-requested"
     other = _event(key, cost=20)
     async with session_factory() as session, session.begin():
         assert await ingest(session, "gateway-a", [other, changed], scope_name=scope_name) == 1
@@ -180,7 +180,7 @@ async def test_conflicting_replay_skips_only_that_event(session_factory: Session
         stored = await session.scalar(
             select(UsageEventRow).where(UsageEventRow.request_id == uuid.UUID(existing.request_id))
         )
-        assert stored is not None and stored.model == existing.model
+        assert stored is not None and stored.requested == existing.requested
         total = await session.scalar(
             select(UsageTotal).where(
                 UsageTotal.scope_type == key.owner_scope[0],
@@ -341,7 +341,7 @@ async def test_invalid_events_do_not_cost_the_rest_of_the_batch(
     unknown_key = _event(key, cost=100)
     unknown_key.key_id = str(uuid7())
     bad_field = _event(key, cost=100)
-    bad_field.route = ""
+    bad_field.endpoint = ""
     reused = usage_pb2.UsageEvent.FromString(valid.SerializeToString())
     reused.cost_nano_usd = 100
     duplicate = usage_pb2.UsageEvent.FromString(valid.SerializeToString())
@@ -373,10 +373,10 @@ async def test_invalid_events_do_not_cost_the_rest_of_the_batch(
 async def test_rejected_events_may_omit_model_and_deployment(session_factory: SessionFactory):
     scope_name, key = await _seed(session_factory)
     completed = _event(key, cost=5)
-    # Authentication rejects before the body is read: no model, no deployment.
-    unauthenticated = _event(key, cost=0, model="")
+    # Authentication rejects before the body is read: no requested, no deployment.
+    unauthenticated = _event(key, cost=0, requested="")
     unauthenticated.deployment = ""
-    # Policy rejections (403/429) know the model but never chose a deployment.
+    # Policy rejections (403/429) know the requested but never chose a deployment.
     rate_limited = _event(key, cost=0)
     rate_limited.deployment = ""
     for rejected in (unauthenticated, rate_limited):
@@ -386,7 +386,7 @@ async def test_rejected_events_may_omit_model_and_deployment(session_factory: Se
         rejected.usage_state = usage_pb2.USAGE_STATE_MISSING
         rejected.outcome = usage_pb2.REQUEST_OUTCOME_REJECTED
     # Anything that reached an upstream must still name both.
-    completed_without_model = _event(key, model="")
+    completed_without_model = _event(key, requested="")
 
     batch = [completed, unauthenticated, rate_limited, completed_without_model]
     async with session_factory() as session, session.begin():
@@ -394,15 +394,15 @@ async def test_rejected_events_may_omit_model_and_deployment(session_factory: Se
 
     async with session_factory() as session:
         stored = {
-            row.request_id: (row.model, row.deployment)
+            row.request_id: (row.requested, row.deployment)
             for row in (
                 await session.execute(select(UsageEventRow).where(UsageEventRow.key_id == key.id))
             ).scalars()
         }
     assert stored == {
-        uuid.UUID(completed.request_id): ("test-model", "test-deployment"),
+        uuid.UUID(completed.request_id): ("test-requested", "test-deployment"),
         uuid.UUID(unauthenticated.request_id): ("", ""),
-        uuid.UUID(rate_limited.request_id): ("test-model", ""),
+        uuid.UUID(rate_limited.request_id): ("test-requested", ""),
     }
 
 
@@ -560,7 +560,7 @@ def _skip_batch(key: ApiKey) -> list[usage_pb2.UsageEvent]:
     unknown_key = _event(key)
     unknown_key.key_id = str(uuid7())
     bad_field = _event(key)
-    bad_field.route = ""
+    bad_field.endpoint = ""
     bad_status = _event(key)
     bad_status.status = 600
     reused = usage_pb2.UsageEvent.FromString(valid.SerializeToString())

@@ -26,5 +26,5 @@ deployments:
     upstream_model: mock
 
 routes:
-  - model: mock
+  - name: mock
     deployments: [mock-deployment]

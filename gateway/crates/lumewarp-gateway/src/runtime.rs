@@ -1,4 +1,4 @@
-//! Process-lifetime state shared by every compiled `Router`. Snapshot swaps
+//! Process-lifetime state shared by every compiled `RoutingTable`. Snapshot swaps
 //! replace the router, never this: counters keyed by stable names/ids survive.
 
 use std::{

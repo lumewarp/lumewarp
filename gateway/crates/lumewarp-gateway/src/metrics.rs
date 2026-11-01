@@ -1,5 +1,5 @@
 //! Duration covers handler entry through response-body completion or drop.
-//! `lumewarp_request_body_read_seconds{route}` measures only the client body
+//! `lumewarp_request_body_read_seconds{endpoint}` measures only the client body
 //! collection interval, including failed, timed-out and cancelled reads.
 //! Gateway overhead starts after collection and excludes all upstream waits;
 //! see `overhead_seconds` for the exact stream and non-stream approximation.
@@ -31,7 +31,7 @@ use crate::{
     runtime::InFlightRegistry,
 };
 
-pub const ROUTES: [&str; 7] = [
+pub const API_ENDPOINTS: [&str; 7] = [
     "chat_completions",
     "completions",
     "embeddings",
@@ -76,22 +76,22 @@ pub const ATTEMPT_OUTCOMES: [&str; 6] = [
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct AttemptLabels {
-    model: String,
+    requested: String,
     deployment: String,
     outcome: &'static str,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct FallbackLabels {
-    model: String,
+    router: String,
     fallback_model: String,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct ModelLabels {
-    model: String,
+struct RouterLabels {
+    router: String,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct SplitLabels {
-    model: String,
+    router: String,
     split: String,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -106,7 +106,7 @@ pub enum UpstreamError {
     Protocol,
 }
 
-pub fn route_index(path: &str) -> usize {
+pub fn endpoint_index(path: &str) -> usize {
     match path {
         "/v1/chat/completions" => 0,
         "/v1/completions" => 1,
@@ -120,21 +120,21 @@ pub fn route_index(path: &str) -> usize {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Labels {
-    model: String,
-    route: &'static str,
+    requested: String,
+    endpoint: &'static str,
     deployment: String,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct RequestLabels {
-    model: String,
-    route: &'static str,
+    requested: String,
+    endpoint: &'static str,
     deployment: String,
     team: String,
     status: &'static str,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct EndpointLabels {
-    route: &'static str,
+    endpoint: &'static str,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct DeploymentLabels {
@@ -142,7 +142,7 @@ struct DeploymentLabels {
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct TtftLabels {
-    model: String,
+    requested: String,
     deployment: String,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -161,7 +161,7 @@ struct NackLabels {
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct TokenLabels {
-    model: String,
+    requested: String,
     team: String,
     direction: &'static str,
 }
@@ -189,7 +189,7 @@ fn overhead_histogram() -> Histogram {
 }
 
 pub struct RequestMetrics {
-    pub model: String,
+    pub requested: String,
     pub deployment: String,
     team: String,
     /// (input, output) `lumewarp_tokens_total` series, created on first use
@@ -212,14 +212,14 @@ impl RequestMetrics {
         }
     }
 
-    /// Adds upstream-reported tokens for this handle's model and team.
+    /// Adds upstream-reported tokens for this handle's requested and team.
     /// Allocation-free after the first call per label set.
     pub fn record_tokens(&self, input: u64, output: u64) {
         let [input_counter, output_counter] = self.tokens.get_or_init(|| {
             ["input", "output"].map(|direction| {
                 self.token_family
                     .get_or_create(&TokenLabels {
-                        model: self.model.clone(),
+                        requested: self.requested.clone(),
                         team: self.team.clone(),
                         direction,
                     })
@@ -239,10 +239,10 @@ pub type LabelId = u32;
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct HandleKey {
     pub team: LabelId,
-    pub model: LabelId,
+    pub requested: LabelId,
     pub deployment: LabelId,
-    /// Index into `ROUTES`.
-    pub route: u8,
+    /// Index into `API_ENDPOINTS`.
+    pub endpoint: u8,
 }
 
 /// Process-lifetime registry owned by `Runtime`; snapshot swaps never reset it.
@@ -250,7 +250,7 @@ pub struct Metrics {
     registry: Registry,
     label_ids: Mutex<HashMap<Box<str>, LabelId>>,
     /// Lock-free reads; an entry is created on the first request with its
-    /// (team, model, deployment, route) and kept across snapshot swaps.
+    /// (team, requested, deployment, endpoint) and kept across snapshot swaps.
     handle_cache: papaya::HashMap<HandleKey, Arc<RequestMetrics>>,
     requests: Family<RequestLabels, Counter>,
     durations: Histograms<Labels>,
@@ -277,7 +277,7 @@ pub struct Metrics {
     spend_cache: papaya::HashMap<Box<str>, SpendCounter>,
     attempts: Family<AttemptLabels, Counter>,
     fallbacks: Family<FallbackLabels, Counter>,
-    budget_exhausted: Family<ModelLabels, Counter>,
+    budget_exhausted: Family<RouterLabels, Counter>,
     circuit: Family<DeploymentLabels, Gauge>,
     healthy: Family<UpstreamLabels, Gauge>,
     splits: Family<SplitLabels, Counter>,
@@ -355,7 +355,7 @@ impl Metrics {
         );
         registry.register(
             "lumewarp_fallbacks",
-            "Requests moving to a fallback route",
+            "Requests moving to a fallback endpoint",
             fallbacks.clone(),
         );
         registry.register(
@@ -460,7 +460,7 @@ impl Metrics {
         );
         registry.register(
             "lumewarp_tokens",
-            "Upstream-reported tokens by public model, team and direction",
+            "Upstream-reported tokens by public requested, team and direction",
             tokens.clone(),
         );
         registry.register(
@@ -504,10 +504,10 @@ impl Metrics {
         }
     }
 
-    pub fn split_handle(&self, model: &str, split: &str) -> Counter {
+    pub fn split_handle(&self, requested: &str, split: &str) -> Counter {
         self.splits
             .get_or_create(&SplitLabels {
-                model: model.into(),
+                router: requested.into(),
                 split: split.into(),
             })
             .clone()
@@ -545,11 +545,11 @@ impl Metrics {
             .set(i64::try_from(version).unwrap_or(i64::MAX));
     }
 
-    pub fn attempt_handles(&self, model: &str, deployment: &str) -> [Counter; 6] {
+    pub fn attempt_handles(&self, requested: &str, deployment: &str) -> [Counter; 6] {
         ATTEMPT_OUTCOMES.map(|outcome| {
             self.attempts
                 .get_or_create(&AttemptLabels {
-                    model: model.into(),
+                    requested: requested.into(),
                     deployment: deployment.into(),
                     outcome,
                 })
@@ -557,19 +557,19 @@ impl Metrics {
         })
     }
 
-    pub fn fallback_handle(&self, model: &str, fallback_model: &str) -> Counter {
+    pub fn fallback_handle(&self, requested: &str, fallback_router: &str) -> Counter {
         self.fallbacks
             .get_or_create(&FallbackLabels {
-                model: model.into(),
-                fallback_model: fallback_model.into(),
+                router: requested.into(),
+                fallback_model: fallback_router.into(),
             })
             .clone()
     }
 
-    pub fn budget_handle(&self, model: &str) -> Counter {
+    pub fn budget_handle(&self, requested: &str) -> Counter {
         self.budget_exhausted
-            .get_or_create(&ModelLabels {
-                model: model.into(),
+            .get_or_create(&RouterLabels {
+                router: requested.into(),
             })
             .clone()
     }
@@ -677,13 +677,13 @@ impl Metrics {
     }
 
     /// Request-path lookup: lock-free and allocation-free once `key` was used
-    /// in this process; the first use creates the series. `team`, `model` and
+    /// in this process; the first use creates the series. `team`, `requested` and
     /// `deployment` must be the strings `key` was interned from.
     pub fn cached_handles(
         &self,
         key: HandleKey,
         team: &str,
-        model: &str,
+        requested: &str,
         deployment: &str,
     ) -> Arc<RequestMetrics> {
         let cache = self.handle_cache.pin();
@@ -692,7 +692,7 @@ impl Metrics {
         }
         cache
             .get_or_insert_with(key, || {
-                self.handles(model, deployment, key.route.into(), team)
+                self.handles(requested, deployment, key.endpoint.into(), team)
             })
             .clone()
     }
@@ -701,16 +701,16 @@ impl Metrics {
     // allocates label strings and locks the families.
     pub fn handles(
         &self,
-        model: &str,
+        requested: &str,
         deployment: &str,
-        route: usize,
+        endpoint: usize,
         team: &str,
     ) -> Arc<RequestMetrics> {
         let counters = std::array::from_fn(|i| {
             self.requests
                 .get_or_create(&RequestLabels {
-                    model: model.into(),
-                    route: ROUTES[route],
+                    requested: requested.into(),
+                    endpoint: API_ENDPOINTS[endpoint],
                     deployment: deployment.into(),
                     team: team.into(),
                     status: STATUSES[i],
@@ -720,27 +720,27 @@ impl Metrics {
         let duration = self
             .durations
             .get_or_create(&Labels {
-                model: model.into(),
-                route: ROUTES[route],
+                requested: requested.into(),
+                endpoint: API_ENDPOINTS[endpoint],
                 deployment: deployment.into(),
             })
             .clone();
         let overhead = self
             .overhead
             .get_or_create(&EndpointLabels {
-                route: ROUTES[route],
+                endpoint: API_ENDPOINTS[endpoint],
             })
             .clone();
         let body_read = self
             .body_read
             .get_or_create(&EndpointLabels {
-                route: ROUTES[route],
+                endpoint: API_ENDPOINTS[endpoint],
             })
             .clone();
         let ttft = (!deployment.is_empty()).then(|| {
             self.ttft
                 .get_or_create(&TtftLabels {
-                    model: model.into(),
+                    requested: requested.into(),
                     deployment: deployment.into(),
                 })
                 .clone()
@@ -756,7 +756,7 @@ impl Metrics {
             })
         });
         Arc::new(RequestMetrics {
-            model: model.into(),
+            requested: requested.into(),
             deployment: deployment.into(),
             team: team.into(),
             tokens: OnceLock::new(),
@@ -767,7 +767,7 @@ impl Metrics {
             body_read,
             ttft,
             errors,
-            attempts: self.attempt_handles(model, deployment),
+            attempts: self.attempt_handles(requested, deployment),
         })
     }
 
@@ -865,7 +865,7 @@ impl Observation {
     pub fn routed(&mut self, handles: Arc<RequestMetrics>, stream: bool) {
         self.handles = handles;
         self.stream = stream;
-        self.span.record("model", &self.handles.model);
+        self.span.record("requested", &self.handles.requested);
         self.span.record("deployment", &self.handles.deployment);
         self.span.record("stream", stream);
     }
@@ -1038,8 +1038,12 @@ pub(crate) mod tests {
         observation.first_frame_forwarding = Duration::ZERO;
         assert!((observation.overhead(start + Duration::from_secs(10)) - 0.0011).abs() < 1e-9);
         let text = metrics.encode(&InFlightRegistry::default()).unwrap();
-        assert!(text.contains("lumewarp_ttft_seconds_sum{model=\"public\",deployment=\"d\"} 1.3"));
-        assert!(text.contains("lumewarp_ttft_seconds_count{model=\"public\",deployment=\"d\"} 1"));
+        assert!(
+            text.contains("lumewarp_ttft_seconds_sum{requested=\"public\",deployment=\"d\"} 1.3")
+        );
+        assert!(
+            text.contains("lumewarp_ttft_seconds_count{requested=\"public\",deployment=\"d\"} 1")
+        );
     }
 
     #[test]
@@ -1051,24 +1055,29 @@ upstreams:
 deployments:
   - {name: d, upstream: u, upstream_model: actual}
 routes:
-  - {model: public, deployments: [d]}
+  - {name: public, deployments: [d]}
 "#,
         )
         .unwrap();
         let runtime = crate::runtime::Runtime::new();
-        let router =
-            crate::router::Router::compile(&snapshot, lumewarp_config::AuthMode::Open, &runtime)
-                .unwrap();
+        let router = crate::router::RoutingTable::compile(
+            &snapshot,
+            lumewarp_config::AuthMode::Open,
+            &runtime,
+        )
+        .unwrap();
         let anonymous = crate::auth::Caller::Anonymous;
         let metrics = &runtime.metrics;
         metrics.set_yaml_hash("123456789abc");
-        assert!(!router.routes.contains_key("client-supplied-secret-model"));
+        assert!(!router
+            .routes
+            .contains_key("client-supplied-secret-requested"));
         let mut observation = Observation::new(router.unknown(&anonymous, 0), Span::none(), false);
         observation.status = StatusCode::NOT_FOUND;
         observation.finish();
         observation.finish();
         let text = runtime.encode_metrics().unwrap();
-        assert!(text.contains("lumewarp_requests_total{model=\"unknown\",route=\"chat_completions\",deployment=\"\",team=\"\",status=\"404\"} 1"));
+        assert!(text.contains("lumewarp_requests_total{requested=\"unknown\",endpoint=\"chat_completions\",deployment=\"\",team=\"\",status=\"404\"} 1"));
         for name in [
             "lumewarp_requests_total",
             "lumewarp_request_duration_seconds",
@@ -1087,18 +1096,18 @@ routes:
         ] {
             assert!(text.contains(name), "missing {name}");
         }
-        assert!(text.contains("model=\"unknown\""));
-        assert!(!text.contains("client-supplied-secret-model"));
-        assert!(!text.contains("model=\"unknown\",route=\"healthz\""));
-        assert!(!text.contains("model=\"unknown\",route=\"metrics\""));
-        assert!(!text.contains("model=\"unknown\",route=\"other\""));
+        assert!(text.contains("requested=\"unknown\""));
+        assert!(!text.contains("client-supplied-secret-requested"));
+        assert!(!text.contains("requested=\"unknown\",endpoint=\"healthz\""));
+        assert!(!text.contains("requested=\"unknown\",endpoint=\"metrics\""));
+        assert!(!text.contains("requested=\"unknown\",endpoint=\"other\""));
         drop(Observation::new(
             router.unknown(&anonymous, 0),
             Span::none(),
             false,
         ));
         assert!(runtime.encode_metrics().unwrap().contains(
-            "model=\"unknown\",route=\"chat_completions\",deployment=\"\",team=\"\",status=\"499\"} 1"
+            "requested=\"unknown\",endpoint=\"chat_completions\",deployment=\"\",team=\"\",status=\"499\"} 1"
         ));
         let guard = router.acquire(&router.routes["public"], 0, &anonymous);
         assert!(runtime
@@ -1114,11 +1123,11 @@ routes:
         fallback.status = StatusCode::IM_A_TEAPOT;
         drop(fallback);
         assert!(runtime.encode_metrics().unwrap().contains(
-            "model=\"unknown\",route=\"chat_completions\",deployment=\"\",team=\"\",status=\"other\"} 1"
+            "requested=\"unknown\",endpoint=\"chat_completions\",deployment=\"\",team=\"\",status=\"other\"} 1"
         ));
         finish_with(&router.unknown(&anonymous, 0), 403);
         assert!(runtime.encode_metrics().unwrap().contains(
-            "model=\"unknown\",route=\"chat_completions\",deployment=\"\",team=\"\",status=\"403\"} 1"
+            "requested=\"unknown\",endpoint=\"chat_completions\",deployment=\"\",team=\"\",status=\"403\"} 1"
         ));
     }
 
@@ -1136,7 +1145,7 @@ routes:
         assert_eq!(allocations, 0);
         let text = metrics.encode(&InFlightRegistry::default()).unwrap();
         assert!(text.contains(
-            "lumewarp_tokens_total{model=\"public\",team=\"t1\",direction=\"output\"} 8"
+            "lumewarp_tokens_total{requested=\"public\",team=\"t1\",direction=\"output\"} 8"
         ));
     }
 
@@ -1172,8 +1181,8 @@ routes:
             "lumewarp_usage_capture_total{state=\"invalid\"} 0",
             "lumewarp_usage_events_reported_total 500",
             "lumewarp_usage_events_failed_total 3",
-            "lumewarp_tokens_total{model=\"public\",team=\"t1\",direction=\"input\"} 10",
-            "lumewarp_tokens_total{model=\"public\",team=\"t1\",direction=\"output\"} 4",
+            "lumewarp_tokens_total{requested=\"public\",team=\"t1\",direction=\"input\"} 10",
+            "lumewarp_tokens_total{requested=\"public\",team=\"t1\",direction=\"output\"} 4",
             "lumewarp_spend_total{team=\"t1\"} 1.5",
         ] {
             assert!(text.contains(line), "missing {line}:\n{text}");

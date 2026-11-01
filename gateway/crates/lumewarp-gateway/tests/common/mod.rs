@@ -290,7 +290,7 @@ impl Gateway {
             .map(|i| format!("d{i}"))
             .collect::<Vec<_>>()
             .join(", ");
-        yaml.push_str(&format!("routes:\n  - {{model: public, deployments: [{deployments}], strategy: least_in_flight}}\n  - {{model: another-alias, deployments: [{deployments}]}}\n"));
+        yaml.push_str(&format!("routes:\n  - {{name: public, deployments: [{deployments}], strategy: least_in_flight}}\n  - {{name: another-alias, deployments: [{deployments}]}}\n"));
         yaml.push_str(extra);
         let dir = std::env::temp_dir().join(format!(
             "lumewarp-proxy-test-{}-{}",

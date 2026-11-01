@@ -1292,13 +1292,10 @@ export interface components {
         };
         /** RouteCreate */
         RouteCreate: {
-            /** Model */
-            model: string;
-            /**
-             * Strategy
-             * @default weighted
-             */
-            strategy: components["schemas"]["RoutingStrategy"] | "custom";
+            /** Name */
+            name: string;
+            /** @default weighted */
+            strategy: components["schemas"]["RoutingStrategy"];
             /** Custom Strategy */
             custom_strategy?: string | null;
             /** Strategy Params */
@@ -1340,10 +1337,9 @@ export interface components {
              * Format: uuid
              */
             id: string;
-            /** Model */
-            model: string;
-            /** Strategy */
-            strategy: components["schemas"]["RoutingStrategy"] | "custom";
+            /** Name */
+            name: string;
+            strategy: components["schemas"]["RoutingStrategy"];
             /** Custom Strategy */
             custom_strategy?: string | null;
             /** Strategy Params */
@@ -1377,10 +1373,9 @@ export interface components {
          *     `sticky_header` accept null to remove the setting.
          */
         RouteUpdate: {
-            /** Model */
-            model?: string | null;
-            /** Strategy */
-            strategy?: components["schemas"]["RoutingStrategy"] | "custom" | null;
+            /** Name */
+            name?: string | null;
+            strategy?: components["schemas"]["RoutingStrategy"] | null;
             /** Custom Strategy */
             custom_strategy?: string | null;
             /** Strategy Params */
@@ -1402,7 +1397,7 @@ export interface components {
          * RoutingStrategy
          * @enum {string}
          */
-        RoutingStrategy: "weighted" | "least_in_flight" | "lowest_latency" | "vllm_load";
+        RoutingStrategy: "weighted" | "least_in_flight" | "lowest_latency" | "vllm_load" | "custom";
         /** ServiceAccountCreate */
         ServiceAccountCreate: {
             model_access?: components["schemas"]["ModelAccess"] | null;
@@ -1752,8 +1747,8 @@ export interface components {
         UsageRowOut: {
             /** Date */
             date?: string | null;
-            /** Model */
-            model?: string | null;
+            /** Requested */
+            requested?: string | null;
             /** Team Id */
             team_id?: string | null;
             owner_kind?: components["schemas"]["KeyOwnerKind"] | null;
@@ -5070,7 +5065,7 @@ export interface operations {
                 user_id?: string | null;
                 service_account_id?: string | null;
                 key_id?: string | null;
-                model?: string | null;
+                requested?: string | null;
                 limit?: number;
                 cursor?: string | null;
             };

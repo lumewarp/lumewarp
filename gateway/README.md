@@ -36,7 +36,7 @@ deployments:
     upstream: local
     upstream_model: mock
 routes:
-  - model: demo
+  - name: demo
     deployments: [mock-local]
 ```
 
@@ -147,7 +147,7 @@ The admin listener stays unauthenticated; keep it private (see the auth section)
 
 Control-plane mode also enables usage reporting to the same URL with the same
 token. Each finalized proxied request (including a rejection for a known key)
-produces one event with a UUIDv7 `request_id`: tokens, model/deployment/route,
+produces one event with a UUIDv7 `request_id`: tokens, requested/deployment/endpoint,
 status, config version and cost computed from `deployments[].price`. Events
 enter a bounded in-memory queue (100,000) and are reported every 1 s or every
 500 events. Failed batches retry from the queue with backoff; when the queue is
@@ -518,19 +518,19 @@ the whole process, so counters are never reset by a config change.
 
 | Series | Type | Labels |
 | --- | --- | --- |
-| `lumewarp_requests_total` | Counter | `model`, `route`, `deployment`, `team`, `status` |
-| `lumewarp_request_duration_seconds` | Histogram | `model`, `route`, `deployment` |
-| `lumewarp_gateway_overhead_seconds` | Histogram | `route` |
-| `lumewarp_request_body_read_seconds` | Histogram | `route` |
-| `lumewarp_ttft_seconds` | Histogram | `model`, `deployment` |
+| `lumewarp_requests_total` | Counter | `requested`, `endpoint`, `deployment`, `team`, `status` |
+| `lumewarp_request_duration_seconds` | Histogram | `requested`, `endpoint`, `deployment` |
+| `lumewarp_gateway_overhead_seconds` | Histogram | `endpoint` |
+| `lumewarp_request_body_read_seconds` | Histogram | `endpoint` |
+| `lumewarp_ttft_seconds` | Histogram | `requested`, `deployment` |
 | `lumewarp_upstream_errors_total` | Counter | `deployment`, `kind` |
-| `lumewarp_upstream_attempts_total` | Counter | `model`, `deployment`, `outcome`: `success`, `retryable_status`, `connect_error`, `timeout`, `circuit_open`, `non_retryable` |
-| `lumewarp_fallbacks_total` | Counter | `model`, `fallback_model` |
-| `lumewarp_retries_budget_exhausted_total` | Counter | `model` |
+| `lumewarp_upstream_attempts_total` | Counter | `requested`, `deployment`, `outcome`: `success`, `retryable_status`, `connect_error`, `timeout`, `circuit_open`, `non_retryable` |
+| `lumewarp_fallbacks_total` | Counter | `router`, `fallback_model` |
+| `lumewarp_retries_budget_exhausted_total` | Counter | `router` |
 | `lumewarp_upstream_circuit_state` | Gauge | `deployment`; 0 closed, 1 half-open, 2 open |
 | `lumewarp_upstream_healthy` | Gauge | `upstream`; 1 healthy, 0 unhealthy |
 | `lumewarp_in_flight_requests` | Gauge | `deployment` |
-| `lumewarp_split_requests_total` | Counter | `model`, `split`; requests assigned to a traffic split. |
+| `lumewarp_split_requests_total` | Counter | `router`, `split`; requests assigned to a traffic split. |
 | `lumewarp_vllm_queue_depth` | Gauge | `deployment`; last scraped `vllm:num_requests_waiting`. |
 | `lumewarp_vllm_kv_cache_usage` | Gauge | `deployment`; last scraped KV-cache usage, 0..1. |
 | `lumewarp_vllm_scrape_failures_total` | Counter | `upstream`; failed or incomplete vLLM metrics scrapes. |
@@ -542,7 +542,7 @@ the whole process, so counters are never reset by a config change.
 | `lumewarp_usage_events_dropped_total` / `_reported_total` / `_failed_total` | Counter | None |
 | `lumewarp_usage_queue_depth` | Gauge | None; events waiting to be reported. |
 | `lumewarp_usage_capture_total` | Counter | `state` (`unspecified`, `reported`, `missing`, `partial`, `invalid`); metering gaps. |
-| `lumewarp_tokens_total` | Counter | `model`, `team`, `direction` (`input`/`output`) |
+| `lumewarp_tokens_total` | Counter | `requested`, `team`, `direction` (`input`/`output`) |
 | `lumewarp_spend_total` | Counter | `team`; USD. |
 
 The config-stream series move in control-plane mode; `lumewarp_config_info` is

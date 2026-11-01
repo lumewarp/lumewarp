@@ -45,7 +45,7 @@ def _route(client, **body):
     if body.get("fallback_route_ids"):
         # Fallbacks need at least two attempts.
         body.setdefault("retry", {})
-    body = {"model": f"alias-{suffix()}", **body}
+    body = {"name": f"alias-{suffix()}", **body}
     return client.post("/api/v1/routes", json=body, headers=H)
 
 
@@ -83,9 +83,7 @@ def test_custom_strategy_route_create_patch_and_clear(client):
     updated = _ok(_patch(client, route["id"], strategy_params={"pin": 3}), 200)
     assert updated["strategy_params"] == {"pin": 3}
     assert updated["custom_strategy"] == "header_pin"
-    assert (
-        _ok(_patch(client, route["id"], model=f"renamed-{suffix()}"), 200)["strategy"] == "custom"
-    )
+    assert _ok(_patch(client, route["id"], name=f"renamed-{suffix()}"), 200)["strategy"] == "custom"
     cleared = _ok(_patch(client, route["id"], strategy="least_in_flight"), 200)
     assert cleared["custom_strategy"] is None and cleared["strategy_params"] == {}
     assert cleared["strategy"] == "least_in_flight"
@@ -400,7 +398,7 @@ def test_weighted_splits_need_positive_weight(client) -> None:
     # And a weight change that would starve a weighted split.
     weighted = _ok(_route(client, traffic_split=[_split("a", [one["id"]])]))
     resp = client.patch(f"/api/v1/deployments/{one['id']}", json={"weight": 0}, headers=H)
-    _422(resp, f"route {weighted['model']!r}")
+    _422(resp, f"route {weighted['name']!r}")
 
 
 @pytest.mark.parametrize("split", [False, True])
@@ -439,9 +437,9 @@ async def test_concurrent_weight_zeroing_preserves_pool(
         for session in (first, second):
             original_get = session.get
 
-            async def guarded_get(model, ident, *, session=session, get=original_get):
+            async def guarded_get(name, ident, *, session=session, get=original_get):
                 assert session.info.get("scope_locked"), "scope must be locked before row read"
-                return await get(model, ident)
+                return await get(name, ident)
 
             monkeypatch.setattr(session, "get", guarded_get)
 
@@ -472,7 +470,7 @@ async def test_concurrent_weight_zeroing_preserves_pool(
         ).all()
         assert sorted(weights) == [0, 1]
         compiled = await compile_scope(check, api_settings.scope, require_local_membership=True)
-        assert route["model"] in {r.model for r in compiled.snapshot.routes}
+        assert route["name"] in {r.name for r in compiled.snapshot.routes}
 
 
 def test_fallback_self_and_cycles(client) -> None:
@@ -483,7 +481,7 @@ def test_fallback_self_and_cycles(client) -> None:
     # a -> c -> b -> a
     resp = _patch(client, a["id"], fallback_route_ids=[c["id"]])
     _422(resp, "cycle")
-    assert f"{a['model']} -> {c['model']} -> {b['model']} -> {a['model']}" in resp.text
+    assert f"{a['name']} -> {c['name']} -> {b['name']} -> {a['name']}" in resp.text
     _422(_patch(client, a["id"], fallback_route_ids=[b["id"]]), "cycle")
     # Duplicates are refused; a DAG with shared fallbacks is fine.
     _422(_patch(client, c["id"], fallback_route_ids=[a["id"], a["id"]]), "duplicate")
@@ -504,7 +502,7 @@ def test_delete_conflicts(client) -> None:
     )
     resp = client.delete(f"/api/v1/routes/{backup['id']}", headers=H)
     assert resp.status_code == 409, resp.text
-    assert main["model"] in resp.json()["error"]["message"]
+    assert main["name"] in resp.json()["error"]["message"]
     # A deployment used only by a split cannot be deleted either.
     resp = client.delete(f"/api/v1/deployments/{split_only['id']}", headers=H)
     assert resp.status_code == 409

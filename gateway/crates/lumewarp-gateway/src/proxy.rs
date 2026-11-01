@@ -35,7 +35,7 @@ use crate::{
     metrics::{Observation, RequestMetrics, UpstreamError, ATTEMPT_OUTCOMES},
     ratelimit::clock,
     ratelimit::Permit,
-    router::{Deployment, InFlight, Router, Skipped},
+    router::{Deployment, InFlight, RoutingTable, Skipped},
     telemetry,
     usage::{Captured, PendingCapture, RequestCtx, SseFilter, Tee, UsageCapture},
 };
@@ -235,7 +235,7 @@ impl<'a> RequestFields<'a> {
 /// Reports a request rejected after its model was parsed (403 / 429). Only
 /// keyed callers are reported: anonymous rejections would be unattributable.
 fn report_rejection(
-    router: &Router,
+    router: &RoutingTable,
     caller: &Caller,
     request: RequestCtx,
     handles: Arc<RequestMetrics>,
@@ -261,7 +261,7 @@ fn report_rejection(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn forward(
-    router: &Router,
+    router: &RoutingTable,
     client: &UpstreamClient,
     req: Request<Incoming>,
     observation: &mut Observation,
@@ -1411,11 +1411,11 @@ upstreams:
 deployments:
   - {name: d, upstream: u, upstream_model: actual}
 routes:
-  - {model: public, deployments: [d]}
+  - {name: public, deployments: [d]}
 "#,
         )
         .unwrap();
-        let router = Router::compile(
+        let router = RoutingTable::compile(
             &snapshot,
             lumewarp_config::AuthMode::Open,
             &crate::runtime::Runtime::new(),

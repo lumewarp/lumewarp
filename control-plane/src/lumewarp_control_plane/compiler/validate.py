@@ -185,41 +185,41 @@ def _validate_split(r: pb.ModelRoute, deployments: set[str], weight: dict[str, i
     """snapshot.rs::validate_split, plus Router::compile's positive weight per pool."""
     if r.sticky == pb.STICKY_BY_HEADER:
         if not r.sticky_header or not _HEADER_NAME.fullmatch(r.sticky_header):
-            raise SnapshotInvalid(f"route {r.model!r}: sticky=header needs a valid sticky_header")
+            raise SnapshotInvalid(f"route {r.name!r}: sticky=header needs a valid sticky_header")
     elif r.sticky_header:
-        raise SnapshotInvalid(f"route {r.model!r}: sticky_header is only used with sticky=header")
+        raise SnapshotInvalid(f"route {r.name!r}: sticky_header is only used with sticky=header")
     if not r.traffic_split:
         if r.sticky != pb.STICKY_BY_NONE:
-            raise SnapshotInvalid(f"route {r.model!r}: sticky needs a traffic_split")
+            raise SnapshotInvalid(f"route {r.name!r}: sticky needs a traffic_split")
         return
     if len(r.traffic_split) > MAX_SPLITS:
-        raise SnapshotInvalid(f"route {r.model!r}: more than {MAX_SPLITS} traffic splits")
+        raise SnapshotInvalid(f"route {r.name!r}: more than {MAX_SPLITS} traffic splits")
     names: set[str] = set()
     for split in r.traffic_split:
         if not _SPLIT_NAME.fullmatch(split.name):
             raise SnapshotInvalid(
-                f"route {r.model!r}: split name {split.name!r} must be 1..={MAX_SPLIT_NAME}"
+                f"route {r.name!r}: split name {split.name!r} must be 1..={MAX_SPLIT_NAME}"
                 " of [A-Za-z0-9_.-]"
             )
         if split.name in names:
-            raise SnapshotInvalid(f"route {r.model!r}: duplicate split {split.name!r}")
+            raise SnapshotInvalid(f"route {r.name!r}: duplicate split {split.name!r}")
         names.add(split.name)
         if not split.deployments:
-            raise SnapshotInvalid(f"route {r.model!r}: split {split.name!r} has no deployments")
+            raise SnapshotInvalid(f"route {r.name!r}: split {split.name!r} has no deployments")
         if len(set(split.deployments)) != len(split.deployments):
-            raise SnapshotInvalid(f"route {r.model!r}: split {split.name!r} repeats a deployment")
+            raise SnapshotInvalid(f"route {r.name!r}: split {split.name!r} repeats a deployment")
         missing = [d for d in split.deployments if d not in deployments]
         if missing:
             raise SnapshotInvalid(
-                f"route {r.model!r}: split {split.name!r} references unknown deployment"
+                f"route {r.name!r}: split {split.name!r} references unknown deployment"
                 f" {missing[0]!r}"
             )
         if r.strategy == pb.ROUTING_STRATEGY_WEIGHTED and not sum(
             weight[d] for d in split.deployments
         ):
-            raise SnapshotInvalid(f"route {r.model!r} split {split.name!r} has zero total weight")
+            raise SnapshotInvalid(f"route {r.name!r} split {split.name!r} has zero total weight")
     if not sum(s.weight for s in r.traffic_split):
-        raise SnapshotInvalid(f"route {r.model!r}: traffic split weights sum to 0")
+        raise SnapshotInvalid(f"route {r.name!r}: traffic split weights sum to 0")
 
 
 def _unique(names: list[str], kind: str) -> set[str]:
@@ -276,12 +276,12 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
         if not d.upstream_model:
             raise SnapshotInvalid(f"deployment {d.name!r} has an empty upstream_model")
 
-    routes = _unique([r.model for r in snap.routes], "route")
+    routes = _unique([r.name for r in snap.routes], "route")
     for r in snap.routes:
-        if r.model in RESERVED_ALIASES:
-            raise SnapshotInvalid(f"route alias {r.model!r} is reserved")
+        if r.name in RESERVED_ALIASES:
+            raise SnapshotInvalid(f"route alias {r.name!r} is reserved")
         if r.strategy not in SERVABLE_STRATEGIES:
-            raise SnapshotInvalid(f"route {r.model!r} has unsupported strategy {r.strategy}")
+            raise SnapshotInvalid(f"route {r.name!r} has unsupported strategy {r.strategy}")
         if r.strategy == pb.ROUTING_STRATEGY_CUSTOM:
             import json
 
@@ -298,31 +298,31 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
         elif r.custom_strategy or r.strategy_params_json:
             raise SnapshotInvalid("custom strategy fields require CUSTOM")
         if r.sticky not in STICKY_BY:
-            raise SnapshotInvalid(f"route {r.model!r} has sticky {r.sticky}")
+            raise SnapshotInvalid(f"route {r.name!r} has sticky {r.sticky}")
         if r.HasField("retry") and (
             r.retry.max_attempts > MAX_RETRY_ATTEMPTS
             or any(not 400 <= code <= 599 for code in r.retry.retry_on_status)
         ):
             raise SnapshotInvalid(
-                f"route {r.model!r}: retry max_attempts must be <= {MAX_RETRY_ATTEMPTS}"
+                f"route {r.name!r}: retry max_attempts must be <= {MAX_RETRY_ATTEMPTS}"
                 " and statuses in 400..=599"
             )
         for fallback in r.fallbacks:
-            if fallback == r.model or fallback not in routes:
+            if fallback == r.name or fallback not in routes:
                 raise SnapshotInvalid(
-                    f"route {r.model!r} has a self or unknown fallback {fallback!r}"
+                    f"route {r.name!r} has a self or unknown fallback {fallback!r}"
                 )
         _validate_split(r, deployments, weight)
         # With traffic_split the route's own deployment list is ignored.
         if r.traffic_split:
             continue
         if not r.deployments:
-            raise SnapshotInvalid(f"route {r.model!r} has no deployments")
+            raise SnapshotInvalid(f"route {r.name!r} has no deployments")
         missing = [d for d in r.deployments if d not in deployments]
         if missing:
-            raise SnapshotInvalid(f"route {r.model!r} references unknown deployment {missing[0]!r}")
+            raise SnapshotInvalid(f"route {r.name!r} references unknown deployment {missing[0]!r}")
         if r.strategy == pb.ROUTING_STRATEGY_WEIGHTED and not sum(weight[d] for d in r.deployments):
-            raise SnapshotInvalid(f"route {r.model!r} has zero total weight")
+            raise SnapshotInvalid(f"route {r.name!r} has zero total weight")
 
     _unique([t.id for t in snap.teams], "team")
     teams = {t.id for t in snap.teams}
@@ -344,7 +344,7 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
         if not k.HasField("policy"):
             raise SnapshotInvalid(f"key {k.key_id!r} has no policy")
         if any(not m for m in k.policy.allowed_models):
-            raise SnapshotInvalid(f"key {k.key_id!r} allows an empty model name")
+            raise SnapshotInvalid(f"key {k.key_id!r} allows an empty name name")
         own: set[str] = set()
         for scope in k.policy.rate_limit_scopes:
             if not scope.id or not scope.HasField("limit"):

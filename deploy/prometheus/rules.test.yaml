@@ -13,11 +13,11 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",route=\"chat_completions\",status=\"200\"}",
+          "series": "lumewarp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",endpoint=\"chat_completions\",status=\"200\"}",
           "values": "0+60x40"
         },
         {
-          "series": "lumewarp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",route=\"chat_completions\",status=\"503\"}",
+          "series": "lumewarp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",endpoint=\"chat_completions\",status=\"503\"}",
           "values": "0+60x40"
         }
       ],
@@ -34,7 +34,7 @@
             {
               "exp_labels": {
                 "namespace": "demo",
-                "model": "m",
+                "requested": "m",
                 "severity": "critical"
               },
               "exp_annotations": {
@@ -52,11 +52,11 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",route=\"chat_completions\",status=\"200\"}",
+          "series": "lumewarp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",endpoint=\"chat_completions\",status=\"200\"}",
           "values": "0+120x40"
         },
         {
-          "series": "lumewarp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",route=\"chat_completions\",status=\"503\"}",
+          "series": "lumewarp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",endpoint=\"chat_completions\",status=\"503\"}",
           "values": "0+0x40"
         }
       ],
@@ -73,15 +73,15 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",route=\"chat_completions\",le=\"0.005\"}",
+          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",endpoint=\"chat_completions\",le=\"0.005\"}",
           "values": "0+0x40"
         },
         {
-          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",route=\"chat_completions\",le=\"0.025\"}",
+          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",endpoint=\"chat_completions\",le=\"0.025\"}",
           "values": "0+60x40"
         },
         {
-          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",route=\"chat_completions\",le=\"+Inf\"}",
+          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",endpoint=\"chat_completions\",le=\"+Inf\"}",
           "values": "0+60x40"
         }
       ],
@@ -98,7 +98,7 @@
             {
               "exp_labels": {
                 "namespace": "demo",
-                "route": "chat_completions",
+                "endpoint": "chat_completions",
                 "severity": "warning"
               },
               "exp_annotations": {
@@ -116,15 +116,15 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",route=\"chat_completions\",le=\"0.005\"}",
+          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",endpoint=\"chat_completions\",le=\"0.005\"}",
           "values": "0+60x40"
         },
         {
-          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",route=\"chat_completions\",le=\"0.025\"}",
+          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",endpoint=\"chat_completions\",le=\"0.025\"}",
           "values": "0+60x40"
         },
         {
-          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",route=\"chat_completions\",le=\"+Inf\"}",
+          "series": "lumewarp_gateway_overhead_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",endpoint=\"chat_completions\",le=\"+Inf\"}",
           "values": "0+60x40"
         }
       ],
@@ -141,15 +141,15 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",deployment=\"d\",le=\"1\"}",
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",deployment=\"d\",le=\"1\"}",
           "values": "0+0x40"
         },
         {
-          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",deployment=\"d\",le=\"10\"}",
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",deployment=\"d\",le=\"10\"}",
           "values": "0+60x40"
         },
         {
-          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",deployment=\"d\",le=\"+Inf\"}",
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",deployment=\"d\",le=\"+Inf\"}",
           "values": "0+60x40"
         }
       ],
@@ -166,13 +166,13 @@
             {
               "exp_labels": {
                 "namespace": "demo",
-                "model": "m",
+                "requested": "m",
                 "severity": "warning"
               },
               "exp_annotations": {
                 "summary": "Stream p99 TTFT is high",
                 "description": "Model m has p99 TTFT above 5 seconds for 10 minutes.",
-                "runbook": "Inspect vLLM queue and KV cache, upstream latency and request sizes; tune this baseline per model."
+                "runbook": "Inspect vLLM queue and KV cache, upstream latency and request sizes; tune this baseline per requested."
               }
             }
           ]
@@ -184,15 +184,15 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",deployment=\"d\",le=\"1\"}",
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",deployment=\"d\",le=\"1\"}",
           "values": "0+60x40"
         },
         {
-          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",deployment=\"d\",le=\"10\"}",
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",deployment=\"d\",le=\"10\"}",
           "values": "0+60x40"
         },
         {
-          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\",deployment=\"d\",le=\"+Inf\"}",
+          "series": "lumewarp_ttft_seconds_bucket{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",requested=\"m\",deployment=\"d\",le=\"+Inf\"}",
           "values": "0+60x40"
         }
       ],
@@ -288,7 +288,7 @@
               "exp_annotations": {
                 "summary": "Upstream health checks are failing",
                 "description": "Upstream u has been unhealthy for 2 minutes.",
-                "runbook": "Check upstream health endpoint, credentials and network reachability; route away if needed."
+                "runbook": "Check upstream health endpoint, credentials and network reachability; endpoint away if needed."
               }
             }
           ]
@@ -317,7 +317,7 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_retries_budget_exhausted_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\"}",
+          "series": "lumewarp_retries_budget_exhausted_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",router=\"m\"}",
           "values": "0+60x40"
         }
       ],
@@ -334,12 +334,12 @@
             {
               "exp_labels": {
                 "namespace": "demo",
-                "model": "m",
+                "router": "m",
                 "severity": "warning"
               },
               "exp_annotations": {
                 "summary": "Upstream retry budget is exhausted",
-                "description": "Model m is exhausting its retry budget.",
+                "description": "Router m is exhausting its retry budget.",
                 "runbook": "Inspect attempts, fallback availability and upstream capacity; do not increase retries during overload."
               }
             }
@@ -352,7 +352,7 @@
       "interval": "1m",
       "input_series": [
         {
-          "series": "lumewarp_retries_budget_exhausted_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\"}",
+          "series": "lumewarp_retries_budget_exhausted_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",router=\"m\"}",
           "values": "0+0x40"
         }
       ],

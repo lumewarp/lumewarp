@@ -66,7 +66,7 @@ async def test_invalid_uri_rejected_by_api_and_compiler(factory, url, field) -> 
         validate_snapshot(snap, max_bytes=1 << 26, max_keys=1000)
     await seed_scope(factory)
     async with factory() as session, session.begin():
-        await add_route(session, "model", [("a", None)])
+        await add_route(session, "name", [("a", None)])
         up = await session.scalar(select(Upstream))
         setattr(up, field, url)
     async with factory() as session:
@@ -97,7 +97,7 @@ def test_valid_uri_contract(url, field) -> None:
 
 
 def test_metrics_query_allowed_but_not_base_query() -> None:
-    url = "http://example.com/metrics?model=a%2Fb&v=1"
+    url = "http://example.com/metrics?name=a%2Fb&v=1"
     assert metrics_url_problem(url) is None
     assert upstream_url_problem(url)
 
@@ -110,7 +110,7 @@ async def test_invalid_health_uri_rejected_by_api_and_compiler(factory, path) ->
         HealthCheckIn(path=path, interval_ms=1000, timeout_ms=100)
     await seed_scope(factory)
     async with factory() as session, session.begin():
-        await add_route(session, "model", [("a", None)])
+        await add_route(session, "name", [("a", None)])
         up = await session.scalar(select(Upstream))
         up.health_check_path = path
         up.health_check_interval_ms = 1000

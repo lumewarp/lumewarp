@@ -96,7 +96,7 @@ class Fleet:
         self.route_id = stack.ok(
             "POST",
             "/routes",
-            json={"model": "mock", "deployment_ids": [self.deployments["mock-a"]]},
+            json={"name": "mock", "deployment_ids": [self.deployments["mock-a"]]},
         )["id"]
         self.teams: list[dict] = []
         self.owners: list[dict] = []

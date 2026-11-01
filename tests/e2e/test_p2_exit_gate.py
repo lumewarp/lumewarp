@@ -207,7 +207,7 @@ def traffic(keys):
             "price_output_nano_usd_per_mtok": 2_000_000_000,
         },
     )
-    stack.ok("POST", "/routes", json={"model": "mock", "deployment_ids": [deployment["id"]]})
+    stack.ok("POST", "/routes", json={"name": "mock", "deployment_ids": [deployment["id"]]})
 
     def published():
         rows = pg(stack.dsn, "SELECT payload FROM config_versions ORDER BY version DESC LIMIT 1")
@@ -215,7 +215,7 @@ def traffic(keys):
             return False
         snapshot = snapshot_pb2.Snapshot.FromString(rows[0]["payload"])
         return len(snapshot.api_keys) == 2 and any(
-            route.model == "mock" for route in snapshot.routes
+            route.name == "mock" for route in snapshot.routes
         )
 
     state.events.wait(
@@ -284,7 +284,7 @@ def test_04_usage_owners_cost_and_team_totals_reconcile(traffic):
                 kind,
                 owner_id,
             )
-            assert (row["status"], row["model"], row["deployment"]) == (200, "mock", "mock-a")
+            assert (row["status"], row["requested"], row["deployment"]) == (200, "mock", "mock-a")
             assert row["cost_known"] and row["prompt_tokens"] > 0 and row["completion_tokens"] > 0
             assert row["cost_nano_usd"] == (
                 row["prompt_tokens"] * 1000 + row["completion_tokens"] * 2000

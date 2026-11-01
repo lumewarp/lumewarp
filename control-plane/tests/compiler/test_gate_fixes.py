@@ -77,7 +77,7 @@ async def test_source_zero_weight_weighted_route_is_left_out(factory) -> None:
     assert await publish_pending(factory, SCOPE, require_local_membership=True) == 1
     snap = await load_version(factory, 1)
     # least_in_flight ignores weights, so only the weighted route is dropped.
-    assert [r.model for r in snap.routes] == ["fine", "lif"]
+    assert [r.name for r in snap.routes] == ["fine", "lif"]
     assert list(snap.api_keys) == []
     async with factory() as s:
         c = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
@@ -121,7 +121,7 @@ async def test_invalid_upstream_url_left_out_with_its_routes(factory) -> None:
     snap = c.snapshot
     assert [u.name for u in snap.upstreams] == ["vllm"]
     assert [d.name for d in snap.deployments] == ["fine-d"]
-    assert [r.model for r in snap.routes] == ["good"]
+    assert [r.name for r in snap.routes] == ["good"]
     assert len(c.warnings) >= 4
 
 
@@ -130,7 +130,7 @@ def _valid_snapshot() -> pb.Snapshot:
         scope="s",
         upstreams=[pb.Upstream(name="u", kind=pb.UPSTREAM_KIND_VLLM, base_url="http://u/v1")],
         deployments=[pb.Deployment(name="d", upstream="u", upstream_model="m", weight=1)],
-        routes=[pb.ModelRoute(model="a", deployments=["d"], strategy=pb.ROUTING_STRATEGY_WEIGHTED)],
+        routes=[pb.ModelRoute(name="a", deployments=["d"], strategy=pb.ROUTING_STRATEGY_WEIGHTED)],
         teams=[pb.Team(id="t")],
         api_keys=[
             pb.ApiKey(
@@ -158,9 +158,9 @@ def _mutations():
         "dup upstream": lambda s: s.upstreams.append(s.upstreams[0]),
         "empty upstream": lambda s: setattr(s.upstreams[0], "name", ""),
         "unknown upstream": lambda s: setattr(s.deployments[0], "upstream", "x"),
-        "empty model": lambda s: setattr(s.deployments[0], "upstream_model", ""),
+        "empty name": lambda s: setattr(s.deployments[0], "upstream_model", ""),
         "dup deployment": lambda s: s.deployments.append(s.deployments[0]),
-        "reserved alias": lambda s: setattr(s.routes[0], "model", "unknown"),
+        "reserved alias": lambda s: setattr(s.routes[0], "name", "unknown"),
         "strategy 0": lambda s: setattr(s.routes[0], "strategy", 0),
         "lowest latency": lambda s: setattr(s.routes[0], "strategy", 3),
         "no deployments": lambda s: s.routes[0].ClearField("deployments"),
@@ -179,7 +179,7 @@ def _mutations():
         "negative expiry": lambda s: setattr(k(s), "expires_at_unix_ms", -1),
         "unknown team": lambda s: setattr(k(s), "team_id", "x"),
         "no policy": lambda s: k(s).ClearField("policy"),
-        "empty allowed model": lambda s: k(s).policy.allowed_models.append(""),
+        "empty allowed name": lambda s: k(s).policy.allowed_models.append(""),
         "scope without limit": lambda s: k(s).policy.rate_limit_scopes[0].ClearField("limit"),
         "repeated scope": lambda s: k(s).policy.rate_limit_scopes.append(
             k(s).policy.rate_limit_scopes[0]

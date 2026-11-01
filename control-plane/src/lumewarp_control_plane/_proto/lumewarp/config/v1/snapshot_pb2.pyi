@@ -155,8 +155,8 @@ class Price(_message.Message):
     def __init__(self, input_nano_usd_per_mtok: _Optional[int] = ..., output_nano_usd_per_mtok: _Optional[int] = ...) -> None: ...
 
 class ModelRoute(_message.Message):
-    __slots__ = ("model", "deployments", "strategy", "retry", "fallbacks", "traffic_split", "sticky", "sticky_header", "custom_strategy", "strategy_params_json")
-    MODEL_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("name", "deployments", "strategy", "retry", "fallbacks", "traffic_split", "sticky", "sticky_header", "custom_strategy", "strategy_params_json")
+    NAME_FIELD_NUMBER: _ClassVar[int]
     DEPLOYMENTS_FIELD_NUMBER: _ClassVar[int]
     STRATEGY_FIELD_NUMBER: _ClassVar[int]
     RETRY_FIELD_NUMBER: _ClassVar[int]
@@ -166,7 +166,7 @@ class ModelRoute(_message.Message):
     STICKY_HEADER_FIELD_NUMBER: _ClassVar[int]
     CUSTOM_STRATEGY_FIELD_NUMBER: _ClassVar[int]
     STRATEGY_PARAMS_JSON_FIELD_NUMBER: _ClassVar[int]
-    model: str
+    name: str
     deployments: _containers.RepeatedScalarFieldContainer[str]
     strategy: RoutingStrategy
     retry: RetryPolicy
@@ -176,7 +176,7 @@ class ModelRoute(_message.Message):
     sticky_header: str
     custom_strategy: str
     strategy_params_json: str
-    def __init__(self, model: _Optional[str] = ..., deployments: _Optional[_Iterable[str]] = ..., strategy: _Optional[_Union[RoutingStrategy, str]] = ..., retry: _Optional[_Union[RetryPolicy, _Mapping]] = ..., fallbacks: _Optional[_Iterable[str]] = ..., traffic_split: _Optional[_Iterable[_Union[TrafficSplit, _Mapping]]] = ..., sticky: _Optional[_Union[StickyBy, str]] = ..., sticky_header: _Optional[str] = ..., custom_strategy: _Optional[str] = ..., strategy_params_json: _Optional[str] = ...) -> None: ...
+    def __init__(self, name: _Optional[str] = ..., deployments: _Optional[_Iterable[str]] = ..., strategy: _Optional[_Union[RoutingStrategy, str]] = ..., retry: _Optional[_Union[RetryPolicy, _Mapping]] = ..., fallbacks: _Optional[_Iterable[str]] = ..., traffic_split: _Optional[_Iterable[_Union[TrafficSplit, _Mapping]]] = ..., sticky: _Optional[_Union[StickyBy, str]] = ..., sticky_header: _Optional[str] = ..., custom_strategy: _Optional[str] = ..., strategy_params_json: _Optional[str] = ...) -> None: ...
 
 class RetryPolicy(_message.Message):
     __slots__ = ("max_attempts", "retry_on_status", "total_timeout_ms")

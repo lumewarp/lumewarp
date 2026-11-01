@@ -58,7 +58,7 @@ async def add_key(
 
 async def add_route(
     s: AsyncSession,
-    model: str,
+    name: str,
     deployments: list[tuple[str, int | None]],
     *,
     upstream: str = "vllm",
@@ -70,7 +70,7 @@ async def add_route(
         up = Upstream(name=upstream, kind=UpstreamKind.VLLM, base_url=f"http://{upstream}/v1")
         s.add(up)
         await s.flush()
-    route = Route(model=model, strategy=strategy)
+    route = Route(name=name, strategy=strategy)
     s.add(route)
     await s.flush()
     for pos, (name, price) in enumerate(deployments):
@@ -79,7 +79,7 @@ async def add_route(
             d = Deployment(
                 name=name,
                 upstream_id=up.id,
-                upstream_model=f"{name}-model",
+                upstream_model=f"{name}-name",
                 price_input_nano_usd_per_mtok=price,
                 price_output_nano_usd_per_mtok=price,
             )

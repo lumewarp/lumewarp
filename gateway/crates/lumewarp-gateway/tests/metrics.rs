@@ -11,16 +11,16 @@ use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, Request};
 use hyper_util::rt::TokioIo;
 
-const ROUTE: &[(&str, &str)] = &[("route", "chat_completions")];
+const ROUTE: &[(&str, &str)] = &[("endpoint", "chat_completions")];
 const PUBLIC: &[(&str, &str)] = &[
-    ("model", "public"),
+    ("requested", "public"),
     ("deployment", "d0"),
-    ("route", "chat_completions"),
+    ("endpoint", "chat_completions"),
 ];
 const UNKNOWN: &[(&str, &str)] = &[
-    ("model", "unknown"),
+    ("requested", "unknown"),
     ("deployment", ""),
-    ("route", "chat_completions"),
+    ("endpoint", "chat_completions"),
 ];
 const STREAM: &[u8] = br#"{"model":"public","stream":true}"#;
 const NORMAL: &[u8] = br#"{"model":"public"}"#;
@@ -142,8 +142,8 @@ async fn request_counts_labels_in_flight_and_histograms_match() {
         0.0
     );
     assert_eq!(
-        after.sum("lumewarp_ttft_seconds_count", &[("model", "public")])
-            - before.sum("lumewarp_ttft_seconds_count", &[("model", "public")]),
+        after.sum("lumewarp_ttft_seconds_count", &[("requested", "public")])
+            - before.sum("lumewarp_ttft_seconds_count", &[("requested", "public")]),
         1.0
     );
     assert!(!after.samples.iter().any(|sample| sample
@@ -182,10 +182,10 @@ async fn headers_first_prefill_is_ttft_not_gateway_overhead() {
         - before.value("lumewarp_gateway_overhead_seconds_sum", ROUTE);
     let ttft = after.value(
         "lumewarp_ttft_seconds_sum",
-        &[("model", "public"), ("deployment", "d0")],
+        &[("requested", "public"), ("deployment", "d0")],
     ) - before.value(
         "lumewarp_ttft_seconds_sum",
-        &[("model", "public"), ("deployment", "d0")],
+        &[("requested", "public"), ("deployment", "d0")],
     );
     assert!(
         (0.0..0.050).contains(&overhead),
@@ -231,10 +231,10 @@ async fn client_cancel_before_headers_records_499_not_500() {
     assert_eq!(
         after.sum(
             "lumewarp_requests_total",
-            &[("route", "chat_completions"), ("status", "500")]
+            &[("endpoint", "chat_completions"), ("status", "500")]
         ) - before.sum(
             "lumewarp_requests_total",
-            &[("route", "chat_completions"), ("status", "500")]
+            &[("endpoint", "chat_completions"), ("status", "500")]
         ),
         0.0
     );
@@ -280,10 +280,10 @@ async fn mid_stream_failure_counts_once_and_keeps_http_200() {
     assert_eq!(
         after.sum(
             "lumewarp_requests_total",
-            &[("route", "chat_completions"), ("status", "200")]
+            &[("endpoint", "chat_completions"), ("status", "200")]
         ) - before.sum(
             "lumewarp_requests_total",
-            &[("route", "chat_completions"), ("status", "200")]
+            &[("endpoint", "chat_completions"), ("status", "200")]
         ),
         1.0
     );

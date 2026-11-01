@@ -35,7 +35,7 @@ interface Split {
 }
 
 interface Values {
-  model: string;
+  name: string;
   strategy: Strategy;
   deployment_ids: string[];
   retry_enabled: boolean;
@@ -48,7 +48,7 @@ interface Values {
   sticky_header: string;
 }
 const blank: Values = {
-  model: "",
+  name: "",
   strategy: "weighted",
   deployment_ids: [],
   retry_enabled: false,
@@ -64,7 +64,7 @@ const blank: Values = {
 const ordered = (r: Route) => [...r.deployments].sort((a, b) => a.position - b.position).map((d) => d.deployment_id);
 
 const fromRoute = (r: Route): Values => ({
-  model: r.model,
+  name: r.name,
   strategy: r.strategy,
   deployment_ids: ordered(r),
   retry_enabled: !!r.retry,
@@ -85,7 +85,7 @@ function parseStatuses(text: string): number[] | undefined {
 }
 
 const body = (v: Values) => ({
-  model: v.model,
+  name: v.name,
   strategy: v.strategy,
   deployment_ids: v.deployment_ids,
   retry: v.retry_enabled
@@ -164,11 +164,11 @@ export function Routes() {
   const list = useQuery({ queryKey: ["routes"], queryFn: () => api.routes() });
   const deployments = useQuery({ queryKey: ["deployments"], queryFn: () => api.deployments() });
   const depName = useNames(deployments.data);
-  const routeName = useNames(list.data?.map((r) => ({ id: r.id, name: r.model })));
+  const routeName = useNames(list.data?.map((r) => ({ id: r.id, name: r.name })));
   const [editing, setEditing] = useState<Route | "new" | null>(null);
   const [deleting, setDeleting] = useState<Route | null>(null);
   const form = useForm<Values>(blank, {
-    model: required("Model alias"),
+    name: required("Model alias"),
     deployment_ids: (v, all) => (v.length || all.splits.length ? undefined : "Pick at least one deployment or add a traffic split"),
     splits: (v) => splitsError(v),
     retry_statuses: (v, all) => (all.retry_enabled && parseStatuses(v) === undefined ? "Comma-separated HTTP statuses in 400–599" : undefined),
@@ -203,7 +203,7 @@ export function Routes() {
 
   return (
     <>
-      <PageHeader title="Models / Routes" description="A model alias that clients request, mapped to one or more deployments, with optional retries, fallbacks and traffic splits." actions={<CreateButton can={perms.isSuper} onClick={() => open("new")}>New route</CreateButton>} />
+      <PageHeader title="Models / Routes" description="A name alias that clients request, mapped to one or more deployments, with optional retries, fallbacks and traffic splits." actions={<CreateButton can={perms.isSuper} onClick={() => open("new")}>New route</CreateButton>} />
       <DataTable
         rows={list.data}
         loading={list.isPending}
@@ -212,7 +212,7 @@ export function Routes() {
         rowKey={(r) => r.id}
         empty="No routes yet."
         columns={[
-          { key: "model", header: "Model alias", sort: (a, b) => a.model.localeCompare(b.model), cell: (r) => <strong>{r.model}</strong> },
+          { key: "name", header: "Model alias", sort: (a, b) => a.name.localeCompare(b.name), cell: (r) => <strong>{r.name}</strong> },
           { key: "strategy", header: "Strategy", cell: (r) => STRATEGIES.find((s) => s.value === r.strategy)?.label ?? r.strategy },
           {
             key: "deps",
@@ -256,7 +256,7 @@ export function Routes() {
         ]}
       />
       <FormDialog variant="drawer" open={!!editing} title={editing === "new" ? "New route" : "Edit route"} submitLabel={editing === "new" ? "Create" : "Save"} onClose={() => setEditing(null)} onSubmit={submit}>
-        <TextField label="Model alias" value={v.model} onChange={(x) => form.set("model", x)} error={form.errors.model} autoFocus hint="The `model` value clients send." />
+        <TextField label="Model alias" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus hint="The `model` value clients send." />
         <SelectField label="Strategy" value={v.strategy} onChange={(x) => form.set("strategy", x as Strategy)} options={STRATEGIES} hint="How a deployment is picked (inside the chosen split when the route is split). vLLM load reads each upstream's metrics endpoint." />
         <Field label="Deployments" error={form.errors.deployment_ids} hint={v.splits.length ? "Ignored while a traffic split is defined." : undefined}>
           {(p) => <DeploymentChecks id={p.id} invalid={p["aria-invalid"]} options={depOptions} selected={v.deployment_ids} onToggle={(id) => form.set("deployment_ids", toggled(v.deployment_ids, id))} />}
@@ -276,7 +276,7 @@ export function Routes() {
           )}
         </fieldset>
 
-        <Field label="Fallback routes" error={form.errors.fallback_route_ids} hint="Tried in order once this route's deployments failed, within this route's attempt budget (enable retries with at least 2 attempts). Clients still see this route's model name.">
+        <Field label="Fallback routes" error={form.errors.fallback_route_ids} hint="Tried in order once this route's deployments failed, within this route's attempt budget (enable retries with at least 2 attempts). Clients still see this route's name name.">
           {(p) => (
             <div className="targets" id={p.id} aria-invalid={p["aria-invalid"]}>
               {v.fallback_route_ids.map((id, i) => (
@@ -299,7 +299,7 @@ export function Routes() {
                 <option value="">{fallbackOptions.length ? "Add a fallback route…" : "No other routes"}</option>
                 {fallbackOptions.map((r) => (
                   <option key={r.id} value={r.id}>
-                    {r.model}
+                    {r.name}
                   </option>
                 ))}
               </select>
@@ -343,7 +343,7 @@ export function Routes() {
           )}
         </fieldset>
       </FormDialog>
-      <ConfirmDialog open={!!deleting} title="Delete route" message={`Delete route “${deleting?.model}”? Clients requesting this model will get an error. A route used as another route's fallback cannot be deleted.`} onConfirm={() => remove.mutateAsync(deleting!.id)} onClose={() => setDeleting(null)} />
+      <ConfirmDialog open={!!deleting} title="Delete route" message={`Delete route “${deleting?.name}”? Clients requesting this name will get an error. A route used as another route's fallback cannot be deleted.`} onConfirm={() => remove.mutateAsync(deleting!.id)} onClose={() => setDeleting(null)} />
     </>
   );
 }

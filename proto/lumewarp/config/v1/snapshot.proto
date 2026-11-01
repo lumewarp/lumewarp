@@ -109,7 +109,7 @@ message Price {
 
 // Public model alias -> deployments.
 message ModelRoute {
-  string model = 1;
+  string name = 1;
   // Ignored when traffic_split is non-empty.
   repeated string deployments = 2;
   RoutingStrategy strategy = 3;

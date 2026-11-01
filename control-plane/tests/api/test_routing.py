@@ -21,7 +21,7 @@ def _deployment(client, upstream_id, **body):
     body = {
         "name": f"dep-{suffix()}",
         "upstream_id": upstream_id,
-        "upstream_model": "model",
+        "upstream_model": "name",
         **body,
     }
     return client.post("/api/v1/deployments", json=body, headers=ADMIN_AUTH)
@@ -47,7 +47,7 @@ def test_upstream_deployment_route_crud(client) -> None:
     route = client.post(
         "/api/v1/routes",
         json={
-            "model": f"alias-{suffix()}",
+            "name": f"alias-{suffix()}",
             "strategy": "weighted",
             "deployment_ids": [deployment["id"]],
         },
@@ -144,7 +144,7 @@ def test_routing_validation(client) -> None:
     assert resp.json()["price_input_nano_usd_per_mtok"] is None
 
     route_body = {
-        "model": f"alias-{suffix()}",
+        "name": f"alias-{suffix()}",
         "strategy": "no_such_strategy",
         "deployment_ids": [dep["id"]],
     }

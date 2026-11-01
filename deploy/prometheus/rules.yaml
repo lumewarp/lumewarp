@@ -6,13 +6,13 @@ groups:
     interval: 1m
     rules:
       - record: lumewarp:model_requests:rate5m
-        expr: "sum by (namespace, model) (rate(lumewarp_requests_total{route=~\"chat_completions|completions|embeddings|models\"}[5m]))"
+        expr: "sum by (namespace, requested) (rate(lumewarp_requests_total{endpoint=~\"chat_completions|completions|embeddings|models\"}[5m]))"
       - record: lumewarp:model_errors:ratio5m
-        expr: "sum by (namespace, model) (rate(lumewarp_requests_total{status=~\"5..\",route=~\"chat_completions|completions|embeddings|models\"}[5m])) / lumewarp:model_requests:rate5m"
+        expr: "sum by (namespace, requested) (rate(lumewarp_requests_total{status=~\"5..\",endpoint=~\"chat_completions|completions|embeddings|models\"}[5m])) / lumewarp:model_requests:rate5m"
       - record: lumewarp:gateway_overhead:p99_5m
-        expr: "histogram_quantile(0.99, sum by (namespace, route, le) (rate(lumewarp_gateway_overhead_seconds_bucket[5m])))"
+        expr: "histogram_quantile(0.99, sum by (namespace, endpoint, le) (rate(lumewarp_gateway_overhead_seconds_bucket[5m])))"
       - record: lumewarp:ttft:p99_5m
-        expr: "histogram_quantile(0.99, sum by (namespace, model, le) (rate(lumewarp_ttft_seconds_bucket[5m])))"
+        expr: "histogram_quantile(0.99, sum by (namespace, requested, le) (rate(lumewarp_ttft_seconds_bucket[5m])))"
   - name: lumewarp.alerts
     interval: 1m
     rules:
@@ -26,13 +26,13 @@ groups:
           runbook: "Investigate the emergency access and review its audit trail."
       # 5% at >=1 request/s avoids paging on isolated failures or local admin traffic.
       - alert: LumewarpGatewayHigh5xxRatio
-        expr: "lumewarp:model_errors:ratio5m > 0.05 and on (namespace, model) lumewarp:model_requests:rate5m >= 1"
+        expr: "lumewarp:model_errors:ratio5m > 0.05 and on (namespace, requested) lumewarp:model_requests:rate5m >= 1"
         for: 5m
         labels:
           severity: critical
         annotations:
           summary: "Gateway 5xx ratio is high"
-          description: "Model {{ $labels.model }} exceeds 5% 5xx responses for 5 minutes at >=1 request/s."
+          description: "Model {{ $labels.requested }} exceeds 5% 5xx responses for 5 minutes at >=1 request/s."
           runbook: "Check upstream errors and routing dashboard; restore a healthy deployment or roll back routing."
       # 10 ms is an operational page budget, not the tighter benchmark target.
       - alert: LumewarpGatewayOverheadHigh
@@ -42,9 +42,9 @@ groups:
           severity: warning
         annotations:
           summary: "Gateway p99 overhead exceeds budget"
-          description: "Route {{ $labels.route }} has p99 processing overhead above 10 ms for 10 minutes."
+          description: "Route {{ $labels.endpoint }} has p99 processing overhead above 10 ms for 10 minutes."
           runbook: "Check gateway CPU throttling, saturation and recent gateway releases; compare the benchmark baseline."
-      # Absolute 5 s regression guard; calibrate for model size and prefill workload.
+      # Absolute 5 s regression guard; calibrate for requested size and prefill workload.
       - alert: LumewarpTTFTHigh
         expr: "lumewarp:ttft:p99_5m > 5"
         for: 10m
@@ -52,8 +52,8 @@ groups:
           severity: warning
         annotations:
           summary: "Stream p99 TTFT is high"
-          description: "Model {{ $labels.model }} has p99 TTFT above 5 seconds for 10 minutes."
-          runbook: "Inspect vLLM queue and KV cache, upstream latency and request sizes; tune this baseline per model."
+          description: "Model {{ $labels.requested }} has p99 TTFT above 5 seconds for 10 minutes."
+          runbook: "Inspect vLLM queue and KV cache, upstream latency and request sizes; tune this baseline per requested."
       # State 2 is open; brief trips and half-open probes do not alert.
       - alert: LumewarpUpstreamCircuitOpen
         expr: "lumewarp_upstream_circuit_state == 2"
@@ -73,16 +73,16 @@ groups:
         annotations:
           summary: "Upstream health checks are failing"
           description: "Upstream {{ $labels.upstream }} has been unhealthy for 2 minutes."
-          runbook: "Check upstream health endpoint, credentials and network reachability; route away if needed."
+          runbook: "Check upstream health endpoint, credentials and network reachability; endpoint away if needed."
       # Any sustained exhaustion deserves investigation; five-minute counter window tolerates scrape jitter.
       - alert: LumewarpRetryBudgetExhausted
-        expr: "sum by (namespace, model) (increase(lumewarp_retries_budget_exhausted_total[5m])) > 0"
+        expr: "sum by (namespace, router) (increase(lumewarp_retries_budget_exhausted_total[5m])) > 0"
         for: 2m
         labels:
           severity: warning
         annotations:
           summary: "Upstream retry budget is exhausted"
-          description: "Model {{ $labels.model }} is exhausting its retry budget."
+          description: "Router {{ $labels.router }} is exhausting its retry budget."
           runbook: "Inspect attempts, fallback availability and upstream capacity; do not increase retries during overload."
       # Exclude standalone YAML gateways, whose stream gauge is always zero.
       - alert: LumewarpConfigStreamDisconnected

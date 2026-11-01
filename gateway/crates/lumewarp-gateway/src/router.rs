@@ -26,7 +26,7 @@ use crate::{
     auth::Caller,
     balance::{self, Latency, Scrape, VllmLoad},
     health::{Breaker, Probe},
-    metrics::{HandleKey, LabelId, RequestMetrics, ROUTES},
+    metrics::{HandleKey, LabelId, RequestMetrics, API_ENDPOINTS},
     ratelimit::clock,
     runtime::Runtime,
     snapshot::{self, ApplyError},
@@ -141,7 +141,7 @@ impl CompiledStrategy {
                     .ok_or_else(|| ApplyError::unsupported("unregistered custom strategy"))?;
                 let deployments: Vec<_> = route_deployment_names(r).collect();
                 let info = RouteInfo {
-                    model: &r.model,
+                    name: &r.name,
                     deployments: &deployments,
                 };
                 let params = snapshot::strategy_params(r)?;
@@ -149,7 +149,7 @@ impl CompiledStrategy {
                 return (factory.create)(&info, &params)
                     .map(Self::Custom)
                     .map_err(|_| {
-                        invalid(format!("route {:?} strategy configuration failed", r.model))
+                        invalid(format!("route {:?} strategy configuration failed", r.name))
                     });
             }
             RoutingStrategy::Unspecified => unreachable!("validated strategy"),
@@ -181,8 +181,8 @@ impl CompiledStrategy {
 }
 
 pub struct Route {
-    model: Box<str>,
-    model_label: LabelId,
+    name: Box<str>,
+    name_label: LabelId,
     /// One pool per traffic split, in declaration order; exactly one pool
     /// when the route has no split.
     pools: Vec<Pool>,
@@ -317,7 +317,7 @@ impl Drop for InFlight {
     }
 }
 
-pub struct Router {
+pub struct RoutingTable {
     pub version: u64,
     pub keys: HashMap<[u8; 32], Arc<KeyContext>>,
     pub routes: HashMap<String, Route>,
@@ -325,7 +325,7 @@ pub struct Router {
     pub auth_mode: AuthMode,
     pub runtime: Arc<Runtime>,
     /// Pre-routing rejections and local endpoints (model "", team "").
-    pub rejected: [Arc<RequestMetrics>; ROUTES.len()],
+    pub rejected: [Arc<RequestMetrics>; API_ENDPOINTS.len()],
     /// Route aliases in snapshot order, for filtered `/v1/models`.
     models: Box<[Box<str>]>,
     unknown_label: LabelId,
@@ -341,7 +341,7 @@ fn invalid(reason: String) -> ApplyError {
     ApplyError::invalid(reason)
 }
 
-impl Router {
+impl RoutingTable {
     /// Compiles a validated snapshot. Fails closed: with `RequireKey` and no
     /// keys every `/v1/*` request is rejected.
     pub fn compile(
@@ -354,7 +354,7 @@ impl Router {
         snapshot::validate(snapshot, &caps)?;
         let mut strategies = HashMap::new();
         for route in &snapshot.routes {
-            strategies.insert(route.model.as_str(), CompiledStrategy::configure(route)?);
+            strategies.insert(route.name.as_str(), CompiledStrategy::configure(route)?);
         }
         let mut upstreams = HashMap::new();
         let mut probes = Vec::new();
@@ -370,7 +370,7 @@ impl Router {
         let mut scraped_upstreams = HashSet::new();
         for r in &snapshot.routes {
             let names = route_deployment_names(r);
-            let needs = strategies[r.model.as_str()].needs();
+            let needs = strategies[r.name.as_str()].needs();
             if needs.latency {
                 latency_tracked.extend(route_deployment_names(r));
             }
@@ -547,7 +547,7 @@ impl Router {
         let mut routes = HashMap::new();
         for r in &snapshot.routes {
             let strategy = strategies
-                .remove(r.model.as_str())
+                .remove(r.name.as_str())
                 .expect("configured strategy");
             let strategy_headers = snapshot::strategy_headers(r)?;
             let groups: Vec<(&str, &[String], u32)> = if r.traffic_split.is_empty() {
@@ -570,13 +570,13 @@ impl Router {
                     resolved.push(deployment.clone());
                     total_weight = total_weight
                         .checked_add(u64::from(*weight))
-                        .ok_or_else(|| invalid(format!("route {:?} weights overflow", r.model)))?;
+                        .ok_or_else(|| invalid(format!("route {:?} weights overflow", r.name)))?;
                     cumulative_weights.push(total_weight);
                 }
                 if r.strategy == RoutingStrategy::Weighted as i32 && total_weight == 0 {
                     return Err(invalid(format!(
                         "route {:?}{}{split} must have deployments with positive total weight",
-                        r.model,
+                        r.name,
                         if split.is_empty() { "" } else { " split " },
                     )));
                 }
@@ -584,14 +584,14 @@ impl Router {
                     std::iter::once("").chain(resolved.iter().map(|d| d.name.as_str()))
                 {
                     for endpoint in 0..ENDPOINTS {
-                        drop(metrics.handles(&r.model, deployment, endpoint, ""));
+                        drop(metrics.handles(&r.name, deployment, endpoint, ""));
                     }
                 }
                 split_total += u64::from(split_weight);
                 split_cumulative.push(split_total);
                 // Pre-register the attempt series at zero.
                 for name in names {
-                    drop(metrics.attempt_handles(&r.model, name));
+                    drop(metrics.attempt_handles(&r.name, name));
                 }
                 pools.push(Pool {
                     deployments: resolved,
@@ -604,29 +604,29 @@ impl Router {
                 snapshot
                     .routes
                     .iter()
-                    .filter(move |x| &x.model == f)
+                    .filter(move |x| &x.name == f)
                     .flat_map(route_deployment_names)
             });
             for name in route_deployment_names(r).chain(fallback_names) {
                 let d = &deployments[name].0;
                 if d.circuit.is_some() && !circuit_open.iter().any(|(l, _)| *l == d.label) {
-                    let [_, _, _, _, open, _] = metrics.attempt_handles(&r.model, name);
+                    let [_, _, _, _, open, _] = metrics.attempt_handles(&r.name, name);
                     circuit_open.push((d.label, open));
                 }
             }
             let sticky = StickyBy::try_from(r.sticky).expect("validated sticky");
             routes.insert(
-                r.model.clone(),
+                r.name.clone(),
                 Route {
-                    model: r.model.as_str().into(),
-                    model_label: metrics.label_id(&r.model),
+                    name: r.name.as_str().into(),
+                    name_label: metrics.label_id(&r.name),
                     pools,
                     split_cumulative,
                     split_total,
                     split_requests: r
                         .traffic_split
                         .iter()
-                        .map(|s| metrics.split_handle(&r.model, &s.name))
+                        .map(|s| metrics.split_handle(&r.name, &s.name))
                         .collect(),
                     sticky,
                     sticky_header: (sticky == StickyBy::Header).then(|| {
@@ -639,9 +639,9 @@ impl Router {
                     fallbacks: r
                         .fallbacks
                         .iter()
-                        .map(|f| (f.clone(), metrics.fallback_handle(&r.model, f)))
+                        .map(|f| (f.clone(), metrics.fallback_handle(&r.name, f)))
                         .collect(),
-                    budget_exhausted: metrics.budget_handle(&r.model),
+                    budget_exhausted: metrics.budget_handle(&r.name),
                     circuit_open,
                 },
             );
@@ -698,7 +698,7 @@ impl Router {
         let models: Box<[Box<str>]> = snapshot
             .routes
             .iter()
-            .map(|r| r.model.as_str().into())
+            .map(|r| r.name.as_str().into())
             .collect();
         Ok(Self {
             version: snapshot.version,
@@ -735,9 +735,9 @@ impl Router {
         self.runtime.metrics.cached_handles(
             HandleKey {
                 team,
-                model: model.0,
+                requested: model.0,
                 deployment: deployment.0,
-                route: route as u8,
+                endpoint: route as u8,
             },
             team_id,
             model.1,
@@ -746,7 +746,7 @@ impl Router {
     }
 
     /// Handles for an authenticated request before (or without) a model:
-    /// model and deployment `""`, the caller's team. `route` indexes `ROUTES`.
+    /// model and deployment `""`, the caller's team. `route` indexes `API_ENDPOINTS`.
     pub fn caller_handles(&self, caller: &Caller, route: usize) -> Arc<RequestMetrics> {
         self.handles(caller, (0, ""), (0, ""), route)
     }
@@ -765,9 +765,7 @@ impl Router {
         endpoint: usize,
     ) -> Arc<RequestMetrics> {
         match self.routes.get(model) {
-            Some(route) => {
-                self.handles(caller, (route.model_label, &route.model), (0, ""), endpoint)
-            }
+            Some(route) => self.handles(caller, (route.name_label, &route.name), (0, ""), endpoint),
             None => self.unknown(caller, endpoint),
         }
     }
@@ -898,7 +896,7 @@ impl Router {
         };
         let lookup = |name: &str| headers.get(name).map(HeaderValue::as_bytes);
         let req = RequestInfo::new(
-            &root.model,
+            &root.name,
             team_id,
             key_id,
             None,
@@ -926,7 +924,7 @@ impl Router {
         deployment.in_flight.fetch_add(1, Ordering::Relaxed);
         let metrics = self.handles(
             caller,
-            (root.model_label, &root.model),
+            (root.name_label, &root.name),
             (deployment.label, &deployment.name),
             endpoint,
         );
@@ -1118,7 +1116,7 @@ mod tests {
             "custom sees only eligible candidates"
         );
         s.routes[0].strategy_params_json = r#"{"reject":"private"}"#.into();
-        let err = Router::compile(&s, AuthMode::Open, &Runtime::new())
+        let err = RoutingTable::compile(&s, AuthMode::Open, &Runtime::new())
             .err()
             .unwrap();
         assert_eq!(err.code, pb::NackCode::InvalidConfig);
@@ -1131,7 +1129,7 @@ mod tests {
         s.routes[0].custom_strategy = "not_compiled".into();
         s.required_capabilities = vec!["strategy:not_compiled".into()];
         assert_eq!(
-            Router::compile(&s, AuthMode::Open, &Runtime::new())
+            RoutingTable::compile(&s, AuthMode::Open, &Runtime::new())
                 .err()
                 .unwrap()
                 .code,
@@ -1140,7 +1138,7 @@ mod tests {
         s.routes[0].custom_strategy = "header_pin".into();
         s.required_capabilities.clear();
         assert_eq!(
-            Router::compile(&s, AuthMode::Open, &Runtime::new())
+            RoutingTable::compile(&s, AuthMode::Open, &Runtime::new())
                 .err()
                 .unwrap()
                 .code,
@@ -1180,8 +1178,8 @@ mod tests {
         }
     }
 
-    fn compile(s: &Snapshot) -> Router {
-        Router::compile(s, AuthMode::Open, &Runtime::new()).unwrap()
+    fn compile(s: &Snapshot) -> RoutingTable {
+        RoutingTable::compile(s, AuthMode::Open, &Runtime::new()).unwrap()
     }
 
     /// Golden traces recorded before introducing the strategy interface. Covers
@@ -1324,12 +1322,12 @@ mod tests {
     fn in_flight_and_metrics_survive_swaps() {
         let runtime = Runtime::new();
         let s = snapshot(RoutingStrategy::LeastInFlight);
-        let old = Router::compile(&s, AuthMode::Open, &runtime).unwrap();
+        let old = RoutingTable::compile(&s, AuthMode::Open, &runtime).unwrap();
         let guard = old.acquire(&old.routes["public"], 0, &Caller::Anonymous);
         let busy = guard.deployment.name.clone();
         let mut next = s.clone();
         next.version = 2;
-        let new = Router::compile(&next, AuthMode::Open, &runtime).unwrap();
+        let new = RoutingTable::compile(&next, AuthMode::Open, &runtime).unwrap();
         drop(old);
         // The stream still running on the old snapshot steers the new one away.
         for _ in 0..100 {
@@ -1351,11 +1349,11 @@ mod tests {
         )));
         // Counters are not reset by recompiling: same label set, same counter.
         crate::metrics::tests::finish_with(&new.rejected[0], 404);
-        let third = Router::compile(&next, AuthMode::Open, &runtime).unwrap();
+        let third = RoutingTable::compile(&next, AuthMode::Open, &runtime).unwrap();
         drop(new);
         crate::metrics::tests::finish_with(&third.rejected[0], 404);
         assert!(runtime.encode_metrics().unwrap().contains(
-            "{model=\"\",route=\"chat_completions\",deployment=\"\",team=\"\",status=\"404\"} 2"
+            "{requested=\"\",endpoint=\"chat_completions\",deployment=\"\",team=\"\",status=\"404\"} 2"
         ));
     }
 
@@ -1369,13 +1367,13 @@ mod tests {
             open_ms: 30_000,
         });
         s.routes[0].retry = Some(RetryPolicy::default());
-        let old = Router::compile(&s, AuthMode::Open, &runtime).unwrap();
+        let old = RoutingTable::compile(&s, AuthMode::Open, &runtime).unwrap();
         let mut first = old.acquire(&old.routes["public"], 0, &Caller::Anonymous);
         let name = first.deployment.name.clone();
         let breaker = first.deployment.breaker.clone();
         first.complete(true);
         drop(first);
-        let next = Router::compile(&s, AuthMode::Open, &runtime).unwrap();
+        let next = RoutingTable::compile(&s, AuthMode::Open, &runtime).unwrap();
         let guard = next.acquire(&next.routes["public"], 0, &Caller::Anonymous);
         assert_ne!(guard.deployment.name, name);
         assert!(Arc::ptr_eq(
@@ -1414,7 +1412,7 @@ mod tests {
     fn missing_api_key_env_is_load_error() {
         let mut s = snapshot(RoutingStrategy::Weighted);
         s.upstreams[0].api_key_ref = "LUMEWARP_TEST_MISSING_KEY_8B3F590E".into();
-        let err = Router::compile(&s, AuthMode::Open, &Runtime::new())
+        let err = RoutingTable::compile(&s, AuthMode::Open, &Runtime::new())
             .err()
             .unwrap();
         assert_eq!(err.code, pb::NackCode::InvalidConfig);
@@ -1425,14 +1423,14 @@ mod tests {
     fn rejects_invalid_snapshots_and_bad_urls() {
         let mut s = snapshot(RoutingStrategy::Weighted);
         s.upstreams[0].base_url = "ftp://x/v1".into();
-        assert!(Router::compile(&s, AuthMode::Open, &Runtime::new()).is_err());
+        assert!(RoutingTable::compile(&s, AuthMode::Open, &Runtime::new()).is_err());
         let mut s = snapshot(RoutingStrategy::Weighted);
         s.deployments[0].weight = 0;
         s.deployments[1].weight = 0;
-        assert!(Router::compile(&s, AuthMode::Open, &Runtime::new()).is_err());
+        assert!(RoutingTable::compile(&s, AuthMode::Open, &Runtime::new()).is_err());
         let mut s = snapshot(RoutingStrategy::Weighted);
         s.routes[0].strategy = 0;
-        assert!(Router::compile(&s, AuthMode::Open, &Runtime::new()).is_err());
+        assert!(RoutingTable::compile(&s, AuthMode::Open, &Runtime::new()).is_err());
     }
 
     #[test]
@@ -1445,7 +1443,7 @@ mod tests {
             }),
             ..key("k3", "s3", "t1", &[])
         });
-        let router = Router::compile(&s, AuthMode::RequireKey, &Runtime::new()).unwrap();
+        let router = RoutingTable::compile(&s, AuthMode::RequireKey, &Runtime::new()).unwrap();
         assert_eq!(router.keys.len(), 3);
         let hash = |secret: &str| -> [u8; 32] {
             <sha2::Sha256 as sha2::Digest>::digest(secret.as_bytes()).into()
@@ -1474,7 +1472,7 @@ mod tests {
     #[test]
     fn team_handles_are_lazy() {
         let runtime = Runtime::new();
-        let router = Router::compile(&base(), AuthMode::RequireKey, &runtime).unwrap();
+        let router = RoutingTable::compile(&base(), AuthMode::RequireKey, &runtime).unwrap();
         assert!(!runtime.encode_metrics().unwrap().contains("team=\"t1\""));
         let k1 = Caller::Key(
             router.keys[&<[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(b"s1"))].clone(),
@@ -1483,7 +1481,7 @@ mod tests {
         crate::metrics::tests::finish_with(&guard.metrics, 200);
         let text = runtime.encode_metrics().unwrap();
         assert!(text.contains(
-            "lumewarp_requests_total{model=\"m1\",route=\"chat_completions\",deployment=\"a\",team=\"t1\",status=\"200\"} 1"
+            "lumewarp_requests_total{requested=\"m1\",endpoint=\"chat_completions\",deployment=\"a\",team=\"t1\",status=\"200\"} 1"
         ));
         assert!(!text.contains("team=\"t2\""));
     }
@@ -1511,7 +1509,7 @@ mod tests {
         for n in [1, 2000] {
             let runtime = Runtime::new();
             let s = many_routes(n);
-            let router = Router::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
+            let router = RoutingTable::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
             let caller = Caller::Key(router.keys[&hash("s1")].clone());
             // Warm this thread's lock-free map state with an unrelated entry.
             drop(router.acquire(&router.routes["m0"], 2, &Caller::Anonymous));
@@ -1532,7 +1530,7 @@ mod tests {
             let mut next = s.clone();
             next.version = 2;
             next.api_keys.push(key("k2", "s2", "t1", &["m0"]));
-            let swapped = Router::compile(&next, AuthMode::RequireKey, &runtime).unwrap();
+            let swapped = RoutingTable::compile(&next, AuthMode::RequireKey, &runtime).unwrap();
             for secret in ["s1", "s2"] {
                 let caller = Caller::Key(swapped.keys[&hash(secret)].clone());
                 let (after, guard) = count(|| swapped.acquire(&swapped.routes["m0"], 0, &caller));
@@ -1564,7 +1562,7 @@ mod tests {
         });
         s.deployments[1].upstream = "p".into();
         s.routes = vec![route("paid", &["a"]), route("free", &["b"])];
-        let router = Router::compile(&s, AuthMode::Open, &runtime).unwrap();
+        let router = RoutingTable::compile(&s, AuthMode::Open, &runtime).unwrap();
         let paid = router.acquire(&router.routes["paid"], 0, &Caller::Anonymous);
         assert_eq!(paid.deployment.price, s.deployments[0].price);
         assert_eq!(
@@ -1586,7 +1584,7 @@ mod tests {
             input_nano_usd_per_mtok: 1,
             output_nano_usd_per_mtok: 2,
         });
-        let swapped = Router::compile(&next, AuthMode::Open, &runtime).unwrap();
+        let swapped = RoutingTable::compile(&next, AuthMode::Open, &runtime).unwrap();
         drop(router);
         assert_eq!(paid.deployment.price, s.deployments[0].price);
         let fresh = swapped.acquire(&swapped.routes["paid"], 0, &Caller::Anonymous);
@@ -1624,7 +1622,7 @@ mod tests {
     fn ten_percent_split_over_10k_requests() {
         fastrand::seed(7);
         let runtime = Runtime::new();
-        let router = Router::compile(
+        let router = RoutingTable::compile(
             &split_snapshot(pb::StickyBy::None, RoutingStrategy::Weighted),
             AuthMode::Open,
             &runtime,
@@ -1648,7 +1646,7 @@ mod tests {
         assert!((900..=1100).contains(&canary), "canary got {canary}");
         let text = runtime.encode_metrics().unwrap();
         assert!(text.contains(&format!(
-            "lumewarp_split_requests_total{{model=\"public\",split=\"canary\"}} {canary}"
+            "lumewarp_split_requests_total{{router=\"public\",split=\"canary\"}} {canary}"
         )));
     }
 
@@ -1689,7 +1687,7 @@ mod tests {
             key("k1", "s1", "t1", &["public"]),
             key("k2", "s2", "t1", &["public"]),
         ];
-        let router = Router::compile(&s, AuthMode::RequireKey, &Runtime::new()).unwrap();
+        let router = RoutingTable::compile(&s, AuthMode::RequireKey, &Runtime::new()).unwrap();
         let k1 = Caller::Key(router.keys[&hash("s1")].clone());
         let k2 = Caller::Key(router.keys[&hash("s2")].clone());
         let route = &router.routes["public"];
@@ -1700,7 +1698,7 @@ mod tests {
             assert_eq!(route.split_for(&none, &k2), team, "same team, same split");
         }
         s.routes[0].sticky = pb::StickyBy::Key as i32;
-        let router = Router::compile(&s, AuthMode::RequireKey, &Runtime::new()).unwrap();
+        let router = RoutingTable::compile(&s, AuthMode::RequireKey, &Runtime::new()).unwrap();
         let route = &router.routes["public"];
         let k1 = Caller::Key(router.keys[&hash("s1")].clone());
         let first = route.split_for(&none, &k1);
@@ -1885,7 +1883,7 @@ mod tests {
             assert!(metrics_uri(&base, bad).is_none(), "{bad}");
         }
         s.upstreams[0].metrics_url = "ftp://h/m".into();
-        assert!(Router::compile(&s, AuthMode::Open, &Runtime::new()).is_err());
+        assert!(RoutingTable::compile(&s, AuthMode::Open, &Runtime::new()).is_err());
     }
 
     #[test]
@@ -1990,14 +1988,14 @@ mod tests {
         s.routes = vec![route("public", &["a"]), route("backup", &["b"])];
         s.routes[0].fallbacks = vec!["backup".into()];
         s.routes[0].retry = Some(RetryPolicy::default());
-        let router = Router::compile(&s, AuthMode::Open, &runtime).unwrap();
+        let router = RoutingTable::compile(&s, AuthMode::Open, &runtime).unwrap();
         let route = &router.routes["public"];
         let now = clock::mono_ms();
         open(&route.pools[0].deployments[0], now);
         open(&router.routes["backup"].pools[0].deployments[0], now);
         let count = |model: &str, deployment: &str| {
             let series = format!(
-                "lumewarp_upstream_attempts_total{{model=\"{model}\",deployment=\"{deployment}\",outcome=\"circuit_open\"}} "
+                "lumewarp_upstream_attempts_total{{requested=\"{model}\",deployment=\"{deployment}\",outcome=\"circuit_open\"}} "
             );
             let text = runtime.encode_metrics().unwrap();
             text.lines()
@@ -2028,7 +2026,7 @@ mod tests {
     fn removed_breaker_config_resets_breaker_on_activation() {
         let runtime = Runtime::new();
         let s = guarded(30_000);
-        let router = Router::compile(&s, AuthMode::Open, &runtime).unwrap();
+        let router = RoutingTable::compile(&s, AuthMode::Open, &runtime).unwrap();
         let a = router.routes["public"].pools[0].deployments[0].clone();
         open(&a, clock::mono_ms());
         let gauge = |runtime: &Arc<Runtime>| {
@@ -2047,7 +2045,7 @@ mod tests {
         next.version = 2;
         next.upstreams[0].circuit_breaker = None;
         next.required_capabilities.clear();
-        let swapped = Router::compile(&next, AuthMode::Open, &runtime).unwrap();
+        let swapped = RoutingTable::compile(&next, AuthMode::Open, &runtime).unwrap();
         // Compiling (which may still be NACKed) changes nothing.
         assert!(!a.breaker.available(clock::mono_ms()));
         assert_eq!(swapped.activate_health(), 0);
@@ -2073,7 +2071,7 @@ mod tests {
             unhealthy_threshold: 3,
             ..Default::default()
         });
-        let router = Router::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
+        let router = RoutingTable::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
         assert_eq!(router.activate_health(), 1);
         let healthy = runtime.health.upstream(&s.upstreams[0].name);
         // Key-only deltas every 250 ms. Restarting the probe on each would
@@ -2095,7 +2093,7 @@ mod tests {
                 "t1",
                 &[],
             ));
-            let next = Router::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
+            let next = RoutingTable::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
             assert_eq!(next.activate_health(), 0, "unchanged probe kept running");
         }
         assert!(version >= 3, "several deltas were applied while probing");
@@ -2105,10 +2103,10 @@ mod tests {
             .as_mut()
             .unwrap()
             .unhealthy_threshold = 4;
-        let changed = Router::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
+        let changed = RoutingTable::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
         assert_eq!(changed.activate_health(), 1);
         s.upstreams[0].health_check = None;
-        let removed = Router::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
+        let removed = RoutingTable::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
         assert_eq!(removed.activate_health(), 0);
         assert!(
             healthy.load(Ordering::Acquire),

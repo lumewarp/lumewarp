@@ -100,7 +100,7 @@ async def test_downgrade_0003_maps_vllm_load() -> None:
         async with engine.begin() as conn:
             await conn.execute(
                 text(
-                    "INSERT INTO routes (id, model, strategy, retry_enabled, retry_on_status)"
+                    "INSERT INTO routes (id, name, strategy, retry_enabled, retry_on_status)"
                     " VALUES (gen_random_uuid(), 'm', 'vllm_load', true, '{503}')"
                 )
             )

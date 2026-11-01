@@ -38,14 +38,14 @@ deployments:
     price: { input_usd_per_mtok: "0.15", output_usd_per_mtok: "0.60" }
 
 routes:
-  - model: llama-3.1-8b
+  - name: llama-3.1-8b
     deployments: [llama-vllm]
     retry: {max_attempts: 2, retry_on_status: [429, 502, 503, 504], total_timeout_ms: 30000}
     fallbacks: [gpt-4o-mini]
-  - model: gpt-4o-mini
+  - name: gpt-4o-mini
     deployments: [gpt-4o-mini]
   # Load-aware routing and a sticky 10% canary (needs a second vLLM deployment):
-  # - model: llama-canary
+  # - name: llama-canary
   #   strategy: vllm_load          # or lowest_latency, weighted, least_in_flight
   #   traffic_split:
   #     - {name: stable, deployments: [llama-vllm], weight: 90}

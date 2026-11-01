@@ -60,7 +60,7 @@ fn snapshot(version: u64, keys: &[(&str, &str)]) -> Snapshot {
             price: None,
         }],
         routes: vec![ModelRoute {
-            model: "m1".into(),
+            name: "m1".into(),
             deployments: vec!["d".into()],
             strategy: 1,
             ..Default::default()

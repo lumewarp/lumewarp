@@ -177,7 +177,11 @@ async fn team_label_in_request_metrics() {
     let metrics = bounded(async {
         loop {
             let m = gateway.metrics().await;
-            if m.sum("lumewarp_requests_total", &[("route", "chat_completions")]) >= 4.0 {
+            if m.sum(
+                "lumewarp_requests_total",
+                &[("endpoint", "chat_completions")],
+            ) >= 4.0
+            {
                 return m;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -187,9 +191,9 @@ async fn team_label_in_request_metrics() {
     let series = |labels: &[(&str, &str)]| metrics.value("lumewarp_requests_total", labels);
     assert_eq!(
         series(&[
-            ("model", "public"),
+            ("requested", "public"),
             ("deployment", "d0"),
-            ("route", "chat_completions"),
+            ("endpoint", "chat_completions"),
             ("team", "team-a"),
             ("status", "200"),
         ]),
@@ -197,9 +201,9 @@ async fn team_label_in_request_metrics() {
     );
     assert_eq!(
         series(&[
-            ("model", "another-alias"),
+            ("requested", "another-alias"),
             ("deployment", ""),
-            ("route", "chat_completions"),
+            ("endpoint", "chat_completions"),
             ("team", "team-a"),
             ("status", "403"),
         ]),
@@ -207,9 +211,9 @@ async fn team_label_in_request_metrics() {
     );
     assert_eq!(
         series(&[
-            ("model", "public"),
+            ("requested", "public"),
             ("deployment", "d0"),
-            ("route", "chat_completions"),
+            ("endpoint", "chat_completions"),
             ("team", "team-b"),
             ("status", "200"),
         ]),
@@ -218,9 +222,9 @@ async fn team_label_in_request_metrics() {
     // Pre-auth rejections carry no team.
     assert_eq!(
         series(&[
-            ("model", ""),
+            ("requested", ""),
             ("deployment", ""),
-            ("route", "chat_completions"),
+            ("endpoint", "chat_completions"),
             ("team", ""),
             ("status", "401"),
         ]),
@@ -244,8 +248,11 @@ async fn authenticated_traffic_without_a_model_keeps_the_team() {
     let metrics = bounded(async {
         loop {
             let m = gateway.metrics().await;
-            if m.sum("lumewarp_requests_total", &[("route", "models")]) >= 2.0
-                && m.sum("lumewarp_requests_total", &[("route", "chat_completions")]) >= 2.0
+            if m.sum("lumewarp_requests_total", &[("endpoint", "models")]) >= 2.0
+                && m.sum(
+                    "lumewarp_requests_total",
+                    &[("endpoint", "chat_completions")],
+                ) >= 2.0
             {
                 return m;
             }
@@ -257,9 +264,9 @@ async fn authenticated_traffic_without_a_model_keeps_the_team() {
         metrics.value(
             "lumewarp_requests_total",
             &[
-                ("model", ""),
+                ("requested", ""),
                 ("deployment", ""),
-                ("route", route),
+                ("endpoint", route),
                 ("team", team),
                 ("status", status),
             ],

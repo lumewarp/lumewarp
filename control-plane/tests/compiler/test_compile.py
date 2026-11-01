@@ -353,7 +353,7 @@ async def test_routing(factory) -> None:
         await add_route(s, "unknown", [("llama-a", None)])
     c = await compile_(factory)
     snap = c.snapshot
-    assert [r.model for r in snap.routes] == ["fast", "llama"]
+    assert [r.name for r in snap.routes] == ["fast", "llama"]
     assert snap.routes[0].strategy == pb.ROUTING_STRATEGY_LOWEST_LATENCY
     assert list(snap.routes[1].deployments) == ["llama-b", "llama-a"]  # position order kept
     assert snap.routes[1].strategy == pb.ROUTING_STRATEGY_WEIGHTED

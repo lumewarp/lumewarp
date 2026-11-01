@@ -47,7 +47,7 @@
         }
       },
       {
-        "name": "model",
+        "name": "requested",
         "label": "Model",
         "type": "query",
         "datasource": {
@@ -55,8 +55,8 @@
           "uid": "${datasource}"
         },
         "query": {
-          "query": "label_values(lumewarp_requests_total{namespace=~\"${namespace:regex}\"}, model)",
-          "refId": "model"
+          "query": "label_values(lumewarp_requests_total{namespace=~\"${namespace:regex}\"}, requested)",
+          "refId": "requested"
         },
         "refresh": 1,
         "includeAll": true,
@@ -131,7 +131,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (deployment, outcome) (rate(lumewarp_upstream_attempts_total{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\"}[$__rate_interval]))",
+          "expr": "sum by (deployment, outcome) (rate(lumewarp_upstream_attempts_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -199,12 +199,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (model, fallback_model) (rate(lumewarp_fallbacks_total{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\"}[$__rate_interval]))",
+          "expr": "sum by (requested, fallback_model) (rate(lumewarp_fallbacks_total{namespace=~\"${namespace:regex}\",router=~\"${requested:regex}\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{model}} -> {{fallback_model}}",
+          "legendFormat": "{{requested}} -> {{fallback_model}}",
           "range": true
         }
       ]
@@ -539,12 +539,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (model, split) (rate(lumewarp_split_requests_total{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\"}[$__rate_interval]))",
+          "expr": "sum by (requested, split) (rate(lumewarp_split_requests_total{namespace=~\"${namespace:regex}\",router=~\"${requested:regex}\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{model}} {{split}}",
+          "legendFormat": "{{requested}} {{split}}",
           "range": true
         }
       ]
@@ -675,12 +675,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (model) (rate(lumewarp_retries_budget_exhausted_total{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\"}[$__rate_interval]))",
+          "expr": "sum by (requested) (rate(lumewarp_retries_budget_exhausted_total{namespace=~\"${namespace:regex}\",router=~\"${requested:regex}\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{model}}",
+          "legendFormat": "{{requested}}",
           "range": true
         }
       ]

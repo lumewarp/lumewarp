@@ -23,7 +23,7 @@ use tonic::{
 };
 
 use crate::{
-    router::Router,
+    router::RoutingTable,
     runtime::Runtime,
     server,
     snapshot::{self, ApplyError},
@@ -43,8 +43,8 @@ pub struct StreamConfig {
 }
 
 /// Compiles a snapshot loaded from disk for immediate serving.
-pub fn compile(snapshot: &Snapshot, runtime: &Arc<Runtime>) -> Result<Router, ApplyError> {
-    Router::compile(snapshot, AuthMode::RequireKey, runtime)
+pub fn compile(snapshot: &Snapshot, runtime: &Arc<Runtime>) -> Result<RoutingTable, ApplyError> {
+    RoutingTable::compile(snapshot, AuthMode::RequireKey, runtime)
 }
 
 /// Starts the stream task. `current` is the snapshot already active in
@@ -237,7 +237,7 @@ fn apply_update(
     digest: &[u8],
     dir: &std::path::Path,
     runtime: &Arc<Runtime>,
-) -> Result<(Snapshot, Router), ApplyError> {
+) -> Result<(Snapshot, RoutingTable), ApplyError> {
     let next = snapshot::apply(base, update)?;
     let router = compile(&next, runtime)?;
     snapshot::store_with_digest(dir, &next, digest).map_err(|err| ApplyError {

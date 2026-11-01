@@ -28,7 +28,7 @@ pub struct Needs {
 }
 
 pub struct RouteInfo<'a> {
-    pub model: &'a str,
+    pub name: &'a str,
     pub deployments: &'a [&'a str],
 }
 
@@ -56,7 +56,7 @@ impl RngCore for ThreadRng {
 
 /// The lookup itself is private: callers cannot bypass the allowlist.
 pub struct RequestInfo<'a> {
-    pub model: &'a str,
+    pub requested: &'a str,
     pub team_id: &'a str,
     pub key_id: &'a str,
     pub estimated_input_tokens: Option<u64>,
@@ -67,7 +67,7 @@ pub struct RequestInfo<'a> {
 impl<'a> RequestInfo<'a> {
     #[inline]
     pub fn new(
-        model: &'a str,
+        requested: &'a str,
         team_id: &'a str,
         key_id: &'a str,
         estimated_input_tokens: Option<u64>,
@@ -75,7 +75,7 @@ impl<'a> RequestInfo<'a> {
         lookup: &'a dyn Fn(&str) -> Option<&'a [u8]>,
     ) -> Self {
         Self {
-            model,
+            requested,
             team_id,
             key_id,
             estimated_input_tokens,

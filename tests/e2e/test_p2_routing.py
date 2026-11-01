@@ -34,7 +34,7 @@ def test_unregistered_custom_strategy_nacks_and_keeps_last_snapshot(stack):
             "POST",
             "/routes",
             json={
-                "model": "custom-test",
+                "name": "custom-test",
                 "deployment_ids": [dep],
                 "strategy": "custom",
                 "custom_strategy": "header_pin",
@@ -165,7 +165,7 @@ def test_retry_to_second_deployment_records_one_usage_event(stack):
     stack.ok(
         "POST",
         "/routes",
-        json={"model": "retry", "deployment_ids": ids, "retry": {"max_attempts": 2}},
+        json={"name": "retry", "deployment_ids": ids, "retry": {"max_attempts": 2}},
     )
     gw = stack.start_gateway()
     _wait_served(gw, seeded.a.secret, "retry")
@@ -178,7 +178,7 @@ def test_retry_to_second_deployment_records_one_usage_event(stack):
     rows = _settled_usage(stack, gw, 3)
     assert len(rows) == 3, "exactly one usage event per client request"
     for row in rows:
-        assert (row["status"], row["model"], row["deployment"]) == (
+        assert (row["status"], row["requested"], row["deployment"]) == (
             200,
             "retry",
             "good-a",
@@ -205,7 +205,7 @@ def test_fallback_route_serves_with_original_model(stack):
         "POST",
         "/routes",
         json={
-            "model": "backup",
+            "name": "backup",
             "deployment_ids": [_deployment(stack, "good-a", good)],
         },
     )
@@ -215,7 +215,7 @@ def test_fallback_route_serves_with_original_model(stack):
             "POST",
             "/routes",
             json={
-                "model": model,
+                "name": model,
                 "deployment_ids": [_deployment(stack, f"{model}-a", upstream)],
                 # Fallbacks share the route's attempt budget: primary + fallback.
                 "retry": {"max_attempts": 2},
@@ -241,15 +241,15 @@ def test_fallback_route_serves_with_original_model(stack):
     assert events and all(e["model"] == "primary-down" for e in events)
 
     fallbacks = _series(gw, "lumewarp_fallbacks_total")
-    assert fallbacks.get('{model="primary",fallback_model="backup"}') == 1, fallbacks
-    assert fallbacks.get('{model="primary-down",fallback_model="backup"}') == 2, (
+    assert fallbacks.get('{router="primary",fallback_model="backup"}') == 1, fallbacks
+    assert fallbacks.get('{router="primary-down",fallback_model="backup"}') == 2, (
         fallbacks
     )
     assert _attempts(gw, "primary-a", "retryable_status") == 1
     assert _attempts(gw, "primary-down-a", "connect_error") == 2
     rows = _settled_usage(stack, gw, 3)
     assert len(rows) == 3, "one usage event per client request"
-    assert sorted((r["model"], r["deployment"], r["status"]) for r in rows) == [
+    assert sorted((r["requested"], r["deployment"], r["status"]) for r in rows) == [
         ("primary", "good-a", 200),
         ("primary-down", "good-a", 200),
         ("primary-down", "good-a", 200),
@@ -344,7 +344,7 @@ def test_circuit_breaker_opens_and_stops_traffic(stack):
         _deployment(stack, "bad-a", bad, BAD_WEIGHT),
         _deployment(stack, "good-a", good),
     ]
-    stack.ok("POST", "/routes", json={"model": "cb", "deployment_ids": ids})
+    stack.ok("POST", "/routes", json={"name": "cb", "deployment_ids": ids})
     gw = stack.start_gateway()
     _wait_served(gw, seeded.a.secret, "cb")
     state = 'lumewarp_upstream_circuit_state{deployment="bad-a"}'

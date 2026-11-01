@@ -1,6 +1,6 @@
 //! Snapshot validation, delta application and on-disk persistence, per
 //! `docs/config-protocol.md`. Everything here is off the request path: the
-//! apply task calls `apply` -> `validate` -> `Router::compile` -> `store` ->
+//! apply task calls `apply` -> `validate` -> `RoutingTable::compile` -> `store` ->
 //! swap -> ACK.
 
 use std::{
@@ -237,7 +237,7 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             )));
         }
     }
-    let routes = unique(snapshot.routes.iter().map(|r| r.model.as_str()), "route")?;
+    let routes = unique(snapshot.routes.iter().map(|r| r.name.as_str()), "route")?;
     for r in &snapshot.routes {
         require(r.retry.is_some(), "retry")?;
         require(!r.fallbacks.is_empty(), "fallbacks")?;
@@ -255,14 +255,14 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             }
         }
         for fallback in &r.fallbacks {
-            if fallback == &r.model || !routes.contains(fallback.as_str()) {
+            if fallback == &r.name || !routes.contains(fallback.as_str()) {
                 return Err(ApplyError::invalid(format!(
                     "route {:?} has a self or unknown fallback {:?}",
-                    r.model, fallback
+                    r.name, fallback
                 )));
             }
         }
-        if r.model == "unknown" {
+        if r.name == "unknown" {
             return Err(ApplyError::invalid(
                 "route alias 'unknown' is reserved for metrics",
             ));
@@ -270,7 +270,7 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
         let strategy = known::<pb::RoutingStrategy>(
             r.strategy,
             false,
-            &format!("route {:?} strategy", r.model),
+            &format!("route {:?} strategy", r.name),
         )?;
         require(
             strategy == pb::RoutingStrategy::LowestLatency,
@@ -299,7 +299,7 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
         if r.deployments.is_empty() {
             return Err(ApplyError::invalid(format!(
                 "route {:?} has no deployments",
-                r.model
+                r.name
             )));
         }
         if let Some(d) = r
@@ -309,7 +309,7 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
         {
             return Err(ApplyError::invalid(format!(
                 "route {:?} references unknown deployment {:?}",
-                r.model, d
+                r.name, d
             )));
         }
     }
@@ -352,7 +352,7 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             .ok_or_else(|| ApplyError::invalid(format!("key {id:?} has no policy")))?;
         if policy.allowed_models.iter().any(String::is_empty) {
             return Err(ApplyError::invalid(format!(
-                "key {id:?} allows an empty model name"
+                "key {id:?} allows an empty name name"
             )));
         }
         let mut own = HashSet::new();
@@ -387,8 +387,8 @@ fn validate_split(
     sticky: pb::StickyBy,
     deployments: &HashSet<&str>,
 ) -> Result<(), ApplyError> {
-    let model = &r.model;
-    let fail = |what: String| Err(ApplyError::invalid(format!("route {model:?}: {what}")));
+    let name = &r.name;
+    let fail = |what: String| Err(ApplyError::invalid(format!("route {name:?}: {what}")));
     match sticky {
         pb::StickyBy::Header => {
             if r.sticky_header.is_empty()
@@ -546,7 +546,7 @@ pub fn apply(base: &Snapshot, update: ConfigUpdate) -> Result<Snapshot, ApplyErr
                 &mut next.routes,
                 delta.upsert_routes,
                 &delta.remove_routes,
-                |r| &r.model,
+                |r| &r.name,
                 "route",
             )?;
             merge(
@@ -722,9 +722,9 @@ pub(crate) mod tests {
         }
     }
 
-    pub fn route(model: &str, deployments: &[&str]) -> pb::ModelRoute {
+    pub fn route(name: &str, deployments: &[&str]) -> pb::ModelRoute {
         pb::ModelRoute {
-            model: model.into(),
+            name: name.into(),
             deployments: deployments.iter().map(|d| d.to_string()).collect(),
             strategy: pb::RoutingStrategy::Weighted as i32,
             ..Default::default()
@@ -1006,7 +1006,7 @@ pub(crate) mod tests {
         assert_eq!(
             next.routes
                 .iter()
-                .map(|r| r.model.clone())
+                .map(|r| r.name.clone())
                 .collect::<Vec<_>>(),
             names(vec!["m2", "m3"])
         );
@@ -1127,7 +1127,7 @@ pub(crate) mod tests {
         invalid(|s| s.routes[0].deployments = vec!["nope".into()]);
         invalid(|s| s.routes[0].deployments.clear());
         invalid(|s| s.api_keys[0].team_id = "nope".into());
-        invalid(|s| s.routes[0].model = "unknown".into());
+        invalid(|s| s.routes[0].name = "unknown".into());
         invalid(|s| s.deployments[0].upstream_model.clear());
     }
 
@@ -1181,7 +1181,7 @@ pub(crate) mod tests {
     fn duplicates_and_unspecified_enums() {
         invalid(|s| s.upstreams[1].name = "u".into());
         invalid(|s| s.deployments[1].name = "a".into());
-        invalid(|s| s.routes[1].model = "m1".into());
+        invalid(|s| s.routes[1].name = "m1".into());
         invalid(|s| s.teams[1].id = "t1".into());
         invalid(|s| s.teams[1].id.clear());
         invalid(|s| s.upstreams[0].kind = 0);

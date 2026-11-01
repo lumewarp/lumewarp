@@ -80,7 +80,7 @@ def test_custom_strategy_mirror_rejects_invalid_params(params):
         required_capabilities=["strategy:header_pin"],
         routes=[
             pb.ModelRoute(
-                model="m",
+                name="m",
                 strategy=pb.ROUTING_STRATEGY_CUSTOM,
                 custom_strategy="header_pin",
                 strategy_params_json=params,
@@ -156,7 +156,7 @@ async def test_route_custom_strategy_database_constraints(factory, strategy, nam
         async with factory() as s, s.begin():
             s.add(
                 Route(
-                    model="invalid", strategy=strategy, custom_strategy=name, strategy_params=params
+                    name="invalid", strategy=strategy, custom_strategy=name, strategy_params=params
                 )
             )
             await s.flush()

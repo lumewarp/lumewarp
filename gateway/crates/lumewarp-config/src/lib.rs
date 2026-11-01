@@ -90,7 +90,7 @@ pub struct Server {
     pub body_read_timeout_ms: u64,
     #[serde(default = "default_retry_budget_percent")]
     pub retry_budget_percent: u32,
-    /// Shorthand: sha256 hex hashes of keys with no team that may call every model.
+    /// Shorthand: sha256 hex hashes of keys with no team that may call every name.
     #[serde(default)]
     pub api_keys: Vec<String>,
 }
@@ -222,7 +222,7 @@ pub struct Price {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelRoute {
-    pub model: String,
+    pub name: String,
     #[serde(default)]
     pub deployments: Vec<String>,
     #[serde(default)]
@@ -506,7 +506,7 @@ impl Config {
             .routes
             .iter()
             .map(|r| pb::ModelRoute {
-                model: r.model.clone(),
+                name: r.name.clone(),
                 deployments: r.deployments.clone(),
                 strategy: match r.strategy {
                     RoutingStrategy::Weighted => pb::RoutingStrategy::Weighted,
@@ -683,7 +683,7 @@ mod tests {
     #[test]
     fn custom_strategy_yaml_preserves_object_and_emits_capability() {
         let (_, snapshot) = Config::parse(
-            "routes:\n  - model: custom\n    strategy: custom\n    custom_strategy: header_pin\n    strategy_params: {headers: [x-pin], value: 2}\n",
+            "routes:\n  - name: custom\n    strategy: custom\n    custom_strategy: header_pin\n    strategy_params: {headers: [x-pin], value: 2}\n",
         ).unwrap();
         assert_eq!(
             snapshot.routes[0].strategy,
@@ -696,7 +696,7 @@ mod tests {
                 .unwrap(),
             serde_json::json!({"headers": ["x-pin"], "value": 2})
         );
-        assert!(Config::parse("routes: [{model: custom, strategy_params: [1]}]").is_err());
+        assert!(Config::parse("routes: [{name: custom, strategy_params: [1]}]").is_err());
     }
 
     #[test]
@@ -713,11 +713,11 @@ upstreams:
 deployments:
   - {name: d, upstream: u, upstream_model: actual}
 routes:
-  - model: public
+  - name: public
     deployments: [d]
     retry: {}
     fallbacks: [backup]
-  - {model: backup, deployments: [d]}
+  - {name: backup, deployments: [d]}
 "#,
         )
         .unwrap();
@@ -743,7 +743,7 @@ routes:
 upstreams:
   - {name: u, kind: vllm, base_url: 'http://localhost/v1', metrics_url: 'http://localhost/metrics'}
 routes:
-  - model: public
+  - name: public
     strategy: vllm_load
     traffic_split: [{name: stable, deployments: [d], weight: 1}]
     sticky: header
@@ -796,7 +796,7 @@ deployments:
   - { name: d, upstream: u, upstream_model: m, weight: 3, price: { input_usd_per_mtok: "0.15", output_usd_per_mtok: "12" } }
   - { name: e, upstream: u, upstream_model: m }
 routes:
-  - { model: alias, deployments: [d, e], strategy: least_in_flight }
+  - { name: alias, deployments: [d, e], strategy: least_in_flight }
 "#,
         )
         .unwrap();

@@ -475,8 +475,8 @@ test("route edit: retry, ordered fallback and a traffic split shown as percentag
   for (const name of ["smoke-stable", "smoke-canary", "smoke-backup-dep"]) {
     deps[name] = (await post("/deployments", { name, upstream_id: upstream.id, upstream_model: "m" })).id;
   }
-  const backup = await post("/routes", { model: "smoke-backup", deployment_ids: [deps["smoke-backup-dep"]] });
-  const main = await post("/routes", { model: "smoke-main", deployment_ids: [deps["smoke-stable"]] });
+  const backup = await post("/routes", { name: "smoke-backup", deployment_ids: [deps["smoke-backup-dep"]] });
+  const main = await post("/routes", { name: "smoke-main", deployment_ids: [deps["smoke-stable"]] });
 
   await login(page, BREAK_GLASS);
   await page.getByRole("link", { name: "Models / Routes", exact: true }).click();

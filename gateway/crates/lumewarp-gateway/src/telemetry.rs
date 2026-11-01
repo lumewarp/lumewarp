@@ -57,12 +57,12 @@ fn otel_targets() -> Targets {
     Targets::new().with_target("lumewarp", LevelFilter::INFO)
 }
 
-pub fn request_span(enabled: bool, headers: &HeaderMap, route: &'static str) -> Span {
+pub fn request_span(enabled: bool, headers: &HeaderMap, endpoint: &'static str) -> Span {
     let span = if enabled {
         tracing::info_span!(
             "request",
-            route,
-            model = "",
+            endpoint,
+            requested = "",
             deployment = "",
             status = tracing::field::Empty,
             stream = false
@@ -70,8 +70,8 @@ pub fn request_span(enabled: bool, headers: &HeaderMap, route: &'static str) -> 
     } else {
         tracing::debug_span!(
             "request",
-            route,
-            model = "",
+            endpoint,
+            requested = "",
             deployment = "",
             status = tracing::field::Empty,
             stream = false

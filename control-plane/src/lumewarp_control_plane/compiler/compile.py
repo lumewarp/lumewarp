@@ -94,7 +94,7 @@ class CompiledSnapshot:
     warnings: tuple[str, ...] = field(default=())
 
 
-# Effective model set: None = every model (universal), else exactly these aliases.
+# Effective name set: None = every name (universal), else exactly these aliases.
 ModelSet = frozenset[str] | None
 
 
@@ -171,7 +171,7 @@ async def compile_scope(
       effective set unchanged; teams are never INHERIT), then intersect: ALL is the
       universal set, LIST is exactly `allowed_models`. `allow_all_models` is true iff the
       resulting effective set is still universal, e.g. ALL -> INHERIT (the defaults)
-      allows every model. A LIST with an empty list on either level is deny-all
+      allows every name. A LIST with an empty list on either level is deny-all
       (`allow_all_models=false`, `allowed_models=[]`), never "all".
       Rate limits: one RateLimitScope per level that sets a limit ("team:<id>",
       "member:<member_scope_id>", "sa:<id>").
@@ -214,7 +214,7 @@ async def compile_scope(
     upstream_name = {u.id: u.name for u in upstreams}
     deployments = (await session.scalars(select(Deployment).order_by(Deployment.name))).all()
     deployment_by_id = {d.id: d for d in deployments}
-    routes = (await session.scalars(select(Route).order_by(Route.model))).all()
+    routes = (await session.scalars(select(Route).order_by(Route.name))).all()
     advertised = {
         cap
         for caps in await session.scalars(
@@ -224,7 +224,7 @@ async def compile_scope(
         )
         for cap in caps
     }
-    route_model = {r.id: r.model for r in routes}
+    route_name = {r.id: r.name for r in routes}
     members: dict[uuid.UUID, list[uuid.UUID]] = {}
     for rd in await session.scalars(
         select(RouteDeployment).order_by(RouteDeployment.route_id, RouteDeployment.position)
@@ -313,12 +313,12 @@ async def compile_scope(
         dropped = [deployment_by_id[i].name for i in member_ids if i not in valid_deployment_ids]
         member_ids = [i for i in member_ids if i in valid_deployment_ids]
         if dropped:
-            warnings.append(f"route {r.model!r}: left-out deployments {dropped} removed")
-        if not r.model or r.model in RESERVED_ALIASES:
-            warnings.append(f"route {r.model!r} left out: alias is empty or reserved")
+            warnings.append(f"route {r.name!r}: left-out deployments {dropped} removed")
+        if not r.name or r.name in RESERVED_ALIASES:
+            warnings.append(f"route {r.name!r} left out: alias is empty or reserved")
             continue
         weighted = r.strategy is RoutingStrategy.WEIGHTED
-        route = pb.ModelRoute(model=r.model, strategy=ROUTING_STRATEGY[r.strategy])
+        route = pb.ModelRoute(name=r.name, strategy=ROUTING_STRATEGY[r.strategy])
         if r.strategy is RoutingStrategy.CUSTOM:
             route.custom_strategy = r.custom_strategy
             route.strategy_params_json = params_json(r.strategy_params or {})
@@ -343,20 +343,20 @@ async def compile_scope(
             if bad is None and not sum(sr.weight for sr in route_splits):
                 bad = "traffic split weights sum to 0"
             if bad is not None:
-                warnings.append(f"route {r.model!r} left out: {bad}")
+                warnings.append(f"route {r.name!r} left out: {bad}")
                 continue
             route.sticky = STICKY_BY[r.sticky]
             if r.sticky is StickyBy.HEADER:
                 route.sticky_header = r.sticky_header or ""
         else:
             if not member_ids:
-                warnings.append(f"route {r.model!r} left out: no deployments")
+                warnings.append(f"route {r.name!r} left out: no deployments")
                 continue
             if weighted and not positive(member_ids):
-                warnings.append(f"route {r.model!r} left out: weighted with zero total weight")
+                warnings.append(f"route {r.name!r} left out: weighted with zero total weight")
                 continue
             if r.sticky is not StickyBy.NONE:
-                warnings.append(f"route {r.model!r}: sticky without a traffic split ignored")
+                warnings.append(f"route {r.name!r}: sticky without a traffic split ignored")
         route.deployments.extend(deployment_by_id[i].name for i in member_ids)
         if r.retry_enabled:
             route.retry.CopyFrom(
@@ -373,18 +373,17 @@ async def compile_scope(
     for r, route in emitted:
         for fallback in fallbacks.get(r.id, []):
             if fallback in emitted_ids and fallback != r.id:
-                route.fallbacks.append(route_model[fallback])
+                route.fallbacks.append(route_name[fallback])
             else:
                 warnings.append(
-                    f"route {r.model!r}: fallback {route_model.get(fallback)!r} is left out,"
-                    " dropped"
+                    f"route {r.name!r}: fallback {route_name.get(fallback)!r} is left out, dropped"
                 )
         snap.routes.append(route)
         if route.strategy == pb.ROUTING_STRATEGY_CUSTOM:
             capability = f"strategy:{route.custom_strategy}"
             if capability not in advertised:
                 warnings.append(
-                    f"route {r.model!r}: {capability} is not advertised by any connected gateway"
+                    f"route {r.name!r}: {capability} is not advertised by any connected gateway"
                 )
 
     for d in valid_deployments:

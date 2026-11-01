@@ -38,10 +38,10 @@ message UsageEvent {
   reserved "org_id", "project_id";
   string team_id = 5;
   // Public alias.
-  string model = 7;
+  string requested = 7;
   string deployment = 8;
   // Endpoint: chat_completions | completions | embeddings.
-  string route = 9;
+  string endpoint = 9;
   uint32 status = 10;
   bool stream = 11;
   uint64 prompt_tokens = 12;

@@ -36,7 +36,7 @@ use tracing::Instrument;
 
 use crate::{
     auth::Caller,
-    metrics::{Metrics, RequestMetrics, ROUTES},
+    metrics::{Metrics, RequestMetrics, API_ENDPOINTS},
     router::Deployment,
     runtime::Runtime,
 };
@@ -561,7 +561,7 @@ pub struct UsageCapture {
     /// The deployment (with the price) this request was served with.
     pub deployment: Option<Arc<Deployment>>,
     pub config_version: u64,
-    /// Index into `ROUTES`.
+    /// Index into `API_ENDPOINTS`.
     pub endpoint: usize,
     pub stream: bool,
     pub status: u16,
@@ -611,13 +611,13 @@ impl UsageCapture {
                 .saturating_add(i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)),
             key_id,
             team_id: team.into(),
-            model: self.handles.model.clone(),
+            requested: self.handles.requested.clone(),
             deployment: self
                 .deployment
                 .as_ref()
                 .map(|d| d.name.clone())
                 .unwrap_or_default(),
-            route: ROUTES[self.endpoint].into(),
+            endpoint: API_ENDPOINTS[self.endpoint].into(),
             status: self.status.into(),
             stream: self.stream,
             prompt_tokens: tokens.prompt,

@@ -877,7 +877,7 @@ mod tests {
     #[test]
     fn snapshot_swap_keeps_limiter_state() {
         use crate::{
-            router::Router,
+            router::RoutingTable,
             runtime::Runtime,
             snapshot::tests::{base, key},
         };
@@ -891,7 +891,7 @@ mod tests {
         s.api_keys[0].policy.as_mut().unwrap().rate_limit_scopes = vec![scope(2)];
         let runtime = Runtime::new();
         let hash: [u8; 32] = Sha256::digest(b"s1").into();
-        let old = Router::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
+        let old = RoutingTable::compile(&s, AuthMode::RequireKey, &runtime).unwrap();
         let caller = Caller::Key(old.keys[&hash].clone());
         drop(runtime.limiters.admit(&caller).unwrap());
         drop(runtime.limiters.admit(&caller).unwrap());
@@ -901,7 +901,7 @@ mod tests {
         let mut k3 = key("k3", "s3", "t1", &["m1"]);
         k3.policy.as_mut().unwrap().rate_limit_scopes = vec![scope(2)];
         next.api_keys.push(k3);
-        let new = Router::compile(&next, AuthMode::RequireKey, &runtime).unwrap();
+        let new = RoutingTable::compile(&next, AuthMode::RequireKey, &runtime).unwrap();
         drop(old);
         let hash3: [u8; 32] = Sha256::digest(b"s3").into();
         for secret in [hash, hash3] {
