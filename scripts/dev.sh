@@ -9,9 +9,8 @@
 #
 # `make dev` picks `tab` inside herdr and `all` elsewhere.
 #
-#   DEV_SSO=0                 skip Keycloak/OpenFGA and OIDC login (default 1)
-#   DEV_AUTHZ=openfga         authorization backend (default builtin; openfga needs DEV_SSO=1)
-#   DEV_ADMIN_TOKEN=dev-admin bootstrap admin token for the UI and API
+#   DEV_AUTHZ=openfga         authorization backend (default builtin)
+#   LUMEWARP_BREAK_GLASS_PASSWORD  override the development emergency password
 #
 # Ports: UI 5173 (Vite, proxies /api to the CP), CP 8091 (+ gRPC 50051, metrics 9465),
 # gateway 4000 (+ admin 9464), mock upstream 9100.
@@ -22,9 +21,10 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 self="$root/scripts/dev.sh"
 state="$root/.dev"
-sso="${DEV_SSO:-1}"
+sso=1
 authz="${DEV_AUTHZ:-builtin}"
-admin_token="${DEV_ADMIN_TOKEN:-dev-admin}"
+break_glass_password="${LUMEWARP_BREAK_GLASS_PASSWORD:-dev-break-glass}"
+admin_csrf=""
 tab_label="lumewarp-dev"
 gateway_id="gw-dev"
 cp_url="http://127.0.0.1:8091"
@@ -86,7 +86,8 @@ prepare() {
   token="$(cd "$root/control-plane" && uv run -q lumewarp-control-plane bootstrap \
     --gateway-id "$gateway_id" 2>/dev/null)"
   {
-    echo "export LUMEWARP_BOOTSTRAP_TOKEN=$admin_token"
+    printf 'export LUMEWARP_BREAK_GLASS_PASSWORD=%q\n' "$break_glass_password"
+    echo "export LUMEWARP_ADMIN_GROUP=lumewarp-admins"
     echo "export LUMEWARP_GATEWAY_TOKEN=$token"
   } >>"$env"
 
@@ -114,12 +115,18 @@ run_service() { # mock | cp | gw | ui
 }
 
 api() { # method, path, [json]
-  curl -fsS -X "$1" -H "Authorization: Bearer $admin_token" \
+  curl -fsS -X "$1" -b "$state/admin-cookie" -H "X-Lumewarp-CSRF: $admin_csrf" \
     -H 'Content-Type: application/json' ${3:+--data-binary "$3"} "$cp_url/api/v1$2"
 }
 
 seed() {
   wait_http "$cp_url/healthz" "control plane"
+  touch "$state/admin-cookie"
+  chmod 600 "$state/admin-cookie"
+  curl -fsS -c "$state/admin-cookie" -H 'Content-Type: application/json' \
+    --data-binary "$(jq -nc --arg password "$break_glass_password" '{password:$password}')" \
+    "$cp_url/api/v1/session/break-glass" >/dev/null
+  admin_csrf="$(curl -fsS -b "$state/admin-cookie" "$cp_url/api/v1/session" | jq -r .csrf_token)"
   [[ $(api GET /upstreams | jq '.items | length') == 0 ]] || return 0
   log "seeding demo upstream, route, team and key"
   local up dep team sa
@@ -135,22 +142,14 @@ seed() {
 summary() { # stop hint
   wait_http "http://127.0.0.1:9464/readyz" "gateway"
   wait_http "$ui_url" "UI"
-  local key example=""
-  key="$(cat "$state/demo-key" 2>/dev/null || true)"
-  if [[ -n $key ]]; then
-    example="
-  curl -sS -H 'Authorization: Bearer $key' -H 'Content-Type: application/json' \\
-    http://127.0.0.1:4000/v1/chat/completions \\
-    --data-binary '{\"model\":\"demo\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}'
-"
-  fi
   cat <<EOF
 
-  UI        $ui_url   (token: $admin_token$([[ $sso == 1 ]] && echo "; SSO: alice/bob/carol, password lumewarp"))
+  UI        $ui_url   (SSO: alice/bob/carol; alice belongs to lumewarp-admins)
+  Emergency login uses LUMEWARP_BREAK_GLASS_PASSWORD (development default configured).
   API       $cp_url/api/v1
   gateway   http://127.0.0.1:4000/v1   (model demo)
   metrics   http://127.0.0.1:9464/metrics (gateway), http://127.0.0.1:9465/metrics (CP)
-$example
+  Demo API key is stored in .dev/demo-key (not printed).
   $1
 
 EOF
@@ -180,7 +179,7 @@ case "${1:-all}" in
         die "a $tab_label tab is already open ($existing); make dev-stop closes it"
       fi
       herdr tab create --label "$tab_label" --cwd "$root" --env DEV_IN_TAB=1 \
-        --env "DEV_SSO=$sso" --env "DEV_AUTHZ=$authz" --env "DEV_ADMIN_TOKEN=$admin_token" \
+        --env "DEV_AUTHZ=$authz" --env "LUMEWARP_BREAK_GLASS_PASSWORD=$break_glass_password" \
         --focus | jq -r '.result.root_pane.pane_id' | {
         read -r pane
         herdr pane run "$pane" "$self tab" >/dev/null

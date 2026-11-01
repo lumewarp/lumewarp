@@ -11,13 +11,11 @@ force is infeasible regardless of hash speed, and the gateway must hash the pres
 every request in microseconds. sha256 is also what the gateway snapshot carries
 (`ApiKey.key_hash`), so CP and gateway agree on one function.
 
-The bootstrap token (`LUMEWARP_BOOTSTRAP_TOKEN`) is an installation-level superuser that
-bypasses the authorization backend. It is compared in constant time and never stored.
+Emergency access uses password-authenticated cookie sessions, never bearer tokens.
 Authentication only establishes who the caller is; what they may do is `authz`'s job.
 """
 
 import hashlib
-import hmac
 import secrets
 import uuid
 from dataclasses import dataclass
@@ -87,17 +85,8 @@ def parse_bearer(authorization: str | None) -> str | None:
     return token
 
 
-def matches_bootstrap(token: str, settings: Settings) -> bool:
-    if settings.bootstrap_token is None:
-        return False
-    expected = settings.bootstrap_token.get_secret_value()
-    if not expected:
-        return False
-    return hmac.compare_digest(hash_secret(token), hash_secret(expected))
-
-
 class PrincipalKind(StrEnum):
-    BOOTSTRAP = "bootstrap"
+    BREAK_GLASS = "break_glass"
     USER = "user"
     SESSION = "session"
 
@@ -105,17 +94,14 @@ class PrincipalKind(StrEnum):
 @dataclass(frozen=True)
 class Principal:
     kind: PrincipalKind
-    # None for the bootstrap token.
+    # Emergency sessions are not users.
     user_id: uuid.UUID | None = None
     token_id: uuid.UUID | None = None
+    groups: tuple[str, ...] = ()
 
     @property
-    def is_bootstrap(self) -> bool:
-        return self.kind is PrincipalKind.BOOTSTRAP
-
-    @classmethod
-    def bootstrap(cls) -> "Principal":
-        return cls(kind=PrincipalKind.BOOTSTRAP)
+    def is_break_glass(self) -> bool:
+        return self.kind is PrincipalKind.BREAK_GLASS
 
 
 async def authenticate(
@@ -127,8 +113,6 @@ async def authenticate(
     update), committed and closed before returning, so the request session handed to the
     handler by `db.get_session` is never touched: the handler still owns its transaction.
     """
-    if matches_bootstrap(token, settings):
-        return Principal.bootstrap()
     if secret_kind(token) is not SecretKind.PAT:
         return None
     now = datetime.now(UTC)
@@ -176,6 +160,7 @@ async def current_principal(request: Request) -> Principal:
         )
     if principal is None:
         raise unauthorized()
+    request.state.principal = principal
     return principal
 
 

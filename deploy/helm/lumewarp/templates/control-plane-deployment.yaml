@@ -75,12 +75,14 @@ spec:
               value: {{ .Values.controlPlane.scope | quote }}
             - name: LUMEWARP_METRICS_BIND
               value: {{ ternary (printf "0.0.0.0:%v" .Values.controlPlane.service.metricsPort) "" .Values.controlPlane.metrics.enabled | quote }}
-            {{- if .Values.controlPlane.bootstrapToken.secretName }}
-            - name: LUMEWARP_BOOTSTRAP_TOKEN
+            - name: LUMEWARP_ADMIN_GROUP
+              value: {{ .Values.controlPlane.adminGroup | quote }}
+            {{- if .Values.controlPlane.breakGlass.passwordHashSecret.name }}
+            - name: LUMEWARP_BREAK_GLASS_PASSWORD_HASH
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.controlPlane.bootstrapToken.secretName }}
-                  key: {{ .Values.controlPlane.bootstrapToken.key }}
+                  name: {{ .Values.controlPlane.breakGlass.passwordHashSecret.name }}
+                  key: {{ .Values.controlPlane.breakGlass.passwordHashSecret.key }}
             {{- end }}
             {{- if .Values.controlPlane.grpcTls.enabled }}
             - name: LUMEWARP_GRPC_TLS_CERT_FILE

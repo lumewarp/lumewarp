@@ -68,7 +68,6 @@ def login(browser, stack, username, *, enabled=True):
     assert browser.cookies.get("lumewarp_session")
     session = browser.get(stack.api_url + "/session").json()
     assert session["authenticated"] and session["csrf_token"]
-    assert not session["user"]["is_superuser"]
     browser.headers["X-Lumewarp-CSRF"] = session["csrf_token"]
     return session["user"]
 

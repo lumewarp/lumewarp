@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import uuid
 
-from tests.api.helpers import BOOTSTRAP_AUTH, suffix
+from tests.api.helpers import ADMIN_AUTH as BOOTSTRAP_AUTH
+from tests.api.helpers import suffix
 
 
 def _upstream(client, **body):

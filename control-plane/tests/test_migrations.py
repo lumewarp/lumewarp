@@ -115,6 +115,46 @@ async def test_downgrade_0003_maps_vllm_load() -> None:
         await drop_database(url)
 
 
+async def test_0004_migrates_audit_and_revokes_emergency_sessions_on_downgrade() -> None:
+    url = await create_database()
+    engine = create_async_engine(url)
+    try:
+        await migrate.upgrade(engine, "0003")
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO users (id, email, is_superuser) "
+                    "VALUES (gen_random_uuid(), 'admin@example.com', true)"
+                )
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO audit_log (actor_type, action, resource_type) "
+                    "VALUES ('superuser_token', 'test', 'test')"
+                )
+            )
+        await migrate.upgrade(engine, "0004")
+        async with engine.begin() as conn:
+            assert await conn.scalar(text("SELECT actor_type FROM audit_log")) == "break_glass"
+            await conn.execute(
+                text(
+                    "INSERT INTO user_sessions (id, kind, token_hash, csrf_hash, expires_at) "
+                    "VALUES (gen_random_uuid(), 'break_glass', "
+                    "decode(repeat('01',32),'hex'), decode(repeat('02',32),'hex'), "
+                    "now() + interval '1 hour')"
+                )
+            )
+        await migrate.downgrade(engine, "0003")
+        async with engine.connect() as conn:
+            assert await conn.scalar(text("SELECT actor_type FROM audit_log")) == "superuser_token"
+            assert await conn.scalar(text("SELECT is_superuser FROM users")) is False
+            assert await conn.scalar(text("SELECT count(*) FROM user_sessions")) == 0
+        await migrate.upgrade(engine, "0004")
+    finally:
+        await engine.dispose()
+        await drop_database(url)
+
+
 async def _database_exists(url: str) -> bool:
     engine = create_async_engine(SERVER_URL)
     try:

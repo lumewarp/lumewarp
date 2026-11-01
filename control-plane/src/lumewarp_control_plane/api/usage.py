@@ -2,7 +2,7 @@
 
 `from`/`to` are a half-open UTC range. `group_by` is a comma-separated subset of
 `day,model,team,owner,key`; the default is `day,model`. `owner` groups by the key owner
-(`owner_kind`, `owner_id`: a user or a service account). A superuser's single `team`
+(`owner_kind`, `owner_id`: a user or a service account). A admin group member's single `team`
 dimension over whole UTC months is served from the pre-aggregated `usage_totals` table;
 everything else is aggregated from `usage_events`, limited to the caller's readable teams.
 """
@@ -299,15 +299,15 @@ async def get_usage(
     scoped_team = await _check_scope_filters(
         session, authz, team_id, user_id, service_account_id, key_id
     )
-    superuser = await authz.is_superuser()
+    is_admin = await authz.is_admin()
     # A narrowing filter already proved TEAM_READ; otherwise limit to the readable teams.
     readable = (
         None
-        if superuser or scoped_team is not None
+        if is_admin or scoped_team is not None
         else await authz.readable_teams(set(await session.scalars(select(Team.id))))
     )
     use_totals = (
-        superuser
+        is_admin
         and groups == ["team"]
         and model is None
         and user_id is None

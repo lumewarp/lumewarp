@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from lumewarp_control_plane.authz import Authorizer, Decision, Relation
 from lumewarp_control_plane.models import AuditLog, KeyLifecycle, TeamRole
-from tests.api.helpers import BOOTSTRAP_AUTH, auth, suffix, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
 from tests.factories import make_key, make_member, make_service_account, make_team
 
 
@@ -16,38 +16,38 @@ def test_user_crud(client) -> None:
     created = client.post(
         "/api/v1/users",
         json={"email": f"u-{suffix()}@example.com", "display_name": "User"},
-        headers=BOOTSTRAP_AUTH,
+        headers=ADMIN_AUTH,
     )
     assert created.status_code == 201, created.text
     user = created.json()
     path = f"/api/v1/users/{user['id']}"
     assert user["is_active"] is True
-    assert client.get(path, headers=BOOTSTRAP_AUTH).json() == user
+    assert client.get(path, headers=ADMIN_AUTH).json() == user
     updated = client.patch(
-        path, json={"display_name": "Renamed", "is_active": False}, headers=BOOTSTRAP_AUTH
+        path, json={"display_name": "Renamed", "is_active": False}, headers=ADMIN_AUTH
     )
     assert updated.status_code == 200
     assert updated.json()["display_name"] == "Renamed"
     assert updated.json()["is_active"] is False
-    assert client.delete(path, headers=BOOTSTRAP_AUTH).status_code == 204
-    assert client.get(path, headers=BOOTSTRAP_AUTH).status_code == 404
+    assert client.delete(path, headers=ADMIN_AUTH).status_code == 204
+    assert client.get(path, headers=ADMIN_AUTH).status_code == 404
 
 
 async def test_current_user_and_pats(client, committed) -> None:
-    boot = client.get("/api/v1/users/me", headers=BOOTSTRAP_AUTH)
+    boot = client.get("/api/v1/users/me", headers=ADMIN_AUTH)
     assert boot.json() == {
-        "kind": "bootstrap",
+        "kind": "break_glass",
         "user_id": None,
         "email": None,
-        "display_name": "bootstrap",
-        "is_superuser": True,
+        "display_name": "break-glass",
+        "is_admin": True,
         "manages_grants": True,
         "teams": [],
     }
-    assert client.get("/api/v1/users/me/tokens", headers=BOOTSTRAP_AUTH).json()["items"] == []
+    assert client.get("/api/v1/users/me/tokens", headers=ADMIN_AUTH).json()["items"] == []
     assert (
         client.post(
-            "/api/v1/users/me/tokens", json={"name": "bootstrap"}, headers=BOOTSTRAP_AUTH
+            "/api/v1/users/me/tokens", json={"name": "bootstrap"}, headers=ADMIN_AUTH
         ).status_code
         == 400
     )
@@ -100,7 +100,7 @@ async def test_external_backend_current_user_teams(client, committed, monkeypatc
     await committed.commit()
 
     async def check(user_id, relation, resource):
-        if relation is Relation.SUPERUSER:
+        if resource.type == "group":
             return Decision.DENY
         if resource.id == str(admin_team.id):
             return Decision.ALLOW
@@ -121,7 +121,7 @@ async def test_external_backend_current_user_teams(client, committed, monkeypatc
 @pytest.mark.parametrize("manages_grants", [True, False])
 def test_bootstrap_reports_backend_grant_management(client, monkeypatch, manages_grants) -> None:
     monkeypatch.setattr(client.app.state.authorizer, "manages_grants", manages_grants)
-    response = client.get("/api/v1/users/me", headers=BOOTSTRAP_AUTH)
+    response = client.get("/api/v1/users/me", headers=ADMIN_AUTH)
     assert response.status_code == 200
     assert response.json()["manages_grants"] is manages_grants
 
@@ -135,7 +135,7 @@ async def test_current_user_team_listing_errors_are_503(
     await committed.commit()
 
     async def check(user_id, relation, resource):
-        if relation is Relation.SUPERUSER:
+        if resource.type == "group":
             return Decision.DENY
         if resource.id == str(team.id):
             return Decision.ERROR if relation is failed_relation else Decision.ALLOW
@@ -166,16 +166,15 @@ async def test_deactivation_suspends_non_revoked_user_keys_everywhere(client, co
     sa_key = await make_key(committed, team, account, created_by_user_id=user.id)
     await committed.commit()
     changed = client.patch(
-        f"/api/v1/users/{user.id}", json={"is_active": False}, headers=BOOTSTRAP_AUTH
+        f"/api/v1/users/{user.id}", json={"is_active": False}, headers=ADMIN_AUTH
     )
     assert changed.status_code == 200, changed.text
     for key in keys:
-        row = client.get(f"/api/v1/keys/{key.id}", headers=BOOTSTRAP_AUTH).json()
+        row = client.get(f"/api/v1/keys/{key.id}", headers=ADMIN_AUTH).json()
         assert (row["lifecycle"], row["suspended_reason"]) == ("suspended", "owner_deactivated")
     for key, expected in ((revoked, "revoked"), (untouched, "active"), (sa_key, "active")):
         assert (
-            client.get(f"/api/v1/keys/{key.id}", headers=BOOTSTRAP_AUTH).json()["lifecycle"]
-            == expected
+            client.get(f"/api/v1/keys/{key.id}", headers=ADMIN_AUTH).json()["lifecycle"] == expected
         )
     assert client.get("/api/v1/users/me", headers=auth(token)).status_code == 401
     audit = (
@@ -197,13 +196,11 @@ async def test_user_with_keys_cannot_be_deleted(client, committed, revoke) -> No
     key = await make_key(committed, team, user)
     await committed.commit()
     if revoke:
-        assert (
-            client.post(f"/api/v1/keys/{key.id}/revoke", headers=BOOTSTRAP_AUTH).status_code == 200
-        )
-    assert client.delete(f"/api/v1/users/{user.id}", headers=BOOTSTRAP_AUTH).status_code == 409
+        assert client.post(f"/api/v1/keys/{key.id}/revoke", headers=ADMIN_AUTH).status_code == 200
+    assert client.delete(f"/api/v1/users/{user.id}", headers=ADMIN_AUTH).status_code == 409
 
 
-@pytest.mark.parametrize("caller", ["bootstrap", "superuser"])
+@pytest.mark.parametrize("caller", ["bootstrap", "group_admin"])
 async def test_user_delete_cannot_remove_last_admin_of_any_team(client, committed, caller) -> None:
     owner, token = await user_with_token(committed)
     first = await make_team(committed)
@@ -213,9 +210,9 @@ async def test_user_delete_cannot_remove_last_admin_of_any_team(client, committe
     await make_member(committed, last, owner, role=TeamRole.ADMIN)
     await make_member(committed, ordinary, owner)
     await make_member(committed, first, role=TeamRole.ADMIN)
-    headers = BOOTSTRAP_AUTH
-    if caller == "superuser":
-        _, admin_token = await user_with_token(committed, superuser=True)
+    headers = ADMIN_AUTH
+    if caller == "group_admin":
+        _, admin_token = await user_with_token(committed, group_admin=True)
         headers = auth(admin_token)
     await committed.commit()
     path = f"/api/v1/users/{owner.id}"
@@ -224,9 +221,7 @@ async def test_user_delete_cannot_remove_last_admin_of_any_team(client, committe
     assert "last admin" in denied.json()["error"]["message"]
     assert client.get(path, headers=headers).status_code == 200
     for team in (first, last, ordinary):
-        rows = client.get(f"/api/v1/teams/{team.id}/members", headers=BOOTSTRAP_AUTH).json()[
-            "items"
-        ]
+        rows = client.get(f"/api/v1/teams/{team.id}/members", headers=ADMIN_AUTH).json()["items"]
         assert str(owner.id) in {r["user_id"] for r in rows}
     await make_member(committed, last, role=TeamRole.ADMIN)
     await committed.commit()
@@ -234,7 +229,5 @@ async def test_user_delete_cannot_remove_last_admin_of_any_team(client, committe
     assert client.get(path, headers=headers).status_code == 404
     assert client.get("/api/v1/users/me", headers=auth(token)).status_code == 401
     for team in (first, last, ordinary):
-        rows = client.get(f"/api/v1/teams/{team.id}/members", headers=BOOTSTRAP_AUTH).json()[
-            "items"
-        ]
+        rows = client.get(f"/api/v1/teams/{team.id}/members", headers=ADMIN_AUTH).json()["items"]
         assert str(owner.id) not in {r["user_id"] for r in rows}

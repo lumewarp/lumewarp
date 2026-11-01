@@ -3,7 +3,7 @@
 import json
 import uuid
 
-from tests.api.helpers import BOOTSTRAP_AUTH, auth, suffix, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
 from tests.factories import make_member, make_team
 
 
@@ -27,13 +27,13 @@ async def test_audit_visibility_filters_pagination_and_redaction(client, committ
     )
     assert (
         client.patch(
-            f"/api/v1/teams/{other.id}", json={"name": f"other-{suffix()}"}, headers=BOOTSTRAP_AUTH
+            f"/api/v1/teams/{other.id}", json={"name": f"other-{suffix()}"}, headers=ADMIN_AUTH
         ).status_code
         == 200
     )
     assert (
         client.post(
-            "/api/v1/users", json={"email": f"audit-{suffix()}@example.com"}, headers=BOOTSTRAP_AUTH
+            "/api/v1/users", json={"email": f"audit-{suffix()}@example.com"}, headers=ADMIN_AUTH
         ).status_code
         == 201
     )
@@ -70,7 +70,7 @@ async def test_audit_visibility_filters_pagination_and_redaction(client, committ
             ).status_code
             == 404
         )
-    all_rows = client.get("/api/v1/audit?limit=500", headers=BOOTSTRAP_AUTH).json()["items"]
+    all_rows = client.get("/api/v1/audit?limit=500", headers=ADMIN_AUTH).json()["items"]
     assert any(r["team_id"] is None for r in all_rows)
     assert any(r["team_id"] == str(other.id) for r in all_rows)
     assert client.get("/api/v1/audit?cursor=nope", headers=auth(token)).status_code == 422

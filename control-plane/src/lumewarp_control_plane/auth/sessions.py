@@ -27,11 +27,20 @@ def csrf_token(token: str) -> str:
     return hmac.digest(token.encode(), b"lumewarp-session-csrf", "sha256").hex()
 
 
-async def create_session(session: AsyncSession, user_id: uuid.UUID, ttl: int) -> str:
+async def create_session(
+    session: AsyncSession,
+    user_id: uuid.UUID | None,
+    ttl: int,
+    *,
+    kind: PrincipalKind = PrincipalKind.SESSION,
+    groups: tuple[str, ...] = (),
+) -> str:
     token = secrets.token_urlsafe(32)
     session.add(
         UserSession(
             user_id=user_id,
+            kind=kind.value,
+            groups=list(groups),
             token_hash=hash_secret(token),
             csrf_hash=hash_secret(csrf_token(token)),
             expires_at=datetime.now(UTC) + timedelta(seconds=ttl),
@@ -48,15 +57,25 @@ async def authenticate_session(
         row = (
             await session.execute(
                 select(UserSession, User)
-                .join(User, User.id == UserSession.user_id)
+                .outerjoin(User, User.id == UserSession.user_id)
                 .where(UserSession.token_hash == hash_secret(token))
             )
         ).one_or_none()
         if row is None:
             return None
         credential, user = row
-        if credential.revoked_at or credential.expires_at <= now or not user.is_active:
+        if credential.revoked_at or credential.expires_at <= now:
             return None
+        if credential.kind != PrincipalKind.BREAK_GLASS and (user is None or not user.is_active):
+            return None
+        principal = Principal(
+            kind=PrincipalKind(credential.kind),
+            user_id=user.id if user else None,
+            token_id=credential.id,
+            groups=tuple(credential.groups),
+        )
+        # Preserve the validated actor for auditing even when the CSRF check fails.
+        request.state.principal = principal
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             supplied = request.headers.get("X-Lumewarp-CSRF", "")
             if not hmac.compare_digest(hash_secret(supplied), credential.csrf_hash):
@@ -65,4 +84,4 @@ async def authenticate_session(
             await session.execute(
                 update(UserSession).where(UserSession.id == credential.id).values(last_seen_at=now)
             )
-        return Principal(kind=PrincipalKind.SESSION, user_id=user.id, token_id=credential.id)
+        return principal

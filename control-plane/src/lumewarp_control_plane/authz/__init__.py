@@ -3,15 +3,16 @@
 Who may do what is decided in two layers:
 
 - The action matrix (`MATRIX`) stays in Lumewarp: every admin API action needs either the
-  installation superuser, any authenticated caller, or one relation on one team.
-- A backend answers only relation questions: "is user U the `superuser` of the
-  installation / an `admin` or `member` of team T?". That is a single async function,
+  configured admin group, any authenticated caller, or one relation on one team.
+- A backend answers only relation questions: "is user U a `member` of group G,
+  or an `admin` or `member` of team T?". That is a single async function,
   `check(user_id, relation, resource) -> Decision`, so OpenFGA, a home-grown AAA system or
   the built-in membership table can be swapped without touching the API.
 
-A backend guarantees the implied relations itself: `admin` implies `member`, and the
-installation `superuser` implies `admin` of every team. `Decision.ERROR` (backend down or
-timed out) is never treated as a deny: the admin API answers 503 and background jobs skip
+A backend guarantees that team `admin` implies `member`. `RequestAuthz` applies the
+configured admin group to every team action, independently of the backend.
+`Decision.ERROR` (backend down or timed out) is never treated as a deny:
+the admin API answers 503 and background jobs skip
 the round. The gateway never calls a backend (it only sees compiled snapshots).
 
 Backends are selected by `LUMEWARP_AUTHZ_BACKEND`: "builtin" (default, `builtin.py`),
@@ -68,18 +69,14 @@ BATCH_CONCURRENCY = 16
 
 
 class Relation(StrEnum):
-    SUPERUSER = "superuser"  # on the installation only
     ADMIN = "admin"  # on a team
     MEMBER = "member"  # on a team
 
 
 @dataclass(frozen=True)
 class Resource:
-    type: Literal["installation", "team"]
+    type: Literal["group", "team"]
     id: str
-
-
-INSTALLATION = Resource("installation", "default")
 
 
 def team_resource(team_id: uuid.UUID | str) -> Resource:
@@ -263,12 +260,12 @@ def load_authorizer(
 
 class Level(StrEnum):
     ANY = "any"  # any authenticated caller
-    INSTALLATION = "installation"  # superuser only
+    INSTALLATION = "installation"  # admin group member only
     TEAM = "team"  # a relation on the team
 
 
 class Action(StrEnum):
-    # Installation-wide (superuser only).
+    # Installation-wide (admin group member only).
     TEAM_CREATE = "team.create"
     TEAM_DELETE = "team.delete"
     USER_MANAGE = "user.manage"
@@ -336,9 +333,12 @@ class RequestAuthz:
     handler may ask the same question repeatedly without another backend round trip.
     """
 
-    def __init__(self, principal: Principal, authorizer: Authorizer) -> None:
+    def __init__(
+        self, principal: Principal, authorizer: Authorizer, admin_group: str | None = None
+    ) -> None:
         self.principal = principal
         self.authorizer = authorizer
+        self.admin_group = admin_group
         self._cache: dict[tuple[Relation, Resource], Decision] = {}
 
     @property
@@ -350,21 +350,31 @@ class RequestAuthz:
         key = (relation, resource)
         decision = self._cache.get(key)
         if decision is None:
-            decision = await self.authorizer.check(str(self.principal.user_id), relation, resource)
+            from lumewarp_control_plane.authz.builtin import session_groups
+
+            token = session_groups.set(self.principal.groups)
+            try:
+                decision = await self.authorizer.check(
+                    str(self.principal.user_id), relation, resource
+                )
+            finally:
+                session_groups.reset(token)
             if decision is not Decision.ERROR:
                 self._cache[key] = decision
         if decision is Decision.ERROR:
             raise AuthzUnavailable()
         return decision is Decision.ALLOW
 
-    async def is_superuser(self) -> bool:
-        if self.principal.is_bootstrap:
+    async def is_admin(self) -> bool:
+        if self.principal.is_break_glass:
             return True
-        return await self._relation(Relation.SUPERUSER, INSTALLATION)
+        if not self.admin_group:
+            return False
+        return await self._relation(Relation.MEMBER, Resource("group", self.admin_group))
 
     async def has(self, relation: Relation, team_id: uuid.UUID) -> bool:
-        """Whether the caller holds `relation` on the team (superusers always do)."""
-        if await self.is_superuser():
+        """Whether the caller holds `relation` on the team (admin group members always do)."""
+        if await self.is_admin():
             return True
         return await self._relation(relation, team_resource(team_id))
 
@@ -373,7 +383,7 @@ class RequestAuthz:
         if rule.level is Level.ANY:
             return True
         if rule.level is Level.INSTALLATION:
-            return await self.is_superuser()
+            return await self.is_admin()
         if team_id is None:
             raise ValueError(f"{action} needs a team")
         assert rule.relation is not None
@@ -388,7 +398,7 @@ class RequestAuthz:
 
     async def readable_teams(self, candidates: Iterable[uuid.UUID]) -> set[uuid.UUID] | None:
         """Teams among `candidates` the caller may read; None means every team."""
-        if await self.is_superuser():
+        if await self.is_admin():
             return None
         assert self.principal.user_id is not None
         teams = await self.authorizer.list_teams(
@@ -404,7 +414,7 @@ def get_authorizer(request: Request) -> Authorizer:
 
 
 async def request_authz(request: Request, principal: CurrentPrincipal) -> RequestAuthz:
-    return RequestAuthz(principal, get_authorizer(request))
+    return RequestAuthz(principal, get_authorizer(request), request.app.state.settings.admin_group)
 
 
 Authz = Annotated[RequestAuthz, Depends(request_authz)]

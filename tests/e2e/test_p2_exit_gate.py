@@ -69,13 +69,25 @@ def p2(request):
             state.events = cleanup.enter_context(DatabaseEvents(stack.dsn))
             state.member = cleanup.enter_context(httpx.Client(timeout=15, trust_env=False))
             state.admin = cleanup.enter_context(httpx.Client(timeout=15, trust_env=False))
-            state.user = login(state.member, stack, "alice@example.com")
-            state.admin_user = login(state.admin, stack, "bob@example.com")
-            # JIT must not trust Keycloak roles/groups or implicitly grant memberships.
+            state.user = login(state.member, stack, "bob@example.com")
+            state.admin_user = login(state.admin, stack, "alice@example.com")
+            if state.backend == "openfga":
+                httpx.post(
+                    f"http://127.0.0.1:18081/stores/{state.store}/write",
+                    json={"writes": {"tuple_keys": [{
+                        "user": f"user:{state.admin_user['id']}",
+                        "relation": "member",
+                        "object": "group:lumewarp-admins",
+                    }]}},
+                    timeout=10,
+                    trust_env=False,
+                ).raise_for_status()
+            assert cookie_api(state.admin, stack, "GET", "/users/me")["is_admin"]
+            # JIT creates no team memberships; the configured group grants admin access.
             for browser in (state.member, state.admin):
                 assert cookie_api(browser, stack, "GET", "/teams")["items"] == []
             assert pg(stack.dsn, "SELECT count(*) AS n FROM team_members")[0]["n"] == 0
-            state.team = stack.ok("POST", "/teams", json={"name": "p2", "model_access": "all"})[
+            state.team = cookie_api(state.admin, stack, "POST", "/teams", json={"name": "p2", "model_access": "all"})[
                 "id"
             ]
             yield state

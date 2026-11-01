@@ -35,9 +35,10 @@ class Settings(BaseSettings):
     grpc_tls_cert_file: str | None = None
     grpc_tls_key_file: str | None = None
 
-    # Installation-level superuser credential (see security.py). Unset = no
-    # bootstrap access; PATs only.
-    bootstrap_token: SecretStr | None = None
+    admin_group: str | None = None
+    break_glass_password_hash: SecretStr | None = None
+    break_glass_password: SecretStr | None = None
+    break_glass_session_ttl_seconds: int = Field(default=3600, ge=60)
     # Authorization backend: "builtin" or a `lumewarp.authz` entry point name (authz/).
     authz_backend: str = "builtin"
     # Every authorization backend call is bounded; a timeout is Decision.ERROR (503).
@@ -59,11 +60,12 @@ class Settings(BaseSettings):
     key_reconcile_enabled: bool = True
 
     # Admin UI login with OIDC (authorization code + PKCE, auth/oidc.py). Unset issuer =
-    # SSO disabled (bootstrap token and PATs only).
+    # SSO disabled (break-glass sessions and PATs only).
     oidc_issuer: str | None = None
     oidc_client_id: str | None = None
     oidc_client_secret: SecretStr | None = None
     oidc_scopes: str = "openid email profile"
+    oidc_groups_claim: str = "groups"
     # Externally visible base URL of the control plane, used to build the OIDC redirect
     # URI (<public_url>/api/v1/session/oidc/callback). Unset = derived from the request.
     public_url: str | None = None

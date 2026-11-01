@@ -42,7 +42,7 @@ async def list_teams(
     cursor: str | None = None,
 ) -> Page[TeamOut]:
     stmt = select(Team).order_by(Team.id)
-    if not await authz.is_superuser():
+    if not await authz.is_admin():
         candidates = set(await session.scalars(select(Team.id)))
         readable = await authz.readable_teams(candidates)
         if readable is not None:

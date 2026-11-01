@@ -1,4 +1,4 @@
-"""Built-in authorization backend: `users.is_superuser` and the `team_members` table.
+"""Built-in authorization backend: session group claims and the `team_members` table.
 
 Lumewarp itself is the IAM here, so it manages grants (member endpoints are writable).
 Each call opens its own short session and reads committed state; `RequestAuthz` caches the
@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from contextvars import ContextVar
 
 from sqlalchemy import select
 
 from lumewarp_control_plane.authz import CheckItem, Decision, Relation, Resource
 from lumewarp_control_plane.db import SessionFactory
-from lumewarp_control_plane.models import Team, TeamMember, TeamRole, User
+from lumewarp_control_plane.models import TeamMember, TeamRole, User
+
+session_groups: ContextVar[tuple[str, ...]] = ContextVar("session_groups", default=())
 
 
 def _uuid(value: str) -> uuid.UUID | None:
@@ -40,11 +43,9 @@ class BuiltinBackend:
         user_ids = {uuid.UUID(u) for u in users}
         async with self._session_factory() as session:
             active = {
-                row.id: row.is_superuser
-                for row in await session.execute(
-                    select(User.id, User.is_superuser).where(
-                        User.id.in_(user_ids), User.is_active.is_(True)
-                    )
+                uid: False
+                for uid in await session.scalars(
+                    select(User.id).where(User.id.in_(user_ids), User.is_active.is_(True))
                 )
             }
             roles = (
@@ -72,10 +73,13 @@ class BuiltinBackend:
         user = _uuid(user_id)
         if user is None or user not in active:
             return Decision.DENY
-        if active[user]:
-            # The superuser holds every relation.
-            return Decision.ALLOW
-        if relation is Relation.SUPERUSER or resource.type != "team":
+        if resource.type == "group":
+            return (
+                Decision.ALLOW
+                if relation is Relation.MEMBER and resource.id in session_groups.get()
+                else Decision.DENY
+            )
+        if resource.type != "team":
             return Decision.DENY
         team = _uuid(resource.id)
         role = roles.get((user, team)) if team is not None else None
@@ -97,9 +101,4 @@ class BuiltinBackend:
         if relation is Relation.ADMIN:
             stmt = stmt.where(TeamMember.role == TeamRole.ADMIN)
         async with self._session_factory() as session:
-            superuser = await session.scalar(
-                select(User.is_superuser).where(User.id == user, User.is_active.is_(True))
-            )
-            if superuser:
-                stmt = select(Team.id)
             return [str(t) for t in await session.scalars(stmt)]

@@ -334,18 +334,20 @@ async def test_changes_page_limit_continues_next_poll(fga, initial):
 @pytest.mark.parametrize(
     "tuple_change",
     [
-        change(relation="superuser", obj="installation:default"),
-        change(relation="installation"),
+        change(relation="member", obj="group:lumewarp-admins"),
+        change(relation="admin"),
     ],
 )
-async def test_changes_broad_effects_reset(fga, tuple_change):
+async def test_group_and_team_changes_identify_affected_user(fga, tuple_change):
     await mock_client(
         fga,
         lambda request: httpx.Response(
             200, json={"changes": [tuple_change], "continuation_token": "same"}
         ),
     )
-    assert (await fga.changes("same")).reset
+    batch = await fga.changes("same")
+    assert not batch.reset
+    assert batch.user_ids == frozenset({ALICE})
 
 
 @pytest.mark.parametrize(

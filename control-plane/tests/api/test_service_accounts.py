@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.api.helpers import BOOTSTRAP_AUTH, auth, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, user_with_token
 from tests.factories import make_key, make_member, make_service_account, make_team
 
 
@@ -14,36 +14,36 @@ async def test_service_account_crud_and_team_local_names(client, committed) -> N
     created = client.post(
         path,
         json={"name": "batch", "description": "nightly", "rpm_limit": 5},
-        headers=BOOTSTRAP_AUTH,
+        headers=ADMIN_AUTH,
     )
     assert created.status_code == 201, created.text
     account = created.json()
     assert account["team_id"] == str(team.id)
     assert account["model_access"] == "inherit"
-    assert client.post(path, json={"name": "batch"}, headers=BOOTSTRAP_AUTH).status_code == 409
+    assert client.post(path, json={"name": "batch"}, headers=ADMIN_AUTH).status_code == 409
     assert (
         client.post(
             f"/api/v1/teams/{other.id}/service-accounts",
             json={"name": "batch"},
-            headers=BOOTSTRAP_AUTH,
+            headers=ADMIN_AUTH,
         ).status_code
         == 201
     )
     detail = f"/api/v1/service-accounts/{account['id']}"
-    assert client.get(detail, headers=BOOTSTRAP_AUTH).json() == account
-    assert [r["id"] for r in client.get(path, headers=BOOTSTRAP_AUTH).json()["items"]] == [
+    assert client.get(detail, headers=ADMIN_AUTH).json() == account
+    assert [r["id"] for r in client.get(path, headers=ADMIN_AUTH).json()["items"]] == [
         account["id"]
     ]
     updated = client.patch(
         detail,
         json={"name": "renamed", "description": "", "rpm_limit": None},
-        headers=BOOTSTRAP_AUTH,
+        headers=ADMIN_AUTH,
     )
     assert updated.status_code == 200, updated.text
     assert updated.json()["rpm_limit"] is None
     assert updated.json()["description"] == ""
-    assert client.delete(detail, headers=BOOTSTRAP_AUTH).status_code == 204
-    assert client.get(detail, headers=BOOTSTRAP_AUTH).status_code == 404
+    assert client.delete(detail, headers=ADMIN_AUTH).status_code == 204
+    assert client.get(detail, headers=ADMIN_AUTH).status_code == 404
 
 
 @pytest.mark.parametrize("revoke", [False, True])
@@ -53,11 +53,9 @@ async def test_service_account_with_key_cannot_be_deleted(client, committed, rev
     key = await make_key(committed, team, account)
     await committed.commit()
     if revoke:
-        assert (
-            client.post(f"/api/v1/keys/{key.id}/revoke", headers=BOOTSTRAP_AUTH).status_code == 200
-        )
+        assert client.post(f"/api/v1/keys/{key.id}/revoke", headers=ADMIN_AUTH).status_code == 200
     assert (
-        client.delete(f"/api/v1/service-accounts/{account.id}", headers=BOOTSTRAP_AUTH).status_code
+        client.delete(f"/api/v1/service-accounts/{account.id}", headers=ADMIN_AUTH).status_code
         == 409
     )
 

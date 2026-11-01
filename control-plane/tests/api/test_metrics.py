@@ -1,7 +1,7 @@
 """Admin API paths that update control-plane metrics."""
 
 from lumewarp_control_plane.models import KeyLifecycle
-from tests.api.helpers import BOOTSTRAP_AUTH, auth, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, user_with_token
 from tests.factories import make_key, make_member, make_team
 
 
@@ -18,10 +18,10 @@ async def test_key_patch_counts_active_to_suspended_only(client, committed) -> N
     await committed.commit()
 
     path = f"/api/v1/keys/{by_admin.id}"
-    assert client.patch(path, json={"lifecycle": "suspended"}, headers=BOOTSTRAP_AUTH).is_success
+    assert client.patch(path, json={"lifecycle": "suspended"}, headers=ADMIN_AUTH).is_success
     assert _suspended(client, "admin") == 1
     # Already suspended: no transition, no count.
-    assert client.patch(path, json={"lifecycle": "suspended"}, headers=BOOTSTRAP_AUTH).is_success
+    assert client.patch(path, json={"lifecycle": "suspended"}, headers=ADMIN_AUTH).is_success
     assert _suspended(client, "admin") == 1
 
     path = f"/api/v1/keys/{by_owner.id}"
@@ -49,12 +49,12 @@ async def test_member_removal_and_deactivation_count_suspended_keys(client, comm
     await committed.commit()
 
     path = f"/api/v1/teams/{team.id}/members/{removed.id}"
-    assert client.delete(path, headers=BOOTSTRAP_AUTH).status_code == 204
+    assert client.delete(path, headers=ADMIN_AUTH).status_code == 204
     # Only the two active keys changed state.
     assert _suspended(client, "owner_removed") == 2
 
     path = f"/api/v1/users/{deactivated.id}"
-    assert client.patch(path, json={"is_active": False}, headers=BOOTSTRAP_AUTH).is_success
+    assert client.patch(path, json={"is_active": False}, headers=ADMIN_AUTH).is_success
     assert _suspended(client, "owner_deactivated") == 2
 
 

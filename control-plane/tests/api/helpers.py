@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumewarp_control_plane.auth import sessions
 from lumewarp_control_plane.ids import uuid7
 from lumewarp_control_plane.models import (
     ApiKey,
@@ -23,10 +24,16 @@ from tests.factories import make_user
 
 
 def auth(secret: str) -> dict[str, str]:
+    if secret.startswith("session:"):
+        token = secret.removeprefix("session:")
+        return {
+            "Cookie": f"{sessions.COOKIE_NAME}={token}",
+            "X-Lumewarp-CSRF": sessions.csrf_token(token),
+        }
     return {"Authorization": f"Bearer {secret}"}
 
 
-BOOTSTRAP_AUTH = auth("test-bootstrap-token")
+ADMIN_AUTH = auth("session:test-admin-session")
 
 
 def suffix() -> str:
@@ -36,7 +43,7 @@ def suffix() -> str:
 async def user_with_token(
     session: AsyncSession,
     *,
-    superuser: bool = False,
+    group_admin: bool = False,
     email: str | None = None,
     active: bool = True,
 ) -> tuple[User, str]:
@@ -44,9 +51,12 @@ async def user_with_token(
         session,
         email=email,
         display_name="test user",
-        is_superuser=superuser,
         is_active=active,
     )
+    if group_admin:
+        token = await sessions.create_session(session, user.id, 3600, groups=("lumewarp-admins",))
+        await session.flush()
+        return user, "session:" + token
     new = generate_secret(SecretKind.PAT)
     session.add(
         PersonalAccessToken(

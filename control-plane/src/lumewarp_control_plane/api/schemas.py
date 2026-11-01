@@ -648,7 +648,6 @@ class RouteOut(ReadModel):
 class UserCreate(ApiModel):
     email: str = Field(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+$")
     display_name: str = Field(default="", max_length=200)
-    is_superuser: bool = False
     is_active: bool = True
 
 
@@ -657,7 +656,6 @@ class UserUpdate(ApiModel):
         default=None, min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+$"
     )
     display_name: str | None = Field(default=None, max_length=200)
-    is_superuser: bool | None = None
     is_active: bool | None = None
 
 
@@ -665,7 +663,6 @@ class UserOut(ReadModel):
     id: uuid.UUID
     email: str
     display_name: str
-    is_superuser: bool
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -682,7 +679,7 @@ class MeOut(ApiModel):
     user_id: uuid.UUID | None
     email: str | None
     display_name: str
-    is_superuser: bool
+    is_admin: bool
     manages_grants: bool
     teams: list[MeTeamOut]
 

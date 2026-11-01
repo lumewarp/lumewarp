@@ -38,7 +38,7 @@ def redact(value: Any) -> Any:
 
 def actor_of(principal: Principal) -> tuple[ActorType, str | None]:
     if principal.user_id is None:
-        return ActorType.SUPERUSER_TOKEN, None
+        return ActorType.BREAK_GLASS, None
     return ActorType.USER, str(principal.user_id)
 
 

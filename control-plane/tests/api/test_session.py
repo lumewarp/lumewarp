@@ -15,7 +15,7 @@ from starlette.requests import Request
 from lumewarp_control_plane import plugins
 from lumewarp_control_plane.api import session as session_api
 from lumewarp_control_plane.auth import oidc, sessions
-from lumewarp_control_plane.authz import INSTALLATION, Authorizer, Decision, Relation
+from lumewarp_control_plane.authz import Authorizer, Decision, Relation, Resource
 from lumewarp_control_plane.models import (
     OIDCLoginState,
     TeamMember,
@@ -24,7 +24,7 @@ from lumewarp_control_plane.models import (
     UserSession,
 )
 from lumewarp_control_plane.security import hash_secret
-from tests.api.helpers import BOOTSTRAP_AUTH, auth, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, user_with_token
 from tests.auth.idp import ISSUER, FakeIdP
 
 
@@ -45,7 +45,12 @@ def idp(client, monkeypatch):
 
 def test_disabled_and_anonymous(client):
     response = client.get("/api/v1/session")
-    assert response.json() == {"oidc_enabled": False, "authenticated": False}
+    assert response.json() == {
+        "oidc_enabled": False,
+        "break_glass_enabled": True,
+        "authenticated": False,
+        "is_break_glass": False,
+    }
     assert response.headers["cache-control"] == "no-store"
     assert client.get("/api/v1/session/oidc/login").status_code == 404
     assert client.get("/api/v1/session/oidc/callback").status_code == 404
@@ -81,7 +86,7 @@ def test_login_parameters_and_cached_discovery(client, idp):
 
 
 async def test_jit_cookie_auth_csrf_and_logout(client, idp, committed):
-    idp.claims.update({"is_superuser": True, "groups": ["admin"], "roles": ["superuser"]})
+    idp.claims.update({"is_admin": True, "groups": ["admin"], "roles": ["group_admin"]})
     idp.login(client, "/teams")
     response = idp.callback(client)
     assert response.status_code == 302
@@ -94,7 +99,7 @@ async def test_jit_cookie_auth_csrf_and_logout(client, idp, committed):
     assert info["authenticated"] is True
     assert info["oidc_enabled"] is True
     assert info["user"]["email"] == idp.claims["email"]
-    assert info["user"]["is_superuser"] is False
+    assert info["user"]["is_admin"] is False
     assert client.get("/api/v1/users/me").status_code == 200
     assert client.get("/api/v1/users", headers={}).status_code == 403
     assert (
@@ -159,7 +164,7 @@ async def test_link_existing_email(client, idp, committed, verified):
         assert response.headers["location"] == "/"
         info = client.get("/api/v1/session").json()
         assert info["user"]["id"] == str(user.id)
-        assert info["user"]["is_superuser"] is False
+        assert info["user"]["is_admin"] is False
     else:
         assert response.headers["location"] == "/login?error=access_denied"
         assert client.get("/api/v1/session").json()["authenticated"] is False
@@ -173,14 +178,14 @@ async def test_unverified_jit_cannot_preclaim_email(client, idp, committed, veri
     assert await committed.scalar(select(User).where(User.email == idp.claims["email"])) is None
 
 
-@pytest.mark.parametrize("existing", ["superuser", "same_issuer", "other_issuer"])
+@pytest.mark.parametrize("existing", ["group_admin", "same_issuer", "other_issuer"])
 async def test_email_link_cannot_take_over_privileged_or_linked_user(
     client, idp, committed, existing
 ):
-    user, _ = await user_with_token(
-        committed, email=idp.claims["email"], superuser=existing == "superuser"
-    )
-    if existing != "superuser":
+    user, _ = await user_with_token(committed, email=idp.claims["email"])
+    if existing == "group_admin":
+        idp.claims["groups"] = ["lumewarp-admins"]
+    else:
         committed.add(
             UserIdentity(
                 user_id=user.id,
@@ -202,7 +207,7 @@ async def test_email_link_cannot_take_over_privileged_or_linked_user(
     ).all()
     if existing == "same_issuer":
         assert [identity.subject for identity in linked] == ["existing-subject"]
-    elif existing == "superuser":
+    elif existing == "group_admin":
         assert linked == []
 
 
@@ -308,7 +313,7 @@ async def test_identity_and_session_cascade_on_user_delete(client, idp, committe
     idp.login(client)
     assert idp.callback(client).headers["location"] == "/"
     user_id = uuid.UUID(client.get("/api/v1/session").json()["user"]["id"])
-    assert client.delete(f"/api/v1/users/{user_id}", headers=BOOTSTRAP_AUTH).status_code == 204
+    assert client.delete(f"/api/v1/users/{user_id}", headers=ADMIN_AUTH).status_code == 204
     assert (
         await committed.scalar(select(UserIdentity).where(UserIdentity.user_id == user_id)) is None
     )
@@ -332,7 +337,7 @@ async def test_session_expiry_and_deactivation(client, idp, committed, expired):
         changed = client.patch(
             f"/api/v1/users/{info['user']['id']}",
             json={"is_active": False},
-            headers=BOOTSTRAP_AUTH,
+            headers=ADMIN_AUTH,
         )
         assert changed.status_code == 200, changed.text
     assert client.get("/api/v1/users/me").status_code == 401
@@ -489,7 +494,7 @@ async def test_plugin_mapping(client, idp, committed, monkeypatch):
     user = client.get("/api/v1/session").json()["user"]
     assert user["email"] == "mapped-" + idp.claims["email"]
     assert user["display_name"] == "Mapped Name"
-    assert user["is_superuser"] is False
+    assert user["is_admin"] is False
 
 
 async def test_last_seen_throttle(client, idp, committed):
@@ -529,25 +534,27 @@ def test_secure_cookie_and_public_client(client, idp):
     assert parse_qs(token_request.content.decode())["client_id"] == ["lumewarp"]
 
 
-def test_bootstrap_and_invalid_bearer_take_precedence(client, idp):
+def test_invalid_bearer_takes_precedence_over_cookie(client, idp):
     idp.login(client)
     assert idp.callback(client).headers["location"] == "/"
-    info = client.get("/api/v1/session", headers=BOOTSTRAP_AUTH).json()
-    assert info == {"oidc_enabled": True, "authenticated": True}
+    info = client.get("/api/v1/session").json()
+    assert info["authenticated"] is True
+    assert info["is_break_glass"] is False
     assert client.get("/api/v1/session", headers=auth("invalid")).json() == {
         "oidc_enabled": True,
+        "break_glass_enabled": True,
+        "is_break_glass": False,
         "authenticated": False,
     }
-    assert client.post("/api/v1/session/logout", headers=BOOTSTRAP_AUTH).status_code == 204
     assert client.get("/api/v1/session").json()["authenticated"] is True
 
 
 @pytest.mark.parametrize("local", [True, False])
 @pytest.mark.parametrize("decision", [Decision.ALLOW, Decision.DENY, Decision.ERROR])
-async def test_session_superuser_uses_backend_with_local_error_fallback(
+async def test_session_group_admin_uses_backend_with_local_error_fallback(
     client, committed, monkeypatch, local, decision
 ):
-    user, token = await user_with_token(committed, superuser=local)
+    user, token = await user_with_token(committed, group_admin=local)
     await committed.commit()
     calls = []
 
@@ -557,14 +564,15 @@ async def test_session_superuser_uses_backend_with_local_error_fallback(
 
     monkeypatch.setattr(client.app.state, "authorizer", Authorizer(check, "external"))
     info = client.get("/api/v1/session", headers=auth(token))
-    assert info.status_code == 200
-    expected = local if decision is Decision.ERROR else decision is Decision.ALLOW
-    assert info.json()["user"]["is_superuser"] is expected
-    assert calls == [(str(user.id), Relation.SUPERUSER, INSTALLATION)]
+    expected = decision is Decision.ALLOW
+    assert info.status_code == (503 if decision is Decision.ERROR else 200)
+    if decision is not Decision.ERROR:
+        assert info.json()["user"]["is_admin"] is expected
+    assert calls == [(str(user.id), Relation.MEMBER, Resource("group", "lumewarp-admins"))]
     me = client.get("/api/v1/users/me", headers=auth(token))
     if decision is Decision.ERROR:
         assert me.status_code == 503
         assert me.json()["error"]["code"] == "authz_unavailable"
     else:
         assert me.status_code == 200
-        assert me.json()["is_superuser"] is expected
+        assert me.json()["is_admin"] is expected

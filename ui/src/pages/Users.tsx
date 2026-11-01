@@ -3,16 +3,16 @@ import { useState } from "react";
 import { api, type Schemas, type User } from "../api";
 import { Badge, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
-import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
+import { FormDialog, required, TextField, useForm } from "../components/Form";
 import { CreateButton } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { useMe, useMut } from "../hooks";
 
 type Values = Schemas["UserCreate"];
-type ConfirmationKind = "activate" | "deactivate" | "promote" | "demote" | "delete";
+type ConfirmationKind = "activate" | "deactivate" | "delete";
 
 const PAGE_SIZE = 50;
-const blank: Values = { email: "", display_name: "", is_superuser: false, is_active: true };
+const blank: Values = { email: "", display_name: "", is_active: true };
 
 export function Users() {
   const me = useMe();
@@ -23,7 +23,7 @@ export function Users() {
   const users = useQuery({
     queryKey: ["users", cursor],
     queryFn: () => api.usersPage(cursor),
-    enabled: !!me.data?.is_superuser,
+    enabled: !!me.data?.is_admin,
   });
   const form = useForm<Values>(blank, { email: required("Email") });
   const create = useMut((values: Values) => api.createUser(values), "User created");
@@ -36,8 +36,8 @@ export function Users() {
 
   if (me.isPending) return <div className="state" aria-busy="true">Loading user access…</div>;
   if (me.error) return <div className="state state-error" role="alert">{me.error.message}</div>;
-  if (!me.data?.is_superuser) {
-    return <div className="state state-error" role="alert">Superuser access is required to manage users.</div>;
+  if (!me.data?.is_admin) {
+    return <div className="state state-error" role="alert">Admin group access is required to manage users.</div>;
   }
 
   const submit = async () => {
@@ -51,28 +51,20 @@ export function Users() {
       ? `Deactivate ${confirmation.user.email}? This suspends the user’s API keys.`
       : confirmation.kind === "activate"
         ? `Reactivate ${confirmation.user.email}?`
-        : confirmation.kind === "promote"
-          ? `Make ${confirmation.user.email} a superuser?`
-          : confirmation.kind === "demote"
-            ? `Remove superuser access from ${confirmation.user.email}?`
-            : `Delete ${confirmation.user.email}? If the user owns keys or is the last admin of a team, the API will reject deletion and show why.`
+        : `Delete ${confirmation.user.email}? If the user owns keys or is the last admin of a team, the API will reject deletion and show why.`
     : "";
   const confirmLabel =
     confirmation?.kind === "delete"
       ? "Delete"
       : confirmation?.kind === "deactivate"
         ? "Deactivate"
-        : confirmation?.kind === "activate"
-          ? "Reactivate"
-          : confirmation?.kind === "promote"
-            ? "Make superuser"
-            : "Remove superuser";
+        : "Reactivate";
 
   return (
     <>
       <PageHeader
         title="Users"
-        description="Manage installation users and superuser access."
+        description="Manage users. Admin group membership is managed by IAM."
         actions={<CreateButton can onClick={() => { form.reset(); setCreating(true); }}>New user</CreateButton>}
       />
       <DataTable
@@ -87,7 +79,6 @@ export function Users() {
           { key: "email", header: "Email", sort: (a, b) => a.email.localeCompare(b.email), cell: (user) => <strong>{user.email}</strong> },
           { key: "name", header: "Name", cell: (user) => user.display_name || "—" },
           { key: "status", header: "Status", cell: (user) => <Badge tone={user.is_active ? "ok" : "danger"}>{user.is_active ? "Active" : "Inactive"}</Badge> },
-          { key: "role", header: "Installation role", cell: (user) => <Badge tone={user.is_superuser ? "info" : "muted"}>{user.is_superuser ? "Superuser" : "User"}</Badge> },
           {
             key: "actions",
             header: "",
@@ -101,13 +92,6 @@ export function Users() {
                     onClick={() => setConfirming({ user, kind: user.is_active ? "deactivate" : "activate" })}
                   >
                     {user.is_active ? "Deactivate" : "Reactivate"}
-                  </button>
-                  <button
-                    className="btn btn-sm"
-                    disabled={isSelf && user.is_superuser}
-                    onClick={() => setConfirming({ user, kind: user.is_superuser ? "demote" : "promote" })}
-                  >
-                    {user.is_superuser ? "Remove superuser" : "Make superuser"}
                   </button>
                   <button
                     className="btn btn-sm btn-danger-ghost"
@@ -156,15 +140,6 @@ export function Users() {
       >
         <TextField label="Email" value={form.values.email} onChange={(value) => form.set("email", value)} error={form.errors.email} autoFocus />
         <TextField label="Display name" value={form.values.display_name} onChange={(value) => form.set("display_name", value)} />
-        <SelectField
-          label="Installation role"
-          value={form.values.is_superuser ? "superuser" : "user"}
-          onChange={(value) => form.set("is_superuser", value === "superuser")}
-          options={[
-            { value: "user", label: "User" },
-            { value: "superuser", label: "Superuser" },
-          ]}
-        />
       </FormDialog>
       <ConfirmDialog
         open={!!confirmation}
@@ -173,11 +148,7 @@ export function Users() {
             ? "Delete user"
             : confirmation?.kind === "deactivate"
               ? "Deactivate user"
-              : confirmation?.kind === "activate"
-                ? "Reactivate user"
-                : confirmation?.kind === "promote"
-                  ? "Grant superuser access"
-                  : "Remove superuser access"
+              : "Reactivate user"
         }
         confirmLabel={confirmLabel}
         message={confirmMessage}
@@ -187,9 +158,7 @@ export function Users() {
           const changes: Schemas["UserUpdate"] =
             confirmation.kind === "activate"
               ? { is_active: true }
-              : confirmation.kind === "deactivate"
-                ? { is_active: false }
-                : { is_superuser: confirmation.kind === "promote" };
+              : { is_active: false };
           return update.mutateAsync({ user: confirmation.user, changes });
         }}
         onClose={() => setConfirming(null)}

@@ -23,7 +23,7 @@ from lumewarp_control_plane.settings import DEV_DATABASE_URL
 
 HTTP_PORT = os.environ.get("E2E_HTTP_PORT", "8992")
 GRPC_PORT = os.environ.get("E2E_GRPC_PORT", "50952")
-BOOTSTRAP_TOKEN = "e2e-bootstrap-token"
+BREAK_GLASS_PASSWORD = "e2e-break-glass-password"
 VIEWER_EMAIL = "viewer@e2e.test"
 VIEWER_TOKEN = SecretKind.PAT.value + "e2e-viewer-token-0123456789abcdef"
 SERVER_URL = os.environ.get("LUMEWARP_TEST_DATABASE_URL", DEV_DATABASE_URL)
@@ -70,7 +70,9 @@ def main() -> None:
     env = {
         **os.environ,
         "LUMEWARP_DATABASE_URL": url,
-        "LUMEWARP_BOOTSTRAP_TOKEN": BOOTSTRAP_TOKEN,
+        "LUMEWARP_BREAK_GLASS_PASSWORD": BREAK_GLASS_PASSWORD,
+        "LUMEWARP_SESSION_COOKIE_SECURE": "false",
+        "LUMEWARP_METRICS_BIND": "",
         "LUMEWARP_HTTP_BIND": f"127.0.0.1:{HTTP_PORT}",
         "LUMEWARP_GRPC_BIND": f"127.0.0.1:{GRPC_PORT}",
     }

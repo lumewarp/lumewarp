@@ -16,6 +16,14 @@ groups:
   - name: lumewarp.alerts
     interval: 1m
     rules:
+      - alert: LumewarpBreakGlassLogin
+        expr: 'sum by (namespace) (increase(lumewarp_cp_break_glass_logins_total{result="success"}[5m])) > 0'
+        labels:
+          severity: critical
+        annotations:
+          summary: "Emergency login was used"
+          description: "A break-glass session was opened in the last 5 minutes."
+          runbook: "Investigate the emergency access and review its audit trail."
       # 5% at >=1 request/s avoids paging on isolated failures or local admin traffic.
       - alert: LumewarpGatewayHigh5xxRatio
         expr: "lumewarp:model_errors:ratio5m > 0.05 and on (namespace, model) lumewarp:model_requests:rate5m >= 1"

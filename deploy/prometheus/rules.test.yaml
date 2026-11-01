@@ -1104,6 +1104,53 @@
           "exp_alerts": []
         }
       ]
+    },
+    {
+      "name": "Break-glass success alerts immediately; failures do not",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_cp_break_glass_logins_total{namespace=\"demo\",result=\"success\"}",
+          "values": "0 0 1 1 1 1 1 1 1"
+        },
+        {
+          "series": "lumewarp_cp_break_glass_logins_total{namespace=\"other\",result=\"failure\"}",
+          "values": "0+10x8"
+        },
+        {
+          "series": "lumewarp_cp_break_glass_logins_total{namespace=\"other\",result=\"rate_limited\"}",
+          "values": "0+10x8"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "1m",
+          "alertname": "LumewarpBreakGlassLogin",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "2m",
+          "alertname": "LumewarpBreakGlassLogin",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "severity": "critical"
+              },
+              "exp_annotations": {
+                "summary": "Emergency login was used",
+                "description": "A break-glass session was opened in the last 5 minutes.",
+                "runbook": "Investigate the emergency access and review its audit trail."
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "8m",
+          "alertname": "LumewarpBreakGlassLogin",
+          "exp_alerts": []
+        }
+      ]
     }
   ]
 }

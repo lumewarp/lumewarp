@@ -1,4 +1,4 @@
-"""Admin-issued PATs are installation-superuser-only, one-time secrets and audited."""
+"""Admin-issued PATs are installation-group_admin-only, one-time secrets and audited."""
 
 import json
 import uuid
@@ -8,21 +8,21 @@ from sqlalchemy import func, select
 
 from lumewarp_control_plane.models import ActorType, AuditLog, PersonalAccessToken, TeamRole
 from lumewarp_control_plane.security import hash_secret
-from tests.api.helpers import BOOTSTRAP_AUTH, auth, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, user_with_token
 from tests.factories import make_member, make_team
 
 
-@pytest.mark.parametrize("issuer", ["bootstrap", "superuser"])
-async def test_superuser_issues_pat_for_another_user(client, committed, issuer) -> None:
+@pytest.mark.parametrize("issuer", ["bootstrap", "group_admin"])
+async def test_group_admin_issues_pat_for_another_user(client, committed, issuer) -> None:
     target = client.post(
         "/api/v1/users",
-        headers=BOOTSTRAP_AUTH,
+        headers=ADMIN_AUTH,
         json={"email": f"{uuid.uuid4()}@example.com", "display_name": "New user"},
     ).json()
     actor = None
-    headers = BOOTSTRAP_AUTH
-    if issuer == "superuser":
-        actor, secret = await user_with_token(committed, superuser=True)
+    headers = ADMIN_AUTH
+    if issuer == "group_admin":
+        actor, secret = await user_with_token(committed, group_admin=True)
         await committed.commit()
         headers = auth(secret)
 
@@ -41,7 +41,7 @@ async def test_superuser_issues_pat_for_another_user(client, committed, issuer) 
     me = client.get("/api/v1/users/me", headers=auth(secret))
     assert me.status_code == 200
     assert me.json()["user_id"] == target["id"]
-    assert me.json()["is_superuser"] is False
+    assert me.json()["is_admin"] is False
 
     listed = client.get("/api/v1/users/me/tokens", headers=auth(secret))
     assert listed.status_code == 200
@@ -59,7 +59,7 @@ async def test_superuser_issues_pat_for_another_user(client, committed, issuer) 
     audit = await committed.scalar(
         select(AuditLog).where(AuditLog.resource_id == token["id"], AuditLog.action == "pat.create")
     )
-    assert audit.actor_type == (ActorType.USER if actor else ActorType.SUPERUSER_TOKEN)
+    assert audit.actor_type == (ActorType.USER if actor else ActorType.BREAK_GLASS)
     assert audit.actor_id == (str(actor.id) if actor else None)
     assert audit.details == {"name": "initial access", "user_id": target["id"]}
     assert secret not in json.dumps(audit.details)
@@ -72,7 +72,7 @@ async def test_superuser_issues_pat_for_another_user(client, committed, issuer) 
 
 
 @pytest.mark.parametrize("role", ["admin", "member", "none"])
-async def test_non_superusers_cannot_issue_for_self_or_others(client, committed, role) -> None:
+async def test_non_group_admins_cannot_issue_for_self_or_others(client, committed, role) -> None:
     team = await make_team(committed)
     user, secret = await user_with_token(committed)
     target, _ = await user_with_token(committed)
@@ -95,7 +95,7 @@ async def test_admin_token_target_and_expiry_validation(client, committed) -> No
     for user_id, expected in ((uuid.uuid4(), 404), (inactive.id, 409)):
         assert (
             client.post(
-                f"/api/v1/users/{user_id}/tokens", headers=BOOTSTRAP_AUTH, json={"name": "test"}
+                f"/api/v1/users/{user_id}/tokens", headers=ADMIN_AUTH, json={"name": "test"}
             ).status_code
             == expected
         )
@@ -103,7 +103,7 @@ async def test_admin_token_target_and_expiry_validation(client, committed) -> No
     for expires_at in ("2000-01-01T00:00:00Z", "2099-01-01T00:00:00"):
         assert (
             client.post(
-                path, headers=BOOTSTRAP_AUTH, json={"name": "test", "expires_at": expires_at}
+                path, headers=ADMIN_AUTH, json={"name": "test", "expires_at": expires_at}
             ).status_code
             == 422
         )

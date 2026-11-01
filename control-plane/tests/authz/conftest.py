@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from lumewarp_control_plane.authz import INSTALLATION, Decision, Relation, team_resource
+from lumewarp_control_plane.authz import Decision, Relation, Resource, team_resource
 from lumewarp_control_plane.authz.contract_tests import AuthzSeed
 from lumewarp_control_plane.authz.openfga import OpenFGABackend
 from lumewarp_control_plane.settings import Settings
@@ -28,18 +28,14 @@ def authz_seed():
 def grant_check(authz_seed):
     seed = authz_seed
     grants = {
-        (seed.superuser, "superuser", "installation", "default"),
+        (seed.outsider, "member", "group", "lumewarp-admins"),
         (seed.admin, "admin", "team", str(seed.teams[0])),
         (seed.member, "member", "team", str(seed.teams[0])),
     }
 
     async def check(user, relation, resource):
-        allowed = (user, "superuser", "installation", "default") in grants or (
-            (user, relation, resource.type, resource.id) in grants
-            or (
-                relation is Relation.MEMBER
-                and (user, "admin", resource.type, resource.id) in grants
-            )
+        allowed = (user, relation, resource.type, resource.id) in grants or (
+            relation is Relation.MEMBER and (user, "admin", resource.type, resource.id) in grants
         )
         return Decision.ALLOW if allowed else Decision.DENY
 
@@ -93,11 +89,7 @@ async def openfga_settings():
 async def live_backend(openfga_settings, authz_seed):
     backend = OpenFGABackend(openfga_settings)
     seed = authz_seed
-    tuples = [backend._tuple(seed.superuser, Relation.SUPERUSER, INSTALLATION)]
-    tuples += [
-        {"user": "installation:default", "relation": "installation", "object": f"team:{team}"}
-        for team in seed.teams
-    ]
+    tuples = [backend._tuple(seed.outsider, Relation.MEMBER, Resource("group", "lumewarp-admins"))]
     tuples += [
         backend._tuple(seed.admin, Relation.ADMIN, team_resource(seed.teams[0])),
         backend._tuple(seed.member, Relation.MEMBER, team_resource(seed.teams[0])),

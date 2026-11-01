@@ -186,7 +186,7 @@ class RequestOutcome(enum.StrEnum):
 
 
 class ActorType(enum.StrEnum):
-    SUPERUSER_TOKEN = "superuser_token"
+    BREAK_GLASS = "break_glass"
     USER = "user"
     GATEWAY = "gateway"
     SYSTEM = "system"
@@ -276,7 +276,6 @@ class User(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     email: Mapped[str] = mapped_column(String(320), nullable=False)
     display_name: Mapped[str] = mapped_column(String(200), nullable=False, server_default="")
-    is_superuser: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
 
 
@@ -297,12 +296,22 @@ class UserIdentity(Base):
 
 class UserSession(Base):
     __tablename__ = "user_sessions"
-    __table_args__ = (_hash32("token_hash"), _hash32("csrf_hash"))
+    __table_args__ = (
+        _hash32("token_hash"),
+        _hash32("csrf_hash"),
+        CheckConstraint(
+            "(kind = 'session' AND user_id IS NOT NULL) OR "
+            "(kind = 'break_glass' AND user_id IS NULL)",
+            name="kind",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
     )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, server_default="session")
+    groups: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
     token_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
     csrf_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     created_at: Mapped[datetime] = _now()
@@ -366,9 +375,7 @@ class Team(PolicyMixin, TimestampMixin, Base):
 
 
 class TeamMember(PolicyMixin, TimestampMixin, Base):
-    """A user in a team, with a role and the member's own (narrowing) policy. The
-    superuser flag lives on `users` (installation-level, not team-level).
-    """
+    """A user in a team, with a role and the member's own (narrowing) policy."""
 
     __tablename__ = "team_members"
     __table_args__ = (

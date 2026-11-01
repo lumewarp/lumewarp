@@ -8,7 +8,7 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 from lumewarp_control_plane.authz import Authorizer, Decision, Relation
 from lumewarp_control_plane.compiler import compile_scope, publish_pending
 from lumewarp_control_plane.models import ConfigVersion, Scope, TeamMember
-from tests.api.helpers import BOOTSTRAP_AUTH, auth, suffix, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
 from tests.factories import make_team
 
 
@@ -51,9 +51,7 @@ async def test_external_member_key_create_compile_and_rollback(
             )
             == 1
         )
-        rollback = client.post(
-            "/api/v1/config/rollback", json={"version": 1}, headers=BOOTSTRAP_AUTH
-        )
+        rollback = client.post("/api/v1/config/rollback", json={"version": 1}, headers=ADMIN_AUTH)
         assert rollback.status_code == 200, rollback.text
         async with AsyncSession(api_engine) as session:
             version = await session.get(ConfigVersion, (settings.scope, rollback.json()["version"]))

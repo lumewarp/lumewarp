@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.api.helpers import BOOTSTRAP_AUTH
+from tests.api.helpers import ADMIN_AUTH
 from tests.factories import make_member, make_service_account, make_team, make_user
 
 
@@ -34,21 +34,21 @@ async def test_owner_cannot_widen_team(client, committed, owner, policy, field) 
     await committed.commit()
     if owner == "member":
         path = f"/api/v1/teams/{team.id}/members/{user.id}"
-        bad = client.put(path, json={"role": "member", **policy}, headers=BOOTSTRAP_AUTH)
-        assert client.put(path, json={"role": "member"}, headers=BOOTSTRAP_AUTH).status_code == 201
+        bad = client.put(path, json={"role": "member", **policy}, headers=ADMIN_AUTH)
+        assert client.put(path, json={"role": "member"}, headers=ADMIN_AUTH).status_code == 201
     else:
         path = f"/api/v1/teams/{team.id}/service-accounts"
-        bad = client.post(path, json={"name": "bad", **policy}, headers=BOOTSTRAP_AUTH)
-        created = client.post(path, json={"name": "good"}, headers=BOOTSTRAP_AUTH)
+        bad = client.post(path, json={"name": "bad", **policy}, headers=ADMIN_AUTH)
+        created = client.post(path, json={"name": "good"}, headers=ADMIN_AUTH)
         assert created.status_code == 201
         path = f"/api/v1/service-accounts/{created.json()['id']}"
     assert bad.status_code == 422, bad.text
     assert field in bad.json()["error"]["message"]
-    updated = client.patch(path, json=policy, headers=BOOTSTRAP_AUTH)
+    updated = client.patch(path, json=policy, headers=ADMIN_AUTH)
     assert updated.status_code == 422, updated.text
     assert field in updated.json()["error"]["message"]
     deny_all = client.patch(
-        path, json={"model_access": "list", "allowed_models": []}, headers=BOOTSTRAP_AUTH
+        path, json={"model_access": "list", "allowed_models": []}, headers=ADMIN_AUTH
     )
     assert deny_all.status_code == 200
     assert deny_all.json()["model_access"] == "list"
@@ -79,10 +79,10 @@ async def test_team_narrowing_names_conflicting_owner(
         prefix = f"service_accounts.{row.id}"
     await committed.commit()
     path = f"/api/v1/teams/{team.id}"
-    response = client.patch(path, json=team_update, headers=BOOTSTRAP_AUTH)
+    response = client.patch(path, json=team_update, headers=ADMIN_AUTH)
     assert response.status_code == 422, response.text
     assert f"{prefix}.{field}" in response.json()["error"]["message"]
-    unchanged = client.get(path, headers=BOOTSTRAP_AUTH).json()
+    unchanged = client.get(path, headers=ADMIN_AUTH).json()
     assert unchanged["rpm_limit"] == 100
     assert unchanged["model_access"] == "all"
 
@@ -101,7 +101,7 @@ def test_team_policy_validation(client, body) -> None:
     from tests.api.helpers import suffix
 
     response = client.post(
-        "/api/v1/teams", json={"name": f"policy-{suffix()}", **body}, headers=BOOTSTRAP_AUTH
+        "/api/v1/teams", json={"name": f"policy-{suffix()}", **body}, headers=ADMIN_AUTH
     )
     assert response.status_code == 422, response.text
 
@@ -127,8 +127,6 @@ async def test_team_locks_scope_before_validating_owners(client, committed, monk
 
     monkeypatch.setattr(teams, "lock_scope", lock)
     monkeypatch.setattr(teams, "validate_owners_after_team_update", validate)
-    response = client.patch(
-        f"/api/v1/teams/{team.id}", json={"rpm_limit": 10}, headers=BOOTSTRAP_AUTH
-    )
+    response = client.patch(f"/api/v1/teams/{team.id}", json={"rpm_limit": 10}, headers=ADMIN_AUTH)
     assert response.status_code == 422
     assert calls == ["locked", "validate"]

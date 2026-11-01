@@ -35,12 +35,11 @@ async def scope(session: AsyncSession, name: str = "default") -> Scope:
 
 
 async def make_user(
-    session: AsyncSession, email: str | None = None, *, is_superuser: bool = False,
+    session: AsyncSession, email: str | None = None, *,
     is_active: bool = True, **kw,
 ) -> User:  # fmt: skip
     user = User(
         email=email or f"{_unique('user')}@example.com",
-        is_superuser=is_superuser,
         is_active=is_active,
         **kw,
     )

@@ -11,20 +11,21 @@ from lumewarp_control_plane.models import (
 from lumewarp_control_plane.security import SecretKind, generate_secret
 from lumewarp_control_plane.settings import Settings
 from tests.api.helpers import (
-    BOOTSTRAP_AUTH,
+    ADMIN_AUTH,
     auth,
     suffix,
+    user_with_token,
 )
 
 API = "/api/v1"
 
 
 def _post(client, path, **body):
-    return client.post(f"{API}{path}", json=body, headers=BOOTSTRAP_AUTH)
+    return client.post(f"{API}{path}", json=body, headers=ADMIN_AUTH)
 
 
 def _patch(client, path, **body):
-    return client.patch(f"{API}{path}", json=body, headers=BOOTSTRAP_AUTH)
+    return client.patch(f"{API}{path}", json=body, headers=ADMIN_AUTH)
 
 
 def _deployment(client, *, weight=1, upstream_id=None):
@@ -81,9 +82,7 @@ def test_deployment_weight_update_cannot_starve_weighted_route(client) -> None:
     resp = _patch(client, f"/deployments/{dep['id']}", weight=0)
     assert resp.status_code == 422
     assert "weight" in resp.json()["error"]["message"]
-    assert (
-        client.get(f"{API}/deployments/{dep['id']}", headers=BOOTSTRAP_AUTH).json()["weight"] == 1
-    )
+    assert client.get(f"{API}/deployments/{dep['id']}", headers=ADMIN_AUTH).json()["weight"] == 1
 
     # With another positive deployment in the route the weight may drop to 0.
     _patch(client, f"/routes/{route['id']}", deployment_ids=[dep["id"], spare["id"]])
@@ -115,10 +114,10 @@ async def test_gateways_are_scoped(client, committed, api_scope) -> None:
     committed.add(GatewaySession(scope=other_scope, gateway_id=foreign_id, connected=True))
     await committed.commit()
 
-    listed = client.get(f"{API}/gateways?limit=500", headers=BOOTSTRAP_AUTH).json()["items"]
+    listed = client.get(f"{API}/gateways?limit=500", headers=ADMIN_AUTH).json()["items"]
     assert foreign_id not in {item["gateway_id"] for item in listed}
     revoke = client.post(
-        f"{API}/gateways/{foreign_id}/tokens/{foreign_token.id}/revoke", headers=BOOTSTRAP_AUTH
+        f"{API}/gateways/{foreign_id}/tokens/{foreign_token.id}/revoke", headers=ADMIN_AUTH
     )
     assert revoke.status_code == 404
 
@@ -130,7 +129,7 @@ async def test_gateways_are_scoped(client, committed, api_scope) -> None:
     cursor = None
     while True:
         url = f"{API}/gateways?limit=2" + (f"&cursor={cursor}" if cursor else "")
-        page = client.get(url, headers=BOOTSTRAP_AUTH).json()
+        page = client.get(url, headers=ADMIN_AUTH).json()
         seen.extend(item["gateway_id"] for item in page["items"])
         cursor = page["next_cursor"]
         if cursor is None:
@@ -176,7 +175,7 @@ def test_list_routes_returns_ordered_deployments_for_every_route(client) -> None
         route = _post(client, "/routes", model=f"m-{suffix()}", deployment_ids=order)
         assert route.status_code == 201
         expected[route.json()["id"]] = order
-    items = client.get(f"{API}/routes?limit=500", headers=BOOTSTRAP_AUTH).json()["items"]
+    items = client.get(f"{API}/routes?limit=500", headers=ADMIN_AUTH).json()["items"]
     for item in items:
         if item["id"] in expected:
             assert [d["deployment_id"] for d in item["deployments"]] == expected[item["id"]]
@@ -230,18 +229,16 @@ def test_names_and_aliases_are_clean(client) -> None:
 # ------------------------------------------------------------------------------ N3-N6
 
 
-def test_superuser_cannot_lock_itself_out(client) -> None:
-    admin = _post(client, "/users", email=f"root-{suffix()}@example.com", is_superuser=True).json()
-    admin_auth = auth(_pat_for(client, admin["id"]))
-    resp = client.patch(
-        f"{API}/users/{admin['id']}", json={"is_superuser": False}, headers=admin_auth
-    )
-    assert resp.status_code == 409
+async def test_group_admin_cannot_lock_itself_out(client, committed) -> None:
+    admin, secret = await user_with_token(committed, group_admin=True)
+    await committed.commit()
+    admin = {"id": str(admin.id)}
+    admin_auth = auth(secret)
     resp = client.patch(f"{API}/users/{admin['id']}", json={"is_active": False}, headers=admin_auth)
     assert resp.status_code == 409
     assert client.delete(f"{API}/users/{admin['id']}", headers=admin_auth).status_code == 409
-    # Another superuser (here the bootstrap token) may still change it.
-    assert _patch(client, f"/users/{admin['id']}", is_superuser=False).status_code == 200
+    # Emergency sessions may still deactivate another user.
+    assert _patch(client, f"/users/{admin['id']}", is_active=False).status_code == 200
 
 
 def _pat_for(client, user_id: str) -> str:
@@ -255,13 +252,11 @@ def test_query_ranges_are_capped(client) -> None:
     wide = {"from": "2024-01-01T00:00:00+00:00", "to": "2026-01-01T00:00:00+00:00"}
     for path in ("/audit", "/usage"):
         resp = client.get(
-            f"{API}{path}", params={**wide, "team_id": team["id"]}, headers=BOOTSTRAP_AUTH
+            f"{API}{path}", params={**wide, "team_id": team["id"]}, headers=ADMIN_AUTH
         )
         assert resp.status_code == 422, path
         assert "400 days" in resp.json()["error"]["message"]
     ok = {"from": "2026-01-01T00:00:00+00:00", "to": "2026-06-01T00:00:00+00:00"}
     for path in ("/audit", "/usage"):
-        resp = client.get(
-            f"{API}{path}", params={**ok, "team_id": team["id"]}, headers=BOOTSTRAP_AUTH
-        )
+        resp = client.get(f"{API}{path}", params={**ok, "team_id": team["id"]}, headers=ADMIN_AUTH)
         assert resp.status_code == 200, (path, resp.text)
