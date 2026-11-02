@@ -15,9 +15,8 @@
 // Plain identifiers that cannot be resolved (props, parameters) are skipped: whatever the caller
 // passes is checked at the caller's own site.
 //
-// Transitional allowlist: scripts/check-shadcn.allowlist.json maps file -> rule -> max count.
-// Going over the count fails; going under only prints "can shrink". Only the lead edits it.
-// `adapters` is the permanent exemption of hand-written adapters, native elements only.
+// There is no allowlist: every finding fails. Only the generated primitives in GENERATED_PRIMITIVES
+// are exempt, and only from the native-element rule (that is what shadcn generates).
 
 import { parse } from "@babel/parser";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -45,10 +44,9 @@ export const PRIMITIVES_DIR = "src/components/ui/";
 export const GENERATED_PRIMITIVES = new Set(
   [
     "alert-dialog", "alert", "badge", "button", "card", "checkbox", "command", "dialog", "empty", "field", "input", "label",
-    "popover", "radio-group", "select", "separator", "sheet", "sidebar", "skeleton", "sonner", "table", "tabs", "textarea", "tooltip",
+    "popover", "radio-group", "select", "separator", "sheet", "sidebar", "skeleton", "sonner", "table", "tabs", "textarea",
   ].map((n) => `${PRIMITIVES_DIR}${n}.tsx`),
 );
-export const RULES = ["legacy-class", "native-element", "native-input-type", "radix-import", "dynamic-class", "css-layer"];
 
 const CLASS_FUNCTIONS = new Set(["cn", "clsx", "cva", "twMerge", "cx", "classNames", "tv"]);
 const PASS_THROUGH_METHODS = new Set(["join", "filter", "trim", "concat", "flat", "toString", "trimEnd", "trimStart"]);
@@ -552,102 +550,29 @@ export function scanCss(code, rel = "src/styles.css") {
   return found;
 }
 
-/** Native-element exemption entries: "button", "input", ... or "*" for all native elements. */
-export function validateConfig(config) {
-  const errors = [];
-  for (const [file, entries] of Object.entries(config.adapters ?? {})) {
-    for (const e of entries) {
-      if (e !== "*" && !NATIVE_ELEMENTS.has(e)) errors.push(`adapters["${file}"]: "${e}" is not a native element; adapters can only be exempt from native elements, never from legacy classes`);
-    }
-  }
-  for (const [file, rules] of Object.entries(config.allowlist ?? {})) {
-    for (const [rule, count] of Object.entries(rules)) {
-      if (!RULES.includes(rule)) errors.push(`allowlist["${file}"]: unknown rule "${rule}"`);
-      if (!Number.isInteger(count) || count < 1) errors.push(`allowlist["${file}"].${rule}: count must be a positive integer`);
-    }
-  }
-  return errors;
-}
-
-/** Whole-project check. Returns {violations, counts, stale, errors}; violations are the failures. */
-export function checkProject(root, config = {}, srcDir = "src") {
-  const errors = validateConfig(config);
+/** Whole-project check. Every finding is a failure; there is no way to allow one. */
+export function checkProject(root, srcDir = "src") {
   const project = loadProject(root, srcDir);
-  let all = [];
+  const all = [];
   for (const f of project.files.values()) all.push(...scanFile(project, f));
   const css = join(root, srcDir, "styles.css");
   if (existsSync(css)) all.push(...scanCss(readFileSync(css, "utf8"), toPosix(relative(root, css))));
 
-  // adapters: native elements only
-  all = all.filter((v) => {
-    if (v.rule !== "native-element") return true;
-    const ex = config.adapters?.[v.file];
-    if (!ex) return true;
-    return !(ex.includes("*") || ex.some((e) => v.detail === `<${e}>`));
-  });
   // primitives: native elements are what shadcn generates
-  all = all.filter((v) => !(v.rule === "native-element" && GENERATED_PRIMITIVES.has(v.file)));
-
-  const counts = new Map(); // file -> rule -> n
-  for (const v of all) {
-    const r = counts.get(v.file) ?? new Map();
-    r.set(v.rule, (r.get(v.rule) ?? 0) + 1);
-    counts.set(v.file, r);
-  }
-  const violations = [];
-  const stale = [];
-  const allow = config.allowlist ?? {};
-  const grouped = new Map();
-  for (const v of all) {
-    const k = v.file + "\0" + v.rule;
-    const l = grouped.get(k) ?? [];
-    l.push(v);
-    grouped.set(k, l);
-  }
-  for (const [k, list] of grouped) {
-    const [file, rule] = k.split("\0");
-    const allowed = allow[file]?.[rule] ?? 0;
-    if (list.length > allowed) violations.push(...(allowed === 0 ? list : list.map((v) => ({ ...v, detail: `${v.detail} (allowlisted ${allowed}, found ${list.length})` }))));
-  }
-  for (const [file, rules] of Object.entries(allow)) {
-    for (const [rule, n] of Object.entries(rules)) {
-      const actual = counts.get(file)?.get(rule) ?? 0;
-      if (actual < n) stale.push({ file, rule, allowed: n, actual });
-    }
-  }
-  return { violations, counts, stale, errors, all };
+  const violations = all.filter((v) => !(v.rule === "native-element" && GENERATED_PRIMITIVES.has(v.file)));
+  return { violations };
 }
 
 function main() {
   const here = dirname(fileURLToPath(import.meta.url));
   const root = resolve(here, "..");
-  const args = process.argv.slice(2);
-  const config = JSON.parse(readFileSync(join(here, "check-shadcn.allowlist.json"), "utf8"));
-  const { violations, counts, stale, errors, all } = checkProject(root, config);
-
-  if (args.includes("--write-allowlist")) {
-    const allowlist = {};
-    for (const [file, rules] of [...counts].sort(([a], [b]) => a.localeCompare(b))) allowlist[file] = Object.fromEntries([...rules].sort(([a], [b]) => a.localeCompare(b)));
-    process.stdout.write(JSON.stringify({ ...config, allowlist }, null, 2) + "\n");
-    return;
-  }
-
-  if (args.includes("--report")) {
-    const byRule = new Map();
-    for (const v of all) byRule.set(v.rule, (byRule.get(v.rule) ?? 0) + 1);
-    console.log(`remaining (allowlisted or not): ${all.length} findings in ${counts.size} files`);
-    for (const [rule, n] of [...byRule].sort()) console.log(`  ${rule}: ${n}`);
-    for (const [file, rules] of [...counts].sort(([a], [b]) => a.localeCompare(b))) console.log(`  ${file}  ${[...rules].map(([r, n]) => `${r}=${n}`).join(" ")}`);
-  }
-  for (const s of stale) console.log(`can shrink: ${s.file} ${s.rule} allowed ${s.allowed}, now ${s.actual}`);
-  for (const e of errors) console.error(`config: ${e}`);
+  const { violations } = checkProject(root);
   for (const v of violations) console.error(`${v.file}:${v.line}  ${v.rule}  ${v.detail}`);
-  if (errors.length || violations.length) {
-    console.error(`check-shadcn: ${violations.length} violation(s), ${errors.length} config error(s)`);
+  if (violations.length) {
+    console.error(`check-shadcn: ${violations.length} violation(s); every finding fails, there is no allowlist`);
     process.exit(1);
   }
-  const files = Object.keys(config.allowlist ?? {}).length;
-  console.log(`check-shadcn: ok (${files} file(s) still allowlisted${files ? "; run with --report for the list" : ""})`);
+  console.log("check-shadcn: ok");
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

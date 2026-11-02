@@ -65,14 +65,14 @@ export function useForm<V extends object>(initial: V, validators: Validators<V> 
 export const required = (label: string) => (v: string) => (v.trim() ? undefined : `${label} is required`);
 
 /**
- * Label, control and message. The `field` class is the one legacy token left: Routers' `.split-head > .field`
- * sizes its children by it; it goes with that page.
+ * Label, control and message. Layout is utilities only: the old `field` class sized the router form's split
+ * children and went with the legacy stylesheet.
  */
 export function Field({ label, error, hint, children }: { label: string; error?: string; hint?: string; children: (p: ControlProps) => ReactNode }) {
   const id = useId();
   const descId = error || hint ? `${id}-d` : undefined;
   return (
-    <UiField className="field min-w-0 gap-1.5" data-invalid={error ? true : undefined}>
+    <UiField className="min-w-0 gap-1.5" data-invalid={error ? true : undefined}>
       <FieldLabel htmlFor={id} className="font-semibold">
         {label}
       </FieldLabel>

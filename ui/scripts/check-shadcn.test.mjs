@@ -2,18 +2,22 @@
 // Run: node --test scripts/check-shadcn.test.mjs
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { checkProject } from "./check-shadcn.mjs";
+
+const scriptsDir = dirname(fileURLToPath(import.meta.url));
 
 const dirs = [];
 after(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
 
 /** Build a throwaway project from {path: source} and check it. */
-function run(files, config = {}) {
+function run(files) {
   const root = mkdtempSync(join(tmpdir(), "check-shadcn-"));
   dirs.push(root);
   for (const [rel, code] of Object.entries(files)) {
@@ -21,7 +25,7 @@ function run(files, config = {}) {
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, code);
   }
-  return checkProject(root, config);
+  return checkProject(root);
 }
 
 const page = (body, head = "") => ({ "src/pages/P.tsx": `${head}\nexport function P() { return ${body}; }\n` });
@@ -30,8 +34,8 @@ const flags = (files, rule, detail) => {
   const r = run(files);
   assert.ok(r.violations.some((v) => v.rule === rule && (!detail || v.detail.includes(detail))), `expected ${rule} ${detail ?? ""}, got ${JSON.stringify(r.violations)}`);
 };
-const clean = (files, config) => {
-  const r = run(files, config);
+const clean = (files) => {
+  const r = run(files);
   assert.deepEqual(r.violations, [], JSON.stringify(r.violations));
 };
 
@@ -165,11 +169,6 @@ describe("native elements", () => {
     assert.deepEqual(rulesOf(r), ["native-element", "native-element", "native-element"]);
   });
   test("a file we add to components/ui is not exempt until it is listed", () => flags({ "src/components/ui/description-list.tsx": `export const D = () => <table />;` }, "native-element"));
-  test("a hand-written ui file can be exempt through adapters, narrowly", () => {
-    const files = { "src/components/ui/combobox-field.tsx": `export const C = () => <><input /><button /></>;` };
-    const r = run(files, { adapters: { "src/components/ui/combobox-field.tsx": ["input"] } });
-    assert.deepEqual(r.violations.map((v) => v.detail), ["<button>"]);
-  });
   test("the generated list names files that exist in the repo", async () => {
     const { GENERATED_PRIMITIVES } = await import("./check-shadcn.mjs");
     const { existsSync } = await import("node:fs");
@@ -179,19 +178,6 @@ describe("native elements", () => {
     assert.ok(!GENERATED_PRIMITIVES.has("src/components/ui/combobox-field.tsx"));
   });
   test("primitives are not exempt from legacy classes", () => flags({ "src/components/ui/x.tsx": `export const T = () => <div className="btn" />;` }, "legacy-class"));
-  test("adapter exemption covers only the named element", () => {
-    const files = { "src/components/Hidden.tsx": `export const H = () => <><input /><button /></>;` };
-    const r = run(files, { adapters: { "src/components/Hidden.tsx": ["input"] } });
-    assert.deepEqual(r.violations.map((v) => v.detail), ["<button>"]);
-  });
-  test("adapter exemption never covers legacy classes", () => {
-    const r = run({ "src/components/A.tsx": `export const A = () => <input className="btn" />;` }, { adapters: { "src/components/A.tsx": ["*"] } });
-    assert.deepEqual(rulesOf(r), ["legacy-class"]);
-  });
-  test("adapters cannot name a legacy class", () => {
-    const r = run({}, { adapters: { "src/x.tsx": ["btn"] } });
-    assert.equal(r.errors.length, 1);
-  });
 });
 
 describe("radix imports", () => {
@@ -210,28 +196,39 @@ describe("css", () => {
   test("commented-out layer and other layers are fine", () => clean({ "src/styles.css": `/* @layer components { } */\n@layer base { a { color: red } }\n@theme inline { --x: 1 }`, "src/a.ts": "export {}" }));
 });
 
-describe("allowlist", () => {
-  const files = page(`<div className="btn btn-sm"><button /></div>`);
-  test("exact count passes", () => clean(files, { allowlist: { "src/pages/P.tsx": { "legacy-class": 2, "native-element": 1 } } }));
-  test("one more than allowed fails", () => {
-    const r = run(files, { allowlist: { "src/pages/P.tsx": { "legacy-class": 1, "native-element": 1 } } });
-    assert.deepEqual(rulesOf(r), ["legacy-class", "legacy-class"]);
+describe("no allowlist: any finding fails", () => {
+  const page = (body) => ({ "src/pages/P.tsx": `export function P() { return ${body}; }\n` });
+  /** A throwaway copy of the checker (it finds @babel/parser through the symlinked node_modules) plus `files`. */
+  const cli = (files, allowlist) => {
+    const root = mkdtempSync(join(tmpdir(), "check-shadcn-cli-"));
+    dirs.push(root);
+    mkdirSync(join(root, "scripts"), { recursive: true });
+    copyFileSync(join(scriptsDir, "check-shadcn.mjs"), join(root, "scripts/check-shadcn.mjs"));
+    symlinkSync(join(scriptsDir, "..", "node_modules"), join(root, "node_modules"));
+    for (const [rel, code] of Object.entries(files)) {
+      mkdirSync(dirname(join(root, rel)), { recursive: true });
+      writeFileSync(join(root, rel), code);
+    }
+    if (allowlist) writeFileSync(join(root, "scripts/check-shadcn.allowlist.json"), JSON.stringify(allowlist));
+    return { root, script: join(root, "scripts/check-shadcn.mjs") };
+  };
+  test("a legacy class fails the check", () => assert.deepEqual(rulesOf(run(page(`<div className="btn" />`))), ["legacy-class"]));
+  test("a native element fails the check", () => assert.deepEqual(rulesOf(run(page(`<button />`))), ["native-element"]));
+  test("the CLI fails on a finding, and no config file can allow it", () => {
+    const { root, script } = cli(page(`<div className="btn" />`), { allowlist: { "src/pages/P.tsx": { "legacy-class": 9 } } });
+    const failed = spawnSync(process.execPath, [script], { encoding: "utf8" });
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, /src\/pages\/P\.tsx:1\s+legacy-class\s+"btn"/);
+    assert.match(failed.stderr, /every finding fails, there is no allowlist/);
+    // --write-allowlist and --report are gone: the flags are not a way to pass, and nothing is written.
+    const flag = spawnSync(process.execPath, [script, "--write-allowlist", "--report"], { encoding: "utf8" });
+    assert.equal(flag.status, 1);
+    assert.deepEqual(readdirSync(join(root, "scripts")), ["check-shadcn.allowlist.json", "check-shadcn.mjs"]);
   });
-  test("an unlisted rule in a listed file fails", () => {
-    const r = run(files, { allowlist: { "src/pages/P.tsx": { "legacy-class": 2 } } });
-    assert.deepEqual(rulesOf(r), ["native-element"]);
-  });
-  test("another file is not covered", () => {
-    const r = run({ ...files, ...{ "src/pages/Q.tsx": `export const Q = () => <i className="btn" />;` } }, { allowlist: { "src/pages/P.tsx": { "legacy-class": 2, "native-element": 1 } } });
-    assert.equal(r.violations.length, 1);
-    assert.equal(r.violations[0].file, "src/pages/Q.tsx");
-  });
-  test("fixed files are reported as can shrink, not failed", () => {
-    const r = run(page(`<div />`), { allowlist: { "src/pages/P.tsx": { "legacy-class": 3 } } });
-    assert.deepEqual(r.violations, []);
-    assert.deepEqual(r.stale, [{ file: "src/pages/P.tsx", rule: "legacy-class", allowed: 3, actual: 0 }]);
-  });
-  test("bad allowlist entries are config errors", () => {
-    assert.equal(run({}, { allowlist: { "src/x.tsx": { nope: 1, "legacy-class": 0 } } }).errors.length, 2);
+  test("the CLI passes a clean project", () => {
+    const { script } = cli(page(`<Button />`));
+    const ok = spawnSync(process.execPath, [script], { encoding: "utf8" });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(ok.stdout.trim(), "check-shadcn: ok");
   });
 });
