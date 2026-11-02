@@ -9,7 +9,9 @@ control-plane mode. No separate project: the tests run in the control-plane's uv
     scripts/check-p1.sh        # every P1-A1 check, then the e2e gate
 
 Environment: `E2E_PG_URL` (server DSN, default dev Postgres 127.0.0.1:55432), `E2E_PROFILE`
-(`debug`|`release` gateway), `E2E_GATEWAY_BIN`, `E2E_MOCK_BIN`. Failing tests print every process log.
+(`debug`|`release` gateway), `E2E_GATEWAY_BIN`, `E2E_MOCK_BIN`, `E2E_STRATEGY_GATEWAY_BIN` (a gateway
+built with `--features strategy-priority-failover`; `scripts/e2e-p1.sh` builds and sets it, and
+`test_strategy_crate.py` skips its crate test without it). Failing tests print every process log.
 
 `test_p2_routing.py` (collected by `scripts/e2e-p1.sh` and `scripts/e2e-p2.sh`; no IdP) configures
 P2 routing over the admin API against a second mock started with `--fail-every 1` (always 503)
@@ -17,6 +19,16 @@ and a closed port: retry to a second model with exactly one usage event for the 
 model; fallback routers (503 and connect error, streaming too) answering with the client's
 model name; a circuit breaker reaching `lumewarp_upstream_circuit_state=2` after N failures, after
 which the failing model gets no attempts (`outcome="circuit_open"` only).
+
+`test_catalog.py` (collected by both scripts; no IdP) is the acceptance of the model catalog
+(`docs/plans/model-catalog.md`, 驗收條件): a model is callable, listed and answers with the called
+name, streaming too, and so do aliases, routers and fallbacks; a new alias target takes new
+requests; renames end the old name unless a model keeps it; a grant covers the called name only;
+rollback restores all three kinds and weights, across renames, with grants and references
+intact; usage rows record the served model, alias, router, fallback, attempts and the served
+model's price, filter by every dimension and stay continuous across a rename. An in-process
+OTLP sink proves a request is found by its `x-lumewarp-request-id`, with every attempt, without
+the prompt, the response or the key, and that `traceparent` sampled=0 does not erase it.
 
 ## P2: real OIDC and authorization exit gate
 

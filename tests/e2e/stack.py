@@ -125,7 +125,15 @@ class Proc:
 
 
 class Gateway:
-    def __init__(self, stack: "Stack", state_dir: Path, gateway_id: str, token: str, tag: str):
+    def __init__(
+        self,
+        stack: "Stack",
+        state_dir: Path,
+        gateway_id: str,
+        token: str,
+        tag: str,
+        extra_env: dict[str, str] | None = None,
+    ):
         self.stack = stack
         self.state_dir = state_dir
         self.port = free_port()
@@ -137,6 +145,7 @@ class Gateway:
         )
         env = {**stack.base_env, "E2E_GATEWAY_TOKEN": token, "RUST_LOG": "info"}
         env.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
+        env.update(extra_env or {})
         self.proc = Proc(
             tag,
             [
@@ -333,10 +342,17 @@ class Stack:
         self.cp.stop()
 
     def start_gateway(
-        self, state_dir: Path | None = None, tag: str | None = None, *, wait_ready: bool = True
+        self,
+        state_dir: Path | None = None,
+        tag: str | None = None,
+        *,
+        wait_ready: bool = True,
+        extra_env: dict[str, str] | None = None,
     ) -> Gateway:
         tag = tag or f"gateway-{len(self.gateways)}"
-        gw = Gateway(self, state_dir or self.dir / "state", GATEWAY_ID, self.gateway_token, tag)
+        gw = Gateway(
+            self, state_dir or self.dir / "state", GATEWAY_ID, self.gateway_token, tag, extra_env
+        )
         self.gateways.append(gw)
         gw.wait_listening()
         if wait_ready:
