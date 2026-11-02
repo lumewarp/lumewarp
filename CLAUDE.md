@@ -16,24 +16,31 @@ The owner, Andy, writes in Traditional Chinese — reply to him in Traditional C
 ## Non-negotiable rules
 
 1. **Hot path stays fast.** The gateway request path never touches a database, never calls the control plane, and never runs Python. It reads only the in-memory config snapshot. Counters and usage events are emitted asynchronously.
-2. **Python only in the control plane.** Customization (auth providers, router policies, notifiers) is a Python plugin registered via entry points (`lumewarp.auth`, `lumewarp.router`, `lumewarp.notifier`). Plugins produce declarative output compiled into the snapshot. Per-request hooks exist only as an opt-in external gRPC call with a timeout and a default route.
+2. **Python only in the control plane.** Customization of auth providers and notifiers is a Python plugin registered via entry points (`lumewarp.auth`, `lumewarp.notifier`, `lumewarp.authz`). Plugins produce declarative output compiled into the snapshot. Router strategies are Rust crates compiled into the gateway (`docs/router-strategies.md`), declaring their settings as schemas the control plane and UI read. Per-request hooks exist only as an opt-in external gRPC call with a timeout and a default route.
 3. **Providers: OpenAI-compatible only.** Upstreams are vLLM and OpenAI (plus any OpenAI-compatible endpoint). Do not add translation layers for other providers. Pass through unknown request fields (e.g. vLLM `extra_body`, guided decoding) untouched.
 4. **Config is an immutable versioned snapshot** pushed over a gRPC stream (full, then deltas; ACK/NACK). Gateway swaps atomically and persists the last good snapshot to disk so it can boot without the control plane. Gateway also supports a standalone YAML mode with the same schema.
 5. **Observability is a feature, not an afterthought.** Every new gateway path gets Prometheus metrics (`lumewarp_*`, see the table in `docs/architecture.md`) and OTel spans. No API-key-level labels on metrics. Never log prompts/responses by default.
 6. **Performance claims need numbers.** Any change on the gateway request path must run the `bench/` suite; don't regress p99 overhead.
 
-## Current phase: P2 done, P3 not started
+## Current phase: P2 done, P2.5 in progress, P3 not started
 
-P0 (Rust gateway + bench vs LiteLLM), P1 (control plane, gRPC config stream, usage/budgets, Admin UI) and P2 are implemented; `docs/architecture.md` ("P1 已實作", "P2 已實作") lists what exists and what is deferred. P2 delivered:
+P0 (Rust gateway + bench vs LiteLLM), P1 (control plane, gRPC config stream, usage/budgets, Admin UI), P2 and the model catalog of P2.5 are implemented; `docs/architecture.md` ("P1 已實作", "P2 已實作", "模型目錄已實作") lists what exists and what is deferred. P2 delivered:
 
 - Tenancy: installation superuser → team → members (admin/member) and service accounts → API keys. No org/project.
 - Admin login via OIDC (cookie sessions + CSRF); the IdP only authenticates. Authorization is pluggable (`builtin`, `openfga`, `http`, or a `lumewarp.authz` entry point) behind `check(user_id, relation, resource)`; backend errors are never denies. A key reconciler suspends keys of members removed in an external IAM.
 - Gateway routing: retries (before any response byte, budgeted), fallbacks, circuit breaker, active health checks, LOWEST_LATENCY, VLLM_LOAD, traffic split with sticky hashing — each gated by a snapshot capability the control plane emits only when used.
 - Observability: Prometheus alert rules (promtool-tested), Grafana dashboards, control-plane `/metrics` on its own listener.
 
+The model catalog (`docs/plans/model-catalog.md`) delivered:
+
+- Names: a client calls a model, an alias or a router, one namespace, all renameable, referenced by id. The response `model` is the called name, without buffering.
+- Grants by id, checked against the called name. Rollback restores the catalog by id.
+- Usage records the served model plus alias, router, fallback and attempts. No access log: a request is looked up in OTel by `x-lumewarp-request-id`.
+- Strategies are Rust crates (`register!`), reported in `Hello` with their schemas, validated on write.
+
 Acceptance suites: `scripts/e2e-p1.sh`, `scripts/e2e-p2.sh` (needs `scripts/dev-idp.sh up`), `scripts/load-e2e.sh`, and `bench/` A6 for request-path changes.
 
-Next: P3 (MCP / A2A), not planned yet.
+Next: the rest of P2.5 (`docs/plans/p25.md`), then P3 (MCP / A2A), not planned yet.
 
 Decided: license Apache-2.0; MVP usage data in Postgres (ClickHouse later).
 

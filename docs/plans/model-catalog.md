@@ -1,6 +1,6 @@
 # 模型目錄計畫：Upstream、Model、Alias、Router
 
-狀態：計畫，尚未實作。基準：`p25/w1` @ 12cdc01。UI 稿：<https://claude.ai/artifact/QABCtDXssnaZFkGbc7eLhU>
+狀態：已實作（c0–c5、c7、c8；UI c6 另行合併），與計畫不同之處見「實作差異」。基準：`p25/w1` @ 12cdc01。UI 稿：<https://claude.ai/artifact/QABCtDXssnaZFkGbc7eLhU>
 
 ## 為什麼要改
 
@@ -116,7 +116,7 @@ lumewarp_router_api::register! {
 - **用戶端用舊名字會立刻 404。** Model 的改名表單提供「Keep old name as alias」（預設勾選）：建立指向新名字的 alias，並複製舊名字的授權，既有呼叫方不中斷。Router 和 alias 改名時沒有這個選項，需要的話到 Aliases 頁自己建。
 - `catalog_name_history` 記錄每個名字用過的舊名。Usage 篩選和分組依 id，所以改名前後的用量連續；歷史 event 保留當時的名字字串。
 - 舊名字可以被其他項目重新使用，所以解析 usage event 時要依種類和 event 時間查（見「Usage 記錄」）。
-- Metrics 的 label 會換新名字，舊名字的時間序列就此結束。這是 Prometheus 的正常行為，文件要寫明。
+- Metrics 的 label 會換新名字，舊名字的時間序列就此結束。這是 Prometheus 的正常行為，已寫在 `docs/architecture.md`「模型目錄已實作」與 `control-plane/README.md`。Dashboard 依舊名字查不到改名後的流量，要跨改名看用量請用 `GET /usage`，它依 id 分組。
 - Audit 記錄 `model.rename`、`router.rename`、`alias.rename` 和新舊名字。
 
 ## Rollback
@@ -358,6 +358,20 @@ Router   { name, members: [{model, weight, params_json}], strategy, params_json,
 - UI：`pnpm check`、`pnpm build:cp`、Playwright 全過。
 - Prometheus：promtool 測試和 dashboard 檢查全過，舊 label 不再出現。
 - Bench A6（`BENCH_AUTH=1`）：c3、c4、c8 各跑一次，c3 另外跑開啟 OTel 的情境，結果寫進 PR 或 `bench/results`。
+
+## 實作差異
+
+結果和上面的計畫不同的地方。
+
+- **讀 body 前被拒絕的請求，`requested` 是空的。** 驗收條件寫「被拒絕或名字不存在的請求，`requested` 仍有值」。403、404、429（限流）在讀完 body 之後才決定，有值；已撤銷、停用、過期和超過預算的 key 在讀 body 之前就被拒絕，那時還不知道名字。要補就得為了被拒絕的請求讀 body，所以維持空值。
+- **快速路徑可能回傳上游更具體的名字。** 呼叫的名字等於 `upstream_model` 時不走掃描器，例如呼叫 `gpt-4o`，OpenAI 可能回 `gpt-4o-2024-08-06`。這是第 10 點「一律改寫」之外的例外，另外兩個例外是錯誤回應和上游仍然壓縮的回應。
+- **Binary 叫 `lumewarp`，** 不是計畫寫的 `lumewarp-gateway`，指令是 `lumewarp strategies --json`。
+- **Usage 的 migration（`0011`）是離線的。** 回填和建索引都在同一個交易內，全程持有 `ACCESS EXCLUSIVE`，要在維護時段執行。Downgrade 會遺失 provenance 欄位，文件有寫。
+- **解析 usage 名字有寬限時間。** 計畫只寫依 event 時間查，實際依請求開始時間（`started_at`，舊 gateway 用完成時間），查不到精確的區間時，寬限時間內只有一個同種類的擁有者才補 id。預設 300 秒，`LUMEWARP_USAGE_CATALOG_GRACE_SECONDS`，0 是關閉。這容忍時鐘偏差和傳播延遲，不是身分證明：同種類舊名字在寬限時間內被重複使用時，落後的 gateway 仍可能算到新擁有者。
+- **非串流回應超過 4 MiB 時，usage 是 `INVALID`。** 回應本身正常轉發和改寫，只是 usage 的 capture 上限 `MAX_JSON_CAPTURE` 讀不到 token。這個上限原本就有，但以前這種回應需要改寫時會中斷，現在會送達，所以比較容易遇到。
+- **沒有 gateway 回報的策略也算 `config_invalid`。** 計畫的表格只列 schema 不符的情況。遷移過來的自訂 router 在 gateway 回報該策略之前都會顯示 `Config invalid`，資料不會被修改。
+- **內建策略拒絕成員 params。** 以前填了會被忽略，現在 API 回 422、gateway NACK，因為空 schema 是 `additionalProperties: false`。已存的這種資料會顯示 `config_invalid`。
+- **`Configure` trait。** 計畫的草稿只有 `register!`，實際上 `configure` 透過新的 `Configure<P, M>` trait 收到已解析的 struct，讓驗證的型別和讀取的型別是同一份；`Strategy` 只剩 `pick`。
 
 ## 不在這份計畫內
 

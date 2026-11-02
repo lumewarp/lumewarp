@@ -13,8 +13,14 @@ virtual keys, budgets and rate limits, usage accounting, plugins and the Admin U
 or HTTP) with automatic key suspension, retries/fallbacks/circuit breaking/health
 checks, latency- and vLLM-load-aware routing, traffic splits, alert rules and
 dashboards (P2). See the [architecture document](docs/architecture.md) for the
-design and its “P1 已實作” / “P2 已實作” status; deferred work includes JWT/mTLS
-client auth, MCP/A2A and an HA control plane.
+design and its “P1 已實作” / “P2 已實作” / “模型目錄已實作” status; deferred work includes
+JWT/mTLS client auth, MCP/A2A and an HA control plane.
+
+Clients call a name, and a name is a **model** (one upstream model), an **alias** (another
+name for a model or router) or a **router** (a strategy over models, with retries, fallbacks
+and traffic splits). Responses carry the called name, usage records what actually served it,
+and names can be renamed without breaking references. New router strategies are Rust crates
+([docs/router-strategies.md](docs/router-strategies.md)).
 
 | Directory | What |
 | --- | --- |
@@ -109,8 +115,9 @@ back to an open router. Open <http://127.0.0.1:8091/> and log in with `dev-admin
 then create:
 
 - an upstream for `http://127.0.0.1:9100/v1` (kind `openai_compatible`),
-- a model using upstream model `mock`,
-- a router with the public alias `demo`,
+- a model named `mock-local` using upstream model `mock`,
+- a router named `demo` with that model as its member (`mock-local` is callable by
+  itself too; a router adds strategy, retries and fallbacks, and an alias is one more name),
 - a team and an API key for a service account of that team (the `lw-...` secret is
   shown once).
 
@@ -125,7 +132,7 @@ curl -sS -H "Authorization: Bearer lw-..." -H 'Content-Type: application/json' \
 
 Usage lands in the UI after the next report batch (about one second); budgets are
 enforced eventually. See the [control-plane README](control-plane/README.md) for
-settings, SSO, authorization backends, plugins and operations, and
+settings, SSO, authorization backends, the catalog, plugins and operations, and
 [`docs/config-protocol.md`](docs/config-protocol.md) for the stream contract.
 
 ## Container images

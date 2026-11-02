@@ -379,15 +379,16 @@ computed when `/metrics` is scraped, not per request.
 
 Each client request records one request sample and one usage capture, attributed
 to its final model. Abandoned attempts release their in-flight reservations.
-Response `model` values: a response from the called name's own models
-(including retries) is forwarded unchanged and carries the upstream model, as in
-P1. Only a successful response from a **fallback** model is rewritten: its
-top-level JSON `model` (or, for SSE, each event's `data` JSON `model`) becomes the
-name the client called, so clients do not observe which fallback served them. Error responses are never rewritten.
-Alias rewriting buffers one JSON response or SSE event, capped at 32 MiB;
-exceeding that limit terminates the response rather than exposing the fallback
-model. A multiline SSE `data` payload is re-emitted with one `data:` field per
-line; comments and other fields are kept.
+Response `model`: a successful response carries the name the client called, whichever model
+served it, retries and fallbacks included. The top-level JSON `model` (or, for SSE, each event's
+`data` JSON `model`) is replaced by a streaming scanner that buffers nothing, so a response of
+any size passes through without a cap, and `Content-Length` gives way to chunked encoding.
+When the called name equals the serving model's `upstream_model`, the scanner is skipped; an
+upstream that answers with a more specific name (`gpt-4o` answered as `gpt-4o-2024-08-06`) is
+then seen as is. Error responses are never rewritten. A response the upstream compresses despite
+the removed `Accept-Encoding` is forwarded as is and counted in
+`lumewarp_response_model_rewrite_compressed_total`. The full decision table is in the
+[config protocol](../docs/config-protocol.md).
 
 ### Teams
 
