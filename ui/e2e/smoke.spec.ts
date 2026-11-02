@@ -19,7 +19,11 @@ async function login(page: Page, token: string) {
     return;
   }
   await page.getByLabel("Break-glass password").fill(token);
-  await page.getByRole("button", { name: "Sign in" }).click();
+  // Wait for the answer: navigating right after the click would abort the login request.
+  await Promise.all([
+    page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/session/break-glass"),
+    page.getByRole("button", { name: "Sign in" }).click(),
+  ]);
 }
 
 const dialog = (page: Page) => page.getByRole("dialog");
