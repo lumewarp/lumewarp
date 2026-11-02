@@ -32,6 +32,7 @@ SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
         "circuit_breaker",
         "traffic_split",
         "vllm_load",
+        "rotation_grace",
         *(f"strategy:{name}" for name in BUILTIN_STRATEGIES),
     }
 )
@@ -173,6 +174,8 @@ def capabilities_used(snap: pb.Snapshot) -> list[str]:
         if r.traffic_split or r.sticky != pb.STICKY_BY_NONE or r.sticky_header:
             used.add("traffic_split")
         used.add(f"strategy:{r.strategy}")
+    if any(k.previous_key_hash for k in snap.api_keys):
+        used.add("rotation_grace")
     return sorted(used)
 
 
@@ -345,6 +348,16 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
             raise SnapshotInvalid(f"key {k.key_id!r} has status {k.status}")
         if k.expires_at_unix_ms < 0:
             raise SnapshotInvalid(f"key {k.key_id!r} has a negative expiry")
+        if k.previous_key_hash:
+            if len(k.previous_key_hash) != DIGEST_LEN:
+                raise SnapshotInvalid(f"key {k.key_id!r} previous hash must be {DIGEST_LEN} bytes")
+            if k.previous_key_expires_at_unix_ms <= 0:
+                raise SnapshotInvalid(f"key {k.key_id!r} previous hash needs a positive expiry")
+            if k.previous_key_hash in hashes:
+                raise SnapshotInvalid(f"key {k.key_id!r} has a duplicate previous hash")
+            hashes.add(k.previous_key_hash)
+        elif k.previous_key_expires_at_unix_ms:
+            raise SnapshotInvalid(f"key {k.key_id!r} has a previous expiry without a hash")
         if k.team_id and k.team_id not in teams:
             raise SnapshotInvalid(f"key {k.key_id!r} references an unknown team")
         if not k.HasField("policy"):

@@ -379,10 +379,22 @@ class Team(PolicyMixin, TimestampMixin, Base):
     __table_args__ = (
         *PolicyMixin.policy_constraints(),
         CheckConstraint("model_access <> 'inherit'", name="no_inherit"),
+        CheckConstraint(
+            "max_keys_per_member IS NULL OR max_keys_per_member > 0",
+            name="max_keys_per_member_positive",
+        ),
+        CheckConstraint(
+            "max_member_key_lifetime_seconds IS NULL OR max_member_key_lifetime_seconds > 0",
+            name="max_member_key_lifetime_positive",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    # Per-member self-service limits. NULL = unlimited. They are source-only (not compiled
+    # into snapshots): the API enforces them on create/rotate. Revoking a key frees a slot.
+    max_keys_per_member: Mapped[int | None] = mapped_column(Integer)
+    max_member_key_lifetime_seconds: Mapped[int | None] = mapped_column(Integer)
 
 
 class TeamMember(PolicyMixin, TimestampMixin, Base):
@@ -457,9 +469,23 @@ class ApiKey(TimestampMixin, Base):
         CheckConstraint(
             "suspended_reason IS NULL OR lifecycle = 'suspended'", name="reason_when_suspended"
         ),
+        CheckConstraint(
+            "previous_key_hash IS NULL OR octet_length(previous_key_hash) = 32",
+            name="previous_key_hash_len",
+        ),
+        CheckConstraint(
+            "(previous_key_hash IS NULL) = (previous_key_expires_at IS NULL)",
+            name="previous_key_pair",
+        ),
         Index(None, "team_id"),
         Index(None, "user_id"),
         Index(None, "service_account_id"),
+        Index(
+            "uq_api_keys_previous_key_hash",
+            "previous_key_hash",
+            unique=True,
+            postgresql_where=text("previous_key_hash IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
@@ -473,6 +499,11 @@ class ApiKey(TimestampMixin, Base):
     service_account_id: Mapped[uuid.UUID | None] = mapped_column()
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     key_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
+    # Rotation grace: the secret being replaced stays valid until its own expiry, so a
+    # gateway that boots from its persisted snapshot enforces it without the control
+    # plane. NULL = no grace. A second rotation drops the older of the two old hashes.
+    previous_key_hash: Mapped[bytes | None] = mapped_column(LargeBinary)
+    previous_key_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     display_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
     lifecycle: Mapped[KeyLifecycle] = mapped_column(
         _enum(KeyLifecycle, "key_lifecycle"),

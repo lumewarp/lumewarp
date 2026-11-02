@@ -64,9 +64,17 @@ async def test_key_mutation_and_member_removal_do_not_deadlock(
                 api_settings,
                 client.app.state.metrics,
             )
+        elif operation == "rotate":
+            mutation = keys.rotate_key(
+                key.id,
+                request,
+                authz,
+                key_session,
+                api_settings,
+                client.app.state.metrics,
+            )
         else:
-            handler = keys.rotate_key if operation == "rotate" else keys.revoke_key
-            mutation = handler(key.id, authz, key_session, api_settings)
+            mutation = keys.revoke_key(key.id, authz, key_session, api_settings)
         async with asyncio.timeout(10), asyncio.TaskGroup() as tasks:
             tasks.create_task(mutation)
             tasks.create_task(

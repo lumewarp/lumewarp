@@ -219,6 +219,17 @@ message ApiKey {
   // Team policy narrowed by the owner's (member or service account) policy,
   // resolved by the compiler.
   EffectivePolicy policy = 8;
+  // Previous secret kept valid during the control plane's rotation grace period.
+  // Empty = no grace. The gateway accepts it as the same key (same key_id) until
+  // previous_key_expires_at_unix_ms, and never past expires_at_unix_ms. Because the
+  // old hash carries its own expiry, a gateway booting from its persisted snapshot
+  // keeps enforcing it while the control plane is unreachable. Capability
+  // "rotation_grace" is required when this is nonempty.
+  bytes previous_key_hash = 9;
+  // Unix ms after which previous_key_hash is rejected. Must be > 0 when the hash is
+  // set; the compiler drops an expired pair on its next compile so the delta removes
+  // it from every gateway.
+  int64 previous_key_expires_at_unix_ms = 10;
 }
 
 enum KeyStatus {

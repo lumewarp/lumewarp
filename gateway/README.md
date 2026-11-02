@@ -216,6 +216,12 @@ considered. The model allowlist is checked right after the request body's
 gets 403 whether or not the alias exists. `/v1/models` lists only the aliases
 the key may call.
 
+Control-plane snapshots may also carry `previous_key_hash` /
+`previous_key_expires_at_unix_ms` during a rotation grace (capability
+`rotation_grace`). It maps to the same key context and expires on its own, so a
+gateway booting from its persisted snapshot stops accepting it at that deadline
+even if the control plane is unreachable. Standalone YAML has no such field.
+
 Generate a key and its config hash without adding a newline to the hash input:
 
 ```sh

@@ -255,6 +255,7 @@ fn key(id: &str, secret: &str, models: &[&str], scopes: Vec<RateLimitScope>) -> 
             rate_limit_scopes: scopes,
             budget_window_end_unix_ms: 0,
         }),
+        ..Default::default()
     }
 }
 

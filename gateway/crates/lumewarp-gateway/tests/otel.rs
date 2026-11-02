@@ -587,6 +587,7 @@ fn api_key(id: &str, secret: &str, models: &[&str], rate_limits: Vec<RateLimitSc
             rate_limit_scopes: rate_limits,
             budget_window_end_unix_ms: 0,
         }),
+        ..Default::default()
     }
 }
 

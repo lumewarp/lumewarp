@@ -300,6 +300,60 @@ mod tests {
         );
     }
 
+    fn with_previous_hash(previous_expiry: i64) -> pb::Snapshot {
+        let mut s = base();
+        s.required_capabilities.push("rotation_grace".into());
+        let mut k = key("k1", "current", "t1", &["m1"]);
+        k.previous_key_hash = Sha256::digest(b"previous").to_vec();
+        k.previous_key_expires_at_unix_ms = previous_expiry;
+        s.api_keys[0] = k;
+        s
+    }
+
+    #[test]
+    fn previous_hash_is_the_same_key_until_its_own_expiry() {
+        let table = routing_table(&with_previous_hash(i64::MAX), AuthMode::RequireKey);
+        let current = authenticate(&table, &headers("Bearer current")).unwrap();
+        let previous = authenticate(&table, &headers("Bearer previous")).unwrap();
+        let id = |caller: Caller| match caller {
+            Caller::Key(key) => key.key_id.clone(),
+            Caller::Anonymous => unreachable!(),
+        };
+        assert_eq!(&*id(current), "k1");
+        assert_eq!(&*id(previous), "k1", "usage stays on one key");
+
+        let expired = routing_table(&with_previous_hash(1), AuthMode::RequireKey);
+        assert_eq!(
+            err(authenticate(&expired, &headers("Bearer previous"))),
+            Some(AuthError::InvalidApiKey)
+        );
+        assert!(authenticate(&expired, &headers("Bearer current")).is_ok());
+    }
+
+    #[test]
+    fn previous_hash_expiry_survives_a_persisted_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let boot = |snapshot: &pb::Snapshot| {
+            crate::snapshot::store(dir.path(), snapshot).unwrap();
+            let loaded = crate::snapshot::load(dir.path(), "scope-a")
+                .unwrap()
+                .unwrap();
+            crate::snapshot::validate(&loaded, crate::snapshot::SUPPORTED_CAPABILITIES).unwrap();
+            routing_table(&loaded, AuthMode::RequireKey)
+        };
+
+        // The control plane is unreachable; the persisted snapshot is all the gateway has.
+        let live = boot(&with_previous_hash(i64::MAX));
+        assert!(authenticate(&live, &headers("Bearer previous")).is_ok());
+
+        let stale = boot(&with_previous_hash(1));
+        assert_eq!(
+            err(authenticate(&stale, &headers("Bearer previous"))),
+            Some(AuthError::InvalidApiKey)
+        );
+        assert!(authenticate(&stale, &headers("Bearer current")).is_ok());
+    }
+
     /// `cargo test --release --bin lumewarp bench_authenticate_and_admit -- --ignored --nocapture`
     #[test]
     #[ignore = "timing benchmark; run explicitly in release mode"]

@@ -150,15 +150,27 @@ class PolicyOut(ReadModel):
     soft_budget_nano_usd: int | None
 
 
-class TeamCreate(PolicyFields):
+class TeamKeyLimits(ApiModel):
+    """Self-service limits for user-owned (member) keys. NULL = unlimited.
+
+    They are source-only: the API enforces the count on create and the lifetime on
+    create, rotate and expiry updates. They never enter a snapshot. Service-account keys
+    are not member keys and are exempt.
+    """
+
+    max_keys_per_member: int | None = Field(default=None, gt=0)
+    max_member_key_lifetime_seconds: int | None = Field(default=None, gt=0)
+
+
+class TeamCreate(PolicyFields, TeamKeyLimits):
     name: Name
 
 
-class TeamUpdate(PolicyFields):
+class TeamUpdate(PolicyFields, TeamKeyLimits):
     name: Name | None = None
 
 
-class TeamOut(PolicyOut):
+class TeamOut(PolicyOut, TeamKeyLimits):
     id: uuid.UUID
     name: str
     created_at: datetime
@@ -245,6 +257,15 @@ class KeyUpdate(ApiModel):
         return value
 
 
+MAX_ROTATION_GRACE_SECONDS = 24 * 3600
+
+
+class KeyRotate(ApiModel):
+    """Optional body of `rotateKey`. Grace 0 replaces the secret immediately."""
+
+    grace_seconds: int = Field(default=0, ge=0, le=MAX_ROTATION_GRACE_SECONDS)
+
+
 class KeyOut(ReadModel):
     id: uuid.UUID
     team_id: uuid.UUID
@@ -256,6 +277,9 @@ class KeyOut(ReadModel):
     lifecycle: KeyLifecycle
     suspended_reason: str | None
     expires_at: datetime | None
+    # End of the rotation grace period for the previous secret; NULL when there is none.
+    # The previous hash itself is never exposed.
+    previous_key_expires_at: datetime | None
     revoked_at: datetime | None
     created_by_user_id: uuid.UUID | None
     created_at: datetime
@@ -751,10 +775,48 @@ class UserOut(ReadModel):
     updated_at: datetime
 
 
+class MeLimitsOut(ApiModel):
+    """Effective rate limits for a key the caller could create in this team."""
+
+    rpm_limit: int | None
+    tpm_limit: int | None
+    max_parallel: int | None
+
+
+class MeKeyLimitsOut(ApiModel):
+    """The team's member-key limits and the caller's current usage of the count."""
+
+    max_keys_per_member: int | None
+    max_member_key_lifetime_seconds: int | None
+    # Non-revoked user-owned keys the caller has in this team.
+    key_count: int
+
+
+class MeBudgetOut(ApiModel):
+    """Per-scope monthly budgets and spend for the caller's key in one team."""
+
+    team_budget_nano_usd: int | None
+    team_spent_nano_usd: int
+    member_budget_nano_usd: int | None
+    member_spent_nano_usd: int
+    # MIN over the scopes that set a budget; NULL when neither does.
+    remaining_nano_usd: int | None
+    window_start: datetime
+    window_end: datetime
+
+
 class MeTeamOut(ApiModel):
     team_id: uuid.UUID
     team_name: str
     role: TeamRole
+    # Effective names the caller may call, already narrowed by their member policy. For a
+    # universal grant this lists the current catalog; `all_models` also covers names added
+    # later. Never the team's full list when the member is narrower.
+    models: list[str]
+    all_models: bool
+    limits: MeLimitsOut
+    key_limits: MeKeyLimitsOut
+    budget: MeBudgetOut
 
 
 class MeOut(ApiModel):

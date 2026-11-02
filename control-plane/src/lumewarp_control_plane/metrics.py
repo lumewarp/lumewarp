@@ -126,10 +126,19 @@ class Metrics:
             "Unix time of the key reconciler's last fully successful step (0 = never).",
             registry=r,
         )
+        self.key_writes = Counter(
+            "lumewarp_cp_key_writes",
+            "Self-service key writes by operation and result.",
+            ["operation", "result"],
+            registry=r,
+        )
         for result in ("ack", "nack"):
             self.gateway_acks.labels(result)
         for reason in KEY_SUSPEND_REASONS:
             self.keys_suspended.labels(reason)
+        for operation in ("create", "rotate"):
+            for result in ("success", "rate_limited"):
+                self.key_writes.labels(operation, result)
 
     def init_authz_backend(self, backend: str) -> None:
         """Export zero series for a backend so rate() works from the first check."""

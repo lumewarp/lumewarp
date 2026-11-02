@@ -24,6 +24,7 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     "circuit_breaker",
     "traffic_split",
     "vllm_load",
+    "rotation_grace",
     "strategy:weighted",
     "strategy:least_in_flight",
     "strategy:lowest_latency",
@@ -336,6 +337,30 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             return Err(ApplyError::invalid(format!(
                 "key {id:?} has a duplicate hash"
             )));
+        }
+        if key.previous_key_hash.is_empty() {
+            if key.previous_key_expires_at_unix_ms != 0 {
+                return Err(ApplyError::invalid(format!(
+                    "key {id:?} has a previous expiry without a hash"
+                )));
+            }
+        } else {
+            require(true, "rotation_grace")?;
+            if key.previous_key_hash.len() != DIGEST_LEN {
+                return Err(ApplyError::invalid(format!(
+                    "key {id:?} previous hash must be 32 bytes"
+                )));
+            }
+            if key.previous_key_expires_at_unix_ms <= 0 {
+                return Err(ApplyError::invalid(format!(
+                    "key {id:?} previous hash needs a positive expiry"
+                )));
+            }
+            if !hashes.insert(key.previous_key_hash.as_slice()) {
+                return Err(ApplyError::invalid(format!(
+                    "key {id:?} has a duplicate previous hash"
+                )));
+            }
         }
         known::<pb::KeyStatus>(key.status, false, &format!("key {id:?} status"))?;
         if key.expires_at_unix_ms < 0 {
@@ -835,6 +860,7 @@ pub(crate) mod tests {
                 allowed_models: models.iter().map(|m| m.to_string()).collect(),
                 ..Default::default()
             }),
+            ..Default::default()
         }
     }
 
@@ -915,7 +941,7 @@ pub(crate) mod tests {
                 }
                 "traffic_split" => r.traffic_split = vec![split("stable", &["a"], 1)],
                 "vllm_load" => s.upstreams[0].metrics_url = "http://h/metrics".into(),
-                "strategy:least_in_flight" => continue,
+                "strategy:least_in_flight" | "rotation_grace" => continue,
                 strategy => {
                     r.strategy = strategy.strip_prefix("strategy:").unwrap().into();
                     s.required_capabilities.clear();
@@ -1338,6 +1364,15 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn rotation_grace_is_valid_with_its_capability() {
+        let mut s = base();
+        s.required_capabilities.push("rotation_grace".into());
+        s.api_keys[0].previous_key_hash = vec![7; 32];
+        s.api_keys[0].previous_key_expires_at_unix_ms = 1;
+        validate(&s, SUPPORTED_CAPABILITIES).unwrap();
+    }
+
+    #[test]
     fn invalid_references() {
         invalid(|s| s.models[0].upstream = "nope".into());
         invalid(|s| s.routers[0].members = vec![member("nope", 1)]);
@@ -1357,6 +1392,29 @@ pub(crate) mod tests {
         invalid(|s| s.api_keys[1].key_hash = s.api_keys[0].key_hash.clone());
         invalid(|s| s.api_keys[0].policy = None);
         invalid(|s| s.api_keys[0].expires_at_unix_ms = -1);
+        // Rotation grace needs its capability, a 32-byte hash and its own expiry.
+        invalid(|s| {
+            s.api_keys[0].previous_key_hash = vec![7; 32];
+            s.api_keys[0].previous_key_expires_at_unix_ms = 1;
+        });
+        invalid(|s| {
+            s.required_capabilities.push("rotation_grace".into());
+            s.api_keys[0].previous_key_hash = vec![7; 31];
+            s.api_keys[0].previous_key_expires_at_unix_ms = 1;
+        });
+        invalid(|s| {
+            s.required_capabilities.push("rotation_grace".into());
+            s.api_keys[0].previous_key_hash = vec![7; 32];
+        });
+        invalid(|s| {
+            s.required_capabilities.push("rotation_grace".into());
+            s.api_keys[0].previous_key_hash = s.api_keys[0].key_hash.clone();
+            s.api_keys[0].previous_key_expires_at_unix_ms = 1;
+        });
+        invalid(|s| {
+            s.required_capabilities.push("rotation_grace".into());
+            s.api_keys[0].previous_key_expires_at_unix_ms = 1;
+        });
         invalid(|s| {
             s.api_keys[0]
                 .policy

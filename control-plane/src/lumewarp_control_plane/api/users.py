@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request, Response, status
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 
 from lumewarp_control_plane import audit
 from lumewarp_control_plane.api.common import (
@@ -22,7 +22,11 @@ from lumewarp_control_plane.api.common import (
     uuid_page,
     validation_error,
 )
+from lumewarp_control_plane.api.policy import effective, policy_of
 from lumewarp_control_plane.api.schemas import (
+    MeBudgetOut,
+    MeKeyLimitsOut,
+    MeLimitsOut,
     MeOut,
     MeTeamOut,
     Page,
@@ -37,13 +41,20 @@ from lumewarp_control_plane.authz import Action, Authz, AuthzUnavailable, Relati
 from lumewarp_control_plane.errors import ApiError, not_found
 from lumewarp_control_plane.models import (
     ApiKey,
+    CatalogName,
+    KeyLifecycle,
+    KeyOwnerKind,
     PersonalAccessToken,
+    ScopeType,
     Team,
     TeamMember,
     TeamRole,
+    UsageTotal,
     User,
+    member_scope_id,
 )
 from lumewarp_control_plane.security import Principal, SecretKind, generate_secret
+from lumewarp_control_plane.windows import month_window
 
 router = APIRouter(tags=["users"])
 
@@ -58,32 +69,145 @@ def _check_not_null(body: object, *fields: str) -> None:
 async def _my_teams(
     authz: RequestAuthz, session: SessionDep, user_id: uuid.UUID
 ) -> list[MeTeamOut]:
+    rows: list[tuple[Team, TeamRole, TeamMember | None]]
     if authz.authorizer.manages_grants:
-        rows = await session.execute(
-            select(Team.id, Team.name, TeamMember.role)
+        result = await session.execute(
+            select(Team, TeamMember)
             .join(TeamMember, TeamMember.team_id == Team.id)
             .where(TeamMember.user_id == user_id)
             .order_by(Team.name)
         )
-        return [MeTeamOut(team_id=r.id, team_name=r.name, role=r.role) for r in rows]
-    teams = (await session.execute(select(Team.id, Team.name).order_by(Team.name))).all()
-    candidates = [t.id for t in teams]
-    uid = str(user_id)
-    members = await authz.authorizer.list_teams(uid, Relation.MEMBER, candidates)
-    if members is None:
-        raise AuthzUnavailable()
-    admins = await authz.authorizer.list_teams(uid, Relation.ADMIN, candidates)
-    if admins is None:
-        raise AuthzUnavailable()
-    return [
-        MeTeamOut(
-            team_id=t.id,
-            team_name=t.name,
-            role=TeamRole.ADMIN if t.id in admins else TeamRole.MEMBER,
-        )
-        for t in teams
-        if t.id in members or t.id in admins
+        rows = [(team, member.role, member) for team, member in result]
+    else:
+        teams = (await session.scalars(select(Team).order_by(Team.name))).all()
+        local = {
+            member.team_id: member
+            for member in await session.scalars(
+                select(TeamMember).where(TeamMember.user_id == user_id)
+            )
+        }
+        candidates = [team.id for team in teams]
+        uid = str(user_id)
+        members = await authz.authorizer.list_teams(uid, Relation.MEMBER, candidates)
+        if members is None:
+            raise AuthzUnavailable()
+        admins = await authz.authorizer.list_teams(uid, Relation.ADMIN, candidates)
+        if admins is None:
+            raise AuthzUnavailable()
+        rows = [
+            (
+                team,
+                TeamRole.ADMIN if team.id in admins else TeamRole.MEMBER,
+                local.get(team.id),
+            )
+            for team in teams
+            if team.id in members or team.id in admins
+        ]
+    return await _team_details(session, user_id, rows)
+
+
+async def _team_details(
+    session: SessionDep, user_id: uuid.UUID, rows: list[tuple[Team, TeamRole, TeamMember | None]]
+) -> list[MeTeamOut]:
+    """Enrich memberships with what a key of this member could do in each team.
+
+    The model list is the member's *effective* set (team policy narrowed by the member
+    policy), never the team's full list, so `/users/me` cannot widen what a member may
+    read. Spend is the current UTC month; a missing local member row (external IAM) means
+    only the team level applies, exactly as in the compiler.
+    """
+    if not rows:
+        return []
+    catalog = sorted((await session.scalars(select(CatalogName.name))).all())
+    window_start, window_end = month_window(datetime.now(UTC))
+    team_ids = [team.id for team, _, _ in rows]
+    member_ids = [
+        member_scope_id(team.id, user_id) for team, _, member in rows if member is not None
     ]
+    scope_filters = [
+        and_(UsageTotal.scope_type == ScopeType.TEAM, UsageTotal.scope_id.in_(team_ids))
+    ]
+    if member_ids:
+        scope_filters.append(
+            and_(UsageTotal.scope_type == ScopeType.MEMBER, UsageTotal.scope_id.in_(member_ids))
+        )
+    spent = {
+        (scope_type, scope_id): cost
+        for scope_type, scope_id, cost in await session.execute(
+            select(UsageTotal.scope_type, UsageTotal.scope_id, UsageTotal.cost_nano_usd).where(
+                UsageTotal.window_start == window_start, or_(*scope_filters)
+            )
+        )
+    }
+    key_counts = {
+        team_id: count
+        for team_id, count in await session.execute(
+            select(ApiKey.team_id, func.count())
+            .where(
+                ApiKey.team_id.in_(team_ids),
+                ApiKey.owner_kind == KeyOwnerKind.USER,
+                ApiKey.user_id == user_id,
+                ApiKey.lifecycle != KeyLifecycle.REVOKED,
+            )
+            .group_by(ApiKey.team_id)
+        )
+    }
+    details: list[MeTeamOut] = []
+    for team, role, member in rows:
+        team_limits = policy_of(team)
+        effective_limits = (
+            effective(None, team_limits)
+            if member is None
+            else effective(effective(None, team_limits), policy_of(member))
+        )
+        member_limits = policy_of(member) if member is not None else None
+        member_spent = (
+            spent.get((ScopeType.MEMBER, member_scope_id(team.id, user_id)), 0)
+            if member is not None
+            else 0
+        )
+        team_spent = spent.get((ScopeType.TEAM, team.id), 0)
+        remaining = [
+            max(limit - used, 0)
+            for limit, used in (
+                (team_limits.budget_nano_usd, team_spent),
+                (member_limits.budget_nano_usd if member_limits else None, member_spent),
+            )
+            if limit is not None
+        ]
+        details.append(
+            MeTeamOut(
+                team_id=team.id,
+                team_name=team.name,
+                role=role,
+                models=catalog
+                if effective_limits.models is None
+                else sorted(effective_limits.models),
+                all_models=effective_limits.models is None,
+                limits=MeLimitsOut(
+                    rpm_limit=effective_limits.rpm_limit,
+                    tpm_limit=effective_limits.tpm_limit,
+                    max_parallel=effective_limits.max_parallel,
+                ),
+                key_limits=MeKeyLimitsOut(
+                    max_keys_per_member=team.max_keys_per_member,
+                    max_member_key_lifetime_seconds=team.max_member_key_lifetime_seconds,
+                    key_count=key_counts.get(team.id, 0),
+                ),
+                budget=MeBudgetOut(
+                    team_budget_nano_usd=team_limits.budget_nano_usd,
+                    team_spent_nano_usd=team_spent,
+                    member_budget_nano_usd=(
+                        member_limits.budget_nano_usd if member_limits else None
+                    ),
+                    member_spent_nano_usd=member_spent,
+                    remaining_nano_usd=min(remaining) if remaining else None,
+                    window_start=window_start,
+                    window_end=window_end,
+                ),
+            )
+        )
+    return details
 
 
 @router.get("/users", response_model=Page[UserOut], operation_id="listUsers")
