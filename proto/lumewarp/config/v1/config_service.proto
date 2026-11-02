@@ -40,6 +40,29 @@ message Hello {
   // control plane sends a delta only if this equals the digest it stored for
   // have_version; otherwise (e.g. after a control-plane restore) a full.
   bytes have_digest = 6;
+  // Every strategy compiled into this gateway. New strategies need no change
+  // here, in the control plane or in the UI.
+  repeated StrategyDescriptor strategies = 7;
+}
+
+// Declared by a strategy crate with `register!` (docs/router-strategies.md).
+// The control plane treats all of it as untrusted data.
+message StrategyDescriptor {
+  // Same name as the "strategy:<name>" capability.
+  string name = 1;
+  string title = 2;
+  string description = 3;
+  // False: member weights have no effect and the UI hides them.
+  bool uses_weight = 4;
+  // Gateway-provided signals the strategy reads: "latency", "vllm_load".
+  repeated string needs = 5;
+  // JSON Schema of Router.params_json, at most 16 KiB UTF-8. Larger ones are
+  // ignored and the params cannot be validated before the gateway's configure.
+  string params_schema_json = 6;
+  // JSON Schema of RouterMember.params_json, same limit.
+  string member_schema_json = 7;
+  // Changes whenever any field above does.
+  string digest = 8;
 }
 
 message Ack {

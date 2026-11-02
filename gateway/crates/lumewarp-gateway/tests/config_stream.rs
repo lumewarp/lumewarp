@@ -278,6 +278,19 @@ async fn full_then_delta_with_durable_acks() {
     assert!(hello.have_digest.is_empty());
     assert_eq!(hello.scope, "");
     assert!(!hello.gateway_version.is_empty());
+    let names: Vec<_> = hello.strategies.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["least_in_flight", "lowest_latency", "vllm_load", "weighted"]
+    );
+    let vllm = &hello.strategies[2];
+    assert_eq!(vllm.needs, ["vllm_load"]);
+    assert!(!vllm.uses_weight);
+    assert_eq!(vllm.digest.len(), 64);
+    assert_eq!(
+        vllm.member_schema_json,
+        r#"{"additionalProperties":false,"type":"object"}"#
+    );
     assert_eq!(gw.readyz().await, 503);
 
     conn.send(full(snapshot(1, &[("k1", "secret-1")])));

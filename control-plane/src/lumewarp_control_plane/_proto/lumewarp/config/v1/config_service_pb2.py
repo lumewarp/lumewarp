@@ -25,27 +25,29 @@ _sym_db = _symbol_database.Default()
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as lumewarp_dot_config_dot_v1_dot_snapshot__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\'lumewarp/config/v1/config_service.proto\x12\x12lumewarp.config.v1\x1a!lumewarp/config/v1/snapshot.proto\"\x95\x01\n\x0eGatewayMessage\x12*\n\x05hello\x18\x01 \x01(\x0b\x32\x19.lumewarp.config.v1.HelloH\x00\x12&\n\x03\x61\x63k\x18\x02 \x01(\x0b\x32\x17.lumewarp.config.v1.AckH\x00\x12(\n\x04nack\x18\x03 \x01(\x0b\x32\x18.lumewarp.config.v1.NackH\x00\x42\x05\n\x03msg\"\x8e\x01\n\x05Hello\x12\x12\n\ngateway_id\x18\x01 \x01(\t\x12\x14\n\x0chave_version\x18\x02 \x01(\x04\x12\x17\n\x0fgateway_version\x18\x03 \x01(\t\x12\x1e\n\x16supported_capabilities\x18\x04 \x03(\t\x12\r\n\x05scope\x18\x05 \x01(\t\x12\x13\n\x0bhave_digest\x18\x06 \x01(\x0c\"\x16\n\x03\x41\x63k\x12\x0f\n\x07version\x18\x01 \x01(\x04\"i\n\x04Nack\x12\x0f\n\x07version\x18\x01 \x01(\x04\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12\x14\n\x0chave_version\x18\x03 \x01(\x04\x12*\n\x04\x63ode\x18\x04 \x01(\x0e\x32\x1c.lumewarp.config.v1.NackCode\"\x89\x01\n\x0c\x43onfigUpdate\x12,\n\x04\x66ull\x18\x01 \x01(\x0b\x32\x1c.lumewarp.config.v1.SnapshotH\x00\x12*\n\x05\x64\x65lta\x18\x02 \x01(\x0b\x32\x19.lumewarp.config.v1.DeltaH\x00\x12\x15\n\rtarget_digest\x18\x03 \x01(\x0c\x42\x08\n\x06update\"\xaf\x04\n\x05\x44\x65lta\x12\x14\n\x0c\x62\x61se_version\x18\x01 \x01(\x04\x12\x0f\n\x07version\x18\x02 \x01(\x04\x12\x36\n\x10upsert_upstreams\x18\x03 \x03(\x0b\x32\x1c.lumewarp.config.v1.Upstream\x12\x18\n\x10remove_upstreams\x18\x04 \x03(\t\x12\x30\n\rupsert_models\x18\x05 \x03(\x0b\x32\x19.lumewarp.config.v1.Model\x12\x15\n\rremove_models\x18\x06 \x03(\t\x12\x32\n\x0eupsert_routers\x18\x07 \x03(\x0b\x32\x1a.lumewarp.config.v1.Router\x12\x16\n\x0eremove_routers\x18\x08 \x03(\t\x12\x33\n\x0fupsert_api_keys\x18\t \x03(\x0b\x32\x1a.lumewarp.config.v1.ApiKey\x12\x17\n\x0fremove_api_keys\x18\n \x03(\t\x12.\n\x0cupsert_teams\x18\x0b \x03(\x0b\x32\x18.lumewarp.config.v1.Team\x12\x14\n\x0cremove_teams\x18\x0c \x03(\t\x12\x1a\n\x12\x63reated_at_unix_ms\x18\r \x01(\x03\x12\x1d\n\x15required_capabilities\x18\x0e \x03(\t\x12\x31\n\x0eupsert_aliases\x18\x0f \x03(\x0b\x32\x19.lumewarp.config.v1.Alias\x12\x16\n\x0eremove_aliases\x18\x10 \x03(\t*\xa1\x01\n\x08NackCode\x12\x19\n\x15NACK_CODE_UNSPECIFIED\x10\x00\x12\x1b\n\x17NACK_CODE_BASE_MISMATCH\x10\x01\x12\x1c\n\x18NACK_CODE_INVALID_CONFIG\x10\x02\x12!\n\x1dNACK_CODE_UNSUPPORTED_FEATURE\x10\x03\x12\x1c\n\x18NACK_CODE_PERSIST_FAILED\x10\x04\x32\x63\n\rConfigService\x12R\n\x06Stream\x12\".lumewarp.config.v1.GatewayMessage\x1a .lumewarp.config.v1.ConfigUpdate(\x01\x30\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\'lumewarp/config/v1/config_service.proto\x12\x12lumewarp.config.v1\x1a!lumewarp/config/v1/snapshot.proto\"\x95\x01\n\x0eGatewayMessage\x12*\n\x05hello\x18\x01 \x01(\x0b\x32\x19.lumewarp.config.v1.HelloH\x00\x12&\n\x03\x61\x63k\x18\x02 \x01(\x0b\x32\x17.lumewarp.config.v1.AckH\x00\x12(\n\x04nack\x18\x03 \x01(\x0b\x32\x18.lumewarp.config.v1.NackH\x00\x42\x05\n\x03msg\"\xca\x01\n\x05Hello\x12\x12\n\ngateway_id\x18\x01 \x01(\t\x12\x14\n\x0chave_version\x18\x02 \x01(\x04\x12\x17\n\x0fgateway_version\x18\x03 \x01(\t\x12\x1e\n\x16supported_capabilities\x18\x04 \x03(\t\x12\r\n\x05scope\x18\x05 \x01(\t\x12\x13\n\x0bhave_digest\x18\x06 \x01(\x0c\x12:\n\nstrategies\x18\x07 \x03(\x0b\x32&.lumewarp.config.v1.StrategyDescriptor\"\xb2\x01\n\x12StrategyDescriptor\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05title\x18\x02 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x03 \x01(\t\x12\x13\n\x0buses_weight\x18\x04 \x01(\x08\x12\r\n\x05needs\x18\x05 \x03(\t\x12\x1a\n\x12params_schema_json\x18\x06 \x01(\t\x12\x1a\n\x12member_schema_json\x18\x07 \x01(\t\x12\x0e\n\x06\x64igest\x18\x08 \x01(\t\"\x16\n\x03\x41\x63k\x12\x0f\n\x07version\x18\x01 \x01(\x04\"i\n\x04Nack\x12\x0f\n\x07version\x18\x01 \x01(\x04\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12\x14\n\x0chave_version\x18\x03 \x01(\x04\x12*\n\x04\x63ode\x18\x04 \x01(\x0e\x32\x1c.lumewarp.config.v1.NackCode\"\x89\x01\n\x0c\x43onfigUpdate\x12,\n\x04\x66ull\x18\x01 \x01(\x0b\x32\x1c.lumewarp.config.v1.SnapshotH\x00\x12*\n\x05\x64\x65lta\x18\x02 \x01(\x0b\x32\x19.lumewarp.config.v1.DeltaH\x00\x12\x15\n\rtarget_digest\x18\x03 \x01(\x0c\x42\x08\n\x06update\"\xaf\x04\n\x05\x44\x65lta\x12\x14\n\x0c\x62\x61se_version\x18\x01 \x01(\x04\x12\x0f\n\x07version\x18\x02 \x01(\x04\x12\x36\n\x10upsert_upstreams\x18\x03 \x03(\x0b\x32\x1c.lumewarp.config.v1.Upstream\x12\x18\n\x10remove_upstreams\x18\x04 \x03(\t\x12\x30\n\rupsert_models\x18\x05 \x03(\x0b\x32\x19.lumewarp.config.v1.Model\x12\x15\n\rremove_models\x18\x06 \x03(\t\x12\x32\n\x0eupsert_routers\x18\x07 \x03(\x0b\x32\x1a.lumewarp.config.v1.Router\x12\x16\n\x0eremove_routers\x18\x08 \x03(\t\x12\x33\n\x0fupsert_api_keys\x18\t \x03(\x0b\x32\x1a.lumewarp.config.v1.ApiKey\x12\x17\n\x0fremove_api_keys\x18\n \x03(\t\x12.\n\x0cupsert_teams\x18\x0b \x03(\x0b\x32\x18.lumewarp.config.v1.Team\x12\x14\n\x0cremove_teams\x18\x0c \x03(\t\x12\x1a\n\x12\x63reated_at_unix_ms\x18\r \x01(\x03\x12\x1d\n\x15required_capabilities\x18\x0e \x03(\t\x12\x31\n\x0eupsert_aliases\x18\x0f \x03(\x0b\x32\x19.lumewarp.config.v1.Alias\x12\x16\n\x0eremove_aliases\x18\x10 \x03(\t*\xa1\x01\n\x08NackCode\x12\x19\n\x15NACK_CODE_UNSPECIFIED\x10\x00\x12\x1b\n\x17NACK_CODE_BASE_MISMATCH\x10\x01\x12\x1c\n\x18NACK_CODE_INVALID_CONFIG\x10\x02\x12!\n\x1dNACK_CODE_UNSUPPORTED_FEATURE\x10\x03\x12\x1c\n\x18NACK_CODE_PERSIST_FAILED\x10\x04\x32\x63\n\rConfigService\x12R\n\x06Stream\x12\".lumewarp.config.v1.GatewayMessage\x1a .lumewarp.config.v1.ConfigUpdate(\x01\x30\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'lumewarp.config.v1.config_service_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_NACKCODE']._serialized_start=1229
-  _globals['_NACKCODE']._serialized_end=1390
+  _globals['_NACKCODE']._serialized_start=1470
+  _globals['_NACKCODE']._serialized_end=1631
   _globals['_GATEWAYMESSAGE']._serialized_start=99
   _globals['_GATEWAYMESSAGE']._serialized_end=248
   _globals['_HELLO']._serialized_start=251
-  _globals['_HELLO']._serialized_end=393
-  _globals['_ACK']._serialized_start=395
-  _globals['_ACK']._serialized_end=417
-  _globals['_NACK']._serialized_start=419
-  _globals['_NACK']._serialized_end=524
-  _globals['_CONFIGUPDATE']._serialized_start=527
-  _globals['_CONFIGUPDATE']._serialized_end=664
-  _globals['_DELTA']._serialized_start=667
-  _globals['_DELTA']._serialized_end=1226
-  _globals['_CONFIGSERVICE']._serialized_start=1392
-  _globals['_CONFIGSERVICE']._serialized_end=1491
+  _globals['_HELLO']._serialized_end=453
+  _globals['_STRATEGYDESCRIPTOR']._serialized_start=456
+  _globals['_STRATEGYDESCRIPTOR']._serialized_end=634
+  _globals['_ACK']._serialized_start=636
+  _globals['_ACK']._serialized_end=658
+  _globals['_NACK']._serialized_start=660
+  _globals['_NACK']._serialized_end=765
+  _globals['_CONFIGUPDATE']._serialized_start=768
+  _globals['_CONFIGUPDATE']._serialized_end=905
+  _globals['_DELTA']._serialized_start=908
+  _globals['_DELTA']._serialized_end=1467
+  _globals['_CONFIGSERVICE']._serialized_start=1633
+  _globals['_CONFIGSERVICE']._serialized_end=1732
 # @@protoc_insertion_point(module_scope)

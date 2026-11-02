@@ -11,7 +11,12 @@ repository.workspace = true
 name = "lumewarp"
 path = "src/main.rs"
 
+# A compiled-in strategy crate is selected with a feature (docs/router-strategies.md).
+[features]
+strategy-priority-failover = ["dep:lumewarp-strategy-priority-failover"]
+
 [dependencies]
+lumewarp-strategy-priority-failover = { path = "../../strategies/priority-failover", optional = true }
 lumewarp-config.workspace = true
 lumewarp-proto.workspace = true
 lumewarp-router-api = { path = "../lumewarp-router-api" }
@@ -47,6 +52,7 @@ uuid.workspace = true
 memchr.workspace = true
 
 [dev-dependencies]
+schemars.workspace = true
 mock-upstream = { path = "../../../bench/mock-upstream" }
 hyper = { workspace = true, features = ["http2"] }
 tempfile.workspace = true

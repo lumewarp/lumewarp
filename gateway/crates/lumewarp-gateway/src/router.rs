@@ -18,7 +18,8 @@ use lumewarp_proto::config::v1::{
     StreamUsageMode,
 };
 use lumewarp_router_api::{
-    Builtin, CandidateSource, Candidates, Load, Needs, RequestInfo, RouterInfo, Strategy, ThreadRng,
+    Builtin, CandidateSource, Candidates, Load, MemberInfo, Needs, RequestInfo, RouterInfo,
+    Strategy, ThreadRng,
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 
@@ -84,6 +85,9 @@ pub struct KeyContext {
 /// The models of one traffic split (or of the whole router without one).
 struct Pool {
     models: Vec<Arc<Model>>,
+    /// Position of `models[0]` among all of the router's members, so that a
+    /// member keeps its index whichever split's pool it is seen through.
+    first_member: usize,
     cumulative_weights: Vec<u64>,
     total_weight: u64,
 }
@@ -99,6 +103,9 @@ impl CandidateSource for PoolSource<'_> {
     }
     fn name(&self, i: usize) -> &str {
         &self.pool.models[i].name
+    }
+    fn member_index(&self, i: usize) -> usize {
+        self.pool.first_member + i
     }
     fn weight(&self, i: usize) -> u64 {
         self.pool.cumulative_weights[i]
@@ -128,33 +135,39 @@ impl CandidateSource for PoolSource<'_> {
 
 enum CompiledStrategy {
     Builtin(Builtin),
-    Custom(Box<dyn Strategy>),
+    Custom(Box<dyn Strategy>, Needs),
 }
 
 impl CompiledStrategy {
+    /// Every strategy, built-in or not, parses its settings here: a router the
+    /// gateway cannot serve is refused at load (standalone) or NACKed.
     fn configure(r: &lumewarp_proto::config::v1::Router) -> Result<Self, ApplyError> {
-        if let Some(builtin) = snapshot::builtin_strategy(&r.strategy) {
-            return Ok(Self::Builtin(builtin));
-        }
         let factory = lumewarp_router_api::lookup(&r.strategy)
             .map_err(|_| invalid("duplicate strategy registration".into()))?
             .ok_or_else(|| ApplyError::unsupported("unregistered strategy"))?;
-        let models: Vec<_> = router_model_names(r).collect();
+        let (infos, member_params) = router_members(r)?;
         let info = RouterInfo {
             name: &r.name,
-            models: &models,
+            members: &infos,
         };
-        let params = snapshot::strategy_params(r)?;
+        let mut params = snapshot::strategy_params(r)?;
+        // Reserved for the gateway (`strategy_headers`); strategies never declare it.
+        if let Some(params) = params.as_object_mut() {
+            params.remove("headers");
+        }
         // Do not propagate plugin error text: params may contain private data.
-        (factory.create)(&info, &params)
-            .map(Self::Custom)
-            .map_err(|_| invalid(format!("router {:?} strategy configuration failed", r.name)))
+        let created = (factory.create)(&info, &params, &member_params)
+            .map_err(|_| invalid(format!("router {:?} strategy configuration failed", r.name)))?;
+        Ok(match snapshot::builtin_strategy(&r.strategy) {
+            Some(builtin) => Self::Builtin(builtin),
+            None => Self::Custom(created, (factory.needs)()),
+        })
     }
 
     fn needs(&self) -> Needs {
         match self {
             Self::Builtin(s) => s.needs(),
-            Self::Custom(s) => s.needs(),
+            Self::Custom(_, needs) => *needs,
         }
     }
 
@@ -166,7 +179,7 @@ impl CompiledStrategy {
     ) -> Option<usize> {
         match self {
             Self::Builtin(s) => s.pick_from(c, rng),
-            Self::Custom(s) => {
+            Self::Custom(s, _) => {
                 let picked = s.pick(req, &c.erased(), rng)?;
                 c.get(picked).map(|d| d.index)
             }
@@ -248,6 +261,7 @@ impl Router {
         Self {
             pools: vec![Pool {
                 models: vec![model],
+                first_member: 0,
                 cumulative_weights: vec![1],
                 total_weight: 1,
             }],
@@ -649,6 +663,7 @@ impl RoutingTable {
             let mut pools = Vec::with_capacity(groups.len());
             let mut split_cumulative = Vec::with_capacity(groups.len());
             let mut split_total = 0u64;
+            let mut first_member = 0;
             for (split, members, split_weight) in groups {
                 let mut resolved = Vec::new();
                 let mut cumulative_weights = Vec::new();
@@ -669,7 +684,10 @@ impl RoutingTable {
                 }
                 split_total += u64::from(split_weight);
                 split_cumulative.push(split_total);
+                let first = first_member;
+                first_member += members.len();
                 pools.push(Pool {
+                    first_member: first,
                     models: resolved,
                     cumulative_weights,
                     total_weight,
@@ -1077,6 +1095,40 @@ fn router_model_names(
     }
 }
 
+/// Every member across the router's splits, in the order `first_member` counts
+/// them, with its settings as a JSON object.
+fn router_members(
+    r: &lumewarp_proto::config::v1::Router,
+) -> Result<(Vec<MemberInfo<'_>>, Vec<serde_json::Value>), ApplyError> {
+    let groups: Vec<(Option<&str>, &[RouterMember])> = if r.traffic_split.is_empty() {
+        vec![(None, r.members.as_slice())]
+    } else {
+        r.traffic_split
+            .iter()
+            .map(|s| (Some(s.name.as_str()), s.members.as_slice()))
+            .collect()
+    };
+    let mut infos = Vec::new();
+    let mut params = Vec::new();
+    for (split, members) in groups {
+        for member in members {
+            infos.push(MemberInfo {
+                model: &member.model,
+                weight: member.weight,
+                split,
+            });
+            params.push(if member.params_json.is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&member.params_json).map_err(|_| {
+                    invalid(format!("router {:?} has invalid member params", r.name))
+                })?
+            });
+        }
+    }
+    Ok((infos, params))
+}
+
 /// Explicit `metrics_url`, or `base_url` minus a trailing `/v1` plus
 /// `/metrics`. `None` when an explicit URL is not plain http(s).
 fn metrics_uri(base: &Uri, explicit: &str) -> Option<Uri> {
@@ -1117,42 +1169,210 @@ mod tests {
         RequestInfo::new("public", "", "", None, &[], &|_| None)
     }
 
-    struct HeaderPin;
+    /// Declared in their own modules: one `register!` per module.
+    mod header_pin {
+        use lumewarp_router_api::{
+            Candidates, ConfigError, Configure, Needs, NoParams, RequestInfo, RngCore, RouterInfo,
+            Strategy,
+        };
+        use schemars::JsonSchema;
+        use serde::Deserialize;
 
-    impl Strategy for HeaderPin {
-        fn name(&self) -> &'static str {
-            "header_pin"
+        pub struct HeaderPin;
+
+        #[derive(Deserialize, JsonSchema)]
+        #[serde(deny_unknown_fields)]
+        pub struct Params {
+            pub reject: Option<String>,
         }
-        fn needs(&self) -> Needs {
-            Needs {
-                latency: true,
-                vllm_load: true,
+
+        impl Configure<Params, NoParams> for HeaderPin {
+            fn configure(
+                _: &RouterInfo<'_>,
+                params: Params,
+                _: &[NoParams],
+            ) -> Result<Self, ConfigError> {
+                if params.reject.is_some() {
+                    return Err(ConfigError("private params".into()));
+                }
+                Ok(Self)
             }
         }
-        fn configure(
-            _: &RouterInfo<'_>,
-            params: &lumewarp_router_api::Params,
-        ) -> Result<Self, lumewarp_router_api::ConfigError> {
-            if params.get("reject").is_some() {
-                return Err(lumewarp_router_api::ConfigError("private params".into()));
+
+        impl Strategy for HeaderPin {
+            fn pick(
+                &self,
+                req: &RequestInfo<'_>,
+                c: &Candidates<'_>,
+                _: &mut dyn RngCore,
+            ) -> Option<usize> {
+                let pin = req.header("x-pin");
+                c.iter()
+                    .find(|d| Some(d.name().as_bytes()) == pin)
+                    .or_else(|| c.iter().next())
+                    .map(|d| d.index)
             }
-            Ok(Self)
         }
-        fn pick(
-            &self,
-            req: &RequestInfo<'_>,
-            c: &Candidates<'_>,
-            _: &mut dyn lumewarp_router_api::RngCore,
-        ) -> Option<usize> {
-            assert!(req.header("authorization").is_none());
-            let pin = req.header("x-pin");
-            c.iter()
-                .find(|d| Some(d.name().as_bytes()) == pin)
-                .or_else(|| c.iter().next())
-                .map(|d| d.index)
+
+        lumewarp_router_api::register! {
+            name: "header_pin",
+            title: "Header pin",
+            description: "Test strategy.",
+            uses_weight: false,
+            needs: Needs { latency: true, vllm_load: true },
+            params: Params,
+            member_params: NoParams,
+            strategy: HeaderPin,
         }
     }
-    lumewarp_router_api::register!("header_pin", HeaderPin);
+
+    mod ranked {
+        use lumewarp_router_api::{
+            Candidates, ConfigError, Configure, Needs, NoParams, RequestInfo, RngCore, RouterInfo,
+            Strategy,
+        };
+        use schemars::JsonSchema;
+        use serde::Deserialize;
+
+        /// Lowest rank wins; ranks are looked up by the stable member index.
+        pub struct Ranked(Vec<u32>);
+
+        #[derive(Deserialize, JsonSchema)]
+        #[serde(deny_unknown_fields)]
+        pub struct Member {
+            pub rank: u32,
+        }
+
+        impl Configure<NoParams, Member> for Ranked {
+            fn configure(
+                router: &RouterInfo<'_>,
+                _: NoParams,
+                members: &[Member],
+            ) -> Result<Self, ConfigError> {
+                assert_eq!(router.members.len(), members.len());
+                Ok(Self(members.iter().map(|m| m.rank).collect()))
+            }
+        }
+
+        impl Strategy for Ranked {
+            fn pick(
+                &self,
+                _: &RequestInfo<'_>,
+                c: &Candidates<'_>,
+                _: &mut dyn RngCore,
+            ) -> Option<usize> {
+                c.iter()
+                    .min_by_key(|d| self.0[d.member_index()])
+                    .map(|d| d.index)
+            }
+        }
+
+        lumewarp_router_api::register! {
+            name: "ranked",
+            title: "Ranked",
+            description: "Test strategy.",
+            uses_weight: false,
+            needs: Needs::default(),
+            params: NoParams,
+            member_params: Member,
+            strategy: Ranked,
+        }
+    }
+
+    fn with_member_params(member: &mut pb::RouterMember, params: &str) {
+        member.params_json = params.into();
+    }
+
+    #[test]
+    fn member_index_spans_splits_and_member_params_reach_configure() {
+        let mut s = split_snapshot(pb::StickyBy::None, "ranked");
+        s.required_capabilities
+            .retain(|c| !c.starts_with("strategy:"));
+        s.required_capabilities.push("strategy:ranked".into());
+        // The same models in both splits: only the member index tells them apart.
+        let r = &mut s.routers[0];
+        r.traffic_split[0].members = vec![member("a", 1), member("b", 1)];
+        r.traffic_split[1].members = vec![member("a", 1), member("b", 1)];
+        let splits = &mut r.traffic_split;
+        with_member_params(&mut splits[0].members[0], r#"{"rank":2}"#);
+        with_member_params(&mut splits[0].members[1], r#"{"rank":1}"#);
+        with_member_params(&mut splits[1].members[0], r#"{"rank":1}"#);
+        with_member_params(&mut splits[1].members[1], r#"{"rank":2}"#);
+        let (first, second) = (
+            splits[0].members[1].model.clone(),
+            splits[1].members[0].model.clone(),
+        );
+        assert_ne!(first, second);
+        let table = compile(&s);
+        let router = &table.names["public"];
+        let offsets: Vec<_> = router.pools.iter().map(|p| p.first_member).collect();
+        assert_eq!(offsets, [0, 2]);
+        let req = empty_request();
+        for (pool, want) in router.pools.iter().zip([&first, &second]) {
+            let picked = pool
+                .pick(&router.strategy, &req, None, clock::mono_ms(), true)
+                .unwrap();
+            assert_eq!(&pool.models[picked].name, want);
+        }
+
+        // A member the strategy's struct cannot parse is refused, without its text.
+        with_member_params(
+            &mut s.routers[0].traffic_split[1].members[0],
+            r#"{"rank":"private"}"#,
+        );
+        let err = RoutingTable::compile(&s, AuthMode::Open, &Runtime::new())
+            .err()
+            .unwrap();
+        assert_eq!(err.code, pb::NackCode::InvalidConfig);
+        assert!(!err.reason.contains("private"));
+    }
+
+    #[test]
+    fn headers_are_removed_before_configure_and_builtins_refuse_member_params() {
+        // `Params` of header_pin has deny_unknown_fields and no `headers` field.
+        let mut s = snapshot("header_pin");
+        s.routers[0].params_json = r#"{"headers":["x-pin"]}"#.into();
+        s.required_capabilities = vec!["strategy:header_pin".into()];
+        let table = compile(&s);
+        assert_eq!(table.names["public"].strategy_headers, ["x-pin"]);
+        s.routers[0].params_json = r#"{"headers":["x-pin"],"other":1}"#.into();
+        assert!(RoutingTable::compile(&s, AuthMode::Open, &Runtime::new()).is_err());
+
+        let mut s = snapshot("least_in_flight");
+        s.required_capabilities = vec!["strategy:least_in_flight".into()];
+        s.routers[0].members[0].params_json = r#"{"zone":"a"}"#.into();
+        let err = RoutingTable::compile(&s, AuthMode::Open, &Runtime::new())
+            .err()
+            .unwrap();
+        assert_eq!(err.code, pb::NackCode::InvalidConfig);
+    }
+
+    #[test]
+    fn registered_descriptors_include_builtins_and_declare_needs() {
+        let descriptors = lumewarp_router_api::descriptors();
+        let needs = |name: &str| {
+            descriptors
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap()
+                .needs
+                .clone()
+        };
+        assert_eq!(needs("vllm_load"), ["vllm_load"]);
+        assert_eq!(needs("lowest_latency"), ["latency"]);
+        assert!(needs("weighted").is_empty());
+        assert_eq!(needs("header_pin"), ["latency", "vllm_load"]);
+        let weighted = descriptors.iter().find(|d| d.name == "weighted").unwrap();
+        assert!(weighted.uses_weight);
+        for name in snapshot::SUPPORTED_CAPABILITIES
+            .iter()
+            .filter_map(|c| c.strip_prefix("strategy:"))
+        {
+            let builtin = lumewarp_router_api::lookup(name).unwrap();
+            assert!(builtin.is_some(), "{name} is not registered");
+            assert!(snapshot::builtin_strategy(name).is_some());
+        }
+    }
 
     #[test]
     fn custom_strategy_snapshot_apply_headers_needs_and_allocations() {

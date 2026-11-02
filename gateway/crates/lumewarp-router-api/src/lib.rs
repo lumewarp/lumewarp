@@ -1,4 +1,4 @@
-//! Version 1 of the compiled-in routing strategy API.
+//! Version 2 of the compiled-in routing strategy API.
 //!
 //! `configure` runs once per router on snapshot application. `pick` must not do
 //! I/O, block, or allocate in the common case. Given the same candidate state,
@@ -7,15 +7,28 @@
 //! paths. Model eligibility, retries, splits and breakers belong to the
 //! gateway, not to a strategy. Candidates expose eligible models only.
 //!
+//! A strategy declares its settings as Rust types: [`register!`] derives the
+//! JSON Schema the control plane validates against and the UI renders from the
+//! same structs `configure` receives (`docs/router-strategies.md`).
+//!
 //! Request headers are readable only when named in `params.headers` (an array
-//! of HTTP header names). There is deliberately no prompt or body interface.
+//! of HTTP header names). The gateway removes that reserved field before
+//! `configure`. There is deliberately no prompt or body interface.
 //! Strategies are linked at compile time with [`register!`]; inventory avoids
 //! requiring edits to the gateway's dispatcher when adding a strategy crate.
 
+mod schema;
+
 use std::ops::Range;
 
-pub const API_VERSION: u32 = 1;
-pub type Params = serde_json::Value;
+use schemars::JsonSchema;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+pub use schema::{assert_schema_subset, schema_for, subset_problem, MAX_SCHEMA_BYTES};
+
+pub const API_VERSION: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -27,9 +40,34 @@ pub struct Needs {
     pub vllm_load: bool,
 }
 
+impl Needs {
+    fn names(self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.latency {
+            names.push("latency");
+        }
+        if self.vllm_load {
+            names.push("vllm_load");
+        }
+        names
+    }
+}
+
+/// One member entry of a router. With a traffic split, the same model can
+/// appear once per split, as separate entries with their own settings.
+#[derive(Clone, Copy, Debug)]
+pub struct MemberInfo<'a> {
+    pub model: &'a str,
+    pub weight: u32,
+    /// `None` without a traffic split.
+    pub split: Option<&'a str>,
+}
+
 pub struct RouterInfo<'a> {
     pub name: &'a str,
-    pub models: &'a [&'a str],
+    /// Every member across all splits, in declaration order. A position here
+    /// is what [`Candidate::member_index`] returns.
+    pub members: &'a [MemberInfo<'a>],
 }
 
 /// Range draws, rather than a particular RNG implementation or version.
@@ -109,6 +147,8 @@ pub trait CandidateSource {
         self.len() == 0
     }
     fn name(&self, index: usize) -> &str;
+    /// Position of pool entry `index` in [`RouterInfo::members`].
+    fn member_index(&self, index: usize) -> usize;
     fn weight(&self, index: usize) -> u64;
     fn in_flight(&self, index: usize) -> usize;
     fn latency_ewma_us(&self, index: usize) -> Option<u64>;
@@ -118,7 +158,8 @@ pub trait CandidateSource {
 }
 
 pub struct Candidate<'a, S: CandidateSource + ?Sized = dyn CandidateSource + 'a> {
-    /// Index in the current pool, not in RouterInfo's router-wide model list.
+    /// Index in the current pool, not stable across traffic splits: return
+    /// this from `pick`, and key `configure`'s tables by [`Self::member_index`].
     pub index: usize,
     source: &'a S,
 }
@@ -134,6 +175,12 @@ impl<S: CandidateSource + ?Sized> Candidate<'_, S> {
     #[inline]
     pub fn name(&self) -> &str {
         self.source.name(self.index)
+    }
+    /// Position in [`RouterInfo::members`] and in `configure`'s member params,
+    /// the same whichever traffic-split pool the candidate is in.
+    #[inline]
+    pub fn member_index(&self) -> usize {
+        self.source.member_index(self.index)
     }
     #[inline]
     pub fn weight(&self) -> u64 {
@@ -251,11 +298,6 @@ impl<'a, S: CandidateSource + ?Sized, E: Fn(usize) -> bool + ?Sized> Candidates<
 }
 
 pub trait Strategy: Send + Sync + 'static {
-    fn name(&self) -> &'static str;
-    fn needs(&self) -> Needs;
-    fn configure(router: &RouterInfo<'_>, params: &Params) -> Result<Self, ConfigError>
-    where
-        Self: Sized;
     fn pick(
         &self,
         req: &RequestInfo<'_>,
@@ -264,10 +306,28 @@ pub trait Strategy: Send + Sync + 'static {
     ) -> Option<usize>;
 }
 
-pub type CreateStrategy = fn(&RouterInfo<'_>, &Params) -> Result<Box<dyn Strategy>, ConfigError>;
+/// Builds a strategy from its typed settings. `P` and `M` are the `params` and
+/// `member_params` types named in [`register!`], so what is validated and what
+/// is read are the same structs. `members[i]` belongs to `router.members[i]`.
+pub trait Configure<P, M>: Strategy + Sized {
+    fn configure(router: &RouterInfo<'_>, params: P, members: &[M]) -> Result<Self, ConfigError>;
+}
 
+/// `params` has already lost the reserved `headers` field. `member_params`
+/// holds one JSON object per [`RouterInfo::members`] entry.
+pub type CreateStrategy =
+    fn(&RouterInfo<'_>, &Value, &[Value]) -> Result<Box<dyn Strategy>, ConfigError>;
+
+/// What [`register!`] submits. Function pointers, because schemas and `Needs`
+/// are not constants; none of them runs on the request path.
 pub struct StrategyFactory {
     pub name: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub uses_weight: bool,
+    pub needs: fn() -> Needs,
+    pub params_schema: fn() -> Value,
+    pub member_schema: fn() -> Value,
     pub create: CreateStrategy,
 }
 
@@ -275,16 +335,68 @@ inventory::collect!(StrategyFactory);
 #[doc(hidden)]
 pub use inventory as __inventory;
 
+#[doc(hidden)]
+pub fn __create<S, P, M>(
+    router: &RouterInfo<'_>,
+    params: &Value,
+    members: &[Value],
+) -> Result<Box<dyn Strategy>, ConfigError>
+where
+    S: Configure<P, M>,
+    P: DeserializeOwned,
+    M: DeserializeOwned,
+{
+    let params = P::deserialize(params).map_err(|e| ConfigError(format!("params: {e}")))?;
+    let members = members
+        .iter()
+        .map(M::deserialize)
+        .collect::<Result<Vec<M>, _>>()
+        .map_err(|e| ConfigError(format!("member params: {e}")))?;
+    S::configure(router, params, &members).map(|s| Box::new(s) as Box<dyn Strategy>)
+}
+
+#[doc(hidden)]
+pub fn __schema<T: JsonSchema>() -> Value {
+    schema_for::<T>()
+}
+
+/// Declares a strategy. Generates a test that fails the strategy crate's
+/// `cargo test` when a schema leaves the subset, so use at most one `register!`
+/// per module. See `docs/router-strategies.md`.
 #[macro_export]
 macro_rules! register {
-    ($name:literal, $strategy:ty) => {
+    (
+        name: $name:literal,
+        title: $title:literal,
+        description: $description:literal,
+        uses_weight: $uses_weight:expr,
+        needs: $needs:expr,
+        params: $params:ty,
+        member_params: $member:ty,
+        strategy: $strategy:ty $(,)?
+    ) => {
         $crate::__inventory::submit! {
             $crate::StrategyFactory {
                 name: $name,
-                create: |router, params| {
-                    <$strategy as $crate::Strategy>::configure(router, params)
-                        .map(|s| Box::new(s) as Box<dyn $crate::Strategy>)
-                },
+                title: $title,
+                description: $description,
+                uses_weight: $uses_weight,
+                needs: || $needs,
+                params_schema: $crate::__schema::<$params>,
+                member_schema: $crate::__schema::<$member>,
+                create: $crate::__create::<$strategy, $params, $member>,
+            }
+        }
+
+        #[cfg(test)]
+        mod lumewarp_strategy_schema {
+            #[allow(unused_imports)]
+            use super::*;
+
+            #[test]
+            fn is_within_the_subset() {
+                $crate::assert_schema_subset::<$params>();
+                $crate::assert_schema_subset::<$member>();
             }
         }
     };
@@ -305,6 +417,73 @@ pub fn lookup(name: &str) -> Result<Option<&'static StrategyFactory>, ConfigErro
     Ok(first)
 }
 
+/// What a gateway tells the control plane about one compiled strategy.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Descriptor {
+    pub name: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub uses_weight: bool,
+    pub needs: Vec<&'static str>,
+    pub params_schema: Value,
+    pub member_schema: Value,
+    /// Hex SHA-256 of the fields above; changes whenever any of them does.
+    pub digest: String,
+}
+
+impl Descriptor {
+    pub fn of(factory: &StrategyFactory) -> Self {
+        let needs = (factory.needs)().names();
+        let (params_schema, member_schema) = ((factory.params_schema)(), (factory.member_schema)());
+        // serde_json objects are sorted by key, so this encoding is canonical.
+        let canonical = serde_json::json!({
+            "name": factory.name,
+            "title": factory.title,
+            "description": factory.description,
+            "uses_weight": factory.uses_weight,
+            "needs": needs,
+            "params_schema": params_schema,
+            "member_schema": member_schema,
+        });
+        let digest = Sha256::digest(canonical.to_string().as_bytes());
+        Self {
+            name: factory.name,
+            title: factory.title,
+            description: factory.description,
+            uses_weight: factory.uses_weight,
+            needs,
+            params_schema,
+            member_schema,
+            digest: hex::encode(digest),
+        }
+    }
+}
+
+/// Every compiled strategy, sorted by name.
+pub fn descriptors() -> Vec<Descriptor> {
+    let mut descriptors: Vec<_> = registered().map(Descriptor::of).collect();
+    descriptors.sort_by_key(|d| d.name);
+    descriptors
+}
+
+/// `lumewarp strategies --json`. An error when two crates registered one name.
+pub fn manifest() -> Result<Value, ConfigError> {
+    let strategies = descriptors();
+    if let Some(pair) = strategies.windows(2).find(|p| p[0].name == p[1].name) {
+        return Err(ConfigError(format!(
+            "duplicate strategy registration {:?}",
+            pair[0].name
+        )));
+    }
+    Ok(serde_json::json!({ "api_version": API_VERSION, "strategies": strategies }))
+}
+
+// The settings of a strategy without any: every field is refused. A plain
+// comment, because a doc comment here would end up in each schema's description.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NoParams {}
+
 /// Inline enum dispatch for stateless built-ins; custom instances alone are boxed.
 #[derive(Clone, Copy, Debug)]
 pub enum Builtin {
@@ -315,18 +494,12 @@ pub enum Builtin {
 }
 
 macro_rules! builtin_strategy {
-    ($type:ident, $variant:ident) => {
+    (
+        $module:ident, $type:ident, $variant:ident, $name:literal, $title:literal,
+        $description:literal, $uses_weight:literal, $needs:expr
+    ) => {
         pub struct $type;
         impl Strategy for $type {
-            fn name(&self) -> &'static str {
-                Builtin::$variant.name()
-            }
-            fn needs(&self) -> Needs {
-                Builtin::$variant.needs()
-            }
-            fn configure(_: &RouterInfo<'_>, _: &Params) -> Result<Self, ConfigError> {
-                Ok(Self)
-            }
             fn pick(
                 &self,
                 req: &RequestInfo<'_>,
@@ -336,35 +509,79 @@ macro_rules! builtin_strategy {
                 Builtin::$variant.pick(req, c, rng)
             }
         }
+        impl Configure<NoParams, NoParams> for $type {
+            fn configure(
+                _: &RouterInfo<'_>,
+                _: NoParams,
+                _: &[NoParams],
+            ) -> Result<Self, ConfigError> {
+                Ok(Self)
+            }
+        }
+        mod $module {
+            use super::*;
+            crate::register! {
+                name: $name,
+                title: $title,
+                description: $description,
+                uses_weight: $uses_weight,
+                needs: $needs,
+                params: NoParams,
+                member_params: NoParams,
+                strategy: $type,
+            }
+        }
     };
 }
 
-builtin_strategy!(Weighted, Weighted);
-builtin_strategy!(LeastInFlight, LeastInFlight);
-builtin_strategy!(LowestLatency, LowestLatency);
-builtin_strategy!(VllmLoad, VllmLoad);
+builtin_strategy!(
+    weighted,
+    Weighted,
+    Weighted,
+    "weighted",
+    "Weighted",
+    "Split requests by member weight.",
+    true,
+    Needs::default()
+);
+builtin_strategy!(
+    least_in_flight,
+    LeastInFlight,
+    LeastInFlight,
+    "least_in_flight",
+    "Least in flight",
+    "Use the member with the fewest requests in flight.",
+    false,
+    Needs::default()
+);
+builtin_strategy!(
+    lowest_latency,
+    LowestLatency,
+    LowestLatency,
+    "lowest_latency",
+    "Lowest latency",
+    "Prefer the member with the lowest time to response headers under load.",
+    false,
+    Needs {
+        latency: true,
+        vllm_load: false
+    }
+);
+builtin_strategy!(
+    vllm_load,
+    VllmLoad,
+    VllmLoad,
+    "vllm_load",
+    "vLLM load",
+    "Prefer the member whose vLLM reports the shortest queue and the least KV cache usage.",
+    false,
+    Needs {
+        latency: false,
+        vllm_load: true
+    }
+);
 
 impl Strategy for Builtin {
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Weighted => "weighted",
-            Self::LeastInFlight => "least_in_flight",
-            Self::LowestLatency => "lowest_latency",
-            Self::VllmLoad => "vllm_load",
-        }
-    }
-
-    fn needs(&self) -> Needs {
-        Needs {
-            latency: matches!(self, Self::LowestLatency),
-            vllm_load: matches!(self, Self::VllmLoad),
-        }
-    }
-
-    fn configure(_: &RouterInfo<'_>, _: &Params) -> Result<Self, ConfigError> {
-        Err(ConfigError("select a built-in by its enum variant".into()))
-    }
-
     fn pick(
         &self,
         _: &RequestInfo<'_>,
@@ -376,6 +593,13 @@ impl Strategy for Builtin {
 }
 
 impl Builtin {
+    pub fn needs(&self) -> Needs {
+        Needs {
+            latency: matches!(self, Self::LowestLatency),
+            vllm_load: matches!(self, Self::VllmLoad),
+        }
+    }
+
     /// Same implementation as Strategy::pick, monomorphized for built-in gateway state.
     #[inline]
     pub fn pick_from<S: CandidateSource + ?Sized, E: Fn(usize) -> bool + ?Sized>(

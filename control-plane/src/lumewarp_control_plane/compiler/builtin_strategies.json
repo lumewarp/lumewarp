@@ -1,0 +1,73 @@
+{
+  "api_version": 2,
+  "strategies": [
+    {
+      "description": "Use the member with the fewest requests in flight.",
+      "digest": "79b23d0f8b2297435d72d3118374fb4e0a7cbf544a1867c95b3fc705c0077b57",
+      "member_schema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "name": "least_in_flight",
+      "needs": [],
+      "params_schema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "title": "Least in flight",
+      "uses_weight": false
+    },
+    {
+      "description": "Prefer the member with the lowest time to response headers under load.",
+      "digest": "59ec25ae8b4a8746e3fd5c479b6dceec91bedd132d43011968eb2900f0012305",
+      "member_schema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "name": "lowest_latency",
+      "needs": [
+        "latency"
+      ],
+      "params_schema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "title": "Lowest latency",
+      "uses_weight": false
+    },
+    {
+      "description": "Prefer the member whose vLLM reports the shortest queue and the least KV cache usage.",
+      "digest": "be2f8f47a15194dcb53a88dc128ee81c6bd1fa6dde591eefa7f63448b26b0dda",
+      "member_schema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "name": "vllm_load",
+      "needs": [
+        "vllm_load"
+      ],
+      "params_schema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "title": "vLLM load",
+      "uses_weight": false
+    },
+    {
+      "description": "Split requests by member weight.",
+      "digest": "6928ff6f92e3141771829fd2a945ac725c4637dd1e732d603d7f05a698f4c572",
+      "member_schema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "name": "weighted",
+      "needs": [],
+      "params_schema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "title": "Weighted",
+      "uses_weight": true
+    }
+  ]
+}

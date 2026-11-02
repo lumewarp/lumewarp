@@ -32,20 +32,42 @@ class GatewayMessage(_message.Message):
     def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., ack: _Optional[_Union[Ack, _Mapping]] = ..., nack: _Optional[_Union[Nack, _Mapping]] = ...) -> None: ...
 
 class Hello(_message.Message):
-    __slots__ = ("gateway_id", "have_version", "gateway_version", "supported_capabilities", "scope", "have_digest")
+    __slots__ = ("gateway_id", "have_version", "gateway_version", "supported_capabilities", "scope", "have_digest", "strategies")
     GATEWAY_ID_FIELD_NUMBER: _ClassVar[int]
     HAVE_VERSION_FIELD_NUMBER: _ClassVar[int]
     GATEWAY_VERSION_FIELD_NUMBER: _ClassVar[int]
     SUPPORTED_CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
     SCOPE_FIELD_NUMBER: _ClassVar[int]
     HAVE_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    STRATEGIES_FIELD_NUMBER: _ClassVar[int]
     gateway_id: str
     have_version: int
     gateway_version: str
     supported_capabilities: _containers.RepeatedScalarFieldContainer[str]
     scope: str
     have_digest: bytes
-    def __init__(self, gateway_id: _Optional[str] = ..., have_version: _Optional[int] = ..., gateway_version: _Optional[str] = ..., supported_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ..., have_digest: _Optional[bytes] = ...) -> None: ...
+    strategies: _containers.RepeatedCompositeFieldContainer[StrategyDescriptor]
+    def __init__(self, gateway_id: _Optional[str] = ..., have_version: _Optional[int] = ..., gateway_version: _Optional[str] = ..., supported_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ..., have_digest: _Optional[bytes] = ..., strategies: _Optional[_Iterable[_Union[StrategyDescriptor, _Mapping]]] = ...) -> None: ...
+
+class StrategyDescriptor(_message.Message):
+    __slots__ = ("name", "title", "description", "uses_weight", "needs", "params_schema_json", "member_schema_json", "digest")
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    TITLE_FIELD_NUMBER: _ClassVar[int]
+    DESCRIPTION_FIELD_NUMBER: _ClassVar[int]
+    USES_WEIGHT_FIELD_NUMBER: _ClassVar[int]
+    NEEDS_FIELD_NUMBER: _ClassVar[int]
+    PARAMS_SCHEMA_JSON_FIELD_NUMBER: _ClassVar[int]
+    MEMBER_SCHEMA_JSON_FIELD_NUMBER: _ClassVar[int]
+    DIGEST_FIELD_NUMBER: _ClassVar[int]
+    name: str
+    title: str
+    description: str
+    uses_weight: bool
+    needs: _containers.RepeatedScalarFieldContainer[str]
+    params_schema_json: str
+    member_schema_json: str
+    digest: str
+    def __init__(self, name: _Optional[str] = ..., title: _Optional[str] = ..., description: _Optional[str] = ..., uses_weight: _Optional[bool] = ..., needs: _Optional[_Iterable[str]] = ..., params_schema_json: _Optional[str] = ..., member_schema_json: _Optional[str] = ..., digest: _Optional[str] = ...) -> None: ...
 
 class Ack(_message.Message):
     __slots__ = ("version",)

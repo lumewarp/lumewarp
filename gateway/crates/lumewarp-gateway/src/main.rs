@@ -65,17 +65,28 @@ pub(crate) mod test_alloc {
     }
 }
 
+// A strategy crate must be named to be linked; its `register!` does the rest.
+#[cfg(feature = "strategy-priority-failover")]
+use lumewarp_strategy_priority_failover as _;
+
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use arc_swap::ArcSwapOption;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use lumewarp_config::{AuthMode, Config, LocalSettings};
 use sha2::{Digest, Sha256};
 
 #[derive(Parser)]
-#[command(name = "lumewarp", version, about = "Lumewarp LLM gateway")]
+#[command(
+    name = "lumewarp",
+    version,
+    about = "Lumewarp LLM gateway",
+    subcommand_negates_reqs = true
+)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
     /// Standalone YAML config.
     #[arg(
         long,
@@ -105,6 +116,28 @@ struct Args {
     local_config: Option<PathBuf>,
 }
 
+#[derive(Subcommand)]
+enum Command {
+    /// List the routing strategies compiled into this binary.
+    Strategies {
+        /// Print the manifest as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn list_strategies(json: bool) -> anyhow::Result<()> {
+    let manifest = lumewarp_router_api::manifest()?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&manifest)?);
+    } else {
+        for d in lumewarp_router_api::descriptors() {
+            println!("{}\t{}\t{}", d.name, d.title, d.description);
+        }
+    }
+    Ok(())
+}
+
 /// Standalone mode: the YAML is the whole configuration.
 fn standalone(
     path: &std::path::Path,
@@ -130,8 +163,11 @@ fn standalone(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let telemetry = tokio::task::spawn_blocking(telemetry::init).await??;
     let args = Args::parse();
+    if let Some(Command::Strategies { json }) = args.command {
+        return list_strategies(json);
+    }
+    let telemetry = tokio::task::spawn_blocking(telemetry::init).await??;
     let mut stream = None;
     let mut reporter = None;
     let (settings, snapshot, runtime) = match (&args.config, &args.control_plane) {

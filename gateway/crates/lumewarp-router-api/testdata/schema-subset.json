@@ -1,0 +1,36 @@
+{
+  "inside": [
+    {"type": "object", "additionalProperties": false},
+    {"type": "object", "description": "Root text.", "properties": {"n": {"type": "integer", "title": "N", "description": "Count.", "default": 3, "minimum": 0, "maximum": 10}}, "required": ["n"], "additionalProperties": false},
+    {"type": "object", "properties": {"ratio": {"type": "number", "minimum": 0.5}, "on": {"type": "boolean", "default": true}, "name": {"type": "string", "default": "a"}, "mode": {"type": "string", "enum": ["a", "b"]}, "level": {"type": "integer", "enum": [1, 2]}}},
+    {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}, "default": []}, "hdrs": {"type": "array", "items": {"type": "string"}, "x-lumewarp-widget": "header-list"}}},
+    {"type": "object", "properties": {"nested": {"type": "object", "title": "Nested", "properties": {"n": {"type": "integer"}}, "required": ["n"], "additionalProperties": false}}}
+  ],
+  "outside": [
+    {},
+    {"type": "string"},
+    {"type": ["object", "null"]},
+    {"type": "object", "$ref": "http://169.254.169.254/latest"},
+    {"type": "object", "$defs": {}},
+    {"type": "object", "properties": {"a": {"$ref": "http://169.254.169.254/latest"}}},
+    {"type": "object", "properties": {"a": {"type": "integer", "$ref": "#/$defs/x"}}},
+    {"type": "object", "properties": {"a": {"type": "string", "pattern": "^(a+)+$"}}},
+    {"type": "object", "properties": {"a": {"type": "string", "format": "uri"}}},
+    {"type": "object", "properties": {"a": {"type": "array", "items": {"type": "integer"}}}},
+    {"type": "object", "properties": {"a": {"type": "array", "items": {"type": "string", "pattern": "(a|a)*"}}}},
+    {"type": "object", "properties": {"a": {"type": "array"}}},
+    {"type": "object", "properties": {"a": {"type": "object", "properties": {"b": {"type": "object"}}}}},
+    {"type": "object", "properties": {"a": {"anyOf": [{"type": "integer"}, {"type": "string"}]}}},
+    {"type": "object", "properties": {"a": {"type": ["integer", "null"]}}},
+    {"type": "object", "properties": {"a": {"type": "integer", "minimum": "1"}}},
+    {"type": "object", "properties": {"a": {"type": "string", "enum": [1]}}},
+    {"type": "object", "properties": {"a": {"type": "string", "enum": []}}},
+    {"type": "object", "properties": {"a": {"type": "string", "x-lumewarp-widget": "header-list"}}},
+    {"type": "object", "properties": {"a": {"type": "array", "items": {"type": "string"}, "x-lumewarp-widget": "html"}}},
+    {"type": "object", "properties": {"a": true}},
+    {"type": "object", "required": ["missing"]},
+    {"type": "object", "additionalProperties": {"type": "string"}},
+    {"type": "object", "patternProperties": {"^a": {"type": "string"}}},
+    {"type": "object", "if": {"type": "object"}}
+  ]
+}
