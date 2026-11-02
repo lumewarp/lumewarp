@@ -303,13 +303,11 @@ function fold(project, f, node, seen = new Set()) {
       if (c.type !== "MemberExpression") return HOLE;
       const m = memberName(c);
       if (m === "join") {
-        let arr = unwrap(c.object);
-        while (arr.type === "CallExpression" && unwrap(arr.callee).type === "MemberExpression" && memberName(unwrap(arr.callee)) === "filter") arr = unwrap(unwrap(arr.callee).object);
-        const list = arr.type === "ArrayExpression" ? arr : null;
+        const array = joinArray(project, f, c.object, seen);
+        if (!array) return HOLE;
         const sepArg = node.arguments[0];
         const sep = sepArg ? fold(project, f, sepArg, seen) : ",";
-        if (!list) return HOLE;
-        return list.elements.map((e) => (e && e.type !== "SpreadElement" ? fold(project, f, e, seen) : HOLE)).join(sep);
+        return array.elements.map((e) => (e && e.type !== "SpreadElement" ? fold(project, array.file, e, seen) : HOLE)).join(sep);
       }
       if (m === "concat") return fold(project, f, c.object, seen) + node.arguments.map((a) => fold(project, f, a, seen)).join("");
       if (m === "trim" || m === "trimStart" || m === "trimEnd" || m === "toString") return fold(project, f, c.object, seen);
@@ -324,6 +322,39 @@ function rootIdentifier(node) {
   let n = unwrap(node);
   while (n && (n.type === "MemberExpression" || n.type === "OptionalMemberExpression")) n = unwrap(n.object);
   return n && n.type === "Identifier" ? n : null;
+}
+
+/** A `join` receiver may be behind one or more `filter(...)` calls; nothing else is stripped, since it would
+ * change which elements take part. */
+function stripFilters(node) {
+  let expr = unwrap(node);
+  while (expr && expr.type === "CallExpression" && unwrap(expr.callee).type === "MemberExpression" && memberName(unwrap(expr.callee)) === "filter") expr = unwrap(unwrap(expr.callee).object);
+  return expr;
+}
+
+/**
+ * The array a `join` receiver stands for: an array literal, or a constant array reached through other modules,
+ * possibly behind `filter(...)` calls. Returns its element expressions and the file they are written in, or null
+ * when the receiver cannot be decided (a parameter, a function call, a cycle).
+ */
+function joinArray(project, f, receiver, seen = new Set()) {
+  const expr = stripFilters(receiver);
+  if (!expr) return null;
+  if (expr.type === "ArrayExpression") return { file: f, elements: expr.elements };
+  if (expr.type !== "Identifier" && expr.type !== "MemberExpression" && expr.type !== "OptionalMemberExpression") return null;
+  const { hits } = resolveRef(project, f, expr);
+  if (hits.length !== 1 || hits[0].inits.length !== 1) return null;
+  const key = `${hits[0].file.rel}#${hits[0].name}`;
+  if (seen.has(key)) return null;
+  let init = unwrap(hits[0].inits[0]);
+  // obj.parts of a constant object: that property's value
+  if (expr.type === "MemberExpression" && init.type === "ObjectExpression") {
+    const want = memberName(expr);
+    const prop = init.properties.find((p) => p.type === "ObjectProperty" && propName(p) === want);
+    if (!want || !prop) return null;
+    init = unwrap(prop.value);
+  }
+  return joinArray(project, hits[0].file, init, new Set(seen).add(key));
 }
 
 /**
@@ -414,6 +445,9 @@ function collectClass(project, f, node, mode, out, seen) {
       if (callee.type === "MemberExpression" && ["join", "concat"].includes(memberName(callee) ?? "")) out.texts.push({ text: fold(project, f, node), loc: node.loc, file: f });
       // member chain pass-through: [...].filter(Boolean).join(" ")
       if (callee.type === "MemberExpression" && !callee.computed && callee.property.type === "Identifier" && PASS_THROUGH_METHODS.has(callee.property.name)) {
+        // A join over a receiver that is not a known array builds a class string that cannot be judged: report it
+        // rather than treating the parts as if they were the whole.
+        if (callee.property.name === "join" && !joinArray(project, f, callee.object)) out.dynamic.push({ loc: node.loc, file: f });
         collectClass(project, f, callee.object, mode, out, seen);
         for (const a of node.arguments) collectClass(project, f, a, mode, out, seen);
         return;
@@ -488,7 +522,13 @@ export function scanFile(project, f) {
   const checkClasses = (node, mode) => {
     const out = { texts: [], dynamic: [] };
     collectClass(project, f, node, mode, out, new Set());
-    for (const d of out.dynamic) if (d.file === f) add("dynamic-class", d.loc, "class expression cannot be decided statically");
+    for (const d of out.dynamic) {
+      // A constant followed into another module can be undecidable there, but the risk is at the class expression
+      // that consumes it: report that, with the location it came from, instead of dropping it because the two
+      // files differ.
+      if (d.file === f) add("dynamic-class", d.loc, "class expression cannot be decided statically");
+      else add("dynamic-class", node.loc, `class expression cannot be decided statically (from ${d.file.rel}:${d.loc?.start.line ?? 0})`);
+    }
     for (const t of out.texts) {
       for (const { token, partial } of classTokens(t.text)) {
         if (!partial && LEGACY_CLASSES.has(token)) add("legacy-class", f === t.file ? t.loc : node.loc, `"${token}"${t.file === f ? "" : ` (from ${t.file.rel})`}`);

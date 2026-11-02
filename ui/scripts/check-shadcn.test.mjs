@@ -39,6 +39,28 @@ const clean = (files) => {
   assert.deepEqual(r.violations, [], JSON.stringify(r.violations));
 };
 
+/** A throwaway copy of the checker (it finds @babel/parser through the symlinked node_modules) plus `files`. */
+function cliProject(files, { allowlist } = {}) {
+  const root = mkdtempSync(join(tmpdir(), "check-shadcn-cli-"));
+  dirs.push(root);
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  copyFileSync(join(scriptsDir, "check-shadcn.mjs"), join(root, "scripts/check-shadcn.mjs"));
+  symlinkSync(join(scriptsDir, "..", "node_modules"), join(root, "node_modules"));
+  for (const [rel, code] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, rel)), { recursive: true });
+    writeFileSync(join(root, rel), code);
+  }
+  if (allowlist) writeFileSync(join(root, "scripts/check-shadcn.allowlist.json"), JSON.stringify(allowlist));
+  return { root, script: join(root, "scripts/check-shadcn.mjs") };
+}
+
+/** Run the CLI on a throwaway copy of the project: the same entry point `pnpm check` runs on the real tree. */
+function runCli(files, { allowlist, args = [] } = {}) {
+  const { root, script } = cliProject(files, { allowlist });
+  const result = spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
+  return { ...result, root, script };
+}
+
 describe("legacy classes: each way to write one is caught", () => {
   test("className string", () => flags(page(`<div className="btn" />`), "legacy-class", '"btn"'));
   test("className among other tokens, with a variant prefix", () => flags(page(`<div className="flex md:hover:btn-sm gap-2" />`), "legacy-class", '"btn-sm"'));
@@ -83,6 +105,23 @@ describe("legacy classes: a class built from pieces is judged by what it builds"
   test('"b" + "tn"', () => flags(page(`<div className={"b" + "tn"} />`), "legacy-class", '"btn"'));
   test("sum with a space-free tail", () => flags(page(`<div className={"flex " + "pa" + "ger"} />`), "legacy-class", '"pager"'));
   test('["b", "tn"].join("")', () => flags(page(`<div className={["b", "tn"].join("")} />`), "legacy-class", '"btn"'));
+  test('parts.join("") with a local constant array', () => {
+    const files = page(`<div className={parts.join("")} />`, `const parts = ["b", "tn"];`);
+    flags(files, "legacy-class", '"btn"');
+    const cli = runCli(files);
+    assert.equal(cli.status, 1, cli.stderr);
+    assert.match(cli.stderr, /src\/pages\/P\.tsx:2\s+legacy-class\s+"btn"/);
+  });
+  test('parts.join("") with an imported constant array', () => {
+    const files = { "src/lib/styles.ts": `export const parts = ["b", "tn"];`, ...page(`<div className={parts.join("")} />`, `import { parts } from "@/lib/styles";`) };
+    flags(files, "legacy-class", '"btn"');
+    const cli = runCli(files);
+    assert.equal(cli.status, 1, cli.stderr);
+    assert.match(cli.stderr, /src\/pages\/P\.tsx:2\s+legacy-class\s+"btn"/);
+  });
+  test('the join separator is kept: parts.join(" ") is not btn', () => clean(page(`<div className={parts.join(" ")} />`, `const parts = ["b", "tn"];`)));
+  test("a join receiver that cannot be resolved is dynamic, never safe", () => flags(page(`<div className={parts.join("")} />`, `declare const parts: string[];`), "dynamic-class"));
+  test("a join over a function call is dynamic, not a crash", () => flags(page(`<div className={makeParts().join("")} />`), "dynamic-class"));
   test("join after filter(Boolean)", () => flags(page(`<div className={["b", cond && "tn"].filter(Boolean).join("")} />`), "legacy-class", "btn"));
   test('"b".concat("tn")', () => flags(page(`<div className={"b".concat("tn")} />`), "legacy-class", '"btn"'));
   test("template with a constant part", () => flags(page("<div className={`b${\"tn\"}`} />"), "legacy-class", '"btn"'));
@@ -135,6 +174,18 @@ describe("legacy classes: through exports, imports and re-exports", () => {
     clean({ "src/lib/s.ts": `const OK = "flex gap-2";\nexport { OK as row };\nexport default OK;`, ...consumer(`import X from "@/lib/s";`) }));
   test("the checked file is not blamed for a dynamic import elsewhere", () =>
     clean({ "src/lib/s.ts": `export function cls() { return "x"; }`, "src/pages/Q.tsx": `export const Q = () => <i />;` }));
+  test("a call in another module's constant is dynamic at the consumer, with its source", () => {
+    const files = {
+      "src/lib/styles.ts": `function makeClass() { return "btn"; }\nexport const BOX = makeClass();`,
+      ...page(`<div className={BOX} />`, `import { BOX } from "@/lib/styles";`),
+    };
+    const r = run(files);
+    assert.deepEqual(r.violations.map((v) => [v.file, v.rule]), [["src/pages/P.tsx", "dynamic-class"]]);
+    assert.match(r.violations[0].detail, /from src\/lib\/styles\.ts:2/);
+    const cli = runCli(files);
+    assert.equal(cli.status, 1, cli.stderr);
+    assert.match(cli.stderr, /src\/pages\/P\.tsx:2\s+dynamic-class\s+class expression cannot be decided statically \(from src\/lib\/styles\.ts:2\)/);
+  });
 });
 
 describe("legacy classes: look-alikes are not flagged", () => {
@@ -198,36 +249,22 @@ describe("css", () => {
 
 describe("no allowlist: any finding fails", () => {
   const page = (body) => ({ "src/pages/P.tsx": `export function P() { return ${body}; }\n` });
-  /** A throwaway copy of the checker (it finds @babel/parser through the symlinked node_modules) plus `files`. */
-  const cli = (files, allowlist) => {
-    const root = mkdtempSync(join(tmpdir(), "check-shadcn-cli-"));
-    dirs.push(root);
-    mkdirSync(join(root, "scripts"), { recursive: true });
-    copyFileSync(join(scriptsDir, "check-shadcn.mjs"), join(root, "scripts/check-shadcn.mjs"));
-    symlinkSync(join(scriptsDir, "..", "node_modules"), join(root, "node_modules"));
-    for (const [rel, code] of Object.entries(files)) {
-      mkdirSync(dirname(join(root, rel)), { recursive: true });
-      writeFileSync(join(root, rel), code);
-    }
-    if (allowlist) writeFileSync(join(root, "scripts/check-shadcn.allowlist.json"), JSON.stringify(allowlist));
-    return { root, script: join(root, "scripts/check-shadcn.mjs") };
-  };
   test("a legacy class fails the check", () => assert.deepEqual(rulesOf(run(page(`<div className="btn" />`))), ["legacy-class"]));
   test("a native element fails the check", () => assert.deepEqual(rulesOf(run(page(`<button />`))), ["native-element"]));
   test("the CLI fails on a finding, and no config file can allow it", () => {
-    const { root, script } = cli(page(`<div className="btn" />`), { allowlist: { "src/pages/P.tsx": { "legacy-class": 9 } } });
-    const failed = spawnSync(process.execPath, [script], { encoding: "utf8" });
+    const files = page(`<div className="btn" />`);
+    const allowlist = { "src/pages/P.tsx": { "legacy-class": 9 } };
+    const failed = runCli(files, { allowlist });
     assert.equal(failed.status, 1);
     assert.match(failed.stderr, /src\/pages\/P\.tsx:1\s+legacy-class\s+"btn"/);
     assert.match(failed.stderr, /every finding fails, there is no allowlist/);
     // --write-allowlist and --report are gone: the flags are not a way to pass, and nothing is written.
-    const flag = spawnSync(process.execPath, [script, "--write-allowlist", "--report"], { encoding: "utf8" });
+    const flag = runCli(files, { allowlist, args: ["--write-allowlist", "--report"] });
     assert.equal(flag.status, 1);
-    assert.deepEqual(readdirSync(join(root, "scripts")), ["check-shadcn.allowlist.json", "check-shadcn.mjs"]);
+    assert.deepEqual(readdirSync(join(flag.root, "scripts")), ["check-shadcn.allowlist.json", "check-shadcn.mjs"]);
   });
   test("the CLI passes a clean project", () => {
-    const { script } = cli(page(`<Button />`));
-    const ok = spawnSync(process.execPath, [script], { encoding: "utf8" });
+    const ok = runCli(page(`<Button />`));
     assert.equal(ok.status, 0, ok.stderr);
     assert.equal(ok.stdout.trim(), "check-shadcn: ok");
   });
