@@ -335,7 +335,7 @@ def test_uri_contract_snapshot_is_accepted_by_gateway(stack):
                 "name": f"uri-{i}",
                 "kind": "openai_compatible",
                 "base_url": url,
-                "metrics_url": url + "?model=a%2Fb&v=1",
+                "metrics_url": url + "/metrics",
             },
         )
     for field in ("base_url", "metrics_url"):
@@ -344,6 +344,7 @@ def test_uri_contract_snapshot_is_accepted_by_gateway(stack):
                 "http://exam%2fple.com/v1",
                 "http://example.com:abc/v1",
                 "http://u/bad<path",
+                "http://example.com/v1?token=secret",
             )
         ):
             response = stack.api(
