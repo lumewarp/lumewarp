@@ -373,12 +373,16 @@ test("long lists at 390 px: a 65 entry Combobox in a dialog, a 64 entry Select a
   await pick(d, "Upstream", lngs[lngs.length - 1]);
   await expect(await control(d, "Upstream")).toHaveText(lngs[lngs.length - 1]);
   // The list scrolls with the wheel too, inside the dialog's scroll lock.
-  const { popup } = await openPopup(page, d, "Upstream");
+  const { trigger, popup } = await openPopup(page, d, "Upstream");
   const scroller = popup.locator("[cmdk-list]");
   await scroller.hover();
   await page.mouse.wheel(0, 400);
   await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
   await page.keyboard.press("Escape");
+  // The first Esc closes only the popover; the dialog stays until the second.
+  await expect(popup).toHaveCount(0);
+  await expect(d).toHaveCount(1);
+  await expect(trigger).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(d).toHaveCount(0);
 
