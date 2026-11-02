@@ -4,7 +4,8 @@ Revision ID: 0011
 Revises: 0010
 
 0007/0008 already renamed requested/model/endpoint. 0010 merged simple routes
-into models; map those legacy serving names via requested where necessary.
+into models; resolve those legacy serving ids via requested where necessary,
+without rewriting the recorded serving-name strings.
 Upstream provenance cannot be reconstructed reliably, so old rows retain empty
 strings rather than inventing an upstream from today's catalog.
 """
@@ -60,8 +61,7 @@ def upgrade() -> None:
         bind.execute(
             sa.text("""
             UPDATE usage_events e SET
-              model = CASE WHEN e.outcome = 'rejected' THEN ''
-                WHEN called.kind = 'model' AND e.model <> '' THEN called.name ELSE e.model END,
+              model = CASE WHEN e.outcome = 'rejected' THEN '' ELSE e.model END,
               router = CASE WHEN called.kind = 'router' AND e.model <> ''
                 AND e.outcome <> 'rejected' THEN called.name ELSE '' END
             FROM (SELECT id, requested FROM usage_events WHERE id > :after AND id <= :high) batch
@@ -73,6 +73,14 @@ def upgrade() -> None:
         # Resolve each kind separately. Historical intervals use the preceding
         # rename, not simply the most recent matching spelling.
         for kind in ("model", "router"):
+            match = f"e.{kind} = c.name"
+            if kind == "model":
+                # A simple legacy route may have absorbed its deployment. Keep
+                # the old deployment spelling, but attach the merged model id.
+                match = """(e.model = c.name OR (e.requested = c.name AND NOT EXISTS (
+                    SELECT 1 FROM candidates original WHERE original.name = e.model
+                      AND e.ts >= original.since AND e.ts < original.until
+                )))"""
             bind.execute(
                 sa.text(f"""
                 WITH history AS (
@@ -91,7 +99,7 @@ def upgrade() -> None:
                 )
                 UPDATE usage_events e SET {kind}_id = c.id
                 FROM candidates c WHERE e.id > :after AND e.id <= :high
-                  AND e.{kind} = c.name AND e.{kind} <> '' AND e.model <> ''
+                  AND {match} AND e.{kind} <> '' AND e.model <> ''
                   AND e.ts >= c.since AND e.ts < c.until
             """),
                 {"after": after, "high": high},

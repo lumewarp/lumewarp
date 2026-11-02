@@ -230,3 +230,31 @@ async def test_catalog_resolution_is_two_queries_for_a_batch(session):
     finally:
         sa_event.remove(engine, "before_cursor_execute", capture)
     assert len(statements) == 2
+
+
+async def test_full_batch_of_distinct_provenance_names_stays_under_bind_limit(session):
+    from lumewarp_control_plane.settings import Settings
+
+    key = await key_for(session)
+    count = Settings().max_usage_batch_events
+    events = [
+        wire(key, model=f"model-{i}", alias=f"alias-{i}", router=f"router-{i}")
+        for i in range(count)
+    ]
+    assert await ingest(session, "gateway", events) == count
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("model", "m" * 401),
+        ("alias", "a" * 401),
+        ("router", "r" * 401),
+        ("upstream", "u" * 201),
+        ("upstream_model", "u" * 401),
+        ("alias", "bad\x00name"),
+    ],
+)
+async def test_invalid_provenance_is_skipped_without_losing_the_batch(session, field, value):
+    key = await key_for(session)
+    assert await ingest(session, "gateway", [wire(key), wire(key, **{field: value})]) == 1

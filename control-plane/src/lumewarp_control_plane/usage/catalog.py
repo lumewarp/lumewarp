@@ -10,7 +10,8 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import String, Uuid, any_, bindparam, func, or_, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane.models import (
@@ -30,7 +31,12 @@ async def resolve_catalog_ids(session: AsyncSession, events: Sequence[dict[str, 
             event[f"{kind.value}_id"] = None
     if not names:
         return
-    history_ids = select(CatalogNameHistory.name_id).where(CatalogNameHistory.old_name.in_(names))
+    # Bind arrays rather than expanding IN lists: a 10k batch may have 30k
+    # distinct names, and repeated lists would exceed asyncpg's bind limit.
+    name_array = bindparam("usage_names", list(names), type_=ARRAY(String))
+    history_ids = select(CatalogNameHistory.name_id).where(
+        CatalogNameHistory.old_name == any_(name_array)
+    )
     # Include current owners AND items that used to own one of these names. All
     # three typed tables are joined once, never one lookup per usage event.
     rows = (
@@ -41,7 +47,7 @@ async def resolve_catalog_ids(session: AsyncSession, events: Sequence[dict[str, 
             .outerjoin(Model, Model.name_id == CatalogName.id)
             .outerjoin(Alias, Alias.name_id == CatalogName.id)
             .outerjoin(Router, Router.name_id == CatalogName.id)
-            .where(or_(CatalogName.name.in_(names), CatalogName.id.in_(history_ids)))
+            .where(or_(CatalogName.name == any_(name_array), CatalogName.id.in_(history_ids)))
         )
     ).all()
     live = {row.id: (row, created) for row, created in rows}
@@ -49,7 +55,11 @@ async def resolve_catalog_ids(session: AsyncSession, events: Sequence[dict[str, 
         await session.scalars(
             select(CatalogNameHistory)
             .where(
-                or_(CatalogNameHistory.name_id.in_(live), CatalogNameHistory.old_name.in_(names))
+                or_(
+                    CatalogNameHistory.name_id
+                    == any_(bindparam("usage_ids", list(live), type_=ARRAY(Uuid))),
+                    CatalogNameHistory.old_name == any_(name_array),
+                )
             )
             .order_by(CatalogNameHistory.renamed_at)
         )

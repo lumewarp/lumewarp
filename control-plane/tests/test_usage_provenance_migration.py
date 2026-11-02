@@ -50,7 +50,7 @@ async def test_populated_0010_usage_upgrade_and_downgrade():
                 )
             ).all()
             assert rows == [
-                ("merged", "merged", "", ids["model"], None, None, "", 0, False, 123),
+                ("merged", "old-deployment", "", ids["model"], None, None, "", 0, False, 123),
                 ("pool", "merged", "pool", ids["model"], ids["router"], None, "", 0, False, 123),
                 ("unknown", "", "", None, None, None, "", 0, False, 123),
             ]
