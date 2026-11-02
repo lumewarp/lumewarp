@@ -48,7 +48,14 @@ export async function unwrap<T>(p: Promise<Result<T>>): Promise<T> {
     await api.session().catch(() => undefined);
   }
   const message = env?.message ?? `HTTP ${response.status}`;
-  throw new ApiError(response.status, message, env?.code, response.status === 422 ? fieldOf(message) : undefined);
+  const retryAfter = Number(response.headers.get("Retry-After"));
+  throw new ApiError(
+    response.status,
+    message,
+    env?.code,
+    response.status === 422 ? fieldOf(message) : undefined,
+    Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
+  );
 }
 
 interface Page<T> {
@@ -112,7 +119,8 @@ export const api = {
   ownKeys: () => listAll((c) => unwrap(client.GET("/api/v1/users/me/keys", { params: { query: q(c) } }))),
   updateKey: (id: string, body: Schemas["KeyUpdate"]) => unwrap(client.PATCH("/api/v1/keys/{key_id}", { params: { path: { key_id: id } }, body })),
   revokeKey: (id: string) => unwrap(client.POST("/api/v1/keys/{key_id}/revoke", { params: { path: { key_id: id } } })),
-  rotateKey: (id: string) => unwrap(client.POST("/api/v1/keys/{key_id}/rotate", { params: { path: { key_id: id } } })),
+  rotateKey: (id: string, body: Schemas["KeyRotate"] = { grace_seconds: 0 }) =>
+    unwrap(client.POST("/api/v1/keys/{key_id}/rotate", { params: { path: { key_id: id } }, body })),
 
   upstreams: () => listAll((c) => unwrap(client.GET("/api/v1/upstreams", { params: { query: q(c) } }))),
   createUpstream: (body: Schemas["UpstreamCreate"]) => unwrap(client.POST("/api/v1/upstreams", { body })),

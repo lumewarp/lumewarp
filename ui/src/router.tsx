@@ -1,7 +1,9 @@
-import { createRootRoute, createRoute, createRouter, Outlet, redirect } from "@tanstack/react-router";
+import { createRootRoute, createRoute, createRouter, Navigate, Outlet, redirect } from "@tanstack/react-router";
 import { api } from "./api";
 import { getCsrfToken } from "./auth";
 import { Layout } from "./components/Layout";
+import { Alert, AlertDescription } from "./components/ui/alert";
+import { useCan, useMe, type Access } from "./hooks";
 import { Aliases } from "./pages/Aliases";
 import { Audit } from "./pages/Audit";
 import { Config } from "./pages/Config";
@@ -9,7 +11,9 @@ import { Models } from "./pages/Models";
 import { Gateways } from "./pages/Gateways";
 import { Keys } from "./pages/Keys";
 import { Login } from "./pages/Login";
+import { MyKeys } from "./pages/MyKeys";
 import { Overview } from "./pages/Overview";
+import { PageLoading, RequireAccess } from "./pages/Access";
 import { Routers } from "./pages/Routers";
 import { Settings } from "./pages/Settings";
 import { TeamDetail } from "./pages/TeamDetail";
@@ -40,7 +44,39 @@ const appRoute = createRoute({
   component: Layout,
 });
 
-const page = <P extends string>(path: P, component: () => React.ReactNode) => createRoute({ getParentRoute: () => appRoute, path, component });
+/** Overview is the home of an installation admin or a team admin; everyone else's home is My keys. */
+function Home() {
+  const me = useMe();
+  const perms = useCan();
+  if (me.isPending) return <PageLoading />;
+  if (me.error) {
+    return (
+      <Alert variant="destructive" data-testid="state-error">
+        <AlertDescription>{me.error.message}</AlertDescription>
+      </Alert>
+    );
+  }
+  if (!perms.isInstallationAdmin && !perms.isTeamAdmin) return <Navigate to="/my-keys" replace />;
+  return <Overview />;
+}
+
+function guarded(Page: () => React.ReactNode, need: Access) {
+  function GuardedPage() {
+    return (
+      <RequireAccess need={need}>
+        <Page />
+      </RequireAccess>
+    );
+  }
+  return GuardedPage;
+}
+
+const page = <P extends string>(path: P, component: () => React.ReactNode, need: Access = "member") =>
+  createRoute({
+    getParentRoute: () => appRoute,
+    path,
+    component: need === "member" ? component : guarded(component, need),
+  });
 const teamDetailRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/teams/$teamId",
@@ -50,19 +86,20 @@ const teamDetailRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   loginRoute,
   appRoute.addChildren([
-    page("/", Overview),
-    page("/teams", Teams),
+    page("/", Home),
+    page("/my-keys", MyKeys),
+    page("/teams", Teams, "teamAdmin"),
     teamDetailRoute,
-    page("/users", Users),
-    page("/keys", Keys),
-    page("/routers", Routers),
-    page("/models", Models),
-    page("/aliases", Aliases),
-    page("/upstreams", Upstreams),
+    page("/users", Users, "installationAdmin"),
+    page("/keys", Keys, "teamAdmin"),
+    page("/routers", Routers, "installationAdmin"),
+    page("/models", Models, "installationAdmin"),
+    page("/aliases", Aliases, "installationAdmin"),
+    page("/upstreams", Upstreams, "installationAdmin"),
     page("/usage", Usage),
-    page("/audit", Audit),
-    page("/gateways", Gateways),
-    page("/config", Config),
+    page("/audit", Audit, "teamAdmin"),
+    page("/gateways", Gateways, "installationAdmin"),
+    page("/config", Config, "installationAdmin"),
     page("/settings", Settings),
   ]),
 ]);

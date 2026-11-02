@@ -180,6 +180,9 @@ export interface paths {
         /**
          * Rotate Key
          * @description Replace the secret in place: same key_id, so usage history continues.
+         *
+         *     With `grace_seconds` > 0 the replaced hash stays valid until its own expiry. Only one
+         *     previous hash is kept: rotating twice inside the grace drops the older one.
          */
         post: operations["rotateKey"];
         delete?: never;
@@ -1061,6 +1064,8 @@ export interface components {
             suspended_reason: string | null;
             /** Expires At */
             expires_at: string | null;
+            /** Previous Key Expires At */
+            previous_key_expires_at: string | null;
             /** Revoked At */
             revoked_at: string | null;
             /** Created By User Id */
@@ -1083,6 +1088,17 @@ export interface components {
          * @enum {string}
          */
         KeyOwnerKind: "user" | "service_account";
+        /**
+         * KeyRotate
+         * @description Optional body of `rotateKey`. Grace 0 replaces the secret immediately.
+         */
+        KeyRotate: {
+            /**
+             * Grace Seconds
+             * @default 0
+             */
+            grace_seconds: number;
+        };
         /** KeyUpdate */
         KeyUpdate: {
             /** Name */
@@ -1090,6 +1106,56 @@ export interface components {
             /** Expires At */
             expires_at?: string | null;
             lifecycle?: components["schemas"]["KeyLifecycle"] | null;
+        };
+        /**
+         * MeBudgetOut
+         * @description Per-scope monthly budgets and spend for the caller's key in one team.
+         */
+        MeBudgetOut: {
+            /** Team Budget Nano Usd */
+            team_budget_nano_usd: number | null;
+            /** Team Spent Nano Usd */
+            team_spent_nano_usd: number;
+            /** Member Budget Nano Usd */
+            member_budget_nano_usd: number | null;
+            /** Member Spent Nano Usd */
+            member_spent_nano_usd: number;
+            /** Remaining Nano Usd */
+            remaining_nano_usd: number | null;
+            /**
+             * Window Start
+             * Format: date-time
+             */
+            window_start: string;
+            /**
+             * Window End
+             * Format: date-time
+             */
+            window_end: string;
+        };
+        /**
+         * MeKeyLimitsOut
+         * @description The team's member-key limits and the caller's current usage of the count.
+         */
+        MeKeyLimitsOut: {
+            /** Max Keys Per Member */
+            max_keys_per_member: number | null;
+            /** Max Member Key Lifetime Seconds */
+            max_member_key_lifetime_seconds: number | null;
+            /** Key Count */
+            key_count: number;
+        };
+        /**
+         * MeLimitsOut
+         * @description Effective rate limits for a key the caller could create in this team.
+         */
+        MeLimitsOut: {
+            /** Rpm Limit */
+            rpm_limit: number | null;
+            /** Tpm Limit */
+            tpm_limit: number | null;
+            /** Max Parallel */
+            max_parallel: number | null;
         };
         /** MeOut */
         MeOut: {
@@ -1123,6 +1189,13 @@ export interface components {
             /** Team Name */
             team_name: string;
             role: components["schemas"]["TeamRole"];
+            /** Models */
+            models: string[];
+            /** All Models */
+            all_models: boolean;
+            limits: components["schemas"]["MeLimitsOut"];
+            key_limits: components["schemas"]["MeKeyLimitsOut"];
+            budget: components["schemas"]["MeBudgetOut"];
         };
         /** MemberCreate */
         MemberCreate: {
@@ -1803,6 +1876,10 @@ export interface components {
         StreamUsageMode: "include_usage" | "passthrough";
         /** TeamCreate */
         TeamCreate: {
+            /** Max Keys Per Member */
+            max_keys_per_member?: number | null;
+            /** Max Member Key Lifetime Seconds */
+            max_member_key_lifetime_seconds?: number | null;
             model_access?: components["schemas"]["ModelAccess"] | null;
             /** Allowed Models */
             allowed_models?: string[] | null;
@@ -1821,6 +1898,10 @@ export interface components {
         };
         /** TeamOut */
         TeamOut: {
+            /** Max Keys Per Member */
+            max_keys_per_member?: number | null;
+            /** Max Member Key Lifetime Seconds */
+            max_member_key_lifetime_seconds?: number | null;
             model_access: components["schemas"]["ModelAccess"];
             /** Allowed Models */
             allowed_models: string[];
@@ -1859,6 +1940,10 @@ export interface components {
         TeamRole: "admin" | "member";
         /** TeamUpdate */
         TeamUpdate: {
+            /** Max Keys Per Member */
+            max_keys_per_member?: number | null;
+            /** Max Member Key Lifetime Seconds */
+            max_member_key_lifetime_seconds?: number | null;
             model_access?: components["schemas"]["ModelAccess"] | null;
             /** Allowed Models */
             allowed_models?: string[] | null;
@@ -3541,7 +3626,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["KeyRotate"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

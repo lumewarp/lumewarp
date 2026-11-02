@@ -12,23 +12,25 @@ export function useMe() {
  * disable actions. Purely cosmetic: the server enforces every request.
  */
 export function can(me: Me | undefined) {
-  const isSuper = !!me?.is_admin || me?.kind === "break_glass";
+  const isInstallationAdmin = !!me?.is_admin || me?.kind === "break_glass";
+  const isTeamAdmin = !!me?.teams.some((team) => team.role === "admin");
   const teamRole = (teamId: string) => me?.teams.find((t) => t.team_id === teamId)?.role;
   const canManageKey = (key: Key) =>
-    isSuper ||
+    isInstallationAdmin ||
     teamRole(key.team_id) === "admin" ||
     (teamRole(key.team_id) !== undefined && key.owner_kind === "user" && key.user_id === me?.user_id);
   return {
-    isSuper,
+    isInstallationAdmin,
+    isTeamAdmin,
     teamRole,
-    teamRead: (teamId: string) => isSuper || teamRole(teamId) !== undefined,
-    teamAdmin: (teamId: string) => isSuper || teamRole(teamId) === "admin",
+    teamRead: (teamId: string) => isInstallationAdmin || teamRole(teamId) !== undefined,
+    teamAdmin: (teamId: string) => isInstallationAdmin || teamRole(teamId) === "admin",
     teamMember: (teamId: string) => teamRole(teamId) !== undefined,
     canCreateOwnKey: (teamId: string) => teamRole(teamId) !== undefined,
     canManageKey,
     canResumeKey: (key: Key) =>
       canManageKey(key) &&
-      (isSuper ||
+      (isInstallationAdmin ||
         teamRole(key.team_id) === "admin" ||
         key.suspended_reason === null ||
         key.suspended_reason === "owner" ||
@@ -40,6 +42,18 @@ export function can(me: Me | undefined) {
 export function useCan() {
   const { data } = useMe();
   return can(data);
+}
+
+/** What a route or navigation entry requires; purely cosmetic, the API enforces every request. */
+export type Access = "installationAdmin" | "teamAdmin" | "member";
+
+export function hasAccess(
+  perms: Pick<ReturnType<typeof can>, "isInstallationAdmin" | "isTeamAdmin">,
+  need: Access,
+) {
+  if (need === "member") return true;
+  if (need === "installationAdmin") return perms.isInstallationAdmin;
+  return perms.isInstallationAdmin || perms.isTeamAdmin;
 }
 
 /** Every mutation refreshes all cached lists: what one page changes (names, policies) shows up in others. */
@@ -109,6 +123,8 @@ export function useNames(rows: { id: string; name: string }[] | undefined) {
 export function useRoutersQuery() {
   return useQuery({ queryKey: ["routers"], queryFn: () => api.routers(), retry: false, structuralSharing: false });
 }
+
+export const useOwnKeys = () => useQuery({ queryKey: ["own-keys"], queryFn: () => api.ownKeys() });
 
 export const useModels = () => useQuery({ queryKey: ["models"], queryFn: () => api.models() });
 export const useAliases = () => useQuery({ queryKey: ["aliases"], queryFn: () => api.aliases() });

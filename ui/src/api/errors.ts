@@ -5,6 +5,8 @@ export class ApiError extends Error {
     public code = "error",
     /** Request field a 422 refers to (last segment of the server's `field.path: message`). */
     public field?: string,
+    /** Seconds from a 429 `Retry-After` header, when the server sent one. */
+    public retryAfter?: number,
   ) {
     super(message);
   }

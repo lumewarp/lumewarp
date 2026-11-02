@@ -546,7 +546,7 @@ test("permission picker: team All or Selected, member Inherit or Selected within
   await expect(dialog(page).getByTestId("permission-options")).toContainText("outside the team's scope");
 });
 
-test("My keys shows what a new key can call; viewers get no write controls", async ({ request, browser }) => {
+test("My keys shows what a new key can call; a member cannot open admin pages", async ({ request, browser }) => {
   const up = await upstream(request, "mine-up");
   await model(request, "mine/a", up.id);
   await model(request, "mine/b", up.id);
@@ -558,30 +558,32 @@ test("My keys shows what a new key can call; viewers get no write controls", asy
   const context = await browser.newContext({ baseURL: test.info().project.use.baseURL });
   const member = await context.newPage();
   await context.addCookies([{ name: "lumewarp_session", value: VIEWER, url: test.info().project.use.baseURL! }]);
-  await member.goto("/keys");
-  await member.getByRole("button", { name: "New key" }).click();
-  const d = dialog(member);
-  await pick(d, "Team", "Mine team");
-  const names = d.getByTestId("callable-names");
+  await member.goto("/my-keys");
+  const section = member.getByTestId("team-Mine team");
+  const names = section.getByTestId("callable-models");
   await expect(names).toContainText("mine/b");
   await expect(names).not.toContainText("mine/a"); // the member's own list narrows the team's
-  await expect(names.getByRole("checkbox")).toHaveCount(0); // read-only
-  await expect(names.locator("input")).toHaveCount(0);
+  await section.getByRole("button", { name: "New key" }).click();
+  const d = dialog(member);
+  const dialogNames = d.getByTestId("callable-models");
+  await expect(dialogNames).toContainText("mine/b");
+  await expect(dialogNames).not.toContainText("mine/a");
+  await expect(dialogNames.getByRole("checkbox")).toHaveCount(0); // read-only
+  await expect(dialogNames.locator("input")).toHaveCount(0);
   await shot(member, "my-keys-new-key");
   await d.getByLabel("Name").fill("viewer-key");
   await d.getByRole("button", { name: "Create key" }).click();
-  await expect(d.getByTestId("secret-value")).toBeVisible();
-  await d.getByRole("button", { name: /saved it/ }).click();
+  const secret = member.getByRole("dialog", { name: "API key created" });
+  await expect(secret.getByTestId("secret-value")).toBeVisible();
+  await secret.getByRole("button", { name: /saved it/ }).click();
 
-  // A plain member may read the catalog but not change it: write controls are disabled.
-  for (const [path, button] of [["/models", "New model"], ["/aliases", "New alias"], ["/routers", "New router"]] as const) {
+  // Admin pages are not shown to a plain member, and opening one by URL says so instead of failing.
+  for (const path of ["/models", "/aliases", "/routers", "/upstreams"]) {
     await member.goto(path);
-    await expect(member.getByRole("button", { name: button })).toBeDisabled();
+    await expect(member.getByRole("heading", { name: "You do not have access to this page" })).toBeVisible();
+    await expect(member.getByTestId("state-error")).toHaveCount(0);
   }
-  await member.goto("/models");
-  await member.getByLabel("Search models").fill("mine/a");
-  await expect(member.getByRole("row").filter({ hasText: "mine/a" }).getByRole("button", { name: "Edit" })).toBeDisabled();
-  await expect(member.getByRole("row").filter({ hasText: "mine/a" }).getByRole("button", { name: "Delete" })).toBeDisabled();
+  await expect(member.getByRole("link", { name: "Models", exact: true })).toHaveCount(0);
   await context.close();
 });
 
@@ -731,7 +733,7 @@ test("dark mode and phone width", async ({ page, request }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await signIn(page, request, "/models");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  for (const [path, heading] of [["/models", "Models"], ["/aliases", "Aliases"], ["/routers", "Routers"], ["/usage", "Usage"], ["/keys", "My keys"], ["/config", "Config versions"]] as const) {
+  for (const [path, heading] of [["/models", "Models"], ["/aliases", "Aliases"], ["/routers", "Routers"], ["/usage", "Usage"], ["/keys", "Keys"], ["/config", "Config versions"]] as const) {
     await page.goto(path);
     await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
     await expect(page.locator("body")).toHaveCSS("background-color", /rgb\(\s*(?:[0-3]?\d)\b/); // a dark page

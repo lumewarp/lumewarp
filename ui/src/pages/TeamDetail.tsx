@@ -5,7 +5,7 @@ import { api, ApiError, type Key, type Member, type Schemas, type ServiceAccount
 import { Badge, fmtDate, fmtUsd, KeyBadge, PageHeader, SecretOnce, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { Dialog } from "../components/Dialog";
-import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
+import { FormDialog, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
 import { blankPolicy, Budget, PolicyFields, policyBody, policyFrom, PolicySummary, POLICY_ALIAS, type PolicyValues } from "../components/Policy";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
@@ -16,6 +16,7 @@ import { ComboboxField } from "../components/ui/combobox-field";
 import { DescriptionDetails, DescriptionList, DescriptionTerm } from "../components/ui/description-list";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { useAction, useCan, useMe, useMut } from "../hooks";
+import { fmtLifetime } from "./keyText";
 
 const TABS = [
   { id: "members", label: "Members" },
@@ -123,7 +124,7 @@ function MembersPanel({
   const userDirectory = useQuery({
     queryKey: ["user-directory"],
     queryFn: () => api.users(),
-    enabled: perms.isSuper,
+    enabled: perms.isInstallationAdmin,
   });
   const [editing, setEditing] = useState<Member | "new" | null>(null);
   const [deleting, setDeleting] = useState<Member | null>(null);
@@ -249,13 +250,13 @@ function MembersPanel({
                 }}
                 error={form.errors.email}
                 hint={
-                  perms.isSuper
+                  perms.isInstallationAdmin
                     ? "Enter an existing user's email address, or pick a matching user below."
                     : "Enter the email address of an existing user."
                 }
                 autoFocus
               />
-              {perms.isSuper && (
+              {perms.isInstallationAdmin && (
                 <ComboboxField
                   label="User"
                   value={form.values.user_id}
@@ -643,20 +644,38 @@ function TeamUsage({ team }: { team: Team }) {
   );
 }
 
+type TeamSettingsValues = PolicyValues & {
+  name: string;
+  max_keys_per_member: number | null;
+  max_member_key_lifetime_seconds: number | null;
+};
+
+const teamSettingsFrom = (team: Team): TeamSettingsValues => ({
+  name: team.name,
+  ...policyFrom(team, true),
+  max_keys_per_member: team.max_keys_per_member ?? null,
+  max_member_key_lifetime_seconds: team.max_member_key_lifetime_seconds ?? null,
+});
+
 function TeamSettings({ team }: { team: Team }) {
   const perms = useCan();
   const [editing, setEditing] = useState(false);
-  const form = useForm<PolicyValues & { name: string }>(
-    { name: team.name, ...policyFrom(team, true) },
-    { name: required("Name") },
-  );
+  const form = useForm<TeamSettingsValues>(teamSettingsFrom(team), {
+    name: required("Name"),
+  });
   const update = useMut(
-    (values: PolicyValues & { name: string }) => api.updateTeam(team.id, { name: values.name, ...policyBody(values) }),
+    (values: TeamSettingsValues) =>
+      api.updateTeam(team.id, {
+        name: values.name,
+        ...policyBody(values),
+        max_keys_per_member: values.max_keys_per_member,
+        max_member_key_lifetime_seconds: values.max_member_key_lifetime_seconds,
+      }),
     "Team settings saved",
   );
 
   const edit = () => {
-    form.reset({ name: team.name, ...policyFrom(team, true) });
+    form.reset(teamSettingsFrom(team));
     setEditing(true);
   };
   const submit = async () => {
@@ -681,6 +700,14 @@ function TeamSettings({ team }: { team: Team }) {
           <DescriptionDetails><PolicySummary p={team} /></DescriptionDetails>
           <DescriptionTerm>Budget</DescriptionTerm>
           <DescriptionDetails><Budget p={team} /></DescriptionDetails>
+          {perms.teamAdmin(team.id) && (
+            <>
+              <DescriptionTerm>Keys per member</DescriptionTerm>
+              <DescriptionDetails>{team.max_keys_per_member ?? "No limit"}</DescriptionDetails>
+              <DescriptionTerm>Longest member key lifetime</DescriptionTerm>
+              <DescriptionDetails>{fmtLifetime(team.max_member_key_lifetime_seconds)}</DescriptionDetails>
+            </>
+          )}
           <DescriptionTerm>Created</DescriptionTerm>
           <DescriptionDetails>{fmtDate(team.created_at)}</DescriptionDetails>
         </DescriptionList>
@@ -688,6 +715,26 @@ function TeamSettings({ team }: { team: Team }) {
       <FormDialog open={editing} title="Edit team settings" onClose={() => setEditing(false)} onSubmit={submit}>
         <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
         <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam />
+        <NumberField
+          label="Max keys per member"
+          min={1}
+          value={form.values.max_keys_per_member}
+          onChange={(value) => form.set("max_keys_per_member", value)}
+          error={form.errors.max_keys_per_member}
+          hint="Blank means no limit. Revoking a key frees a slot; the cap is checked when a key is created."
+        />
+        <NumberField
+          label="Longest member key lifetime (seconds)"
+          min={1}
+          value={form.values.max_member_key_lifetime_seconds}
+          onChange={(value) => form.set("max_member_key_lifetime_seconds", value)}
+          error={form.errors.max_member_key_lifetime_seconds}
+          hint={
+            form.values.max_member_key_lifetime_seconds
+              ? `${fmtLifetime(form.values.max_member_key_lifetime_seconds)}. Blank means no limit.`
+              : "Blank means no limit. Member keys must expire within this many seconds."
+          }
+        />
       </FormDialog>
     </>
   );

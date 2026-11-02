@@ -51,7 +51,7 @@ export function Aliases() {
 
   return (
     <>
-      <PageHeader title="Aliases" description="Another name for a model or a router. Access is granted to the alias itself, not to its target." actions={<CreateButton can={perms.isSuper} onClick={() => open("new")}>New alias</CreateButton>} />
+      <PageHeader title="Aliases" description="Another name for a model or a router. Access is granted to the alias itself, not to its target." actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => open("new")}>New alias</CreateButton>} />
       <SearchBox value={search} onChange={setSearch} label="Search aliases" placeholder="Name, target or upstream model" />
       <DataTable
         rows={rows}
@@ -92,7 +92,7 @@ export function Aliases() {
               );
             },
           },
-          { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isSuper} canDelete={perms.isSuper} onEdit={() => open(r)} onDelete={() => setDeleting(r)} /> },
+          { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => open(r)} onDelete={() => setDeleting(r)} /> },
         ]}
       />
       <FormDialog open={!!editing} title={editing === "new" ? "New alias" : "Edit alias"} submitLabel={editing === "new" ? "Create" : "Save"} onClose={() => setEditing(null)} onSubmit={submit}>

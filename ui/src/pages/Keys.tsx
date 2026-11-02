@@ -1,225 +1,144 @@
-import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
-import { api, type Key, type Schemas } from "../api";
-import { fmtDate, KeyBadge, PageHeader, SecretOnce, SuspendedReason } from "../components/Bits";
+import { Link } from "@tanstack/react-router";
+import { useState } from "react";
+
+import { api, type Key } from "../api";
+import { fmtDate, KeyBadge, PageHeader, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
-import { Dialog } from "../components/Dialog";
-import { FormDialog, required, TextField, useForm } from "../components/Form";
-import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { Button } from "../components/ui/button";
-import { ComboboxField } from "../components/ui/combobox-field";
-import { useAction, useCan, useCatalog, useMe, useMut } from "../hooks";
-import { Badge as UiBadge } from "../components/ui/badge";
-import { Skeleton } from "../components/ui/skeleton";
+import { useAllTeamKeys, useCan, useMut, useTeamDirectory, useTeams } from "../hooks";
+import { RotateKeyDialog, SecretDialog } from "./KeyDialogs";
+import { rotationNote } from "./keyText";
 
-type Values = { name: string; team_id: string; expires: string };
-const blank: Values = { name: "", team_id: "", expires: "" };
-
-function expiresAt(value: string) {
-  return value ? new Date(`${value}T23:59:59`).toISOString() : null;
-}
-
-/**
- * The names a new key can call: what the team allows, narrowed by the owner's own member policy.
- * Read-only; built from what the API returns for any team member (the team, its members, the catalog).
- */
-function CallableNames({ teamId, userId }: { teamId: string; userId: string | null | undefined }) {
-  const team = useQuery({ queryKey: ["team", teamId], queryFn: () => api.team(teamId), enabled: !!teamId });
-  const members = useQuery({ queryKey: ["members", teamId], queryFn: () => api.members(teamId), enabled: !!teamId });
-  const catalog = useCatalog();
-  const names = useMemo(() => {
-    if (!team.data || !members.data || !catalog.data) return null;
-    const own = members.data.find((m) => m.user_id === userId);
-    let allowed: Set<string> | null = team.data.model_access === "list" ? new Set(team.data.allowed_models) : null;
-    if (own?.model_access === "list") {
-      const mine = new Set(own.allowed_models);
-      allowed = allowed ? new Set([...allowed].filter((n) => mine.has(n))) : mine;
-    }
-    return catalog.data.filter((e) => allowed === null || allowed.has(e.name));
-  }, [team.data, members.data, catalog.data, userId]);
-  const error = team.error ?? members.error ?? catalog.error;
-  return (
-    <div className="flex flex-col gap-2" data-testid="callable-names">
-      <span className="text-sm font-semibold">This key can call</span>
-      {error ? (
-        <p className="text-[13px] text-destructive" role="alert">
-          {error.message}
-        </p>
-      ) : !names ? (
-        <Skeleton className="h-4 w-full" />
-      ) : names.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No names. The team or your own access allows none.</p>
-      ) : (
-        (["model", "alias", "router"] as const).map((kind) => {
-          const items = names.filter((e) => e.kind === kind);
-          return (
-            items.length > 0 && (
-              <div key={kind} role="group" aria-label={`${kind}s`} className="flex flex-wrap items-center gap-1.5">
-                <span className="w-16 text-xs text-muted-foreground capitalize">{kind}s</span>
-                {items.map((e) => (
-                  <UiBadge key={e.id} variant="muted">
-                    {e.name}
-                  </UiBadge>
-                ))}
-              </div>
-            )
-          );
-        })
-      )}
-      <p className="text-[13px] text-muted-foreground">Read-only. Access is set on the team and on your membership.</p>
-    </div>
-  );
-}
-
+/** The admin view: every key in the teams the caller administers. Members use My keys for their own. */
 export function Keys() {
-  const me = useMe();
   const perms = useCan();
-  const list = useQuery({ queryKey: ["own-keys"], queryFn: () => api.ownKeys() });
-  const [editing, setEditing] = useState<Key | "new" | null>(null);
+  const teams = useTeams();
+  const adminTeams = (teams.data ?? []).filter((team) => perms.teamAdmin(team.id));
+  const keys = useAllTeamKeys(teams.data ? adminTeams : undefined);
+  const directory = useTeamDirectory(teams.data ? adminTeams : undefined);
+  const [rotating, setRotating] = useState<Key | null>(null);
   const [revoking, setRevoking] = useState<Key | null>(null);
-  const [secret, setSecret] = useState<string | null>(null);
-  const [secretTitle, setSecretTitle] = useState("API key created");
-  const teams = (me.data?.teams ?? []).map((team) => ({ value: team.team_id, label: team.team_name }));
-  const form = useForm<Values>(blank, { name: required("Name"), team_id: required("Team") });
-  const create = useMut(
-    (values: Values) => api.createKey(values.team_id, { name: values.name, expires_at: expiresAt(values.expires) }),
-    (result) => {
-      setSecretTitle("API key created");
-      setSecret(result.secret);
-    },
-  );
-  const update = useMut(
-    ({ key, values }: { key: Key; values: Values }) => {
-      const body: Schemas["KeyUpdate"] = { name: values.name };
-      if (values.expires !== (key.expires_at?.slice(0, 10) ?? "")) {
-        body.expires_at = expiresAt(values.expires);
-      }
-      return api.updateKey(key.id, body);
-    },
-    "Key saved",
-  );
-  const setLifecycle = useAction(
-    ({ key, lifecycle }: { key: Key; lifecycle: "active" | "suspended" }) =>
-      api.updateKey(key.id, { lifecycle }),
-    "Key updated",
-  );
+  const [secret, setSecret] = useState<{ value: string; title: string; note?: string } | null>(null);
   const revoke = useMut((key: Key) => api.revokeKey(key.id), "Key revoked");
-  const rotate = useAction(
-    (key: Key) => api.rotateKey(key.id),
-    (result) => {
-      setSecretTitle("API key rotated");
-      setSecret(result.secret);
-    },
-  );
-
-  const open = (key: Key | "new") => {
-    form.reset(
-      key === "new"
-        ? { ...blank, team_id: teams[0]?.value ?? "" }
-        : { name: key.name, team_id: key.team_id, expires: key.expires_at?.slice(0, 10) ?? "" },
-    );
-    setEditing(key);
-  };
-  const submit = async () => {
-    if (!form.validate()) return false;
-    return form.run(() =>
-      editing === "new"
-        ? create.mutateAsync(form.values)
-        : update.mutateAsync({ key: editing as Key, values: form.values }),
+  const teamName = (id: string) => teams.data?.find((team) => team.id === id)?.name ?? id.slice(0, 8);
+  const ownerName = (key: Key) => {
+    if (key.owner_kind === "service_account") {
+      return (
+        directory.data?.serviceAccounts.find((account) => account.id === key.service_account_id)?.name ??
+        key.service_account_id?.slice(0, 8) ??
+        "—"
+      );
+    }
+    return (
+      directory.data?.members.find((member) => member.user_id === key.user_id)?.email ??
+      key.user_id?.slice(0, 8) ??
+      "—"
     );
   };
 
   return (
     <>
       <PageHeader
-        title="My keys"
-        description="Keys you own across your teams. Secrets are shown once when created or rotated."
-        actions={<CreateButton can={!!me.data?.user_id && teams.length > 0} onClick={() => open("new")}>New key</CreateButton>}
+        title="Keys"
+        description="Keys in the teams you administer, service accounts included. Members manage their own keys on My keys; a team's policies live on the team page."
       />
-      {!me.data?.user_id && <p className="text-muted-foreground">The break-glass session does not own API keys.</p>}
       <DataTable
-        rows={list.data}
-        loading={list.isPending}
-        error={list.error}
-        onRetry={() => void list.refetch()}
+        rows={keys.data}
+        loading={keys.isPending || teams.isPending || directory.isPending}
+        error={keys.error ?? teams.error ?? directory.error}
+        onRetry={() => {
+          void keys.refetch();
+          void teams.refetch();
+          void directory.refetch();
+        }}
         rowKey={(key) => key.id}
-        empty="You do not own any API keys yet."
+        empty="No keys in the teams you administer."
         columns={[
-          { key: "name", header: "Name", sort: (a, b) => a.name.localeCompare(b.name), cell: (key) => <><strong>{key.name}</strong> <code className="text-muted-foreground">{key.display_prefix}…</code></> },
-          { key: "owner", header: "Owner", cell: () => me.data?.email ?? "—" },
-          { key: "team", header: "Team", cell: (key) => me.data?.teams.find((team) => team.team_id === key.team_id)?.team_name ?? key.team_id.slice(0, 8) },
-          { key: "lifecycle", header: "Lifecycle", cell: (key) => <><KeyBadge k={key} /><SuspendedReason reason={key.suspended_reason} /></> },
-          { key: "expires", header: "Expires", cell: (key) => fmtDate(key.expires_at) },
-          { key: "created", header: "Created", cell: (key) => fmtDate(key.created_at) },
+          {
+            key: "name",
+            header: "Name",
+            sort: (a, b) => a.name.localeCompare(b.name),
+            cell: (key) => (
+              <>
+                <strong>{key.name}</strong> <code className="text-muted-foreground">{key.display_prefix}…</code>
+              </>
+            ),
+          },
+          {
+            key: "team",
+            header: "Team",
+            cell: (key) => (
+              <Link to="/teams/$teamId" params={{ teamId: key.team_id }} className="[overflow-wrap:anywhere]">
+                {teamName(key.team_id)}
+              </Link>
+            ),
+          },
+          {
+            key: "owner",
+            header: "Owner",
+            hideBelow: "md",
+            cell: (key) => (
+              <>
+                {key.owner_kind === "service_account" ? "Service account: " : ""}
+                {ownerName(key)}
+              </>
+            ),
+          },
+          {
+            key: "status",
+            header: "Status",
+            cell: (key) => (
+              <>
+                <KeyBadge k={key} />
+                <SuspendedReason reason={key.suspended_reason} />
+              </>
+            ),
+          },
+          { key: "expires", header: "Expires", hideBelow: "sm", cell: (key) => fmtDate(key.expires_at) },
           {
             key: "actions",
             header: "",
-            cell: (key) => {
-              const allowed = perms.canManageKey(key);
-              const ownerInactive = key.owner_kind === "user" && key.owner_active === false;
-              return (
-                <RowActions
-                  canEdit={allowed && key.lifecycle !== "revoked"}
-                  onEdit={() => open(key)}
-                  extra={key.lifecycle === "revoked" ? null : (
-                    <>
-                      <Button variant="outline" size="sm" disabled={!allowed} onClick={() => void rotate(key)}>Rotate</Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={
-                          key.lifecycle === "suspended"
-                            ? ownerInactive || !perms.canResumeKey(key)
-                            : !allowed
-                        }
-                        title={key.lifecycle === "suspended" && ownerInactive ? "Cannot resume because the owner is inactive" : undefined}
-                        onClick={() => void setLifecycle({ key, lifecycle: key.lifecycle === "suspended" ? "active" : "suspended" })}
-                      >
-                        {key.lifecycle === "suspended" ? "Resume" : "Suspend"}
-                      </Button>
-                      <Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10 hover:text-destructive" disabled={!allowed} onClick={() => setRevoking(key)}>Revoke</Button>
-                    </>
-                  )}
-                />
-              );
-            },
+            cell: (key) =>
+              key.lifecycle === "revoked" ? (
+                <span className="text-muted-foreground">—</span>
+              ) : (
+                <div className="flex flex-col items-end gap-1 whitespace-nowrap sm:flex-row sm:justify-end sm:gap-1.5">
+                  <Button variant="outline" size="sm" onClick={() => setRotating(key)}>
+                    Rotate
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    onClick={() => setRevoking(key)}
+                  >
+                    Revoke
+                  </Button>
+                </div>
+              ),
           },
         ]}
       />
-      <FormDialog
-        open={!!editing}
-        title={editing === "new" ? "New API key" : "Edit API key"}
-        submitLabel={editing === "new" ? "Create key" : "Save"}
-        onClose={() => setEditing(null)}
-        onSubmit={submit}
-      >
-        {editing === "new" && (
-          <ComboboxField
-            label="Team"
-            value={form.values.team_id}
-            onChange={(value) => form.set("team_id", value)}
-            error={form.errors.team_id}
-            options={teams}
-          />
-        )}
-        <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
-        <TextField label="Expires" type="date" value={form.values.expires} onChange={(value) => form.set("expires", value)} hint="Empty means the key never expires." />
-        {editing === "new" && form.values.team_id && <CallableNames teamId={form.values.team_id} userId={me.data?.user_id} />}
-      </FormDialog>
-      <Dialog
-        open={!!secret}
-        title={secretTitle}
+      <RotateKeyDialog
+        target={rotating}
+        onClose={() => setRotating(null)}
+        onRotated={(created) => {
+          setRotating(null);
+          setSecret({ value: created.secret, title: "API key rotated", note: rotationNote(created.key) });
+        }}
+      />
+      <SecretDialog
+        secret={secret?.value ?? null}
+        title={secret?.title ?? ""}
+        note={secret?.note}
         onClose={() => setSecret(null)}
-        footer={<Button onClick={() => setSecret(null)}>I’ve saved it</Button>}
-      >
-        {secret && <SecretOnce secret={secret} />}
-      </Dialog>
+      />
       <ConfirmDialog
         open={!!revoking}
         title="Revoke key"
         confirmLabel="Revoke"
-        message={`Revoke “${revoking?.name}”? This cannot be undone.`}
+        message={`Revoke “${revoking?.name}”? Requests using it stop working immediately. This cannot be undone.`}
         onConfirm={() => revoke.mutateAsync(revoking!)}
         onClose={() => setRevoking(null)}
       />

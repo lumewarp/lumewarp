@@ -412,7 +412,7 @@ export function Routers() {
 
   return (
     <>
-      <PageHeader title="Routers" description="A public name that spreads requests over several models, with a strategy, optional retries, fallbacks and traffic splits." actions={<CreateButton can={perms.isSuper} onClick={() => open("new")}>New router</CreateButton>} />
+      <PageHeader title="Routers" description="A public name that spreads requests over several models, with a strategy, optional retries, fallbacks and traffic splits." actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => open("new")}>New router</CreateButton>} />
       <SearchBox value={search} onChange={setSearch} label="Search routers" placeholder="Name or upstream model" />
       <DataTable
         rows={rows}
@@ -498,7 +498,7 @@ export function Routers() {
               );
             },
           },
-          { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isSuper} canDelete={perms.isSuper} onEdit={() => open(r)} onDelete={() => setDeleting(r)} /> },
+          { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => open(r)} onDelete={() => setDeleting(r)} /> },
         ]}
       />
 
