@@ -1,9 +1,8 @@
 import { Plus, X } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
-import { cn } from "../lib/utils";
 import { getOwn, HEADER_LIST_WIDGET, hasOwn, withKey, withoutKey, type Field as SchemaField, type Values } from "../lib/schema";
-import { Field } from "./Form";
+import { Field, SelectControl } from "./Form";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -24,8 +23,10 @@ interface FieldsProps {
   idPrefix: string;
 }
 
-const SELECT_CLASS = "flex h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30";
-const UNSET = "unset";
+const BOOLEAN_OPTIONS = [
+  { value: true, label: "On" },
+  { value: false, label: "Off" },
+];
 
 /** `undefined` removes the key; anything else (`""`, `false`, `0`, `[]` too) is a value. */
 function setKey(values: Values, key: string, value: unknown): Values {
@@ -98,11 +99,14 @@ export function SchemaFields({ fields, values, onChange, errors = {}, path = "",
           return (
             <Field key={f.key} label={label} hint={hint} error={error}>
               {(p) => (
-                <select {...p} className={cn(SELECT_CLASS, error && "border-destructive")} value={typeof current === "boolean" ? String(current) : UNSET} onChange={(e) => onChange(setKey(values, f.key, e.target.value === UNSET ? undefined : e.target.value === "true"))}>
-                  <option value={UNSET}>{f.required ? "Choose…" : typeof f.default === "boolean" ? `Not set (default ${f.default ? "On" : "Off"})` : "Not set"}</option>
-                  <option value="true">On</option>
-                  <option value="false">Off</option>
-                </select>
+                <SelectControl<boolean>
+                  {...p}
+                  strict
+                  value={present ? (current as boolean) : undefined}
+                  options={BOOLEAN_OPTIONS}
+                  onChange={(b) => onChange(setKey(values, f.key, b))}
+                  unset={{ label: f.required ? "Choose…" : typeof f.default === "boolean" ? `Not set (default ${f.default ? "On" : "Off"})` : "Not set", onSelect: () => onChange(setKey(values, f.key, undefined)) }}
+                />
               )}
             </Field>
           );
@@ -115,23 +119,18 @@ export function SchemaFields({ fields, values, onChange, errors = {}, path = "",
           );
         }
         if (f.enum) {
-          const index = present ? f.enum.findIndex((o) => o === current) : -1;
+          const options = f.enum.map((o) => ({ value: o, label: o === "" ? "(empty text)" : String(o) }));
           return (
             <Field key={f.key} label={label} hint={hint} error={error}>
               {(p) => (
-                <select
+                <SelectControl<string | number>
                   {...p}
-                  className={cn(SELECT_CLASS, error && "border-destructive")}
-                  value={index >= 0 ? `i${index}` : UNSET}
-                  onChange={(e) => onChange(setKey(values, f.key, e.target.value === UNSET ? undefined : f.enum![Number(e.target.value.slice(1))]))}
-                >
-                  <option value={UNSET}>{f.required ? "Select…" : f.default !== undefined ? `Default (${String(f.default)})` : "Not set"}</option>
-                  {f.enum!.map((o, i) => (
-                    <option key={i} value={`i${i}`}>
-                      {o === "" ? "(empty text)" : String(o)}
-                    </option>
-                  ))}
-                </select>
+                  strict
+                  value={present ? (current as string | number) : undefined}
+                  options={options}
+                  onChange={(v) => onChange(setKey(values, f.key, v))}
+                  unset={{ label: f.required ? "Select…" : f.default !== undefined ? `Default (${String(f.default)})` : "Not set", onSelect: () => onChange(setKey(values, f.key, undefined)) }}
+                />
               )}
             </Field>
           );

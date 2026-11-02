@@ -10,6 +10,7 @@ import { SearchBox } from "../components/Search";
 import { DataTable } from "../components/Table";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Checkbox } from "../components/ui/checkbox";
+import { Combobox } from "../components/ui/combobox-field";
 import { Label } from "../components/ui/label";
 import { useAliases, useCan, useModels, useMut, useNames, useRouters, useStrategies } from "../hooks";
 import { matches, routerUpstreamModels } from "../lib/catalog";
@@ -553,7 +554,7 @@ export function Routers() {
           {(p) => (
             <div className="targets" id={p.id} aria-invalid={p["aria-invalid"]}>
               {v.fallback_model_ids.map((id, i) => (
-                <div key={id} className="order-row">
+                <div key={id} className="order-row" data-testid="order-row">
                   <span>
                     {i + 1}. {modelName(id)}
                   </span>
@@ -568,14 +569,15 @@ export function Routers() {
                   </button>
                 </div>
               ))}
-              <select className="input" aria-label="Add fallback model" value="" disabled={!fallbackOptions.length} onChange={(e) => e.target.value && form.set("fallback_model_ids", [...v.fallback_model_ids, e.target.value])}>
-                <option value="">{fallbackOptions.length ? "None — add a fallback model…" : "No other models"}</option>
-                {fallbackOptions.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.name}
-                  </option>
-                ))}
-              </select>
+              <Combobox
+                aria-label="Add fallback model"
+                searchLabel="Search fallback models"
+                value={undefined}
+                disabled={!fallbackOptions.length}
+                placeholder={fallbackOptions.length ? "None — add a fallback model…" : "No other models"}
+                options={fallbackOptions.map((r) => ({ value: r.id, label: r.name }))}
+                onChange={(id) => form.set("fallback_model_ids", [...v.fallback_model_ids, id])}
+              />
             </div>
           )}
         </Field>
