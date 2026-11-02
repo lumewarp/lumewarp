@@ -34,6 +34,7 @@ INVALID_WEBHOOK_CONFIGS = [
     {"url_ref": "LUMEWARP_TEST_HOOK", "timeout_seconds": "5"},
     {"url_ref": "LUMEWARP_TEST_HOOK", "timeout_seconds": True},
     {"url_ref": "LUMEWARP_TEST_HOOK", "timeout_seconds": 0},
+    {"url_ref": "LUMEWARP_TEST_HOOK", "timeout_seconds": 0.0009},  # below the shared floor
     {"url_ref": "LUMEWARP_TEST_HOOK", "timeout_seconds": -1},
     {"url_ref": "LUMEWARP_TEST_HOOK", "timeout_seconds": 30.5},
 ]
@@ -206,7 +207,7 @@ async def test_webhook_config_refuses_anything_but_an_env_reference(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("timeout", [None, 1, 0.5, 30])
+@pytest.mark.parametrize("timeout", [None, 1, 0.5, 0.001, 30])
 async def test_webhook_config_accepts_a_valid_env_reference_and_timeout(
     session_factory: SessionFactory, timeout
 ):

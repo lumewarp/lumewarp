@@ -176,6 +176,39 @@ async def test_0004_migrates_audit_and_revokes_emergency_sessions_on_downgrade()
         await drop_database(url)
 
 
+async def test_0013_refuses_a_metrics_url_with_a_query_without_printing_it() -> None:
+    url = await create_database()
+    engine = create_async_engine(url)
+    try:
+        await migrate.upgrade(engine, "0012")
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO upstreams (id, name, kind, base_url, metrics_url) VALUES ("
+                    "gen_random_uuid(), :name, :kind, :base, :metrics)"
+                ),
+                {
+                    "name": "scraped",
+                    "kind": "vllm",
+                    "base": "http://vllm:8000/v1",
+                    "metrics": "http://vllm:8000/metrics?token=private-value",
+                },
+            )
+        with pytest.raises(RuntimeError, match="scraped") as refused:
+            await migrate.upgrade(engine)
+        assert "private-value" not in str(refused.value)
+        async with engine.connect() as conn:
+            assert await migrate.current_revision(conn) == "0012"
+        async with engine.begin() as conn:
+            await conn.execute(text("UPDATE upstreams SET metrics_url = NULL"))
+        await migrate.upgrade(engine)
+        async with engine.connect() as conn:
+            assert await migrate.current_revision(conn) == migrate.head_revision()
+    finally:
+        await engine.dispose()
+        await drop_database(url)
+
+
 async def _database_exists(url: str) -> bool:
     engine = create_async_engine(SERVER_URL)
     try:

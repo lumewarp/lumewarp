@@ -31,6 +31,8 @@ log = logging.getLogger(__name__)
 _MAX_RETRY_SECONDS = 60 * 60
 _PLUGIN_TIMEOUT_SECONDS = 10.0
 _MAX_WEBHOOK_TIMEOUT_SECONDS = 30.0
+# The same floor as the database CHECK: any stored value decodes to a usable non-zero float.
+_MIN_WEBHOOK_TIMEOUT_SECONDS = 0.001
 _DEFAULT_WEBHOOK_TIMEOUT_SECONDS = 5.0
 # The webhook channel contract, mirrored by the notifier_channels CHECK constraint
 # (migration 0013 / models.py): an environment variable name using the same pattern as
@@ -169,7 +171,7 @@ def _webhook_settings(config: dict) -> tuple[str, float]:
     if (
         isinstance(timeout, bool)
         or not isinstance(timeout, (int, float))
-        or not 0 < timeout <= _MAX_WEBHOOK_TIMEOUT_SECONDS
+        or not _MIN_WEBHOOK_TIMEOUT_SECONDS <= timeout <= _MAX_WEBHOOK_TIMEOUT_SECONDS
     ):
         raise ValueError("invalid webhook timeout")
     return ref, float(timeout)

@@ -1306,7 +1306,7 @@ class NotifierChannel(TimestampMixin, Base):
             " AND octet_length(config->>'url_ref') <= 200"
             " AND (NOT (config ? 'timeout_seconds')"
             " OR (CASE WHEN jsonb_typeof(config->'timeout_seconds') <> 'number' THEN false"
-            " ELSE (config->>'timeout_seconds')::numeric > 0"
+            " ELSE (config->>'timeout_seconds')::numeric >= 0.001"
             " AND (config->>'timeout_seconds')::numeric <= 30 END))"
             " AND config - 'url_ref' - 'timeout_seconds' = '{}'::jsonb,"
             " false)",
