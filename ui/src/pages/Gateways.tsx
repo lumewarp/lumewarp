@@ -5,6 +5,7 @@ import { Badge, fmtDateTime, PageHeader, SecretOnce } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { Dialog } from "../components/Dialog";
 import { FormDialog, required, TextField, useForm } from "../components/Form";
+import { Button } from "../components/ui/button";
 import { CreateButton } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { useMut } from "../hooks";
@@ -47,7 +48,7 @@ export function Gateways() {
         rowKey={(r) => r.gateway_id}
         empty="No gateways have registered yet. Create a token to connect one."
         columns={[
-          { key: "id", header: "Gateway", sort: (a, b) => a.gateway_id.localeCompare(b.gateway_id), cell: (r) => (<><strong>{r.gateway_id}</strong> <span className="muted">{r.gateway_version}</span></>) },
+          { key: "id", header: "Gateway", sort: (a, b) => a.gateway_id.localeCompare(b.gateway_id), cell: (r) => (<><strong>{r.gateway_id}</strong> <span className="text-muted-foreground">{r.gateway_version}</span></>) },
           { key: "state", header: "State", cell: (r) => (r.connected ? <Badge tone="ok">Connected</Badge> : <Badge>Disconnected</Badge>) },
           {
             key: "version",
@@ -69,10 +70,10 @@ export function Gateways() {
             key: "tokens",
             header: "Tokens",
             cell: (r) => (
-              <ul className="plain tight">
+              <ul className="m-0 mb-3 flex list-none flex-col gap-1 p-0">
                 {r.tokens.map((t) => (
                   <li key={t.id}>
-                    <code>{t.display_prefix}…</code> {t.name && <span className="muted">{t.name}</span>} {t.revoked_at ? <Badge>Revoked</Badge> : <button className="btn btn-sm btn-danger-ghost" onClick={() => setRevoking({ gateway: r.gateway_id, token: t })}>Revoke</button>}
+                    <code>{t.display_prefix}…</code> {t.name && <span className="text-muted-foreground">{t.name}</span>} {t.revoked_at ? <Badge>Revoked</Badge> : <Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={() => setRevoking({ gateway: r.gateway_id, token: t })}>Revoke</Button>}
                   </li>
                 ))}
               </ul>
@@ -84,7 +85,7 @@ export function Gateways() {
         <TextField label="Gateway id" value={form.values.gateway_id} onChange={(v) => form.set("gateway_id", v)} error={form.errors.gateway_id} autoFocus hint="Identifier the gateway reports, e.g. gw-eu-1." />
         <TextField label="Label" value={form.values.name} onChange={(v) => form.set("name", v)} />
       </FormDialog>
-      <Dialog open={!!secret} title="Gateway token created" onClose={() => setSecret(null)} footer={<button className="btn btn-primary" onClick={() => setSecret(null)}>I’ve saved it</button>}>
+      <Dialog open={!!secret} title="Gateway token created" onClose={() => setSecret(null)} footer={<Button onClick={() => setSecret(null)}>I’ve saved it</Button>}>
         {secret && <SecretOnce secret={secret} />}
       </Dialog>
       <ConfirmDialog open={!!revoking} title="Revoke gateway token" confirmLabel="Revoke" message="The gateway using this token can no longer connect. It keeps serving its last good config." onConfirm={() => revoke.mutateAsync({ g: revoking!.gateway, t: revoking!.token.id })} onClose={() => setRevoking(null)} />

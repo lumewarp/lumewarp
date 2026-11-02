@@ -4,6 +4,9 @@ import { api, type Schemas, type User } from "../api";
 import { Badge, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, required, TextField, useForm } from "../components/Form";
+import { Alert, AlertDescription } from "../components/ui/alert";
+import { Button } from "../components/ui/button";
+import { Card } from "../components/ui/card";
 import { CreateButton } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { useMe, useMut } from "../hooks";
@@ -34,10 +37,10 @@ export function Users() {
   );
   const remove = useMut((user: User) => api.deleteUser(user.id), "User deleted");
 
-  if (me.isPending) return <div className="state" aria-busy="true">Loading user access…</div>;
-  if (me.error) return <div className="state state-error" role="alert">{me.error.message}</div>;
+  if (me.isPending) return <div className="p-8 text-center text-muted-foreground" aria-busy="true">Loading user access…</div>;
+  if (me.error) return <Alert variant="destructive"><AlertDescription>{me.error.message}</AlertDescription></Alert>;
   if (!me.data?.is_admin) {
-    return <div className="state state-error" role="alert">Admin group access is required to manage users.</div>;
+    return <Alert variant="destructive"><AlertDescription>Admin group access is required to manage users.</AlertDescription></Alert>;
   }
 
   const submit = async () => {
@@ -85,31 +88,35 @@ export function Users() {
             cell: (user) => {
               const isSelf = user.id === me.data?.user_id;
               return (
-                <div className="row-actions">
-                  <button
-                    className="btn btn-sm"
+                <div className="flex justify-end gap-1.5 whitespace-nowrap">
+                  <Button
+                    variant="outline"
+                    size="sm"
                     disabled={isSelf && user.is_active}
                     onClick={() => setConfirming({ user, kind: user.is_active ? "deactivate" : "activate" })}
                   >
                     {user.is_active ? "Deactivate" : "Reactivate"}
-                  </button>
-                  <button
-                    className="btn btn-sm btn-danger-ghost"
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                     disabled={isSelf}
                     onClick={() => setConfirming({ user, kind: "delete" })}
                   >
                     Delete
-                  </button>
+                  </Button>
                 </div>
               );
             },
           },
         ]}
       />
-      <div className="card pager" aria-label="User pages">
+      <Card className="flex-row flex-wrap items-center justify-end gap-2 px-3.5 py-2 text-sm text-muted-foreground shadow-none" aria-label="User pages">
         <span>Showing {users.data?.items.length ?? 0} users · up to {PAGE_SIZE} per page</span>
-        <button
-          className="btn btn-sm"
+        <Button
+          variant="outline"
+          size="sm"
           disabled={previousCursors.length === 0 || users.isFetching}
           onClick={() => {
             const previous = previousCursors.at(-1);
@@ -118,9 +125,10 @@ export function Users() {
           }}
         >
           Previous
-        </button>
-        <button
-          className="btn btn-sm"
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
           disabled={!next || users.isFetching}
           onClick={() => {
             if (!next) return;
@@ -129,8 +137,8 @@ export function Users() {
           }}
         >
           Next
-        </button>
-      </div>
+        </Button>
+      </Card>
       <FormDialog
         open={creating}
         title="New user"
