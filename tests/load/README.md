@@ -26,8 +26,9 @@ control-plane job):
       uv run --frozen --project control-plane pytest -c tests/load/pytest.ini \
       --rootdir tests/load tests/load/test_loadlib_unit.py -q -p no:cacheprovider
 
-Elapsed-time guard rails remain failures unless a timestamped Locust CPU saturation warning
-falls within the orchestration step, with successful non-stream p99 below `LOAD_SAT_P99_S`
+Elapsed-time guard rails remain failures unless a Locust CPU saturation warning, recorded with
+its monotonic time when logged (`cpu-warnings-<pid>.jsonl`, not read back from the log's wall clock
+stamps), falls within the orchestration step, with successful non-stream p99 below `LOAD_SAT_P99_S`
 and stream p99 below `LOAD_SAT_STREAM_P99_S` during that step, and no hard errors.
 Both request types must be observed. Steps ending after the total load duration always fail.
 Qualifying overruns are recorded in `load_window` as diagnostics; revoke/new-key/budget
@@ -44,11 +45,23 @@ show a positive queue depth or an increase in usage report retry events during t
 | `test_gateway_restart_under_load` | Gateway SIGTERM + restart on the same ports: boots from the on-disk snapshot, reconnects, connection errors only inside the restart window, never 5xx, no lost or duplicated usage. |
 
 Elapsed times, including the `t` of each request record, are `CLOCK_MONOTONIC`, and Locust is
-paced on it (`monotonic_throughput`) rather than by its own `constant_throughput`. Locust's reads
-`time.time()`, so with a wall clock stepping back and forth by 24.9 s the pacing stalled every
-user for 25 s on each step back: about 70 RPS against the 400 target, the budget never reached
-within the scenario, and a revoke measured as 25 s. Only `exceeded_at` is wall clock, in Postgres,
-and the budget scenario does not compare it with the records.
+paced on it (`loadpacing.Pacer`) rather than by its own `constant_throughput`, which reads
+`time.time()`.
+
+The one wall clock value is `exceeded_at`, set by the control plane before its transaction commits.
+The budget scenario converts it with wall-minus-monotonic samples taken around the measurement, so
+the 5 s flip bound still runs from the threshold evaluation. If the samples show the offset moving
+inside the window the flip is unmeasured: the scenario runs again on a fresh stack, at most twice,
+then fails saying the clock stepped. It never passes on an unmeasured flip.
+
+What was shown about clock steps: with `time.time()` in the Locust processes alone shimmed to jump
+by 24.9 s and back (`sitecustomize` on `PYTHONPATH`), Locust's `constant_throughput` stalled each
+user for about 25 s on each step back: about 70 RPS against the 400 target, the budget never reached
+within the scenario, and one revoke measured as 25 s. That is a reproduced mechanism, nothing more.
+It does not show that the four load failures seen on `main` had this cause: their assertion text
+was not kept and no real clock step was observed in those runs, and the control-plane restart
+failure was not reproduced. A real step across the control plane, Postgres and the gateway has not
+been tested.
 
 Reports: `tests/load/results/<UTC timestamp>/` (`summary.md`, one JSON per scenario with RPS,
 latency p50/p90/p99/max, revoke and new-key latency distributions, budget overshoot,

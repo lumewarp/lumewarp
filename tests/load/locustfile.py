@@ -1,20 +1,24 @@
 """Locust workload for the control-plane-mode load e2e (tests/load).
 
-Runs in its own Python (uvx locust==2.32.4), never imports the harness. The orchestrator
+Runs in its own Python (uvx locust==2.32.4), never imports the harness; loadpacing.py next to it
+is stdlib only (Locust puts this directory on sys.path while it loads the file). The orchestrator
 (test_load.py) owns the key pool: a JSON file it rewrites atomically while the run goes on
 (revoked keys stay in it, new keys are appended once the gateway accepts them). Every
 request is appended to `<LOAD_OUT>/requests-<pid>.jsonl` so the orchestrator can compare
 what clients saw with what landed in Postgres, key by key. Record times are CLOCK_MONOTONIC, which
-every process on the machine shares and which a wall clock step does not move.
+every process on the machine shares and which a wall clock step does not move. So are the CPU
+warnings in `<LOAD_OUT>/cpu-warnings-<pid>.jsonl`.
 
 Environment: LOAD_POOL, LOAD_OUT, LOAD_USER_RPS (per user), LOAD_STREAM_SHARE.
 """
 
 import json
+import logging
 import os
 import random
 import time
 
+from loadpacing import CpuWarningRecorder, Pacer
 from locust import FastHttpUser, events, task
 from locust.runners import WorkerRunner
 
@@ -81,6 +85,12 @@ def _flush(**_kwargs) -> None:
 
 
 @events.init.add_listener
+def _record_cpu_warnings(**_kwargs) -> None:
+    # init fires in each process, after the fork and after Locust configured logging.
+    logging.getLogger("locust.runners").addHandler(CpuWarningRecorder(OUT))
+
+
+@events.init.add_listener
 def _final_stats(environment, **_kwargs) -> None:
     if isinstance(environment.runner, WorkerRunner):
         return
@@ -108,28 +118,18 @@ def _sse_problem(text: str) -> str | None:
     return None
 
 
-def monotonic_throughput(task_runs_per_second: float):
-    """locust.constant_throughput on the monotonic clock. Locust's own reads the wall clock, so
-    a step back of N seconds stalls every user for N seconds, on each step."""
-    interval = 1 / task_runs_per_second
-
-    def wait_time(self) -> float:
-        now = time.monotonic()
-        previous = getattr(self, "_pacing_previous", None)
-        ran = 0.0 if previous is None else now - previous[0] - previous[1]
-        wait = max(0.0, interval - ran)
-        self._pacing_previous = (now, wait)
-        return wait
-
-    return wait_time
-
-
 class GatewayUser(FastHttpUser):
-    wait_time = monotonic_throughput(USER_RPS)
     # A connection error must surface as status 0, not be retried by the client.
     max_retries = 0
     network_timeout = 30.0
     connection_timeout = 5.0
+
+    def __init__(self, environment) -> None:
+        super().__init__(environment)
+        self.pacer = Pacer(1 / USER_RPS)
+
+    def wait_time(self) -> float:
+        return self.pacer.next()
 
     @task
     def chat(self) -> None:

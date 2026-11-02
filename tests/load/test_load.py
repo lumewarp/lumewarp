@@ -7,7 +7,8 @@ client made (Locust or the orchestrator's probes) is recorded; usage rows must m
 per key, status and stream flag.
 
 Times are monotonic, including the records' `t`: this machine's wall clock can step by tens of
-seconds, and these assertions are about elapsed time.
+seconds, and these assertions are about elapsed time. Only `exceeded_at` is wall clock; the budget
+scenario converts it (loadlib.ClockSampler) and runs again when the clock stepped meanwhile.
 """
 
 import time
@@ -15,11 +16,13 @@ from collections import Counter, defaultdict
 
 import pytest
 from loadlib import (
+    ClockSampler,
     Fleet,
     LoadRun,
     Probe,
     Records,
     accounting,
+    budget_flips,
     cost_check,
     dist,
     env_float,
@@ -27,6 +30,7 @@ from loadlib import (
     gateway_counter,
     hard_errors,
     load_window,
+    retry_unmeasurable,
     settle_usage,
     stream_resets,
     summarize,
@@ -388,7 +392,15 @@ def test_control_plane_restart_under_load(stack):
 
 
 @pytest.mark.parametrize("scope", ["service_account", "member", "team"])
-def test_budget_under_load(stack, scope):
+def test_budget_under_load(stack_factory, scope):
+    def attempt(number: int) -> None:
+        with stack_factory() as stack:
+            budget_scenario(stack, scope, number)
+
+    retry_unmeasurable(attempt, f"budget {scope}")
+
+
+def budget_scenario(stack, scope: str, attempt: int) -> None:
     owner_index = 1 if scope == "member" else 0
     fleet = Fleet(
         stack,
@@ -405,46 +417,35 @@ def test_budget_under_load(stack, scope):
         if (k["team_id"] == scope_id if scope == "team" else k["owner_id"] == owner["id"])
     }
     run = LoadRun(stack, gw, f"budget-{scope}", fleet.keys, BUDGET_SECS)
-    run.start()
-
-    # exceeded_at is the database's wall clock, not comparable with the records. The last poll
-    # that did not see it yet is a monotonic time no later than the budget was seen exceeded,
-    # so a flip is never measured shorter than it was.
-    not_yet = time.monotonic()
-
-    def exceeded():
-        nonlocal not_yet
-        asked = time.monotonic()
-        rows = pg(
-            stack.dsn,
-            "SELECT exceeded_at FROM usage_totals WHERE scope_type = $1"
-            " AND scope_id = $2::uuid AND exceeded_at IS NOT NULL",
-            scope,
-            scope_id,
-        )
-        if rows:
-            return rows[0]["exceeded_at"]
-        not_yet = asked
-        return None
-
+    clock = ClockSampler()
+    clock.start()
+    measuring_since = time.monotonic()
     try:
+        run.start()
+
+        def exceeded():
+            rows = pg(
+                stack.dsn,
+                "SELECT exceeded_at FROM usage_totals WHERE scope_type = $1"
+                " AND scope_id = $2::uuid AND exceeded_at IS NOT NULL",
+                scope,
+                scope_id,
+            )
+            return rows[0]["exceeded_at"] if rows else None
+
         step_started = time.monotonic()
-        wait_for(exceeded, BUDGET_SECS - 15, "owner budget exceeded", interval=0.02)
-        t_exceeded = not_yet
+        exceeded_at = wait_for(exceeded, BUDGET_SECS - 15, "owner budget exceeded", interval=0.02)
         step_elapsed = run.elapsed()
     except BaseException:
         run.proc.kill()
+        clock.stop()
         raise
-    records = finish(stack, run)
+    try:
+        records = finish(stack, run)
+    finally:
+        clock.stop()
 
-    flips = {}
-    for key in budget_keys:
-        mine = sorted((r for r in records if r["k"] == key), key=lambda r: r["t"])
-        first = next((r for r in mine if r["st"] == 429), None)
-        assert first is not None, f"budget key {key} never got 429"
-        flips[key] = first["t"] - t_exceeded
-        late = [r for r in mine if r["st"] == 200 and r["t"] > first["t"] + 0.1]
-        assert not late, f"budget key {key} accepted after it flipped: {late[:3]}"
+    t_exceeded, flips = budget_flips(records, budget_keys, exceeded_at, clock, measuring_since)
     spent = pg(
         stack.dsn,
         "SELECT cost_nano_usd FROM usage_totals WHERE scope_type = $1 AND scope_id = $2::uuid",
@@ -458,6 +459,7 @@ def test_budget_under_load(stack, scope):
         "budget_nano_usd": BUDGET,
         "budget_scope": scope,
         "budget_scope_id": scope_id,
+        "attempt": attempt,
         "spent_nano_usd": spent,
         "overshoot_nano_usd": spent - BUDGET,
         "overshoot_pct": round(100 * (spent - BUDGET) / BUDGET, 1),

@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent / "e2e"))
 sys.path.insert(0, str(HERE))
 
-from loadlib import RESULTS  # noqa: E402
+from loadlib import RESULTS, ClockStepped  # noqa: E402
 from stack import GATEWAY_BIN, MOCK_BIN, Proc, Stack  # noqa: E402
 
 
@@ -29,13 +30,18 @@ def binaries() -> None:
             )
 
 
-@pytest.fixture
-def stack(request, binaries):
+def new_stack() -> Stack:
     s = Stack()
     if wrapper := os.environ.get("LOAD_CP_WRAPPER"):
         # Run the control plane through a script (profiler, coverage, a local patch); it
         # receives the same CLI arguments as `python -m lumewarp_control_plane`.
         s.cp = Proc("control-plane", [sys.executable, wrapper, "serve"], s.cp_env, s.dir)
+    return s
+
+
+@pytest.fixture
+def stack(request, binaries):
+    s = new_stack()
     try:
         s.setup()
         yield s
@@ -49,6 +55,28 @@ def stack(request, binaries):
             print("\n" + s.logs(), file=sys.stderr)
         s.teardown()
         s.cleanup_dir()
+
+
+@pytest.fixture
+def stack_factory(binaries):
+    """A fresh stack per attempt, for a scenario that may have to run again."""
+
+    @contextmanager
+    def fresh():
+        s = new_stack()
+        try:
+            s.setup()
+            yield s
+        except ClockStepped:
+            raise
+        except BaseException:
+            print("\n" + s.logs(), file=sys.stderr)
+            raise
+        finally:
+            s.teardown()
+            s.cleanup_dir()
+
+    return fresh
 
 
 def _fmt(d: dict | None) -> str:

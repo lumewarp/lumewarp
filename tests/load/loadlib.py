@@ -6,16 +6,19 @@ like Locust's, usage accounting against Postgres, and the per-scenario report.
 import json
 import math
 import os
-import re
 import shutil
+import sys
 import threading
 import time
 import uuid
 from collections import Counter
+from collections.abc import Callable
 from datetime import datetime
+from itertools import pairwise
 from pathlib import Path
 
 import httpx
+from loadpacing import CPU_WARNING_FILES
 from stack import ROOT, SCOPE, Gateway, Proc, Stack, free_port, pg, wait_for
 
 
@@ -330,8 +333,6 @@ class LoadRun:
             argv += ["--master-port", port]
         self.proc = Proc(f"locust-{name}", argv, env, stack.dir)
         self.started = 0.0
-        # Wall minus monotonic, only to read the wall-clock timestamps in Locust's own log.
-        self.wall_offset = 0.0
 
     def set_keys(self, keys: list[dict]) -> None:
         tmp = self.pool.with_suffix(".tmp")
@@ -348,13 +349,21 @@ class LoadRun:
         # The first uvx run may have to install locust.
         wait_for(first_records, 180, "first Locust requests", interval=0.1)
         self.started = time.monotonic()
-        self.wall_offset = time.time() - self.started
 
     def elapsed(self) -> float:
         return time.monotonic() - self.started
 
     def sleep_until(self, offset: float) -> None:
         time.sleep(max(0.0, offset - self.elapsed()))
+
+    def cpu_warnings(self) -> list[float]:
+        """Monotonic times of the generators' CPU warnings (loadpacing.CpuWarningRecorder)."""
+        return sorted(
+            json.loads(line)["t"]
+            for path in self.dir.glob(CPU_WARNING_FILES)
+            for line in path.read_text().splitlines()
+            if line
+        )
 
     def wait(self) -> list[dict]:
         assert self.proc.popen is not None
@@ -387,6 +396,117 @@ class LoadRun:
             f"locust counted {count} requests, records have {len(records)}"
         )
         return records
+
+
+# --------------------------------------------------------------------------- clocks
+
+
+class ClockStepped(Exception):
+    """A wall clock time could not be placed on the monotonic clock: the measurement is void."""
+
+
+class ClockSampler:
+    """Samples wall minus monotonic for the duration of a measurement, to convert a wall clock
+    time from another process (exceeded_at) to monotonic. Refuses when the offset moved inside
+    the window, or when the samples leave room for a step and its return to hide."""
+
+    def __init__(
+        self,
+        *,
+        interval: float = 0.02,
+        tolerance: float = 0.05,
+        max_gap: float = 1.0,
+        mono: Callable[[], float] = time.monotonic,
+        wall: Callable[[], float] = time.time,
+    ) -> None:
+        self.interval = interval
+        self.tolerance = tolerance
+        self.max_gap = max_gap
+        self.mono = mono
+        self.wall = wall
+        self.samples: list[tuple[float, float]] = []
+        self.stopping = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def sample(self) -> None:
+        # A preempted pair would read as a step, so one that took too long is not a sample.
+        before = self.mono()
+        wall = self.wall()
+        after = self.mono()
+        if after - before < self.tolerance / 2:
+            self.samples.append((after, wall - after))
+
+    def _run(self) -> None:
+        while not self.stopping.wait(self.interval):
+            self.sample()
+
+    def start(self) -> None:
+        self.sample()
+        self.thread = threading.Thread(target=self._run, name="clock-sampler", daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stopping.set()
+        if self.thread is not None:
+            self.thread.join()
+
+    def to_monotonic(self, wall: float, since: float, until: float) -> float:
+        """`wall` on the monotonic clock, given it happened in the monotonic window. Raises
+        ClockStepped unless samples cover the window and agree within the tolerance."""
+        samples = list(self.samples)
+        first = max((i for i, s in enumerate(samples) if s[0] <= since), default=None)
+        last = min((i for i, s in enumerate(samples) if s[0] >= until), default=None)
+        if first is None or last is None:
+            raise ClockStepped(f"no clock samples around the window {since:.3f}..{until:.3f}")
+        window = samples[first : last + 1]
+        gap = max((b[0] - a[0] for a, b in pairwise(window)), default=0.0)
+        if gap > self.max_gap:
+            raise ClockStepped(f"no clock sample for {gap:.3f} s inside the window")
+        offsets = [s[1] for s in window]
+        if max(offsets) - min(offsets) > self.tolerance:
+            raise ClockStepped(
+                f"wall minus monotonic moved by {max(offsets) - min(offsets):.3f} s inside"
+                f" the window {since:.3f}..{until:.3f}"
+            )
+        return wall - offsets[0]
+
+
+def retry_unmeasurable(scenario: Callable[[int], None], what: str, attempts: int = 3) -> None:
+    """Runs a scenario again when its measurement was void. Any other outcome is final, and a
+    scenario that never got measured fails: it does not pass."""
+    for attempt in range(1, attempts + 1):
+        try:
+            scenario(attempt)
+            return
+        except ClockStepped as err:
+            print(f"{what}: attempt {attempt} unmeasurable: {err}", file=sys.stderr)
+            if attempt == attempts:
+                raise AssertionError(
+                    f"{what}: the wall clock stepped in each of {attempts} attempts, so the"
+                    f" flip could not be measured: {err}"
+                ) from err
+
+
+def budget_flips(
+    records: list[dict],
+    keys: set[str],
+    exceeded_at: datetime,
+    clock: ClockSampler,
+    since: float,
+) -> tuple[float, dict[str, float]]:
+    """(exceeded_at on the monotonic clock, seconds from it to each key's first 429). The bound
+    runs from the threshold evaluation: exceeded_at is set before the transaction commits, so a
+    slow commit stays inside the flip. Raises ClockStepped before any flip is computed."""
+    first: dict[str, float] = {}
+    for key in keys:
+        mine = sorted((r for r in records if r["k"] == key), key=lambda r: r["t"])
+        rejected = next((r for r in mine if r["st"] == 429), None)
+        assert rejected is not None, f"budget key {key} never got 429"
+        first[key] = rejected["t"]
+        late = [r for r in mine if r["st"] == 200 and r["t"] > rejected["t"] + 0.1]
+        assert not late, f"budget key {key} accepted after it flipped: {late[:3]}"
+    exceeded = clock.to_monotonic(exceeded_at.timestamp(), since, max(first.values()))
+    return exceeded, {key: t - exceeded for key, t in first.items()}
 
 
 # --------------------------------------------------------------------------- analysis
@@ -428,20 +548,9 @@ def load_window(
     step_ended = run.started + elapsed
     generator_cpu_warning = False
     warning_before_step_at = None
-    # Locust's default formatter uses local time, as does datetime.timestamp().
-    for match in re.finditer(
-        r"^\[([^\]]+)\] \S+/WARNING/[^\n]*CPU usage above 90%",
-        run.proc.text(),
-        re.MULTILINE | re.IGNORECASE,
-    ):
-        try:
-            timestamp = datetime.strptime(match[1], "%Y-%m-%d %H:%M:%S,%f").timestamp()
-            timestamp -= getattr(run, "wall_offset", 0.0)
-        except ValueError:
-            continue
+    for timestamp in run.cpu_warnings():
         if timestamp < step_started:
-            if warning_before_step_at is None or timestamp > warning_before_step_at:
-                warning_before_step_at = timestamp
+            warning_before_step_at = timestamp
         elif timestamp <= step_ended:
             generator_cpu_warning = True
     requests = [r for r in records if not r.get("probe") and step_started <= r["t"] <= step_ended]
