@@ -66,6 +66,8 @@ pub(crate) mod test_alloc {
 }
 
 // A strategy crate must be named to be linked; its `register!` does the rest.
+#[cfg(feature = "strategy-cheapest-first")]
+use lumewarp_strategy_cheapest_first as _;
 #[cfg(feature = "strategy-priority-failover")]
 use lumewarp_strategy_priority_failover as _;
 

@@ -1,0 +1,360 @@
+{
+  "cases": [
+    {
+      "eligible": [
+        true,
+        true,
+        true
+      ],
+      "in_flight": [
+        0,
+        0,
+        0
+      ],
+      "members": [
+        {
+          "model": "a",
+          "params": {
+            "input_price_nano_usd_per_mtok": 300
+          }
+        },
+        {
+          "model": "b",
+          "params": {
+            "input_price_nano_usd_per_mtok": 100
+          }
+        },
+        {
+          "model": "c",
+          "params": {
+            "input_price_nano_usd_per_mtok": 200
+          }
+        }
+      ],
+      "name": "the cheapest priced member wins",
+      "params": {},
+      "pick": "b"
+    },
+    {
+      "eligible": [
+        true,
+        true
+      ],
+      "in_flight": [
+        3,
+        1
+      ],
+      "members": [
+        {
+          "model": "a",
+          "params": {
+            "input_price_nano_usd_per_mtok": 100
+          }
+        },
+        {
+          "model": "b",
+          "params": {
+            "input_price_nano_usd_per_mtok": 100
+          }
+        }
+      ],
+      "name": "equal prices prefer fewer requests in flight",
+      "params": {},
+      "pick": "b"
+    },
+    {
+      "eligible": [
+        true,
+        true
+      ],
+      "in_flight": [
+        0,
+        0
+      ],
+      "members": [
+        {
+          "model": "a",
+          "params": {
+            "input_price_nano_usd_per_mtok": 100
+          }
+        },
+        {
+          "model": "b",
+          "params": {
+            "input_price_nano_usd_per_mtok": 100
+          }
+        }
+      ],
+      "name": "equal prices and load prefer configuration order",
+      "params": {},
+      "pick": "a"
+    },
+    {
+      "eligible": [
+        true,
+        true
+      ],
+      "in_flight": [
+        4,
+        0
+      ],
+      "members": [
+        {
+          "model": "priced",
+          "params": {
+            "input_price_nano_usd_per_mtok": 500
+          }
+        },
+        {
+          "model": "unpriced",
+          "params": {}
+        }
+      ],
+      "name": "an unpriced member comes after every priced one",
+      "params": {},
+      "pick": "priced"
+    },
+    {
+      "eligible": [
+        true,
+        true
+      ],
+      "in_flight": [
+        4,
+        1
+      ],
+      "members": [
+        {
+          "model": "a",
+          "params": {}
+        },
+        {
+          "model": "b",
+          "params": {}
+        }
+      ],
+      "name": "with nothing priced, load then order decide among unpriced members",
+      "params": {},
+      "pick": "b"
+    },
+    {
+      "eligible": [
+        true,
+        true
+      ],
+      "in_flight": [
+        9,
+        0
+      ],
+      "members": [
+        {
+          "model": "free",
+          "params": {
+            "input_price_nano_usd_per_mtok": 0
+          }
+        },
+        {
+          "model": "paid",
+          "params": {
+            "input_price_nano_usd_per_mtok": 1
+          }
+        }
+      ],
+      "name": "zero is a price: free beats paid",
+      "params": {},
+      "pick": "free"
+    },
+    {
+      "eligible": [
+        true,
+        true
+      ],
+      "in_flight": [
+        0,
+        0
+      ],
+      "members": [
+        {
+          "model": "a",
+          "params": {
+            "input_price_nano_usd_per_mtok": 100
+          }
+        },
+        {
+          "model": "b",
+          "params": {
+            "input_price_nano_usd_per_mtok": 300
+          }
+        }
+      ],
+      "name": "a member over the cap is not eligible",
+      "params": {
+        "max_input_price_nano_usd_per_mtok": 200
+      },
+      "pick": "a"
+    },
+    {
+      "eligible": [
+        true,
+        true
+      ],
+      "in_flight": [
+        0,
+        0
+      ],
+      "members": [
+        {
+          "model": "unpriced",
+          "params": {}
+        },
+        {
+          "model": "b",
+          "params": {
+            "input_price_nano_usd_per_mtok": 300
+          }
+        }
+      ],
+      "name": "the cap cannot be checked against an unknown price",
+      "params": {
+        "max_input_price_nano_usd_per_mtok": 200
+      },
+      "pick": null
+    },
+    {
+      "eligible": [
+        true,
+        true
+      ],
+      "in_flight": [
+        0,
+        0
+      ],
+      "members": [
+        {
+          "model": "a",
+          "params": {
+            "input_price_nano_usd_per_mtok": 100
+          }
+        },
+        {
+          "model": "b",
+          "params": {
+            "input_price_nano_usd_per_mtok": 300
+          }
+        }
+      ],
+      "name": "a cap with nothing under it picks nothing",
+      "params": {
+        "max_input_price_nano_usd_per_mtok": 50
+      },
+      "pick": null
+    },
+    {
+      "eligible": [
+        true,
+        true
+      ],
+      "in_flight": [
+        0,
+        0
+      ],
+      "members": [
+        {
+          "model": "free",
+          "params": {
+            "input_price_nano_usd_per_mtok": 0
+          }
+        },
+        {
+          "model": "unpriced",
+          "params": {}
+        }
+      ],
+      "name": "free is under any cap",
+      "params": {
+        "max_input_price_nano_usd_per_mtok": 1
+      },
+      "pick": "free"
+    },
+    {
+      "eligible": [
+        false,
+        true,
+        true
+      ],
+      "in_flight": [
+        0,
+        3,
+        1
+      ],
+      "members": [
+        {
+          "model": "a",
+          "params": {
+            "input_price_nano_usd_per_mtok": 100
+          }
+        },
+        {
+          "model": "b",
+          "params": {
+            "input_price_nano_usd_per_mtok": 200
+          }
+        },
+        {
+          "model": "c",
+          "params": {
+            "input_price_nano_usd_per_mtok": 200
+          }
+        }
+      ],
+      "name": "ineligible priced members leave the priced ones that remain",
+      "params": {},
+      "pick": "c"
+    },
+    {
+      "eligible": [
+        false,
+        true
+      ],
+      "in_flight": [
+        0,
+        0
+      ],
+      "members": [
+        {
+          "model": "a",
+          "params": {
+            "input_price_nano_usd_per_mtok": 100
+          }
+        },
+        {
+          "model": "unpriced",
+          "params": {}
+        }
+      ],
+      "name": "an unpriced member is used when every priced member is ineligible",
+      "params": {},
+      "pick": "unpriced"
+    },
+    {
+      "eligible": [
+        false
+      ],
+      "in_flight": [
+        0
+      ],
+      "members": [
+        {
+          "model": "a",
+          "params": {
+            "input_price_nano_usd_per_mtok": 100
+          }
+        }
+      ],
+      "name": "nothing eligible picks nothing",
+      "params": {},
+      "pick": null
+    }
+  ],
+  "generated_by": "python3 .claude/skills/port-router-to-rust/example/gen_pick_table.py"
+}
