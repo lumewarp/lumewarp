@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { confirmDialog, dialog, optionNames, pick } from "./helpers";
+import { confirmDialog, dialog, optionNames, pick, shot } from "./helpers";
 
 const BREAK_GLASS = "e2e-break-glass-password";
 const VIEWER = "e2e-viewer-session-0123456789abcdef";
@@ -59,10 +59,10 @@ test("SSO availability and login errors follow session discovery", async ({ page
   // The emergency password form stays available as the secondary option.
   await expect(page.getByLabel("Break-glass password")).toBeVisible();
   await page.setViewportSize({ width: 1280, height: 900 });
-  await page.screenshot({ path: "/tmp/lumewarp-admin-login-desktop.png", fullPage: true });
+  await shot(page, "smoke-login-error-desktop");
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
-  await page.screenshot({ path: "/tmp/lumewarp-admin-login-mobile.png", fullPage: true });
+  await shot(page, "smoke-login-error-phone");
 
   await page.route("**/api/v1/session/oidc/login**", (route) =>
     route.fulfill({ status: 200, body: "Authorization request intercepted." }),
@@ -240,18 +240,18 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await page.getByRole("button", { name: "Theme: Auto" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
-  await page.screenshot({ path: "/tmp/lumewarp-users-mobile-light.png", fullPage: true });
+  await shot(page, "smoke-users-phone-light");
   await page.getByRole("button", { name: "Theme: Light" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await page.screenshot({ path: "/tmp/lumewarp-users-mobile-dark.png", fullPage: true });
+  await shot(page, "smoke-users-phone-dark");
   await page.setViewportSize({ width: 1280, height: 900 });
   await expect(page.getByRole("button", { name: "Toggle navigation" })).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
-  await page.screenshot({ path: "/tmp/lumewarp-users-desktop-dark.png", fullPage: true });
+  await shot(page, "smoke-users-desktop-dark");
   await page.getByRole("button", { name: "Theme: Dark" }).click();
   await page.getByRole("button", { name: "Theme: Auto" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await page.screenshot({ path: "/tmp/lumewarp-users-desktop-light.png", fullPage: true });
+  await shot(page, "smoke-users-desktop-light");
 
   await page.getByRole("link", { name: "Teams" }).click();
   await page.getByRole("button", { name: "New team" }).click();
@@ -433,14 +433,14 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await expect(viewerPage.getByRole("link", { name: "Teams", exact: true })).toHaveCount(0);
   await viewerPage.getByRole("button", { name: "Theme: Auto" }).click();
   await expect(viewerPage.locator("html")).toHaveAttribute("data-theme", "light");
-  await viewerPage.screenshot({ path: "/tmp/lumewarp-team-detail-mobile-light.png", fullPage: true });
+  await shot(viewerPage, "smoke-team-detail-phone-light");
   await viewerPage.getByRole("button", { name: "Theme: Light" }).click();
-  await viewerPage.screenshot({ path: "/tmp/lumewarp-team-detail-mobile-dark.png", fullPage: true });
+  await shot(viewerPage, "smoke-team-detail-phone-dark");
   await expect(viewerPage.locator("html")).toHaveAttribute("data-theme", "dark");
   expect(await viewerPage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
   await viewerPage.setViewportSize({ width: 1280, height: 900 });
   await expect(viewerPage.getByRole("button", { name: "Toggle navigation" })).toBeHidden();
-  await viewerPage.screenshot({ path: "/tmp/lumewarp-team-detail-desktop-dark.png", fullPage: true });
+  await shot(viewerPage, "smoke-team-detail-desktop-dark");
   expect(await viewerPage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
   await viewerContext.close();
 
@@ -514,7 +514,7 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
   await expect(second.getByLabel("Share of split 2")).toHaveText("25%");
   await pick(d, "Sticky", "By request header");
   await d.getByLabel("Sticky header").fill("X-Session-Id");
-  await page.screenshot({ path: "/tmp/lumewarp-router-edit.png", fullPage: true });
+  await shot(page, "smoke-router-edit");
   await d.getByRole("button", { name: "Save" }).click();
   await expect(d).toBeHidden();
 

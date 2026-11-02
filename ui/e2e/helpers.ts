@@ -1,4 +1,18 @@
 import { expect, type Locator, type Page } from "@playwright/test";
+import { join } from "node:path";
+
+/** Where screenshots go; set by the runner, never by a spec. Unset in normal runs: nothing is written. */
+export const SHOTS = process.env.E2E_SHOTS;
+
+/**
+ * Save a screenshot under E2E_SHOTS. Without it this is a no-op, so a normal `pnpm test:e2e` writes no files (and
+ * test runs never write to /tmp). `settle` waits out a dialog or popover animation before the picture.
+ */
+export async function shot(page: Page, name: string, { fullPage = true, settle = 0 }: { fullPage?: boolean; settle?: number } = {}) {
+  if (!SHOTS) return;
+  if (settle) await page.waitForTimeout(settle);
+  await page.screenshot({ path: join(SHOTS, `${name}.png`), fullPage });
+}
 
 /** An open Dialog or Sheet (a form). */
 export const dialog = (page: Page) => page.getByRole("dialog");
