@@ -429,3 +429,27 @@ async fn vllm_metrics_follow_load_control() {
     load("metrics_status=0").await;
     assert_eq!(metrics().await.0, 200);
 }
+
+#[tokio::test]
+async fn large_embedding_body_has_model_after_data() {
+    const SIZE: usize = 200 * 1024;
+    let server = server(&["--large-embedding-bytes", "204800"]).await;
+    let client = reqwest::Client::new();
+    let post = |model: &'static str| {
+        client
+            .post(format!("{}/v1/embeddings", server.url))
+            .json(&json!({"model": model, "input": "x"}))
+            .send()
+    };
+    let text = post("mock").await.unwrap().text().await.unwrap();
+    assert!(text.len() >= SIZE, "{}", text.len());
+    assert!(text.find("\"data\"").unwrap() < text.find("\"model\"").unwrap());
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["model"], "mock");
+    assert_eq!(body["usage"]["prompt_tokens"], 8);
+    assert_eq!(body["data"][0]["embedding"].as_array().unwrap().len(), 1536);
+    // Any other model keeps the small response.
+    let small: Value = post("other").await.unwrap().json().await.unwrap();
+    assert_eq!(small["model"], "other");
+    assert_eq!(small["data"][0]["embedding"].as_array().unwrap().len(), 16);
+}

@@ -125,12 +125,49 @@ trial already in progress is never duplicated (another candidate is used
 instead). Circuit breaker state belongs to the model and is shared by every
 router that holds it; its configuration comes from the upstream.
 
-Response `model` contract: responses from the called name's own models
-(members or splits, including retries) are forwarded unchanged and carry
-`Model.upstream_model`. Successful responses served by a `Router.fallbacks`
-model have their top-level `model` (JSON body, or each SSE event's `data` JSON)
-rewritten to the name the client called, which may be an alias. Error responses
-are not rewritten.
+Response `model` contract: a successful (2xx) response carries the name the
+client called, which may be a model, an alias or a router, in its top-level
+`model` (the JSON body, or each SSE event's `data` JSON). Which model served it,
+retry or fallback included, makes no difference. There are three exceptions:
+
+- **Same name.** When the called name equals `Model.upstream_model` of the model
+  that served, the response is not scanned and carries whatever the upstream
+  sent, which may differ from what was asked for (OpenAI answers `gpt-4o` with a
+  dated `gpt-4o-2024-08-06`). `Content-Length` and the client's `Accept-Encoding`
+  are kept.
+- **Compressed anyway.** When a rewrite is needed the gateway removes the client's
+  `Accept-Encoding` from that upstream attempt. An upstream that still sets a
+  `Content-Encoding` other than `identity` is passed through byte for byte, not
+  decompressed: the client sees the upstream's name, usage is
+  `USAGE_STATE_INVALID` as for any encoded body, and
+  `lumewarp_response_model_rewrite_compressed_total{model}` increments.
+- **Errors.** Non-2xx responses are forwarded unchanged and may name the upstream
+  model.
+
+The rewrite never buffers: bytes are forwarded as each frame is scanned, whatever
+the size of the body, and the length changes, so `Content-Length` is dropped and
+the response is chunked. The scanner follows the structure, it does not validate:
+
+| Upstream sends | Result |
+| --- | --- |
+| Top-level `model` with a string value | Value replaced; every other byte unchanged |
+| Key spelled with escapes (`"m\u006fdel"`) | Same key to a JSON parser, so the same; the key's spelling is kept |
+| Duplicate top-level `model` | All replaced |
+| `model` with a non-string value | Unchanged |
+| No top-level `model`, or only nested ones | Unchanged, none added |
+| Body that is not a JSON object | Unchanged |
+| Invalid structure of the top-level object, mismatched brackets, nesting deeper than 128 | Unchanged from that byte on; a `model` already passed stays replaced, and the connection is not failed |
+| Invalid scalars, commas in nested values, or string contents | Not checked: a later `model` is still replaced in a body that stays invalid |
+| `model` string cut by EOF, or holding a raw control byte | The called name in full, then unchanged from the control byte on |
+| Bytes after the top-level object closes | Unchanged |
+
+SSE: the `data` lines of one event form one document, joined by a newline, and
+each event starts over at the blank line. Comments and other fields pass through,
+also between `data` lines. CR, LF and CRLF end a line. `[DONE]` and any other
+non-object data, and events with no data, are unchanged. A byte order mark before
+the first field hides that one event from the scanner. The meter reads upstream
+bytes before the rewrite, so token counts are unaffected; the SSE filter that
+drops the forced usage event runs before it too.
 
 The retry budget (`retry_budget_percent`, gateway-local) is funded only by
 requests on routers with `Router.retry` set. A `Retry-After` cooldown is

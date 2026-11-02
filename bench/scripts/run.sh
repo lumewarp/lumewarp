@@ -57,6 +57,15 @@ Environment overrides (defaults):
   BENCH_OTEL=0                1 exports Lumewarp's traces to a local OTLP sink on
                               OTLP_SINK_PORT (default 4318), at 100% sampling with
                               a queue sized not to drop; report it separately
+  BENCH_REWRITE=0             1 adds the target lumewarp-rewrite: the same gateway
+                              called as mock-renamed, so every response goes through
+                              the model scanner; reported against the lumewarp target
+                              (the fast path) in the "Response rewrite" section
+  BENCH_EMBED_BYTES=0         >0 adds non-stream POST /v1/embeddings with a response of
+                              at least this many bytes (model after data), on direct
+                              and the lumewarp targets only
+  EMBED_RATES="50"            offered RPS of the embeddings scenario
+  BENCH_LITELLM=1             0 skips LiteLLM (no A6 ratio; for rewrite-only runs)
   LITELLM_VERSION=1.106.2     litellm[proxy] pin (must match bench/litellm/config.yaml)
   LITELLM_WORKERS=$(nproc)    LiteLLM --num_workers
   DURATION_SECS               measured duration per scenario (profile default)
@@ -110,6 +119,10 @@ MOCK_HEADERS_FIRST="${MOCK_HEADERS_FIRST:-0}"
 BENCH_AUTH="${BENCH_AUTH:-0}"
 BENCH_OTEL="${BENCH_OTEL:-0}"
 OTLP_SINK_PORT="${OTLP_SINK_PORT:-4318}"
+BENCH_REWRITE="${BENCH_REWRITE:-0}"
+BENCH_EMBED_BYTES="${BENCH_EMBED_BYTES:-0}"
+EMBED_RATES="${EMBED_RATES:-50}"
+BENCH_LITELLM="${BENCH_LITELLM:-1}"
 LITELLM_VERSION="${LITELLM_VERSION:-1.106.2}"
 LITELLM_WORKERS="${LITELLM_WORKERS:-$(nproc)}"
 HEALTH_TIMEOUT_SECS="${HEALTH_TIMEOUT_SECS:-180}"
@@ -161,6 +174,19 @@ case "$BENCH_OTEL" in
   0|1) ;;
   *) die "BENCH_OTEL must be 0 or 1 (got: $BENCH_OTEL)" ;;
 esac
+case "$BENCH_REWRITE" in
+  0|1) ;;
+  *) die "BENCH_REWRITE must be 0 or 1 (got: $BENCH_REWRITE)" ;;
+esac
+case "$BENCH_LITELLM" in
+  0|1) ;;
+  *) die "BENCH_LITELLM must be 0 or 1 (got: $BENCH_LITELLM)" ;;
+esac
+[[ "$BENCH_EMBED_BYTES" =~ ^[0-9]+$ ]] || die "BENCH_EMBED_BYTES must be a byte count"
+read -r -a EMBED_RATE_LIST <<< "$EMBED_RATES"
+for rate in "${EMBED_RATE_LIST[@]}"; do
+  [[ "$rate" =~ ^[1-9][0-9]*$ ]] || die "invalid embeddings rate: $rate (positive integer required)"
+done
 AUTH_MODE="off"
 BENCH_API_KEY=""
 BENCH_API_KEY_SHA256=""
@@ -172,7 +198,10 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid RUN_ID: $RUN_ID"
 
 REQUEST_BODY='{"model":"mock","messages":[{"role":"user","content":"benchmark"}],"max_tokens":16,"temperature":0}'
+EMBED_BODY='{"model":"mock","input":"benchmark"}'
 MODEL="mock"
+# Routes to the same pool as `mock`; only the called name differs from upstream_model.
+REWRITE_MODEL="mock-renamed"
 
 # --------------------------------------------------------------------------- #
 # Process-tree helpers (LiteLLM forks workers, uvx wraps the real server)
@@ -284,7 +313,7 @@ mkdir -p "$RUN_DIR/logs" "$RUN_DIR/configs" "$RUN_DIR/nonstream" "$RUN_DIR/strea
 : > "$RUN_DIR/scenarios.jsonl"
 
 log "run directory: $RUN_DIR"
-log "profile: $PROFILE, targets: direct / lumewarp / litellm, auth: $AUTH_MODE, repetitions: $REPEAT"
+log "profile: $PROFILE, auth: $AUTH_MODE, rewrite: $BENCH_REWRITE, embeddings bytes: $BENCH_EMBED_BYTES, litellm: $BENCH_LITELLM, repetitions: $REPEAT"
 
 # --------------------------------------------------------------------------- #
 # Cleanup
@@ -362,7 +391,9 @@ wait_for_http() {
 
 require_port_free "$MOCK_PORT"
 require_port_free "$LUMEWARP_PORT"
-require_port_free "$LITELLM_PORT"
+if (( BENCH_LITELLM )); then
+  require_port_free "$LITELLM_PORT"
+fi
 
 # Mock upstream.
 MOCK_EXTRA_ARGS=()
@@ -371,13 +402,17 @@ if [[ "$MOCK_HEADERS_FIRST" == "1" ]]; then
   MOCK_EXTRA_ARGS+=(--headers-first)
   MOCK_MODE=", headers-first"
 fi
+if (( BENCH_EMBED_BYTES > 0 )); then
+  MOCK_EXTRA_ARGS+=(--large-embedding-bytes "$BENCH_EMBED_BYTES")
+  MOCK_MODE+=", embeddings ${BENCH_EMBED_BYTES} bytes"
+fi
 log "starting mock upstream on 127.0.0.1:$MOCK_PORT (latency ${MOCK_LATENCY_MS}ms, ${MOCK_STREAM_CHUNKS} chunks x ${MOCK_CHUNK_INTERVAL_MS}ms${MOCK_MODE})"
 "$MOCK_BIN" \
   --listen "127.0.0.1:$MOCK_PORT" \
   --latency-ms "$MOCK_LATENCY_MS" \
   --stream-chunks "$MOCK_STREAM_CHUNKS" \
   --chunk-interval-ms "$MOCK_CHUNK_INTERVAL_MS" \
-  "${MOCK_EXTRA_ARGS[@]}" \
+  ${MOCK_EXTRA_ARGS[@]+"${MOCK_EXTRA_ARGS[@]}"} \
   >"$RUN_DIR/logs/mock.log" 2>&1 &
 MOCK_PID=$!
 SERVER_PIDS+=("$MOCK_PID")
@@ -450,51 +485,54 @@ SERVER_PIDS+=("$LUMEWARP_PID")
 wait_for_http "lumewarp" "http://127.0.0.1:$LUMEWARP_PORT/healthz" "$HEALTH_TIMEOUT_SECS" "$LUMEWARP_PID" "$RUN_DIR/logs/lumewarp.log"
 
 # LiteLLM (pinned; uvx caches after the first run).
-LITELLM_CONFIG="$RUN_DIR/configs/litellm.yaml"
-LITELLM_SED=(
-  -e "s|127\.0\.0\.1:9000/v1|127.0.0.1:${MOCK_PORT}/v1|g"
-)
-if (( AUTH )); then
-  LITELLM_SED+=(
-    -e "s|^  # master_key: __BENCH_MASTER_KEY__$|  master_key: \"${BENCH_API_KEY}\"|"
-    -e "s|^  dangerously_permit_weak_or_unset_master_key: true$|  # BENCH_AUTH=1: master_key is set, so the weak-key escape hatch is removed.|"
+LITELLM_PID=""
+if (( BENCH_LITELLM )); then
+  LITELLM_CONFIG="$RUN_DIR/configs/litellm.yaml"
+  LITELLM_SED=(
+    -e "s|127\.0\.0\.1:9000/v1|127.0.0.1:${MOCK_PORT}/v1|g"
   )
-fi
-sed "${LITELLM_SED[@]}" "$BENCH_DIR/litellm/config.yaml" >"$LITELLM_CONFIG"
-grep -q "127.0.0.1:${MOCK_PORT}/v1" "$LITELLM_CONFIG" ||
-  die "failed to template mock port into $LITELLM_CONFIG"
-if (( AUTH )); then
-  grep -qx "  master_key: \"${BENCH_API_KEY}\"" "$LITELLM_CONFIG" ||
-    die "failed to template general_settings.master_key into $LITELLM_CONFIG"
-  if grep -q "^  dangerously_permit_weak_or_unset_master_key:" "$LITELLM_CONFIG"; then
-    die "BENCH_AUTH=1 must remove dangerously_permit_weak_or_unset_master_key from $LITELLM_CONFIG"
+  if (( AUTH )); then
+    LITELLM_SED+=(
+      -e "s|^  # master_key: __BENCH_MASTER_KEY__$|  master_key: \"${BENCH_API_KEY}\"|"
+      -e "s|^  dangerously_permit_weak_or_unset_master_key: true$|  # BENCH_AUTH=1: master_key is set, so the weak-key escape hatch is removed.|"
+    )
   fi
-else
-  if grep -q "^  master_key:" "$LITELLM_CONFIG"; then
-    die "general_settings.master_key must stay unset without BENCH_AUTH=1 in $LITELLM_CONFIG"
+  sed "${LITELLM_SED[@]}" "$BENCH_DIR/litellm/config.yaml" >"$LITELLM_CONFIG"
+  grep -q "127.0.0.1:${MOCK_PORT}/v1" "$LITELLM_CONFIG" ||
+    die "failed to template mock port into $LITELLM_CONFIG"
+  if (( AUTH )); then
+    grep -qx "  master_key: \"${BENCH_API_KEY}\"" "$LITELLM_CONFIG" ||
+      die "failed to template general_settings.master_key into $LITELLM_CONFIG"
+    if grep -q "^  dangerously_permit_weak_or_unset_master_key:" "$LITELLM_CONFIG"; then
+      die "BENCH_AUTH=1 must remove dangerously_permit_weak_or_unset_master_key from $LITELLM_CONFIG"
+    fi
+  else
+    if grep -q "^  master_key:" "$LITELLM_CONFIG"; then
+      die "general_settings.master_key must stay unset without BENCH_AUTH=1 in $LITELLM_CONFIG"
+    fi
   fi
-fi
 
-log "starting LiteLLM ${LITELLM_VERSION} on 127.0.0.1:$LITELLM_PORT with ${LITELLM_WORKERS} workers (first run downloads packages)"
-env \
-  LITELLM_LOG=ERROR \
-  LITELLM_DONT_SHOW_FEEDBACK_BOX=True \
-  LITELLM_LOCAL_MODEL_COST_MAP=True \
-  DISABLE_SCHEMA_UPDATE=True \
-  uvx --from "litellm[proxy]==${LITELLM_VERSION}" litellm \
-  --config "$LITELLM_CONFIG" \
-  --host 127.0.0.1 \
-  --port "$LITELLM_PORT" \
-  --num_workers "$LITELLM_WORKERS" \
-  >"$RUN_DIR/logs/litellm.log" 2>&1 &
-LITELLM_PID=$!
-SERVER_PIDS+=("$LITELLM_PID")
-LITELLM_HEALTH_ARGS=()
-if (( AUTH )); then
-  # /health is behind user_api_key_auth once a master key is configured.
-  LITELLM_HEALTH_ARGS+=(-H "Authorization: Bearer ${BENCH_API_KEY}")
+  log "starting LiteLLM ${LITELLM_VERSION} on 127.0.0.1:$LITELLM_PORT with ${LITELLM_WORKERS} workers (first run downloads packages)"
+  env \
+    LITELLM_LOG=ERROR \
+    LITELLM_DONT_SHOW_FEEDBACK_BOX=True \
+    LITELLM_LOCAL_MODEL_COST_MAP=True \
+    DISABLE_SCHEMA_UPDATE=True \
+    uvx --from "litellm[proxy]==${LITELLM_VERSION}" litellm \
+    --config "$LITELLM_CONFIG" \
+    --host 127.0.0.1 \
+    --port "$LITELLM_PORT" \
+    --num_workers "$LITELLM_WORKERS" \
+    >"$RUN_DIR/logs/litellm.log" 2>&1 &
+  LITELLM_PID=$!
+  SERVER_PIDS+=("$LITELLM_PID")
+  LITELLM_HEALTH_ARGS=()
+  if (( AUTH )); then
+    # /health is behind user_api_key_auth once a master key is configured.
+    LITELLM_HEALTH_ARGS+=(-H "Authorization: Bearer ${BENCH_API_KEY}")
+  fi
+  wait_for_http "litellm" "http://127.0.0.1:$LITELLM_PORT/health" "$HEALTH_TIMEOUT_SECS" "$LITELLM_PID" "$RUN_DIR/logs/litellm.log" "${LITELLM_HEALTH_ARGS[@]}"
 fi
-wait_for_http "litellm" "http://127.0.0.1:$LITELLM_PORT/health" "$HEALTH_TIMEOUT_SECS" "$LITELLM_PID" "$RUN_DIR/logs/litellm.log" "${LITELLM_HEALTH_ARGS[@]}"
 
 # Let LiteLLM's workers finish booting (health is served before every worker is
 # ready) and let the whole machine settle before the direct baseline.
@@ -508,7 +546,7 @@ sleep "$SETTLE_SECS"
 base_url() {
   case "$1" in
     direct) printf 'http://127.0.0.1:%s' "$MOCK_PORT" ;;
-    lumewarp) printf 'http://127.0.0.1:%s' "$LUMEWARP_PORT" ;;
+    lumewarp | lumewarp-rewrite) printf 'http://127.0.0.1:%s' "$LUMEWARP_PORT" ;;
     litellm) printf 'http://127.0.0.1:%s' "$LITELLM_PORT" ;;
     *) die "unknown target: $1" ;;
   esac
@@ -517,7 +555,7 @@ base_url() {
 server_pid() {
   case "$1" in
     direct) printf '%s' "$MOCK_PID" ;;
-    lumewarp) printf '%s' "$LUMEWARP_PID" ;;
+    lumewarp | lumewarp-rewrite) printf '%s' "$LUMEWARP_PID" ;;
     litellm) printf '%s' "$LITELLM_PID" ;;
     *) die "unknown target: $1" ;;
   esac
@@ -526,6 +564,7 @@ server_pid() {
 logfile_for() {
   case "$1" in
     direct) printf '%s' "$RUN_DIR/logs/mock.log" ;;
+    lumewarp-rewrite) printf '%s' "$RUN_DIR/logs/lumewarp.log" ;;
     *) printf '%s' "$RUN_DIR/logs/$1.log" ;;
   esac
 }
@@ -587,8 +626,25 @@ run_load() {
   return "$status"
 }
 
+# The model a target is called with; the upstream always sees `mock`.
+target_model() {
+  if [[ "$1" == "lumewarp-rewrite" ]]; then
+    printf '%s' "$REWRITE_MODEL"
+  else
+    printf '%s' "$MODEL"
+  fi
+}
+
+# `body` with the model a target is called with.
+body_for() {
+  local target="$1" body="$2" old new
+  old="\"model\":\"$MODEL\""
+  new="\"model\":\"$(target_model "$target")\""
+  printf '%s' "${body/"$old"/"$new"}"
+}
+
 run_oha() {
-  local target="$1" rate="$2" duration="$3" out="$4"
+  local target="$1" rate="$2" duration="$3" out="$4" path="${5:-/v1/chat/completions}" body="${6:-$REQUEST_BODY}"
   local conns
   local -a auth_args=()
   conns="$(connections_for_rate "$rate")"
@@ -605,10 +661,10 @@ run_oha() {
     -c "$conns" \
     -m POST \
     -T application/json \
-    -d "$REQUEST_BODY" \
+    -d "$(body_for "$target" "$body")" \
     -t 600s \
-    "${auth_args[@]}" \
-    "$(base_url "$target")/v1/chat/completions"
+    ${auth_args[@]+"${auth_args[@]}"} \
+    "$(base_url "$target")$path"
 }
 
 run_sse() {
@@ -619,8 +675,8 @@ run_sse() {
   fi
   run_load "$SSE_BENCH_BIN" \
     --url "$(base_url "$target")" \
-    --model "$MODEL" \
-    "${auth_args[@]}" \
+    --model "$(target_model "$target")" \
+    ${auth_args[@]+"${auth_args[@]}"} \
     --concurrency "$concurrency" \
     --duration-secs "$duration" \
     --out "$out"
@@ -667,6 +723,30 @@ run_nonstream() {
   append_manifest "{\"kind\":\"nonstream\",\"target\":\"${target}\",\"rate\":${rate},\"repetition\":${rep},\"connections\":${conns},\"duration_secs\":${DURATION_SECS},\"raw\":\"nonstream/${target}/rate-${rate}.rep${rep}.json\",\"cpu\":\"nonstream/${target}/rate-${rate}.rep${rep}.cpu.csv\"}"
 }
 
+# Large non-stream response. No warmup: one scenario, and few requests per second.
+run_embeddings() {
+  local target="$1" rate="$2" rep="$3"
+  local out_dir="$RUN_DIR/embeddings/$target"
+  local raw="$out_dir/rate-${rate}.rep${rep}.json"
+  local cpu="$out_dir/rate-${rate}.rep${rep}.cpu.csv"
+  local conns
+  conns="$(connections_for_rate "$rate")"
+  mkdir -p "$out_dir"
+
+  ensure_alive "$target"
+  log "  measure ${DURATION_SECS}s: embeddings $target @ ${rate} rps (rep ${rep}/${REPEAT})"
+  start_sampler "$(server_pid "$target")" "$cpu"
+  if ! run_oha "$target" "$rate" "$DURATION_SECS" "$raw" /v1/embeddings "$EMBED_BODY"; then
+    stop_sampler
+    die "oha failed: embeddings $target @ ${rate} rps"
+  fi
+  stop_sampler
+  [[ -s "$raw" ]] || die "oha produced no JSON: embeddings $target @ ${rate} rps"
+  ensure_alive "$target"
+
+  append_manifest "{\"kind\":\"embeddings\",\"target\":\"${target}\",\"rate\":${rate},\"repetition\":${rep},\"connections\":${conns},\"duration_secs\":${DURATION_SECS},\"raw\":\"embeddings/${target}/rate-${rate}.rep${rep}.json\",\"cpu\":\"embeddings/${target}/rate-${rate}.rep${rep}.cpu.csv\"}"
+}
+
 run_stream() {
   local target="$1" concurrency="$2" rep="$3"
   local out_dir="$RUN_DIR/stream/$target"
@@ -688,7 +768,47 @@ run_stream() {
   append_manifest "{\"kind\":\"stream\",\"target\":\"${target}\",\"concurrency\":${concurrency},\"repetition\":${rep},\"duration_secs\":${DURATION_SECS},\"raw\":\"stream/${target}/c${concurrency}.rep${rep}.json\",\"cpu\":\"stream/${target}/c${concurrency}.rep${rep}.cpu.csv\"}"
 }
 
-TARGETS=(direct lumewarp litellm)
+# Refuses to measure anything if the two gateway targets are not the two paths
+# they claim to be: the fast path keeps the upstream's name and its length, the
+# rewrite path carries the called name and is chunked.
+verify_rewrite_paths() {
+  local path="$1" body="$2" min_bytes="$3" target headers out size expected
+  local -a auth_args=()
+  if (( AUTH )); then
+    auth_args+=(-H "Authorization: Bearer ${BENCH_API_KEY}")
+  fi
+  headers="$RUN_DIR/logs/verify.headers"
+  out="$RUN_DIR/logs/verify.body"
+  for target in lumewarp lumewarp-rewrite; do
+    expected="$(target_model "$target")"
+    curl -fsS -m 30 -D "$headers" -o "$out" -H 'content-type: application/json' \
+      ${auth_args[@]+"${auth_args[@]}"} \
+      -d "$(body_for "$target" "$body")" \
+      "$(base_url "$target")$path" || die "$target: request to $path failed"
+    size="$(wc -c <"$out")"
+    (( size >= min_bytes )) || die "$target: $path answered $size bytes, expected at least $min_bytes"
+    python3 -I -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["model"] != sys.argv[2])' \
+      "$out" "$expected" || die "$target: $path did not answer with model $expected"
+    if [[ "$target" == "lumewarp" ]]; then
+      grep -qi '^content-length:' "$headers" || die "fast path lost Content-Length on $path"
+    else
+      grep -qi '^transfer-encoding: chunked' "$headers" || die "rewrite path is not chunked on $path"
+    fi
+  done
+  log "verified fast path and rewrite path on $path"
+}
+
+TARGETS=(direct lumewarp)
+if (( BENCH_REWRITE )); then
+  TARGETS+=(lumewarp-rewrite)
+  verify_rewrite_paths /v1/chat/completions "$REQUEST_BODY" 1
+  if (( BENCH_EMBED_BYTES > 0 )); then
+    verify_rewrite_paths /v1/embeddings "$EMBED_BODY" "$BENCH_EMBED_BYTES"
+  fi
+fi
+if (( BENCH_LITELLM )); then
+  TARGETS+=(litellm)
+fi
 
 # Warn once if the fd limit forced fewer connections than "half a second of
 # requests in flight".
@@ -725,6 +845,16 @@ for (( rep = 1; rep <= REPEAT; rep++ )); do
       run_stream "$target" "$concurrency" "$rep"
     done
   done
+  if (( BENCH_EMBED_BYTES > 0 )); then
+    log "embeddings: ${BENCH_EMBED_BYTES} bytes, rates [${EMBED_RATE_LIST[*]}] for ${DURATION_SECS}s each"
+    for rate in "${EMBED_RATE_LIST[@]}"; do
+      for target in "${target_order[@]}"; do
+        # LiteLLM parses every response; this scenario is about the gateway's scanner.
+        [[ "$target" == "litellm" ]] && continue
+        run_embeddings "$target" "$rate" "$rep"
+      done
+    done
+  fi
 done
 
 # --------------------------------------------------------------------------- #
@@ -759,6 +889,9 @@ python3 -I "$SCRIPT_DIR/write_meta.py" \
   --rates "${RATE_LIST[*]}" \
   --stream-concurrencies "${STREAM_CONCURRENCY_LIST[*]}" \
   --connections "$CONNECTIONS_ARG" \
+  --rewrite "$BENCH_REWRITE" \
+  --embed-bytes "$BENCH_EMBED_BYTES" \
+  --embed-rates "${EMBED_RATE_LIST[*]}" \
   --request-body "$REQUEST_BODY" \
   --mock-bin "$MOCK_BIN" \
   --sse-bench-bin "$SSE_BENCH_BIN" \

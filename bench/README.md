@@ -78,6 +78,32 @@ event, matching vLLM/OpenAI prefill-after-headers behavior. This is useful when
 validating gateway TTFT/overhead metrics; it does not affect non-stream or
 embedding responses. Default off.
 
+## Response rewrite and large responses
+
+The default targets call `mock`, whose `upstream_model` is also `mock`: the fast
+path, which never scans a response. Request-path changes to the rewrite must also
+measure the scanner:
+
+- `BENCH_REWRITE=1` adds the target `lumewarp-rewrite`: the same gateway process,
+  calling the router `mock-renamed` over the same pool, so every response goes
+  through the scanner and is chunked. `summary.md` gets a "Response rewrite" table
+  (`results.json.rewrite`): overhead p99 of both paths and the paired per-repetition
+  delta. A6 stays judged on `lumewarp`. The driver first checks that the fast path
+  answers `mock` with `Content-Length` and the rewrite path answers `mock-renamed`
+  chunked, and stops otherwise.
+- `BENCH_EMBED_BYTES=<n>` starts the mock with `--large-embedding-bytes` and adds a
+  non-stream `POST /v1/embeddings` scenario (`EMBED_RATES`, default 50 RPS) with a
+  response of at least `n` bytes, `model` after `data`, so the scanner reads all of
+  it. LiteLLM is left out of this one. Keep `n` at or below 4 MiB to include usage
+  parsing as well: larger bodies skip it (`MAX_JSON_CAPTURE`, reported INVALID).
+- `BENCH_LITELLM=0` skips LiteLLM, for runs that only compare the gateway's two
+  paths. A6 then reports a missing LiteLLM result.
+
+```sh
+BENCH_AUTH=1 BENCH_REWRITE=1 BENCH_EMBED_BYTES=3145728 \
+  MOCK_PORT=9100 LUMEWARP_PORT=4100 LITELLM_PORT=4101 bench/scripts/run.sh --full
+```
+
 ## Prerequisites
 
 - Rust toolchain (asdf) for release builds.
@@ -109,7 +135,8 @@ MOCK_PORT=9100 LUMEWARP_PORT=4100 LITELLM_PORT=4101 bench/scripts/run.sh --quick
 
 Other useful overrides: `MOCK_LATENCY_MS` (default 50), `MOCK_STREAM_CHUNKS`,
 `MOCK_CHUNK_INTERVAL_MS`, `MOCK_HEADERS_FIRST` (see below), `BENCH_AUTH`
-(`0`/`1`, default `0`), `LITELLM_WORKERS`,
+(`0`/`1`, default `0`), `BENCH_REWRITE`, `BENCH_EMBED_BYTES`, `EMBED_RATES`,
+`BENCH_LITELLM`, `LITELLM_WORKERS`,
 `LITELLM_VERSION`, `DURATION_SECS`, `WARMUP_SECS`, `RATES`,
 `STREAM_CONCURRENCIES`, `REPEAT`, `SETTLE_SECS`, `HEALTH_TIMEOUT_SECS`,
 `RESULTS_DIR`, `RUN_ID`, plus `MOCK_BIN`/`SSE_BENCH_BIN`/`LUMEWARP_BIN` for
@@ -145,6 +172,7 @@ bench/results/<UTC timestamp>/
   nonstream/<target>/rate-<N>.rep<M>.cpu.csv   /proc samples (1 Hz, PSS)
   stream/<target>/c<N>.rep<M>.json             raw sse-bench JSON
   stream/<target>/c<N>.rep<M>.cpu.csv
+  embeddings/<target>/rate-<N>.rep<M>.json     with BENCH_EMBED_BYTES
   configs/                   templated configs actually used
   logs/                      server + sampler logs
 ```

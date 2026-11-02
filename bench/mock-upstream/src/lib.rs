@@ -53,6 +53,10 @@ pub struct Options {
     /// Initial `vllm:kv_cache_usage_perc` (0..1).
     #[arg(long, default_value_t = 0.0)]
     pub kv_cache_usage: f64,
+    /// Answer embeddings for model `mock` with a shared body of at least this
+    /// many bytes, `model` after `data`; zero keeps the small response.
+    #[arg(long, default_value_t = 0)]
+    pub large_embedding_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -148,10 +152,31 @@ impl Payloads {
     }
 }
 
+/// A list of 1536-dimension vectors of at least `size` bytes, shaped like
+/// OpenAI's: `model` follows `data`, so a scanner reads the whole body to find it.
+fn large_embedding(size: usize) -> Bytes {
+    let vector = format!("[{}0.125]", "0.125,".repeat(1535));
+    let mut body = String::with_capacity(size + vector.len() + 256);
+    body.push_str(r#"{"object":"list","data":["#);
+    let mut index = 0;
+    while body.len() < size {
+        if index > 0 {
+            body.push(',');
+        }
+        body.push_str(&format!(
+            r#"{{"object":"embedding","index":{index},"embedding":{vector}}}"#
+        ));
+        index += 1;
+    }
+    body.push_str(r#"],"model":"mock","usage":{"prompt_tokens":8,"total_tokens":8}}"#);
+    Bytes::from(body)
+}
+
 pub struct App {
     options: Options,
     chat: Arc<Payloads>,
     completions: Arc<Payloads>,
+    large_embedding: Option<Bytes>,
     models: Bytes,
     fault: AtomicU16,
     requests: AtomicU64,
@@ -168,6 +193,8 @@ impl App {
         Arc::new(Self {
             chat: Arc::new(Payloads::new("mock", true, options.stream_chunks)),
             completions: Arc::new(Payloads::new("mock", false, options.stream_chunks)),
+            large_embedding: (options.large_embedding_bytes > 0)
+                .then(|| large_embedding(options.large_embedding_bytes)),
             models: Bytes::from(json!({"object":"list","data":[{"id":"mock","object":"model","created":1700000000,"owned_by":"mock"}]}).to_string()),
             fault: AtomicU16::new(0),
             requests: AtomicU64::new(0),
@@ -338,6 +365,9 @@ impl App {
                 Value::Array(ref values) => values.len(),
                 _ => return error(StatusCode::BAD_REQUEST, "input must be a string or array"),
             };
+            if let Some(large) = self.large_embedding.as_ref().filter(|_| model == "mock") {
+                return response(StatusCode::OK, "application/json", large.clone());
+            }
             let data: Vec<_> = (0..count)
                 .map(
                     |index| json!({"object":"embedding","index":index,"embedding":vec![0.125; 16]}),

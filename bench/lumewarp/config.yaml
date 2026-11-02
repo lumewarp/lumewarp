@@ -26,6 +26,12 @@ models:
     upstream_model: mock
 
 routers:
+  # Called name == upstream_model: the fast path, no response scanning.
   - name: mock
+    members:
+      - {model: mock-model}
+  # The same pool under another name: the response `model` is rewritten
+  # (BENCH_REWRITE=1 measures it as the `lumewarp-rewrite` target).
+  - name: mock-renamed
     members:
       - {model: mock-model}

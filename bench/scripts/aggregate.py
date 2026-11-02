@@ -31,7 +31,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-TARGETS = ("direct", "lumewarp", "litellm")
+TARGETS = ("direct", "lumewarp", "lumewarp-rewrite", "litellm")
 LATENCY_KEYS = ("p50", "p90", "p99", "mean", "max")
 
 
@@ -322,6 +322,7 @@ def _finalize_nonstream(
     rep_lists: dict[str, list[dict[str, Any]]],
     rate: int,
     flags: list[dict[str, Any]],
+    kind: str = "nonstream",
 ) -> None:
     # First pass: saturation state (needed to judge direct's comparability).
     for target in TARGETS:
@@ -333,7 +334,7 @@ def _finalize_nonstream(
         scenario["saturated_repetitions"] = saturated_reps
         scenario["saturation_reasons"] = reasons
         if saturated:
-            flags.append({"scenario": f"nonstream/{rate}/{target}", "reasons": reasons})
+            flags.append({"scenario": f"{kind}/{rate}/{target}", "reasons": reasons})
 
     direct = group.get("direct")
     direct_ok = bool(
@@ -429,6 +430,7 @@ def _finalize_stream(
 def build_results(run_dir: Path, meta: dict[str, Any], manifest: list[dict[str, Any]]) -> dict[str, Any]:
     nonstream_reps: dict[int, dict[str, list[dict[str, Any]]]] = {}
     stream_reps: dict[int, dict[str, list[dict[str, Any]]]] = {}
+    embeddings_reps: dict[int, dict[str, list[dict[str, Any]]]] = {}
 
     for entry in manifest:
         target = entry["target"]
@@ -443,7 +445,7 @@ def build_results(run_dir: Path, meta: dict[str, Any], manifest: list[dict[str, 
         doc = _load_json(raw)
         repetition = int(entry.get("repetition", 1))
 
-        if entry["kind"] == "nonstream":
+        if entry["kind"] in ("nonstream", "embeddings"):
             rate = int(entry["rate"])
             scenario = summarize_oha(doc)
             scenario.update(
@@ -457,7 +459,8 @@ def build_results(run_dir: Path, meta: dict[str, Any], manifest: list[dict[str, 
                     "raw": entry["raw"],
                 }
             )
-            nonstream_reps.setdefault(rate, {}).setdefault(target, []).append(scenario)
+            by_kind = nonstream_reps if entry["kind"] == "nonstream" else embeddings_reps
+            by_kind.setdefault(rate, {}).setdefault(target, []).append(scenario)
         elif entry["kind"] == "stream":
             concurrency = int(entry["concurrency"])
             scenario = summarize_sse(doc)
@@ -500,13 +503,81 @@ def build_results(run_dir: Path, meta: dict[str, Any], manifest: list[dict[str, 
         _finalize_stream(group, per_target, concurrency, flags)
         stream[concurrency] = group
 
+    embeddings: dict[int, dict[str, dict[str, Any]]] = {}
+    for rate, per_target in sorted(embeddings_reps.items()):
+        group = {}
+        for target in TARGETS:
+            reps = per_target.get(target)
+            if not reps:
+                continue
+            reps.sort(key=lambda r: r["repetition"])
+            group[target] = _median_scenario(reps, "nonstream", rate)
+        _finalize_nonstream(group, per_target, rate, flags, "embeddings")
+        embeddings[rate] = group
+
     return {
         "meta": meta,
         "nonstream": {str(k): v for k, v in sorted(nonstream.items())},
         "stream": {str(k): v for k, v in sorted(stream.items())},
+        "embeddings": {str(k): v for k, v in sorted(embeddings.items())},
+        "rewrite": _rewrite(nonstream_reps, stream_reps, embeddings_reps, nonstream, stream, embeddings),
         "a6": _a6(nonstream),
         "flags": flags,
     }
+
+
+def _rewrite(
+    nonstream_reps: dict[int, dict[str, list[dict[str, Any]]]],
+    stream_reps: dict[int, dict[str, list[dict[str, Any]]]],
+    embeddings_reps: dict[int, dict[str, list[dict[str, Any]]]],
+    nonstream: dict[int, dict[str, dict[str, Any]]],
+    stream: dict[int, dict[str, dict[str, Any]]],
+    embeddings: dict[int, dict[str, dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """The scanner's cost: lumewarp-rewrite minus lumewarp (the fast path), same
+    gateway process and repetition, so direct and the machine cancel out."""
+    rows: list[dict[str, Any]] = []
+
+    def add(
+        scenario: str,
+        load: int,
+        reps: dict[str, list[dict[str, Any]]],
+        group: dict[str, dict[str, Any]],
+        latency: str,
+        overhead_key: str,
+    ) -> None:
+        fast_reps = {r["repetition"]: r for r in reps.get("lumewarp", [])}
+        deltas = []
+        for rep in reps.get("lumewarp-rewrite", []):
+            fast = fast_reps.get(rep["repetition"])
+            if fast is not None:
+                deltas.append(_delta(rep[latency].get("p99"), fast[latency].get("p99")))
+        deltas = [d for d in deltas if d is not None]
+        if not deltas:
+            return
+        fast = group["lumewarp"]
+        rewrite = group["lumewarp-rewrite"]
+        rows.append(
+            {
+                "scenario": scenario,
+                "load": load,
+                "fast_overhead_p99_ms": (fast.get("overhead_ms") or {}).get(overhead_key),
+                "rewrite_overhead_p99_ms": (rewrite.get("overhead_ms") or {}).get(overhead_key),
+                "delta_p99_ms": _median(deltas),
+                "delta_p99_min_ms": min(deltas),
+                "delta_p99_max_ms": max(deltas),
+                "repetitions": len(deltas),
+                "comparable": bool(fast.get("overhead_comparable") and rewrite.get("overhead_comparable")),
+            }
+        )
+
+    for rate, reps in sorted(nonstream_reps.items()):
+        add("non-stream", rate, reps, nonstream[rate], "latency_ms", "p99")
+    for concurrency, reps in sorted(stream_reps.items()):
+        add("stream TTFT", concurrency, reps, stream[concurrency], "ttft_ms", "ttft_p99")
+    for rate, reps in sorted(embeddings_reps.items()):
+        add("embeddings", rate, reps, embeddings[rate], "latency_ms", "p99")
+    return rows
 
 
 def _a6(nonstream: dict[int, dict[str, dict[str, Any]]]) -> dict[str, Any]:
@@ -708,6 +779,47 @@ def render_summary(results: dict[str, Any]) -> str:
     add("")
     add("Stream `rps` uses successful requests only (`ok_rps`) when sse-bench provides it.")
     add("")
+
+    if results.get("embeddings"):
+        add(f"## Embeddings (`POST /v1/embeddings`, at least {config.get('embed_bytes', '?')} bytes, `model` after `data`)")
+        add("")
+        add("| rate | target | p50 ms | p99 ms | rps | err % | cmp | ovh p50 ms | ovh p99 ms | cpu avg/max % | PSS max MiB | flags |")
+        add("|---:|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---|")
+        for rate, group in results["embeddings"].items():
+            for target in TARGETS:
+                s = group.get(target)
+                if not s:
+                    continue
+                lat = s.get("latency_ms") or {}
+                ovh = s.get("overhead_ms") or {}
+                cpu = s.get("cpu") or {}
+                add(
+                    f"| {rate} | {target} | {_fmt(lat.get('p50'))} | {_fmt(lat.get('p99'))} | "
+                    f"{_fmt(s.get('rps'), 0)} | {_fmt((s.get('error_rate') or 0) * 100, 2)} | "
+                    f"{_cmp_text(s, target)} | {_fmt(ovh.get('p50'))} | "
+                    f"{_fmt_range(ovh.get('p99'), s.get('overhead_p99_min'), s.get('overhead_p99_max'))} | "
+                    f"{_fmt(cpu.get('avg_pct'), 1)}/{_fmt(cpu.get('max_pct'), 1)} | "
+                    f"{_mem_cell(cpu, s.get('mem_kind'))} | {_flag_text(s)} |"
+                )
+        add("")
+
+    if results.get("rewrite"):
+        add("## Response rewrite (`lumewarp-rewrite` against the fast path)")
+        add("")
+        add("`lumewarp-rewrite` calls the same pool under a name that differs from")
+        add("`upstream_model`, so every response goes through the scanner. Delta p99 is")
+        add("`lumewarp-rewrite` minus `lumewarp` per repetition, `median [min–max]`.")
+        add("")
+        add("| scenario | rate / conc | fast ovh p99 ms | rewrite ovh p99 ms | delta p99 ms | cmp |")
+        add("|---|---:|---:|---:|---:|---|")
+        for row in results["rewrite"]:
+            add(
+                f"| {row['scenario']} | {row['load']} | {_fmt(row.get('fast_overhead_p99_ms'))} | "
+                f"{_fmt(row.get('rewrite_overhead_p99_ms'))} | "
+                f"{_fmt_range(row.get('delta_p99_ms'), row.get('delta_p99_min_ms'), row.get('delta_p99_max_ms'))} | "
+                f"{'yes' if row.get('comparable') else 'no'} |"
+            )
+        add("")
 
     add("## A6 gate (overhead p99, non-stream)")
     add("")
@@ -1112,8 +1224,68 @@ def _selftest_a6_404() -> int:
     return assertions
 
 
+def _selftest_rewrite() -> int:
+    assertions = 0
+
+    def check(condition: bool, label: str) -> None:
+        nonlocal assertions
+        if not condition:
+            raise AssertionError(label)
+        assertions += 1
+
+    with tempfile.TemporaryDirectory(prefix="lumewarp-bench-selftest-rewrite-") as tmp:
+        run_dir = Path(tmp)
+        manifest: list[dict[str, Any]] = []
+        latency = {
+            ("nonstream", "direct"): 50.0,
+            ("nonstream", "lumewarp"): 50.2,
+            ("nonstream", "lumewarp-rewrite"): 50.5,
+            ("embeddings", "direct"): 60.0,
+            ("embeddings", "lumewarp"): 62.0,
+            ("embeddings", "lumewarp-rewrite"): 66.0,
+        }
+        for (kind, target), p99 in latency.items():
+            rate = 1000 if kind == "nonstream" else 50
+            for rep in (1, 2):
+                raw = f"{kind}/{target}/rate-{rate}.rep{rep}.json"
+                cpu = f"{kind}/{target}/rate-{rate}.rep{rep}.cpu.csv"
+                (run_dir / raw).parent.mkdir(parents=True, exist_ok=True)
+                (run_dir / raw).write_text(
+                    json.dumps(_oha_doc(p99 - 1, p99 - 0.5, p99 + rep / 10, rate, {"200": rate * 15})),
+                    encoding="utf-8",
+                )
+                _write_cpu(run_dir / cpu, [10.0, 20.0], 1024)
+                manifest.append(
+                    {
+                        "kind": kind,
+                        "target": target,
+                        "rate": rate,
+                        "repetition": rep,
+                        "connections": 64,
+                        "duration_secs": 15,
+                        "raw": raw,
+                        "cpu": cpu,
+                    }
+                )
+        results = build_results(run_dir, {"config": {"embed_bytes": 3145728}}, manifest)
+        rows = {row["scenario"]: row for row in results["rewrite"]}
+        check(set(rows) == {"non-stream", "embeddings"}, "one row per scenario with both targets")
+        check(rows["non-stream"]["delta_p99_ms"] == 0.3, "paired delta p99")
+        check(rows["embeddings"]["delta_p99_ms"] == 4.0, "embeddings delta p99")
+        check(rows["embeddings"]["fast_overhead_p99_ms"] == 2.0, "fast path overhead")
+        check(rows["embeddings"]["rewrite_overhead_p99_ms"] == 6.0, "rewrite overhead")
+        check(results["a6"]["1000"]["lumewarp_p99_overhead_ms"] == 0.2, "A6 stays on the fast path")
+        summary = render_summary(results)
+        check("## Response rewrite" in summary, "rewrite section rendered")
+        check("## Embeddings" in summary, "embeddings section rendered")
+        check("3145728 bytes" in summary, "embeddings size shown")
+        empty = build_results(run_dir, {}, [e for e in manifest if e["target"] != "lumewarp-rewrite"])
+        check(empty["rewrite"] == [], "no rewrite target, no rows")
+    return assertions
+
+
 def run_selftest() -> int:
-    assertions = _selftest_main_case() + _selftest_a6_404()
+    assertions = _selftest_main_case() + _selftest_a6_404() + _selftest_rewrite()
     print(f"selftest: OK ({assertions} assertions)")
     return 0
 

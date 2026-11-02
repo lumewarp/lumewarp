@@ -35,6 +35,7 @@ curl -N -H 'content-type: application/json' \
 | `--served-model-name` | `mock` | `model_name` label of the vLLM-style `/metrics` series |
 | `--waiting` | `0` | Initial `vllm:num_requests_waiting` |
 | `--kv-cache-usage` | `0` | Initial `vllm:kv_cache_usage_perc` (0..1) |
+| `--large-embedding-bytes` | `0` (off) | Embeddings for model `mock` answer with one shared body of at least this size: 1536-dimension vectors, `model` after `data` |
 
 Fault injection is opt-in: `x-mock-fail: 429` (any 400..599), `reset`
 (close before headers), or `timeout` (never send headers).

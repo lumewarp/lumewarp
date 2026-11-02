@@ -123,6 +123,9 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--rates", required=True, help="space/comma separated target RPS")
     parser.add_argument("--stream-concurrencies", required=True)
     parser.add_argument("--connections", required=True, help="rate:conns,rate:conns")
+    parser.add_argument("--rewrite", type=int, default=0)
+    parser.add_argument("--embed-bytes", type=int, default=0)
+    parser.add_argument("--embed-rates", default="")
     parser.add_argument("--request-body", required=True)
     parser.add_argument("--mock-bin", required=True, type=Path)
     parser.add_argument("--sse-bench-bin", required=True, type=Path)
@@ -171,6 +174,9 @@ def main(argv: list[str]) -> int:
             "rates": _parse_list(args.rates),
             "stream_concurrencies": _parse_list(args.stream_concurrencies),
             "connections": _parse_pairs(args.connections),
+            "rewrite": bool(args.rewrite),
+            "embed_bytes": args.embed_bytes,
+            "embed_rates": _parse_list(args.embed_rates) if args.embed_bytes else [],
         },
         "request": {"model": "mock", "body": json.loads(args.request_body)},
     }
