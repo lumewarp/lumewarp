@@ -1453,6 +1453,11 @@ export interface components {
         RollbackCreate: {
             /** Version */
             version: number;
+            /**
+             * Force
+             * @description Save although connected gateways lack the strategy; they will NACK.
+             */
+            force?: boolean;
         };
         /** RollbackOut */
         RollbackOut: {

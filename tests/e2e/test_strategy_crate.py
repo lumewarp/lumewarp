@@ -6,17 +6,24 @@ plane or the UI names it, its form comes from `GET /strategies`, and a router us
 created and called through the admin API.
 """
 
+import json
 import os
+import socket
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 import stack as stack_module
-from stack import wait_for
+from stack import free_port, wait_for
 from test_p2_routing import _model, _upstream_id
 
 STRATEGY = "priority_failover"
 ROOT = Path(__file__).resolve().parents[2]
+# Also run through the factory by the crate's own tests.
+BOUNDARIES = json.loads(
+    (ROOT / "gateway/strategies/priority-failover/testdata/boundaries.json").read_text()
+)
 
 
 def test_nothing_outside_the_crate_names_the_strategy():
@@ -90,3 +97,68 @@ def test_crate_appears_through_hello_and_a_router_using_it_is_served(stack, monk
     found = row()
     # The member's params reached the strategy: priority 1 wins whatever the order.
     assert (found["requested"], found["model"]) == ("failover", "second")
+
+
+def _standalone_accepts(binary: str, directory: Path, params: dict, member: dict) -> bool:
+    """Whether the gateway starts from YAML with these settings. JSON is YAML."""
+    listen, admin = free_port(), free_port()
+    config = directory / f"standalone-{listen}.yaml"
+    config.write_text(
+        json.dumps(
+            {
+                "server": {"listen": f"127.0.0.1:{listen}", "admin_listen": f"127.0.0.1:{admin}"},
+                "upstreams": [{"name": "u", "kind": "vllm", "base_url": "http://127.0.0.1:9/v1"}],
+                "models": [{"name": "m", "upstream": "u", "upstream_model": "m"}],
+                "routers": [
+                    {
+                        "name": "r",
+                        "strategy": STRATEGY,
+                        "params": params,
+                        "members": [{"model": "m", "params": member}],
+                    }
+                ],
+            }
+        )
+    )
+    proc = subprocess.Popen(
+        [binary, "--config", str(config)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                return False
+            try:
+                with socket.create_connection(("127.0.0.1", listen), 0.2):
+                    return True
+            except OSError:
+                time.sleep(0.05)
+        raise AssertionError(f"gateway neither started nor exited: {params} {member}")
+    finally:
+        proc.terminate()
+        proc.wait(15)
+
+
+def test_the_same_boundary_payloads_agree_in_control_plane_and_standalone(
+    stack, monkeypatch, tmp_path
+):
+    binary = os.environ.get("E2E_STRATEGY_GATEWAY_BIN")
+    if not binary:
+        pytest.skip("only scripts/e2e-p1.sh builds the gateway with the strategy crate")
+    stack.seed()
+    model = _model(stack, "boundary", _upstream_id(stack, "mock"))
+    monkeypatch.setattr(stack_module, "GATEWAY_BIN", Path(binary))
+    stack.start_gateway()
+    wait_for(lambda: _strategy(stack), 15, "strategy reported")
+    for i, case in enumerate(BOUNDARIES):
+        body = {
+            "name": f"boundary-{i}",
+            "strategy": STRATEGY,
+            "params": case["params"],
+            "members": [{"model_id": model, "params": case["member"]}],
+        }
+        response = stack.api("POST", "/routers", json=body)
+        assert response.status_code == (201 if case["ok"] else 422), (case, response.text)
+        assert _standalone_accepts(binary, tmp_path, case["params"], case["member"]) is case["ok"], (
+            case
+        )

@@ -34,7 +34,11 @@ pub struct MemberParams {
 pub struct PriorityFailover { priorities: Box<[u32]> }
 
 impl Configure<Params, MemberParams> for PriorityFailover {
-    fn configure(_: &RouterInfo<'_>, _: Params, members: &[MemberParams]) -> Result<Self, ConfigError> {
+    fn configure(_: &RouterInfo<'_>, params: Params, members: &[MemberParams]) -> Result<Self, ConfigError> {
+        // Annotations above create no runtime check: enforce them here.
+        if params.max_in_flight == Some(0) || members.iter().any(|m| m.priority == 0) {
+            return Err(ConfigError("max_in_flight and priority must be at least 1".into()));
+        }
         Ok(Self { priorities: members.iter().map(|m| m.priority).collect() })
     }
 }
@@ -78,14 +82,18 @@ There is deliberately no prompt or body interface.
 
 ## Schema subset
 
-`register!` derives JSON Schema from the same structs with `schemars` and normalizes it. `Option<T>` is an optional `T`; `format` becomes `minimum`/`maximum` bounds matching the Rust integer type; a nested struct is inlined; doc comments become `description`.
+`register!` derives JSON Schema from the same structs with `schemars` and normalizes it. `Option<T>` is an optional `T`; an integer `format` becomes `minimum`/`maximum` bounds, intersected with any declared ones, so they match the Rust integer type; a nested struct is inlined; doc comments become `description`.
+
+**Schema annotations create no runtime checks.** `#[schemars(range(min = 1))]` changes only the emitted schema: serde ignores it, and the gateway calls `configure` with whatever deserializes. Standalone YAML and snapshots reach `configure` without passing the schema, so `configure` must enforce every limit the schema states, as the example does. Test it with one list of boundary payloads through each path, as `priority-failover/testdata/boundaries.json` does.
 
 | Allowed | |
 |---|---|
 | Types | `string`, `integer`, `number`, `boolean`, arrays of strings, one level of nested objects |
 | Keywords | `title`, `description`, `default`, `required`, `enum` (string, integer, number), `minimum`, `maximum`, `additionalProperties: false`, `x-lumewarp-widget` on a string array |
 
-Everything else is outside it: `HashMap`, `Vec<u32>`, enums with data, `regex`, `length`, two levels of nesting. The test `register!` generates fails `cargo test` in the strategy crate, naming the field. Add `assert_schema_subset::<T>()` yourself for a helper type.
+Everything else is outside it: `HashMap`, `Vec<u32>`, enums with data, `regex`, `length`, two levels of nesting, any `format` other than the integer ones (`Ipv4Addr` emits `format: ipv4`, which the control plane would not check), a range the type cannot hold or `minimum` above `maximum` (`range(max = 1000)` on a `u8` narrows to 255; `range(min = 300)` on it has no valid value). The test `register!` generates fails `cargo test` in the strategy crate, naming the field. Add `assert_schema_subset::<T>()` yourself for a helper type.
+
+An `Option<T>` deserializes `null` as absent, but its schema says only `T`, so the control plane refuses an explicit `null`: leave the field out.
 
 If a schema outside the subset or above 16 KiB does reach the control plane, it is not used: the UI falls back to a JSON editor and only `configure` validates those settings. Properties are listed by name, not in declaration order, because JSON objects are stored sorted.
 
@@ -103,9 +111,13 @@ If a schema outside the subset or above 16 KiB does reach the control plane, it 
 | No gateway connected | Built-ins validate against the manifest committed with the control plane; custom ones against the most recent report. |
 | Stored settings fail a schema after an upgrade | The router reads `config_invalid: true` with `config_problems`. The data is not altered. Writes that do not touch strategy, params, members or splits still save. |
 
-A gateway's report counts while its token is unrevoked and it is connected or was seen in the last 30 days.
+A rollback restores routers from an old version, but the gateways are today's, so every restored router meets the same rules, with the same `force` and the same audit. A rejection is a 422 and changes nothing.
 
-Schemas are untrusted data from the gateway: capped at 16 KiB each, restricted to the subset before use (so no `$ref` to fetch and no regex to run), and rendered only as text. A bad schema in `Hello` never affects the stream.
+A gateway counts while the token of its latest `Hello` is unrevoked and it is connected or was seen in the last 30 days. A report counts while the token that made it is unrevoked; another token of the same gateway keeps nothing alive, and counts from its own `Hello` on. A connected gateway has what its latest `Hello` lists, an offline one what it last reported. Each `Hello` replaces the reports under the gateway's session row lock, and a reader sees one `Hello`, never parts of two.
+
+Each gateway counts for at most 128 strategies, descriptors first, then `strategy:<name>` capabilities, with names as in `register!`. The rest of a `Hello` is ignored, logged and counted in `lumewarp_cp_gateway_strategies_ignored_total`; the stream stays up.
+
+Schemas are untrusted data from the gateway: capped at 16 KiB each, restricted to the subset before use (so no `$ref` to fetch and no regex to run), and rendered only as text. A bad schema in `Hello` never affects the stream. The `digest` only shows that a descriptor changed: nothing verifies it against the content and nothing is trusted, cached or skipped because of it.
 
 ## Compatible changes
 

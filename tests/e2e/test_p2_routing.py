@@ -109,20 +109,23 @@ def test_alias_and_direct_model_through_the_control_plane(stack):
 
 def _offline_gateway_with(stack, strategy: str) -> None:
     gateway = "offline-with-strategy"
-    stack.ok("POST", "/gateways", json={"gateway_id": gateway})
+    token = stack.ok("POST", "/gateways", json={"gateway_id": gateway})["token"]["id"]
     pg(
         stack.dsn,
-        "INSERT INTO gateway_sessions (scope, gateway_id, connected, last_seen_at)"
-        " VALUES ('e2e', $1, false, now())",
+        "INSERT INTO gateway_sessions (scope, gateway_id, token_id, connected, last_seen_at)"
+        " VALUES ('e2e', $1, $2::uuid, false, now())",
         gateway,
+        token,
     )
     pg(
         stack.dsn,
-        "INSERT INTO gateway_strategies (scope, gateway_id, name, digest, descriptor, seen_at)"
-        " VALUES ('e2e', $1, $2, 'aa', $3, now())",
+        "INSERT INTO gateway_strategies"
+        " (scope, gateway_id, name, digest, descriptor, token_id, seen_at)"
+        " VALUES ('e2e', $1, $2, 'aa', $3, $4::uuid, now())",
         gateway,
         strategy,
         json.dumps({"name": strategy, "params_schema": None, "member_schema": None}),
+        token,
     )
 
 
