@@ -486,7 +486,23 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Usage */
+        /**
+         * Get Usage
+         * @description Aggregate usage within the caller's existing team/key permission scope.
+         *
+         *     Catalog identity uses request started_at (completion ts for old gateways).
+         *     If no exact interval matches, a unique same-kind owner within
+         *     LUMEWARP_USAGE_CATALOG_GRACE_SECONDS (default 300) is used. Same-kind name
+         *     reuse within the grace window while a gateway lags can still misattribute
+         *     to the new exact owner;
+         *     config_version is not mapped to catalog history.
+         *
+         *     Name filters select the current live id. Orphan rows sharing a live name
+         *     remain visible in unfiltered groups but cannot be selected separately by
+         *     that name/id; no orphan-only filter is provided. Catalog provenance refs
+         *     are collected for catalog/upstream-model groupings, not scope-only/default
+         *     day,requested loads. Empty upstream_model means unavailable; null means mixed.
+         */
         get: operations["getUsage"];
         put?: never;
         post?: never;
@@ -1908,9 +1924,11 @@ export interface components {
          * UsageRowOut
          * @description Aggregated usage with current catalog names and immutable upstream names.
          *
-         *     Singular model/alias/router fields are set for one distinct value; mixed groups
-         *     use the corresponding lists. Their empty string means no provenance, while null
-         *     means mixed/unavailable. Lists omit empty values. Served by lists actual models.
+         *     Singular model/alias/router/upstream_model fields are set for one distinct
+         *     value; mixed groups use lists. Empty string means no provenance; null means
+         *     mixed/not collected. Lists omit empty values. Model grouping collects all refs;
+         *     alias/router grouping collects its refs and Served by; upstream-model grouping
+         *     collects Served by. Default/scope-only grouping does not collect catalog refs.
          */
         UsageRowOut: {
             /** Date */

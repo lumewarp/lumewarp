@@ -207,6 +207,96 @@ async def _totals_page(
     return Page[UsageRowOut](items=items, next_cursor=next_cursor)
 
 
+_AMOUNTS = ("requests", "prompt_tokens", "completion_tokens", "cost_nano_usd", "unknown_cost_count")
+
+
+def _events_query(
+    groups: list[str],
+    readable: set[uuid.UUID] | None,
+    from_: datetime,
+    to_: datetime,
+    filters: list[Any],
+) -> tuple[Any, dict[str, Any], list[str], bool]:
+    """Aggregate raw rows first; resolve names/collect UI refs only after reduction.
+
+    The default day/requested (and scope-only) load needs no catalog joins or
+    distinct ref aggregates. Model groups need all provenance; alias/router groups
+    need their own refs plus Served by. Upstream-model groups need Served by.
+    """
+    names = [column for group in groups for column in COLUMNS[group]]
+    kinds = [kind.value for kind in CatalogKind if kind.value in groups]
+    if any(name in groups for name in ("model", "alias", "router", "upstream_model")):
+        kinds = (
+            ["model", "alias", "router"]
+            if "model" in groups
+            else list(dict.fromkeys(["model", *kinds]))
+        )
+    upstream = "model" in groups or "upstream_model" in groups
+    fields = {
+        "day": func.date_trunc("day", func.timezone("UTC", UsageEvent.ts)),
+        "requested": UsageEvent.requested,
+        "team": UsageEvent.team_id,
+        "owner_kind": UsageEvent.owner_kind,
+        "owner_id": UsageEvent.owner_id,
+        "key": UsageEvent.key_id,
+        "upstream_model": UsageEvent.upstream_model,
+    }
+    raw_names = [name for name in names if name not in {kind.value for kind in CatalogKind}]
+    for kind in kinds:
+        fields[kind] = getattr(UsageEvent, kind)
+        fields[f"{kind}_id"] = getattr(UsageEvent, f"{kind}_id")
+        raw_names.extend([f"{kind}_id", kind])
+    if upstream and "upstream_model" not in raw_names:
+        raw_names.append("upstream_model")
+    columns = [fields[name].label(name) for name in raw_names]
+    amounts = [
+        func.count().label("requests"),
+        func.coalesce(func.sum(UsageEvent.prompt_tokens), 0).label("prompt_tokens"),
+        func.coalesce(func.sum(UsageEvent.completion_tokens), 0).label("completion_tokens"),
+        func.coalesce(func.sum(UsageEvent.cost_nano_usd), 0).label("cost_nano_usd"),
+        func.coalesce(func.sum(case((UsageEvent.cost_known.is_(False), 1), else_=0)), 0).label(
+            "unknown_cost_count"
+        ),
+    ]
+    raw = select(*columns, *amounts).where(UsageEvent.ts >= from_, UsageEvent.ts < to_, *filters)
+    if readable is not None:
+        raw = raw.where(UsageEvent.team_id.in_(readable))
+    if columns:
+        raw = raw.group_by(*columns)
+    if not kinds:
+        return raw, {name: fields[name] for name in names}, kinds, upstream
+
+    reduced = raw.subquery("usage_reduced")
+    fields = {name: reduced.c[name] for name in names if name not in kinds}
+    joins = []
+    refs = []
+    for kind in kinds:
+        catalog = aliased(CatalogName)
+        joins.append((catalog, (catalog.id == reduced.c[f"{kind}_id"]) & (catalog.kind == kind)))
+        fields[kind] = case(
+            (catalog.id.is_not(None), "id:" + cast(catalog.id, String)),
+            else_="name:" + reduced.c[kind],
+        )
+        ref = func.jsonb_build_object(
+            "id", catalog.id, "name", func.coalesce(catalog.name, reduced.c[kind])
+        )
+        refs.append(cast(func.jsonb_agg(distinct(ref)), JSONB).label(f"{kind}_refs"))
+    if upstream:
+        refs.append(func.array_agg(distinct(reduced.c.upstream_model)).label("upstream_values"))
+    # Keep caller's dimension order; ids unify historic spellings after rename.
+    group_columns = [fields[name].label(name) for name in names]
+    stmt = select(
+        *group_columns,
+        *(func.coalesce(func.sum(reduced.c[name]), 0).label(name) for name in _AMOUNTS),
+        *refs,
+    ).select_from(reduced)
+    for catalog, condition in joins:
+        stmt = stmt.outerjoin(catalog, condition)
+    if group_columns:
+        stmt = stmt.group_by(*group_columns)
+    return stmt, {name: fields[name] for name in names}, kinds, upstream
+
+
 async def _events_page(
     session: AsyncSession,
     groups: list[str],
@@ -217,77 +307,33 @@ async def _events_page(
     limit: int,
     cursor: str | None,
 ) -> Page[UsageRowOut]:
-    fields = {
-        "day": func.date_trunc("day", func.timezone("UTC", UsageEvent.ts)),
-        "requested": UsageEvent.requested,
-        "team": UsageEvent.team_id,
-        "owner_kind": UsageEvent.owner_kind,
-        "owner_id": UsageEvent.owner_id,
-        "key": UsageEvent.key_id,
-    }
-    catalogs = {kind.value: aliased(CatalogName) for kind in CatalogKind}
-    refs = {}
-    for name, catalog in catalogs.items():
-        # Non-null, collision-free identity keys keep pagination stable even for
-        # missing provenance. A live id and an orphan's spelling never coalesce.
-        fields[name] = case(
-            (catalog.id.is_not(None), "id:" + cast(catalog.id, String)),
-            else_="name:" + getattr(UsageEvent, name),
-        )
-        refs[name] = func.jsonb_build_object(
-            "id", catalog.id, "name", func.coalesce(catalog.name, getattr(UsageEvent, name))
-        )
-    fields["upstream_model"] = UsageEvent.upstream_model
-    names = [column for group in groups for column in COLUMNS[group]]
-    group_columns = [fields[name] for name in names]
-    aggregates = [
-        func.count().label("requests"),
-        func.coalesce(func.sum(UsageEvent.prompt_tokens), 0).label("prompt_tokens"),
-        func.coalesce(func.sum(UsageEvent.completion_tokens), 0).label("completion_tokens"),
-        func.coalesce(func.sum(UsageEvent.cost_nano_usd), 0).label("cost_nano_usd"),
-        func.coalesce(func.sum(case((UsageEvent.cost_known.is_(False), 1), else_=0)), 0).label(
-            "unknown_cost_count"
-        ),
-    ]
-    aggregates.extend(cast(func.jsonb_agg(distinct(refs[name])), JSONB) for name in catalogs)
-    aggregates.append(func.array_agg(distinct(UsageEvent.upstream_model)))
-    stmt = select(*group_columns, *aggregates).where(UsageEvent.ts >= from_, UsageEvent.ts < to_)
-    for name, catalog in catalogs.items():
-        stmt = stmt.outerjoin(
-            catalog, (catalog.id == getattr(UsageEvent, f"{name}_id")) & (catalog.kind == name)
-        )
-    for condition in filters:
-        stmt = stmt.where(condition)
-    if readable is not None:
-        if not readable:
-            return Page[UsageRowOut](items=[], next_cursor=None)
-        stmt = stmt.where(UsageEvent.team_id.in_(readable))
+    if readable is not None and not readable:
+        return Page[UsageRowOut](items=[], next_cursor=None)
+    stmt, fields, kinds, upstream = _events_query(groups, readable, from_, to_, filters)
+    names = list(fields)
+    group_columns = list(fields.values())
     if names:
-        stmt = stmt.group_by(*group_columns).order_by(*group_columns)
+        stmt = stmt.order_by(*group_columns)
         if cursor is not None:
-            values = _decode_cursor(cursor, names)
-            stmt = stmt.where(tuple_(*group_columns) > tuple_(*values))
-    rows = (await session.execute(stmt.limit(limit + 1))).all()
+            stmt = stmt.having(tuple_(*group_columns) > tuple_(*_decode_cursor(cursor, names)))
+    rows = (await session.execute(stmt.limit(limit + 1))).mappings().all()
+    next_cursor = None
     if names and len(rows) > limit:
         last = rows[limit - 1]
         next_cursor = _encode_cursor(
             [
-                last[index].isoformat()
+                last[name].isoformat()
                 if name == "day"
-                else getattr(last[index], "value", None) or str(last[index])
-                for index, name in enumerate(names)
+                else getattr(last[name], "value", None) or str(last[name])
+                for name in names
             ]
         )
-    else:
-        next_cursor = None
-    n = len(names)
-    items: list[UsageRowOut] = []
+    items = []
     for row in rows[:limit]:
-        values = {name: row[index] for index, name in enumerate(names)}
-        provenance: dict[str, Any] = {}
-        for index, name in enumerate(catalogs):
+        provenance = {}
+        for name in kinds:
             entries = sorted(
-                row[n + 5 + index] or [], key=lambda item: (item["name"], item["id"] or "")
+                row[f"{name}_refs"] or [], key=lambda item: (item["name"], item["id"] or "")
             )
             if len(entries) == 1:
                 provenance[name] = entries[0]["name"]
@@ -295,25 +341,21 @@ async def _events_page(
             provenance[
                 {"model": "served_by", "alias": "via_aliases", "router": "via_routers"}[name]
             ] = [entry for entry in entries if entry["name"]]
-        upstream_models = sorted(value for value in (row[n + 8] or []) if value)
-        provenance["upstream_models"] = upstream_models
-        if len(upstream_models) == 1:
-            provenance["upstream_model"] = upstream_models[0]
+        if upstream:
+            values = row["upstream_values"] or []
+            provenance["upstream_model"] = values[0] if len(values) == 1 else None
+            provenance["upstream_models"] = sorted(value for value in values if value)
         items.append(
             UsageRowOut(
                 **provenance,
-                date=values["day"].date() if "day" in values else None,
-                requested=values.get("requested"),
-                team_id=values.get("team"),
-                owner_kind=values.get("owner_kind"),
-                owner_id=values.get("owner_id"),
-                key_id=values.get("key"),
-                requests=int(row[n]),
-                prompt_tokens=int(row[n + 1]),
-                completion_tokens=int(row[n + 2]),
-                total_tokens=int(row[n + 1]) + int(row[n + 2]),
-                cost_nano_usd=int(row[n + 3]),
-                unknown_cost_count=int(row[n + 4]),
+                date=row["day"].date() if "day" in row else None,
+                requested=row.get("requested"),
+                team_id=row.get("team"),
+                owner_kind=row.get("owner_kind"),
+                owner_id=row.get("owner_id"),
+                key_id=row.get("key"),
+                **{name: int(row[name]) for name in _AMOUNTS},
+                total_tokens=int(row["prompt_tokens"]) + int(row["completion_tokens"]),
             )
         )
     return Page[UsageRowOut](items=items, next_cursor=next_cursor)
@@ -369,6 +411,21 @@ async def get_usage(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[UsageRowOut]:
+    """Aggregate usage within the caller's existing team/key permission scope.
+
+    Catalog identity uses request started_at (completion ts for old gateways).
+    If no exact interval matches, a unique same-kind owner within
+    LUMEWARP_USAGE_CATALOG_GRACE_SECONDS (default 300) is used. Same-kind name
+    reuse within the grace window while a gateway lags can still misattribute
+    to the new exact owner;
+    config_version is not mapped to catalog history.
+
+    Name filters select the current live id. Orphan rows sharing a live name
+    remain visible in unfiltered groups but cannot be selected separately by
+    that name/id; no orphan-only filter is provided. Catalog provenance refs
+    are collected for catalog/upstream-model groupings, not scope-only/default
+    day,requested loads. Empty upstream_model means unavailable; null means mixed.
+    """
     now = datetime.now(UTC)
     start = (aware(from_, "from") or month_start(now)).astimezone(UTC)
     end = (aware(to_, "to") or now).astimezone(UTC)

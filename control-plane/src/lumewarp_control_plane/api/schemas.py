@@ -769,9 +769,11 @@ class UsageNameOut(ApiModel):
 class UsageRowOut(ApiModel):
     """Aggregated usage with current catalog names and immutable upstream names.
 
-    Singular model/alias/router fields are set for one distinct value; mixed groups
-    use the corresponding lists. Their empty string means no provenance, while null
-    means mixed/unavailable. Lists omit empty values. Served by lists actual models.
+    Singular model/alias/router/upstream_model fields are set for one distinct
+    value; mixed groups use lists. Empty string means no provenance; null means
+    mixed/not collected. Lists omit empty values. Model grouping collects all refs;
+    alias/router grouping collects its refs and Served by; upstream-model grouping
+    collects Served by. Default/scope-only grouping does not collect catalog refs.
     """
 
     date: date_type | None = None
