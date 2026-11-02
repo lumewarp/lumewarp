@@ -14,8 +14,9 @@
 #
 # Ports: UI 5173 (Vite, proxies /api to the CP), CP 8091 (+ gRPC 50051, metrics 9465),
 # gateway 4000 (+ admin 9464), mock upstream 9100.
-# An empty database gets a demo router `demo`, a team `demo` and one key; the key secret
-# is kept in .dev/demo-key. Each start issues a fresh gateway token (.dev/env).
+# An empty database gets a model `mock-local`, a router `demo` over it, an alias
+# `demo-latest` to the router, a team `demo` and one key; the key secret is kept in
+# .dev/demo-key. Each start issues a fresh gateway token (.dev/env).
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -129,11 +130,12 @@ seed() {
     "$cp_url/api/v1/session/break-glass" >/dev/null
   admin_csrf="$(curl -fsS -b "$state/admin-cookie" "$cp_url/api/v1/session" | jq -r .csrf_token)"
   [[ $(api GET /upstreams | jq '.items | length') == 0 ]] || return 0
-  log "seeding demo upstream, router, team and key"
-  local up dep team sa
+  log "seeding demo upstream, model, router, alias, team and key"
+  local up model router team sa
   up="$(api POST /upstreams '{"name":"mock","kind":"openai_compatible","base_url":"http://127.0.0.1:9100/v1"}' | jq -r .id)"
-  dep="$(api POST /models "{\"name\":\"mock-local\",\"upstream_id\":\"$up\",\"upstream_model\":\"mock\"}" | jq -r .id)"
-  api POST /routers "{\"name\":\"demo\",\"members\":[{\"model_id\":\"$dep\"}]}" >/dev/null
+  model="$(api POST /models "{\"name\":\"mock-local\",\"upstream_id\":\"$up\",\"upstream_model\":\"mock\"}" | jq -r .id)"
+  router="$(api POST /routers "{\"name\":\"demo\",\"members\":[{\"model_id\":\"$model\"}]}" | jq -r .id)"
+  api POST /aliases "{\"name\":\"demo-latest\",\"target\":\"$router\"}" >/dev/null
   team="$(api POST /teams '{"name":"demo","model_access":"all"}' | jq -r .id)"
   sa="$(api POST "/teams/$team/service-accounts" '{"name":"chat"}' | jq -r .id)"
   api POST "/teams/$team/keys" "{\"name\":\"demo\",\"service_account_id\":\"$sa\"}" \
@@ -148,7 +150,7 @@ summary() { # stop hint
   UI        $ui_url   (SSO: alice/bob/carol; alice belongs to lumewarp-admins)
   Emergency login uses LUMEWARP_BREAK_GLASS_PASSWORD (development default configured).
   API       $cp_url/api/v1
-  gateway   http://127.0.0.1:4000/v1   (model demo)
+  gateway   http://127.0.0.1:4000/v1   (names: mock-local, demo, demo-latest)
   metrics   http://127.0.0.1:9464/metrics (gateway), http://127.0.0.1:9465/metrics (CP)
   Demo API key is stored in .dev/demo-key (not printed).
   $1
@@ -211,7 +213,7 @@ case "${1:-all}" in
     log "closed $tab"
     ;;
   *)
-    sed -n '2,19p' "$self" | sed 's/^# \{0,1\}//'
+    sed -n '2,20p' "$self" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac
