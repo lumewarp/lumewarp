@@ -154,7 +154,7 @@ export function Upstreams() {
           { key: "name", header: "Name", sort: (a, b) => a.name.localeCompare(b.name), cell: (r) => <strong>{r.name}</strong> },
           { key: "kind", header: "Kind", cell: (r) => <Badge tone="info">{KINDS.find((k) => k.value === r.kind)?.label ?? r.kind}</Badge> },
           { key: "url", header: "Base URL", cell: (r) => <code>{r.base_url}</code> },
-          { key: "ref", header: "API key env", cell: (r) => (r.api_key_ref ? <code>{r.api_key_ref}</code> : <span className="muted">none</span>) },
+          { key: "ref", header: "API key env", cell: (r) => (r.api_key_ref ? <code>{r.api_key_ref}</code> : <span className="text-muted-foreground">none</span>) },
           { key: "timeout", header: "Timeout", align: "right", cell: (r) => `${r.timeout_ms} ms` },
           {
             key: "resilience",
@@ -167,7 +167,7 @@ export function Upstreams() {
                   {r.metrics_url && <Badge>metrics</Badge>}
                 </>
               ) : (
-                <span className="muted">—</span>
+                <span className="text-muted-foreground">—</span>
               ),
           },
           { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isSuper} canDelete={perms.isSuper} onEdit={() => open(r)} onDelete={() => setDeleting(r)} /> },
@@ -180,13 +180,13 @@ export function Upstreams() {
         <TextField label="API key environment variable" value={form.values.api_key_ref} onChange={(v) => form.set("api_key_ref", v)} error={form.errors.api_key_ref} placeholder="OPENAI_API_KEY" hint="Name of the variable the gateway reads the credential from. Leave empty for none." />
         <NumberField label="Timeout (ms)" value={form.values.timeout_ms} onChange={(v) => form.set("timeout_ms", v)} error={form.errors.timeout_ms} min={1} />
         <SelectField label="Streaming usage" value={form.values.stream_usage_mode} onChange={(v) => form.set("stream_usage_mode", v as Values["stream_usage_mode"])} options={USAGE_MODES} />
-        <fieldset className="form-section">
-          <legend>Active health check</legend>
+        <fieldset className="m-0 flex min-w-0 flex-col gap-3 rounded-xl border p-3">
+          <legend className="px-1 font-semibold">Active health check</legend>
           <CheckField label="Probe this upstream" checked={form.values.health_enabled} onChange={(v) => form.set("health_enabled", v)} hint="GET base URL + path on an interval; 2xx within the timeout counts as healthy. Unhealthy upstreams are skipped while another candidate is available." />
           {form.values.health_enabled && (
             <>
               <TextField label="Probe path" value={form.values.health_path} onChange={(v) => form.set("health_path", v)} error={form.errors.health_path} placeholder="/models" hint="Relative to the base URL. Empty uses /models." />
-              <div className="field-grid">
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
                 <NumberField label="Probe interval (ms)" value={form.values.health_interval_ms} onChange={(v) => form.set("health_interval_ms", v)} error={form.errors.health_interval_ms} min={1000} placeholder="10000" />
                 <NumberField label="Probe timeout (ms)" value={form.values.health_timeout_ms} onChange={(v) => form.set("health_timeout_ms", v)} error={form.errors.health_timeout_ms} min={1} placeholder="2000" />
                 <NumberField label="Failures to mark down" value={form.values.health_unhealthy} onChange={(v) => form.set("health_unhealthy", v)} error={form.errors.health_unhealthy} min={1} placeholder="default (3)" />
@@ -195,11 +195,11 @@ export function Upstreams() {
             </>
           )}
         </fieldset>
-        <fieldset className="form-section">
-          <legend>Circuit breaker</legend>
+        <fieldset className="m-0 flex min-w-0 flex-col gap-3 rounded-xl border p-3">
+          <legend className="px-1 font-semibold">Circuit breaker</legend>
           <CheckField label="Open the circuit after repeated failures" checked={form.values.breaker_enabled} onChange={(v) => form.set("breaker_enabled", v)} hint="Applies to each model on this upstream. While open the model gets no traffic; after the open time one trial request decides whether it closes." />
           {form.values.breaker_enabled && (
-            <div className="field-grid">
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
               <NumberField label="Consecutive failures" value={form.values.breaker_failures} onChange={(v) => form.set("breaker_failures", v)} error={form.errors.breaker_failures} min={1} placeholder="default (5)" />
               <NumberField label="Open time (ms)" value={form.values.breaker_open_ms} onChange={(v) => form.set("breaker_open_ms", v)} error={form.errors.breaker_open_ms} min={1} placeholder="default (30000)" />
             </div>

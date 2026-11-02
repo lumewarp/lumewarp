@@ -3,10 +3,11 @@ import { type Model } from "../api";
 import { api } from "../api";
 import { Badge, fmtUsd, nanoToUsd, PageHeader, usdToNano } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
-import { CheckField, FormDialog, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
+import { CheckField, FormDialog, NumberField, required, TextField, useForm } from "../components/Form";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { SearchBox } from "../components/Search";
 import { DataTable } from "../components/Table";
+import { ComboboxField } from "../components/ui/combobox-field";
 import { useAliases, useCan, useModels, useMut, useNames, useRouters, useUpstreams } from "../hooks";
 import { matches, usedBy } from "../lib/catalog";
 
@@ -121,10 +122,10 @@ export function Models() {
       <FormDialog open={!!editing} title={editing === "new" ? "New model" : "Edit model"} submitLabel={editing === "new" ? "Create" : "Save"} onClose={() => setEditing(null)} onSubmit={submit}>
         <TextField label="Name" value={form.values.name} onChange={(v) => form.set("name", v)} error={form.errors.name} autoFocus hint="The `model` value clients send. Shared with aliases and routers: it must be unique." />
         {renamed && <CheckField label="Keep old name as alias" checked={form.values.keep_old_name_as_alias} onChange={(c) => form.set("keep_old_name_as_alias", c)} hint="Clients still calling the old name keep working, with the same access." />}
-        <SelectField label="Upstream" value={form.values.upstream_id} onChange={(v) => form.set("upstream_id", v)} error={form.errors.upstream_id} options={(upstreams.data ?? []).map((u) => ({ value: u.id, label: u.name }))} />
+        <ComboboxField label="Upstream" value={form.values.upstream_id} onChange={(v) => form.set("upstream_id", v)} error={form.errors.upstream_id} options={(upstreams.data ?? []).map((u) => ({ value: u.id, label: u.name }))} />
         <TextField label="Upstream model" value={form.values.upstream_model} onChange={(v) => form.set("upstream_model", v)} error={form.errors.upstream_model} placeholder="meta-llama/Llama-3.1-8B-Instruct" hint="The model name sent to the upstream." />
-        <NumberField label="Input price (USD per 1M tokens)" value={form.values.price_in} onChange={(v) => form.set("price_in", v)} error={form.errors.price_in} step="any" />
-        <NumberField label="Output price (USD per 1M tokens)" value={form.values.price_out} onChange={(v) => form.set("price_out", v)} error={form.errors.price_out} step="any" hint="Leave prices empty if the cost is unknown; usage is then counted as unpriced." />
+        <NumberField label="Input price (USD per 1M tokens)" value={form.values.price_in} onChange={(v) => form.set("price_in", v)} error={form.errors.price_in} step="any" placeholder="unpriced" />
+        <NumberField label="Output price (USD per 1M tokens)" value={form.values.price_out} onChange={(v) => form.set("price_out", v)} error={form.errors.price_out} step="any" placeholder="unpriced" hint="Leave prices empty if the cost is unknown; usage is then counted as unpriced." />
       </FormDialog>
       <ConfirmDialog open={!!deleting} title="Delete model" message={`Delete “${deleting?.name}”? It must not be used by any router, fallback or alias.`} onConfirm={() => remove.mutateAsync(deleting!.id)} onClose={() => setDeleting(null)} />
     </>
