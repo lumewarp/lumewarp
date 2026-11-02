@@ -1,0 +1,486 @@
+// Guard: the UI is built from shadcn components, and stays that way.
+//
+// Static (AST) checks over src/**/*.{ts,tsx}; no runtime DOM, because Radix itself needs hidden
+// <select>/<input> elements. Rules:
+//   legacy-class       one of the 45 classes of the old styles.css used as a full class token
+//   native-element     <button> <select> <input> <textarea> <table> <datalist> <option>
+//   native-input-type  <Input type="checkbox|radio"> instead of Checkbox / RadioGroup
+//   radix-import       `radix-ui` or `@radix-ui/*` imported outside src/components/ui/
+//   dynamic-class      a class expression that cannot be decided statically (unknown call)
+//   css-layer          `@layer components` in styles.css
+//
+// Where a class is looked for: className (and *ClassName / class) attributes, `className:` object
+// properties, the arguments of cn / clsx / cva / twMerge / ..., template strings, and constants
+// those expressions reference, including constants exported from other .ts/.tsx files.
+// Plain identifiers that cannot be resolved (props, parameters) are skipped: whatever the caller
+// passes is checked at the caller's own site.
+//
+// Transitional allowlist: scripts/check-shadcn.allowlist.json maps file -> rule -> max count.
+// Going over the count fails; going under only prints "can shrink". Only the lead edits it.
+// `adapters` is the permanent exemption of hand-written adapters, native elements only.
+
+import { parse } from "@babel/parser";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const LEGACY_CLASSES = new Set(
+  (
+    "brand brand-mark btn btn-danger-ghost btn-primary btn-sm card field field-error field-grid " +
+    "field-hint filters form form-error form-fieldset form-section form-warn input kv login " +
+    "login-card muted order-row pad page-actions page-head pager panel-head plain row-actions " +
+    "section-gap split-card split-head split-share stat stat-value state state-error stats " +
+    "tab-button tabs target-row targets tight toolbar"
+  ).split(" "),
+);
+
+export const NATIVE_ELEMENTS = new Set(["button", "select", "input", "textarea", "table", "datalist", "option"]);
+export const PRIMITIVES_DIR = "src/components/ui/";
+export const RULES = ["legacy-class", "native-element", "native-input-type", "radix-import", "dynamic-class", "css-layer"];
+
+const CLASS_FUNCTIONS = new Set(["cn", "clsx", "cva", "twMerge", "cx", "classNames", "tv"]);
+const PASS_THROUGH_METHODS = new Set(["join", "filter", "trim", "concat", "flat", "toString", "trimEnd", "trimStart"]);
+const HOLE = "\u0000";
+
+const toPosix = (p) => p.split(sep).join("/");
+
+function parseSource(code, file) {
+  return parse(code, {
+    sourceType: "module",
+    plugins: ["typescript", "jsx"],
+    errorRecovery: false,
+    sourceFilename: file,
+  });
+}
+
+function* children(node) {
+  for (const key of Object.keys(node)) {
+    if (key === "loc" || key === "start" || key === "end" || key === "extra" || key === "leadingComments" || key === "trailingComments" || key === "innerComments") continue;
+    const v = node[key];
+    if (Array.isArray(v)) {
+      for (const c of v) if (c && typeof c.type === "string") yield c;
+    } else if (v && typeof v.type === "string") yield v;
+  }
+}
+
+function walk(node, visit) {
+  visit(node);
+  for (const c of children(node)) walk(c, visit);
+}
+
+const unwrap = (n) => {
+  while (n && (n.type === "TSAsExpression" || n.type === "TSSatisfiesExpression" || n.type === "TSNonNullExpression" || n.type === "ParenthesizedExpression" || n.type === "TSTypeAssertion")) n = n.expression;
+  return n;
+};
+
+const propName = (p) => (p.computed ? null : p.key.type === "Identifier" ? p.key.name : p.key.type === "StringLiteral" ? p.key.value : null);
+
+/** Split a class string into tokens; returns tokens as {token, partial}. */
+function classTokens(text) {
+  return text
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((raw) => {
+      let t = raw;
+      // Drop Tailwind variants (md:, hover:, dark:) unless the colon is inside an arbitrary value.
+      if (!t.includes("[")) t = t.slice(t.lastIndexOf(":") + 1);
+      t = t.replace(/^!+/, "").replace(/!+$/, "");
+      return { token: t, partial: t.includes(HOLE) };
+    });
+}
+
+function partialMatchesLegacy(token) {
+  const re = new RegExp("^" + token.split(HOLE).map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$");
+  const hits = [...LEGACY_CLASSES].filter((c) => re.test(c));
+  return hits.length ? hits.map((c) => `"${c}"`).join(", ") : null;
+}
+
+/** Index a project: parsed ASTs, top-level consts and imports per file. */
+export function loadProject(root, srcDir = "src") {
+  const files = new Map();
+  const abs = join(root, srcDir);
+  const stack = existsSync(abs) ? [abs] : [];
+  while (stack.length) {
+    const dir = stack.pop();
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) stack.push(p);
+      else if (/\.(ts|tsx)$/.test(name) && !name.endsWith(".d.ts")) {
+        const rel = toPosix(relative(root, p));
+        const code = readFileSync(p, "utf8");
+        const ast = parseSource(code, rel);
+        files.set(rel, { rel, code, ast, consts: new Map(), imports: new Map(), exports: new Map() });
+      }
+    }
+  }
+  const project = { root, srcDir, files };
+  for (const f of files.values()) indexFile(f);
+  return project;
+}
+
+function indexFile(f) {
+  walk(f.ast.program, (n) => {
+    if (n.type === "VariableDeclarator" && n.id.type === "Identifier" && n.init) {
+      const list = f.consts.get(n.id.name) ?? [];
+      list.push(n.init);
+      f.consts.set(n.id.name, list);
+    }
+    if (n.type === "ImportDeclaration") {
+      for (const s of n.specifiers) {
+        if (s.type === "ImportSpecifier") f.imports.set(s.local.name, { source: n.source.value, name: s.imported.name ?? s.imported.value });
+        else if (s.type === "ImportDefaultSpecifier") f.imports.set(s.local.name, { source: n.source.value, name: "default" });
+        else if (s.type === "ImportNamespaceSpecifier") f.imports.set(s.local.name, { source: n.source.value, name: "*" });
+      }
+    }
+  });
+}
+
+function resolveModule(project, from, source) {
+  let base;
+  if (source.startsWith("@/")) base = join(project.srcDir, source.slice(2));
+  else if (source.startsWith(".")) base = toPosix(join(dirname(from.rel), source));
+  else return null;
+  base = toPosix(base);
+  for (const cand of [base + ".ts", base + ".tsx", base + "/index.ts", base + "/index.tsx", base]) {
+    if (project.files.has(cand)) return project.files.get(cand);
+  }
+  return null;
+}
+
+/** Initialisers an identifier may refer to: same-file consts, or exported consts of an imported module. */
+function resolveIdentifier(project, f, name) {
+  const local = f.consts.get(name);
+  if (local) return { file: f, inits: local };
+  const imp = f.imports.get(name);
+  if (imp) {
+    const target = resolveModule(project, f, imp.source);
+    if (target && imp.name !== "*" && imp.name !== "default") {
+      const inits = target.consts.get(imp.name);
+      if (inits) return { file: target, inits };
+    }
+  }
+  return null;
+}
+
+function rootIdentifier(node) {
+  let n = unwrap(node);
+  while (n && (n.type === "MemberExpression" || n.type === "OptionalMemberExpression")) n = unwrap(n.object);
+  return n && n.type === "Identifier" ? n : null;
+}
+
+/**
+ * Collect class text from an expression. `direct` means the expression sits in a class position,
+ * so object keys are class names (clsx style); through a reference (`ref`), an object is a lookup
+ * table and its values are classes while its keys are not.
+ */
+function collectClass(project, f, node, mode, out, seen) {
+  node = unwrap(node);
+  if (!node) return;
+  switch (node.type) {
+    case "StringLiteral":
+      out.texts.push({ text: node.value, loc: node.loc, file: f });
+      return;
+    case "TemplateLiteral": {
+      let text = "";
+      node.quasis.forEach((q, i) => {
+        text += q.value.cooked ?? q.value.raw;
+        if (i < node.expressions.length) text += HOLE;
+      });
+      out.texts.push({ text, loc: node.loc, file: f });
+      for (const e of node.expressions) collectClass(project, f, e, mode, out, seen);
+      return;
+    }
+    case "JSXExpressionContainer":
+      collectClass(project, f, node.expression, mode, out, seen);
+      return;
+    case "ConditionalExpression":
+      collectClass(project, f, node.consequent, mode, out, seen);
+      collectClass(project, f, node.alternate, mode, out, seen);
+      return;
+    case "LogicalExpression":
+    case "BinaryExpression":
+      collectClass(project, f, node.left, mode, out, seen);
+      collectClass(project, f, node.right, mode, out, seen);
+      return;
+    case "SequenceExpression":
+      collectClass(project, f, node.expressions[node.expressions.length - 1], mode, out, seen);
+      return;
+    case "ArrayExpression":
+      for (const e of node.elements) if (e) collectClass(project, f, e.type === "SpreadElement" ? e.argument : e, mode, out, seen);
+      return;
+    case "ObjectExpression":
+      for (const p of node.properties) {
+        if (p.type === "SpreadElement") collectClass(project, f, p.argument, mode, out, seen);
+        else if (mode === "direct") {
+          const name = propName(p);
+          if (name != null) out.texts.push({ text: name, loc: p.key.loc, file: f });
+        } else if (p.type === "ObjectProperty") collectClass(project, f, p.value, mode, out, seen);
+      }
+      return;
+    case "Identifier":
+    case "MemberExpression":
+    case "OptionalMemberExpression": {
+      const id = rootIdentifier(node);
+      if (!id) return;
+      const hit = resolveIdentifier(project, f, id.name);
+      if (!hit) return; // parameter, prop, global: checked where the value is produced
+      const key = hit.file.rel + "#" + id.name;
+      if (seen.has(key)) return;
+      seen.add(key);
+      for (const init of hit.inits) collectClass(project, hit.file, init, "ref", out, seen);
+      return;
+    }
+    case "CallExpression":
+    case "OptionalCallExpression": {
+      const callee = unwrap(node.callee);
+      const calleeName = callee.type === "Identifier" ? callee.name : null;
+      if (calleeName === "cva" || calleeName === "tv") {
+        collectCva(project, f, node, out, seen);
+        return;
+      }
+      // buttonVariants({...}): a cva() result; its own definition is scanned wherever it appears
+      if (calleeName) {
+        const hit = resolveIdentifier(project, f, calleeName);
+        if (hit && hit.inits.some((i) => isCvaCall(i))) return;
+      }
+      if (calleeName && CLASS_FUNCTIONS.has(calleeName)) {
+        for (const a of node.arguments) collectClass(project, f, a.type === "SpreadElement" ? a.argument : a, "direct", out, seen);
+        return;
+      }
+      // member chain pass-through: [...].filter(Boolean).join(" ")
+      if (callee.type === "MemberExpression" && !callee.computed && callee.property.type === "Identifier" && PASS_THROUGH_METHODS.has(callee.property.name)) {
+        collectClass(project, f, callee.object, mode, out, seen);
+        for (const a of node.arguments) collectClass(project, f, a, mode, out, seen);
+        return;
+      }
+      out.dynamic.push({ loc: node.loc, file: f });
+      return;
+    }
+    case "TaggedTemplateExpression":
+      out.dynamic.push({ loc: node.loc, file: f });
+      return;
+    default:
+      return;
+  }
+}
+
+function isCvaCall(n) {
+  n = unwrap(n);
+  return !!n && n.type === "CallExpression" && n.callee.type === "Identifier" && (n.callee.name === "cva" || n.callee.name === "tv");
+}
+
+function collectCva(project, f, call, out, seen) {
+  const [base, config] = call.arguments;
+  if (base) collectClass(project, f, base, "direct", out, seen);
+  const cfg = unwrap(config);
+  if (!cfg || cfg.type !== "ObjectExpression") return;
+  for (const p of cfg.properties) {
+    if (p.type !== "ObjectProperty") continue;
+    const name = propName(p);
+    const val = unwrap(p.value);
+    if (name === "base") collectClass(project, f, val, "direct", out, seen);
+    if (name === "variants" && val.type === "ObjectExpression") {
+      for (const group of val.properties) {
+        const g = group.type === "ObjectProperty" ? unwrap(group.value) : null;
+        if (g && g.type === "ObjectExpression") for (const opt of g.properties) if (opt.type === "ObjectProperty") collectClass(project, f, opt.value, "direct", out, seen);
+      }
+    }
+    if (name === "compoundVariants" && val.type === "ArrayExpression") {
+      for (const e of val.elements) {
+        const o = unwrap(e);
+        if (o && o.type === "ObjectExpression") for (const q of o.properties) if (q.type === "ObjectProperty" && ["class", "className"].includes(propName(q))) collectClass(project, f, q.value, "direct", out, seen);
+      }
+    }
+  }
+}
+
+const isClassAttr = (name) => name === "className" || name === "class" || /ClassName$/.test(name);
+
+function jsxName(n) {
+  if (n.type === "JSXIdentifier") return n.name;
+  if (n.type === "JSXMemberExpression") return jsxName(n.property);
+  if (n.type === "JSXNamespacedName") return n.name.name;
+  return "";
+}
+
+function stringValueOf(attrValue) {
+  if (!attrValue) return null;
+  if (attrValue.type === "StringLiteral") return attrValue.value;
+  if (attrValue.type === "JSXExpressionContainer") {
+    const e = unwrap(attrValue.expression);
+    if (e.type === "StringLiteral") return e.value;
+    if (e.type === "TemplateLiteral" && e.expressions.length === 0) return e.quasis[0].value.cooked;
+  }
+  return null;
+}
+
+/** Scan one file; returns [{file, line, rule, detail}]. */
+export function scanFile(project, f) {
+  const found = [];
+  const add = (rule, loc, detail) => found.push({ file: f.rel, line: loc?.start.line ?? 0, rule, detail });
+  const inPrimitives = f.rel.startsWith(PRIMITIVES_DIR);
+
+  const checkClasses = (node, mode) => {
+    const out = { texts: [], dynamic: [] };
+    collectClass(project, f, node, mode, out, new Set());
+    for (const d of out.dynamic) if (d.file === f) add("dynamic-class", d.loc, "class expression cannot be decided statically");
+    for (const t of out.texts) {
+      for (const { token, partial } of classTokens(t.text)) {
+        if (!partial && LEGACY_CLASSES.has(token)) add("legacy-class", f === t.file ? t.loc : node.loc, `"${token}"${t.file === f ? "" : ` (from ${t.file.rel})`}`);
+        else if (partial) {
+          const m = partialMatchesLegacy(token);
+          if (m) add("legacy-class", f === t.file ? t.loc : node.loc, `dynamic "${token.replaceAll(HOLE, "${…}")}" can produce ${m}`);
+        }
+      }
+    }
+  };
+
+  walk(f.ast.program, (n) => {
+    if (n.type === "JSXOpeningElement") {
+      const name = jsxName(n.name);
+      if (n.name.type === "JSXIdentifier" && NATIVE_ELEMENTS.has(name)) add("native-element", n.loc, `<${name}>`);
+      if (n.name.type === "JSXIdentifier" && name === "Input") {
+        for (const a of n.attributes) {
+          if (a.type === "JSXAttribute" && a.name.name === "type") {
+            const v = stringValueOf(a.value);
+            if (v === "checkbox" || v === "radio") add("native-input-type", n.loc, `<Input type="${v}">`);
+          }
+        }
+      }
+      for (const a of n.attributes) if (a.type === "JSXAttribute" && a.name.type === "JSXIdentifier" && isClassAttr(a.name.name) && a.value) checkClasses(a.value, "direct");
+    }
+    // a cva() definition is checked wherever it is written, referenced or not
+    if (isCvaCall(n)) checkClasses(n, "direct");
+    if (n.type === "ObjectProperty" && ["className", "class"].includes(propName(n) ?? "")) checkClasses(n.value, "direct");
+    // createElement("button") / jsx("button") bypass
+    if (n.type === "CallExpression") {
+      const c = unwrap(n.callee);
+      const cn = c.type === "Identifier" ? c.name : c.type === "MemberExpression" && c.property.type === "Identifier" ? c.property.name : "";
+      if (["createElement", "jsx", "jsxs", "jsxDEV"].includes(cn)) {
+        const first = unwrap(n.arguments[0]);
+        if (first && first.type === "StringLiteral" && NATIVE_ELEMENTS.has(first.value)) add("native-element", n.loc, `createElement("${first.value}")`);
+      }
+    }
+    // Radix imports
+    const src = n.type === "ImportDeclaration" || n.type === "ExportNamedDeclaration" || n.type === "ExportAllDeclaration" ? n.source?.value : null;
+    const dyn = n.type === "ImportExpression" && n.source.type === "StringLiteral" ? n.source.value : null;
+    const req = n.type === "CallExpression" && n.callee.type === "Identifier" && n.callee.name === "require" && n.arguments[0]?.type === "StringLiteral" ? n.arguments[0].value : null;
+    for (const s of [src, dyn, req]) if (typeof s === "string" && (s === "radix-ui" || s.startsWith("radix-ui/") || s.startsWith("@radix-ui/")) && !inPrimitives) add("radix-import", n.loc, `import of "${s}"`);
+  });
+  const seen = new Set();
+  return found.filter((v) => {
+    const k = `${v.line}|${v.rule}|${v.detail}`;
+    return seen.has(k) ? false : (seen.add(k), true);
+  });
+}
+
+export function scanCss(code, rel = "src/styles.css") {
+  const stripped = code.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
+  const found = [];
+  const re = /@layer\s+([^{;]+)/g;
+  let m;
+  while ((m = re.exec(stripped))) {
+    if (m[1].split(",").map((s) => s.trim()).includes("components")) found.push({ file: rel, line: stripped.slice(0, m.index).split("\n").length, rule: "css-layer", detail: "@layer components" });
+  }
+  return found;
+}
+
+/** Native-element exemption entries: "button", "input", ... or "*" for all native elements. */
+export function validateConfig(config) {
+  const errors = [];
+  for (const [file, entries] of Object.entries(config.adapters ?? {})) {
+    for (const e of entries) {
+      if (e !== "*" && !NATIVE_ELEMENTS.has(e)) errors.push(`adapters["${file}"]: "${e}" is not a native element; adapters can only be exempt from native elements, never from legacy classes`);
+    }
+  }
+  for (const [file, rules] of Object.entries(config.allowlist ?? {})) {
+    for (const [rule, count] of Object.entries(rules)) {
+      if (!RULES.includes(rule)) errors.push(`allowlist["${file}"]: unknown rule "${rule}"`);
+      if (!Number.isInteger(count) || count < 1) errors.push(`allowlist["${file}"].${rule}: count must be a positive integer`);
+    }
+  }
+  return errors;
+}
+
+/** Whole-project check. Returns {violations, counts, stale, errors}; violations are the failures. */
+export function checkProject(root, config = {}, srcDir = "src") {
+  const errors = validateConfig(config);
+  const project = loadProject(root, srcDir);
+  let all = [];
+  for (const f of project.files.values()) all.push(...scanFile(project, f));
+  const css = join(root, srcDir, "styles.css");
+  if (existsSync(css)) all.push(...scanCss(readFileSync(css, "utf8"), toPosix(relative(root, css))));
+
+  // adapters: native elements only
+  all = all.filter((v) => {
+    if (v.rule !== "native-element") return true;
+    const ex = config.adapters?.[v.file];
+    if (!ex) return true;
+    return !(ex.includes("*") || ex.some((e) => v.detail === `<${e}>`));
+  });
+  // primitives: native elements are what shadcn generates
+  all = all.filter((v) => !(v.rule === "native-element" && v.file.startsWith(PRIMITIVES_DIR)));
+
+  const counts = new Map(); // file -> rule -> n
+  for (const v of all) {
+    const r = counts.get(v.file) ?? new Map();
+    r.set(v.rule, (r.get(v.rule) ?? 0) + 1);
+    counts.set(v.file, r);
+  }
+  const violations = [];
+  const stale = [];
+  const allow = config.allowlist ?? {};
+  const grouped = new Map();
+  for (const v of all) {
+    const k = v.file + "\0" + v.rule;
+    const l = grouped.get(k) ?? [];
+    l.push(v);
+    grouped.set(k, l);
+  }
+  for (const [k, list] of grouped) {
+    const [file, rule] = k.split("\0");
+    const allowed = allow[file]?.[rule] ?? 0;
+    if (list.length > allowed) violations.push(...(allowed === 0 ? list : list.map((v) => ({ ...v, detail: `${v.detail} (allowlisted ${allowed}, found ${list.length})` }))));
+  }
+  for (const [file, rules] of Object.entries(allow)) {
+    for (const [rule, n] of Object.entries(rules)) {
+      const actual = counts.get(file)?.get(rule) ?? 0;
+      if (actual < n) stale.push({ file, rule, allowed: n, actual });
+    }
+  }
+  return { violations, counts, stale, errors, all };
+}
+
+function main() {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const root = resolve(here, "..");
+  const args = process.argv.slice(2);
+  const config = JSON.parse(readFileSync(join(here, "check-shadcn.allowlist.json"), "utf8"));
+  const { violations, counts, stale, errors, all } = checkProject(root, config);
+
+  if (args.includes("--write-allowlist")) {
+    const allowlist = {};
+    for (const [file, rules] of [...counts].sort(([a], [b]) => a.localeCompare(b))) allowlist[file] = Object.fromEntries([...rules].sort(([a], [b]) => a.localeCompare(b)));
+    process.stdout.write(JSON.stringify({ ...config, allowlist }, null, 2) + "\n");
+    return;
+  }
+
+  if (args.includes("--report")) {
+    const byRule = new Map();
+    for (const v of all) byRule.set(v.rule, (byRule.get(v.rule) ?? 0) + 1);
+    console.log(`remaining (allowlisted or not): ${all.length} findings in ${counts.size} files`);
+    for (const [rule, n] of [...byRule].sort()) console.log(`  ${rule}: ${n}`);
+    for (const [file, rules] of [...counts].sort(([a], [b]) => a.localeCompare(b))) console.log(`  ${file}  ${[...rules].map(([r, n]) => `${r}=${n}`).join(" ")}`);
+  }
+  for (const s of stale) console.log(`can shrink: ${s.file} ${s.rule} allowed ${s.allowed}, now ${s.actual}`);
+  for (const e of errors) console.error(`config: ${e}`);
+  for (const v of violations) console.error(`${v.file}:${v.line}  ${v.rule}  ${v.detail}`);
+  if (errors.length || violations.length) {
+    console.error(`check-shadcn: ${violations.length} violation(s), ${errors.length} config error(s)`);
+    process.exit(1);
+  }
+  const files = Object.keys(config.allowlist ?? {}).length;
+  console.log(`check-shadcn: ok (${files} file(s) still allowlisted${files ? "; run with --report for the list" : ""})`);
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();
