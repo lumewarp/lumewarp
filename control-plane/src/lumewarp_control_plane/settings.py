@@ -4,7 +4,7 @@ from functools import lru_cache
 from ipaddress import ip_network
 from typing import Annotated
 
-from pydantic import Field, IPvAnyNetwork, SecretStr, field_validator
+from pydantic import Field, IPvAnyNetwork, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 DEV_DATABASE_URL = "postgresql+asyncpg://lumewarp:lumewarp@127.0.0.1:55432/lumewarp"
@@ -68,6 +68,10 @@ class Settings(BaseSettings):
 
     # Admin UI login with OIDC (authorization code + PKCE, auth/oidc.py). Unset issuer =
     # SSO disabled (break-glass sessions and PATs only).
+    #
+    # `secret_key` seals the transient OIDC login cookie (nonce + PKCE verifier) with
+    # AES-256-GCM; it is required whenever SSO is enabled and never leaves the process.
+    secret_key: SecretStr | None = Field(default=None, min_length=32)
     oidc_issuer: str | None = None
     oidc_client_id: str | None = None
     oidc_client_secret: SecretStr | None = None
@@ -96,6 +100,12 @@ class Settings(BaseSettings):
 
     # Run the gRPC server and background loops in `serve`. Tests turn it off.
     background_enabled: bool = True
+
+    @model_validator(mode="after")
+    def _sso_needs_secret_key(self) -> "Settings":
+        if self.oidc_issuer and not self.secret_key:
+            raise ValueError("LUMEWARP_SECRET_KEY is required when LUMEWARP_OIDC_ISSUER is set")
+        return self
 
     @field_validator("trusted_proxies", "break_glass_allowed_cidrs", mode="before")
     @classmethod

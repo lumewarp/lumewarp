@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from lumewarp_control_plane.db import SessionFactory, create_session_factory
@@ -63,8 +64,11 @@ async def _webhook_server():
 
 
 @pytest.mark.asyncio
-async def test_webhook_outbox_retries_and_marks_delivered(session_factory: SessionFactory):
+async def test_webhook_outbox_retries_and_marks_delivered(
+    session_factory: SessionFactory, monkeypatch
+):
     server, url, state = await _webhook_server()
+    monkeypatch.setenv("LUMEWARP_TEST_WEBHOOK_URL", url)
     team_id = uuid7()
     event = BudgetEvent(
         kind="soft",
@@ -79,7 +83,10 @@ async def test_webhook_outbox_retries_and_marks_delivered(session_factory: Sessi
         session.add(Team(id=team_id, name=f"notifier-team-{uuid7().hex}"))
         await session.flush()
         channel = NotifierChannel(
-            name=f"webhook-{uuid7().hex}", kind="webhook", team_id=team_id, config={"url": url}
+            name=f"webhook-{uuid7().hex}",
+            kind="webhook",
+            team_id=team_id,
+            config={"url_ref": "LUMEWARP_TEST_WEBHOOK_URL"},
         )
         session.add(channel)
         await session.flush()
@@ -122,6 +129,77 @@ async def test_webhook_outbox_retries_and_marks_delivered(session_factory: Sessi
     finally:
         server.close()
         await server.wait_closed()
+
+
+async def _webhook_row(factory: SessionFactory, config: dict) -> int:
+    team_id = uuid7()
+    async with factory() as session, session.begin():
+        session.add(Team(id=team_id, name=f"webhook-team-{uuid7().hex}"))
+        await session.flush()
+        channel = NotifierChannel(
+            name=f"webhook-{uuid7().hex}", kind="webhook", team_id=team_id, config=config
+        )
+        session.add(channel)
+        await session.flush()
+        event = BudgetEvent(
+            kind="soft",
+            scope_type=ScopeType.TEAM,
+            scope_id=team_id,
+            team_id=team_id,
+            window_start=datetime(2026, 10, 1, tzinfo=UTC),
+            spent_nano_usd=1,
+            budget_nano_usd=2,
+        )
+        row = NotifierOutbox(
+            dedupe_key=f"webhook:{uuid7()}",
+            channel_id=channel.id,
+            event_type="budget.soft",
+            payload=event.to_payload(),
+            status=OutboxStatus.PENDING,
+            next_attempt_at=datetime.now(UTC),
+        )
+        session.add(row)
+        await session.flush()
+        return row.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "config",
+    [
+        {},  # no reference at all
+        {"url": "https://hooks.example.test/budget"},  # the old inline shape
+        {"url_ref": "LUMEWARP_TEST_HOOK", "url": "https://hooks.example.test/budget"},
+        {"url_ref": "LUMEWARP_TEST_HOOK", "token": "lw-secret"},  # unclassified key
+        {"url_ref": ""},
+    ],
+)
+async def test_webhook_config_refuses_anything_but_an_env_reference(
+    session_factory: SessionFactory, config
+):
+    with pytest.raises(IntegrityError):
+        await _webhook_row(session_factory, config)
+
+
+@pytest.mark.asyncio
+async def test_webhook_url_env_is_read_at_delivery_time(
+    session_factory: SessionFactory, monkeypatch
+):
+    reference = "LUMEWARP_TEST_WEBHOOK_ENV"
+    monkeypatch.delenv(reference, raising=False)
+    row_id = await _webhook_row(session_factory, {"url_ref": reference})
+    assert await deliver_pending(session_factory) == 0
+    async with session_factory() as session, session.begin():
+        row = await session.get(NotifierOutbox, row_id)
+        assert row.last_error == "LookupError"
+        assert row.attempts == 1
+        row.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+    # The value is validated when resolved: a non-HTTP URL is an error, not a request.
+    monkeypatch.setenv(reference, "file:///etc/passwd")
+    assert await deliver_pending(session_factory) == 0
+    async with session_factory() as session:
+        row = await session.get(NotifierOutbox, row_id)
+        assert row.last_error == "ValueError"
 
 
 @pytest.mark.asyncio
@@ -294,7 +372,7 @@ async def test_failing_row_becomes_failed_after_max_attempts(
     from lumewarp_control_plane import notifier
 
     async def send(self, event, config):
-        raise RuntimeError("destination is gone")
+        raise RuntimeError("failed to POST https://hooks.example.test/secret-webhook-token")
 
     _plugin(monkeypatch, send)
     (row_id,) = await _plugin_rows(session_factory, 1, attempts=notifier._MAX_ATTEMPTS - 1)
@@ -303,6 +381,7 @@ async def test_failing_row_becomes_failed_after_max_attempts(
         row = await session.get(NotifierOutbox, row_id)
     assert row.status is OutboxStatus.FAILED
     assert row.attempts == notifier._MAX_ATTEMPTS
+    # Only the exception class: messages can carry URLs and secrets.
     assert row.last_error == "RuntimeError"
 
 

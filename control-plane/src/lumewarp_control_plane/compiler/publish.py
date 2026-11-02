@@ -45,7 +45,6 @@ log = logging.getLogger(__name__)
 
 # NOTIFY channel with payload "<scope>:<version>", sent on commit of a new version.
 PUBLISHED_CHANNEL = "lumewarp_config_published"
-MAX_ERROR_CHARS = 2000
 SERIALIZATION_ATTEMPTS = 5
 
 
@@ -218,7 +217,8 @@ async def _publish_locked(
         outcome.duration = time.perf_counter() - started
         outcome.failed = True
         log.error("compile of scope %s failed: %s", scope, exc)
-        await _mark(session, scope, revision, OutboxStatus.FAILED, error=str(exc)[:MAX_ERROR_CHARS])
+        # Only the class is stored: exception text may quote configuration or payloads.
+        await _mark(session, scope, revision, OutboxStatus.FAILED, error=type(exc).__name__)
         return None
     await _mark(session, scope, revision, OutboxStatus.DONE, version=version)
     return version

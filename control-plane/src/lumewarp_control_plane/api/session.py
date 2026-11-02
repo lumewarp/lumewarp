@@ -149,8 +149,12 @@ async def login_break_glass(body: BreakGlassLogin, request: Request) -> Response
 
 
 def require_oidc(request: Request) -> None:
-    if not request.app.state.settings.oidc_issuer:
+    settings = request.app.state.settings
+    if not settings.oidc_issuer:
         raise not_found()
+    if not settings.secret_key:
+        log.error("OIDC is enabled but LUMEWARP_SECRET_KEY is missing")
+        raise ApiError(503, "sso_unconfigured", "SSO is not configured")
 
 
 def clear_state(response: Response, request: Request) -> None:
@@ -214,8 +218,6 @@ async def login(request: Request, next: str = "/") -> RedirectResponse:
         session.add(
             OIDCLoginState(
                 state_hash=hash_secret(state),
-                nonce=nonce,
-                code_verifier=verifier,
                 return_path=path,
                 redirect_uri=redirect_uri,
                 expires_at=now + timedelta(seconds=oidc.STATE_TTL),
@@ -225,7 +227,9 @@ async def login(request: Request, next: str = "/") -> RedirectResponse:
     response.headers["Cache-Control"] = "no-store"
     response.set_cookie(
         oidc.STATE_COOKIE,
-        state,
+        oidc.seal_login_state(
+            settings, oidc.LoginState(state=state, nonce=nonce, code_verifier=verifier)
+        ),
         max_age=oidc.STATE_TTL,
         httponly=True,
         secure=settings.session_cookie_secure,
@@ -239,10 +243,14 @@ async def login(request: Request, next: str = "/") -> RedirectResponse:
 async def callback(request: Request) -> RedirectResponse:
     require_oidc(request)
     state = request.query_params.get("state", "")
-    bound = request.cookies.get(oidc.STATE_COOKIE, "")
+    sealed = request.cookies.get(oidc.STATE_COOKIE, "")
     response = RedirectResponse("/login?error=invalid_state", status_code=302)
     clear_state(response, request)
-    if not state or not bound or not hmac.compare_digest(hash_secret(state), hash_secret(bound)):
+    try:
+        login_state = oidc.open_login_state(request.app.state.settings, sealed)
+    except oidc.LoginStateInvalid as exc:
+        return callback_failure(response, "invalid_state", exc)
+    if not state or not hmac.compare_digest(state.encode(), login_state.state.encode()):
         return callback_failure(response, "invalid_state", ValueError())
     async with request.app.state.session_factory() as session, session.begin():
         saved = await session.scalar(
@@ -259,12 +267,12 @@ async def callback(request: Request) -> RedirectResponse:
         token = await remote.fetch_access_token(
             code=request.query_params["code"],
             redirect_uri=saved.redirect_uri,
-            code_verifier=saved.code_verifier,
+            code_verifier=login_state.code_verifier,
         )
         settings = request.app.state.settings
         claims = await remote.parse_id_token(
             token,
-            nonce=saved.nonce,
+            nonce=login_state.nonce,
             leeway=60,
             claims_options={
                 "iss": {"essential": True, "value": settings.oidc_issuer},
