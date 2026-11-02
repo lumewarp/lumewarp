@@ -19,8 +19,14 @@
 {{- $controlPlaneUrl = printf "%s://%s:%v" $scheme (include "lumewarp.controlPlane.name" .) .Values.controlPlane.service.grpcPort }}
 {{- end }}
 {{- $scope := default .Values.controlPlane.scope .Values.gateway.scope }}
-{{- $samplingRatio := toString .Values.gateway.otel.samplingRatio }}
-{{- if not (regexMatch "^(0(\\.[0-9]+)?|1(\\.0+)?)$" $samplingRatio) }}
+{{- /* A number from values.yaml, or a string from --set for a small decimal or scientific notation. Checked by value, since the spelling depends on how it got here. */}}
+{{- $samplingValue := .Values.gateway.otel.samplingRatio }}
+{{- $samplingRatio := toString $samplingValue }}
+{{- $samplingNumeric := or (kindIs "float64" $samplingValue) (kindIs "int" $samplingValue) (kindIs "int64" $samplingValue) (and (kindIs "string" $samplingValue) (regexMatch "^[+-]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][+-]?[0-9]+)?$" $samplingRatio)) }}
+{{- if not $samplingNumeric }}
+{{- fail (printf "gateway.otel.samplingRatio must be a number from 0 to 1, got %s" $samplingRatio) }}
+{{- end }}
+{{- if not (and (ge (float64 $samplingRatio) 0.0) (le (float64 $samplingRatio) 1.0)) }}
 {{- fail (printf "gateway.otel.samplingRatio must be a number from 0 to 1, got %s" $samplingRatio) }}
 {{- end }}
 apiVersion: apps/v1
