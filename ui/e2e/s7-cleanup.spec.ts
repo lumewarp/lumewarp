@@ -2,7 +2,7 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-import { confirmDialog, control, dialog, pick, SHOTS, shot } from "./helpers";
+import { confirmDialog, control, deleteTeams, dialog, pick, SHOTS, shot } from "./helpers";
 
 /*
  * The screenshot matrix, in one place: every page, every team tab, the two catalog forms, the permission picker,
@@ -52,13 +52,14 @@ test.beforeEach(async ({ request }) => {
   admin["X-Lumewarp-CSRF"] = (await (await request.get("/api/v1/session")).json()).csrf_token;
 });
 
-// The catalog fixtures go again, in reference order; the team (with its member, service account and key) stays
-// behind like the other screenshot specs' teams.
+// The catalog fixtures go again, in reference order. The team goes too, unless it has a key: the API keeps keys
+// for usage history and then refuses to delete the team at all (see deleteTeams), so s7-shots stays.
 test.afterEach(async ({ request }) => {
   for (const path of ["/aliases", "/routers", "/models", "/upstreams"]) {
     const rows = (await (await request.get(`/api/v1${path}?limit=200`, { headers: admin })).json()).items as { id: string; name: string }[];
     for (const r of rows) if (myFixture(r.name)) await request.delete(`/api/v1${path}/${r.id}`, { headers: admin });
   }
+  await deleteTeams(request, admin, "s7-");
 });
 
 async function post<T = { id: string; name: string }>(request: APIRequestContext, path: string, data: object): Promise<T> {

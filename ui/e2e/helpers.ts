@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page } from "@playwright/test";
+import { expect, type APIRequestContext, type Locator, type Page } from "@playwright/test";
 import { join } from "node:path";
 
 /** Where screenshots go; set by the runner, never by a spec. Unset in normal runs: nothing is written. */
@@ -68,4 +68,39 @@ export async function optionNames(scope: Page | Locator, label: string): Promise
   await expect(trigger).toHaveAttribute("aria-expanded", "false");
   await expect(popup).toHaveCount(0);
   return names;
+}
+
+type Items<T> = { items: T[] };
+
+/**
+ * Delete the teams a spec made for itself (every team whose name starts with `prefix`), through the API.
+ *
+ * The API refuses to delete a team that still has a service account, and refuses both the account and the
+ * team while a key exists — keys are kept for usage history and there is no delete-key endpoint, only revoke.
+ * So a team that has a key cannot be deleted at all: it is left untouched and its name is returned. Members
+ * cascade with their team and need no separate call.
+ */
+export async function deleteTeams(request: APIRequestContext, headers: Record<string, string>, prefix: string): Promise<string[]> {
+  const list = async <T>(path: string): Promise<T[]> => {
+    const response = await request.get(`/api/v1${path}`, { headers });
+    expect(response.status(), await response.text()).toBe(200);
+    return ((await response.json()) as Items<T>).items;
+  };
+  const remove = async (path: string, what: string) => {
+    const response = await request.delete(`/api/v1${path}`, { headers });
+    expect(response.status(), `delete ${what}: ${await response.text()}`).toBe(204);
+  };
+  const own = (await list<{ id: string; name: string }>("/teams?limit=200")).filter((team) => team.name.startsWith(prefix));
+  const kept: string[] = [];
+  for (const team of own) {
+    if ((await list(`/teams/${team.id}/keys?limit=1`)).length) {
+      kept.push(team.name);
+      continue;
+    }
+    for (const account of await list<{ id: string; name: string }>(`/teams/${team.id}/service-accounts?limit=200`)) {
+      await remove(`/service-accounts/${account.id}`, `service account ${account.name}`);
+    }
+    await remove(`/teams/${team.id}`, `team ${team.name}`);
+  }
+  return kept;
 }

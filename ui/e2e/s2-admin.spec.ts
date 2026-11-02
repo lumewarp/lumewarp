@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { join } from "node:path";
 
-import { pick } from "./helpers";
+import { deleteTeams, pick } from "./helpers";
 
 /* Audit, Gateways, Settings, Users and Config after the move to shadcn components. */
 
@@ -14,6 +14,11 @@ test.beforeEach(async ({ request }) => {
   expect(response.status()).toBe(204);
   const session = await (await request.get("/api/v1/session")).json();
   admin["X-Lumewarp-CSRF"] = session.csrf_token;
+});
+
+// This spec's teams (s2-*) go again, so a later spec's Teams page is not pushed off its first page.
+test.afterEach(async ({ request }) => {
+  await deleteTeams(request, admin, "s2-");
 });
 
 async function signIn(page: Page, path: string) {
