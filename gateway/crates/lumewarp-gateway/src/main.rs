@@ -6,6 +6,7 @@ mod health;
 mod metrics;
 mod proxy;
 mod ratelimit;
+mod rewrite;
 mod router;
 mod runtime;
 mod server;

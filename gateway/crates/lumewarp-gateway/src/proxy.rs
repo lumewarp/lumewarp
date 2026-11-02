@@ -35,6 +35,7 @@ use crate::{
     metrics::{Observation, RequestMetrics, UpstreamError, ATTEMPT_OUTCOMES},
     ratelimit::clock,
     ratelimit::Permit,
+    rewrite::{ModelRewriter, RewriteBody},
     router::{InFlight, Model, RoutingTable, Skipped},
     telemetry,
     usage::{
@@ -533,6 +534,11 @@ pub async fn forward(
             parts.headers.insert(header::AUTHORIZATION, value.clone());
         }
         parts.headers.insert(header::HOST, model.host.clone());
+        // A compressed body can be neither rewritten nor metered. Per attempt:
+        // the retry template keeps the client's header for a fast-path model.
+        if needs_rewrite(&called.name, model) {
+            parts.headers.remove(header::ACCEPT_ENCODING);
+        }
         let span = if observation.otel {
             tracing::info_span!(parent: &observation.span, "upstream_attempt",
                 model = %model.name, upstream = &*model.upstream,
@@ -723,16 +729,23 @@ pub async fn forward(
     let meter = Meter::select(&parts, stream, inject, include_usage.requested());
     let mut capture = pending.take();
     capture.status = parts.status.as_u16();
-    let alias = (fallback_response && parts.status.is_success()).then(|| {
-        AliasBody::new(
-            serde_json::to_vec(&*called.name).expect("name serializes"),
-            stream
-                && !parts
-                    .headers
-                    .get(header::CONTENT_TYPE)
-                    .is_some_and(|v| v.as_bytes().starts_with(b"application/json")),
-        )
-    });
+    let rewriter = (parts.status.is_success() && needs_rewrite(&called.name, &guard.model))
+        .then(|| {
+            if content_encoded(&parts.headers) {
+                routing_table
+                    .runtime
+                    .metrics
+                    .response_rewrite_compressed(&guard.model.name);
+                return None;
+            }
+            Some(ModelRewriter::new(
+                Bytes::from(serde_json::to_vec(&*called.name).expect("name serializes")),
+                sse_response(&parts.headers, stream),
+            ))
+        })
+        .flatten();
+    // The meter reads the upstream's bytes, before the rewrite; forwarded bytes
+    // go through the SSE filter first, which only ever drops whole events.
     let body = MeteredBody {
         body,
         guard: Some(guard),
@@ -741,18 +754,39 @@ pub async fn forward(
         capture: Some(capture),
         end: None,
         held: None,
-    }
-    .boxed_unsync();
-    Response::from_parts(
-        parts,
-        match alias {
-            Some(mut alias) => {
-                alias.body = body;
-                alias.boxed_unsync()
-            }
-            None => body,
-        },
-    )
+    };
+    let body = match rewriter {
+        Some(rewriter) => RewriteBody::new(body, rewriter).boxed_unsync(),
+        None => body.boxed_unsync(),
+    };
+    Response::from_parts(parts, body)
+}
+
+/// Whether a response from `model` must have its `model` rewritten for a client
+/// that called `called`. The fast path, when the names match, never scans and
+/// keeps `Content-Length` and the client's `Accept-Encoding`.
+fn needs_rewrite(called: &str, model: &Model) -> bool {
+    called != &*model.upstream_model
+}
+
+fn content_encoded(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_ENCODING)
+        .is_some_and(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
+}
+
+/// Whether a response body is an SSE stream rather than one JSON document. A
+/// stream request answered with JSON is JSON, as for the meter.
+fn sse_response(headers: &HeaderMap, stream: bool) -> bool {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .map_or(&b""[..], |value| value.as_bytes());
+    let starts_with = |prefix: &[u8]| {
+        content_type
+            .get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+    };
+    starts_with(b"text/event-stream") || (stream && !starts_with(b"application/json"))
 }
 
 fn retry_status(policy: Option<&lumewarp_proto::config::v1::RetryPolicy>, status: u16) -> bool {
@@ -823,45 +857,6 @@ mod resilience_tests {
     }
 
     #[test]
-    fn fallback_alias_rewrites_json_and_split_multiline_sse() {
-        let mut alias = AliasBody::new(br#""public""#.to_vec(), false);
-        alias.pending = br#"{ "model": "backup", "extra":{"model":"untouched"} }"#.to_vec();
-        assert_eq!(
-            alias.flush(true),
-            br#"{ "model": "public", "extra":{"model":"untouched"} }"#.as_slice()
-        );
-        let mut alias = AliasBody::new(br#""public""#.to_vec(), true);
-        alias.pending.extend_from_slice(b"data: {\"model\":\r\n");
-        assert!(alias.flush(false).is_empty());
-        alias
-            .pending
-            .extend_from_slice(b"data: \"backup\"}\r\n\r\n");
-        let event = alias.flush(false);
-        assert_eq!(
-            event,
-            b"data: {\"model\":\ndata: \"public\"}\n\n".as_slice()
-        );
-        // Valid SSE: one event, every line a `data:` field, and the joined
-        // field values are the rewritten JSON.
-        let text = std::str::from_utf8(&event).unwrap();
-        let body = text.strip_suffix("\n\n").expect("event terminator");
-        let data: Vec<&str> = body
-            .split('\n')
-            .map(|line| line.strip_prefix("data: ").expect("data field"))
-            .collect();
-        let value: serde_json::Value = serde_json::from_str(&data.join("\n")).unwrap();
-        assert_eq!(value["model"], "public");
-        // Comments and other fields are kept; a single-line payload is unchanged.
-        alias
-            .pending
-            .extend_from_slice(b": keep\nevent: chunk\ndata: {\"model\":\"backup\"}\n\n");
-        assert_eq!(
-            alias.flush(false),
-            b": keep\nevent: chunk\ndata: {\"model\":\"public\"}\n\n".as_slice()
-        );
-    }
-
-    #[test]
     fn retry_after_cooldown_is_clamped() {
         let s = Duration::from_secs;
         assert_eq!(cooldown_ms(s(10), None), 10_000);
@@ -877,166 +872,6 @@ mod resilience_tests {
         assert_eq!(cooldown_ms(s(2), breaker(5_000)), 2_000);
         // open_ms 0 is the 30 s default.
         assert_eq!(cooldown_ms(s(120), breaker(0)), 30_000);
-    }
-}
-
-/// Only fallback responses need alias restoration. Bound buffering to one SSE
-/// event or one JSON response; ordinary responses retain the original body.
-struct AliasBody {
-    body: ProxyBody,
-    model: Vec<u8>,
-    pending: Vec<u8>,
-    stream: bool,
-    ended: bool,
-    held: Option<Frame<Bytes>>,
-}
-
-impl AliasBody {
-    fn new(model: Vec<u8>, stream: bool) -> Self {
-        Self {
-            body: full_body(Bytes::new()),
-            model,
-            pending: Vec::new(),
-            stream,
-            ended: false,
-            held: None,
-        }
-    }
-
-    fn rewrite(&self, bytes: &[u8]) -> Bytes {
-        match RequestFields::parse(bytes) {
-            Ok(fields) => fields.rewrite(bytes, &self.model, None),
-            Err(_) => Bytes::copy_from_slice(bytes),
-        }
-    }
-
-    fn flush(&mut self, eof: bool) -> Bytes {
-        if !self.stream {
-            if !eof {
-                return Bytes::new();
-            }
-            let pending = std::mem::take(&mut self.pending);
-            return self.rewrite(&pending);
-        }
-        let mut output = Vec::new();
-        // SSE field values are UTF-8 text; keep comments and non-data fields.
-        // Reassemble multiline data values before parsing their JSON.
-        while let Some(end) = sse_event_end(&self.pending)
-            .or_else(|| (eof && !self.pending.is_empty()).then_some(self.pending.len()))
-        {
-            let event: Vec<_> = self.pending.drain(..end).collect();
-            let mut data = Vec::new();
-            let mut metadata = Vec::new();
-            for line in event.split(|b| *b == b'\n') {
-                let line = line.strip_suffix(b"\r").unwrap_or(line);
-                if let Some(value) = line.strip_prefix(b"data:") {
-                    if !data.is_empty() {
-                        data.push(b'\n');
-                    }
-                    data.extend_from_slice(value.strip_prefix(b" ").unwrap_or(value));
-                } else if !line.is_empty() {
-                    metadata.extend_from_slice(line);
-                    metadata.push(b'\n');
-                }
-            }
-            output.extend_from_slice(&metadata);
-            if !data.is_empty() {
-                // Every line of the (possibly multiline) payload is its own
-                // `data:` field, so the client reassembles the same value.
-                for line in self.rewrite(&data).split(|b| *b == b'\n') {
-                    output.extend_from_slice(b"data: ");
-                    output.extend_from_slice(line);
-                    output.push(b'\n');
-                }
-            }
-            output.push(b'\n');
-        }
-        Bytes::from(output)
-    }
-}
-
-fn sse_event_end(bytes: &[u8]) -> Option<usize> {
-    let mut line_start = 0;
-    let mut at = 0;
-    while at < bytes.len() {
-        if matches!(bytes[at], b'\r' | b'\n') {
-            let empty = at == line_start;
-            if bytes[at] == b'\r' {
-                if at + 1 == bytes.len() {
-                    return None;
-                }
-                if bytes[at + 1] == b'\n' {
-                    at += 1;
-                }
-            }
-            at += 1;
-            if empty {
-                return Some(at);
-            }
-            line_start = at;
-        } else {
-            at += 1;
-        }
-    }
-    None
-}
-
-impl Body for AliasBody {
-    type Data = Bytes;
-    type Error = BoxError;
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
-        if let Some(frame) = self.held.take() {
-            return Poll::Ready(Some(Ok(frame)));
-        }
-        if self.ended {
-            return Poll::Ready(None);
-        }
-        loop {
-            match Pin::new(&mut self.body).poll_frame(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some(Err(err))) => {
-                    self.ended = true;
-                    return Poll::Ready(Some(Err(err)));
-                }
-                Poll::Ready(frame) => {
-                    let eof = frame.is_none();
-                    if let Some(Ok(frame)) = frame {
-                        match frame.into_data() {
-                            Ok(data) => self.pending.extend_from_slice(&data),
-                            Err(trailers) => {
-                                self.held = Some(trailers);
-                                let tail = self.flush(true);
-                                if !tail.is_empty() {
-                                    return Poll::Ready(Some(Ok(Frame::data(tail))));
-                                }
-                                return Poll::Ready(self.held.take().map(Ok));
-                            }
-                        }
-                    }
-                    if self.pending.len() > MAX_BODY {
-                        self.ended = true;
-                        return Poll::Ready(Some(Err(std::io::Error::other(
-                            "fallback response exceeds alias rewrite limit",
-                        )
-                        .into())));
-                    }
-                    self.ended = eof;
-                    let data = self.flush(eof);
-                    if !data.is_empty() {
-                        return Poll::Ready(Some(Ok(Frame::data(data))));
-                    }
-                    if eof {
-                        return Poll::Ready(None);
-                    }
-                }
-            }
-        }
-    }
-    fn is_end_stream(&self) -> bool {
-        self.ended && self.held.is_none()
     }
 }
 
@@ -1130,11 +965,7 @@ impl Meter {
         }
         // Before choosing a parser: compressed bytes are never parsed or
         // filtered, whatever the content type.
-        if parts
-            .headers
-            .get(header::CONTENT_ENCODING)
-            .is_some_and(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
-        {
+        if content_encoded(&parts.headers) {
             return Self::Encoded;
         }
         let json = parts

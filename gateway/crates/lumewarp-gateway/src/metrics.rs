@@ -286,6 +286,7 @@ pub struct Metrics {
     vllm_kv: Family<ModelLabels, Gauge<f64, AtomicU64>>,
     vllm_scrape_failures: Family<UpstreamLabels, Counter>,
     latency_ewma: Family<ModelLabels, Gauge<f64, AtomicU64>>,
+    rewrite_compressed: Family<ModelLabels, Counter>,
 }
 
 impl Metrics {
@@ -324,6 +325,12 @@ impl Metrics {
         let vllm_kv = Family::default();
         let vllm_scrape_failures = Family::default();
         let latency_ewma = Family::default();
+        let rewrite_compressed = Family::default();
+        registry.register(
+            "lumewarp_response_model_rewrite_compressed",
+            "Successful responses that kept the upstream's model name because the upstream compressed them",
+            rewrite_compressed.clone(),
+        );
         registry.register(
             "lumewarp_split_requests",
             "Requests assigned to a traffic split",
@@ -502,7 +509,17 @@ impl Metrics {
             vllm_kv,
             vllm_scrape_failures,
             latency_ewma,
+            rewrite_compressed,
         }
+    }
+
+    /// Only for the rare upstream that compresses despite no `Accept-Encoding`.
+    pub fn response_rewrite_compressed(&self, model: &str) {
+        self.rewrite_compressed
+            .get_or_create(&ModelLabels {
+                model: model.into(),
+            })
+            .inc();
     }
 
     pub fn split_handle(&self, router: &str, split: &str) -> Counter {

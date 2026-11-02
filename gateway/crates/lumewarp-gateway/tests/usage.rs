@@ -103,6 +103,7 @@ impl Drop for FrameBody {
 
 struct Received {
     path: String,
+    headers: hyper::HeaderMap,
     body: Bytes,
     /// Fires when the upstream response body is dropped (stream closed).
     closed: tokio::sync::oneshot::Receiver<()>,
@@ -131,6 +132,7 @@ impl Upstream {
                         let (queue, tx) = (queue.clone(), tx.clone());
                         async move {
                             let path = request.uri().path().to_owned();
+                            let headers = request.headers().clone();
                             let body = request.into_body().collect().await.unwrap().to_bytes();
                             let script = queue
                                 .lock()
@@ -138,7 +140,12 @@ impl Upstream {
                                 .pop_front()
                                 .expect("a scripted upstream response");
                             let (dropped, closed) = tokio::sync::oneshot::channel();
-                            let _ = tx.send(Received { path, body, closed });
+                            let _ = tx.send(Received {
+                                path,
+                                headers,
+                                body,
+                                closed,
+                            });
                             if let Some(gate) = script.gate {
                                 let _ = gate.await;
                             }
@@ -419,11 +426,25 @@ impl Gateway {
     }
 
     async fn post(&self, path: &str, secret: &str, body: &str) -> Response<Incoming> {
-        let request = Request::builder()
+        self.post_with(path, secret, body, &[]).await
+    }
+
+    async fn post_with(
+        &self,
+        path: &str,
+        secret: &str,
+        body: &str,
+        headers: &[(&str, &str)],
+    ) -> Response<Incoming> {
+        let mut request = Request::builder()
             .method("POST")
             .uri(format!("http://{}{path}", self.addr))
             .header("authorization", format!("Bearer {secret}"))
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        for &(name, value) in headers {
+            request = request.header(name, value);
+        }
+        let request = request
             .body(Full::new(Bytes::from(body.to_owned())))
             .unwrap();
         bounded(self.http.request(request))
@@ -1034,6 +1055,10 @@ async fn catalog_setup() -> (FakeCp, Upstream, Gateway) {
             target: "flaky".into(),
         },
     ];
+    // Called by the same name as its upstream_model: the fast path.
+    let mut same = snapshot.models[0].clone();
+    same.name = "actual".into();
+    snapshot.models.push(same);
     let mut flaky = snapshot.routers[0].clone();
     flaky.name = "flaky".into();
     flaky.members[0].model = "dd".into();
@@ -1054,6 +1079,7 @@ async fn catalog_setup() -> (FakeCp, Upstream, Gateway) {
         "to-router",
         "to-flaky",
         "flaky",
+        "actual",
     ]
     .map(String::from)
     .to_vec();
@@ -1098,9 +1124,7 @@ async fn usage_event_for_each_way_of_calling_a_name() {
         assert_eq!(event.fallback, fallback, "{called}");
         assert_eq!(event.attempts, attempts, "{called}");
         assert_eq!(event.request_id, header, "{called}");
-        if fallback {
-            assert_eq!(body["model"], called, "a fallback keeps the called name");
-        }
+        assert_eq!(body["model"], called, "the client sees the name it called");
         // The body reaches the upstream with its upstream_model.
         let received = upstream.received().await;
         assert_eq!(json(&received.body)["model"], "actual");
@@ -1227,4 +1251,454 @@ async fn a_grant_covers_the_called_name_only() {
         .map(|m| m["id"].as_str().unwrap())
         .collect();
     assert_eq!(ids, ["nick", "public"]);
+}
+
+// ---------------------------------------------------------------------------
+// Response `model` rewrite
+// ---------------------------------------------------------------------------
+
+/// Every way of calling a name that needs the rewrite.
+const REWRITTEN: [&str; 5] = ["d", "to-model", "public", "to-router", "to-flaky"];
+const STREAM_HEAD: &[u8] =
+    b"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"act";
+const STREAM_TAIL: &[u8] = b"ual\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":null}\r\n\r\n: ping\r\n\r\ndata: {\"model\":\"actual\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18}}\n\ndata: [DONE]\n\n";
+
+fn sized_headers(
+    content_type: &'static str,
+    body: &[u8],
+    extra: &[(&'static str, &'static str)],
+) -> Vec<(&'static str, &'static str)> {
+    let length: &'static str = body.len().to_string().leak();
+    let mut headers = vec![("content-type", content_type), ("content-length", length)];
+    headers.extend_from_slice(extra);
+    headers
+}
+
+fn frames(chunks: &[&[u8]]) -> Frames {
+    let (tx, rx) = mpsc::channel(chunks.len().max(1));
+    for chunk in chunks {
+        tx.try_send(Ok(Bytes::copy_from_slice(chunk))).unwrap();
+    }
+    rx
+}
+
+#[tokio::test]
+async fn non_stream_responses_carry_the_called_name_and_are_chunked() {
+    let (mut cp, mut upstream, gateway) = catalog_setup().await;
+    for called in REWRITTEN {
+        upstream.push(
+            200,
+            sized_headers("application/json", NAMED_CHAT_JSON, &[]),
+            frames(&[NAMED_CHAT_JSON]),
+        );
+        let response = gateway
+            .post(
+                "/v1/chat/completions",
+                KEY,
+                &format!(r#"{{"model":"{called}"}}"#),
+            )
+            .await;
+        assert_eq!(response.status(), 200, "{called}");
+        assert!(
+            !response.headers().contains_key("content-length"),
+            "{called}"
+        );
+        assert_eq!(
+            response.headers()["transfer-encoding"],
+            "chunked",
+            "{called}"
+        );
+        let body = bytes(response).await;
+        let expected = std::str::from_utf8(NAMED_CHAT_JSON)
+            .unwrap()
+            .replace(r#""model":"actual""#, &format!(r#""model":"{called}""#));
+        assert_eq!(body, expected.as_bytes(), "only the value changes");
+        let event = cp.event().await;
+        assert_eq!(event.model, "d", "{called}");
+        assert_eq!(
+            (event.prompt_tokens, event.completion_tokens),
+            (5, 3),
+            "{called}"
+        );
+        assert_eq!(event.usage_state(), UsageState::Reported, "{called}");
+        upstream.received().await;
+    }
+    assert_eq!(
+        gateway
+            .metrics()
+            .await
+            .sum("lumewarp_response_model_rewrite_compressed_total", &[]),
+        0.
+    );
+}
+
+#[tokio::test]
+async fn streams_carry_the_called_name_with_any_split_and_keep_usage() {
+    let (mut cp, mut upstream, gateway) = catalog_setup().await;
+    for called in REWRITTEN {
+        upstream.respond(200, "text/event-stream", &[STREAM_HEAD, STREAM_TAIL]);
+        let response = gateway
+            .post(
+                "/v1/chat/completions",
+                KEY,
+                &format!(r#"{{"model":"{called}","stream":true}}"#),
+            )
+            .await;
+        assert_eq!(response.status(), 200, "{called}");
+        let body = bytes(response).await;
+        let text = std::str::from_utf8(&body).unwrap();
+        // The forced usage event is stripped; the comment and CRLF stay.
+        assert_eq!(
+            text,
+            format!(
+                "data: {{\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"{called}\",\"choices\":[{{\"delta\":{{\"content\":\"hi\"}}}}],\"usage\":null}}\r\n\r\n: ping\r\n\r\ndata: [DONE]\n\n"
+            ),
+            "{called}"
+        );
+        let event = cp.event().await;
+        assert_eq!(
+            (event.prompt_tokens, event.completion_tokens),
+            (11, 7),
+            "{called}"
+        );
+        assert_eq!(event.usage_state(), UsageState::Reported, "{called}");
+        upstream.received().await;
+    }
+}
+
+#[tokio::test]
+async fn a_client_asking_for_usage_gets_that_event_rewritten_too() {
+    let (mut cp, upstream, gateway) = catalog_setup().await;
+    upstream.respond(200, "text/event-stream", &[STREAM_HEAD, STREAM_TAIL]);
+    let response = gateway
+        .post(
+            "/v1/chat/completions",
+            KEY,
+            r#"{"model":"to-model","stream":true,"stream_options":{"include_usage":true}}"#,
+        )
+        .await;
+    let body = bytes(response).await;
+    let text = std::str::from_utf8(&body).unwrap();
+    assert_eq!(text.matches(r#""model":"to-model""#).count(), 2, "{text}");
+    assert!(!text.contains("actual"), "{text}");
+    let event = cp.event().await;
+    assert_eq!((event.prompt_tokens, event.completion_tokens), (11, 7));
+}
+
+#[tokio::test]
+async fn embeddings_with_model_after_data_are_rewritten() {
+    let (mut cp, upstream, gateway) = catalog_setup().await;
+    let at = EMBEDDINGS_JSON.len() / 2;
+    upstream.respond(
+        200,
+        "application/json",
+        &[&EMBEDDINGS_JSON[..at], &EMBEDDINGS_JSON[at..]],
+    );
+    let response = gateway
+        .post(
+            "/v1/embeddings",
+            KEY,
+            r#"{"model":"to-router","input":"x"}"#,
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    let body = bytes(response).await;
+    let expected = std::str::from_utf8(EMBEDDINGS_JSON)
+        .unwrap()
+        .replace(r#""model":"m""#, r#""model":"to-router""#);
+    assert_eq!(body, expected.as_bytes());
+    let event = cp.event().await;
+    assert_eq!((event.prompt_tokens, event.completion_tokens), (8, 0));
+    assert_eq!(event.usage_state(), UsageState::Reported);
+}
+
+#[tokio::test]
+async fn the_fast_path_keeps_length_encoding_and_bytes() {
+    let (mut cp, mut upstream, gateway) = catalog_setup().await;
+    upstream.push(
+        200,
+        sized_headers("application/json", NAMED_CHAT_JSON, &[]),
+        frames(&[NAMED_CHAT_JSON]),
+    );
+    let response = gateway
+        .post_with(
+            "/v1/chat/completions",
+            KEY,
+            r#"{"model":"actual"}"#,
+            &[("accept-encoding", "gzip")],
+        )
+        .await;
+    assert_eq!(
+        response.headers()["content-length"],
+        NAMED_CHAT_JSON.len().to_string().as_str()
+    );
+    assert_eq!(bytes(response).await, NAMED_CHAT_JSON);
+    assert_eq!(
+        upstream.received().await.headers["accept-encoding"],
+        "gzip",
+        "no rewrite needed: the client's header goes through"
+    );
+    assert_eq!(cp.event().await.prompt_tokens, 5);
+
+    // A compressed answer is no exception here: nothing needed rewriting.
+    upstream.push(
+        200,
+        vec![
+            ("content-type", "application/json"),
+            ("content-encoding", "gzip"),
+        ],
+        frames(&[b"gzipped"]),
+    );
+    let response = gateway
+        .post_with(
+            "/v1/chat/completions",
+            KEY,
+            r#"{"model":"actual"}"#,
+            &[("accept-encoding", "gzip")],
+        )
+        .await;
+    assert_eq!(bytes(response).await, &b"gzipped"[..]);
+    assert_eq!(cp.event().await.usage_state(), UsageState::Invalid);
+    assert_eq!(
+        gateway
+            .metrics()
+            .await
+            .sum("lumewarp_response_model_rewrite_compressed_total", &[]),
+        0.
+    );
+}
+
+#[tokio::test]
+async fn accept_encoding_is_removed_when_the_response_will_be_rewritten() {
+    let (mut cp, mut upstream, gateway) = catalog_setup().await;
+    upstream.respond(200, "application/json", &[NAMED_CHAT_JSON]);
+    let response = gateway
+        .post_with(
+            "/v1/chat/completions",
+            KEY,
+            r#"{"model":"to-model"}"#,
+            &[("accept-encoding", "gzip, br")],
+        )
+        .await;
+    assert_eq!(
+        json(&bytes(response).await)["model"],
+        "to-model",
+        "the upstream honoured the removal"
+    );
+    assert!(!upstream
+        .received()
+        .await
+        .headers
+        .contains_key("accept-encoding"));
+    let event = cp.event().await;
+    assert_eq!((event.prompt_tokens, event.completion_tokens), (5, 3));
+    assert_eq!(event.usage_state(), UsageState::Reported);
+}
+
+#[tokio::test]
+async fn an_upstream_compressing_anyway_passes_through_with_the_metric() {
+    let (mut cp, mut upstream, gateway) = catalog_setup().await;
+    const GZIPPED: &[u8] = b"\x1f\x8b\x08\x00not-really-gzip\"model\":\"actual\"";
+    upstream.push(
+        200,
+        sized_headers("application/json", GZIPPED, &[("content-encoding", "gzip")]),
+        frames(&[GZIPPED]),
+    );
+    let response = gateway
+        .post_with(
+            "/v1/chat/completions",
+            KEY,
+            r#"{"model":"to-model"}"#,
+            &[("accept-encoding", "gzip")],
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-encoding"], "gzip");
+    assert_eq!(
+        response.headers()["content-length"],
+        GZIPPED.len().to_string().as_str()
+    );
+    assert_eq!(bytes(response).await, GZIPPED);
+    assert!(!upstream
+        .received()
+        .await
+        .headers
+        .contains_key("accept-encoding"));
+    // Nothing can read the tokens of a body the gateway does not decompress.
+    let event = cp.event().await;
+    assert_eq!(event.usage_state(), UsageState::Invalid);
+    assert_eq!(event.model, "d");
+    let metrics = gateway.metrics().await;
+    assert_eq!(
+        metrics.value(
+            "lumewarp_response_model_rewrite_compressed_total",
+            &[("model", "d")]
+        ),
+        1.
+    );
+
+    // Also for a stream.
+    upstream.push(
+        200,
+        vec![
+            ("content-type", "text/event-stream"),
+            ("content-encoding", "gzip"),
+        ],
+        frames(&[GZIPPED]),
+    );
+    let response = gateway
+        .post(
+            "/v1/chat/completions",
+            KEY,
+            r#"{"model":"to-model","stream":true}"#,
+        )
+        .await;
+    assert_eq!(bytes(response).await, GZIPPED);
+    cp.event().await;
+    assert_eq!(
+        gateway.metrics().await.value(
+            "lumewarp_response_model_rewrite_compressed_total",
+            &[("model", "d")]
+        ),
+        2.
+    );
+}
+
+#[tokio::test]
+async fn error_responses_are_not_rewritten() {
+    let (mut cp, mut upstream, gateway) = catalog_setup().await;
+    const ERROR: &[u8] = br#"{"error":{"message":"no such model"},"model":"actual"}"#;
+    upstream.push(
+        400,
+        sized_headers("application/json", ERROR, &[]),
+        frames(&[ERROR]),
+    );
+    let response = gateway
+        .post("/v1/chat/completions", KEY, r#"{"model":"to-model"}"#)
+        .await;
+    assert_eq!(response.status(), 400);
+    assert_eq!(
+        response.headers()["content-length"],
+        ERROR.len().to_string().as_str()
+    );
+    assert_eq!(bytes(response).await, ERROR);
+    upstream.received().await;
+    assert_eq!(cp.event().await.status, 400);
+}
+
+#[tokio::test]
+async fn a_retry_decides_rewrite_and_encoding_per_attempt() {
+    let mut upstream = Upstream::start().await;
+    let mut snapshot = snapshot(upstream.addr);
+    // One member needs no rewrite for the name `same`, the other does.
+    let mut fast = snapshot.models[0].clone();
+    fast.name = "fast".into();
+    fast.upstream_model = "same".into();
+    snapshot.models.push(fast);
+    let mut router = snapshot.routers[0].clone();
+    router.name = "same".into();
+    router.members[0].model = "d".into();
+    router.members.push(RouterMember {
+        model: "fast".into(),
+        weight: 1,
+        ..Default::default()
+    });
+    router.retry = Some(lumewarp_proto::config::v1::RetryPolicy::default());
+    snapshot.routers.push(router);
+    snapshot.required_capabilities.push("retry".into());
+    snapshot.api_keys[0]
+        .policy
+        .as_mut()
+        .unwrap()
+        .allowed_models
+        .push("same".into());
+    upstream.respond(503, "application/json", &[b"{\"error\":\"retry\"}"]);
+    upstream.respond(200, "application/json", &[NAMED_CHAT_JSON]);
+    let mut cp = FakeCp::start(snapshot).await;
+    let gateway = Gateway::start(cp.addr).await;
+    let response = gateway
+        .post_with(
+            "/v1/chat/completions",
+            KEY,
+            r#"{"model":"same"}"#,
+            &[("accept-encoding", "gzip")],
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    let body = json(&bytes(response).await);
+    let first = upstream.received().await;
+    let second = upstream.received().await;
+    for attempt in [&first, &second] {
+        assert_eq!(
+            attempt.headers.contains_key("accept-encoding"),
+            json(&attempt.body)["model"] == "same",
+            "kept only for the attempt that needs no rewrite"
+        );
+    }
+    assert_ne!(json(&first.body)["model"], json(&second.body)["model"]);
+    let event = cp.event().await;
+    let (expected, model) = if json(&second.body)["model"] == "same" {
+        ("actual", "fast")
+    } else {
+        ("same", "d")
+    };
+    assert_eq!(body["model"], expected, "by the model that served");
+    assert_eq!(event.model, model);
+    assert_eq!((event.prompt_tokens, event.completion_tokens), (5, 3));
+}
+
+#[tokio::test]
+async fn a_response_above_max_body_is_rewritten_without_breaking() {
+    const FRAME: usize = 1024 * 1024;
+    const FRAMES: usize = 33;
+    let (mut cp, mut upstream, gateway) = catalog_setup().await;
+    let frames_tx = upstream.respond_live("application/json");
+    let response = gateway
+        .post("/v1/embeddings", KEY, r#"{"model":"to-model","input":"x"}"#)
+        .await;
+    upstream.received().await;
+    assert_eq!(response.status(), 200);
+    assert!(!response.headers().contains_key("content-length"));
+    tokio::spawn(async move {
+        let send = |bytes: Bytes| frames_tx.send(Ok(bytes));
+        send(Bytes::from_static(br#"{"object":"list","data":[[0.5"#))
+            .await
+            .unwrap();
+        let filler = Bytes::from(",0.5".repeat(FRAME / 4));
+        for _ in 0..FRAMES {
+            send(filler.clone()).await.unwrap();
+        }
+        send(Bytes::from_static(
+            br#"]],"model":"actual","usage":{"prompt_tokens":8,"total_tokens":8}}"#,
+        ))
+        .await
+        .unwrap();
+    });
+    let body = tokio::time::timeout(Duration::from_secs(120), response.into_body().collect())
+        .await
+        .expect("body in time")
+        .expect("connection not broken")
+        .to_bytes();
+    assert!(body.len() > 32 * 1024 * 1024);
+    assert!(
+        body.ends_with(br#"]],"model":"to-model","usage":{"prompt_tokens":8,"total_tokens":8}}"#),
+        "the tail arrives rewritten"
+    );
+    // The usage copy is bounded (`MAX_JSON_CAPTURE`), the forwarded bytes are not.
+    let event = cp.event().await;
+    assert_eq!(event.outcome(), RequestOutcome::Completed);
+    assert_eq!(event.usage_state(), UsageState::Invalid);
+}
+
+#[tokio::test]
+async fn invalid_json_from_an_upstream_reaches_the_client_unchanged() {
+    let (mut cp, upstream, gateway) = catalog_setup().await;
+    const BROKEN: &[u8] = br#"{"a":[},"model":"actual"} not json"#;
+    upstream.respond(200, "application/json", &[BROKEN]);
+    let response = gateway
+        .post("/v1/chat/completions", KEY, r#"{"model":"to-model"}"#)
+        .await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(bytes(response).await, BROKEN);
+    assert_eq!(cp.event().await.usage_state(), UsageState::Invalid);
 }

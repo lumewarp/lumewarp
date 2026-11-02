@@ -133,6 +133,7 @@ gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control 
 | `lumewarp_spend_total` | team | 花費 |
 | `lumewarp_upstream_circuit_state` | model | 熔斷與健康 |
 | `lumewarp_upstream_attempts_total` | requested, model, outcome | 每次上游嘗試；success / retryable_status / connect_error / timeout / circuit_open / non_retryable |
+| `lumewarp_response_model_rewrite_compressed_total` | model | 需要改寫回應 `model` 但上游仍壓縮：原樣轉發、不解壓縮，用戶端看到上游模型名，usage 為 invalid |
 | `lumewarp_fallbacks_total` | router, model | 切換至備援路由 |
 | `lumewarp_retries_budget_exhausted_total` | router | 全域重試額度耗盡 |
 | `lumewarp_upstream_healthy` | upstream | 主動健康檢查狀態（1 正常、0 異常）；探測不計入請求與用量 |
