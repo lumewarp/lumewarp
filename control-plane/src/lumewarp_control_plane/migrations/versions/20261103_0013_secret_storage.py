@@ -9,10 +9,13 @@ Revises: 0012
   discarded so no row is expected to carry the removed columns.
 - `notifier_channels` refuses inline webhook configuration: a channel of kind `webhook`
   has exactly `url_ref` (an environment variable name matching the same pattern as
-  `upstreams.api_key_ref`) and optionally a numeric `timeout_seconds` in (0, 30]. The CHECK
+  `upstreams.api_key_ref`) and optionally a numeric `timeout_seconds` in [0.001, 30]. The CHECK
   refuses a literal URL, a JSON null, other keys, non-string refs and non-numeric or
   out-of-range timeouts. Rows that do not satisfy it cannot be migrated automatically
   because the URL must be moved into the environment by the operator first.
+- `upstreams.metrics_url` no longer accepts a query, which can carry a credential. The
+  upgrade refuses to run while a row has one, naming the upstream and never the URL: only
+  the operator knows the endpoint to use instead. Set a clean `metrics_url` or null first.
 
 Downgrade re-adds the removed columns as NOT NULL after deleting pending logins, so a
 downgraded server simply starts a fresh login.
@@ -37,7 +40,7 @@ WEBHOOK_CONFIG_CHECK = (
     " AND octet_length(config->>'url_ref') <= 200"
     " AND (NOT (config ? 'timeout_seconds')"
     " OR (CASE WHEN jsonb_typeof(config->'timeout_seconds') <> 'number' THEN false"
-    " ELSE (config->>'timeout_seconds')::numeric > 0"
+    " ELSE (config->>'timeout_seconds')::numeric >= 0.001"
     " AND (config->>'timeout_seconds')::numeric <= 30 END))"
     " AND config - 'url_ref' - 'timeout_seconds' = '{}'::jsonb,"
     " false)"
@@ -45,6 +48,17 @@ WEBHOOK_CONFIG_CHECK = (
 
 
 def upgrade() -> None:
+    names = op.get_bind().scalars(
+        sa.text(
+            "SELECT name FROM upstreams WHERE position(chr(63) in metrics_url) > 0 ORDER BY name"
+        )
+    )
+    blocked = list(names)
+    if blocked:
+        raise RuntimeError(
+            "upstream metrics_url must not contain a query; set a clean metrics_url or null "
+            "on: " + ", ".join(blocked)
+        )
     op.execute("DELETE FROM oidc_login_states")
     op.drop_column("oidc_login_states", "nonce")
     op.drop_column("oidc_login_states", "code_verifier")

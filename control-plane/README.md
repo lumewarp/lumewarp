@@ -546,7 +546,7 @@ Settings that compile 1:1 into the snapshot (`proto/lumewarp/config/v1/snapshot.
 
 Validation mirrors the gateway's snapshot checks so an accepted write never makes a gateway
 NACK (422 otherwise): health interval >= 1000 ms and 0 < timeout < interval, path absolute
-without query/fragment; `metrics_url` plain http(s) without userinfo or query; `max_attempts` 1..5,
+without query/fragment; `metrics_url` plain http(s) without userinfo or query (migration 0013 stops while a stored one has a query, naming the upstream); `max_attempts` 1..5,
 statuses 400..599 and unique; members and fallbacks exist, are models and are unique; at most
 16 splits, names 1..32 of `[A-Za-z0-9_.-]` and unique, each split non-empty, weights >= 0
 summing to more than 0; `sticky_header` (an HTTP header name, stored lower-case) required iff
