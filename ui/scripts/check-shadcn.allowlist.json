@@ -1,12 +1,8 @@
 {
   "adapters": {},
   "allowlist": {
-    "src/components/Dialog.tsx": {
-      "radix-import": 1
-    },
     "src/components/Form.tsx": {
-      "legacy-class": 6,
-      "native-element": 2
+      "legacy-class": 1
     },
     "src/components/Layout.tsx": {
       "legacy-class": 1,
@@ -15,16 +11,8 @@
     "src/components/PermissionPicker.tsx": {
       "legacy-class": 3
     },
-    "src/components/RowActions.tsx": {
-      "legacy-class": 1
-    },
     "src/components/SchemaForm.tsx": {
-      "legacy-class": 7,
-      "native-element": 7
-    },
-    "src/components/Table.tsx": {
-      "legacy-class": 5,
-      "native-element": 1
+      "legacy-class": 7
     },
     "src/pages/Audit.tsx": {
       "legacy-class": 6
@@ -49,8 +37,8 @@
       "legacy-class": 2
     },
     "src/pages/Routers.tsx": {
-      "legacy-class": 35,
-      "native-element": 8
+      "legacy-class": 34,
+      "native-element": 5
     },
     "src/pages/Settings.tsx": {
       "legacy-class": 19,
