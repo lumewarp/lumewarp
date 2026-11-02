@@ -390,9 +390,10 @@ class Stack:
 
     def api(self, method: str, path: str, token: str | None = None, **kwargs) -> httpx.Response:
         return self.admin.request(
-            method, self.api_url + path,
+            method,
+            self.api_url + path,
             headers={"authorization": f"Bearer {token}"} if token is not None else {},
-            **kwargs
+            **kwargs,
         )
 
     def ok(self, method: str, path: str, token: str | None = None, **kwargs) -> dict:
