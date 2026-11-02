@@ -2,7 +2,7 @@ import { Plus, X } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
 import { getOwn, HEADER_LIST_WIDGET, hasOwn, withKey, withoutKey, type Field as SchemaField, type Values } from "../lib/schema";
-import { Field, SelectControl } from "./Form";
+import { Field, SelectField } from "./Form";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -65,9 +65,9 @@ export function SchemaFields({ fields, values, onChange, errors = {}, path = "",
                   </Button>
                   <span className="text-xs text-muted-foreground">{f.required ? "Required" : "Not set"}</span>
                 </div>
-                {hint && <p className="field-hint">{hint}</p>}
+                {hint && <p className="mt-1 text-[13px] text-muted-foreground">{hint}</p>}
                 {error && (
-                  <p className="field-error" role="alert">
+                  <p className="mt-1 text-[13px] text-destructive" role="alert">
                     {error}
                   </p>
                 )}
@@ -75,11 +75,11 @@ export function SchemaFields({ fields, values, onChange, errors = {}, path = "",
             );
           }
           return (
-            <fieldset key={f.key} className="form-section" data-testid={`schema-${full}`}>
-              <legend>{f.title}</legend>
-              {hint && <p className="field-hint">{hint}</p>}
+            <fieldset key={f.key} className="m-0 flex min-w-0 flex-col gap-3 rounded-xl border p-3" data-testid={`schema-${full}`}>
+              <legend className="px-1 font-semibold">{f.title}</legend>
+              {hint && <p className="mt-1 text-[13px] text-muted-foreground">{hint}</p>}
               {error && (
-                <p className="field-error" role="alert">
+                <p className="mt-1 text-[13px] text-destructive" role="alert">
                   {error}
                 </p>
               )}
@@ -97,18 +97,17 @@ export function SchemaFields({ fields, values, onChange, errors = {}, path = "",
         }
         if (f.kind === "boolean") {
           return (
-            <Field key={f.key} label={label} hint={hint} error={error}>
-              {(p) => (
-                <SelectControl<boolean>
-                  {...p}
-                  strict
-                  value={present ? (current as boolean) : undefined}
-                  options={BOOLEAN_OPTIONS}
-                  onChange={(b) => onChange(setKey(values, f.key, b))}
-                  unset={{ label: f.required ? "Choose…" : typeof f.default === "boolean" ? `Not set (default ${f.default ? "On" : "Off"})` : "Not set", onSelect: () => onChange(setKey(values, f.key, undefined)) }}
-                />
-              )}
-            </Field>
+            <SelectField<boolean>
+              key={f.key}
+              label={label}
+              hint={hint}
+              error={error}
+              strict
+              value={present ? (current as boolean) : undefined}
+              options={BOOLEAN_OPTIONS}
+              onChange={(b) => onChange(setKey(values, f.key, b))}
+              unset={{ label: f.required ? "Choose…" : typeof f.default === "boolean" ? `Not set (default ${f.default ? "On" : "Off"})` : "Not set", onSelect: () => onChange(setKey(values, f.key, undefined)) }}
+            />
           );
         }
         if (f.kind === "array") {
@@ -121,18 +120,17 @@ export function SchemaFields({ fields, values, onChange, errors = {}, path = "",
         if (f.enum) {
           const options = f.enum.map((o) => ({ value: o, label: o === "" ? "(empty text)" : String(o) }));
           return (
-            <Field key={f.key} label={label} hint={hint} error={error}>
-              {(p) => (
-                <SelectControl<string | number>
-                  {...p}
-                  strict
-                  value={present ? (current as string | number) : undefined}
-                  options={options}
-                  onChange={(v) => onChange(setKey(values, f.key, v))}
-                  unset={{ label: f.required ? "Select…" : f.default !== undefined ? `Default (${String(f.default)})` : "Not set", onSelect: () => onChange(setKey(values, f.key, undefined)) }}
-                />
-              )}
-            </Field>
+            <SelectField<string | number>
+              key={f.key}
+              label={label}
+              hint={hint}
+              error={error}
+              strict
+              value={present ? (current as string | number) : undefined}
+              options={options}
+              onChange={(v) => onChange(setKey(values, f.key, v))}
+              unset={{ label: f.required ? "Select…" : f.default !== undefined ? `Default (${String(f.default)})` : "Not set", onSelect: () => onChange(setKey(values, f.key, undefined)) }}
+            />
           );
         }
         if (f.kind === "string") {
@@ -267,11 +265,11 @@ export function JsonEditor({ label, value, onChange, onProblem, error, hint }: {
       </Label>
       <Textarea id={id} className="min-h-24 font-mono text-[13px]" spellCheck={false} value={text} aria-invalid={!!shown} onChange={(e) => update(e.target.value)} />
       {shown ? (
-        <p className="field-error" role="alert">
+        <p className="mt-1 text-[13px] text-destructive" role="alert">
           {shown}
         </p>
       ) : (
-        hint && <p className="field-hint">{hint}</p>
+        hint && <p className="mt-1 text-[13px] text-muted-foreground">{hint}</p>
       )}
     </div>
   );
