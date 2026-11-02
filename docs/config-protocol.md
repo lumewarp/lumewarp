@@ -146,13 +146,12 @@ retry or fallback included, makes no difference. There are three exceptions:
 - **Not JSON or SSE.** Only `application/json`, `application/*+json` and
   `text/event-stream` are scanned, compared case-insensitively with parameters
   ignored. Any other declared `Content-Type`, an empty one, or more than one field
-  makes the body opaque: the scanner leaves it alone, even for a `stream: true`
+  makes the body opaque: the gateway leaves it alone, even for a `stream: true`
   request. Without a `Content-Type` the request decides, because OpenAI-compatible
   servers vary: `stream: true` is scanned as SSE, otherwise as JSON. Usage metering
-  does not depend on this and still follows the `stream` flag and
-  `application/json`, so an opaque answer to a `stream: true` request with forced
-  usage stays under the SSE filter: it has no `Content-Length`, and an event in it
-  that looks like the forced usage event is dropped.
+  reads the body the same way. An opaque body is only observed: its bytes and
+  `Content-Length` stay, nothing is filtered out, not even an event that looks like
+  the forced usage event, and tokens found in it still count.
 
 The rewrite never buffers: bytes are forwarded as each frame is scanned, whatever
 the size of the body, and the length changes, so `Content-Length` is dropped and

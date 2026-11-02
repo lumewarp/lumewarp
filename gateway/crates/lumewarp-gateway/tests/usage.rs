@@ -1878,7 +1878,7 @@ async fn only_json_and_sse_media_types_are_rewritten() {
     const EVENTS: &[u8] = b"data: {\"model\":\"up\"}\n\n";
     let non_stream = r#"{"model":"to-model"}"#;
     let stream = r#"{"model":"to-model","stream":true}"#;
-    // Declared as something else: byte for byte.
+    // Declared as something else: byte for byte, with its length.
     for (content_type, body, request, path) in [
         (
             "application/octet-stream",
@@ -1915,15 +1915,11 @@ async fn only_json_and_sse_media_types_are_rewritten() {
         upstream.push(200, sized_headers(content_type, body, &[]), frames(&[body]));
         let response = gateway.post(path, KEY, request).await;
         assert_eq!(response.status(), 200, "{content_type}");
-        // A stream request stays under the SSE meter, as before, which may drop
-        // the usage event it forced and so does not promise a length.
-        if request == non_stream {
-            assert_eq!(
-                response.headers()["content-length"],
-                body.len().to_string().as_str(),
-                "{content_type}"
-            );
-        }
+        assert_eq!(
+            response.headers()["content-length"],
+            body.len().to_string().as_str(),
+            "{content_type}"
+        );
         assert_eq!(bytes(response).await, body, "{content_type}");
         cp.event().await;
     }
@@ -1993,4 +1989,109 @@ async fn only_json_and_sse_media_types_are_rewritten() {
         &b"data: {\"model\":\"to-model\"}\n\n"[..]
     );
     cp.event().await;
+}
+
+#[tokio::test]
+async fn opaque_answers_to_a_stream_are_observed_but_never_filtered() {
+    let (mut cp, upstream, gateway) = catalog_setup().await;
+    // This request has forced usage: USAGE is what the filter strips from SSE.
+    let stream = r#"{"model":"to-model","stream":true}"#;
+    let body = [CONTENT, USAGE, DONE].concat();
+    for content_type in ["text/plain", "application/octet-stream"] {
+        upstream.push(
+            200,
+            sized_headers(content_type, &body, &[]),
+            frames(&[&body]),
+        );
+        let response = gateway.post("/v1/chat/completions", KEY, stream).await;
+        assert_eq!(
+            response.headers()["content-length"],
+            body.len().to_string().as_str(),
+            "{content_type}"
+        );
+        assert_eq!(bytes(response).await, body.as_slice(), "{content_type}");
+        // The tokens are read all the same: billing does not depend on the label.
+        let event = cp.event().await;
+        assert_eq!(event.usage_state(), UsageState::Reported, "{content_type}");
+        assert_eq!(
+            (event.prompt_tokens, event.completion_tokens),
+            (11, 7),
+            "{content_type}"
+        );
+    }
+
+    // The same bytes declared as SSE still lose the event the gateway forced.
+    upstream.push(
+        200,
+        vec![("content-type", "text/event-stream")],
+        frames(&[&body]),
+    );
+    let response = gateway.post("/v1/chat/completions", KEY, stream).await;
+    assert_eq!(bytes(response).await, [CONTENT, DONE].concat().as_slice());
+    assert_eq!(cp.event().await.prompt_tokens, 11);
+}
+
+#[tokio::test]
+async fn the_meter_reads_the_declared_media_type_like_the_rewrite() {
+    let (mut cp, upstream, gateway) = catalog_setup().await;
+    // A JSON answer to a stream request, however the type is written.
+    for content_type in [
+        "application/json",
+        "Application/JSON",
+        "APPLICATION/JSON; charset=utf-8",
+        "application/vnd.api+json",
+    ] {
+        upstream.push(
+            200,
+            vec![("content-type", content_type)],
+            frames(&[NAMED_CHAT_JSON]),
+        );
+        let response = gateway
+            .post(
+                "/v1/chat/completions",
+                KEY,
+                r#"{"model":"to-model","stream":true}"#,
+            )
+            .await;
+        assert_eq!(json(&bytes(response).await)["model"], "to-model");
+        let event = cp.event().await;
+        assert_eq!(event.usage_state(), UsageState::Reported, "{content_type}");
+        assert_eq!(
+            (event.prompt_tokens, event.completion_tokens),
+            (5, 3),
+            "{content_type}"
+        );
+    }
+
+    // SSE answering a non-stream request: read as SSE, in any case, and nothing
+    // is stripped since no usage was forced.
+    let body = [CONTENT, USAGE, DONE].concat();
+    for content_type in ["text/event-stream", "Text/Event-Stream; charset=utf-8"] {
+        upstream.push(200, vec![("content-type", content_type)], frames(&[&body]));
+        let response = gateway
+            .post("/v1/chat/completions", KEY, r#"{"model":"actual"}"#)
+            .await;
+        assert_eq!(bytes(response).await, body.as_slice(), "{content_type}");
+        let event = cp.event().await;
+        assert_eq!(event.usage_state(), UsageState::Reported, "{content_type}");
+        assert_eq!(event.prompt_tokens, 11, "{content_type}");
+    }
+
+    // No Content-Type: the request's flag decides, for the meter as well.
+    upstream.push(200, Vec::new(), frames(&[NAMED_CHAT_JSON]));
+    let response = gateway
+        .post("/v1/chat/completions", KEY, r#"{"model":"to-model"}"#)
+        .await;
+    bytes(response).await;
+    assert_eq!(cp.event().await.prompt_tokens, 5);
+    upstream.push(200, Vec::new(), frames(&[&body]));
+    let response = gateway
+        .post(
+            "/v1/chat/completions",
+            KEY,
+            r#"{"model":"to-model","stream":true}"#,
+        )
+        .await;
+    bytes(response).await;
+    assert_eq!(cp.event().await.prompt_tokens, 11);
 }

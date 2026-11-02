@@ -1007,18 +1007,19 @@ impl Meter {
         if content_encoded(&parts.headers) {
             return Self::Encoded;
         }
-        let json = parts
-            .headers
-            .get(header::CONTENT_TYPE)
-            .is_some_and(|value| value.as_bytes().starts_with(b"application/json"));
-        if stream && !json {
-            return if inject || requested {
+        // The same reading of the body as the rewrite.
+        match rewrite_format(&parts.headers, stream) {
+            Some(BodyFormat::Json) => Self::Json(Tee::default()),
+            Some(BodyFormat::Sse) if inject || requested || !stream => {
                 Self::Sse(SseFilter::new(inject))
-            } else {
-                Self::Off
-            };
+            }
+            Some(BodyFormat::Sse) => Self::Off,
+            // Opaque: only ever observed. Tokens are still read if they are
+            // there, but the filter does not strip, so bytes and length stay.
+            None if !stream => Self::Json(Tee::default()),
+            None if inject || requested => Self::Sse(SseFilter::new(false)),
+            None => Self::Off,
         }
-        Self::Json(Tee::default())
     }
 
     fn holds_bytes(&self) -> bool {
