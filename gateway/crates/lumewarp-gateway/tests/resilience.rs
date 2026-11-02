@@ -248,10 +248,11 @@ async fn retry_chooses_another_model_and_meters_once() {
     let response = gateway.post(false, &[]).await;
     assert_eq!(response.status(), 200);
     let body: serde_json::Value = serde_json::from_slice(&bytes(response).await).unwrap();
+    assert_eq!(body["model"], "public");
     let metrics = gateway.metrics().await;
     assert_eq!(attempts(&metrics, "retryable_status"), 1.);
     assert_eq!(attempts(&metrics, "success"), 1.);
-    let final_model = if body["model"] == "actual-a" {
+    let final_model = if metrics.sum("lumewarp_requests_total", &[("model", "a")]) == 1. {
         "a"
     } else {
         "b"
@@ -550,7 +551,15 @@ async fn breaker_skips_open_primary_and_half_open_recovers() {
     tokio::time::sleep_until(tokio::time::Instant::now() + Duration::from_millis(1000)).await;
     let response = gateway.post(false, &[]).await;
     let body: serde_json::Value = serde_json::from_slice(&bytes(response).await).unwrap();
-    assert_eq!(body["model"], "actual-a");
+    assert_eq!(body["model"], "public");
+    assert_eq!(
+        gateway.metrics().await.sum(
+            "lumewarp_requests_total",
+            &[("model", "a"), ("status", "200")]
+        ),
+        1.,
+        "a served it"
+    );
     assert_eq!(
         gateway
             .metrics()
@@ -582,7 +591,15 @@ async fn active_health_probes_skip_down_upstreams_and_recover() {
     gateway.log("healthy=true").await;
     let response = gateway.post(false, &[]).await;
     let body: serde_json::Value = serde_json::from_slice(&bytes(response).await).unwrap();
-    assert_eq!(body["model"], "actual-a");
+    assert_eq!(body["model"], "public");
+    assert_eq!(
+        gateway.metrics().await.sum(
+            "lumewarp_requests_total",
+            &[("model", "a"), ("status", "200")]
+        ),
+        1.,
+        "a served it"
+    );
     assert_eq!(
         gateway
             .metrics()
@@ -612,14 +629,15 @@ async fn wait_metric(
 
 /// Sends `n` sequential requests and returns how many `model` served.
 async fn served_by(gateway: &Gateway, n: usize, headers: &[(&str, &str)], model: &str) -> usize {
-    let mut count = 0;
+    let served = |metrics: Prometheus| metrics.sum("lumewarp_requests_total", &[("model", model)]);
+    let before = served(gateway.metrics().await);
     for _ in 0..n {
         let response = gateway.post(false, headers).await;
         assert_eq!(response.status(), 200);
         let body: serde_json::Value = serde_json::from_slice(&bytes(response).await).unwrap();
-        count += usize::from(body["model"] == format!("actual-{model}"));
+        assert_eq!(body["model"], "public");
     }
-    count
+    (served(gateway.metrics().await) - before) as usize
 }
 
 #[tokio::test]
