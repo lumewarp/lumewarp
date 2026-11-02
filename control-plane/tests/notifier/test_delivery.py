@@ -18,6 +18,39 @@ from lumewarp_control_plane.models import (
 )
 from lumewarp_control_plane.notifier import BudgetEvent, deliver_pending
 
+INVALID_WEBHOOK_CONFIGS = [
+    {},  # no reference at all
+    {"url": "https://hooks.example.test/budget"},  # the old inline shape
+    {"url_ref": "LUMEWARP_TEST_HOOK", "url": "https://hooks.example.test/budget"},
+    {"url_ref": "LUMEWARP_TEST_HOOK", "token": "lw-secret"},  # unclassified key
+    {"url_ref": ""},
+    {"url_ref": None},  # JSON null would make a naive CHECK evaluate to UNKNOWN
+    {"url_ref": 42},
+    {"url_ref": "https://hooks.example.test/budget?token=lw-secret"},  # a URL as ref
+    {"url_ref": "1HOOK"},  # env names cannot start with a digit
+    {"url_ref": "HOOK-NAME"},  # nor contain hyphens
+    {"url_ref": "A" * 201},
+    {"url_ref": "LUMEWARP_TEST_HOOK", "timeout_seconds": {"token": "secret"}},
+    {"url_ref": "LUMEWARP_TEST_HOOK", "timeout_seconds": "5"},
+    {"url_ref": "LUMEWARP_TEST_HOOK", "timeout_seconds": True},
+    {"url_ref": "LUMEWARP_TEST_HOOK", "timeout_seconds": 0},
+    {"url_ref": "LUMEWARP_TEST_HOOK", "timeout_seconds": -1},
+    {"url_ref": "LUMEWARP_TEST_HOOK", "timeout_seconds": 30.5},
+]
+
+
+def _event() -> BudgetEvent:
+    team_id = uuid7()
+    return BudgetEvent(
+        kind="soft",
+        scope_type=ScopeType.TEAM,
+        scope_id=team_id,
+        team_id=team_id,
+        window_start=datetime(2026, 10, 1, tzinfo=UTC),
+        spent_nano_usd=1,
+        budget_nano_usd=2,
+    )
+
 
 @pytest.fixture(scope="module")
 async def c4_engine():
@@ -164,21 +197,37 @@ async def _webhook_row(factory: SessionFactory, config: dict) -> int:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "config",
-    [
-        {},  # no reference at all
-        {"url": "https://hooks.example.test/budget"},  # the old inline shape
-        {"url_ref": "LUMEWARP_TEST_HOOK", "url": "https://hooks.example.test/budget"},
-        {"url_ref": "LUMEWARP_TEST_HOOK", "token": "lw-secret"},  # unclassified key
-        {"url_ref": ""},
-    ],
-)
+@pytest.mark.parametrize("config", INVALID_WEBHOOK_CONFIGS)
 async def test_webhook_config_refuses_anything_but_an_env_reference(
     session_factory: SessionFactory, config
 ):
     with pytest.raises(IntegrityError):
         await _webhook_row(session_factory, config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout", [None, 1, 0.5, 30])
+async def test_webhook_config_accepts_a_valid_env_reference_and_timeout(
+    session_factory: SessionFactory, timeout
+):
+    config = {"url_ref": "LUMEWARP_TEST_HOOK"}
+    if timeout is not None:
+        config["timeout_seconds"] = timeout
+    row_id = await _webhook_row(session_factory, config)
+    async with session_factory() as session:
+        row = await session.get(NotifierOutbox, row_id)
+        channel = await session.get(NotifierChannel, row.channel_id)
+    assert channel is not None and channel.config == config
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config", INVALID_WEBHOOK_CONFIGS)
+async def test_delivery_validates_the_webhook_config_contract(config):
+    """The worker re-checks the DB contract: a stale row must not resolve a URL as a ref."""
+    from lumewarp_control_plane import notifier
+
+    with pytest.raises(ValueError):
+        await notifier._deliver("webhook", config, _event(), {})
 
 
 @pytest.mark.asyncio

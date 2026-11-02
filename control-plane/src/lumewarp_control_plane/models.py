@@ -1288,18 +1288,28 @@ class NotifierChannel(TimestampMixin, Base):
     """A configured notification target. `kind` is "webhook" (built-in) or the entry-point
     name of a `lumewarp.notifier` plugin. team_id NULL = installation-wide.
 
-    A webhook channel's config holds `url_ref`, the name of an environment variable, never
-    the URL: the outbox loop resolves it at delivery time. The CHECK constraint refuses a
-    literal URL so an inline secret cannot be stored again by mistake.
+    A webhook channel's config holds `url_ref`, the name of an environment variable (the
+    same pattern as upstream `api_key_ref`), and an optional numeric `timeout_seconds`;
+    never the URL. The CHECK constraint refuses a literal URL, a JSON null, other keys and
+    non-numeric or out-of-range timeouts, so a credential cannot be stored there again.
     """
 
     __tablename__ = "notifier_channels"
     __table_args__ = (
         Index(None, "team_id"),
         CheckConstraint(
-            "kind <> 'webhook' OR (jsonb_typeof(config) = 'object'"
-            " AND config ? 'url_ref' AND config->>'url_ref' <> ''"
-            " AND config - 'url_ref' - 'timeout_seconds' = '{}'::jsonb)",
+            "kind <> 'webhook' OR coalesce("
+            " jsonb_typeof(config) = 'object'"
+            " AND config ? 'url_ref'"
+            " AND jsonb_typeof(config->'url_ref') = 'string'"
+            " AND (config->>'url_ref') ~ '^[A-Za-z_][A-Za-z0-9_]*$'"
+            " AND octet_length(config->>'url_ref') <= 200"
+            " AND (NOT (config ? 'timeout_seconds')"
+            " OR (CASE WHEN jsonb_typeof(config->'timeout_seconds') <> 'number' THEN false"
+            " ELSE (config->>'timeout_seconds')::numeric > 0"
+            " AND (config->>'timeout_seconds')::numeric <= 30 END))"
+            " AND config - 'url_ref' - 'timeout_seconds' = '{}'::jsonb,"
+            " false)",
             name="webhook_config_url_ref",
         ),
     )
