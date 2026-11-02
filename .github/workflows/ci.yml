@@ -153,6 +153,20 @@ jobs:
   ui:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: lumewarp
+          POSTGRES_PASSWORD: lumewarp
+          POSTGRES_DB: lumewarp
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U lumewarp -d lumewarp"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     defaults:
       run:
         working-directory: ui
@@ -164,8 +178,18 @@ jobs:
           node-version: 24
           cache: pnpm
           cache-dependency-path: ui/pnpm-lock.yaml
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked --project ../control-plane
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build
+      - run: pnpm check
+      - run: pnpm exec playwright install --with-deps chromium
+      - name: Playwright (serve.py creates a fresh database on the Postgres service)
+        env:
+          # serve.py reads LUMEWARP_TEST_DATABASE_URL (an asyncpg URL), not E2E_PG_URL.
+          LUMEWARP_TEST_DATABASE_URL: postgresql+asyncpg://lumewarp:lumewarp@127.0.0.1:55432/lumewarp
+        run: pnpm test:e2e
 
   proto:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
