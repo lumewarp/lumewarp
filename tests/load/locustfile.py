@@ -4,8 +4,8 @@ Runs in its own Python (uvx locust==2.32.4), never imports the harness. The orch
 (test_load.py) owns the key pool: a JSON file it rewrites atomically while the run goes on
 (revoked keys stay in it, new keys are appended once the gateway accepts them). Every
 request is appended to `<LOAD_OUT>/requests-<pid>.jsonl` so the orchestrator can compare
-what clients saw with what landed in Postgres, key by key. Record times are CLOCK_MONOTONIC, which every
-process on the machine shares and which a wall clock step does not move.
+what clients saw with what landed in Postgres, key by key. Record times are CLOCK_MONOTONIC, which
+every process on the machine shares and which a wall clock step does not move.
 
 Environment: LOAD_POOL, LOAD_OUT, LOAD_USER_RPS (per user), LOAD_STREAM_SHARE.
 """
