@@ -41,7 +41,12 @@ use lumewarp_proto::{
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::mpsc,
+    task::JoinHandle,
+};
 use usage_cp::FakeCp;
 
 const SCOPE: &str = "usage-test";
@@ -930,6 +935,79 @@ async fn keyed_rejections_are_reported_without_spam() {
         .await;
     assert_eq!(response.status(), 400);
     cp.no_more_events().await;
+}
+
+/// These keys are refused by what the snapshot says about them, from the headers alone. The
+/// body is never sent here: an answer proves it was not read, so no called name can be known,
+/// and the event is still reported for the key's owner.
+#[tokio::test]
+async fn keys_refused_before_the_body_report_an_event_with_no_name() {
+    let mut upstream = Upstream::start().await;
+    let mut snapshot = snapshot(upstream.addr);
+    let refused = |id: &str, secret: &str, change: &dyn Fn(&mut ApiKey)| {
+        let mut key = key(id, secret, &["public"], vec![]);
+        change(&mut key);
+        key
+    };
+    snapshot.api_keys.extend([
+        refused("expired", "lw-expired", &|k| k.expires_at_unix_ms = 1),
+        refused("suspended", "lw-suspended", &|k| {
+            k.status = KeyStatus::Suspended as i32
+        }),
+        refused("revoked", "lw-revoked", &|k| {
+            k.status = KeyStatus::Revoked as i32
+        }),
+        refused("budget", "lw-budget", &|k| {
+            k.status = KeyStatus::BudgetExceeded as i32
+        }),
+    ]);
+    let mut cp = FakeCp::start(snapshot).await;
+    let gateway = Gateway::start(cp.addr).await;
+
+    for (id, secret, status) in [
+        ("expired", "lw-expired", 401),
+        ("suspended", "lw-suspended", 401),
+        ("revoked", "lw-revoked", 401),
+        ("budget", "lw-budget", 429),
+    ] {
+        let mut socket = TcpStream::connect(gateway.addr).await.unwrap();
+        socket
+            .write_all(
+                format!(
+                    "POST /v1/chat/completions HTTP/1.1\r\nhost: gw\r\n\
+                     authorization: Bearer {secret}\r\ncontent-type: application/json\r\n\
+                     content-length: 1000\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut head = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+            let read = bounded(socket.read(&mut chunk)).await.unwrap();
+            assert_ne!(read, 0, "{id}: closed without an answer");
+            head.extend_from_slice(&chunk[..read]);
+        }
+        let head = String::from_utf8_lossy(&head);
+        assert!(
+            head.starts_with(&format!("HTTP/1.1 {status} ")),
+            "{id}: {head}"
+        );
+        let event = cp.event().await;
+        assert_eq!(event.key_id, id);
+        assert_eq!(event.status, status);
+        assert_eq!(event.outcome, RequestOutcome::Rejected as i32, "{id}");
+        assert_eq!(event.requested, "", "{id}: the body was never read");
+        assert_eq!(event.model, "", "{id}");
+        assert_eq!(event.endpoint, "chat_completions", "{id}");
+        assert_eq!(event.attempts, 0, "{id}");
+    }
+    cp.no_more_events().await;
+    assert!(
+        upstream.received.try_recv().is_err(),
+        "nothing went upstream"
+    );
 }
 
 #[tokio::test]
