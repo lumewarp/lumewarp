@@ -3,6 +3,7 @@ import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import {
   BarChart3,
   Boxes,
+  CornerDownRight,
   History,
   KeyRound,
   LayoutDashboard,
@@ -32,18 +33,39 @@ import { useToast } from "./Toast";
 import { Button } from "./ui/button";
 
 const NAV = [
-  { to: "/", label: "Overview", icon: LayoutDashboard },
-  { to: "/teams", label: "Teams", icon: Users },
-  { to: "/users", label: "Users", icon: ShieldCheck, superOnly: true },
-  { to: "/keys", label: "My keys", icon: KeyRound },
-  { to: "/routers", label: "Routers", icon: Route },
-  { to: "/models", label: "Models", icon: Boxes },
-  { to: "/upstreams", label: "Upstreams", icon: Server },
-  { to: "/usage", label: "Usage", icon: BarChart3 },
-  { to: "/audit", label: "Audit log", icon: ScrollText },
-  { to: "/gateways", label: "Gateways", icon: Radio, superOnly: true },
-  { to: "/config", label: "Config versions", icon: History, superOnly: true },
-  { to: "/settings", label: "Settings", icon: Settings },
+  { group: null, items: [{ to: "/", label: "Overview", icon: LayoutDashboard }] },
+  {
+    group: "Access",
+    items: [
+      { to: "/keys", label: "My keys", icon: KeyRound },
+      { to: "/teams", label: "Teams", icon: Users },
+      { to: "/users", label: "Users", icon: ShieldCheck, superOnly: true },
+    ],
+  },
+  {
+    group: "Routing",
+    items: [
+      { to: "/upstreams", label: "Upstreams", icon: Server },
+      { to: "/models", label: "Models", icon: Boxes },
+      { to: "/aliases", label: "Aliases", icon: CornerDownRight },
+      { to: "/routers", label: "Routers", icon: Route },
+    ],
+  },
+  {
+    group: "Activity",
+    items: [
+      { to: "/usage", label: "Usage", icon: BarChart3 },
+      { to: "/audit", label: "Audit log", icon: ScrollText },
+    ],
+  },
+  {
+    group: "Data plane",
+    items: [
+      { to: "/gateways", label: "Gateways", icon: Radio, superOnly: true },
+      { to: "/config", label: "Config versions", icon: History, superOnly: true },
+      { to: "/settings", label: "Settings", icon: Settings },
+    ],
+  },
 ] as const;
 
 function roleLabel(me: Me) {
@@ -105,23 +127,32 @@ export function Layout() {
           <span className="brand-mark" aria-hidden="true" />
           Lumewarp
         </div>
-        <nav aria-label="Main" className="flex flex-col gap-1">
-          {NAV.filter((n) => !("superOnly" in n) || perms.isSuper).map((n) => {
-            const Icon = n.icon;
+        <nav aria-label="Main" className="flex min-h-0 flex-col gap-1 overflow-y-auto">
+          {NAV.map((section) => {
+            const items = section.items.filter((n) => !("superOnly" in n) || perms.isSuper);
+            if (!items.length) return null;
             return (
-              <Link
-                key={n.to}
-                to={n.to}
-                className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/50 data-[status=active]:bg-sidebar-primary data-[status=active]:text-sidebar-primary-foreground data-[status=active]:hover:bg-sidebar-primary data-[status=active]:hover:text-sidebar-primary-foreground"
-                activeProps={{
-                  "aria-current": "page",
-                }}
-                activeOptions={{ exact: n.to === "/" }}
-                onClick={() => setNavOpen(false)}
-              >
-                <Icon className="size-4 opacity-80" aria-hidden="true" />
-                {n.label}
-              </Link>
+              <div key={section.group ?? "top"} role="group" aria-label={section.group ?? undefined} className="flex flex-col gap-1">
+                {section.group && <span className="mt-3 px-2.5 pb-0.5 text-[11px] font-semibold tracking-wider text-sidebar-foreground/55 uppercase">{section.group}</span>}
+                {items.map((n) => {
+                  const Icon = n.icon;
+                  return (
+                    <Link
+                      key={n.to}
+                      to={n.to}
+                      className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/50 data-[status=active]:bg-sidebar-primary data-[status=active]:text-sidebar-primary-foreground data-[status=active]:hover:bg-sidebar-primary data-[status=active]:hover:text-sidebar-primary-foreground"
+                      activeProps={{
+                        "aria-current": "page",
+                      }}
+                      activeOptions={{ exact: n.to === "/" }}
+                      onClick={() => setNavOpen(false)}
+                    >
+                      <Icon className="size-4 opacity-80" aria-hidden="true" />
+                      {n.label}
+                    </Link>
+                  );
+                })}
+              </div>
             );
           })}
         </nav>

@@ -12,7 +12,7 @@ interface Props {
   children: ReactNode;
   footer?: ReactNode;
   /** `drawer` slides in from the right. */
-  variant?: "dialog" | "drawer";
+  variant?: "dialog" | "drawer" | "wide-drawer";
 }
 
 /** Radix dialog: focus trap, Esc, backdrop close and inert background. */
@@ -25,8 +25,8 @@ export function Dialog({ open, onClose, title, children, footer, variant = "dial
           aria-describedby={undefined}
           className={cn(
             "fixed z-50 flex flex-col border bg-background shadow-xl outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0",
-            variant === "drawer"
-              ? "inset-y-0 right-0 h-full w-full max-w-md border-l data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right"
+            variant === "drawer" || variant === "wide-drawer"
+              ? cn("inset-y-0 right-0 h-full w-full border-l data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right", variant === "wide-drawer" ? "max-w-xl" : "max-w-md")
               : "top-1/2 left-1/2 max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-xl data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
           )}
         >

@@ -13,6 +13,11 @@ export type ServiceAccount = Schemas["ServiceAccountOut"];
 export type Upstream = Schemas["UpstreamOut"];
 export type Model = Schemas["ModelOut"];
 export type Router = Schemas["RouterOut"];
+export type Alias = Schemas["AliasOut"];
+export type Strategy = Schemas["StrategyOut"];
+export type CatalogEntry = Schemas["CatalogEntryOut"];
+export type CatalogKind = Schemas["CatalogKind"];
+export type UsageRow = Schemas["UsageRowOut"];
 export type User = Schemas["UserOut"];
 export type Me = Schemas["MeOut"];
 export type ModelAccess = Schemas["ModelAccess"];
@@ -62,6 +67,8 @@ export async function listAll<T>(fetchPage: (cursor: string | undefined) => Prom
   } while (cursor);
   return out;
 }
+
+export type UsageQuery = NonNullable<paths["/api/v1/usage"]["get"]["parameters"]["query"]>;
 
 const q = (cursor: string | undefined) => ({ limit: 200, cursor });
 
@@ -122,6 +129,14 @@ export const api = {
   updateRouter: (id: string, body: Schemas["RouterUpdate"]) => unwrap(client.PATCH("/api/v1/routers/{router_id}", { params: { path: { router_id: id } }, body })),
   deleteRouter: (id: string) => unwrap(client.DELETE("/api/v1/routers/{router_id}", { params: { path: { router_id: id } } })),
 
+  aliases: () => listAll((c) => unwrap(client.GET("/api/v1/aliases", { params: { query: q(c) } }))),
+  createAlias: (body: Schemas["AliasCreate"]) => unwrap(client.POST("/api/v1/aliases", { body })),
+  updateAlias: (id: string, body: Schemas["AliasUpdate"]) => unwrap(client.PATCH("/api/v1/aliases/{alias_id}", { params: { path: { alias_id: id } }, body })),
+  deleteAlias: (id: string) => unwrap(client.DELETE("/api/v1/aliases/{alias_id}", { params: { path: { alias_id: id } } })),
+
+  strategies: async () => (await unwrap(client.GET("/api/v1/strategies"))).items,
+  catalog: () => listAll((c) => unwrap(client.GET("/api/v1/catalog", { params: { query: q(c) } }))),
+
   users: () => listAll((c) => unwrap(client.GET("/api/v1/users", { params: { query: q(c) } }))),
   usersPage: (cursor?: string) =>
     unwrap(client.GET("/api/v1/users", { params: { query: { limit: 50, cursor } } })),
@@ -133,7 +148,7 @@ export const api = {
   createToken: (body: Schemas["TokenCreate"]) => unwrap(client.POST("/api/v1/users/me/tokens", { body })),
   revokeToken: (id: string) => unwrap(client.POST("/api/v1/users/me/tokens/{token_id}/revoke", { params: { path: { token_id: id } } })),
 
-  usage: (query: { from?: string; to?: string; group_by?: string; team_id?: string; user_id?: string; service_account_id?: string; key_id?: string; requested?: string }) =>
+  usage: (query: UsageQuery) =>
     listAll((c) => unwrap(client.GET("/api/v1/usage", { params: { query: { ...query, ...q(c) } } }))),
   audit: (query: { team_id?: string; actor_id?: string; action?: string; resource_type?: string; resource_id?: string; from?: string; to?: string } = {}) =>
     listAll((c) => unwrap(client.GET("/api/v1/audit", { params: { query: { ...query, ...q(c) } } }))),
@@ -144,5 +159,5 @@ export const api = {
     unwrap(client.POST("/api/v1/gateways/{gateway_id}/tokens/{token_id}/revoke", { params: { path: { gateway_id: gatewayId, token_id: tokenId } } })),
 
   configVersions: () => listAll((c) => unwrap(client.GET("/api/v1/config/versions", { params: { query: q(c) } }))),
-  rollback: (version: number) => unwrap(client.POST("/api/v1/config/rollback", { body: { version } })),
+  rollback: (version: number, force = false) => unwrap(client.POST("/api/v1/config/rollback", { body: force ? { version, force } : { version } })),
 };

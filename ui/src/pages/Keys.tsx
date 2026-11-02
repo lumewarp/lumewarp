@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { api, type Key, type Schemas } from "../api";
 import { fmtDate, KeyBadge, PageHeader, SecretOnce, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
@@ -7,13 +7,67 @@ import { Dialog } from "../components/Dialog";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
-import { useAction, useCan, useMe, useMut } from "../hooks";
+import { useAction, useCan, useCatalog, useMe, useMut } from "../hooks";
+import { Badge as UiBadge } from "../components/ui/badge";
+import { Skeleton } from "../components/ui/skeleton";
 
 type Values = { name: string; team_id: string; expires: string };
 const blank: Values = { name: "", team_id: "", expires: "" };
 
 function expiresAt(value: string) {
   return value ? new Date(`${value}T23:59:59`).toISOString() : null;
+}
+
+/**
+ * The names a new key can call: what the team allows, narrowed by the owner's own member policy.
+ * Read-only; built from what the API returns for any team member (the team, its members, the catalog).
+ */
+function CallableNames({ teamId, userId }: { teamId: string; userId: string | null | undefined }) {
+  const team = useQuery({ queryKey: ["team", teamId], queryFn: () => api.team(teamId), enabled: !!teamId });
+  const members = useQuery({ queryKey: ["members", teamId], queryFn: () => api.members(teamId), enabled: !!teamId });
+  const catalog = useCatalog();
+  const names = useMemo(() => {
+    if (!team.data || !members.data || !catalog.data) return null;
+    const own = members.data.find((m) => m.user_id === userId);
+    let allowed: Set<string> | null = team.data.model_access === "list" ? new Set(team.data.allowed_models) : null;
+    if (own?.model_access === "list") {
+      const mine = new Set(own.allowed_models);
+      allowed = allowed ? new Set([...allowed].filter((n) => mine.has(n))) : mine;
+    }
+    return catalog.data.filter((e) => allowed === null || allowed.has(e.name));
+  }, [team.data, members.data, catalog.data, userId]);
+  const error = team.error ?? members.error ?? catalog.error;
+  return (
+    <div className="flex flex-col gap-2" data-testid="callable-names">
+      <span className="text-sm font-semibold">This key can call</span>
+      {error ? (
+        <p className="field-error" role="alert">
+          {error.message}
+        </p>
+      ) : !names ? (
+        <Skeleton className="h-4 w-full" />
+      ) : names.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No names. The team or your own access allows none.</p>
+      ) : (
+        (["model", "alias", "router"] as const).map((kind) => {
+          const items = names.filter((e) => e.kind === kind);
+          return (
+            items.length > 0 && (
+              <div key={kind} role="group" aria-label={`${kind}s`} className="flex flex-wrap items-center gap-1.5">
+                <span className="w-16 text-xs text-muted-foreground capitalize">{kind}s</span>
+                {items.map((e) => (
+                  <UiBadge key={e.id} variant="muted">
+                    {e.name}
+                  </UiBadge>
+                ))}
+              </div>
+            )
+          );
+        })
+      )}
+      <p className="field-hint">Read-only. Access is set on the team and on your membership.</p>
+    </div>
+  );
 }
 
 export function Keys() {
@@ -148,6 +202,7 @@ export function Keys() {
         )}
         <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
         <TextField label="Expires" type="date" value={form.values.expires} onChange={(value) => form.set("expires", value)} hint="Empty means the key never expires." />
+        {editing === "new" && form.values.team_id && <CallableNames teamId={form.values.team_id} userId={me.data?.user_id} />}
       </FormDialog>
       <Dialog
         open={!!secret}

@@ -277,7 +277,7 @@ function MembersPanel({
               { value: "member", label: "Member" },
             ]}
           />
-          <PolicyFields values={form.values} errors={form.errors} set={form.set} />
+          <PolicyFields values={form.values} errors={form.errors} set={form.set} team={team} />
         </fieldset>
       </FormDialog>
       <ConfirmDialog
@@ -371,7 +371,7 @@ function ServiceAccountsPanel({ team }: { team: Team }) {
       >
         <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
         <TextField label="Description" value={form.values.description} onChange={(value) => form.set("description", value)} />
-        <PolicyFields values={form.values} errors={form.errors} set={form.set} />
+        <PolicyFields values={form.values} errors={form.errors} set={form.set} team={team} />
       </FormDialog>
       <ConfirmDialog
         open={!!deleting}
@@ -629,7 +629,7 @@ function TeamSettings({ team }: { team: Team }) {
   const perms = useCan();
   const [editing, setEditing] = useState(false);
   const form = useForm<PolicyValues & { name: string }>(
-    { name: team.name, ...policyFrom(team) },
+    { name: team.name, ...policyFrom(team, true) },
     { name: required("Name") },
   );
   const update = useMut(
@@ -638,7 +638,7 @@ function TeamSettings({ team }: { team: Team }) {
   );
 
   const edit = () => {
-    form.reset({ name: team.name, ...policyFrom(team) });
+    form.reset({ name: team.name, ...policyFrom(team, true) });
     setEditing(true);
   };
   const submit = async () => {

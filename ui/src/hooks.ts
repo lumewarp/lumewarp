@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Key, type Me, type Team } from "./api";
+import { useMemo } from "react";
 import { useToast } from "./components/Toast";
 
 export function useMe() {
@@ -107,4 +108,16 @@ export function useNames(rows: { id: string; name: string }[] | undefined) {
 
 export function useRoutersQuery() {
   return useQuery({ queryKey: ["routers"], queryFn: () => api.routers(), retry: false });
+}
+
+export const useModels = () => useQuery({ queryKey: ["models"], queryFn: () => api.models() });
+export const useAliases = () => useQuery({ queryKey: ["aliases"], queryFn: () => api.aliases() });
+export const useRouters = () => useQuery({ queryKey: ["routers"], queryFn: () => api.routers() });
+export const useUpstreams = () => useQuery({ queryKey: ["upstreams"], queryFn: () => api.upstreams() });
+export const useStrategies = () => useQuery({ queryKey: ["strategies"], queryFn: () => api.strategies() });
+export const useCatalog = () => useQuery({ queryKey: ["catalog"], queryFn: () => api.catalog() });
+
+/** id → row lookup. */
+export function useById<T extends { id: string }>(rows: T[] | undefined) {
+  return useMemo(() => new Map((rows ?? []).map((r) => [r.id, r])), [rows]);
 }

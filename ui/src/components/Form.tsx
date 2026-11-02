@@ -159,15 +159,6 @@ export function CheckField({ label, checked, onChange, hint }: { label: string; 
   );
 }
 
-/** Comma-separated list input (model allow-lists). */
-export function ListField({ label, value, onChange, hint, error }: { label: string; value: string[]; onChange: (v: string[]) => void; hint?: string; error?: string }) {
-  return (
-    <Field label={label} hint={hint} error={error}>
-      {(p) => <Input {...p} value={value.join(", ")} placeholder="model aliases" onChange={(e) => onChange(e.target.value.split(",").map((s) => s.trim()).filter(Boolean))} />}
-    </Field>
-  );
-}
-
 interface FormDialogProps {
   open: boolean;
   title: string;
@@ -177,7 +168,7 @@ interface FormDialogProps {
   /** Return false to keep the dialog open (validation failed). Throw to show a server error. */
   onSubmit: () => Promise<boolean | void> | boolean | void;
   children: ReactNode;
-  variant?: "dialog" | "drawer";
+  variant?: "dialog" | "drawer" | "wide-drawer";
 }
 
 export function FormDialog({ open, title, submitLabel = "Save", submitDisabled = false, onClose, onSubmit, children, variant }: FormDialogProps) {

@@ -1,6 +1,7 @@
-import type { ModelAccess, PolicyOut } from "../api";
+import type { ModelAccess, PolicyOut, Team } from "../api";
 import { nanoToUsd, usdToNano, fmtUsd } from "./Bits";
-import { ListField, NumberField, SelectField } from "./Form";
+import { NumberField } from "./Form";
+import { PermissionPicker } from "./PermissionPicker";
 
 /** Policy form state shared by teams and key owners; budgets are edited in USD. */
 export interface PolicyValues {
@@ -23,8 +24,9 @@ export const blankPolicy = (isTeam = false): PolicyValues => ({
   soft_budget_usd: null,
 });
 
-export const policyFrom = (p: PolicyOut): PolicyValues => ({
-  model_access: p.model_access,
+/** Members and service accounts have no "All": it means the same as inheriting what the team allows. */
+export const policyFrom = (p: PolicyOut, isTeam = false): PolicyValues => ({
+  model_access: !isTeam && p.model_access === "all" ? "inherit" : p.model_access,
   allowed_models: p.allowed_models,
   rpm_limit: p.rpm_limit,
   tpm_limit: p.tpm_limit,
@@ -47,35 +49,21 @@ export const policyBody = (v: PolicyValues) => ({
 /** Server field names -> form field names, for `useForm().run`. */
 export const POLICY_ALIAS = { budget_nano_usd: "budget_usd", soft_budget_nano_usd: "soft_budget_usd" } as const;
 
-const ACCESS_HINT: Record<ModelAccess, string> = {
-  inherit: "Use exactly what the parent level allows.",
-  all: "No restriction at this level (the parent's limits still apply).",
-  list: "Only the models listed below, intersected with the parent. An empty list denies everything.",
-};
-
 interface Props {
   values: PolicyValues;
   errors: Partial<Record<keyof PolicyValues, string>>;
   set<K extends keyof PolicyValues>(k: K, v: PolicyValues[K]): void;
   /** Teams have no parent to inherit from. */
   isTeam?: boolean;
-  models?: string[];
+  /** The team a member or service account belongs to: its names bound what can be picked. */
+  team?: Team;
 }
 
-export function PolicyFields({ values, errors, set, isTeam, models }: Props) {
-  const options = [...(isTeam ? [] : [{ value: "inherit", label: "Inherit from team" }]), { value: "all", label: "All models" }, { value: "list", label: "Specific models" }];
+export function PolicyFields({ values, errors, set, isTeam, team }: Props) {
+  const scope = isTeam || !team || team.model_access !== "list" ? null : team.allowed_models;
   return (
     <>
-      <SelectField label="Model access" value={values.model_access} onChange={(v) => set("model_access", v as ModelAccess)} options={options} error={errors.model_access} hint={ACCESS_HINT[values.model_access]} />
-      {values.model_access === "list" && (
-        <ListField
-          label="Allowed models"
-          value={values.allowed_models}
-          onChange={(v) => set("allowed_models", v)}
-          error={errors.allowed_models}
-          hint={models?.length ? `Comma-separated aliases. Known: ${models.join(", ")}` : "Comma-separated model aliases."}
-        />
-      )}
+      <PermissionPicker isTeam={isTeam} access={values.model_access} onAccess={(a) => set("model_access", a)} selected={values.allowed_models} onSelected={(names) => set("allowed_models", names)} scope={scope} error={errors.model_access ?? errors.allowed_models} />
       <NumberField label="Requests per minute" value={values.rpm_limit} onChange={(v) => set("rpm_limit", v)} error={errors.rpm_limit} />
       <NumberField label="Tokens per minute" value={values.tpm_limit} onChange={(v) => set("tpm_limit", v)} error={errors.tpm_limit} />
       <NumberField label="Max parallel requests" value={values.max_parallel} onChange={(v) => set("max_parallel", v)} error={errors.max_parallel} />

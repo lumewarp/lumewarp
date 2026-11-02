@@ -23,7 +23,7 @@ export function Teams() {
   const remove = useMut((id: string) => api.deleteTeam(id), "Team deleted");
 
   const open = (team: Team | "new") => {
-    form.reset(team === "new" ? blank : { name: team.name, ...policyFrom(team) });
+    form.reset(team === "new" ? blank : { name: team.name, ...policyFrom(team, true) });
     setEditing(team);
   };
   const submit = async () => {

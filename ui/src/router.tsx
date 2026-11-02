@@ -2,6 +2,7 @@ import { createRootRoute, createRoute, createRouter, Outlet, redirect } from "@t
 import { api } from "./api";
 import { getCsrfToken } from "./auth";
 import { Layout } from "./components/Layout";
+import { Aliases } from "./pages/Aliases";
 import { Audit } from "./pages/Audit";
 import { Config } from "./pages/Config";
 import { Models } from "./pages/Models";
@@ -56,6 +57,7 @@ const routeTree = rootRoute.addChildren([
     page("/keys", Keys),
     page("/routers", Routers),
     page("/models", Models),
+    page("/aliases", Aliases),
     page("/upstreams", Upstreams),
     page("/usage", Usage),
     page("/audit", Audit),
