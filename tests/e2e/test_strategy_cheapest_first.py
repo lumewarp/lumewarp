@@ -5,14 +5,13 @@
 using it is saved, compiled into the snapshot and served, and the prices in its
 member params decide which model answers.
 
-The gateway is built with `--features strategy-cheapest-first` by
-`scripts/e2e-p1.sh` or, when this test is run on its own, here. Set
-`E2E_CHEAPEST_FIRST_GATEWAY_BIN` to use a binary built elsewhere.
+The gateway is built with `--features strategy-cheapest-first` into its own
+`gateway/target/e2e-cheapest-first` directory, so the default binary the other
+e2e tests start is never overwritten. Set `E2E_CHEAPEST_FIRST_GATEWAY_BIN` to
+use a binary built elsewhere.
 """
 
-import json
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -43,48 +42,27 @@ def _strategy(stack) -> dict | None:
 
 
 @pytest.fixture(scope="module")
-def strategy_gateway(tmp_path_factory) -> Path:
-    """A gateway binary with the crate compiled in, without leaving it in the
-    default build the other e2e tests start (their capability lists are exact)."""
+def strategy_gateway() -> Path:
+    """A gateway binary with the crate compiled in.
+
+    It builds into its own target directory: the default
+    gateway/target/debug/lumewarp must keep the built-ins only, because
+    test_p2_routing.py asserts its exact strategy capabilities.
+    """
     if binary := os.environ.get("E2E_CHEAPEST_FIRST_GATEWAY_BIN"):
         return Path(binary)
-    directory = tmp_path_factory.mktemp("cheapest-first")
-    default_binary = ROOT / "gateway/target/debug/lumewarp"
-    plain = directory / "lumewarp-plain"
-    if default_binary.exists():
-        shutil.copy2(default_binary, plain)
-    output = subprocess.run(
-        [
-            "cargo",
-            "build",
-            "-p",
-            "lumewarp-gateway",
-            "--features",
-            FEATURE,
-            "--message-format=json-render-diagnostics",
-        ],
+    target_dir = ROOT / "gateway/target/e2e-cheapest-first"
+    result = subprocess.run(
+        ["cargo", "build", "-p", "lumewarp-gateway", "--features", FEATURE],
         cwd=ROOT / "gateway",
+        env={**os.environ, "CARGO_TARGET_DIR": str(target_dir)},
         capture_output=True,
         text=True,
         timeout=900,
     )
-    built = None
-    try:
-        assert output.returncode == 0, output.stderr[-4000:]
-        for line in output.stdout.splitlines():
-            if not line.startswith("{"):
-                continue
-            message = json.loads(line)
-            if message.get("reason") == "compiler-artifact" and message["target"][
-                "name"
-            ] == "lumewarp":
-                built = message.get("executable")
-        assert built, output.stderr[-4000:]
-        binary = directory / "lumewarp-cheapest-first"
-        shutil.copy2(built, binary)
-    finally:
-        if plain.exists():
-            shutil.copy2(plain, default_binary)
+    assert result.returncode == 0, result.stderr[-4000:]
+    binary = target_dir / "debug/lumewarp"
+    assert binary.exists(), f"cargo build did not produce {binary}"
     return binary
 
 
