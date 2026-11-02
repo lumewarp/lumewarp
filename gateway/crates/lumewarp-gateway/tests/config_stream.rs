@@ -279,12 +279,21 @@ async fn full_then_delta_with_durable_acks() {
     assert!(hello.have_digest.is_empty());
     assert_eq!(hello.scope, "");
     assert!(!hello.gateway_version.is_empty());
-    let names: Vec<_> = hello.strategies.iter().map(|d| d.name.as_str()).collect();
-    assert_eq!(
-        names,
-        ["least_in_flight", "lowest_latency", "vllm_load", "weighted"]
-    );
-    let vllm = &hello.strategies[2];
+    // The binary links every strategy feature; this test only relies on the
+    // built-ins. `tests/strategies.rs` covers the custom entries.
+    let builtins = ["least_in_flight", "lowest_latency", "vllm_load", "weighted"];
+    let names: Vec<_> = hello
+        .strategies
+        .iter()
+        .map(|d| d.name.as_str())
+        .filter(|name| builtins.contains(name))
+        .collect();
+    assert_eq!(names, builtins);
+    let vllm = hello
+        .strategies
+        .iter()
+        .find(|d| d.name == "vllm_load")
+        .expect("vllm_load is built in");
     assert_eq!(vllm.needs, ["vllm_load"]);
     assert!(!vllm.uses_weight);
     assert_eq!(vllm.digest.len(), 64);
