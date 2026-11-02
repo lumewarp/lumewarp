@@ -150,21 +150,15 @@ test("select contract: a stored value that is not an option is shown as such, ne
   expect(patched).toEqual([{ name: "sel-stale-2", params: { max_waiting: 7, scope: "narrow", level: 1 } }]);
 });
 
-test("select contract: options that arrive late or change order keep the chosen value, not the position", async ({ page, request }) => {
+test("select contract: options that arrive late are chosen from by value", async ({ page, request }) => {
   const up1 = await upstream(request, "sel-a-up");
   const up2 = await upstream(request, "sel-b-up");
   await signIn(page, request, "/models");
   let release!: () => void;
   const gate = new Promise<void>((resolve) => (release = resolve));
-  let second = false;
   await page.route("**/api/v1/upstreams?**", async (route) => {
     await gate;
-    const response = await route.fetch();
-    const body = await response.json();
-    // The second answer lists the same upstreams in the opposite order.
-    if (second) body.items.reverse();
-    second = true;
-    await route.fulfill({ response, json: body });
+    await route.fallback();
   });
   const posted = recordWrites(page, "POST", "models");
   await page.reload();
@@ -176,6 +170,48 @@ test("select contract: options that arrive late or change order keep the chosen 
   await expect.poll(async () => (await optionNames(d, "Upstream")).length).toBeGreaterThanOrEqual(2);
   await pick(d, "Upstream", "sel-b-up");
   await d.getByLabel("Name", { exact: true }).fill("sel-late");
+  await d.getByLabel("Upstream model", { exact: true }).fill("m");
+  await d.getByRole("button", { name: "Create" }).click();
+  await expect(d).toBeHidden();
+  expect(posted[0].upstream_id).toBe(up2.id);
+  expect(posted[0].upstream_id).not.toBe(up1.id);
+});
+
+test("select contract: when the options are reordered after a choice, the chosen value stays, not its position", async ({ page, request }) => {
+  const up1 = await upstream(request, "sel-a-up");
+  const up2 = await upstream(request, "sel-b-up");
+  // Fake time so that the list is stale (15 s) on demand and a focus event refetches it, with no waiting.
+  await page.clock.install();
+  await signIn(page, request, "/models");
+  let reverse = false;
+  let answered = 0;
+  await page.route("**/api/v1/upstreams?**", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    if (reverse) body.items.reverse();
+    answered += 1;
+    await route.fulfill({ response, json: body });
+  });
+  const posted = recordWrites(page, "POST", "models");
+  await page.reload();
+  await page.getByRole("button", { name: "New model" }).click();
+  const d = dialog(page);
+  await expect.poll(async () => (await optionNames(d, "Upstream")).length).toBeGreaterThanOrEqual(3);
+  const before = await optionNames(d, "Upstream");
+  await pick(d, "Upstream", "sel-b-up");
+  const positionBefore = before.indexOf("sel-b-up");
+  // Force the second fetch now, answered in the opposite order.
+  reverse = true;
+  const seen = answered;
+  await page.clock.fastForward(20_000);
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange", { bubbles: true })));
+  await expect.poll(() => answered).toBeGreaterThan(seen);
+  // Wait until the reversed list is what the form offers: the same option now sits somewhere else ...
+  await expect.poll(async () => (await optionNames(d, "Upstream")).indexOf("sel-b-up")).not.toBe(positionBefore);
+  expect((await optionNames(d, "Upstream")).slice().reverse()).toEqual(before);
+  // ... and the trigger still shows the upstream that was chosen, not whatever sits at its old position.
+  await expect(await control(d, "Upstream")).toHaveText("sel-b-up");
+  await d.getByLabel("Name", { exact: true }).fill("sel-reordered");
   await d.getByLabel("Upstream model", { exact: true }).fill("m");
   await d.getByRole("button", { name: "Create" }).click();
   await expect(d).toBeHidden();
@@ -607,4 +643,126 @@ test("screenshots of forms, open dropdowns and confirmations", async ({ page, re
     await shot(`${label}-confirm-blocked`);
     await confirmDialog(page).getByRole("button", { name: "Got it" }).click();
   }
+});
+
+test("confirm dialog: a long list of referrers scrolls inside the dialog at 390 px; header and Got it stay on screen", async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 700 });
+  const up = await upstream(request, "cf-long-up");
+  const m = await model(request, "cf-long/m", up.id);
+  const longName = "cf-long-" + "x".repeat(60);
+  const names = Array.from({ length: 60 }, (_, i) => `cf-long-alias-${String(i).padStart(2, "0")}`);
+  names[59] = longName;
+  for (const name of names) await post(request, "/aliases", { name, target: m.id });
+  await signIn(page, request, "/models");
+  await page.getByLabel("Search models").fill("cf-long/m");
+  await page.getByRole("row").filter({ has: page.getByRole("cell", { name: "cf-long/m", exact: true }) }).getByRole("button", { name: "Delete" }).click();
+  const c = confirmDialog(page);
+  await c.getByRole("button", { name: "Delete" }).click();
+  const blocked = c.getByTestId("delete-blocked");
+  await expect(blocked).toBeVisible();
+  const inView = async (loc: ReturnType<typeof c.locator>) => {
+    const box = (await loc.boundingBox())!;
+    return box.y >= 0 && box.y + box.height <= 700 && box.x >= 0 && box.x + box.width <= 390;
+  };
+  // The dialog fits the screen; only the list scrolls; the title and Got it are never pushed out.
+  const box = (await c.boundingBox())!;
+  expect(box.height).toBeLessThanOrEqual(700);
+  expect(await blocked.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+  expect(await inView(c.getByRole("heading", { name: "Cannot delete" }))).toBe(true);
+  expect(await inView(c.getByRole("button", { name: "Got it" }))).toBe(true);
+  // The last referrer (a 60 character name) is reachable by scrolling the list, and wraps instead of overflowing.
+  await blocked.evaluate((el) => (el.scrollTop = el.scrollHeight));
+  const last = c.getByRole("listitem").filter({ hasText: longName });
+  await expect(last).toBeVisible();
+  expect(await last.evaluate((el) => {
+    const list = el.closest("[data-testid=delete-blocked]")!.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    return r.top >= list.top - 1 && r.bottom <= list.bottom + 1;
+  })).toBe(true);
+  expect(await blocked.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+  expect(await inView(c.getByRole("button", { name: "Got it" }))).toBe(true);
+  await c.getByRole("button", { name: "Got it" }).click();
+  await expect(c).toHaveCount(0);
+});
+
+async function openModelDelete(page: Page, name: string) {
+  await page.getByLabel("Search models").fill(name);
+  await page.getByRole("row").filter({ has: page.getByRole("cell", { name, exact: true }) }).getByRole("button", { name: "Delete" }).click();
+}
+
+test("confirm dialog: an answer to a request that was cancelled does not touch the next dialog (success)", async ({ page, request }) => {
+  const a = await aliasFixture(request, "cf-stale-a");
+  await aliasFixture(request, "cf-stale-b");
+  await signIn(page, request, "/aliases");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  await page.route(`**/api/v1/aliases/${a.id}`, async (route) => {
+    if (route.request().method() !== "DELETE") return route.fallback();
+    await gate;
+    await route.fallback();
+  });
+  await openDelete(page, "cf-stale-a");
+  await confirmDialog(page).getByRole("button", { name: "Delete" }).click();
+  await expect(confirmDialog(page).getByRole("button", { name: "Working…" })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(confirmDialog(page)).toHaveCount(0);
+  // Another row, while the first request is still out: a fresh dialog, not busy.
+  await openDelete(page, "cf-stale-b");
+  const c = confirmDialog(page);
+  await expect(c.getByRole("heading", { name: "Delete alias" })).toBeVisible();
+  await expect(c.getByRole("button", { name: "Delete" })).toBeEnabled();
+  const answered = page.waitForResponse((r) => r.request().method() === "DELETE" && r.url().endsWith(`/aliases/${a.id}`));
+  release();
+  await answered;
+  await expect.poll(async () => (await get<{ items: any[] }>(request, "/aliases")).items.map((a) => a.name)).not.toContain("cf-stale-a");
+  // A's success did not close B's dialog, and B is still there to be decided.
+  await page.waitForTimeout(300);
+  await expect(c).toBeVisible();
+  await expect(c.getByRole("button", { name: "Delete" })).toBeEnabled();
+  await c.getByRole("button", { name: "Cancel" }).click();
+  expect((await get<{ items: any[] }>(request, "/aliases")).items.map((a) => a.name)).toContain("cf-stale-b");
+});
+
+test("confirm dialog: a 409 for a cancelled request does not turn the next dialog into Cannot delete, whether it arrives while it is open or after", async ({ page, request }) => {
+  const up = await upstream(request, "cf-s409-up");
+  const a = await model(request, "cf-s409/a", up.id);
+  await model(request, "cf-s409/b", up.id);
+  await post(request, "/aliases", { name: "cf-s409-alias", target: a.id });
+  await signIn(page, request, "/models");
+  let gate!: Promise<void>;
+  let release!: () => void;
+  const arm = () => (gate = new Promise<void>((resolve) => (release = resolve)));
+  arm();
+  await page.route(`**/api/v1/models/${a.id}`, async (route) => {
+    if (route.request().method() !== "DELETE") return route.fallback();
+    await gate;
+    await route.fallback(); // the real 409: an alias still points at it
+  });
+  for (const whileOpen of [true, false]) {
+    await openModelDelete(page, "cf-s409/a");
+    await confirmDialog(page).getByRole("button", { name: "Delete" }).click();
+    await expect(confirmDialog(page).getByRole("button", { name: "Working…" })).toBeDisabled();
+    await page.keyboard.press("Escape");
+    await expect(confirmDialog(page)).toHaveCount(0);
+    const answered = page.waitForResponse((r) => r.request().method() === "DELETE" && r.url().endsWith(`/models/${a.id}`));
+    if (!whileOpen) {
+      release();
+      expect((await answered).status()).toBe(409);
+    }
+    await openModelDelete(page, "cf-s409/b");
+    const c = confirmDialog(page);
+    await expect(c.getByRole("heading", { name: "Delete model" })).toBeVisible();
+    if (whileOpen) {
+      release();
+      expect((await answered).status()).toBe(409);
+      await page.waitForTimeout(300);
+    }
+    await expect(c.getByRole("heading", { name: "Delete model" })).toBeVisible();
+    await expect(c.getByTestId("delete-blocked")).toHaveCount(0);
+    await expect(c.getByRole("button", { name: "Delete" })).toBeEnabled();
+    await c.getByRole("button", { name: "Cancel" }).click();
+    await expect(c).toHaveCount(0);
+    arm();
+  }
+  expect((await get<{ items: any[] }>(request, "/models")).items.map((m) => m.name)).toContain("cf-s409/b");
 });

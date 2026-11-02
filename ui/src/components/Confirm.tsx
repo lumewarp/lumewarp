@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ApiError } from "../api/errors";
 import { useReturnFocus } from "./Dialog";
@@ -31,36 +31,51 @@ export function ConfirmDialog({ open, title, message, confirmLabel = "Delete", o
   const [blocked, setBlocked] = useState<ApiError | null>(null);
   const toast = useToast();
   const onCloseAutoFocus = useReturnFocus(open);
+  // One number per "round" of the dialog: closing or reopening starts a new one. A request answers into the round
+  // it was sent in; an answer for an earlier round (Esc, then another row's delete) touches nothing here. The
+  // request itself is not aborted, so its toast and the caller's cache updates still happen.
+  const round = useRef(0);
   const close = () => {
+    round.current++;
     setBlocked(null);
+    setBusy(false);
     onClose();
   };
+  useEffect(() => {
+    round.current++;
+    setBlocked(null);
+    setBusy(false);
+  }, [open]);
   const run = async () => {
+    const mine = round.current;
+    const current = () => round.current === mine;
     setBusy(true);
     try {
       await onConfirm();
-      close();
+      if (current()) close();
     } catch (e) {
       // A 409 means something still points at it: say what, and keep the dialog until it is read.
-      if (e instanceof ApiError && e.status === 409) setBlocked(e);
-      else {
+      if (e instanceof ApiError && e.status === 409) {
+        if (current()) setBlocked(e);
+      } else {
         toast("error", e instanceof Error ? e.message : String(e));
-        close();
+        if (current()) close();
       }
     } finally {
-      setBusy(false);
+      if (current()) setBusy(false);
     }
   };
   const referrers = blocked ? parseReferrers(blocked.message) : null;
   return (
     <AlertDialog open={open} onOpenChange={(next) => (!next ? close() : undefined)}>
-      <AlertDialogContent onCloseAutoFocus={onCloseAutoFocus} {...(blocked ? { "aria-describedby": undefined } : {})}>
-        <AlertDialogHeader>
+      {/* Header and footer keep their size; only the middle scrolls, so a long list of referrers never pushes Got it off screen. */}
+      <AlertDialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col gap-4" onCloseAutoFocus={onCloseAutoFocus} {...(blocked ? { "aria-describedby": undefined } : {})}>
+        <AlertDialogHeader className="shrink-0">
           <AlertDialogTitle className="m-0">{blocked ? "Cannot delete" : title}</AlertDialogTitle>
-          {!blocked && <AlertDialogDescription>{message}</AlertDialogDescription>}
+          {!blocked && <AlertDialogDescription className="[overflow-wrap:anywhere]">{message}</AlertDialogDescription>}
         </AlertDialogHeader>
         {blocked && (
-          <div className="flex flex-col gap-3 text-sm" data-testid="delete-blocked" role="alert">
+          <div className="flex min-h-0 flex-col gap-3 overflow-y-auto text-sm [overflow-wrap:anywhere]" data-testid="delete-blocked" role="alert">
             <p>{referrers ? "Still in use. Remove these references first:" : blocked.message}</p>
             {referrers && (
               <ul className="list-disc pl-5">
@@ -71,7 +86,7 @@ export function ConfirmDialog({ open, title, message, confirmLabel = "Delete", o
             )}
           </div>
         )}
-        <AlertDialogFooter>
+        <AlertDialogFooter className="shrink-0">
           {blocked ? (
             <Button type="button" onClick={close} autoFocus>
               Got it
