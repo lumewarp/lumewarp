@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && node --test scripts/check-shadcn.test.mjs && node scripts/check-shadcn.mjs",
     "gen:api": "LUMEWARP_DATABASE_URL=postgresql+asyncpg://nobody:nothing@127.0.0.1:1/none uv run --project ../control-plane python -m lumewarp_control_plane openapi -o openapi.json && openapi-typescript openapi.json -o src/api/schema.d.ts && rm openapi.json",
     "build:cp": "pnpm build && node scripts/copy-static.mjs",
     "test:e2e": "pnpm build:cp && playwright test"
@@ -18,6 +18,7 @@
     "@tanstack/react-router": "^1.170.45",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
     "lucide-react": "^1.65.0",
     "openapi-fetch": "~0.13.8",
     "radix-ui": "^1.8.1",
@@ -27,6 +28,7 @@
     "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
+    "@babel/parser": "^8.0.10",
     "@playwright/test": "^1.64.1",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^24.19.2",
