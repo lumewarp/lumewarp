@@ -1,12 +1,23 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, type UsageQuery, type UsageRow } from "../api";
 import { Badge, fmtUsd, PageHeader } from "../components/Bits";
-import { SelectField, TextField } from "../components/Form";
+import { Field, SelectField, TextField } from "../components/Form";
+import { Input } from "../components/ui/input";
 import { DataTable, type Column } from "../components/Table";
 import { useCatalog, useModels, useNames, useTeamDirectory, useTeams } from "../hooks";
 
 const n = (x: number) => x.toLocaleString();
+
+/** `value`, once it has stopped changing for `ms`: typed filters do not query on every keystroke. */
+function useDebounced<T>(value: T, ms: number): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(value), ms);
+    return () => clearTimeout(timer);
+  }, [value, ms]);
+  return settled;
+}
 const GROUPS = [
   { value: "model", label: "Model" },
   { value: "upstream_model", label: "Upstream model" },
@@ -37,16 +48,22 @@ export function Stat({ label, value }: { label: string; value: string }) {
 }
 
 
+/*
+ * Alias and router filters: a select whose values are tagged, so a catalog name can never be mistaken for a
+ * mode. `any`, `none` and `has` are modes; `id:<uuid>` is one catalog entry and is sent as alias_id/router_id
+ * (a name can be literally "none" or "__has__").
+ */
 const ANY = "";
-const NONE = "__none__";
-const HAS = "__has__";
+const NONE = "mode:none";
+const HAS = "mode:has";
+const ID = "id:";
 
-/** A usage filter select value -> API params. "none" means no alias/router at all; never a literal name. */
 function provenanceFilter(kind: "alias" | "router", value: string): Partial<UsageQuery> {
   if (value === ANY) return {};
   if (value === NONE) return kind === "alias" ? { alias_missing: true } : { router_missing: true };
   if (value === HAS) return kind === "alias" ? { alias_missing: false } : { router_missing: false };
-  return { [kind]: value };
+  if (value.startsWith(ID)) return kind === "alias" ? { alias_id: value.slice(ID.length) } : { router_id: value.slice(ID.length) };
+  return {};
 }
 
 /** One name, "—" for none (empty string), or the mixed list (null). */
@@ -97,7 +114,8 @@ export function Usage() {
   const [groupBy, setGroupBy] = useState("model");
   const [teamId, setTeamId] = useState("");
   const [model, setModel] = useState(ANY);
-  const [upstreamModel, setUpstreamModel] = useState(ANY);
+  const [upstreamText, setUpstreamText] = useState("");
+  const upstreamModel = useDebounced(upstreamText.trim(), 300);
   const [alias, setAlias] = useState(ANY);
   const [router, setRouter] = useState(ANY);
   const teams = useTeams();
@@ -145,12 +163,13 @@ export function Usage() {
   );
 
   const names = (kind: "model" | "alias" | "router") => (catalog.data ?? []).filter((e) => e.kind === kind).map((e) => e.name);
-  const upstreamModels = [...new Set((models.data ?? []).map((m) => m.upstream_model))].sort();
+  // Suggestions only: the filter takes any string, as old usage keeps the upstream name it was served under.
+  const upstreamSuggestions = [...new Set((models.data ?? []).map((m) => m.upstream_model))].sort();
   const provenanceOptions = (kind: "alias" | "router") => [
     { value: ANY, label: "Any" },
     { value: NONE, label: kind === "alias" ? "None (no alias)" : "None (no router)" },
     { value: HAS, label: kind === "alias" ? "Via any alias" : "Via any router" },
-    ...names(kind).map((name) => ({ value: name, label: name })),
+    ...(catalog.data ?? []).filter((e) => e.kind === kind).map((e) => ({ value: `${ID}${e.id}`, label: e.name })),
   ];
 
   const dims = groupBy.split(",");
@@ -193,7 +212,18 @@ export function Usage() {
         <TextField label="To (inclusive)" type="date" value={to} onChange={setTo} />
         <SelectField label="Team" value={teamId} onChange={setTeamId} options={[{ value: "", label: "All teams" }, ...(teams.data ?? []).map((team) => ({ value: team.id, label: team.name }))]} />
         <SelectField label="Model" value={model} onChange={setModel} options={[{ value: ANY, label: "All models" }, ...names("model").map((name) => ({ value: name, label: name }))]} />
-        <SelectField label="Upstream model" value={upstreamModel} onChange={setUpstreamModel} options={[{ value: ANY, label: "All upstream models" }, ...upstreamModels.map((name) => ({ value: name, label: name }))]} />
+        <Field label="Upstream model" hint="Any name, including one no model uses any more.">
+          {(p) => (
+            <>
+              <Input {...p} list="usage-upstream-models" value={upstreamText} placeholder="All upstream models" autoComplete="off" onChange={(e) => setUpstreamText(e.target.value)} />
+              <datalist id="usage-upstream-models">
+                {upstreamSuggestions.map((name) => (
+                  <option key={name} value={name} />
+                ))}
+              </datalist>
+            </>
+          )}
+        </Field>
         <SelectField label="Alias" value={alias} onChange={setAlias} options={provenanceOptions("alias")} />
         <SelectField label="Router" value={router} onChange={setRouter} options={provenanceOptions("router")} />
         <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={GROUPS} />

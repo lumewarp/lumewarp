@@ -174,6 +174,63 @@ STRATEGY_DESCRIPTORS: dict[str, dict] = {
         },
         "member_schema": {"type": "object", "additionalProperties": False},
     },
+    # Presence rules and property names: required fields of every kind (a required boolean, an enum whose
+    # value "" is legal, a required list and object), an optional object with a required field of its own,
+    # and property names that are also members of Object.prototype or `__proto__` itself.
+    "e2e_presence": {
+        "title": "E2E presence",
+        "description": "Required and optional fields; empty values are values.",
+        "uses_weight": False,
+        "params_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["enabled", "scope", "regions", "limits"],
+            "properties": {
+                "enabled": {"type": "boolean", "title": "Enabled"},
+                "scope": {"type": "string", "enum": ["", "wide"], "title": "Scope"},
+                "regions": {"type": "array", "items": {"type": "string"}, "title": "Regions"},
+                "limits": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "title": "Limits",
+                    "properties": {"soft": {"type": "integer", "title": "Soft limit"}},
+                },
+                "prefix": {"type": "string", "title": "Prefix", "default": "pre-"},
+                "tuning": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["priority"],
+                    "title": "Tuning",
+                    "properties": {
+                        "priority": {"type": "integer", "minimum": 1, "title": "Priority"},
+                        "note": {"type": "string", "title": "Note"},
+                    },
+                },
+                "constructor": {"type": "string", "title": "Constructor"},
+                "toString": {"type": "string", "title": "To string"},
+                "__proto__": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "title": "Proto",
+                    "properties": {"inner": {"type": "string", "title": "Inner"}},
+                },
+            },
+        },
+        "member_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"region": {"type": "string", "title": "Region"}},
+        },
+    },
+    # Two strategies without a usable schema, to switch between.
+    "e2e_schemaless2": {
+        "title": "E2E schemaless two",
+        "description": "Also reported without a schema.",
+        "uses_weight": True,
+        "params_schema": None,
+        "member_schema": None,
+        "schema_problems": [],
+    },
     # No usable schema (null) and one outside the subset (kept null with a problem): JSON editor.
     "e2e_schemaless": {
         "title": "E2E schemaless",
@@ -279,6 +336,8 @@ async def seed_usage(url: str) -> None:
         name: api.call("POST", "/models", {"name": name, "upstream_id": upstream["id"], "upstream_model": up_model})
         for name, up_model in [("use/a", "Qwen/UseA"), ("use/b", "Qwen/UseA"), ("use/c", "Other/UseC")]
     }
+    # Existed once: usage keeps its names, the catalog does not.
+    model["use/retired"] = {"id": str(uuid.uuid4()), "upstream_model": "Org/Retired"}
     router = api.call(
         "POST", "/routers", {"name": "use-router", "members": [{"model_id": model["use/a"]["id"]}, {"model_id": model["use/b"]["id"]}]}
     )
@@ -292,6 +351,8 @@ async def seed_usage(url: str) -> None:
         ("use-alias", "use/a", alias, router, 1000, 2),
         ("use-alias", "use/b", alias, router, 500, 1),
         ("use/c", "use/c", None, None, 200, 1),
+        # Served under an upstream name no model maps to any more (the model was remapped or deleted).
+        ("use/retired", "use/retired", None, None, 100, 1),
         ("use-direct", "use/c", direct_alias, None, 300, 1),
     ]
     engine = create_async_engine(url)

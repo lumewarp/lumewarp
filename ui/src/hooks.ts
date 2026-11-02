@@ -107,14 +107,15 @@ export function useNames(rows: { id: string; name: string }[] | undefined) {
 }
 
 export function useRoutersQuery() {
-  return useQuery({ queryKey: ["routers"], queryFn: () => api.routers(), retry: false });
+  return useQuery({ queryKey: ["routers"], queryFn: () => api.routers(), retry: false, structuralSharing: false });
 }
 
 export const useModels = () => useQuery({ queryKey: ["models"], queryFn: () => api.models() });
 export const useAliases = () => useQuery({ queryKey: ["aliases"], queryFn: () => api.aliases() });
-export const useRouters = () => useQuery({ queryKey: ["routers"], queryFn: () => api.routers() });
+// Settings and schemas may hold a `__proto__` key; structural sharing would rebuild them by assignment and lose it.
+export const useRouters = () => useQuery({ queryKey: ["routers"], queryFn: () => api.routers(), structuralSharing: false });
 export const useUpstreams = () => useQuery({ queryKey: ["upstreams"], queryFn: () => api.upstreams() });
-export const useStrategies = () => useQuery({ queryKey: ["strategies"], queryFn: () => api.strategies() });
+export const useStrategies = () => useQuery({ queryKey: ["strategies"], queryFn: () => api.strategies(), structuralSharing: false });
 export const useCatalog = (enabled = true) => useQuery({ queryKey: ["catalog"], queryFn: () => api.catalog(), enabled });
 
 /** id → row lookup. */

@@ -479,6 +479,8 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
 
   await login(page, BREAK_GLASS);
   await page.getByRole("link", { name: "Routers", exact: true }).click();
+  // Find the row by searching: what else exists (and on which page it lands) does not matter.
+  await page.getByLabel("Search routers").fill("smoke-main");
   const row = page.getByRole("row").filter({ has: page.getByRole("cell", { name: "smoke-main", exact: true }) });
   await row.getByRole("button", { name: "Edit" }).click();
   const d = dialog(page);
@@ -525,6 +527,7 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
 
   // The fallback target cannot be deleted while referenced: the API error is shown.
   await page.getByRole("link", { name: "Models", exact: true }).click();
+  await page.getByLabel("Search models").fill("smoke-backup");
   await page
     .getByRole("row")
     .filter({ has: page.getByRole("cell", { name: "smoke-backup", exact: true }) })

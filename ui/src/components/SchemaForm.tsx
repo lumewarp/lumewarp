@@ -2,10 +2,9 @@ import { Plus, X } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
 import { cn } from "../lib/utils";
-import { HEADER_LIST_WIDGET, type Field as SchemaField, type Values } from "../lib/schema";
+import { getOwn, HEADER_LIST_WIDGET, hasOwn, withKey, withoutKey, type Field as SchemaField, type Values } from "../lib/schema";
 import { Field } from "./Form";
 import { Button } from "./ui/button";
-import { Checkbox } from "./ui/checkbox";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Textarea } from "./ui/textarea";
@@ -25,11 +24,21 @@ interface FieldsProps {
   idPrefix: string;
 }
 
+const SELECT_CLASS = "flex h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30";
+const UNSET = "unset";
+
+/** `undefined` removes the key; anything else (`""`, `false`, `0`, `[]` too) is a value. */
 function setKey(values: Values, key: string, value: unknown): Values {
-  const next = { ...values };
-  if (value === undefined) delete next[key];
-  else next[key] = value;
-  return next;
+  return value === undefined ? withoutKey(values, key) : withKey(values, key, value);
+}
+
+function Unset({ title, onClick }: { title: string; onClick: () => void }) {
+  return (
+    <Button type="button" variant="ghost" size="sm" className="shrink-0 text-muted-foreground" aria-label={`Unset ${title}`} onClick={onClick}>
+      <X aria-hidden="true" />
+      Unset
+    </Button>
+  );
 }
 
 export function SchemaFields({ fields, values, onChange, errors = {}, path = "", idPrefix }: FieldsProps) {
@@ -37,62 +46,89 @@ export function SchemaFields({ fields, values, onChange, errors = {}, path = "",
     <>
       {fields.map((f) => {
         const full = `${path}${f.key}`;
-        const id = `${idPrefix}-${full}`;
+        const error = Object.hasOwn(errors, full) ? errors[full] : undefined;
+        const present = hasOwn(values, f.key) && values[f.key] !== undefined;
+        const current = getOwn(values, f.key);
+        const unset = !f.required && present ? <Unset title={f.title} onClick={() => onChange(setKey(values, f.key, undefined))} /> : null;
+        const label = f.required ? `${f.title} *` : f.title;
+        const hint = f.description || undefined;
         if (f.kind === "object") {
-          const inner = typeof values[f.key] === "object" && values[f.key] !== null ? (values[f.key] as Values) : {};
+          const inner = isObject(current) ? current : undefined;
+          if (!present || !inner) {
+            return (
+              <div key={f.key} className="flex flex-col gap-1.5" data-testid={`schema-${full}`}>
+                <div className="flex items-center gap-2">
+                  <Button type="button" variant="outline" size="sm" onClick={() => onChange(setKey(values, f.key, Object.create(null)))}>
+                    <Plus aria-hidden="true" />
+                    Add {f.title}
+                  </Button>
+                  <span className="text-xs text-muted-foreground">{f.required ? "Required" : "Not set"}</span>
+                </div>
+                {hint && <p className="field-hint">{hint}</p>}
+                {error && (
+                  <p className="field-error" role="alert">
+                    {error}
+                  </p>
+                )}
+              </div>
+            );
+          }
           return (
             <fieldset key={f.key} className="form-section" data-testid={`schema-${full}`}>
               <legend>{f.title}</legend>
-              {f.description && <p className="field-hint">{f.description}</p>}
-              <SchemaFields fields={f.fields ?? []} values={inner} onChange={(next) => onChange(setKey(values, f.key, Object.keys(next).length ? next : undefined))} errors={errors} path={`${full}.`} idPrefix={idPrefix} />
+              {hint && <p className="field-hint">{hint}</p>}
+              {error && (
+                <p className="field-error" role="alert">
+                  {error}
+                </p>
+              )}
+              <SchemaFields fields={f.fields ?? []} values={inner} onChange={(next) => onChange(withKey(values, f.key, next))} errors={errors} path={`${full}.`} idPrefix={idPrefix} />
+              {!f.required && (
+                <div>
+                  <Button type="button" variant="ghost" size="sm" className="text-muted-foreground" aria-label={`Remove ${f.title}`} onClick={() => onChange(setKey(values, f.key, undefined))}>
+                    <X aria-hidden="true" />
+                    Remove {f.title}
+                  </Button>
+                </div>
+              )}
             </fieldset>
           );
         }
-        const label = f.required ? `${f.title} *` : f.title;
-        const hint = f.description || undefined;
         if (f.kind === "boolean") {
           return (
-            <div key={f.key} className="flex flex-col gap-1.5">
-              <div className="flex items-center gap-2">
-                <Checkbox id={id} checked={values[f.key] === true || (values[f.key] === undefined && f.default === true)} onCheckedChange={(c) => onChange(setKey(values, f.key, c === true))} />
-                <Label htmlFor={id} className="cursor-pointer font-semibold">
-                  {f.title}
-                </Label>
-              </div>
-              {hint && <p className="field-hint">{hint}</p>}
-              {errors[full] && (
-                <p className="field-error" role="alert">
-                  {errors[full]}
-                </p>
+            <Field key={f.key} label={label} hint={hint} error={error}>
+              {(p) => (
+                <select {...p} className={cn(SELECT_CLASS, error && "border-destructive")} value={typeof current === "boolean" ? String(current) : UNSET} onChange={(e) => onChange(setKey(values, f.key, e.target.value === UNSET ? undefined : e.target.value === "true"))}>
+                  <option value={UNSET}>{f.required ? "Choose…" : typeof f.default === "boolean" ? `Not set (default ${f.default ? "On" : "Off"})` : "Not set"}</option>
+                  <option value="true">On</option>
+                  <option value="false">Off</option>
+                </select>
               )}
-            </div>
+            </Field>
           );
         }
         if (f.kind === "array") {
           return (
-            <Field key={f.key} label={label} hint={hint} error={errors[full]}>
-              {(p) => <StringList {...p} header={f.widget === HEADER_LIST_WIDGET} title={f.title} value={Array.isArray(values[f.key]) ? (values[f.key] as string[]) : []} onChange={(next) => onChange(setKey(values, f.key, next.length ? next : undefined))} />}
+            <Field key={f.key} label={label} hint={hint} error={error}>
+              {(p) => <StringList {...p} header={f.widget === HEADER_LIST_WIDGET} title={f.title} required={f.required} value={Array.isArray(current) ? (current as string[]) : undefined} onChange={(next) => onChange(setKey(values, f.key, next))} />}
             </Field>
           );
         }
         if (f.enum) {
-          const current = values[f.key];
+          const index = present ? f.enum.findIndex((o) => o === current) : -1;
           return (
-            <Field key={f.key} label={label} hint={hint} error={errors[full]}>
+            <Field key={f.key} label={label} hint={hint} error={error}>
               {(p) => (
                 <select
                   {...p}
-                  className={cn("flex h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30", errors[full] && "border-destructive")}
-                  value={current === undefined ? "" : String(current)}
-                  onChange={(e) => {
-                    const raw = e.target.value;
-                    onChange(setKey(values, f.key, raw === "" ? undefined : f.kind === "string" ? raw : Number(raw)));
-                  }}
+                  className={cn(SELECT_CLASS, error && "border-destructive")}
+                  value={index >= 0 ? `i${index}` : UNSET}
+                  onChange={(e) => onChange(setKey(values, f.key, e.target.value === UNSET ? undefined : f.enum![Number(e.target.value.slice(1))]))}
                 >
-                  <option value="">{f.required ? "Select…" : f.default !== undefined ? `Default (${String(f.default)})` : "Not set"}</option>
-                  {f.enum!.map((o) => (
-                    <option key={String(o)} value={String(o)}>
-                      {String(o)}
+                  <option value={UNSET}>{f.required ? "Select…" : f.default !== undefined ? `Default (${String(f.default)})` : "Not set"}</option>
+                  {f.enum!.map((o, i) => (
+                    <option key={i} value={`i${i}`}>
+                      {o === "" ? "(empty text)" : String(o)}
                     </option>
                   ))}
                 </select>
@@ -102,21 +138,28 @@ export function SchemaFields({ fields, values, onChange, errors = {}, path = "",
         }
         if (f.kind === "string") {
           return (
-            <Field key={f.key} label={label} hint={hint} error={errors[full]}>
-              {(p) => <Input {...p} value={typeof values[f.key] === "string" ? (values[f.key] as string) : ""} placeholder={f.default !== undefined ? String(f.default) : undefined} onChange={(e) => onChange(setKey(values, f.key, e.target.value === "" ? undefined : e.target.value))} />}
+            <Field key={f.key} label={label} hint={hint} error={error}>
+              {(p) => (
+                <div className="flex items-center gap-1.5">
+                  <Input {...p} value={typeof current === "string" ? current : ""} placeholder={f.default !== undefined ? String(f.default) : undefined} onChange={(e) => onChange(setKey(values, f.key, e.target.value))} />
+                  {unset}
+                </div>
+              )}
             </Field>
           );
         }
-        // integer | number
+        // integer | number: an empty box is "not set"
         return (
-          <Field key={f.key} label={label} hint={[hint, bounds(f)].filter(Boolean).join(" ") || undefined} error={errors[full]}>
-            {(p) => <NumberInput {...p} integer={f.kind === "integer"} min={f.minimum} max={f.maximum} placeholder={f.default !== undefined ? String(f.default) : undefined} value={typeof values[f.key] === "number" ? (values[f.key] as number) : undefined} onChange={(n) => onChange(setKey(values, f.key, n))} />}
+          <Field key={f.key} label={label} hint={[hint, bounds(f)].filter(Boolean).join(" ") || undefined} error={error}>
+            {(p) => <NumberInput {...p} integer={f.kind === "integer"} min={f.minimum} max={f.maximum} placeholder={f.default !== undefined ? String(f.default) : undefined} value={typeof current === "number" ? current : undefined} onChange={(n) => onChange(setKey(values, f.key, n))} />}
           </Field>
         );
       })}
     </>
   );
 }
+
+const isObject = (v: unknown): v is Values => typeof v === "object" && v !== null && !Array.isArray(v);
 
 function bounds(f: SchemaField): string {
   if (f.minimum !== undefined && f.maximum !== undefined) return `Between ${f.minimum} and ${f.maximum}.`;
@@ -150,23 +193,39 @@ export function NumberInput({ value, onChange, integer, min, max, ...rest }: { v
   );
 }
 
-/** Add/remove list of strings (header names for the `header-list` widget). */
-function StringList({ id, value, onChange, header, title, ...aria }: { id: string; value: string[]; onChange: (v: string[]) => void; header: boolean; title: string } & Record<string, unknown>) {
+/**
+ * Add/remove list of strings (header names for the `header-list` widget). `undefined` is "not set"; an
+ * empty list is a value of its own, and entries are kept exactly as typed.
+ */
+function StringList({ id, value, onChange, header, title, required, ...aria }: { id: string; value: string[] | undefined; onChange: (v: string[] | undefined) => void; header: boolean; title: string; required: boolean } & Record<string, unknown>) {
+  const list = value ?? [];
   return (
     <div className="flex flex-col gap-1.5" id={id} role="group" aria-label={title} data-widget={header ? HEADER_LIST_WIDGET : "string-list"} {...aria}>
-      {value.map((entry, i) => (
+      {value === undefined && <p className="text-xs text-muted-foreground">{required ? "Required" : "Not set"}</p>}
+      {list.map((entry, i) => (
         <div key={i} className="flex items-center gap-1.5">
-          <Input aria-label={`${title} ${i + 1}`} value={entry} placeholder={header ? "x-session-id" : undefined} onChange={(e) => onChange(value.map((x, j) => (j === i ? e.target.value : x)))} />
-          <Button type="button" variant="ghost" size="icon" className="size-8 shrink-0 text-muted-foreground" aria-label={`Remove ${title} ${i + 1}`} onClick={() => onChange(value.filter((_, j) => j !== i))}>
+          <Input aria-label={`${title} ${i + 1}`} value={entry} placeholder={header ? "x-session-id" : undefined} onChange={(e) => onChange(list.map((x, j) => (j === i ? e.target.value : x)))} />
+          <Button type="button" variant="ghost" size="icon" className="size-8 shrink-0 text-muted-foreground" aria-label={`Remove ${title} ${i + 1}`} onClick={() => onChange(list.filter((_, j) => j !== i))}>
             <X aria-hidden="true" />
           </Button>
         </div>
       ))}
-      <div>
-        <Button type="button" variant="outline" size="sm" onClick={() => onChange([...value, ""])}>
+      <div className="flex flex-wrap gap-1.5">
+        <Button type="button" variant="outline" size="sm" onClick={() => onChange([...list, ""])}>
           <Plus aria-hidden="true" />
           {header ? "Add header" : "Add entry"}
         </Button>
+        {value === undefined && (
+          <Button type="button" variant="outline" size="sm" onClick={() => onChange([])}>
+            Use empty list
+          </Button>
+        )}
+        {value !== undefined && !required && (
+          <Button type="button" variant="ghost" size="sm" className="text-muted-foreground" aria-label={`Unset ${title}`} onClick={() => onChange(undefined)}>
+            <X aria-hidden="true" />
+            Unset
+          </Button>
+        )}
       </div>
     </div>
   );
@@ -175,21 +234,18 @@ function StringList({ id, value, onChange, header, title, ...aria }: { id: strin
 /**
  * Raw JSON object editor: the fallback when no usable schema is known. Reports a parse problem through
  * `onProblem` (null when the text is a valid JSON object) so the owning form can refuse to submit.
+ *
+ * The text is seeded from `value` once: the owner gives it a `key` naming what is being edited (router,
+ * strategy, member), so a different identity remounts it with that value's text and no stale problem.
+ * `JSON.parse` and `JSON.stringify` keep a `__proto__` member as the own property it is.
  */
-export function JsonEditor({ label, value, onChange, onProblem, error, hint, idPrefix }: { label: string; value: Values; onChange: (v: Values) => void; onProblem: (message: string | null) => void; error?: string; hint?: string; idPrefix?: string }) {
+export function JsonEditor({ label, value, onChange, onProblem, error, hint }: { label: string; value: Values; onChange: (v: Values) => void; onProblem: (message: string | null) => void; error?: string; hint?: string }) {
   const initial = JSON.stringify(value, null, 2);
   const [text, setText] = useState(initial);
   const [problem, setProblem] = useState<string | null>(null);
   const id = useId();
   // Unmounting (a member was unchecked, the strategy changed) clears the problem it reported.
   useEffect(() => () => onProblem(null), []); // eslint-disable-line react-hooks/exhaustive-deps
-  // A different router was loaded into the form.
-  useEffect(() => {
-    setText(initial);
-    setProblem(null);
-    onProblem(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [idPrefix]);
   const update = (next: string) => {
     setText(next);
     try {

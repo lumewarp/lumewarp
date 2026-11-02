@@ -122,6 +122,44 @@ export function parseSchema(schema: unknown): ParsedSchema | null {
 
 export type Values = Record<string, unknown>;
 
+/*
+ * Settings objects are plain JSON from the server and may carry any property name, including `__proto__`,
+ * `constructor` and `toString`. They are only ever read with `getOwn` and written with `withKey`/`withoutKey`,
+ * which create own data properties on a null-prototype object and never go through the prototype chain.
+ */
+export const hasOwn = (o: object, key: string): boolean => Object.hasOwn(o, key);
+export const getOwn = (o: Values, key: string): unknown => (Object.hasOwn(o, key) ? o[key] : undefined);
+
+function define(target: Values, key: string, value: unknown): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
+/** A copy of `values` with `key` set to `value` (as an own property, in place if it exists). */
+export function withKey(values: Values, key: string, value: unknown): Values {
+  const next: Values = Object.create(null);
+  for (const k of Object.keys(values)) define(next, k, values[k]);
+  define(next, key, value);
+  return next;
+}
+
+/** A copy of `values` without `key`. */
+export function withoutKey(values: Values, key: string): Values {
+  const next: Values = Object.create(null);
+  for (const k of Object.keys(values)) if (k !== key) define(next, k, values[k]);
+  return next;
+}
+
+/** Structural equality over own enumerable keys (settings are JSON: no cycles, no prototypes). */
+export function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((x, i) => sameJson(x, b[i]));
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  return ka.length === kb.length && ka.every((k) => Object.hasOwn(b, k) && sameJson((a as Values)[k], (b as Values)[k]));
+}
+
 // What the platform refuses in a header-list, whatever the strategy's schema says (server is the authority).
 export const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const CREDENTIAL_HEADERS = new Set(["authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key"]);
@@ -132,34 +170,38 @@ export function headerProblem(name: string): string | undefined {
   return undefined;
 }
 
-/** Problems keyed by field path ("max_waiting", "nested.field"); `prefix` is added in front. */
+/**
+ * Problems keyed by field path ("max_waiting", "nested.field"); `prefix` is added in front.
+ *
+ * Presence follows JSON Schema as the control plane applies it (`compiler/strategy.py`): a property is
+ * missing only when it is not an own key; `required` asks for presence and nothing else. `""`, `false`, `0`
+ * and `[]` are values, not absence, and no `minLength`/`minItems` is implied. An optional object that is
+ * absent is not looked into.
+ */
 export function validateValues(fields: Field[], values: Values, prefix = ""): Record<string, string> {
-  const errors: Record<string, string> = {};
+  const errors: Record<string, string> = Object.create(null);
   for (const f of fields) {
     const path = `${prefix}${f.key}`;
-    const v = values[f.key];
-    if (f.kind === "object") {
-      const inner = isRecord(v) ? v : {};
-      Object.assign(errors, validateValues(f.fields ?? [], inner, `${path}.`));
+    if (!hasOwn(values, f.key) || values[f.key] === undefined) {
+      if (f.required) errors[path] = f.kind === "boolean" ? `${f.title} is required: choose On or Off` : `${f.title} is required`;
       continue;
     }
-    const empty = v === undefined || v === null || v === "" || (Array.isArray(v) && v.length === 0 && f.kind !== "array");
-    if (empty) {
-      if (f.required && f.kind !== "boolean") errors[path] = `${f.title} is required`;
+    const v = values[f.key];
+    if (f.kind === "object") {
+      if (!isRecord(v)) errors[path] = "Must be an object";
+      else Object.assign(errors, validateValues(f.fields ?? [], v, `${path}.`));
       continue;
     }
     if (f.kind === "string" && typeof v !== "string") errors[path] = "Must be text";
     else if ((f.kind === "integer" || f.kind === "number") && !isNumber(v)) errors[path] = "Must be a number";
     else if (f.kind === "integer" && !Number.isInteger(v)) errors[path] = "Must be a whole number";
-    else if (f.kind === "boolean" && typeof v !== "boolean") errors[path] = "Must be on or off";
+    else if (f.kind === "boolean" && typeof v !== "boolean") errors[path] = "Must be On or Off";
     else if (f.kind === "array") {
-      const list = Array.isArray(v) ? v : [];
-      const blank = list.some((x) => typeof x !== "string" || !x.trim());
-      if (blank) errors[path] = "Entries cannot be empty";
+      if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) errors[path] = "Must be a list of text";
       else if (f.widget === HEADER_LIST_WIDGET) {
-        const problem = list.map((x) => headerProblem(String(x))).find(Boolean);
+        const problem = v.map((x) => headerProblem(x as string)).find(Boolean);
         if (problem) errors[path] = problem;
-      } else if (f.required && !list.length) errors[path] = `${f.title} is required`;
+      }
     }
     if (errors[path]) continue;
     if (isNumber(v)) {
@@ -171,26 +213,10 @@ export function validateValues(fields: Field[], values: Values, prefix = ""): Re
   return errors;
 }
 
-/** Drop empty optional entries so the stored params hold only what was set. */
-export function cleanValues(fields: Field[], values: Values, keepUnknown = false): Values {
-  const out: Values = keepUnknown ? { ...values } : {};
-  for (const f of fields) delete out[f.key];
-  for (const f of fields) {
-    const v = values[f.key];
-    if (f.kind === "object") {
-      const inner = cleanValues(f.fields ?? [], isRecord(v) ? v : {});
-      if (Object.keys(inner).length) out[f.key] = inner;
-    } else if (v !== undefined && v !== null && v !== "") {
-      out[f.key] = f.kind === "array" ? (v as string[]).map((x) => x.trim()) : v;
-    }
-  }
-  return out;
-}
-
 /** Keys of `values` the schema does not declare (kept out of the form, shown as a warning). */
 export function unknownKeys(fields: Field[], values: Values): string[] {
   const known = new Set(fields.map((f) => f.key));
-  return Object.keys(values).filter((k) => !known.has(k) && k !== "headers");
+  return Object.keys(values).filter((k) => !known.has(k));
 }
 
 /** Titles of everything a schema lets a user set, for the strategies table. */

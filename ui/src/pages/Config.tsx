@@ -8,8 +8,15 @@ import { Button } from "../components/ui/button";
 import { ApiError } from "../api";
 import { useMut } from "../hooks";
 
-/** The control plane refuses a rollback when connected gateways lack a router's strategy, unless forced. */
-const isMissingStrategy = (e: unknown): e is ApiError => e instanceof ApiError && e.status === 422 && /send force/i.test(e.message);
+/**
+ * The control plane refuses a rollback when connected gateways lack a router's strategy, unless forced
+ * (`compiler/strategy.py::check_router_strategy`): a 422 on field `strategy` whose message is
+ * `strategy: [router '<name>': ]connected gateways lack '<name>' and would reject the whole config: <ids>; send force to save anyway`.
+ * Anything else, including a `params` error that happens to contain "send force", is not forceable.
+ * (A structured error code from the API would be sturdier than matching its text.)
+ */
+const MISSING_GATEWAYS = /^strategy: (?:router '.*': )?connected gateways lack .+ and would reject the whole config: .*; send force to save anyway$/s;
+export const isMissingStrategy = (e: unknown): e is ApiError => e instanceof ApiError && e.status === 422 && e.field === "strategy" && MISSING_GATEWAYS.test(e.message);
 
 /**
  * Confirm a rollback. A 422 about strategies gateways lack offers a second, explicit confirmation that

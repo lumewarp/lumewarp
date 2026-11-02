@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
  *
  * serve.py seeds two connected gateways (e2e-gw has every strategy, e2e-gw-b lacks `priority_failover`),
  * a small catalog (`use-*`, `use/*`) and usage events across every path a request can take.
- * Everything else is created here through the forms or the API. This file is named to sort after `smoke.spec.ts`
- * on purpose: that test lists the first page of routers and models without searching.
+ * Everything else is created here through the forms or the API, and removed again after each test (see
+ * `afterEach`), so no spec depends on the order the files run in or on how many rows an earlier one left.
  */
 
 const BREAK_GLASS = "e2e-break-glass-password";
@@ -34,6 +34,16 @@ test.beforeEach(async ({ request }) => {
       return strategies.find((s) => s.name === "priority_failover")?.missing_gateways.length === 1 && usage.length > 0;
     })
     .toBe(true);
+});
+
+// Everything a test made goes away, apart from what serve.py seeded (`use-*` and `use/*`). Delete order follows
+// the references: aliases and routers point at models, models at upstreams.
+test.afterEach(async ({ request }) => {
+  const seeded = (name: string) => /^use[-/]/.test(name);
+  for (const path of ["/aliases", "/routers", "/models", "/upstreams"]) {
+    const rows = (await (await request.get(`/api/v1${path}?limit=200`, { headers: admin })).json()).items as { id: string; name: string }[];
+    for (const r of rows) if (!seeded(r.name)) await request.delete(`/api/v1${path}/${r.id}`, { headers: admin });
+  }
 });
 
 async function post<T = { id: string; name: string }>(request: APIRequestContext, path: string, data: object): Promise<T> {
@@ -319,7 +329,8 @@ test("schema fields: required, bounds, enum, boolean, nested, header list", asyn
   await max.fill("7");
 
   await d.getByLabel("Mode", { exact: true }).selectOption("relaxed");
-  await d.getByLabel("Skip unpriced models").check();
+  await d.getByLabel("Skip unpriced models").selectOption({ label: "On" });
+  await d.getByRole("button", { name: "Add Tuning" }).click();
   await d.getByTestId("schema-tuning").getByLabel("Fail back after (ms)").fill("5");
   await d.getByTestId("member-tuned/a").getByLabel("Region").fill("eu");
 
@@ -607,10 +618,10 @@ test("usage: grouped by model by default, with how each request was reached, and
   await expect(row(page, "use/b")).toBeVisible();
   await expect(row(page, "use/a")).toHaveCount(0);
   await page.getByLabel("Model", { exact: true }).selectOption("");
-  await page.getByLabel("Upstream model", { exact: true }).selectOption("Other/UseC");
+  await page.getByLabel("Upstream model", { exact: true }).fill("Other/UseC");
   await expect(row(page, "use/c")).toBeVisible();
   await expect(row(page, "use/a")).toHaveCount(0);
-  await page.getByLabel("Upstream model", { exact: true }).selectOption("");
+  await page.getByLabel("Upstream model", { exact: true }).fill("");
   await page.getByLabel("Alias", { exact: true }).selectOption({ label: "None (no alias)" });
   await expect(row(page, "use/c")).toBeVisible();
   await expect(row(page, "use/a")).toHaveCount(0);
@@ -674,6 +685,19 @@ test("rollback: a 422 about missing strategies offers a forced confirm, other 42
   await expect(dialog(page).getByTestId("rollback-problem")).toContainText("payload was compacted");
   await expect(dialog(page).getByRole("button", { name: "Roll back anyway" })).toHaveCount(0);
   await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  // Text that merely contains "send force" is not the missing-gateway refusal: a params error whose allowed
+  // value is "send force", and a strategy error that is not about gateways.
+  for (const message of ["params: mode: must be one of ['send force']", "strategy: no gateway reports strategy 'x'; send force", "params: connected gateways lack 'x' and would reject the whole config: g; send force to save anyway"]) {
+    await page.unroute("**/api/v1/config/rollback");
+    await page.route("**/api/v1/config/rollback", async (route) => {
+      await route.fulfill({ status: 422, json: { error: { code: "validation_error", message } } });
+    });
+    await row(page, `v${withRouter}`).getByRole("button", { name: "Roll back" }).click();
+    await dialog(page).getByRole("button", { name: "Roll back" }).click();
+    await expect(dialog(page).getByTestId("rollback-problem")).toContainText(message.split(": ").slice(1).join(": "));
+    await expect(dialog(page).getByRole("button", { name: "Roll back anyway" })).toHaveCount(0);
+    await dialog(page).getByRole("button", { name: "Cancel" }).click();
+  }
   await page.unroute("**/api/v1/config/rollback");
 
   // The real refusal: connected gateways lack the strategy.
@@ -759,6 +783,295 @@ test("empty states: nothing to show and nothing matches", async ({ page, request
   await page.route("**/api/v1/aliases**", (route) => route.fulfill({ json: { items: [], next_cursor: null } }));
   await signIn(page, request, "/aliases");
   await expect(page.getByText("No aliases yet.")).toBeVisible();
+});
+
+/** The bodies of the PATCH requests the page sends to routers, as the raw text (so `__proto__` can be looked for). */
+function recordPatches(page: Page) {
+  const sent: string[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "PATCH" && /\/api\/v1\/routers\/[^/?]+$/.test(r.url())) sent.push(r.postData() ?? "");
+  });
+  return sent;
+}
+async function editRouter(page: Page, name: string) {
+  await page.getByLabel("Search routers").fill(name);
+  await row(page, name).getByRole("button", { name: "Edit" }).click();
+}
+const withoutName = ({ name: _name, updated_at: _updated, ...rest }: any) => rest;
+
+test("saving a router sends only what changed: settings, hidden weights and split members stay as stored", async ({ page, request }) => {
+  const up = await upstream(request, "rt-up");
+  const [a, b, c] = [await model(request, "rt/a", up.id), await model(request, "rt/b", up.id), await model(request, "rt/c", up.id)];
+  // Stored values a form must not tidy: an empty string, a list entry with spaces, an empty nested string.
+  const params = { enabled: false, scope: "", regions: [" eu "], limits: {}, prefix: "", tuning: { priority: 2, note: "" } };
+  const plain = await post<any>(request, "/routers", { name: "rt-plain", strategy: "e2e_presence", params, members: [{ model_id: a.id, weight: 20, params: { region: "" } }, { model_id: b.id, weight: 80, params: { region: " x " } }] });
+  const split = await post<any>(request, "/routers", {
+    name: "rt-split",
+    strategy: "e2e_presence",
+    params,
+    traffic_split: [
+      { name: "stable", weight: 90, members: [{ model_id: a.id, weight: 20, params: { region: "" } }] },
+      { name: "canary", weight: 10, members: [{ model_id: b.id, weight: 80, params: {} }] },
+    ],
+  });
+  // The page knows an older shape of the strategy: `prefix` and `tuning.note` are settings it cannot show.
+  await page.route("**/api/v1/strategies", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    const schema = body.items.find((s: any) => s.name === "e2e_presence").params_schema;
+    delete schema.properties.prefix;
+    delete schema.properties.tuning.properties.note;
+    await route.fulfill({ response, json: body });
+  });
+  const sent = recordPatches(page);
+  await signIn(page, request, "/routers");
+
+  for (const [stored, name] of [[plain, "rt-plain"], [split, "rt-split"]] as const) {
+    const before = await get<any>(request, `/routers/${stored.id}`);
+    await editRouter(page, name);
+    await dialog(page).getByLabel("Name", { exact: true }).fill(`${name}-renamed`);
+    await dialog(page).getByRole("button", { name: "Save" }).click();
+    await expect(dialog(page)).toBeHidden();
+    // Renaming sends the name and nothing else ...
+    expect(JSON.parse(sent[sent.length - 1])).toEqual({ name: `${name}-renamed` });
+    // ... so settings, weights (hidden by this strategy) and split members are exactly what they were.
+    const after = await get<any>(request, `/routers/${stored.id}`);
+    expect(after.name).toBe(`${name}-renamed`);
+    expect(withoutName(after)).toEqual(withoutName(before));
+  }
+  expect((await get<any>(request, `/routers/${plain.id}`)).members.map((m: any) => m.weight)).toEqual([20, 80]);
+  expect((await get<any>(request, `/routers/${split.id}`)).traffic_split.map((s: any) => s.members[0].weight)).toEqual([20, 80]);
+
+  // Changing one setting sends the settings with everything else in them untouched (empty strings, the
+  // spaces, the keys the form does not show, nested ones included) and no members.
+  await editRouter(page, "rt-plain-renamed");
+  await dialog(page).getByLabel("Enabled *", { exact: true }).selectOption({ label: "On" });
+  await dialog(page).getByRole("button", { name: "Save" }).click();
+  await expect(dialog(page)).toBeHidden();
+  expect(JSON.parse(sent[sent.length - 1])).toEqual({ params: { ...params, enabled: true } });
+  expect((await get<any>(request, `/routers/${plain.id}`)).params).toEqual({ ...params, enabled: true });
+
+  // Adding a model sends the members: the ones already there keep their weights, the new one starts at 1.
+  await editRouter(page, "rt-plain-renamed");
+  await dialog(page).getByLabel("rt/c", { exact: true }).check();
+  await dialog(page).getByRole("button", { name: "Save" }).click();
+  await expect(dialog(page)).toBeHidden();
+  expect(Object.keys(JSON.parse(sent[sent.length - 1]))).toEqual(["members"]);
+  expect((await get<any>(request, `/routers/${plain.id}`)).members).toEqual([
+    { model_id: a.id, weight: 20, params: { region: "" } },
+    { model_id: b.id, weight: 80, params: { region: " x " } },
+    { model_id: c.id, weight: 1, params: {} },
+  ]);
+});
+
+test("schema presence: required values, empty values and optional objects follow JSON Schema", async ({ page, request }) => {
+  const up = await upstream(request, "pres-up");
+  const a = await model(request, "pres/a", up.id);
+  await signIn(page, request, "/routers");
+  await page.getByRole("button", { name: "New router" }).click();
+  const d = dialog(page);
+  await d.getByLabel("Name").fill("pres-router");
+  await d.getByLabel("Strategy").selectOption("e2e_presence");
+  await d.getByLabel("pres/a", { exact: true }).check();
+  await d.getByRole("button", { name: "Create" }).click();
+  // Nothing is chosen yet: every required field says so (a boolean included), the optional object is left alone.
+  await expect(d.getByText("Enabled is required: choose On or Off")).toBeVisible();
+  await expect(d.getByText("Scope is required")).toBeVisible();
+  await expect(d.getByText("Regions is required")).toBeVisible();
+  await expect(d.getByText("Limits is required")).toBeVisible();
+  await expect(d.getByText("Priority is required")).toHaveCount(0);
+  await expect(d.getByTestId("schema-tuning")).toContainText("Not set");
+  await shot(page, "router-form-presence");
+  // `false`, "" (a legal enum value, labelled), the empty list and the empty object are values.
+  await d.getByLabel("Enabled *", { exact: true }).selectOption({ label: "Off" });
+  await d.getByLabel("Scope *", { exact: true }).selectOption({ label: "(empty text)" });
+  await d.getByRole("group", { name: "Regions" }).getByRole("button", { name: "Use empty list" }).click();
+  await d.getByRole("button", { name: "Add Limits" }).click();
+  await d.getByRole("button", { name: "Create" }).click();
+  await expect(d).toBeHidden();
+  const stored = (await items<any>(request, "/routers")).find((r) => r.name === "pres-router");
+  expect(stored.params).toEqual({ enabled: false, scope: "", regions: [], limits: {} });
+
+  // An optional object with a required field of its own: asked for only once it is added.
+  await editRouter(page, "pres-router");
+  await d.getByRole("button", { name: "Add Tuning" }).click();
+  await d.getByRole("button", { name: "Save" }).click();
+  await expect(d.getByText("Priority is required")).toBeVisible();
+  await d.getByLabel("Priority *", { exact: true }).fill("3");
+  await d.getByRole("button", { name: "Save" }).click();
+  await expect(d).toBeHidden();
+  expect((await get<any>(request, `/routers/${stored.id}`)).params.tuning).toEqual({ priority: 3 });
+  await editRouter(page, "pres-router");
+  await d.getByRole("button", { name: "Remove Tuning" }).click();
+  await d.getByRole("button", { name: "Save" }).click();
+  await expect(d).toBeHidden();
+  expect(Object.hasOwn((await get<any>(request, `/routers/${stored.id}`)).params, "tuning")).toBe(false);
+
+  // An optional string: typed then emptied is "", which is not the same as unset.
+  await editRouter(page, "pres-router");
+  await d.getByLabel("Prefix", { exact: true }).fill("abc");
+  await d.getByLabel("Prefix", { exact: true }).fill("");
+  await d.getByRole("button", { name: "Save" }).click();
+  await expect(d).toBeHidden();
+  expect((await get<any>(request, `/routers/${stored.id}`)).params.prefix).toBe("");
+  await editRouter(page, "pres-router");
+  await d.getByRole("button", { name: "Unset Prefix" }).click();
+  await d.getByRole("button", { name: "Save" }).click();
+  await expect(d).toBeHidden();
+  expect(Object.hasOwn((await get<any>(request, `/routers/${stored.id}`)).params, "prefix")).toBe(false);
+  expect(a.id).toBeTruthy();
+});
+
+test("property names that are also Object.prototype members or __proto__ round-trip as data", async ({ page, request }) => {
+  const up = await upstream(request, "proto-up");
+  const a = await model(request, "proto/a", up.id);
+  await signIn(page, request, "/routers");
+  await page.getByRole("button", { name: "New router" }).click();
+  const d = dialog(page);
+  await d.getByLabel("Name").fill("proto-router");
+  await d.getByLabel("Strategy").selectOption("e2e_presence");
+  await d.getByLabel("proto/a", { exact: true }).check();
+  await d.getByLabel("Enabled *", { exact: true }).selectOption({ label: "On" });
+  await d.getByLabel("Scope *", { exact: true }).selectOption({ label: "wide" });
+  await d.getByRole("group", { name: "Regions" }).getByRole("button", { name: "Use empty list" }).click();
+  await d.getByRole("button", { name: "Add Limits" }).click();
+  // Optional and untouched: an inherited `constructor` must not read as a value or an error.
+  await d.getByRole("button", { name: "Create" }).click();
+  await expect(d.getByText("Must be text")).toHaveCount(0);
+  await expect(d).toBeHidden();
+  const created = (await items<any>(request, "/routers")).find((r) => r.name === "proto-router");
+  expect(JSON.stringify(created.params)).not.toMatch(/constructor|toString|__proto__/);
+
+  const sent = recordPatches(page);
+  await editRouter(page, "proto-router");
+  await d.getByLabel("Constructor", { exact: true }).fill("c");
+  await d.getByLabel("To string", { exact: true }).fill("t");
+  await d.getByRole("button", { name: "Add Proto" }).click();
+  await d.getByLabel("Inner", { exact: true }).fill("i");
+  await d.getByRole("button", { name: "Save" }).click();
+  await expect(d).toBeHidden();
+  const text = await (await request.get(`/api/v1/routers/${created.id}`, { headers: admin })).text();
+  expect(text).toContain('"constructor":"c"');
+  expect(text).toContain('"toString":"t"');
+  expect(text).toContain('"__proto__":{"inner":"i"}');
+  expect(sent[sent.length - 1]).toContain('"__proto__":{"inner":"i"}');
+  // Reopened, the nested `__proto__` object is shown with its field, not lost into a prototype.
+  await editRouter(page, "proto-router");
+  await expect(d.getByLabel("Inner", { exact: true })).toHaveValue("i");
+  await d.getByRole("button", { name: "Cancel" }).click();
+
+  // The JSON editor keeps an own `__proto__` key too.
+  const m = await model(request, "proto/b", up.id);
+  const raw = await request.post("/api/v1/routers", {
+    headers: { ...admin, "content-type": "application/json" },
+    data: `{"name":"proto-json","strategy":"e2e_schemaless","params":{"__proto__":{"a":1},"constructor":2,"toString":3},"members":[{"model_id":"${m.id}"}]}`,
+  });
+  expect(raw.status(), await raw.text()).toBe(201);
+  const jsonRouter = await raw.json();
+  await page.goto("/routers");
+  await editRouter(page, "proto-json");
+  const editor = d.getByLabel("Settings (JSON)", { exact: true });
+  const shown = await editor.inputValue();
+  expect(shown).toContain('"__proto__"');
+  expect(JSON.parse(shown).constructor).toBe(2);
+  await editor.fill('{"__proto__": {"a": 1}, "constructor": 2, "toString": 3, "z": 4}');
+  await d.getByRole("button", { name: "Save" }).click();
+  await expect(d).toBeHidden();
+  expect(sent[sent.length - 1]).toContain('"__proto__":{"a":1}');
+  const stored = await (await request.get(`/api/v1/routers/${jsonRouter.id}`, { headers: admin })).text();
+  expect(stored).toContain('"__proto__":{"a":1}');
+  expect(stored).toContain('"constructor":2');
+  expect(stored).toContain('"z":4');
+  expect(a.id).toBeTruthy();
+});
+
+test("switching between strategies without a schema resets the JSON editors to what will be sent", async ({ page, request }) => {
+  const up = await upstream(request, "sw-up");
+  await model(request, "sw/a", up.id);
+  await signIn(page, request, "/routers");
+  await page.getByRole("button", { name: "New router" }).click();
+  const d = dialog(page);
+  await d.getByLabel("Name").fill("sw-router");
+  await d.getByLabel("Strategy").selectOption("e2e_schemaless");
+  await d.getByLabel("sw/a", { exact: true }).check();
+  const settings = d.getByLabel("Settings (JSON)", { exact: true });
+  const memberSettings = d.getByLabel("Settings for sw/a (JSON)");
+  await settings.fill('{"threshold": 3}');
+  await memberSettings.fill('{"zone": "z1"}');
+
+  // The other schemaless strategy starts empty, and the boxes say so.
+  await d.getByLabel("Strategy").selectOption("e2e_schemaless2");
+  await expect(settings).toHaveValue("{}");
+  await expect(memberSettings).toHaveValue("{}");
+  const posts: any[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "POST" && r.url().endsWith("/api/v1/routers")) posts.push(r.postDataJSON());
+  });
+  await d.getByLabel("Strategy").selectOption("e2e_schemaless");
+  await settings.fill("{ not json");
+  await memberSettings.fill("{ also not");
+  await expect(d.getByText(/JSON|Expected|Unexpected|position/).first()).toBeVisible();
+  await d.getByRole("button", { name: "Create" }).click();
+  await expect(d).toBeVisible();
+  expect(posts).toEqual([]); // refused while the text is not JSON
+
+  // Switching clears the problem together with the text: what is shown is what is sent.
+  await d.getByLabel("Strategy").selectOption("e2e_schemaless2");
+  await expect(settings).toHaveValue("{}");
+  await expect(memberSettings).toHaveValue("{}");
+  await expect(d.getByText(/Expected|Unexpected|position/)).toHaveCount(0);
+  await d.getByRole("button", { name: "Create" }).click();
+  await expect(d).toBeHidden();
+  expect(posts).toHaveLength(1);
+  expect(posts[0].strategy).toBe("e2e_schemaless2");
+  expect(posts[0].params).toEqual({});
+  expect(posts[0].members[0].params).toEqual({});
+});
+
+test("usage filters: a catalog name is never a mode, whatever it is called", async ({ page, request }) => {
+  const up = await upstream(request, "sent-up");
+  const m = await model(request, "sent/a", up.id);
+  const aliasNone = await post<any>(request, "/aliases", { name: "none", target: m.id });
+  const aliasMarker = await post<any>(request, "/aliases", { name: "__none__", target: m.id });
+  const routerHas = await post<any>(request, "/routers", { name: "__has__", members: [{ model_id: m.id }] });
+  await signIn(page, request, "/usage");
+  const query = (url: string) => new URL(url).searchParams;
+  const next = async (action: () => Promise<unknown>, usage: (q: URLSearchParams) => boolean) => {
+    const [req] = await Promise.all([page.waitForRequest((r) => r.url().includes("/api/v1/usage") && usage(query(r.url()))), action()]);
+    return query(req.url());
+  };
+
+  for (const [alias, id] of [["none", aliasNone.id], ["__none__", aliasMarker.id]]) {
+    const q = await next(() => page.getByLabel("Alias", { exact: true }).selectOption({ label: alias }), (p) => p.has("alias_id"));
+    expect(q.get("alias_id")).toBe(id);
+    expect([q.get("alias"), q.get("alias_missing")]).toEqual([null, null]);
+  }
+  let q = await next(() => page.getByLabel("Router", { exact: true }).selectOption({ label: "__has__" }), (p) => p.has("router_id"));
+  expect(q.get("router_id")).toBe(routerHas.id);
+  expect([q.get("router"), q.get("router_missing")]).toEqual([null, null]);
+
+  // The modes are separate options with their own meaning.
+  q = await next(() => page.getByLabel("Alias", { exact: true }).selectOption({ label: "None (no alias)" }), (p) => p.has("alias_missing"));
+  expect([q.get("alias_missing"), q.get("alias_id")]).toEqual(["true", null]);
+  q = await next(() => page.getByLabel("Alias", { exact: true }).selectOption({ label: "Via any alias" }), (p) => p.get("alias_missing") === "false");
+  expect(q.get("alias_id")).toBeNull();
+  q = await next(() => page.getByLabel("Router", { exact: true }).selectOption({ label: "Via any router" }), (p) => p.get("router_missing") === "false");
+  expect(q.get("router_id")).toBeNull();
+});
+
+test("usage: the upstream model is a text filter, so a name nothing maps to any more still filters", async ({ page, request }) => {
+  await signIn(page, request, "/usage");
+  const box = page.getByLabel("Upstream model", { exact: true });
+  // The catalog only suggests.
+  await expect(page.locator("#usage-upstream-models option[value='Qwen/UseA']")).toHaveCount(1);
+  await expect(page.locator("#usage-upstream-models option[value='Org/Retired']")).toHaveCount(0);
+  await expect(row(page, "use/retired")).toBeVisible();
+  const [req] = await Promise.all([page.waitForRequest((r) => r.url().includes("/api/v1/usage") && r.url().includes("upstream_model=")), box.fill("Org/Retired")]);
+  expect(new URL(req.url()).searchParams.get("upstream_model")).toBe("Org/Retired");
+  await expect(row(page, "use/retired")).toBeVisible();
+  await expect(row(page, "use/a")).toHaveCount(0);
+  await box.fill("");
+  await expect(row(page, "use/a")).toBeVisible();
 });
 
 test("screenshots", async ({ page, request }, info) => {

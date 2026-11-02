@@ -13,7 +13,7 @@ import { Checkbox } from "../components/ui/checkbox";
 import { Label } from "../components/ui/label";
 import { useAliases, useCan, useModels, useMut, useNames, useRouters, useStrategies } from "../hooks";
 import { matches, routerUpstreamModels } from "../lib/catalog";
-import { cleanValues, parseSchema, settingTitles, strategyDescription, strategyTitle, unknownKeys, validateValues, type ParsedSchema, type Values as Params } from "../lib/schema";
+import { parseSchema, sameJson, settingTitles, strategyDescription, strategyTitle, unknownKeys, validateValues, type ParsedSchema, type Values as Params } from "../lib/schema";
 import { useById } from "../hooks";
 
 type Sticky = Router["sticky"];
@@ -97,6 +97,8 @@ function parseStatuses(text: string): number[] | undefined {
 
 /** What the form needs of a strategy to render and validate settings. */
 interface Shape {
+  /** The picked strategy's name: the identity settings editors are keyed on. */
+  name: string;
   desc: Strategy | undefined;
   params: ParsedSchema | null;
   member: ParsedSchema | null;
@@ -105,24 +107,21 @@ interface Shape {
   memberJson: boolean;
 }
 
-function shapeOf(desc: Strategy | undefined): Shape {
+function shapeOf(name: string, desc: Strategy | undefined): Shape {
   const params = parseSchema(desc?.params_schema);
   const member = parseSchema(desc?.member_schema);
-  return { desc, params, member, usesWeight: desc?.uses_weight ?? true, memberJson: !member };
+  return { name, desc, params, member, usesWeight: desc?.uses_weight ?? true, memberJson: !member };
 }
 
-const memberBody = (m: MemberV, shape: Shape) => ({
-  model_id: m.model_id,
-  weight: shape.usesWeight ? m.weight : 1,
-  params: shape.member ? cleanValues(shape.member.fields, m.params, true) : m.params,
-});
+/** An existing member keeps its weight and settings exactly: hiding a weight is not deleting it. */
+const memberBody = (m: MemberV) => ({ model_id: m.model_id, weight: m.weight, params: m.params });
 
-const body = (v: Values, shape: Shape, missing: boolean) => ({
+const body = (v: Values, missing: boolean) => ({
   name: v.name.trim(),
   strategy: v.strategy,
-  params: shape.params ? cleanValues(shape.params.fields, v.params, true) : v.params,
+  params: v.params,
   // A split router has its members under each split.
-  members: v.splits.length ? [] : v.members.map((m) => memberBody(m, shape)),
+  members: v.splits.length ? [] : v.members.map(memberBody),
   retry: v.retry_enabled
     ? {
         max_attempts: v.retry_max_attempts,
@@ -131,11 +130,31 @@ const body = (v: Values, shape: Shape, missing: boolean) => ({
       }
     : null,
   fallback_model_ids: v.fallback_model_ids,
-  traffic_split: v.splits.map((s) => ({ name: s.name.trim(), weight: s.weight ?? 0, members: s.members.map((m) => memberBody(m, shape)) })),
+  traffic_split: v.splits.map((s) => ({ name: s.name.trim(), weight: s.weight ?? 0, members: s.members.map(memberBody) })),
   sticky: v.splits.length ? v.sticky : ("none" as const),
   sticky_header: v.splits.length && v.sticky === "header" ? v.sticky_header.trim() : null,
   ...(v.force && missing ? { force: true } : {}),
 });
+
+const PATCHABLE = ["name", "strategy", "params", "members", "retry", "fallback_model_ids", "traffic_split", "sticky", "sticky_header"] as const;
+
+/**
+ * The PATCH of an edit: only what the form changed against the router as it was loaded. A save never
+ * rewrites what the user did not edit (settings, weights, members hidden by the strategy). A changed
+ * strategy resets settings, so everything that depends on it is sent.
+ */
+export function patchBody(original: Router, v: Values, missing: boolean): Record<string, unknown> {
+  const next: Record<string, unknown> = body(v, missing);
+  const before: Record<string, unknown> = body(fromRouter(original), false);
+  const strategyChanged = next.strategy !== before.strategy;
+  const out: Record<string, unknown> = {};
+  for (const key of PATCHABLE) {
+    const dependsOnStrategy = key === "params" || key === "members" || key === "traffic_split";
+    if ((strategyChanged && dependsOnStrategy) || !sameJson(next[key], before[key])) out[key] = next[key];
+  }
+  if (next.force) out.force = true;
+  return out;
+}
 
 /** Leaf field names of 422 messages mapped to form fields. */
 const ALIAS = {
@@ -240,7 +259,7 @@ function MemberEditor({ scope, label, options, members, onChange, shape, errors,
               </div>
             )}
             {member && shape.memberJson && (
-              <JsonEditor label={`Settings for ${d.name} (JSON)`} idPrefix={`${scope}-${d.id}`} value={member.params} onChange={(next) => patch(d.id, { params: next })} onProblem={(m) => onProblem(`${scope}:${d.id}`, m)} hint="This strategy has no settings schema the form can show." />
+              <JsonEditor key={`${scope}-${d.id}|${shape.name}`} label={`Settings for ${d.name} (JSON)`} value={member.params} onChange={(next) => patch(d.id, { params: next })} onProblem={(m) => onProblem(`${scope}:${d.id}`, m)} hint="This strategy has no settings schema the form can show." />
             )}
           </div>
         );
@@ -317,7 +336,7 @@ export function Routers() {
     force: (v, all) => ((strategyByName.get(all.strategy)?.missing_gateways.length ?? 0) > 0 && !v ? "Tick “Save anyway” to save while those gateways lack this strategy" : undefined),
   });
   const v = form.values;
-  const shape = useMemo(() => shapeOf(strategyByName.get(v.strategy)), [strategyByName, v.strategy]);
+  const shape = useMemo(() => shapeOf(v.strategy, strategyByName.get(v.strategy)), [strategyByName, v.strategy]);
   const missing = shape.desc?.missing_gateways ?? [];
 
   const schemaErrors = useMemo(() => {
@@ -328,8 +347,8 @@ export function Routers() {
     return out;
   }, [shape, v.params, v.members, v.splits]);
 
-  const create = useMut((x: { v: Values; shape: Shape }) => api.createRouter(body(x.v, x.shape, (x.shape.desc?.missing_gateways.length ?? 0) > 0)), "Router created");
-  const update = useMut(({ id, ...x }: { id: string; v: Values; shape: Shape }) => api.updateRouter(id, body(x.v, x.shape, (x.shape.desc?.missing_gateways.length ?? 0) > 0)), "Router saved");
+  const create = useMut((x: { v: Values; shape: Shape }) => api.createRouter(body(x.v, (x.shape.desc?.missing_gateways.length ?? 0) > 0)), "Router created");
+  const update = useMut((x: { original: Router; v: Values; shape: Shape }) => api.updateRouter(x.original.id, patchBody(x.original, x.v, (x.shape.desc?.missing_gateways.length ?? 0) > 0) as Parameters<typeof api.updateRouter>[1]), "Router saved");
   const remove = useMut((id: string) => api.deleteRouter(id), "Router deleted");
 
   const open = (r: Router | "new") => {
@@ -342,7 +361,7 @@ export function Routers() {
     setSubmitted(true);
     const ok = form.validate();
     if (!ok || Object.keys(schemaErrors).length || Object.keys(problems).length) return false;
-    return form.run(() => (editing === "new" ? create.mutateAsync({ v, shape }) : update.mutateAsync({ id: (editing as Router).id, v, shape })), ALIAS);
+    return form.run(() => (editing === "new" ? create.mutateAsync({ v, shape }) : update.mutateAsync({ original: editing as Router, v, shape })), ALIAS);
   };
 
   const changeStrategy = (name: string) => {
@@ -504,7 +523,7 @@ export function Routers() {
           </Alert>
         )}
 
-        <StrategySettings shape={shape} params={v.params} onChange={(next) => form.set("params", next)} errors={submitted ? paramErrors("params:", schemaErrors) : {}} error={form.errors.params} onProblem={(m) => setProblem("params", m)} idPrefix={`router-${editing === "new" ? "new" : (editing as Router | null)?.id}`} />
+        <StrategySettings shape={shape} strategy={v.strategy} params={v.params} onChange={(next) => form.set("params", next)} errors={submitted ? paramErrors("params:", schemaErrors) : {}} error={form.errors.params} onProblem={(m) => setProblem("params", m)} idPrefix={`router-${editing === "new" ? "new" : (editing as Router | null)?.id}`} />
 
         {v.splits.length > 0 ? (
           <p className="field-hint" data-testid="members-in-splits">
@@ -603,7 +622,7 @@ export function Routers() {
 }
 
 /** Settings of the picked strategy: a form from its schema, or a JSON editor when there is no usable one. */
-function StrategySettings({ shape, params, onChange, errors, error, onProblem, idPrefix }: { shape: Shape; params: Params; onChange: (v: Params) => void; errors: Record<string, string>; error?: string; onProblem: (message: string | null) => void; idPrefix: string }) {
+function StrategySettings({ shape, strategy, params, onChange, errors, error, onProblem, idPrefix }: { shape: Shape; strategy: string; params: Params; onChange: (v: Params) => void; errors: Record<string, string>; error?: string; onProblem: (message: string | null) => void; idPrefix: string }) {
   const { desc } = shape;
   if (shape.params) {
     const extra = unknownKeys(shape.params.fields, params);
@@ -634,7 +653,7 @@ function StrategySettings({ shape, params, onChange, errors, error, onProblem, i
         <p className="field-hint">No gateway reports this strategy, so its settings schema is unknown. Edit the settings as JSON.</p>
       )}
       {desc && desc.schema_problems.length > 0 && <p className="field-hint">{desc.schema_problems.slice(0, 3).join("; ")}</p>}
-      <JsonEditor label="Settings (JSON)" value={params} onChange={onChange} onProblem={onProblem} error={error} idPrefix={idPrefix} hint="Settings are stored in config snapshots and audit logs: do not put secrets here." />
+      <JsonEditor key={`${idPrefix}|${strategy}`} label="Settings (JSON)" value={params} onChange={onChange} onProblem={onProblem} error={error} hint="Settings are stored in config snapshots and audit logs: do not put secrets here." />
     </fieldset>
   );
 }
