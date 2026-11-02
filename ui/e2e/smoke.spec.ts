@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { confirmDialog, dialog, optionNames, pick } from "./helpers";
+
 const BREAK_GLASS = "e2e-break-glass-password";
 const VIEWER = "e2e-viewer-session-0123456789abcdef";
 const admin: Record<string, string> = {};
@@ -26,7 +28,6 @@ async function login(page: Page, token: string) {
   ]);
 }
 
-const dialog = (page: Page) => page.getByRole("dialog");
 
 test("SSO availability and login errors follow session discovery", async ({ page }) => {
   let oidcEnabled = false;
@@ -173,7 +174,7 @@ test("cookie session: CSRF on writes, inline member errors, key owner state, log
 
   await page.goto(`/teams/${teamId}`);
   await expect(page.getByRole("heading", { name: "Cookie Team" })).toBeVisible();
-  await expect(page.locator(".principal")).toContainText("Cookie Admin");
+  await expect(page.getByTestId("principal")).toContainText("Cookie Admin");
   await expect(page.locator("tr", { hasText: "gone@e2e.test" }).getByText("Inactive")).toBeVisible();
 
   await page.getByRole("button", { name: "Add member" }).click();
@@ -218,7 +219,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
 
   await login(page, BREAK_GLASS);
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
-  await expect(page.locator(".principal")).toContainText("break-glass");
+  await expect(page.getByTestId("principal")).toContainText("break-glass");
   await expect(page.getByRole("link", { name: "Organizations" })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Projects" })).toHaveCount(0);
 
@@ -231,8 +232,8 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   const createdUser = page.locator("tr", { hasText: "created-user@e2e.test" });
   await expect(createdUser).toBeVisible();
   await createdUser.getByRole("button", { name: "Deactivate" }).click();
-  await expect(dialog(page).getByText(/suspends the user’s API keys/i)).toBeVisible();
-  await dialog(page).getByRole("button", { name: "Deactivate" }).click();
+  await expect(confirmDialog(page).getByText(/suspends the user’s API keys/i)).toBeVisible();
+  await confirmDialog(page).getByRole("button", { name: "Deactivate" }).click();
   await expect(createdUser.getByText("Inactive")).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -286,7 +287,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
 
   await page.getByRole("button", { name: "Add member" }).click();
   await dialog(page).getByLabel("Email", { exact: true }).fill("viewer@e2e.test");
-  await dialog(page).getByLabel("User", { exact: true }).selectOption(viewer.id);
+  await pick(dialog(page), "User", "viewer@e2e.test");
   await dialog(page).getByRole("button", { name: "Add member" }).click();
   await expect(page.getByRole("cell", { name: "viewer@e2e.test" })).toBeVisible();
 
@@ -320,7 +321,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await page.getByRole("button", { name: "New key" }).click();
   await dialog(page).getByLabel("Name").fill("service-key");
   await dialog(page).getByRole("button", { name: "Create key" }).click();
-  const serviceSecret = (await dialog(page).locator(".secret-value").textContent()) ?? "";
+  const serviceSecret = (await dialog(page).getByTestId("secret-value").textContent()) ?? "";
   expect(serviceSecret).toMatch(/^lw-/);
   await expect(dialog(page).getByRole("button", { name: "Copy" })).toBeVisible();
   await dialog(page).getByRole("button", { name: /saved it/ }).click();
@@ -375,7 +376,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await viewerPage.getByRole("button", { name: "New key" }).click();
   await dialog(viewerPage).getByLabel("Name").fill("personal-key");
   await dialog(viewerPage).getByRole("button", { name: "Create key" }).click();
-  const personalSecret = (await dialog(viewerPage).locator(".secret-value").textContent()) ?? "";
+  const personalSecret = (await dialog(viewerPage).getByTestId("secret-value").textContent()) ?? "";
   expect(personalSecret).toMatch(/^lw-/);
   await dialog(viewerPage).getByRole("button", { name: /saved it/ }).click();
   const personalRow = viewerPage.locator("tr", { hasText: "personal-key" });
@@ -399,27 +400,27 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await viewerPage.getByRole("button", { name: "New key" }).click();
   await dialog(viewerPage).getByLabel("Name").fill("central-key");
   await dialog(viewerPage).getByRole("button", { name: "Create key" }).click();
-  const centralSecret = (await dialog(viewerPage).locator(".secret-value").textContent()) ?? "";
+  const centralSecret = (await dialog(viewerPage).getByTestId("secret-value").textContent()) ?? "";
   expect(centralSecret).toMatch(/^lw-/);
   await dialog(viewerPage).getByRole("button", { name: /saved it/ }).click();
   await expect(viewerPage.getByRole("cell", { name: "central-key" })).toBeVisible();
 
   await personalRow.getByRole("button", { name: "Rotate" }).click();
-  const rotatedSecret = (await dialog(viewerPage).locator(".secret-value").textContent()) ?? "";
+  const rotatedSecret = (await dialog(viewerPage).getByTestId("secret-value").textContent()) ?? "";
   expect(rotatedSecret).toMatch(/^lw-/);
   await dialog(viewerPage).getByRole("button", { name: /saved it/ }).click();
   await expect(viewerPage.locator("tr", { hasText: "personal-key" }).locator("code")).not.toHaveText(oldPrefix ?? "");
   await personalRow.getByRole("button", { name: "Revoke" }).click();
-  await dialog(viewerPage).getByRole("button", { name: "Revoke" }).click();
+  await confirmDialog(viewerPage).getByRole("button", { name: "Revoke" }).click();
   await expect(viewerPage.locator("tr", { hasText: "personal-key" }).getByText("Revoked")).toBeVisible();
 
   await viewerPage.getByRole("link", { name: "Settings" }).click();
   await expect(viewerPage.getByText("Research · member")).toBeVisible();
   await viewerPage.getByRole("link", { name: "Usage" }).click();
-  await viewerPage.getByLabel("Group by").selectOption("team,owner,key");
+  await pick(viewerPage, "Group by", "Team × owner × key");
   await expect(viewerPage.getByRole("heading", { name: "Usage" })).toBeVisible();
   await viewerPage.getByRole("link", { name: "Audit log" }).click();
-  await expect(viewerPage.getByLabel("Team").locator("option", { hasText: "Research" })).toBeAttached();
+  expect(await optionNames(viewerPage, "Team")).toContain("Research");
 
   // The team view works at narrow and wide widths in both explicit themes.
   await viewerPage.setViewportSize({ width: 390, height: 844 });
@@ -451,7 +452,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   ]) {
     await page.getByRole("link", { name: link, exact: true }).click();
     await expect(page.getByRole("heading", { name: heading, level: 1 })).toBeVisible();
-    await expect(page.locator(".state-error")).toHaveCount(0);
+    await expect(page.getByTestId("state-error")).toHaveCount(0);
   }
 
   await page.goto(`/teams/${team.id}`);
@@ -488,12 +489,12 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
   const row = page.getByRole("row").filter({ has: page.getByRole("cell", { name: "smoke-main", exact: true }) });
   await row.getByRole("button", { name: "Edit" }).click();
   const d = dialog(page);
-  await d.getByLabel("Strategy").selectOption("vllm_load");
+  await pick(d, "Strategy", "vLLM load");
   await d.getByLabel("Retry failed attempts").check();
   await d.getByLabel("Max attempts").fill("3");
   await d.getByLabel("Retry on status").fill("503, 502");
-  await d.getByLabel("Add fallback model").selectOption({ label: "smoke-backup" });
-  await expect(d.locator(".order-row")).toHaveText([/1\. smoke-backup/]);
+  await pick(d, "Add fallback model", "smoke-backup");
+  await expect(d.getByTestId("order-row")).toHaveText([/1\. smoke-backup/]);
 
   await d.getByRole("button", { name: "Add split" }).click();
   await d.getByRole("button", { name: "Add split" }).click();
@@ -509,7 +510,7 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
   await second.getByLabel("Weight", { exact: true }).fill("30");
   await expect(first.getByLabel("Share of split 1")).toHaveText("75%");
   await expect(second.getByLabel("Share of split 2")).toHaveText("25%");
-  await d.getByLabel("Sticky", { exact: true }).selectOption("header");
+  await pick(d, "Sticky", "By request header");
   await d.getByLabel("Sticky header").fill("X-Session-Id");
   await page.screenshot({ path: "/tmp/lumewarp-router-edit.png", fullPage: true });
   await d.getByRole("button", { name: "Save" }).click();
@@ -537,10 +538,10 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
     .filter({ has: page.getByRole("cell", { name: "smoke-backup", exact: true }) })
     .getByRole("button", { name: "Delete" })
     .click();
-  await dialog(page).getByRole("button", { name: "Delete" }).click();
+  await confirmDialog(page).getByRole("button", { name: "Delete" }).click();
   await expect(page.getByText(/router smoke-main \(fallback\)/)).toBeVisible();
   // The blocked delete is a dialog listing the referrers; dismiss it to carry on.
-  await dialog(page).getByRole("button", { name: "Got it" }).click();
+  await confirmDialog(page).getByRole("button", { name: "Got it" }).click();
 
   // Upstream health check and circuit breaker.
   await page.getByRole("link", { name: "Upstreams", exact: true }).click();

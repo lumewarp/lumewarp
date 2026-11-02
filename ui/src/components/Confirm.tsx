@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { ApiError } from "../api/errors";
+import { useReturnFocus } from "./Dialog";
 import { useToast } from "./Toast";
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";
 import { Button } from "./ui/button";
@@ -29,6 +30,7 @@ export function ConfirmDialog({ open, title, message, confirmLabel = "Delete", o
   const [busy, setBusy] = useState(false);
   const [blocked, setBlocked] = useState<ApiError | null>(null);
   const toast = useToast();
+  const onCloseAutoFocus = useReturnFocus(open);
   const close = () => {
     setBlocked(null);
     onClose();
@@ -52,7 +54,7 @@ export function ConfirmDialog({ open, title, message, confirmLabel = "Delete", o
   const referrers = blocked ? parseReferrers(blocked.message) : null;
   return (
     <AlertDialog open={open} onOpenChange={(next) => (!next ? close() : undefined)}>
-      <AlertDialogContent {...(blocked ? { "aria-describedby": undefined } : {})}>
+      <AlertDialogContent onCloseAutoFocus={onCloseAutoFocus} {...(blocked ? { "aria-describedby": undefined } : {})}>
         <AlertDialogHeader>
           <AlertDialogTitle>{blocked ? "Cannot delete" : title}</AlertDialogTitle>
           {!blocked && <AlertDialogDescription>{message}</AlertDialogDescription>}

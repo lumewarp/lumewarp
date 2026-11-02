@@ -138,6 +138,13 @@ STRATEGY_DESCRIPTORS: dict[str, dict] = {
                     "description": "Skip members with a longer queue.",
                 },
                 "mode": {"type": "string", "enum": ["strict", "relaxed"], "title": "Mode"},
+                # Choices of every shape the Select contract has to carry: a 64 entry enum (the schema subset's
+                # limit), number enums where 0 is a value and "" as a legal value. Optional, so the other tests
+                # that use this strategy never see them in a request.
+                "big": {"type": "string", "enum": [f"opt-{i:02d}" for i in range(64)], "title": "Big list"},
+                "level": {"type": "integer", "enum": [0, 1, 5], "title": "Level"},
+                "ratio": {"type": "number", "enum": [0.5, 1, 2], "title": "Ratio"},
+                "scope": {"type": "string", "enum": ["", "wide", "narrow"], "title": "Scope"},
                 "skip_unpriced": {"type": "boolean", "title": "Skip unpriced models"},
                 "tuning": {
                     "type": "object",

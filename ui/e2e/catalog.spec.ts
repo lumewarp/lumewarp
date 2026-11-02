@@ -3,6 +3,8 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { confirmDialog, dialog, optionNames, pick } from "./helpers";
+
 /*
  * The model catalog UI through the real control plane (e2e/serve.py): Models, Aliases, Routers with
  * schema-driven strategy forms, the permission picker, My keys, Usage and Rollback.
@@ -16,9 +18,10 @@ import { fileURLToPath } from "node:url";
 const BREAK_GLASS = "e2e-break-glass-password";
 const VIEWER = "e2e-viewer-session-0123456789abcdef";
 const SHOTS = process.env.E2E_SHOTS;
+// The title serve.py gives the hostile strategy (what the Strategy select shows for it).
+const HOSTILE_TITLE = '<img src=x onerror="window.__pwned=1"> <b>bold</b> [click](javascript:window.__pwned=1) https://evil.example/phish';
 const admin: Record<string, string> = {};
 
-const dialog = (page: Page) => page.getByRole("dialog");
 const row = (page: Page, name: string | RegExp) => page.getByRole("row").filter({ has: page.getByRole("cell", { name, exact: typeof name === "string" }) });
 
 test.beforeEach(async ({ request }) => {
@@ -88,7 +91,7 @@ test("models, aliases and routers: create through the forms, search by upstream 
     await page.getByRole("button", { name: "New model" }).click();
     const d = dialog(page);
     await d.getByLabel("Name").fill(name);
-    await d.getByLabel("Upstream", { exact: true }).selectOption({ label: "cat-up" });
+    await pick(d, "Upstream", "cat-up");
     await d.getByLabel("Upstream model").fill(upstreamModel);
     await d.getByRole("button", { name: "Create" }).click();
     await expect(d).toBeHidden();
@@ -114,7 +117,7 @@ test("models, aliases and routers: create through the forms, search by upstream 
   await nav.getByRole("link", { name: "Aliases" }).click();
   await page.getByRole("button", { name: "New alias" }).click();
   await dialog(page).getByLabel("Name").fill("cat-alias");
-  await dialog(page).getByLabel("Points to").selectOption({ label: "cat/alpha (model)" });
+  await pick(dialog(page), "Points to", "cat/alpha (model)");
   await dialog(page).getByRole("button", { name: "Create" }).click();
   const aliasRow = row(page, "cat-alias");
   await expect(aliasRow).toContainText("cat/alpha");
@@ -132,7 +135,7 @@ test("models, aliases and routers: create through the forms, search by upstream 
   await page.getByRole("button", { name: "New router" }).click();
   let d = dialog(page);
   await d.getByLabel("Name").fill("cat-router");
-  await d.getByLabel("Strategy").selectOption("weighted");
+  await pick(d, "Strategy", "Weighted");
   await d.getByLabel("cat/alpha", { exact: true }).check();
   await d.getByLabel("Weight of cat/alpha").fill("20");
   await d.getByLabel("cat/beta", { exact: true }).check();
@@ -155,11 +158,11 @@ test("models, aliases and routers: create through the forms, search by upstream 
 
   // --- Delete is blocked while referenced: the 409 lists who refers to it.
   await row(page, "cat/alpha").getByRole("button", { name: "Delete" }).click();
-  await dialog(page).getByRole("button", { name: "Delete" }).click();
-  const blocked = dialog(page).getByTestId("delete-blocked");
+  await confirmDialog(page).getByRole("button", { name: "Delete" }).click();
+  const blocked = confirmDialog(page).getByTestId("delete-blocked");
   await expect(blocked).toContainText("alias cat-alias");
   await expect(blocked).toContainText("router cat-router");
-  await dialog(page).getByRole("button", { name: "Got it" }).click();
+  await confirmDialog(page).getByRole("button", { name: "Got it" }).click();
   await expect(row(page, "cat/alpha")).toBeVisible();
 
   // --- Rename with "Keep old name as alias" (checked by default) ...
@@ -191,7 +194,7 @@ test("models, aliases and routers: create through the forms, search by upstream 
   await row(page, "cat-alias").getByRole("button", { name: "Edit" }).click();
   await expect(dialog(page).getByLabel("Keep old name as alias")).toHaveCount(0);
   await dialog(page).getByLabel("Name").fill("cat-alias2");
-  await dialog(page).getByLabel("Points to").selectOption({ label: "cat-router (router)" });
+  await pick(dialog(page), "Points to", "cat-router (router)");
   await dialog(page).getByRole("button", { name: "Save" }).click();
   await expect(row(page, "cat-alias2")).toContainText("router");
   await expect(row(page, "cat-alias2")).toContainText("Org/Alpha-8B");
@@ -206,9 +209,9 @@ test("models, aliases and routers: create through the forms, search by upstream 
 
   // A router with an alias pointing at it cannot be deleted either.
   await row(page, "cat-router2").getByRole("button", { name: "Delete" }).click();
-  await dialog(page).getByRole("button", { name: "Delete" }).click();
-  await expect(dialog(page).getByTestId("delete-blocked")).toContainText("alias cat-alias2");
-  await dialog(page).getByRole("button", { name: "Got it" }).click();
+  await confirmDialog(page).getByRole("button", { name: "Delete" }).click();
+  await expect(confirmDialog(page).getByTestId("delete-blocked")).toContainText("alias cat-alias2");
+  await confirmDialog(page).getByRole("button", { name: "Got it" }).click();
 });
 
 test("reference strategy: form from its descriptor, weight hidden, Save anyway for a gateway that lacks it", async ({ page, request }) => {
@@ -220,7 +223,7 @@ test("reference strategy: form from its descriptor, weight hidden, Save anyway f
   await page.getByRole("button", { name: "New router" }).click();
   const d = dialog(page);
   await d.getByLabel("Name").fill("pf-router");
-  await d.getByLabel("Strategy").selectOption("priority_failover");
+  await pick(d, "Strategy", "Priority failover");
   await expect(d.getByText("Use the lowest priority number that is healthy.")).toBeVisible();
 
   // A gateway without the strategy: warning plus a required "Save anyway".
@@ -308,7 +311,7 @@ test("schema fields: required, bounds, enum, boolean, nested, header list", asyn
   await page.getByRole("button", { name: "New router" }).click();
   const d = dialog(page);
   await d.getByLabel("Name").fill("tuned-router");
-  await d.getByLabel("Strategy").selectOption("e2e_tuned");
+  await pick(d, "Strategy", "E2E tuned");
   // Supported by every connected gateway: nothing to confirm.
   await expect(d.getByTestId("missing-gateways")).toHaveCount(0);
   await expect(d.getByLabel("Save anyway")).toHaveCount(0);
@@ -328,8 +331,8 @@ test("schema fields: required, bounds, enum, boolean, nested, header list", asyn
   await expect(d.getByText("Must be a whole number")).toBeVisible();
   await max.fill("7");
 
-  await d.getByLabel("Mode", { exact: true }).selectOption("relaxed");
-  await d.getByLabel("Skip unpriced models").selectOption({ label: "On" });
+  await pick(d, "Mode", "relaxed");
+  await pick(d, "Skip unpriced models", "On");
   await d.getByRole("button", { name: "Add Tuning" }).click();
   await d.getByTestId("schema-tuning").getByLabel("Fail back after (ms)").fill("5");
   await d.getByTestId("member-tuned/a").getByLabel("Region").fill("eu");
@@ -367,9 +370,9 @@ test("no usable schema: a JSON editor, for null and for a schema outside the sub
   await page.getByRole("button", { name: "New router" }).click();
   const d = dialog(page);
 
-  await d.getByLabel("Strategy").selectOption("e2e_weird");
+  await pick(d, "Strategy", "E2E weird");
   await expect(d.getByTestId("strategy-settings-json")).toContainText("outside what the form can show");
-  await d.getByLabel("Strategy").selectOption("e2e_schemaless");
+  await pick(d, "Strategy", "E2E schemaless");
   await expect(d.getByTestId("strategy-settings-json")).toContainText("No settings schema is known");
   const editor = d.getByLabel("Settings (JSON)", { exact: true });
   await d.getByLabel("Name").fill("json-router");
@@ -396,7 +399,7 @@ test("hostile strategy text is only ever shown as text", async ({ page, request 
   await page.evaluate(() => ((window as any).__pwned = undefined));
   await page.getByRole("button", { name: "New router" }).click();
   const d = dialog(page);
-  await d.getByLabel("Strategy").selectOption("e2e_hostile");
+  await pick(d, "Strategy", HOSTILE_TITLE);
   const settings = d.getByTestId("strategy-settings");
   await expect(settings).toBeVisible();
   const text = (await settings.textContent()) ?? "";
@@ -412,9 +415,11 @@ test("hostile strategy text is only ever shown as text", async ({ page, request 
   expect(longest).toBeLessThanOrEqual(2100);
   expect(await page.evaluate(() => (window as any).__pwned)).toBeUndefined();
   // The enum option that is hostile is an option's text.
-  const options = await d.getByLabel("Pick").locator("option").allTextContents();
-  expect(options.some((o) => o.includes("<img"))).toBe(true);
-  await d.getByLabel("Pick").selectOption({ index: 1 });
+  const options = await optionNames(d, "Pick");
+  const hostile = options.find((o) => o.includes("<img"));
+  expect(hostile).toBeTruthy();
+  await pick(d, "Pick", hostile!);
+  await expect(page.locator("img, [onerror]")).toHaveCount(0);
   await d.getByRole("button", { name: "Cancel" }).click();
   // The installed-strategies table shows the title as text too.
   await expect(page.getByRole("row").filter({ has: page.getByText("e2e_hostile", { exact: true }) })).toContainText("<b>bold</b>");
@@ -445,7 +450,8 @@ test("traffic split: models move under each split", async ({ page, request }) =>
   await first.getByLabel("Weight", { exact: true }).fill("90");
   await expect(first.getByLabel("Share of split 1")).toHaveText("90%");
   // Fallback is optional: none picked.
-  await expect(d.getByLabel("Add fallback model")).toHaveValue("");
+  await expect(d.getByTestId("order-row")).toHaveCount(0);
+  await expect(d.getByLabel("Add fallback model")).toHaveText("None — add a fallback model…");
   await d.getByRole("button", { name: "Create" }).click();
   await expect(d).toBeHidden();
   const stored = (await items<any>(request, "/routers")).find((r) => r.name === "split-router");
@@ -555,7 +561,7 @@ test("My keys shows what a new key can call; viewers get no write controls", asy
   await member.goto("/keys");
   await member.getByRole("button", { name: "New key" }).click();
   const d = dialog(member);
-  await d.getByLabel("Team").selectOption({ label: "Mine team" });
+  await pick(d, "Team", "Mine team");
   const names = d.getByTestId("callable-names");
   await expect(names).toContainText("mine/b");
   await expect(names).not.toContainText("mine/a"); // the member's own list narrows the team's
@@ -564,7 +570,7 @@ test("My keys shows what a new key can call; viewers get no write controls", asy
   await shot(member, "my-keys-new-key");
   await d.getByLabel("Name").fill("viewer-key");
   await d.getByRole("button", { name: "Create key" }).click();
-  await expect(d.locator(".secret-value")).toBeVisible();
+  await expect(d.getByTestId("secret-value")).toBeVisible();
   await d.getByRole("button", { name: /saved it/ }).click();
 
   // A plain member may read the catalog but not change it: write controls are disabled.
@@ -581,7 +587,7 @@ test("My keys shows what a new key can call; viewers get no write controls", asy
 
 test("usage: grouped by model by default, with how each request was reached, and filters", async ({ page, request }) => {
   await signIn(page, request, "/usage");
-  await expect(page.getByLabel("Group by")).toHaveValue("model");
+  await expect(page.getByLabel("Group by")).toHaveText("Model");
   const headers = page.getByRole("columnheader");
   await expect(headers.filter({ hasText: "Upstream model" })).toBeVisible();
   await expect(headers.filter({ hasText: "Via alias" })).toBeVisible();
@@ -600,47 +606,47 @@ test("usage: grouped by model by default, with how each request was reached, and
   await shot(page, "usage-by-model");
 
   // Group by alias / router show who served.
-  await page.getByLabel("Group by").selectOption("alias");
+  await pick(page, "Group by", "Alias");
   await expect(page.getByRole("columnheader", { name: "Served by" })).toBeVisible();
   await expect(row(page, "use-alias")).toContainText("use/a");
   await expect(row(page, "use-alias")).toContainText("use/b");
   await expect(row(page, "none")).toContainText("use/c");
-  await page.getByLabel("Group by").selectOption("router");
+  await pick(page, "Group by", "Router");
   await expect(row(page, "use-router")).toContainText("use/a");
   await expect(row(page, "none")).toContainText("use/c");
-  await page.getByLabel("Group by").selectOption("upstream_model");
+  await pick(page, "Group by", "Upstream model");
   await expect(row(page, "Qwen/UseA")).toContainText("use/a");
   await expect(row(page, "Qwen/UseA")).toContainText("use/b");
-  await page.getByLabel("Group by").selectOption("model");
+  await pick(page, "Group by", "Model");
 
   // Filters: model, upstream model, alias (including none), router (including none).
-  await page.getByLabel("Model", { exact: true }).selectOption("use/b");
+  await pick(page, "Model", "use/b");
   await expect(row(page, "use/b")).toBeVisible();
   await expect(row(page, "use/a")).toHaveCount(0);
-  await page.getByLabel("Model", { exact: true }).selectOption("");
+  await pick(page, "Model", "All models");
   await page.getByLabel("Upstream model", { exact: true }).fill("Other/UseC");
   await expect(row(page, "use/c")).toBeVisible();
   await expect(row(page, "use/a")).toHaveCount(0);
   await page.getByLabel("Upstream model", { exact: true }).fill("");
-  await page.getByLabel("Alias", { exact: true }).selectOption({ label: "None (no alias)" });
+  await pick(page, "Alias", "None (no alias)");
   await expect(row(page, "use/c")).toBeVisible();
   await expect(row(page, "use/a")).toHaveCount(0);
   await expect(row(page, "use/c").getByTestId("mixed")).toHaveCount(0); // only the direct request is left
-  await page.getByLabel("Alias", { exact: true }).selectOption("use-direct");
+  await pick(page, "Alias", "use-direct");
   await expect(row(page, "use/c")).toContainText("use-direct");
-  await page.getByLabel("Alias", { exact: true }).selectOption("");
-  await page.getByLabel("Router", { exact: true }).selectOption({ label: "None (no router)" });
+  await pick(page, "Alias", "Any");
+  await pick(page, "Router", "None (no router)");
   await expect(row(page, "use/c")).toBeVisible();
   await expect(row(page, "use/a")).toHaveCount(0);
-  await page.getByLabel("Router", { exact: true }).selectOption("use-router");
+  await pick(page, "Router", "use-router");
   await expect(row(page, "use/a")).toBeVisible();
   await expect(row(page, "use/c")).toHaveCount(0);
-  await page.getByLabel("Router", { exact: true }).selectOption({ label: "Via any router" });
+  await pick(page, "Router", "Via any router");
   await expect(row(page, "use/b")).toBeVisible();
   await expect(row(page, "use/c")).toHaveCount(0);
 
   // Nothing matches: an empty state, not an error.
-  await page.getByLabel("Alias", { exact: true }).selectOption("use-direct");
+  await pick(page, "Alias", "use-direct");
   await expect(page.getByText("No usage in this period.")).toBeVisible();
 });
 
@@ -736,7 +742,7 @@ test("dark mode and phone width", async ({ page, request }) => {
   await page.goto("/routers");
   await page.getByRole("button", { name: "New router" }).click();
   const d = dialog(page);
-  await d.getByLabel("Strategy").selectOption("e2e_tuned");
+  await pick(d, "Strategy", "E2E tuned");
   // Once it has slid in, the drawer lies within the screen (subpixel layout).
   await expect
     .poll(async () => {
@@ -845,7 +851,7 @@ test("saving a router sends only what changed: settings, hidden weights and spli
   // Changing one setting sends the settings with everything else in them untouched (empty strings, the
   // spaces, the keys the form does not show, nested ones included) and no members.
   await editRouter(page, "rt-plain-renamed");
-  await dialog(page).getByLabel("Enabled *", { exact: true }).selectOption({ label: "On" });
+  await pick(dialog(page), "Enabled *", "On");
   await dialog(page).getByRole("button", { name: "Save" }).click();
   await expect(dialog(page)).toBeHidden();
   expect(JSON.parse(sent[sent.length - 1])).toEqual({ params: { ...params, enabled: true } });
@@ -871,7 +877,7 @@ test("schema presence: required values, empty values and optional objects follow
   await page.getByRole("button", { name: "New router" }).click();
   const d = dialog(page);
   await d.getByLabel("Name").fill("pres-router");
-  await d.getByLabel("Strategy").selectOption("e2e_presence");
+  await pick(d, "Strategy", "E2E presence");
   await d.getByLabel("pres/a", { exact: true }).check();
   await d.getByRole("button", { name: "Create" }).click();
   // Nothing is chosen yet: every required field says so (a boolean included), the optional object is left alone.
@@ -883,8 +889,8 @@ test("schema presence: required values, empty values and optional objects follow
   await expect(d.getByTestId("schema-tuning")).toContainText("Not set");
   await shot(page, "router-form-presence");
   // `false`, "" (a legal enum value, labelled), the empty list and the empty object are values.
-  await d.getByLabel("Enabled *", { exact: true }).selectOption({ label: "Off" });
-  await d.getByLabel("Scope *", { exact: true }).selectOption({ label: "(empty text)" });
+  await pick(d, "Enabled *", "Off");
+  await pick(d, "Scope *", "(empty text)");
   await d.getByRole("group", { name: "Regions" }).getByRole("button", { name: "Use empty list" }).click();
   await d.getByRole("button", { name: "Add Limits" }).click();
   await d.getByRole("button", { name: "Create" }).click();
@@ -929,10 +935,10 @@ test("property names that are also Object.prototype members or __proto__ round-t
   await page.getByRole("button", { name: "New router" }).click();
   const d = dialog(page);
   await d.getByLabel("Name").fill("proto-router");
-  await d.getByLabel("Strategy").selectOption("e2e_presence");
+  await pick(d, "Strategy", "E2E presence");
   await d.getByLabel("proto/a", { exact: true }).check();
-  await d.getByLabel("Enabled *", { exact: true }).selectOption({ label: "On" });
-  await d.getByLabel("Scope *", { exact: true }).selectOption({ label: "wide" });
+  await pick(d, "Enabled *", "On");
+  await pick(d, "Scope *", "wide");
   await d.getByRole("group", { name: "Regions" }).getByRole("button", { name: "Use empty list" }).click();
   await d.getByRole("button", { name: "Add Limits" }).click();
   // Optional and untouched: an inherited `constructor` must not read as a value or an error.
@@ -992,7 +998,7 @@ test("switching between strategies without a schema resets the JSON editors to w
   await page.getByRole("button", { name: "New router" }).click();
   const d = dialog(page);
   await d.getByLabel("Name").fill("sw-router");
-  await d.getByLabel("Strategy").selectOption("e2e_schemaless");
+  await pick(d, "Strategy", "E2E schemaless");
   await d.getByLabel("sw/a", { exact: true }).check();
   const settings = d.getByLabel("Settings (JSON)", { exact: true });
   const memberSettings = d.getByLabel("Settings for sw/a (JSON)");
@@ -1000,14 +1006,14 @@ test("switching between strategies without a schema resets the JSON editors to w
   await memberSettings.fill('{"zone": "z1"}');
 
   // The other schemaless strategy starts empty, and the boxes say so.
-  await d.getByLabel("Strategy").selectOption("e2e_schemaless2");
+  await pick(d, "Strategy", "E2E schemaless two");
   await expect(settings).toHaveValue("{}");
   await expect(memberSettings).toHaveValue("{}");
   const posts: any[] = [];
   page.on("request", (r) => {
     if (r.method() === "POST" && r.url().endsWith("/api/v1/routers")) posts.push(r.postDataJSON());
   });
-  await d.getByLabel("Strategy").selectOption("e2e_schemaless");
+  await pick(d, "Strategy", "E2E schemaless");
   await settings.fill("{ not json");
   await memberSettings.fill("{ also not");
   await expect(d.getByText(/JSON|Expected|Unexpected|position/).first()).toBeVisible();
@@ -1016,7 +1022,7 @@ test("switching between strategies without a schema resets the JSON editors to w
   expect(posts).toEqual([]); // refused while the text is not JSON
 
   // Switching clears the problem together with the text: what is shown is what is sent.
-  await d.getByLabel("Strategy").selectOption("e2e_schemaless2");
+  await pick(d, "Strategy", "E2E schemaless two");
   await expect(settings).toHaveValue("{}");
   await expect(memberSettings).toHaveValue("{}");
   await expect(d.getByText(/Expected|Unexpected|position/)).toHaveCount(0);
@@ -1042,20 +1048,20 @@ test("usage filters: a catalog name is never a mode, whatever it is called", asy
   };
 
   for (const [alias, id] of [["none", aliasNone.id], ["__none__", aliasMarker.id]]) {
-    const q = await next(() => page.getByLabel("Alias", { exact: true }).selectOption({ label: alias }), (p) => p.has("alias_id"));
+    const q = await next(() => pick(page, "Alias", alias), (p) => p.has("alias_id"));
     expect(q.get("alias_id")).toBe(id);
     expect([q.get("alias"), q.get("alias_missing")]).toEqual([null, null]);
   }
-  let q = await next(() => page.getByLabel("Router", { exact: true }).selectOption({ label: "__has__" }), (p) => p.has("router_id"));
+  let q = await next(() => pick(page, "Router", "__has__"), (p) => p.has("router_id"));
   expect(q.get("router_id")).toBe(routerHas.id);
   expect([q.get("router"), q.get("router_missing")]).toEqual([null, null]);
 
   // The modes are separate options with their own meaning.
-  q = await next(() => page.getByLabel("Alias", { exact: true }).selectOption({ label: "None (no alias)" }), (p) => p.has("alias_missing"));
+  q = await next(() => pick(page, "Alias", "None (no alias)"), (p) => p.has("alias_missing"));
   expect([q.get("alias_missing"), q.get("alias_id")]).toEqual(["true", null]);
-  q = await next(() => page.getByLabel("Alias", { exact: true }).selectOption({ label: "Via any alias" }), (p) => p.get("alias_missing") === "false");
+  q = await next(() => pick(page, "Alias", "Via any alias"), (p) => p.get("alias_missing") === "false");
   expect(q.get("alias_id")).toBeNull();
-  q = await next(() => page.getByLabel("Router", { exact: true }).selectOption({ label: "Via any router" }), (p) => p.get("router_missing") === "false");
+  q = await next(() => pick(page, "Router", "Via any router"), (p) => p.get("router_missing") === "false");
   expect(q.get("router_id")).toBeNull();
 });
 
@@ -1095,7 +1101,7 @@ test("screenshots", async ({ page, request }, info) => {
     }
     await page.goto("/routers");
     await page.getByRole("button", { name: "New router" }).click();
-    await dialog(page).getByLabel("Strategy").selectOption("e2e_tuned");
+    await pick(dialog(page), "Strategy", "E2E tuned");
     await dialog(page).getByLabel("Name").fill("shot");
     await page.waitForTimeout(300);
     await shot(page, `${label}-router-form`);

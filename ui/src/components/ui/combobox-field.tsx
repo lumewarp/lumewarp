@@ -32,7 +32,7 @@ export function Combobox<T>({
   ...aria
 }: ChoiceProps<T> & Partial<ControlProps> & { "aria-label"?: string; searchLabel?: string; emptyText?: string }) {
   const [open, setOpen] = useState(false);
-  const listId = useId();
+  const generatedId = useId();
   const { key, missing } = selection(value, options, unset, strict);
   const shown = key === UNSET_KEY ? unset?.label : key ? options[Number(key.slice(2))]?.label : undefined;
   const choose = (k: string) => {
@@ -48,7 +48,7 @@ export function Combobox<T>({
   return (
     <Popover open={open} onOpenChange={setOpen} modal>
       <PopoverTrigger asChild>
-        <Button type="button" variant="outline" role="combobox" aria-expanded={open} aria-haspopup="listbox" disabled={disabled} className={cn("w-full min-w-0 justify-between px-3 font-normal", !shown && "text-muted-foreground")} {...aria}>
+        <Button type="button" variant="outline" role="combobox" aria-expanded={open} aria-haspopup="listbox" id={aria.id ?? generatedId} disabled={disabled} className={cn("w-full min-w-0 justify-between px-3 font-normal", !shown && "text-muted-foreground")} {...aria}>
           <span className="min-w-0 flex-1 truncate text-left">{shown ?? (missing ? MISSING_LABEL : placeholder)}</span>
           <ChevronsUpDownIcon className="opacity-50" aria-hidden="true" />
         </Button>
@@ -56,7 +56,7 @@ export function Combobox<T>({
       <PopoverContent align="start" className="w-(--radix-popover-trigger-width) min-w-48 p-0">
         <Command filter={match} loop>
           <CommandInput aria-label={searchLabel} placeholder="Search…" />
-          <CommandList id={listId} className="max-h-[min(300px,var(--radix-popover-content-available-height))]">
+          <CommandList className="max-h-[min(300px,var(--radix-popover-content-available-height))]">
             <CommandEmpty>{emptyText}</CommandEmpty>
             <CommandGroup>
               {unset && item(UNSET_KEY, unset.label)}
