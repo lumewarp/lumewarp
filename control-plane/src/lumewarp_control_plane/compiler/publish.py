@@ -26,6 +26,7 @@ from lumewarp_control_plane.compiler.catalog_state import (
     restore_catalog_state,
 )
 from lumewarp_control_plane.compiler.compile import CompileError, compile_scope
+from lumewarp_control_plane.compiler.strategy import check_stored_routers
 from lumewarp_control_plane.compiler.validate import SnapshotInvalid, validate_snapshot
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.metrics import DISCARD, Metrics
@@ -37,6 +38,7 @@ from lumewarp_control_plane.models import (
     OutboxStatus,
     Scope,
 )
+from lumewarp_control_plane.security import Principal
 from lumewarp_control_plane.settings import get_settings
 
 log = logging.getLogger(__name__)
@@ -288,6 +290,8 @@ async def rollback_routing(
     *,
     now: datetime | None = None,
     require_local_membership: bool,
+    force: bool = False,
+    principal: Principal | None = None,
 ) -> int:
     """Publish a new version whose routing content (upstreams, models, aliases, routers)
     comes from `to_version` while keys, teams, policies and statuses come from current source
@@ -297,8 +301,10 @@ async def rollback_routing(
     catalog source tables are restored by id from the version's `catalog_state`, so later
     compiles keep the rolled-back routing and grants keep following their names across
     renames. The published routing is exactly `to_version`'s.
+    Gateways may have changed since `to_version`, so its routers meet the same rule as a
+    router write (`force` included, audited as `principal`).
     Raises LookupError if `to_version` is unknown or compacted, CompileError if the
-    resulting snapshot is invalid.
+    resulting snapshot is invalid, StrategyRejected if a router's strategy cannot be saved.
     """
     # Lock order: advisory lock, then the scope row lock, before any source read or write.
     # Catalog writers take only the scope row lock, so this serializes with them and no
@@ -315,6 +321,8 @@ async def rollback_routing(
         await restore_catalog_state(session, row.catalog_state)
     except ValueError as exc:
         raise CompileError(str(exc)) from exc
+    # Under the locks above. The registry read takes none, so the order stays as documented.
+    await check_stored_routers(session, scope, force=force, principal=principal, now=now)
     revision = await outbox.enqueue_recompile(session, scope, f"rollback to {to_version}")
     compiled = await compile_scope(
         session,

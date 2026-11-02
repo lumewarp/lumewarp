@@ -7,10 +7,12 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lumewarp_control_plane.compiler.strategy import MAX_GATEWAY_STRATEGIES
 from lumewarp_control_plane.models import AuditLog, GatewaySession, GatewayToken
+from lumewarp_control_plane.security import SecretKind, generate_secret
 from tests.api.helpers import ADMIN_AUTH, auth, report_strategies, suffix, user_with_token
 
 H = ADMIN_AUTH
@@ -33,8 +35,10 @@ FAILOVER = (PARAMS, MEMBER)
 async def report(committed: AsyncSession, api_scope: str) -> AsyncIterator:
     """Report as a gateway; every gateway it made is gone after the test."""
 
-    async def report_as(gateway: str, strategies: dict, **kwargs) -> None:
-        await report_strategies(committed, api_scope, f"{PREFIX}{gateway}", strategies, **kwargs)
+    async def report_as(gateway: str, strategies: dict, **kwargs):
+        return await report_strategies(
+            committed, api_scope, f"{PREFIX}{gateway}", strategies, **kwargs
+        )
 
     yield report_as
     await committed.rollback()
@@ -270,6 +274,81 @@ async def test_revoked_and_long_unseen_gateways_no_longer_count(client, report):
     # Offline is enough to edit, and its schema still validates.
     assert _create(client, recent).status_code == 201
     _422(_create(client, recent, params={"limit": 99}), "params.limit")
+
+
+async def test_revoking_the_reporting_token_ends_the_report_whatever_other_tokens_exist(
+    client, report, committed: AsyncSession, api_scope: str
+):
+    name = _name("two_tokens")
+    reporter = await report("two-tokens", {name: FAILOVER})
+    other = generate_secret(SecretKind.GATEWAY_TOKEN)
+    committed.add(
+        GatewayToken(
+            scope=api_scope,
+            gateway_id=f"{PREFIX}two-tokens",
+            name="unused",
+            token_hash=other.hash,
+            display_prefix=other.display_prefix,
+        )
+    )
+    await committed.execute(
+        update(GatewayToken).where(GatewayToken.id == reporter).values(revoked_at=datetime.now(UTC))
+    )
+    await committed.commit()
+    assert _strategy(client, name) is None
+    _422(_create(client, name), "no gateway reports")
+    # A token counts from its own Hello on.
+    await report("two-tokens", {name: FAILOVER})
+    assert _strategy(client, name) is not None
+
+
+async def test_a_report_of_another_token_is_ignored_when_that_token_is_revoked(
+    client, report, committed: AsyncSession, api_scope: str
+):
+    gone = _name("gone")
+    first = await report("handover", {gone: FAILOVER})
+    # A second token's Hello whose reports could not be stored: the old rows stay behind.
+    second = generate_secret(SecretKind.GATEWAY_TOKEN)
+    token = GatewayToken(
+        scope=api_scope,
+        gateway_id=f"{PREFIX}handover",
+        name="second",
+        token_hash=second.hash,
+        display_prefix=second.display_prefix,
+    )
+    committed.add(token)
+    await committed.flush()
+    await committed.execute(
+        update(GatewaySession)
+        .where(GatewaySession.gateway_id == f"{PREFIX}handover")
+        .values(token_id=token.id)
+    )
+    await committed.commit()
+    assert _strategy(client, gone) is not None
+    await committed.execute(
+        update(GatewayToken).where(GatewayToken.id == first).values(revoked_at=datetime.now(UTC))
+    )
+    await committed.commit()
+    assert _strategy(client, gone) is None
+
+
+async def test_capability_only_strategies_share_the_limit_and_name_rules(client, report):
+    prefix = _name("flood")
+    names = [f"{prefix}_{i}" for i in range(MAX_GATEWAY_STRATEGIES + 1)]
+    illegal = ["", "Bad Name", "UPPER", "x" * 64, "a/b"]
+    capabilities = [f"strategy:{n}" for n in illegal] + [f"strategy:{n}" for n in names]
+    await report("flood", {}, capabilities=capabilities, connected=True)
+    listed = {item["name"] for item in client.get("/api/v1/strategies", headers=H).json()["items"]}
+    assert listed >= set(names[:MAX_GATEWAY_STRATEGIES])
+    assert names[MAX_GATEWAY_STRATEGIES] not in listed
+    assert not listed & set(illegal)
+
+
+async def test_a_connected_gateway_counts_only_what_its_latest_hello_lists(client, report):
+    dropped = _name("dropped")
+    await report("rebuilt", {dropped: FAILOVER}, connected=True, capabilities=[])
+    assert _strategy(client, dropped) is None
+    _422(_create(client, dropped), "no gateway reports")
 
 
 async def test_connected_for_longer_than_the_window_still_counts(client, report):

@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
+import uuid
 from datetime import UTC, datetime
 
 import grpc
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import event, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import (
@@ -21,6 +23,10 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import (
 )
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2, usage_pb2_grpc
 from lumewarp_control_plane.compiler.publish import compact_versions
+from lumewarp_control_plane.compiler.strategy import (
+    MAX_GATEWAY_STRATEGIES,
+    load_strategies,
+)
 from lumewarp_control_plane.db import SessionFactory, create_session_factory
 from lumewarp_control_plane.grpc import bound_port, registry_for, serve
 from lumewarp_control_plane.ids import uuid7
@@ -164,6 +170,8 @@ async def _open_stream(
     scope: str = "",
     have_digest: bytes | None = None,
     strategies: tuple[cpb.StrategyDescriptor, ...] = (),
+    capabilities: tuple[str, ...] = (),
+    gateway_version: str = "test-gateway",
 ):
     """Hello; by default have_digest is the stored digest of have_version (if any)."""
     if have_digest is None:
@@ -175,9 +183,10 @@ async def _open_stream(
                 gateway_id=gateway_id,
                 have_version=have_version,
                 have_digest=have_digest,
-                gateway_version="test-gateway",
+                gateway_version=gateway_version,
                 scope=scope,
                 strategies=strategies,
+                supported_capabilities=capabilities,
             )
         )
     )
@@ -988,6 +997,334 @@ async def test_failure_to_store_descriptors_does_not_break_the_stream(
         )
         assert (await call.read()).WhichOneof("update") == "full"
         await _close(call)
+    finally:
+        await channel.close()
+        await server.stop(0)
+
+
+STRICT = '{"type":"object","properties":{"n":{"type":"integer","maximum":1}}}'
+LOOSE = '{"type":"object","properties":{"n":{"type":"integer","maximum":100}}}'
+
+
+async def _session_row(factory: SessionFactory, scope: str, gateway_id: str) -> GatewaySession:
+    async with factory() as session:
+        return await session.get(GatewaySession, (scope, gateway_id))
+
+
+async def _token_id(factory: SessionFactory, scope: str, gateway_id: str) -> uuid.UUID:
+    async with factory() as session:
+        return await session.scalar(
+            select(GatewayToken.id).where(
+                GatewayToken.scope == scope, GatewayToken.gateway_id == gateway_id
+            )
+        )
+
+
+async def test_a_stale_hello_read_slowly_cannot_overwrite_a_newer_connection(
+    session_factory: SessionFactory, monkeypatch
+):
+    """A's Hello is still being read when B connects with a stricter schema and finishes."""
+    import lumewarp_control_plane.grpc as module
+
+    real = module.normalize_hello
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(hello):
+        if hello.gateway_version == "old-build":
+            entered.set()
+            assert release.wait(10)
+        return real(hello)
+
+    monkeypatch.setattr(module, "normalize_hello", slow)
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    token = tokens["gateway-a"]
+    try:
+        old = await _open_stream(
+            stub,
+            token,
+            "gateway-a",
+            strategies=(_descriptor("loose", "aa", LOOSE), _descriptor("shared", "a1", LOOSE)),
+            capabilities=("strategy:loose", "strategy:shared"),
+            gateway_version="old-build",
+        )
+        assert await asyncio.to_thread(entered.wait, 10)
+        new = await _open_stream(
+            stub,
+            token,
+            "gateway-a",
+            strategies=(_descriptor("shared", "bb", STRICT),),
+            capabilities=("strategy:shared",),
+            gateway_version="new-build",
+        )
+        assert (await asyncio.wait_for(new.read(), 5)).WhichOneof("update") == "full"
+        release.set()
+        with pytest.raises(grpc.aio.AioRpcError) as error:
+            await asyncio.wait_for(old.read(), 5)
+        assert error.value.code() is grpc.StatusCode.UNAVAILABLE
+
+        stored = await _stored(session_factory, scope, "gateway-a")
+        assert {name: row.digest for name, row in stored.items()} == {"shared": "bb"}
+        row = await _session_row(session_factory, scope, "gateway-a")
+        assert row.connected is True
+        assert row.gateway_version == "new-build"
+        assert row.capabilities == ["strategy:shared"]
+        async with session_factory() as session:
+            registry = await load_strategies(session, scope)
+        assert not registry.known("loose")
+        assert registry.router_problems("shared", {"n": 50}, [])
+        # And the live stream still is the new one.
+        current = registry_for(server)._sessions[(scope, "gateway-a")]
+        assert current.gateway_version == "new-build"
+        await _close(new)
+    finally:
+        release.set()
+        await channel.close()
+        await server.stop(0)
+
+
+async def test_hello_transaction_holds_the_row_lock_until_its_descriptors_are_written(
+    session_factory: SessionFactory, monkeypatch
+):
+    """A sits inside its transaction with the row locked; B's Hello must queue behind it."""
+    import lumewarp_control_plane.grpc as module
+
+    real = module.replace_gateway_strategies
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def pause_first(session, scope, gateway_id, token_id, reported, now):
+        await real(session, scope, gateway_id, token_id, reported, now)
+        if any(item.name == "loose" for item in reported):
+            entered.set()
+            await asyncio.wait_for(release.wait(), 10)
+
+    monkeypatch.setattr(module, "replace_gateway_strategies", pause_first)
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    token = tokens["gateway-a"]
+    try:
+        old = await _open_stream(
+            stub,
+            token,
+            "gateway-a",
+            strategies=(_descriptor("loose", "aa", LOOSE),),
+            gateway_version="old-build",
+        )
+        await asyncio.wait_for(entered.wait(), 10)
+        new = await _open_stream(
+            stub,
+            token,
+            "gateway-a",
+            strategies=(_descriptor("strict", "bb", STRICT),),
+            gateway_version="new-build",
+        )
+        first = asyncio.ensure_future(new.read())
+        done, _ = await asyncio.wait({first}, timeout=0.5)
+        assert not done, "B got past A's row lock"
+        assert await _stored(session_factory, scope, "gateway-a") == {}
+        release.set()
+        assert (await asyncio.wait_for(first, 5)).WhichOneof("update") == "full"
+        stored = await _stored(session_factory, scope, "gateway-a")
+        assert {name: row.digest for name, row in stored.items()} == {"strict": "bb"}
+        row = await _session_row(session_factory, scope, "gateway-a")
+        assert row.gateway_version == "new-build"
+        assert row.token_id == await _token_id(session_factory, scope, "gateway-a")
+        assert all(
+            r.token_id == row.token_id
+            for r in (await _stored(session_factory, scope, "gateway-a")).values()
+        )
+        with pytest.raises(grpc.aio.AioRpcError):
+            await asyncio.wait_for(old.read(), 5)
+        await _close(new)
+    finally:
+        release.set()
+        await channel.close()
+        await server.stop(0)
+
+
+async def test_router_validation_sees_one_hello_never_a_mix(
+    session_factory: SessionFactory, c4_engine: AsyncEngine, monkeypatch
+):
+    """A new build drops a strategy and tightens another. Until its Hello commits a reader sees
+    the old build whole, from then on the new build whole, in one statement.
+    """
+    import lumewarp_control_plane.grpc as module
+
+    real = module.replace_gateway_strategies
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def pause_new_build(session, scope, gateway_id, token_id, reported, now):
+        await real(session, scope, gateway_id, token_id, reported, now)
+        if any(item.digest == "b0" for item in reported):
+            entered.set()
+            await asyncio.wait_for(release.wait(), 10)
+
+    monkeypatch.setattr(module, "replace_gateway_strategies", pause_new_build)
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    token = tokens["gateway-a"]
+
+    async def read():
+        statements = []
+
+        def count(_conn, _cursor, statement, *_rest):
+            statements.append(statement)
+
+        event.listen(c4_engine.sync_engine, "before_cursor_execute", count)
+        try:
+            async with session_factory() as session:
+                registry = await load_strategies(session, scope)
+        finally:
+            event.remove(c4_engine.sync_engine, "before_cursor_execute", count)
+        assert len(statements) == 1, statements
+        return registry
+
+    try:
+        first = await _open_stream(
+            stub,
+            token,
+            "gateway-a",
+            strategies=(_descriptor("dropped", "a1"), _descriptor("kept", "a0", LOOSE)),
+            capabilities=("strategy:dropped", "strategy:kept"),
+        )
+        await first.read()
+        await _close(first)
+
+        second = await _open_stream(
+            stub,
+            token,
+            "gateway-a",
+            strategies=(_descriptor("kept", "b0", STRICT),),
+            capabilities=("strategy:kept",),
+        )
+        await asyncio.wait_for(entered.wait(), 10)
+        during = await read()
+        assert during.known("dropped")
+        assert during.support("kept")[0].digest == "a0"
+        assert during.router_problems("kept", {"n": 50}, []) == []
+        release.set()
+        assert (await asyncio.wait_for(second.read(), 5)).WhichOneof("update") == "full"
+        after = await read()
+        assert not after.known("dropped")
+        assert after.support("kept")[0].digest == "b0"
+        assert after.router_problems("kept", {"n": 50}, [])
+        await _close(second)
+    finally:
+        release.set()
+        await channel.close()
+        await server.stop(0)
+
+
+async def test_capability_flood_is_bounded_counted_and_keeps_the_stream(
+    session_factory: SessionFactory,
+):
+    from lumewarp_control_plane.metrics import Metrics
+
+    metrics = Metrics()
+    scope, tokens = await _seed(session_factory)
+    server = await serve(
+        Settings(scope=scope, grpc_bind="127.0.0.1:0", background_enabled=False),
+        session_factory,
+        metrics,
+    )
+    channel = grpc.aio.insecure_channel(f"127.0.0.1:{bound_port(server)}")
+    stub = cpb_grpc.ConfigServiceStub(channel)
+    names = [f"s_{i}" for i in range(MAX_GATEWAY_STRATEGIES + 1)]
+    illegal = ["", "Bad Name", "UPPER", "x" * 64, "a/b"]
+    capabilities = tuple(f"strategy:{n}" for n in (*illegal, *names))
+    try:
+        call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", capabilities=capabilities)
+        assert (await call.read()).WhichOneof("update") == "full"
+        row = await _session_row(session_factory, scope, "gateway-a")
+        assert len(row.capabilities) == MAX_GATEWAY_STRATEGIES
+        assert f"strategy:{names[-1]}" not in row.capabilities
+        async with session_factory() as session:
+            registry = await load_strategies(session, scope)
+        assert set(names[:MAX_GATEWAY_STRATEGIES]) <= set(registry.names())
+        assert not set(illegal) & set(registry.names())
+        assert not registry.known(names[-1])
+        ignored = metrics.value("lumewarp_cp_gateway_strategies_ignored_total", {})
+        assert ignored == len(illegal) + 1
+        await _close(call)
+    finally:
+        await channel.close()
+        await server.stop(0)
+
+
+async def test_descriptors_and_capabilities_share_one_limit(session_factory: SessionFactory):
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    described = tuple(_descriptor(f"d_{i}", "aa") for i in range(100))
+    capabilities = tuple(f"strategy:c_{i}" for i in range(100))
+    try:
+        call = await _open_stream(
+            stub,
+            tokens["gateway-a"],
+            "gateway-a",
+            strategies=described,
+            capabilities=("retries", *capabilities),
+        )
+        assert (await call.read()).WhichOneof("update") == "full"
+        row = await _session_row(session_factory, scope, "gateway-a")
+        strategies = [c for c in row.capabilities if c.startswith("strategy:")]
+        assert len(strategies) == MAX_GATEWAY_STRATEGIES
+        assert {f"strategy:d_{i}" for i in range(100)} <= set(strategies)
+        assert "retries" in row.capabilities
+        assert len(await _stored(session_factory, scope, "gateway-a")) == 100
+        await _close(call)
+    finally:
+        await channel.close()
+        await server.stop(0)
+
+
+async def test_an_unreadable_hello_keeps_what_is_known_and_the_stream(
+    session_factory: SessionFactory, monkeypatch
+):
+    import lumewarp_control_plane.grpc as module
+
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    try:
+        call = await _open_stream(
+            stub,
+            tokens["gateway-a"],
+            "gateway-a",
+            strategies=(_descriptor("one", "aa"),),
+            capabilities=("retries",),
+        )
+        await call.read()
+        await _close(call)
+
+        def fail(_hello):
+            raise RuntimeError("unreadable")
+
+        monkeypatch.setattr(module, "normalize_hello", fail)
+        call = await _open_stream(stub, tokens["gateway-a"], "gateway-a")
+        assert (await call.read()).WhichOneof("update") == "full"
+        row = await _session_row(session_factory, scope, "gateway-a")
+        assert row.connected is True
+        assert set(row.capabilities) == {"retries", "strategy:one"}
+        assert set(await _stored(session_factory, scope, "gateway-a")) == {"one"}
+        await _close(call)
+    finally:
+        await channel.close()
+        await server.stop(0)
+
+
+async def test_session_ids_always_move_forward(session_factory: SessionFactory, monkeypatch):
+    import lumewarp_control_plane.grpc as module
+
+    scope, _ = await _seed(session_factory)
+    server, channel, _ = await _start(session_factory, scope)
+    try:
+        registry = registry_for(server)
+        fixed = uuid7()
+        monkeypatch.setattr(module, "uuid7", lambda: fixed)  # same millisecond, clock stuck
+        first = registry._next_session_id(None)
+        second = registry._next_session_id(None)
+        assert first < second
+        ahead = uuid.UUID(int=second.int + 1000)  # a stored id from before a clock step back
+        assert registry._next_session_id(ahead) > ahead
     finally:
         await channel.close()
         await server.stop(0)

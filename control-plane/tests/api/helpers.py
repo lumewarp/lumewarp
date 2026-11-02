@@ -138,9 +138,10 @@ async def report_strategies(
     last_seen_at=None,
     revoked: bool = False,
     capabilities: list[str] | None = None,
-) -> None:
-    """A gateway as Hello leaves it: a session, a token and its reports. A strategy maps to
-    (params schema, member schema), each a dict or the raw text a gateway sends.
+) -> uuid.UUID:
+    """A gateway as Hello leaves it: a new token, the session and reports of its Hello. Returns
+    the token. A strategy maps to (params schema, member schema), each a dict or the raw text
+    a gateway sends.
     """
     import hashlib
     import json
@@ -151,7 +152,7 @@ async def report_strategies(
     from lumewarp_control_plane._proto.lumewarp.config.v1 import config_service_pb2 as cpb
     from lumewarp_control_plane.compiler.strategy import (
         BUILTIN_STRATEGIES,
-        clean_reported_strategies,
+        normalize_hello,
         replace_gateway_strategies,
     )
     from lumewarp_control_plane.models import GatewaySession, GatewayToken
@@ -160,9 +161,21 @@ async def report_strategies(
     now = datetime.now(UTC)
     if capabilities is None:
         capabilities = [f"strategy:{name}" for name in (*BUILTIN_STRATEGIES, *strategies)]
+    secret = generate_secret(SecretKind.GATEWAY_TOKEN)
+    token = GatewayToken(
+        scope=scope,
+        gateway_id=gateway_id,
+        name=gateway_id,
+        token_hash=secret.hash,
+        display_prefix=secret.display_prefix,
+        revoked_at=now if revoked else None,
+    )
+    session.add(token)
+    await session.flush()
     values = {
         "connected": connected,
         "capabilities": capabilities,
+        "token_id": token.id,
         "last_seen_at": last_seen_at or now,
         "connected_at": now,
     }
@@ -170,17 +183,6 @@ async def report_strategies(
         insert(GatewaySession)
         .values(scope=scope, gateway_id=gateway_id, **values)
         .on_conflict_do_update(index_elements=["scope", "gateway_id"], set_=values)
-    )
-    secret = generate_secret(SecretKind.GATEWAY_TOKEN)
-    session.add(
-        GatewayToken(
-            scope=scope,
-            gateway_id=gateway_id,
-            name=gateway_id,
-            token_hash=secret.hash,
-            display_prefix=secret.display_prefix,
-            revoked_at=now if revoked else None,
-        )
     )
     text = lambda schema: schema if isinstance(schema, str) else json.dumps(schema)  # noqa: E731
     reported = [
@@ -194,7 +196,9 @@ async def report_strategies(
         )
         for name, (params, member) in strategies.items()
     ]
+    normalized = normalize_hello(cpb.Hello(strategies=reported))
     await replace_gateway_strategies(
-        session, scope, gateway_id, clean_reported_strategies(reported), now
+        session, scope, gateway_id, token.id, normalized.strategies, now
     )
     await session.commit()
+    return token.id

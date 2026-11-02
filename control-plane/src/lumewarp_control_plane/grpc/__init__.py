@@ -30,7 +30,9 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import (
 )
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2, usage_pb2_grpc
 from lumewarp_control_plane.compiler.strategy import (
-    clean_reported_strategies,
+    NormalizedHello,
+    ReportedStrategy,
+    normalize_hello,
     replace_gateway_strategies,
 )
 from lumewarp_control_plane.db import SessionFactory
@@ -260,6 +262,18 @@ class SessionRegistry:
         self._build_lock = asyncio.Lock()
         self._snapshots: OrderedDict[tuple[str, int, bytes], snapshot_pb2.Snapshot] = OrderedDict()
         self._updates: OrderedDict[_UpdateKey, config_service_pb2.ConfigUpdate] = OrderedDict()
+        self._last_session_id = uuid.UUID(int=0)
+
+    def _next_session_id(self, previous: uuid.UUID | None) -> uuid.UUID:
+        """Later than any session seen, as `_mirror`'s fence needs: two UUIDv7 in one
+        millisecond are in random order, and the wall clock can step back.
+        """
+        floor = max(self._last_session_id, previous or self._last_session_id)
+        candidate = uuid7()
+        if candidate <= floor:
+            candidate = uuid.UUID(int=floor.int + 1)
+        self._last_session_id = candidate
+        return candidate
 
     def notify_published(self, scope: str, version: int) -> None:
         """Wake all live streams in the changed scope; polling covers missed notifications."""
@@ -360,7 +374,17 @@ class SessionRegistry:
                 self._updates.popitem(last=False)
             return update
 
-    async def _mirror(self, state: _StreamState, *, disconnected: bool = False) -> None:
+    async def _mirror(
+        self,
+        state: _StreamState,
+        *,
+        disconnected: bool = False,
+        reported: list[ReportedStrategy] | None = None,
+    ) -> None:
+        """Upsert the status row unless a newer session owns it. With `reported`, also replace
+        the gateway's descriptors in the same transaction, under the row lock the upsert took,
+        so a stale Hello never overwrites them and readers never see half a Hello.
+        """
         if self.session_factory is None:
             return
         now = datetime.now(UTC)
@@ -370,6 +394,7 @@ class SessionRegistry:
             "scope": state.scope,
             "gateway_id": state.gateway_id,
             "session_id": state.session_id,
+            "token_id": state.identity.token_id,
             "connected": not disconnected,
             "gateway_version": state.gateway_version[:100],
             "capabilities": state.capabilities,
@@ -398,24 +423,47 @@ class SessionRegistry:
             where=GatewaySession.session_id <= stmt.excluded.session_id,
         )
         async with self.session_factory() as session, session.begin():
-            await session.execute(stmt)
-
-    async def _store_strategies(self, state: _StreamState, hello: config_service_pb2.Hello) -> None:
-        """Keep what the Hello reports. It is the gateway's data and only informs the API, so
-        no failure here may affect the stream; parsing is off the event loop.
-        """
-        if self.session_factory is None:
-            return
-        try:
-            reported = await asyncio.to_thread(clean_reported_strategies, list(hello.strategies))
-            async with self.session_factory() as session, session.begin():
-                await replace_gateway_strategies(
-                    session, state.scope, state.gateway_id, reported, datetime.now(UTC)
+            owner = await session.scalar(stmt.returning(GatewaySession.session_id))
+            if owner is None or reported is None:
+                return
+            try:
+                # Descriptors only inform the API: failing here must not cost the status row
+                # or the stream. A connected gateway's presence still comes from that row.
+                async with session.begin_nested():
+                    await replace_gateway_strategies(
+                        session,
+                        state.scope,
+                        state.gateway_id,
+                        state.identity.token_id,
+                        reported,
+                        now,
+                    )
+            except Exception:
+                log.exception(
+                    "could not store the strategies of gateway %s/%s",
+                    state.scope,
+                    state.gateway_id,
                 )
+
+    async def _normalize_hello(
+        self, hello: config_service_pb2.Hello, stored_capabilities: list[str]
+    ) -> NormalizedHello:
+        """Off the event loop: its size is up to the gateway. No failure may end the stream;
+        unreadable, it changes nothing about what is known of the gateway.
+        """
+        try:
+            normalized = await asyncio.to_thread(normalize_hello, hello)
         except Exception:
-            log.exception(
-                "could not store the strategies of gateway %s/%s", state.scope, state.gateway_id
+            log.exception("could not read a gateway Hello's strategies")
+            return NormalizedHello(capabilities=stored_capabilities, strategies=None)
+        if normalized.ignored:
+            self.metrics.gateway_strategies_ignored.inc(normalized.ignored)
+            log.warning(
+                "gateway %s: ignored %d strategies or capabilities of its Hello",
+                hello.gateway_id[:200],
+                normalized.ignored,
             )
+        return normalized
 
     @asynccontextmanager
     async def stream(
@@ -428,6 +476,8 @@ class SessionRegistry:
         last_nack_version = None
         last_nack_code = None
         last_nack_reason = None
+        previous_session = None
+        stored_capabilities: list[str] = []
         if self.session_factory is not None:
             async with self.session_factory() as session:
                 previous = await session.get(GatewaySession, (identity.scope, identity.gateway_id))
@@ -437,14 +487,19 @@ class SessionRegistry:
                     last_nack_version = previous.last_nack_version
                     last_nack_code = previous.last_nack_code
                     last_nack_reason = previous.last_nack_reason
+                    previous_session = previous.session_id
+                    stored_capabilities = list(previous.capabilities)
+        # Before anything slow: the id is this connection's place in line.
+        session_id = self._next_session_id(previous_session)
+        normalized = await self._normalize_hello(hello, stored_capabilities)
         state = _StreamState(
             identity=identity,
-            session_id=uuid7(),
+            session_id=session_id,
             hello_version=hello.have_version,
             hello_digest=bytes(hello.have_digest),
             hello_scope_matches=hello.scope == identity.scope,
             gateway_version=hello.gateway_version,
-            capabilities=list(hello.supported_capabilities),
+            capabilities=normalized.capabilities,
             peer=peer,
             connected_at=datetime.now(UTC),
             acked_version=hello.have_version,
@@ -456,7 +511,10 @@ class SessionRegistry:
         key = (identity.scope, identity.gateway_id)
         async with self._lock:
             old = self._sessions.get(key)
-            if old is not None:
+            if old is not None and old.session_id > state.session_id:
+                # A newer connection overtook this one while its Hello was being read.
+                state.close(grpc.StatusCode.UNAVAILABLE, "gateway stream replaced")
+            elif old is not None:
                 # Replicas must not share a gateway_id/token: they would evict each other.
                 log.warning(
                     "gateway %s/%s reconnected; replacing its previous stream (peer %s -> %s)",
@@ -466,11 +524,11 @@ class SessionRegistry:
                     peer,
                 )
                 old.close(grpc.StatusCode.UNAVAILABLE, "gateway stream replaced")
-            self._sessions[key] = state
+            if state.closed is None:
+                self._sessions[key] = state
             self.metrics.gateway_sessions.set(len(self._sessions))
         try:
-            await self._mirror(state)
-            await self._store_strategies(state, hello)
+            await self._mirror(state, reported=normalized.strategies)
             yield state
         finally:
             async with self._lock:

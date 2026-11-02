@@ -15,8 +15,9 @@ from lumewarp_control_plane.compiler import (
 )
 from lumewarp_control_plane.compiler.strategy import strategy_problem
 from lumewarp_control_plane.compiler.validate import SnapshotInvalid, validate_snapshot
-from lumewarp_control_plane.models import CatalogKind, CatalogName, GatewaySession, Router
+from lumewarp_control_plane.models import CatalogKind, CatalogName, Router
 from tests import factories
+from tests.api.helpers import report_strategies
 from tests.compiler.helpers import OCT, SCOPE, add_router, load_version, seed_scope, touch
 from tests.conftest import create_database, drop_database
 
@@ -40,14 +41,14 @@ async def test_custom_strategy_compile_capability_warning_and_rollback(factory):
     assert json.loads(router.params_json) == {"headers": ["x-pin"]}
     assert list(result.snapshot.required_capabilities) == ["strategy:header_pin"]
     assert len(result.warnings) == 1 and "not advertised" in result.warnings[0]
-    async with factory() as s, s.begin():
-        s.add(
-            GatewaySession(
-                scope=SCOPE,
-                gateway_id="custom-gateway",
-                connected=True,
-                capabilities=["strategy:header_pin"],
-            )
+    async with factory() as s:
+        await report_strategies(
+            s,
+            SCOPE,
+            "custom-gateway",
+            {},
+            connected=True,
+            capabilities=["strategy:header_pin"],
         )
     async with factory() as s:
         assert not (await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)).warnings

@@ -940,6 +940,7 @@ class ConfigVersionOut(ApiModel):
 
 class RollbackCreate(ApiModel):
     version: int = Field(gt=0)
+    force: bool = _force_field()
 
 
 class RollbackOut(ApiModel):

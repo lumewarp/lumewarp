@@ -13,6 +13,7 @@ from lumewarp_control_plane.api.common import (
     conflict,
     mutation,
     parse_int_cursor,
+    validation_error,
 )
 from lumewarp_control_plane.api.schemas import (
     ConfigVersionOut,
@@ -21,6 +22,7 @@ from lumewarp_control_plane.api.schemas import (
     RollbackOut,
 )
 from lumewarp_control_plane.authz import Action, Authz
+from lumewarp_control_plane.compiler.strategy import StrategyRejected
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import ConfigVersion
 
@@ -86,7 +88,11 @@ async def rollback_config(
                 settings.scope,
                 body.version,
                 require_local_membership=authz.authorizer.manages_grants,
+                force=body.force,
+                principal=authz.principal,
             )
+        except StrategyRejected as exc:
+            raise validation_error(exc.field, exc.message) from exc
         except LookupError as exc:
             raise not_found("config version not found") from exc
         except compiler.CompileError as exc:
@@ -97,6 +103,6 @@ async def rollback_config(
             resource_type="config_version",
             resource_id=version,
             principal=authz.principal,
-            details={"to_version": body.version},
+            details={"to_version": body.version, **({"force": True} if body.force else {})},
         )
     return RollbackOut(version=version)

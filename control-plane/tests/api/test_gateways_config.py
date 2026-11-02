@@ -107,7 +107,7 @@ async def test_config_versions_and_rollback(client, committed, api_scope, monkey
     await committed.commit()
     assert client.get("/api/v1/config/versions", headers=auth(secret)).status_code == 403
 
-    async def fake_rollback(session, scope, version, *, require_local_membership):
+    async def fake_rollback(session, scope, version, *, require_local_membership, **_):
         assert require_local_membership is True
         if version == 404:
             raise LookupError("missing")
@@ -138,3 +138,21 @@ async def test_config_versions_and_rollback(client, committed, api_scope, monkey
             await check.scalars(select(AuditLog.action).where(AuditLog.action == "config.rollback"))
         ).all()
         assert actions
+
+
+def test_rollback_rejected_by_strategy_rules_is_422_and_force_reaches_it(client, monkeypatch):
+    from lumewarp_control_plane import compiler
+    from lumewarp_control_plane.compiler.strategy import StrategyRejected
+
+    seen = []
+
+    async def refuse(session, scope, version, *, require_local_membership, force, principal):
+        seen.append((force, principal is not None))
+        raise StrategyRejected("strategy", "router 'r': no gateway reports strategy 's'")
+
+    monkeypatch.setattr(compiler, "rollback_routing", refuse)
+    for body, force in (({"version": 1}, False), ({"version": 1, "force": True}, True)):
+        resp = client.post("/api/v1/config/rollback", json=body, headers=ADMIN_AUTH)
+        assert resp.status_code == 422, resp.text
+        assert "no gateway reports" in resp.json()["error"]["message"]
+        assert seen.pop() == (force, True)

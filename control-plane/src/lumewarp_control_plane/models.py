@@ -1052,6 +1052,10 @@ class GatewaySession(Base):
     )
     gateway_id: Mapped[str] = mapped_column(String(200), nullable=False)
     session_id: Mapped[uuid.UUID | None] = mapped_column()
+    # The token of the latest Hello. Another token of this gateway says nothing about it.
+    token_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("gateway_tokens.id", ondelete="SET NULL")
+    )
     connected: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     gateway_version: Mapped[str] = mapped_column(String(100), nullable=False, server_default="")
     capabilities: Mapped[list[str]] = mapped_column(
@@ -1090,6 +1094,10 @@ class GatewayStrategy(Base):
     name: Mapped[str] = mapped_column(String(63), nullable=False)
     digest: Mapped[str] = mapped_column(String(128), nullable=False)
     descriptor: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # The report stops counting when this token is revoked.
+    token_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("gateway_tokens.id", ondelete="CASCADE"), nullable=False
+    )
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 

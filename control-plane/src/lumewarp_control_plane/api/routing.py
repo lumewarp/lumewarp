@@ -55,7 +55,11 @@ from lumewarp_control_plane.api.schemas import (
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.compiler.strategy import (
     StrategyRegistry,
+    StrategyRejected,
+    audit_forced,
+    check_router_strategy,
     load_strategies,
+    member_settings,
     params_problem,
     strategy_problem,
 )
@@ -213,53 +217,34 @@ async def _validate_spec(session: AsyncSession, spec: RouterSpec) -> None:
     await _existing_models(session, spec.fallback_model_ids, "fallback_model_ids")
 
 
-def _member_settings(members: list[Any], splits: list[Any]) -> list[tuple[str, dict[str, Any]]]:
-    """Each member's params with the path errors name it by, split members included."""
-    settings = [(f"members[{i}].params", m.params) for i, m in enumerate(members)]
-    for s, split in enumerate(splits):
-        settings += [
-            (f"traffic_split[{s}].members[{i}].params", m.params)
-            for i, m in enumerate(split.members)
-        ]
-    return settings
-
-
 async def _validate_strategy(
     session: AsyncSession, settings: Any, spec: RouterSpec, *, force: bool
 ) -> list[str]:
-    """422 unless the gateways can serve the strategy with these settings. Returns the
-    connected gateways that `force` is saving past, which the caller audits.
-    """
+    """One registry, read once. Returns the connected gateways `force` saved past."""
     registry = await load_strategies(session, settings.scope)
-    if not registry.known(spec.strategy):
-        raise validation_error("strategy", f"no gateway reports strategy {spec.strategy!r}")
-    missing = registry.missing(spec.strategy)
-    if missing and not force:
-        raise validation_error(
-            "strategy",
-            f"connected gateways lack {spec.strategy!r} and would reject the whole config: "
-            f"{', '.join(missing)}; send force to save anyway",
+    try:
+        return check_router_strategy(
+            registry,
+            spec.strategy,
+            spec.params,
+            member_settings(spec.members, spec.traffic_split),
+            force=force,
         )
-    problems = registry.router_problems(
-        spec.strategy, spec.params, _member_settings(spec.members, spec.traffic_split)
-    )
-    if problems:
-        raise validation_error("params", "; ".join(problems[:10]))
-    return missing
+    except StrategyRejected as exc:
+        raise validation_error(exc.field, exc.message) from exc
 
 
 def _audit_forced(
     session: AsyncSession, authz: Any, row: Router, strategy: str, missing: list[str]
 ) -> None:
-    if missing:
-        audit.record(
-            session,
-            action="router.force_save",
-            resource_type="router",
-            resource_id=row.id,
-            principal=authz.principal,
-            details={"name": row.name, "strategy": strategy, "missing_gateways": missing},
-        )
+    audit_forced(
+        session,
+        router_id=row.id,
+        name=row.name,
+        strategy=strategy,
+        missing=missing,
+        principal=authz.principal,
+    )
 
 
 async def _write_children(
@@ -320,7 +305,7 @@ def _router_out_problems(
     members: list[RouterMemberOut],
     splits: list[TrafficSplitOut],
 ) -> list[str]:
-    return registry.router_problems(row.strategy, row.params, _member_settings(members, splits))
+    return registry.router_problems(row.strategy, row.params, member_settings(members, splits))
 
 
 async def _routers_out(session: AsyncSession, scope: str, rows: list[Router]) -> list[RouterOut]:

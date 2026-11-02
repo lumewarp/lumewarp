@@ -11,7 +11,8 @@ Keep the subset in step with the gateway's `lumewarp-router-api/src/schema.rs`; 
 import hashlib
 import json
 import re
-from collections.abc import Iterable
+import uuid
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,11 +20,22 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, validators
 from referencing import Registry
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumewarp_control_plane.models import GatewaySession, GatewayStrategy, GatewayToken
+from lumewarp_control_plane import audit
+from lumewarp_control_plane.models import (
+    ActorType,
+    GatewaySession,
+    GatewayStrategy,
+    GatewayToken,
+    Router,
+    RouterMember,
+    RouterSplit,
+    RouterSplitMember,
+)
+from lumewarp_control_plane.security import Principal
 
 _MANIFEST = json.loads(Path(__file__).with_name("builtin_strategies.json").read_text("utf-8"))
 BUILTIN_DESCRIPTORS: dict[str, dict[str, Any]] = {d["name"]: d for d in _MANIFEST["strategies"]}
@@ -31,7 +43,11 @@ BUILTIN_STRATEGIES = frozenset(BUILTIN_DESCRIPTORS)
 
 MAX_PARAMS_BYTES = 16 * 1024
 MAX_SCHEMA_BYTES = 16 * 1024
-MAX_HELLO_STRATEGIES = 128
+# Per gateway, whether a name comes from a descriptor or a capability.
+MAX_GATEWAY_STRATEGIES = 128
+_MAX_OTHER_CAPABILITIES = 64
+_MAX_CAPABILITY_LENGTH = 128
+_STRATEGY_CAPABILITY = "strategy:"
 # A gateway unseen for longer no longer makes a strategy available.
 GATEWAY_RETENTION = timedelta(days=30)
 STRATEGY_NAME = re.compile(r"[a-z][a-z0-9_]{0,62}")
@@ -129,6 +145,8 @@ def _scalar_problem(path: str, schema: Any) -> str | None:
     for bound in ("minimum", "maximum"):
         if bound in schema and not _is_number(schema[bound]):
             return f"{path}: {bound} must be a number"
+    if "minimum" in schema and "maximum" in schema and schema["minimum"] > schema["maximum"]:
+        return f"{path}: minimum is above maximum"
     if "enum" in schema:
         match = {
             "string": lambda v: isinstance(v, str),
@@ -302,50 +320,110 @@ class ReportedStrategy:
     descriptor: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class NormalizedHello:
+    """What a Hello is taken to say, bounded. `strategies` is None when it could not be read:
+    what is stored then stays as it is.
+    """
+
+    capabilities: list[str]
+    strategies: list[ReportedStrategy] | None
+    ignored: int = 0
+
+
+def bounded_strategy_names(names: Iterable[str]) -> tuple[list[str], int]:
+    """The per-gateway set of strategies: valid names, deduplicated, up to the limit, and how
+    many entries were left out. Descriptors and capabilities both pass through this.
+    """
+    kept: dict[str, None] = {}
+    ignored = 0
+    for name in names:
+        if name in kept:
+            continue
+        if STRATEGY_NAME.fullmatch(name) and len(kept) < MAX_GATEWAY_STRATEGIES:
+            kept[name] = None
+        else:
+            ignored += 1
+    return list(kept), ignored
+
+
+def _capability_strategies(capabilities: Iterable[str]) -> Iterable[str]:
+    return (
+        capability[len(_STRATEGY_CAPABILITY) :]
+        for capability in capabilities
+        if capability.startswith(_STRATEGY_CAPABILITY)
+    )
+
+
 def _clean_text(text: str, limit: int) -> str:
     return text.replace("\x00", "")[:limit]
 
 
-def clean_reported_strategies(reported: Iterable[Any]) -> list[ReportedStrategy]:
-    """Hello's descriptors in the form stored. A bad schema is dropped, not the strategy: the
-    gateway still has it, only its settings cannot be validated before `configure`.
+def _clean_descriptor(item: Any) -> ReportedStrategy:
+    params_schema, params_error = parse_untrusted_schema(item.params_schema_json)
+    member_schema, member_error = parse_untrusted_schema(item.member_schema_json)
+    digest = item.digest
+    if not _DIGEST.fullmatch(digest):
+        digest = hashlib.sha256(item.SerializeToString(deterministic=True)).hexdigest()
+    return ReportedStrategy(
+        name=item.name,
+        digest=digest,
+        descriptor={
+            "name": item.name,
+            "title": _clean_text(item.title, _MAX_TITLE),
+            "description": _clean_text(item.description, _MAX_DESCRIPTION),
+            "uses_weight": item.uses_weight,
+            "needs": [n for n in item.needs[:_MAX_NEEDS] if _NEED.fullmatch(n)],
+            "params_schema": params_schema,
+            "member_schema": member_schema,
+            "schema_problems": [p for p in (params_error, member_error) if p],
+        },
+    )
+
+
+def normalize_hello(hello: Any) -> NormalizedHello:
+    """Hello in the form stored. A bad schema is dropped, not the strategy: the gateway still
+    has it, only its settings cannot be validated before `configure`. Past the per-gateway
+    limit the rest is ignored and counted. CPU bound on hostile input: run off the event loop.
     """
-    cleaned: dict[str, ReportedStrategy] = {}
-    for item in reported:
-        if not STRATEGY_NAME.fullmatch(item.name) or (
-            item.name not in cleaned and len(cleaned) >= MAX_HELLO_STRATEGIES
-        ):
+    descriptors = {item.name: item for item in hello.strategies}
+    names, ignored = bounded_strategy_names(
+        [*descriptors, *_capability_strategies(hello.supported_capabilities)]
+    )
+    capabilities: list[str] = []
+    others = 0
+    for capability in hello.supported_capabilities:
+        if capability.startswith(_STRATEGY_CAPABILITY):
             continue
-        params_schema, params_error = parse_untrusted_schema(item.params_schema_json)
-        member_schema, member_error = parse_untrusted_schema(item.member_schema_json)
-        digest = item.digest
-        if not _DIGEST.fullmatch(digest):
-            digest = hashlib.sha256(item.SerializeToString(deterministic=True)).hexdigest()
-        cleaned[item.name] = ReportedStrategy(
-            name=item.name,
-            digest=digest,
-            descriptor={
-                "name": item.name,
-                "title": _clean_text(item.title, _MAX_TITLE),
-                "description": _clean_text(item.description, _MAX_DESCRIPTION),
-                "uses_weight": item.uses_weight,
-                "needs": [n for n in item.needs[:_MAX_NEEDS] if _NEED.fullmatch(n)],
-                "params_schema": params_schema,
-                "member_schema": member_schema,
-                "schema_problems": [p for p in (params_error, member_error) if p],
-            },
-        )
-    return list(cleaned.values())
+        if (
+            others < _MAX_OTHER_CAPABILITIES
+            and len(capability) <= _MAX_CAPABILITY_LENGTH
+            and "\x00" not in capability
+        ):
+            capabilities.append(capability)
+            others += 1
+        else:
+            ignored += 1
+    # A connected gateway's presence is read from here, so every kept strategy is listed.
+    capabilities.extend(f"{_STRATEGY_CAPABILITY}{name}" for name in names)
+    return NormalizedHello(
+        capabilities=capabilities,
+        strategies=[_clean_descriptor(descriptors[n]) for n in names if n in descriptors],
+        ignored=ignored,
+    )
 
 
 async def replace_gateway_strategies(
     session: AsyncSession,
     scope: str,
     gateway_id: str,
+    token_id: uuid.UUID,
     reported: list[ReportedStrategy],
     now: datetime,
 ) -> None:
-    """What a gateway reports replaces all it reported before; a changed digest updates."""
+    """What a gateway reports replaces all it reported before; a changed digest updates. The
+    caller holds the gateway's session row lock and has checked that this Hello still owns it.
+    """
     await session.execute(
         delete(GatewayStrategy).where(
             GatewayStrategy.scope == scope,
@@ -363,6 +441,7 @@ async def replace_gateway_strategies(
                 "name": item.name,
                 "digest": item.digest,
                 "descriptor": item.descriptor,
+                "token_id": token_id,
                 "seen_at": now,
             }
             for item in reported
@@ -378,6 +457,7 @@ async def replace_gateway_strategies(
             set_={
                 "digest": stmt.excluded.digest,
                 "descriptor": stmt.excluded.descriptor,
+                "token_id": stmt.excluded.token_id,
                 "seen_at": stmt.excluded.seen_at,
             },
         )
@@ -452,53 +532,192 @@ class StrategyRegistry:
 async def load_strategies(
     session: AsyncSession, scope: str, *, now: datetime | None = None
 ) -> StrategyRegistry:
-    """Only gateways with an unrevoked token that are connected or seen within 30 days count."""
+    """A gateway counts while the token of its latest Hello is unrevoked and it is connected or
+    was seen within 30 days; a report counts while its own token is unrevoked. One statement,
+    so this sees one snapshot: never a Hello's capabilities with another Hello's reports. It
+    takes no lock, so any caller's lock order is safe.
+    """
     cutoff = (now or datetime.now(UTC)) - GATEWAY_RETENTION
-    tokened = set(
-        (
-            await session.scalars(
-                select(GatewayToken.gateway_id).where(
-                    GatewayToken.scope == scope, GatewayToken.revoked_at.is_(None)
-                )
-            )
-        ).all()
+    unrevoked = select(GatewayToken.id).where(GatewayToken.revoked_at.is_(None))
+    rows = await session.execute(
+        select(
+            GatewaySession.gateway_id,
+            GatewaySession.connected,
+            GatewaySession.capabilities,
+            GatewaySession.connected_at,
+            GatewayStrategy.name,
+            GatewayStrategy.digest,
+            GatewayStrategy.descriptor,
+            GatewayStrategy.seen_at,
+        )
+        .outerjoin(
+            GatewayStrategy,
+            and_(
+                GatewayStrategy.scope == GatewaySession.scope,
+                GatewayStrategy.gateway_id == GatewaySession.gateway_id,
+                GatewayStrategy.token_id.in_(unrevoked),
+            ),
+        )
+        .where(
+            GatewaySession.scope == scope,
+            GatewaySession.token_id.in_(unrevoked),
+            or_(GatewaySession.connected, GatewaySession.last_seen_at >= cutoff),
+        )
     )
-    sessions = {
-        row.gateway_id: row
-        for row in (
-            await session.scalars(select(GatewaySession).where(GatewaySession.scope == scope))
-        ).all()
-        if row.gateway_id in tokened
-        and (row.connected or (row.last_seen_at is not None and row.last_seen_at >= cutoff))
-    }
-    support: dict[str, dict[str, GatewaySupport]] = {}
-    for row in (
-        await session.scalars(select(GatewayStrategy).where(GatewayStrategy.scope == scope))
-    ).all():
-        gateway = sessions.get(row.gateway_id)
-        if gateway is not None:
-            support.setdefault(row.name, {})[row.gateway_id] = GatewaySupport(
-                row.gateway_id, gateway.connected, row.seen_at, row.digest, row.descriptor
-            )
-    # A connected gateway's capabilities are authoritative for presence, report or not.
-    for gateway in sessions.values():
-        if not gateway.connected:
-            continue
-        for capability in gateway.capabilities:
-            name = capability.removeprefix("strategy:")
-            if name != capability and gateway.gateway_id not in support.get(name, {}):
-                support.setdefault(name, {})[gateway.gateway_id] = GatewaySupport(
-                    gateway.gateway_id, True, gateway.connected_at, None, None
+    gateways: dict[str, Any] = {}
+    reports: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        gateways[row.gateway_id] = row
+        if row.name is not None:
+            reports.setdefault(row.gateway_id, {})[row.name] = row
+    support: dict[str, list[GatewaySupport]] = {}
+    for gateway_id, gateway in gateways.items():
+        reported = reports.get(gateway_id, {})
+        # A connected gateway says what it has now; an offline one, what it last reported.
+        names, _ = bounded_strategy_names(
+            _capability_strategies(gateway.capabilities) if gateway.connected else reported
+        )
+        for name in names:
+            report = reported.get(name)
+            support.setdefault(name, []).append(
+                GatewaySupport(
+                    gateway_id,
+                    gateway.connected,
+                    report.seen_at if report else gateway.connected_at,
+                    report.digest if report else None,
+                    report.descriptor if report else None,
                 )
+            )
     oldest = datetime.min.replace(tzinfo=UTC)
+    for entries in support.values():
+        entries.sort(key=lambda s: (s.connected, s.seen_at or oldest), reverse=True)
     return StrategyRegistry(
-        connected=sorted(g.gateway_id for g in sessions.values() if g.connected),
-        _support={
-            name: sorted(
-                entries.values(),
-                key=lambda s: (s.connected, s.seen_at or oldest),
-                reverse=True,
-            )
-            for name, entries in support.items()
-        },
+        connected=sorted(g.gateway_id for g in gateways.values() if g.connected),
+        _support=support,
     )
+
+
+# --------------------------------------------------------------------------- saving routers
+
+
+class StrategyRejected(Exception):
+    """A router's strategy cannot be saved. `field` names the offending request field."""
+
+    def __init__(self, field_name: str, message: str) -> None:
+        super().__init__(message)
+        self.field = field_name
+        self.message = message
+
+
+def member_settings(
+    members: Sequence[Any], splits: Sequence[Any]
+) -> list[tuple[str, dict[str, Any]]]:
+    """Each member's params with the path errors name it by, split members included."""
+    settings = [(f"members[{i}].params", m.params) for i, m in enumerate(members)]
+    for s, split in enumerate(splits):
+        settings += [
+            (f"traffic_split[{s}].members[{i}].params", m.params)
+            for i, m in enumerate(split.members)
+        ]
+    return settings
+
+
+def check_router_strategy(
+    registry: StrategyRegistry,
+    strategy: str,
+    params: dict[str, Any],
+    members: list[tuple[str, dict[str, Any]]],
+    *,
+    force: bool,
+) -> list[str]:
+    """The rule for every path that saves or republishes a router. Raises StrategyRejected
+    unless the gateways can serve it; returns the connected gateways `force` is saving past,
+    which the caller audits with `audit_forced`.
+    """
+    if not registry.known(strategy):
+        raise StrategyRejected("strategy", f"no gateway reports strategy {strategy!r}")
+    missing = registry.missing(strategy)
+    if missing and not force:
+        raise StrategyRejected(
+            "strategy",
+            f"connected gateways lack {strategy!r} and would reject the whole config: "
+            f"{', '.join(missing)}; send force to save anyway",
+        )
+    if problems := registry.router_problems(strategy, params, members):
+        raise StrategyRejected("params", "; ".join(problems[:10]))
+    return missing
+
+
+def audit_forced(
+    session: AsyncSession,
+    *,
+    router_id: uuid.UUID,
+    name: str,
+    strategy: str,
+    missing: list[str],
+    principal: Principal | None,
+) -> None:
+    """Without a principal the actor is the rollback, as in `catalog.audit_grant_removal`."""
+    if not missing:
+        return
+    audit.record(
+        session,
+        action="router.force_save",
+        resource_type="router",
+        resource_id=router_id,
+        principal=principal,
+        actor_type=None if principal else ActorType.SYSTEM,
+        actor_id=None if principal else "rollback",
+        details={"name": name, "strategy": strategy, "missing_gateways": missing},
+    )
+
+
+@dataclass(frozen=True)
+class _SplitMembers:
+    members: list[Any]
+
+
+async def check_stored_routers(
+    session: AsyncSession,
+    scope: str,
+    *,
+    force: bool,
+    principal: Principal | None,
+    now: datetime | None,
+) -> None:
+    """`check_router_strategy` on every router in the source tables, for a rollback that has
+    just restored them in this transaction: a rejection aborts it all.
+    """
+    registry = await load_strategies(session, scope, now=now)
+    members: dict[uuid.UUID, list[RouterMember]] = {}
+    for member in await session.scalars(select(RouterMember).order_by(RouterMember.position)):
+        members.setdefault(member.router_id, []).append(member)
+    split_members: dict[uuid.UUID, list[RouterSplitMember]] = {}
+    for member in await session.scalars(
+        select(RouterSplitMember).order_by(RouterSplitMember.position)
+    ):
+        split_members.setdefault(member.split_id, []).append(member)
+    splits: dict[uuid.UUID, list[Any]] = {}
+    for split in await session.scalars(select(RouterSplit).order_by(RouterSplit.position)):
+        splits.setdefault(split.router_id, []).append(
+            _SplitMembers(split_members.get(split.id, []))
+        )
+    routers = await session.scalars(
+        select(Router).order_by(Router.name_id).execution_options(populate_existing=True)
+    )
+    for router in routers:
+        settings = member_settings(members.get(router.id, []), splits.get(router.id, []))
+        try:
+            missing = check_router_strategy(
+                registry, router.strategy, router.params, settings, force=force
+            )
+        except StrategyRejected as exc:
+            raise StrategyRejected(exc.field, f"router {router.name!r}: {exc.message}") from exc
+        audit_forced(
+            session,
+            router_id=router.id,
+            name=router.name,
+            strategy=router.strategy,
+            missing=missing,
+            principal=principal,
+        )

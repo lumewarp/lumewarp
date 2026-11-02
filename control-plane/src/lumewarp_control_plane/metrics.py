@@ -93,6 +93,11 @@ class Metrics:
             ["result"],
             registry=r,
         )
+        self.gateway_strategies_ignored = Counter(
+            "lumewarp_cp_gateway_strategies_ignored",
+            "Strategies and capabilities in a Hello ignored: over the limit or invalid names.",
+            registry=r,
+        )
         self.usage_ingested = Counter(
             "lumewarp_cp_usage_events_ingested",
             "Usage events accepted (committed) from gateway reports.",
