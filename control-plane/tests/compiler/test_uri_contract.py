@@ -97,9 +97,9 @@ def test_valid_uri_contract(url, field) -> None:
     validate_snapshot(snap, max_bytes=1 << 26, max_keys=1000)
 
 
-def test_metrics_query_allowed_but_not_base_query() -> None:
+def test_metrics_query_rejected_like_base_query() -> None:
     url = "http://example.com/metrics?name=a%2Fb&v=1"
-    assert metrics_url_problem(url) is None
+    assert metrics_url_problem(url) == "must not contain a query"
     assert upstream_url_problem(url)
 
 

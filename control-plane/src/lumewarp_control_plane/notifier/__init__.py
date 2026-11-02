@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -30,6 +31,14 @@ log = logging.getLogger(__name__)
 _MAX_RETRY_SECONDS = 60 * 60
 _PLUGIN_TIMEOUT_SECONDS = 10.0
 _MAX_WEBHOOK_TIMEOUT_SECONDS = 30.0
+_DEFAULT_WEBHOOK_TIMEOUT_SECONDS = 5.0
+# The webhook channel contract, mirrored by the notifier_channels CHECK constraint
+# (migration 0013 / models.py): an environment variable name using the same pattern as
+# upstream `api_key_ref`, an optional numeric timeout, and nothing else. A credential can
+# therefore never be written to `config`, and delivery validates the same shape again.
+_ENV_REF = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_MAX_ENV_REF_CHARS = 200
+_WEBHOOK_CONFIG_KEYS = frozenset({"url_ref", "timeout_seconds"})
 # A claimed row is invisible to other workers for this long; it must exceed any one delivery.
 _CLAIM_LEASE_SECONDS = 2 * _MAX_WEBHOOK_TIMEOUT_SECONDS
 _MAX_ATTEMPTS = 20
@@ -144,19 +153,35 @@ def _event_from_payload(payload: dict) -> BudgetEvent:
         raise ValueError("invalid budget notification payload") from exc
 
 
+def _webhook_settings(config: dict) -> tuple[str, float]:
+    """Return (env var name, timeout) from a channel config, or raise ValueError.
+
+    The database CHECK already refuses anything else; this second check means a row written
+    before the migration, or through a future code path, cannot make the worker resolve an
+    arbitrary string (a URL, a JSON null, an object) as an environment variable.
+    """
+    if set(config) - _WEBHOOK_CONFIG_KEYS:
+        raise ValueError("webhook config has unknown keys")
+    ref = config.get("url_ref")
+    if not isinstance(ref, str) or len(ref) > _MAX_ENV_REF_CHARS or not _ENV_REF.fullmatch(ref):
+        raise ValueError("webhook channel has no valid url_ref")
+    timeout = config.get("timeout_seconds", _DEFAULT_WEBHOOK_TIMEOUT_SECONDS)
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not 0 < timeout <= _MAX_WEBHOOK_TIMEOUT_SECONDS
+    ):
+        raise ValueError("invalid webhook timeout")
+    return ref, float(timeout)
+
+
 async def _deliver(kind: str, config: dict, event: BudgetEvent, plugins: dict[str, object]) -> None:
     if kind == "webhook":
-        ref = config.get("url_ref")
-        if not isinstance(ref, str) or not ref:
-            raise ValueError("webhook channel has no url_ref")
+        ref, timeout = _webhook_settings(config)
         # Only the environment variable name is stored in the database.
         url = os.environ.get(ref)
         if not url:
             raise LookupError(f"webhook URL environment variable {ref!r} is not set")
-        timeout = config.get("timeout_seconds", 5.0)
-        if not isinstance(timeout, (int, float)) or timeout <= 0:
-            raise ValueError("invalid webhook timeout")
-        timeout = min(float(timeout), _MAX_WEBHOOK_TIMEOUT_SECONDS)
         await WebhookNotifier(url, timeout).notify(event)
         return
 

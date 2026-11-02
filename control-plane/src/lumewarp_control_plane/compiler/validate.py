@@ -132,10 +132,18 @@ def upstream_url_problem(url: str) -> str | None:
 
 
 def metrics_url_problem(url: str) -> str | None:
-    """Why the gateway would reject an explicit `Upstream.metrics_url` (router.rs
-    metrics_uri: a plain http(s) URI with an authority and no userinfo), or None.
+    """Why the gateway or control plane rejects an explicit `Upstream.metrics_url`.
+
+    router.rs::metrics_uri accepts a plain http(s) URI with an authority and no userinfo.
+    The control plane is stricter on purpose: a query string is the remaining way to smuggle
+    a credential (`?token=...`) into a column that is returned by the API and copied into
+    audit, so it is refused here as `base_url` already refuses it.
     """
-    return _http_url_problem(url)
+    if problem := _http_url_problem(url):
+        return problem
+    if "?" in url:
+        return "must not contain a query"
+    return None
 
 
 def health_path_problem(path: str) -> str | None:

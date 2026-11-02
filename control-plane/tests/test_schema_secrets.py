@@ -94,6 +94,7 @@ CLASSIFIED: dict[tuple[str, str], ColumnClass] = {
     ("upstreams", "api_key_ref"): ColumnClass.ENV_REF,
     ("upstreams", "base_url"): ColumnClass.PUBLIC,
     ("upstreams", "health_check_path"): ColumnClass.PUBLIC,
+    # The API and compiler refuse userinfo and query strings, so it cannot carry a credential.
     ("upstreams", "metrics_url"): ColumnClass.PUBLIC,
     ("upstreams", "name"): ColumnClass.PUBLIC,
     ("usage_events", "alias"): ColumnClass.PUBLIC,
