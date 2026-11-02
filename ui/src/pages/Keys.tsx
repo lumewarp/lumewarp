@@ -4,9 +4,11 @@ import { api, type Key, type Schemas } from "../api";
 import { fmtDate, KeyBadge, PageHeader, SecretOnce, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { Dialog } from "../components/Dialog";
-import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
+import { FormDialog, required, TextField, useForm } from "../components/Form";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
+import { Button } from "../components/ui/button";
+import { ComboboxField } from "../components/ui/combobox-field";
 import { useAction, useCan, useCatalog, useMe, useMut } from "../hooks";
 import { Badge as UiBadge } from "../components/ui/badge";
 import { Skeleton } from "../components/ui/skeleton";
@@ -41,7 +43,7 @@ function CallableNames({ teamId, userId }: { teamId: string; userId: string | nu
     <div className="flex flex-col gap-2" data-testid="callable-names">
       <span className="text-sm font-semibold">This key can call</span>
       {error ? (
-        <p className="field-error" role="alert">
+        <p className="text-[13px] text-destructive" role="alert">
           {error.message}
         </p>
       ) : !names ? (
@@ -65,7 +67,7 @@ function CallableNames({ teamId, userId }: { teamId: string; userId: string | nu
           );
         })
       )}
-      <p className="field-hint">Read-only. Access is set on the team and on your membership.</p>
+      <p className="text-[13px] text-muted-foreground">Read-only. Access is set on the team and on your membership.</p>
     </div>
   );
 }
@@ -135,7 +137,7 @@ export function Keys() {
         description="Keys you own across your teams. Secrets are shown once when created or rotated."
         actions={<CreateButton can={!!me.data?.user_id && teams.length > 0} onClick={() => open("new")}>New key</CreateButton>}
       />
-      {!me.data?.user_id && <p className="muted">The break-glass session does not own API keys.</p>}
+      {!me.data?.user_id && <p className="text-muted-foreground">The break-glass session does not own API keys.</p>}
       <DataTable
         rows={list.data}
         loading={list.isPending}
@@ -144,7 +146,7 @@ export function Keys() {
         rowKey={(key) => key.id}
         empty="You do not own any API keys yet."
         columns={[
-          { key: "name", header: "Name", sort: (a, b) => a.name.localeCompare(b.name), cell: (key) => <><strong>{key.name}</strong> <code className="muted">{key.display_prefix}…</code></> },
+          { key: "name", header: "Name", sort: (a, b) => a.name.localeCompare(b.name), cell: (key) => <><strong>{key.name}</strong> <code className="text-muted-foreground">{key.display_prefix}…</code></> },
           { key: "owner", header: "Owner", cell: () => me.data?.email ?? "—" },
           { key: "team", header: "Team", cell: (key) => me.data?.teams.find((team) => team.team_id === key.team_id)?.team_name ?? key.team_id.slice(0, 8) },
           { key: "lifecycle", header: "Lifecycle", cell: (key) => <><KeyBadge k={key} /><SuspendedReason reason={key.suspended_reason} /></> },
@@ -162,9 +164,10 @@ export function Keys() {
                   onEdit={() => open(key)}
                   extra={key.lifecycle === "revoked" ? null : (
                     <>
-                      <button className="btn btn-sm" disabled={!allowed} onClick={() => void rotate(key)}>Rotate</button>
-                      <button
-                        className="btn btn-sm"
+                      <Button variant="outline" size="sm" disabled={!allowed} onClick={() => void rotate(key)}>Rotate</Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
                         disabled={
                           key.lifecycle === "suspended"
                             ? ownerInactive || !perms.canResumeKey(key)
@@ -174,8 +177,8 @@ export function Keys() {
                         onClick={() => void setLifecycle({ key, lifecycle: key.lifecycle === "suspended" ? "active" : "suspended" })}
                       >
                         {key.lifecycle === "suspended" ? "Resume" : "Suspend"}
-                      </button>
-                      <button className="btn btn-sm btn-danger-ghost" disabled={!allowed} onClick={() => setRevoking(key)}>Revoke</button>
+                      </Button>
+                      <Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10 hover:text-destructive" disabled={!allowed} onClick={() => setRevoking(key)}>Revoke</Button>
                     </>
                   )}
                 />
@@ -192,7 +195,7 @@ export function Keys() {
         onSubmit={submit}
       >
         {editing === "new" && (
-          <SelectField
+          <ComboboxField
             label="Team"
             value={form.values.team_id}
             onChange={(value) => form.set("team_id", value)}
@@ -208,7 +211,7 @@ export function Keys() {
         open={!!secret}
         title={secretTitle}
         onClose={() => setSecret(null)}
-        footer={<button className="btn btn-primary" onClick={() => setSecret(null)}>I’ve saved it</button>}
+        footer={<Button onClick={() => setSecret(null)}>I’ve saved it</Button>}
       >
         {secret && <SecretOnce secret={secret} />}
       </Dialog>

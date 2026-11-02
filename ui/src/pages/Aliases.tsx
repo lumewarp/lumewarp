@@ -2,10 +2,11 @@ import { useMemo, useState } from "react";
 import { api, type Alias } from "../api";
 import { Badge, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
-import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
+import { FormDialog, required, TextField, useForm } from "../components/Form";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { SearchBox } from "../components/Search";
 import { DataTable } from "../components/Table";
+import { ComboboxField } from "../components/ui/combobox-field";
 import { useAliases, useById, useCan, useModels, useMut, useRouters } from "../hooks";
 import { aliasUpstreamModels, matches } from "../lib/catalog";
 
@@ -96,7 +97,7 @@ export function Aliases() {
       />
       <FormDialog open={!!editing} title={editing === "new" ? "New alias" : "Edit alias"} submitLabel={editing === "new" ? "Create" : "Save"} onClose={() => setEditing(null)} onSubmit={submit}>
         <TextField label="Name" value={form.values.name} onChange={(v) => form.set("name", v)} error={form.errors.name} autoFocus hint="The `model` value clients send. Must be unique across models, aliases and routers." />
-        <SelectField label="Points to" value={form.values.target} onChange={(v) => form.set("target", v)} error={form.errors.target} options={[{ value: "", label: "Select a model or router…" }, ...targets]} hint="An alias cannot point at another alias." />
+        <ComboboxField label="Points to" value={form.values.target} onChange={(v) => form.set("target", v)} error={form.errors.target} options={targets} placeholder="Select a model or router…" emptyText="No model or router matches" hint="An alias cannot point at another alias." />
       </FormDialog>
       <ConfirmDialog open={!!deleting} title="Delete alias" message={`Delete alias “${deleting?.name}”? Clients calling this name will get an error, and access granted to it is removed.`} onConfirm={() => remove.mutateAsync(deleting!.id)} onClose={() => setDeleting(null)} />
     </>

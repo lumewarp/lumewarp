@@ -51,12 +51,12 @@ export function PermissionPicker({ isTeam, access, onAccess, selected, onSelecte
           </div>
         ))}
       </RadioGroup>
-      <p className="field-hint">{access === "list" ? "Only the names ticked below" + (isTeam ? "." : ", and only within what the team allows. None ticked denies everything.") : first.hint}</p>
+      <p className="text-[13px] text-muted-foreground">{access === "list" ? "Only the names ticked below" + (isTeam ? "." : ", and only within what the team allows. None ticked denies everything.") : first.hint}</p>
       {access === "list" && (
         <div className="flex max-h-72 flex-col gap-3 overflow-y-auto rounded-md border p-3" data-testid="permission-options">
           {catalog.isPending && <Skeleton className="h-4 w-full" />}
           {catalog.error && (
-            <p className="field-error" role="alert">
+            <p className="text-[13px] text-destructive" role="alert">
               {catalog.error.message}
             </p>
           )}
@@ -96,7 +96,7 @@ export function PermissionPicker({ isTeam, access, onAccess, selected, onSelecte
         </div>
       )}
       {error && (
-        <p className="field-error" role="alert">
+        <p className="text-[13px] text-destructive" role="alert">
           {error}
         </p>
       )}
