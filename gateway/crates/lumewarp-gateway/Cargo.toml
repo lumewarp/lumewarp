@@ -13,9 +13,11 @@ path = "src/main.rs"
 
 # A compiled-in strategy crate is selected with a feature (docs/router-strategies.md).
 [features]
+strategy-cheapest-first = ["dep:lumewarp-strategy-cheapest-first"]
 strategy-priority-failover = ["dep:lumewarp-strategy-priority-failover"]
 
 [dependencies]
+lumewarp-strategy-cheapest-first = { path = "../../strategies/cheapest-first", optional = true }
 lumewarp-strategy-priority-failover = { path = "../../strategies/priority-failover", optional = true }
 lumewarp-config.workspace = true
 lumewarp-proto.workspace = true

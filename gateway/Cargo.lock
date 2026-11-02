@@ -1076,6 +1076,7 @@ dependencies = [
  "lumewarp-config",
  "lumewarp-proto",
  "lumewarp-router-api",
+ "lumewarp-strategy-cheapest-first",
  "lumewarp-strategy-priority-failover",
  "memchr",
  "mock-upstream",
@@ -1124,6 +1125,16 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+]
+
+[[package]]
+name = "lumewarp-strategy-cheapest-first"
+version = "0.1.0"
+dependencies = [
+ "lumewarp-router-api",
+ "schemars",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
