@@ -4,6 +4,7 @@ import { api } from "../api";
 import { Badge, fmtDateTime, PageHeader } from "../components/Bits";
 import { DataTable } from "../components/Table";
 import { Dialog } from "../components/Dialog";
+import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { ApiError } from "../api";
 import { useMut } from "../hooks";
@@ -59,10 +60,12 @@ function RollbackDialog({ version, onClose }: { version: number | null; onClose:
       <div className="flex flex-col gap-3 text-sm">
         <p className="text-muted-foreground">Restore the routing (models, aliases and routers) from v{version} as a new version? Keys, budgets, policies and access grants are not rolled back.</p>
         {problem && (
-          <div role="alert" data-testid="rollback-problem" className={force ? "form-warn" : "form-error"}>
-            <p>{problem.message}</p>
-            {force && <p className="mt-1">Gateways that lack it will reject the whole config and stop receiving updates, including key revocations. Roll back anyway only if you are fixing those gateways.</p>}
-          </div>
+          <Alert variant={force ? "warn" : "destructive"} data-testid="rollback-problem">
+            <AlertDescription>
+              <p>{problem.message}</p>
+              {force && <p>Gateways that lack it will reject the whole config and stop receiving updates, including key revocations. Roll back anyway only if you are fixing those gateways.</p>}
+            </AlertDescription>
+          </Alert>
         )}
       </div>
     </Dialog>
@@ -89,15 +92,15 @@ export function Config() {
           { key: "created", header: "Created", sort: (a, b) => a.created_at.localeCompare(b.created_at), cell: (r) => fmtDateTime(r.created_at) },
           { key: "keys", header: "Keys", align: "right", cell: (r) => r.key_count.toLocaleString() },
           { key: "size", header: "Size", align: "right", cell: (r) => `${(r.size_bytes / 1024).toFixed(1)} KiB` },
-          { key: "digest", header: "Digest", cell: (r) => <code className="muted">{r.digest.slice(0, 12)}</code> },
+          { key: "digest", header: "Digest", cell: (r) => <code className="text-muted-foreground">{r.digest.slice(0, 12)}</code> },
           {
             key: "actions",
             header: "",
             cell: (r) => (
-              <div className="row-actions">
-                <button className="btn btn-sm" disabled={r.version === current || !!r.compacted_at} title={r.compacted_at ? "Compacted; payload no longer retained" : undefined} onClick={() => setTarget(r.version)}>
+              <div className="flex justify-end gap-1.5 whitespace-nowrap">
+                <Button variant="outline" size="sm" disabled={r.version === current || !!r.compacted_at} title={r.compacted_at ? "Compacted; payload no longer retained" : undefined} onClick={() => setTarget(r.version)}>
                   Roll back
-                </button>
+                </Button>
               </div>
             ),
           },
