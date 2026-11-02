@@ -1,12 +1,15 @@
 import { useId, useState, type FormEvent, type ReactNode } from "react";
 
 import { ApiError } from "../api/errors";
-import { cn } from "../lib/utils";
 import { Dialog } from "./Dialog";
+import { applyChoice, MISSING_LABEL, optionKey, selection, UNSET_KEY, type ChoiceProps } from "./choice";
+import { Alert, AlertDescription } from "./ui/alert";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
+import { Field as UiField, FieldDescription, FieldError, FieldLabel } from "./ui/field";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 
 type Validators<V> = { [K in keyof V]?: (value: V[K], all: V) => string | undefined };
 
@@ -61,28 +64,28 @@ export function useForm<V extends object>(initial: V, validators: Validators<V> 
 
 export const required = (label: string) => (v: string) => (v.trim() ? undefined : `${label} is required`);
 
-export function Field({ label, error, hint, children }: { label: string; error?: string; hint?: string; children: (p: { id: string; "aria-invalid": boolean; "aria-describedby"?: string }) => ReactNode }) {
+/**
+ * Label, control and message. The `field` class is the one legacy token left: Routers' `.split-head > .field`
+ * sizes its children by it; it goes with that page.
+ */
+export function Field({ label, error, hint, children }: { label: string; error?: string; hint?: string; children: (p: ControlProps) => ReactNode }) {
   const id = useId();
   const descId = error || hint ? `${id}-d` : undefined;
   return (
-    <div className="field flex min-w-0 flex-col gap-1.5">
-      <Label htmlFor={id} className="font-semibold">
+    <UiField className="field min-w-0 gap-1.5" data-invalid={error ? true : undefined}>
+      <FieldLabel htmlFor={id} className="font-semibold">
         {label}
-      </Label>
+      </FieldLabel>
       {children({ id, "aria-invalid": !!error, "aria-describedby": descId })}
-      {error ? (
-        <p id={descId} className="field-error" role="alert">
-          {error}
-        </p>
-      ) : (
-        hint && (
-          <p id={descId} className="field-hint">
-            {hint}
-          </p>
-        )
-      )}
-    </div>
+      {error ? <FieldError id={descId}>{error}</FieldError> : hint && <FieldDescription id={descId}>{hint}</FieldDescription>}
+    </UiField>
   );
+}
+
+export interface ControlProps {
+  id: string;
+  "aria-invalid": boolean;
+  "aria-describedby"?: string;
 }
 
 interface TextProps {
@@ -114,28 +117,33 @@ export function NumberField({ label, value, onChange, error, hint, min = 0, step
   );
 }
 
-export function SelectField({ label, value, onChange, options, error, hint }: { label: string; value: string; onChange: (v: string) => void; options: { value: string; label: string }[]; error?: string; hint?: string }) {
+/**
+ * The control of a select, without label or message (for places that label it themselves, e.g. with
+ * aria-label). Contract, see choice.ts: the domain value is the only state; the Radix value is
+ * `i:<index>` derived on every render; a value that is none of the options is shown as "Current value
+ * not in list" and nothing is selected for it; only an in-range index can change the value.
+ */
+export function SelectControl<T>({ value, onChange, options, unset, placeholder = "Select…", strict = false, disabled, ...aria }: ChoiceProps<T> & Partial<ControlProps> & { "aria-label"?: string }) {
+  const { key, missing } = selection(value, options, unset, strict);
   return (
-    <Field label={label} error={error} hint={hint}>
-      {(p) => (
-        <select
-          {...p}
-          className={cn(
-            "flex h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-input/30",
-            error && "border-destructive ring-destructive/20",
-          )}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-        >
-          {options.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
-      )}
-    </Field>
+    <Select value={key} onValueChange={(k) => applyChoice(k, options, unset, onChange)} disabled={disabled}>
+      <SelectTrigger {...aria} className="w-full min-w-0">
+        <SelectValue placeholder={missing ? MISSING_LABEL : placeholder} />
+      </SelectTrigger>
+      <SelectContent position="popper">
+        {unset && <SelectItem value={UNSET_KEY}>{unset.label}</SelectItem>}
+        {options.map((o, i) => (
+          <SelectItem key={i} value={optionKey(i)}>
+            {o.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
+}
+
+export function SelectField<T = string>({ label, error, hint, ...choice }: ChoiceProps<T> & { label: string; error?: string; hint?: string }) {
+  return <Field label={label} error={error} hint={hint}>{(p) => <SelectControl {...choice} {...p} />}</Field>;
 }
 
 /** A labelled checkbox (switches an optional settings group on or off). */
@@ -151,9 +159,7 @@ export function CheckField({ label, checked, onChange, hint }: { label: string; 
         </Label>
       </div>
       {hint && (
-        <p id={descId} className="field-hint">
-          {hint}
-        </p>
+        <FieldDescription id={descId}>{hint}</FieldDescription>
       )}
     </div>
   );
@@ -204,11 +210,11 @@ export function FormDialog({ open, title, submitLabel = "Save", submitDisabled =
         </>
       }
     >
-      <form id={formId} onSubmit={submit} noValidate className="form">
+      <form id={formId} onSubmit={submit} noValidate className="flex flex-col gap-3.5">
         {error && (
-          <p className="form-error" role="alert">
-            {error}
-          </p>
+          <Alert variant="destructive">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
         )}
         {children}
       </form>

@@ -2,9 +2,11 @@ import { ArrowDown, ArrowUp } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 
 import { cn } from "../lib/utils";
-import { Card } from "./ui/card";
-import { Skeleton } from "./ui/skeleton";
+import { Alert, AlertDescription } from "./ui/alert";
 import { Button } from "./ui/button";
+import { Card } from "./ui/card";
+import { Empty } from "./ui/empty";
+import { Skeleton } from "./ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 
 export interface Column<T> {
@@ -51,25 +53,31 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
   let body: ReactNode;
   if (error) {
     body = (
-      <div className="state state-error" role="alert" data-testid="state-error">
-        <p>{error.message}</p>
-        {onRetry && (
-          <Button variant="outline" size="sm" onClick={onRetry}>
-            Retry
-          </Button>
-        )}
-      </div>
+      <Alert variant="destructive" className="rounded-none border-0 py-6" data-testid="state-error">
+        <AlertDescription className="col-start-2 flex flex-col items-center gap-3 text-center text-sm">
+          <p>{error.message}</p>
+          {onRetry && (
+            <Button variant="outline" size="sm" onClick={onRetry}>
+              Retry
+            </Button>
+          )}
+        </AlertDescription>
+      </Alert>
     );
   } else if (loading) {
     body = (
-      <div className="state" aria-busy="true">
+      <div className="p-8" aria-busy="true">
         {[0, 1, 2].map((i) => (
           <Skeleton key={i} className="mx-auto mb-3 h-4 w-full" />
         ))}
       </div>
     );
   } else if (sorted.length === 0) {
-    body = <div className="state">{empty}</div>;
+    body = (
+      <Empty className="border-0 p-8">
+        <div className="text-sm text-muted-foreground">{empty}</div>
+      </Empty>
+    );
   }
 
   return (
@@ -83,10 +91,10 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
                 return (
                   <TableHead key={c.key} scope="col" className={cn(c.align === "right" && "text-right", c.hideBelow && HIDE[c.hideBelow])} aria-sort={active ? (sort.dir === 1 ? "ascending" : "descending") : undefined}>
                     {c.sort ? (
-                      <button type="button" className="inline-flex items-center gap-1 rounded-sm text-left uppercase tracking-[0.04em] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50" onClick={() => toggle(c.key)}>
+                      <Button type="button" variant="ghost" size="sm" className="-mx-2 h-7 gap-1 px-2 text-left font-[inherit] uppercase tracking-[0.04em] text-[inherit] hover:text-foreground" onClick={() => toggle(c.key)}>
                         {c.header}
                         {active && (sort.dir === 1 ? <ArrowUp className="size-3" aria-hidden="true" /> : <ArrowDown className="size-3" aria-hidden="true" />)}
-                      </button>
+                      </Button>
                     ) : (
                       c.header
                     )}
@@ -109,7 +117,7 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
         </Table>
       )}
       {!body && pages > 1 && (
-        <div className="pager border-t">
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t px-3.5 py-2 text-sm text-muted-foreground">
           <span>
             {cur * pageSize + 1}–{Math.min((cur + 1) * pageSize, sorted.length)} of {sorted.length}
           </span>

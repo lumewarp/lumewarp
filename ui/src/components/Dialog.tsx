@@ -1,9 +1,10 @@
 import { XIcon } from "lucide-react";
 import type { ReactNode } from "react";
-import { Dialog as DialogPrimitive } from "radix-ui";
 
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
+import { Dialog as UiDialog, DialogClose, DialogContent, DialogTitle } from "./ui/dialog";
+import { Sheet, SheetClose, SheetContent, SheetTitle } from "./ui/sheet";
 
 interface Props {
   open: boolean;
@@ -15,33 +16,48 @@ interface Props {
   variant?: "dialog" | "drawer" | "wide-drawer";
 }
 
-/** Radix dialog: focus trap, Esc, backdrop close and inert background. */
+const HEADER = "flex shrink-0 flex-row items-center justify-between gap-3 border-b px-5 py-3.5 text-left";
+
+/**
+ * Focus trap, Esc, backdrop close and inert background come from Radix (via ui/dialog and ui/sheet). The
+ * header and footer stay put and only the body scrolls, so a long form can always be cancelled or saved.
+ */
 export function Dialog({ open, onClose, title, children, footer, variant = "dialog" }: Props) {
-  return (
-    <DialogPrimitive.Root open={open} onOpenChange={(next) => (!next ? onClose() : undefined)}>
-      <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/50 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
-        <DialogPrimitive.Content
-          aria-describedby={undefined}
-          className={cn(
-            "fixed z-50 flex flex-col border bg-background shadow-xl outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0",
-            variant === "drawer" || variant === "wide-drawer"
-              ? cn("inset-y-0 right-0 h-full w-full border-l data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right", variant === "wide-drawer" ? "max-w-xl" : "max-w-md")
-              : "top-1/2 left-1/2 max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 rounded-xl data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
-          )}
-        >
-          <header className="flex shrink-0 items-center justify-between gap-3 border-b px-5 py-3.5">
-            <DialogPrimitive.Title className="text-base font-semibold">{title}</DialogPrimitive.Title>
-            <DialogPrimitive.Close asChild>
-              <Button type="button" variant="ghost" size="icon" className="size-8 text-muted-foreground" aria-label="Close">
-                <XIcon aria-hidden="true" />
-              </Button>
-            </DialogPrimitive.Close>
+  const onOpenChange = (next: boolean) => (!next ? onClose() : undefined);
+  const body = (
+    <>
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+      {footer && <footer className="flex shrink-0 justify-end gap-2 border-t px-5 py-3">{footer}</footer>}
+    </>
+  );
+  const close = (
+    <Button type="button" variant="ghost" size="icon" className="size-8 text-muted-foreground" aria-label="Close">
+      <XIcon aria-hidden="true" />
+    </Button>
+  );
+  if (variant === "dialog") {
+    return (
+      <UiDialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent aria-describedby={undefined} showCloseButton={false} className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 p-0 sm:max-w-lg">
+          <header className={HEADER}>
+            <DialogTitle>{title}</DialogTitle>
+            <DialogClose asChild>{close}</DialogClose>
           </header>
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
-          {footer && <footer className="flex shrink-0 justify-end gap-2 border-t px-5 py-3">{footer}</footer>}
-        </DialogPrimitive.Content>
-      </DialogPrimitive.Portal>
-    </DialogPrimitive.Root>
+          {body}
+        </DialogContent>
+      </UiDialog>
+    );
+  }
+  // Sheet's own default is 75% wide and max-w-sm: a drawer is the full width on a phone and md / xl from sm up.
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent aria-describedby={undefined} showCloseButton={false} side="right" className={cn("w-full gap-0 p-0 data-[state=closed]:duration-200 data-[state=open]:duration-200", variant === "wide-drawer" ? "sm:max-w-xl" : "sm:max-w-md")}>
+        <header className={HEADER}>
+          <SheetTitle className="text-base">{title}</SheetTitle>
+          <SheetClose asChild>{close}</SheetClose>
+        </header>
+        {body}
+      </SheetContent>
+    </Sheet>
   );
 }

@@ -1,8 +1,8 @@
 import { useState } from "react";
 
 import { ApiError } from "../api/errors";
-import { Dialog } from "./Dialog";
 import { useToast } from "./Toast";
+import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";
 import { Button } from "./ui/button";
 
 interface Props {
@@ -20,6 +20,11 @@ export function parseReferrers(message: string): string[] | null {
   return m ? m[1].split(/,\s*/).filter(Boolean) : null;
 }
 
+/**
+ * An alertdialog: focus starts on Cancel and a click on the backdrop does not dismiss it. The confirm
+ * button is a plain button, not AlertDialogAction (that one closes on click without waiting): the dialog
+ * closes only when the delete succeeded; a 409 turns it into the "Cannot delete" view with the referrers.
+ */
 export function ConfirmDialog({ open, title, message, confirmLabel = "Delete", onConfirm, onClose }: Props) {
   const [busy, setBusy] = useState(false);
   const [blocked, setBlocked] = useState<ApiError | null>(null);
@@ -46,41 +51,39 @@ export function ConfirmDialog({ open, title, message, confirmLabel = "Delete", o
   };
   const referrers = blocked ? parseReferrers(blocked.message) : null;
   return (
-    <Dialog
-      open={open}
-      onClose={close}
-      title={blocked ? "Cannot delete" : title}
-      footer={
-        blocked ? (
-          <Button type="button" onClick={close} autoFocus>
-            Got it
-          </Button>
-        ) : (
-          <>
-            <Button type="button" variant="outline" onClick={close} autoFocus>
-              Cancel
+    <AlertDialog open={open} onOpenChange={(next) => (!next ? close() : undefined)}>
+      <AlertDialogContent {...(blocked ? { "aria-describedby": undefined } : {})}>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{blocked ? "Cannot delete" : title}</AlertDialogTitle>
+          {!blocked && <AlertDialogDescription>{message}</AlertDialogDescription>}
+        </AlertDialogHeader>
+        {blocked && (
+          <div className="flex flex-col gap-3 text-sm" data-testid="delete-blocked" role="alert">
+            <p>{referrers ? "Still in use. Remove these references first:" : blocked.message}</p>
+            {referrers && (
+              <ul className="list-disc pl-5">
+                {referrers.map((r) => (
+                  <li key={r}>{r}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+        <AlertDialogFooter>
+          {blocked ? (
+            <Button type="button" onClick={close} autoFocus>
+              Got it
             </Button>
-            <Button type="button" variant="destructive" disabled={busy} onClick={run}>
-              {busy ? "Working…" : confirmLabel}
-            </Button>
-          </>
-        )
-      }
-    >
-      {blocked ? (
-        <div className="flex flex-col gap-3 text-sm" data-testid="delete-blocked" role="alert">
-          <p>{referrers ? "Still in use. Remove these references first:" : blocked.message}</p>
-          {referrers && (
-            <ul className="list-disc pl-5">
-              {referrers.map((r) => (
-                <li key={r}>{r}</li>
-              ))}
-            </ul>
+          ) : (
+            <>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <Button type="button" variant="destructive" disabled={busy} onClick={run}>
+                {busy ? "Working…" : confirmLabel}
+              </Button>
+            </>
           )}
-        </div>
-      ) : (
-        <p className="text-sm text-muted-foreground">{message}</p>
-      )}
-    </Dialog>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }

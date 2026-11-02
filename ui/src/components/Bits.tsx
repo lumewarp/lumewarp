@@ -55,7 +55,7 @@ export function SecretOnce({ secret }: { secret: string }) {
       </p>
       <div className="flex items-stretch gap-2">
         <code
-          className="secret-value min-w-0 flex-1 select-all break-all rounded-md border bg-secondary px-2.5 py-2 font-mono"
+          className="min-w-0 flex-1 select-all break-all rounded-md border bg-secondary px-2.5 py-2 font-mono"
           data-testid="secret-value"
           tabIndex={0}
         >
