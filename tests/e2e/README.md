@@ -20,8 +20,8 @@ model; fallback routers (503 and connect error, streaming too) answering with th
 model name; a circuit breaker reaching `lumewarp_upstream_circuit_state=2` after N failures, after
 which the failing model gets no attempts (`outcome="circuit_open"` only).
 
-`test_catalog.py` (collected by both scripts; no IdP) is the acceptance of the model catalog
-(`docs/plans/model-catalog.md`, 驗收條件): a model is callable, listed and answers with the called
+`test_catalog.py` (collected by both scripts; no IdP) is the acceptance of the model catalog:
+a model is callable, listed and answers with the called
 name, streaming too, and so do aliases, routers and fallbacks; a new alias target takes new
 requests; renames end the old name unless a model keeps it; a grant covers the called name only;
 rollback restores all three kinds and weights, across renames, with grants and references

@@ -31,7 +31,7 @@ P0 (Rust gateway + bench vs LiteLLM), P1 (control plane, gRPC config stream, usa
 - Gateway routing: retries (before any response byte, budgeted), fallbacks, circuit breaker, active health checks, LOWEST_LATENCY, VLLM_LOAD, traffic split with sticky hashing — each gated by a snapshot capability the control plane emits only when used.
 - Observability: Prometheus alert rules (promtool-tested), Grafana dashboards, control-plane `/metrics` on its own listener.
 
-The model catalog (`docs/plans/model-catalog.md`) delivered:
+The model catalog (`docs/architecture.md`, "模型目錄已實作") delivered:
 
 - Names: a client calls a model, an alias or a router, one namespace, all renameable, referenced by id. The response `model` is the called name, without buffering.
 - Grants by id, checked against the called name. Rollback restores the catalog by id.

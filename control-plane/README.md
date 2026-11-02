@@ -452,7 +452,7 @@ unique across all three (`catalog_names`):
 Any authenticated principal may read these, writes need `ROUTING_MANAGE`. Every write is
 audited and enqueues a recompile. A name that a router, alias or fallback references cannot be
 deleted (409, listing who references it); deleting a name deletes the grants on it, with an
-audit row. See [the catalog plan](../docs/plans/model-catalog.md) for the reasoning.
+audit row. See [the architecture notes](../docs/architecture.md#模型目錄已實作) for the reasoning.
 
 **Renames.** `PATCH` with `name` works on all three kinds and references are by id, so
 routers, aliases and grants follow. The old name is a 404 at once, except that a model's

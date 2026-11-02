@@ -1,5 +1,5 @@
 /**
- * The JSON Schema subset strategies may use for their settings (docs/plans/model-catalog.md, "Schema 子集").
+ * The JSON Schema subset strategies may use for their settings (docs/router-strategies.md, "Schema subset").
  *
  * A schema comes from a gateway, so it is untrusted data: it is size-limited, anything outside the subset
  * makes `parseSchema` return null (the caller falls back to a JSON editor), and every string in it is only

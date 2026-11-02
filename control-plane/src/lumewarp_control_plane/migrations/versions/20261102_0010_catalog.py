@@ -3,7 +3,7 @@
 Revision ID: 0010
 Revises: 0009
 
-Conversion rules (docs/plans/model-catalog.md "資料模型"):
+Conversion rules:
 - A route with one member and no retry, fallback or split merges into a model named after
   the route; two such routes sharing a deployment each get their own model. A deployment
   still used elsewhere (or by nothing) stays a model under its own name.

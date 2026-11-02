@@ -80,7 +80,7 @@ HOSTILE = (
     "[click](javascript:window.__pwned=1) https://evil.example/phish"
 )
 
-# What gateways report in Hello for the strategies the tests use (docs/plans/model-catalog.md, "Schema 子集").
+# What gateways report in Hello for the strategies the tests use (docs/router-strategies.md, "Schema subset").
 # `priority_failover` is the reference extension strategy: its descriptor is the one its crate declares.
 STRATEGY_DESCRIPTORS: dict[str, dict] = {
     "priority_failover": {
@@ -325,7 +325,7 @@ class Api:
 
 
 async def seed_usage(url: str) -> None:
-    """A catalog with traffic through every kind of path (docs/plans/model-catalog.md, "Usage 記錄"):
+    """A catalog with traffic through every kind of path:
     direct, via an alias, via a router, via an alias to a router, and mixed groups.
     """
     from sqlalchemy.ext.asyncio import AsyncSession

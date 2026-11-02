@@ -87,7 +87,7 @@ flowchart TB
 
 ### Router
 
-- 用戶端呼叫的是「名字」，一個名字是 model（一個 upstream 上的一個模型）、alias（model 或 router 的另一個名字，只有一層）或 router（把請求分給後面的 models）。三種共用名字空間，都可以改名，內部參照都用 id。權限依呼叫的名字檢查。完整規則見[模型目錄計畫](plans/model-catalog.md)。
+- 用戶端呼叫的是「名字」，一個名字是 model（一個 upstream 上的一個模型）、alias（model 或 router 的另一個名字，只有一層）或 router（把請求分給後面的 models）。三種共用名字空間，都可以改名，內部參照都用 id。權限依呼叫的名字檢查。完整規則見下方「模型目錄已實作」。
 - 回應的 `model` 是呼叫時的名字；usage 的 `model` 是實際服務的 model，另外記錄來源的 alias、router、fallback 與 attempts。
 - 策略是 Rust crate（`docs/router-strategies.md`），重新 build gateway 即可，proto、control plane、UI 都不用改。Retry、fallback、traffic split 只在 router 上；直接呼叫 model 就是一次嘗試。
 - 策略：加權、最低延遲（EWMA）、最少進行中請求、vLLM 負載感知（P2 已實作）；依 team、header、輸入 token 數條件分流（延後）。
@@ -248,7 +248,7 @@ P2 把權限模型縮成 team → member／service account，加上 SSO、可抽
 
 ## 模型目錄已實作
 
-P2.5 把 deployment／route 換成 model、alias、router。計畫、已定的決定與實作差異見[模型目錄計畫](plans/model-catalog.md)，以下只列現況。
+P2.5 把 deployment／route 換成 model、alias、router。以下先列現況，後面是已定的決定、實作取捨與尚未做的項目。
 
 - **目錄與 API：** `/models`、`/aliases`、`/routers`、`/strategies`、`/catalog`。名字跨種類唯一（`catalog_names`），參照與權限都用 id（`policy_grants`），改名不弄斷關係；舊名字立刻 404，只有 model 可以 `keep_old_name_as_alias`。被參照的名字不能刪（409）。
 - **快照：** `Snapshot` 直接帶 models、aliases、routers，gateway 在套用時建成一張名字表，請求路徑仍是一次查表。`Router.strategy` 是字串。`ApiKey.allowed_models` 由 control plane 展開成當下的名字。
@@ -261,6 +261,51 @@ P2.5 把 deployment／route 換成 model、alias、router。計畫、已定的�
 - **驗收：** `tests/e2e/test_catalog.py`（真實 control plane + gateway）。
 
 **尚未包含：** 註冊時的連線測試、在 Models／Routers 顯示「已生效／被 NACK」、`api_key_ref` 錯誤的處理、對成員隱藏上游資訊、dropped spans 的 metric（span 遺失目前是無聲的）。
+
+### 已定的決定（Andy，2026-11-02）
+
+1. **名字全域唯一。** 一個 model 只對應一個 upstream + upstream_model，反過來不限制：同一個上游模型可以有多個 model。Model、alias、router 共用同一個名字空間，要負載平衡一律建 router。
+2. **名字可以改。**
+3. **Alias 可指向 model 或 router，只有一層，獨立授權。** 有 alias 權限就能呼叫，不需要目標的權限；有目標的權限也不會自動得到 alias。
+4. **Router 底下只有 model 名字。** 成員只能是 model，不能放 alias 或其他 router。Fallback 目標也只能是 model，而且可以不設。
+5. **權重放在 router 的成員上。** 同一個 model 在不同 router 可以有不同權重。Model 上不再有 weight。
+6. **Retry、fallback、traffic split、strategy 都只在 router 上。** 直接呼叫 model 就是一次嘗試。Health check 和熔斷的設定仍在 upstream 上，熔斷狀態依 model 分開。需要重試就建單一成員的 router。
+7. **權限依呼叫的名字檢查。** Key 能呼叫 `qwen-coder`，不代表能直接呼叫 `lumewarp/qwen3-a`，直接呼叫 model 要有該 model 的權限。Router 的 fallback 不重新檢查權限，和現在一樣。
+8. **權限維持 team → member / service account。** Key 繼承持有者的範圍，不加 key 層。
+9. **被參照的名字不能刪。** 被 router、alias 或 fallback 參照時回 409，並列出參照者。
+10. **回應的 `model` 一律改寫成呼叫時的名字。** Control plane UI 要能同時用對外名字和上游模型名篩選。
+11. **內部命名全部一起改。** 目前沒有遷移成本，不保留舊詞。
+12. **Team 設成 All 就包含之後新增的名字。** 需要限制的 team 改用 Selected。
+13. **Usage 的 `model` 記最後實際服務的 model，另外記錄來源的 alias 和 router。**
+14. **Router 的設定由 Rust 擴充介面定義。** 內建和自訂策略走同一套，UI 依策略宣告的 schema 產生表單。策略只定義自己的設定，成員清單、retry、fallback、traffic split 由 gateway 統一提供。
+15. **Gateway 不寫 access log，要查單一請求就到 OTel 找。**
+16. **只有 model 改名有「Keep old name as alias」。** 預設勾選；router 和 alias 沒有。
+17. **有 gateway 沒有某個策略時，預設不能儲存。** API 回 422 並列出缺少的 gateway，帶 `force` 才能存。
+18. **Control plane 的上游資訊暫時維持現狀（Andy：先這樣處理）。** 任何已登入的人都能讀路由設定，team member 也能在 Usage 看到實際的 model 和上游模型名。回應改寫只影響 API 用戶端看到的名字，不算保密。之後要對成員隱藏再另外設計。
+
+- **價格放在 model 上。** 費用永遠依實際服務的 model 計算。
+- **權限清單驗證名字存在。** Member / service account 的清單必須是 team 範圍的子集，UI 也只列 team 範圍內的名字。
+- **Team 範圍縮小時，** 不改 member 的設定，實際權限仍取交集（現有 `narrow` 的行為）。
+- **刪除名字時，** 指向它的授權一起刪除並寫入 audit；被 router、alias 或 fallback 參照則依第 9 點回 409。
+
+### 實作取捨
+
+- **讀 body 前被拒絕的請求，`requested` 是空的。** 403、404、429（限流）在讀完 body 之後才決定，有值；已撤銷、停用、過期和超過預算的 key 在讀 body 之前就被拒絕，那時還不知道名字。要補就得為了被拒絕的請求讀 body，所以維持空值。
+- **快速路徑可能回傳上游更具體的名字。** 呼叫的名字等於 `upstream_model` 時不走掃描器，例如呼叫 `gpt-4o`，OpenAI 可能回 `gpt-4o-2024-08-06`。這是第 10 點「一律改寫」之外的例外，另外兩個例外是錯誤回應和上游仍然壓縮的回應。
+- **Binary 叫 `lumewarp`，** 指令是 `lumewarp strategies --json`。
+- **Usage 的 migration（`0011`）是離線的。** 回填和建索引都在同一個交易內，全程持有 `ACCESS EXCLUSIVE`，要在維護時段執行。Downgrade 會遺失 provenance 欄位，文件有寫。
+- **解析 usage 名字有寬限時間。** 依請求開始時間（`started_at`，舊 gateway 用完成時間），查不到精確的區間時，寬限時間內只有一個同種類的擁有者才補 id。預設 300 秒，`LUMEWARP_USAGE_CATALOG_GRACE_SECONDS`，0 是關閉。這容忍時鐘偏差和傳播延遲，不是身分證明：同種類舊名字在寬限時間內被重複使用時，落後的 gateway 仍可能算到新擁有者。
+- **非串流回應超過 4 MiB 時，usage 是 `INVALID`。** 回應本身正常轉發和改寫，只是 usage 的 capture 上限 `MAX_JSON_CAPTURE` 讀不到 token。這個上限原本就有，但以前這種回應需要改寫時會中斷，現在會送達，所以比較容易遇到。
+- **沒有 gateway 回報的策略也算 `config_invalid`。** 遷移過來的自訂 router 在 gateway 回報該策略之前都會顯示 `Config invalid`，資料不會被修改。
+- **內建策略拒絕成員 params。** 以前填了會被忽略，現在 API 回 422、gateway NACK，因為空 schema 是 `additionalProperties: false`。已存的這種資料會顯示 `config_invalid`。
+- **`Configure` trait。** `configure` 透過新的 `Configure<P, M>` trait 收到已解析的 struct，讓驗證的型別和讀取的型別是同一份；`Strategy` 只剩 `pick`。
+
+### 尚未做
+
+- 註冊時的連線測試（確認 upstream 連得上、`upstream_model` 存在）。
+- 在 Models、Routers 顯示「已生效／被 NACK」。
+- `api_key_ref` 錯誤造成 gateway 收不到新設定的問題。這項尚未實測，應該獨立設計。
+- Token 月配額、Tokens / Cost 切換的實作。
 
 ## 效能目標（尚未實測）
 

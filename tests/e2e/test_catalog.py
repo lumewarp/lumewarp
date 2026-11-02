@@ -1,6 +1,6 @@
-"""The model catalog through a real control plane and gateway (docs/plans/model-catalog.md,
-驗收條件 → E2E, Usage, OTel): names are created over the admin API, reach the gateway in a
-snapshot, and are called like a client would. Runs under scripts/e2e-p1.sh and e2e-p2.sh.
+"""The model catalog through a real control plane and gateway: names are created over the
+admin API, reach the gateway in a snapshot, and are called like a client would. Runs under
+scripts/e2e-p1.sh and e2e-p2.sh.
 """
 
 import json
@@ -660,8 +660,8 @@ def test_refused_requests_keep_the_called_name(stack):
     assert forbidden.status_code == 403
     row = _row(stack, forbidden)
     assert (row["requested"], row["model"], row["status"]) == ("mock-a", "", 403)
-    # A key refused before the body is read has no called name to record (docs/plans/
-    # model-catalog.md 實作差異): gateway/tests/usage.rs
+    # A key refused before the body is read has no called name to record (docs/architecture.md,
+    # "實作取捨"): gateway/tests/usage.rs
     # keys_refused_before_the_body_report_an_event_with_no_name.
 
 
