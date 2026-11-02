@@ -532,6 +532,120 @@ def test_usage_filters_and_renames_keep_one_identity(stack):
     assert set(groups[0]["upstream_models"]) == {"up-a"}
 
 
+@pytest.fixture
+def gated_upstream():
+    """An upstream that holds each chat completion until released."""
+    arrived = threading.Event()
+    release = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers.get("content-length", 0)))
+            arrived.set()
+            release.wait(60)
+            body = json.dumps(
+                {
+                    "id": "chatcmpl-gated",
+                    "object": "chat.completion",
+                    "model": "gated",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server.server_address[1], arrived, release
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_request_in_flight_across_a_rename_stays_with_its_model(stack, gated_upstream):
+    """Started under the old name, reported after the rename and the keep-old-name alias are
+    live: the ingest has to resolve the old serving string through the name history, and must
+    not hand the row to the alias now holding that name."""
+    port, arrived, release = gated_upstream
+    seeded = stack.seed()
+    gw = stack.start_gateway()
+    model = _model(stack, "before-rename", _upstream(stack, "gated", port), upstream_model="gated")
+    _wait_names(gw, seeded.a.secret, ["before-rename"])
+
+    responses: list[httpx.Response] = []
+
+    def call() -> None:
+        responses.append(
+            httpx.post(
+                gw.url("/v1/chat/completions"),
+                json={"model": "before-rename", "messages": [{"role": "user", "content": "hi"}]},
+                headers={"authorization": f"Bearer {seeded.a.secret}"},
+                timeout=60,
+            )
+        )
+
+    client = threading.Thread(target=call)
+    client.start()
+    try:
+        assert arrived.wait(15), "the request never reached the upstream"
+        stack.ok(
+            "PATCH",
+            f"/models/{model}",
+            json={"name": "after-rename", "keep_old_name_as_alias": True},
+        )
+        _version_settled(stack)
+        assert not responses, "the request must still be in flight across the rename"
+    finally:
+        release.set()
+        client.join(30)
+    assert responses, "the request did not finish"
+    response = responses[0]
+    assert response.status_code == 200, response.text
+    assert response.json()["model"] == "before-rename", "the response keeps the called name"
+
+    row = _row(stack, response)
+    renamed_at = pg(
+        stack.dsn, "SELECT renamed_at FROM catalog_name_history WHERE old_name = 'before-rename'"
+    )[0]["renamed_at"]
+    assert row["started_at"] < renamed_at, "the request has to start before the rename"
+    assert (row["requested"], row["model"], row["alias"]) == (
+        "before-rename",
+        "before-rename",
+        "",
+    )
+    assert row["model_id"] == uuid.UUID(model), "resolved through the name history"
+    assert row["alias_id"] is None, "the alias on the old name did not serve this request"
+
+    def requests(**params) -> int:
+        return sum(item["requests"] for item in _usage(stack, team_id=seeded.team_id, **params))
+
+    assert requests(model_id=model) == 1
+    assert requests(model="after-rename") == 1
+    assert requests(alias="before-rename") == 0
+    groups = [
+        item for item in _usage(stack, team_id=seeded.team_id, group_by="model") if item["requests"]
+    ]
+    assert [(g["model_id"], g["model"], g["requests"]) for g in groups] == [
+        (model, "after-rename", 1)
+    ], groups
+
+
 def test_refused_requests_keep_the_called_name(stack):
     seeded = stack.seed()
     gw = stack.start_gateway()
@@ -547,7 +661,8 @@ def test_refused_requests_keep_the_called_name(stack):
     row = _row(stack, forbidden)
     assert (row["requested"], row["model"], row["status"]) == ("mock-a", "", 403)
     # A key refused before the body is read has no called name to record (docs/plans/
-    # model-catalog.md 實作差異); gateway/tests/usage.rs pins that case.
+    # model-catalog.md 實作差異): gateway/tests/usage.rs
+    # keys_refused_before_the_body_report_an_event_with_no_name.
 
 
 # ------------------------------------------------------------------------------- OTel
