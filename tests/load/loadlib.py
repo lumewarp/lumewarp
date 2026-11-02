@@ -242,7 +242,7 @@ class Probe:
         self.http = httpx.Client(timeout=10)
 
     def chat(self, key: dict) -> tuple[int, str | None]:
-        started = time.time()
+        started = time.monotonic()
         t0 = time.perf_counter()
         record = {"t": started, "k": key["id"], "s": False, "probe": True}
         try:
@@ -269,12 +269,12 @@ class Probe:
             self.records.add(record)
 
     def until(self, key: dict, want, timeout: float, interval: float = 0.02) -> float | None:
-        """Polls until want(status, code); returns the wall time it first held, or None."""
+        """Polls until want(status, code); returns the monotonic time it first held, or None."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             status, code = self.chat(key)
             if want(status, code):
-                return time.time()
+                return time.monotonic()
             time.sleep(interval)
         return None
 
@@ -330,6 +330,8 @@ class LoadRun:
             argv += ["--master-port", port]
         self.proc = Proc(f"locust-{name}", argv, env, stack.dir)
         self.started = 0.0
+        # Wall minus monotonic, only to read the wall-clock timestamps in Locust's own log.
+        self.wall_offset = 0.0
 
     def set_keys(self, keys: list[dict]) -> None:
         tmp = self.pool.with_suffix(".tmp")
@@ -345,10 +347,11 @@ class LoadRun:
 
         # The first uvx run may have to install locust.
         wait_for(first_records, 180, "first Locust requests", interval=0.1)
-        self.started = time.time()
+        self.started = time.monotonic()
+        self.wall_offset = time.time() - self.started
 
     def elapsed(self) -> float:
-        return time.time() - self.started
+        return time.monotonic() - self.started
 
     def sleep_until(self, offset: float) -> None:
         time.sleep(max(0.0, offset - self.elapsed()))
@@ -404,7 +407,7 @@ def summarize(records: list[dict], seconds: float) -> dict:
 
 
 def hard_errors(records: list[dict], allow_conn: tuple[float, float] | None = None) -> list[dict]:
-    """5xx, connection errors (outside `allow_conn` wall-time window), malformed bodies and
+    """5xx, connection errors (outside the `allow_conn` monotonic window), malformed bodies and
     any other unexpected status."""
     bad = []
     for r in records:
@@ -433,6 +436,7 @@ def load_window(
     ):
         try:
             timestamp = datetime.strptime(match[1], "%Y-%m-%d %H:%M:%S,%f").timestamp()
+            timestamp -= getattr(run, "wall_offset", 0.0)
         except ValueError:
             continue
         if timestamp < step_started:

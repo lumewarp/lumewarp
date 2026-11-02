@@ -37,11 +37,18 @@ show a positive queue depth or an increase in usage report retry events during t
 | scenario | what it asserts |
 | --- | --- |
 | `test_steady_mixed_load` | 60 keys over 6 teams × 2 owners (one service account and one member using a PAT) × 5 keys, chat + stream mix: zero 5xx, zero connection errors, well-formed bodies/SSE (no leaked usage-only chunk), exact usage + cost accounting at team and owner scopes, no dropped events, config stream stays up. |
-| `test_churn_under_load` | Under load: revoke keys (each rejected < 2 s, measured per key, never accepted after the first 401), create keys (accepted < 2 s), add model `mock-b` (1:1 split), weight `mock-a` to 0 (all `mock-b`), remove `mock-b` (all `mock-a`) — checked by the config version each request was served under; lower an owner rpm limit (429 `rate_limit_exceeded` + `Retry-After` only for that owner's keys and window, never 5xx), clear it; publish 40 versions back to back through owner policy changes (gateway ACKs the latest, `source_revision`/`created_at` monotonic, nothing quarantined). |
+| `test_churn_under_load` | Under load: revoke keys (each rejected < 2 s, measured per key, never accepted after the first 401), create keys (accepted < 2 s), add model `mock-b` (1:1 split), weight `mock-a` to 0 (all `mock-b`), remove `mock-b` (all `mock-a`) — checked by the config version each request was served under; lower an owner rpm limit (429 `rate_limit_exceeded` + `Retry-After` only for that owner's keys and window, never 5xx), clear it; publish 40 versions back to back through owner policy changes (gateway ACKs the latest, `source_revision` strictly increasing, nothing quarantined). |
 | `test_control_plane_restart_under_load` | CP stopped for 20 s mid-run: every request still 200, usage queued meanwhile is delivered after restart (exact counts, drop counter 0), gateway reconnects and ACKs. |
 | `test_budget_under_load` | Separate service-account, member and team cases with a 0.01 USD budget: every affected key flips to 429 `insufficient_quota` < 5 s after the budget was exceeded at ingestion and is never accepted after its flip; keys outside the scope remain unaffected; overshoot recorded. |
 | `test_rate_limit_under_load` | A service account and member each share an RPM limiter across their keys: 429 `rate_limit_exceeded` with `Retry-After`, unrelated owners unaffected, clearing both limits restores service, exact usage and cost accounting. |
 | `test_gateway_restart_under_load` | Gateway SIGTERM + restart on the same ports: boots from the on-disk snapshot, reconnects, connection errors only inside the restart window, never 5xx, no lost or duplicated usage. |
+
+Elapsed times, including the `t` of each request record, are `CLOCK_MONOTONIC`, and Locust is
+paced on it (`monotonic_throughput`) rather than by its own `constant_throughput`. Locust's reads
+`time.time()`, so with a wall clock stepping back and forth by 24.9 s the pacing stalled every
+user for 25 s on each step back: about 70 RPS against the 400 target, the budget never reached
+within the scenario, and a revoke measured as 25 s. Only `exceeded_at` is wall clock, in Postgres,
+and the budget scenario does not compare it with the records.
 
 Reports: `tests/load/results/<UTC timestamp>/` (`summary.md`, one JSON per scenario with RPS,
 latency p50/p90/p99/max, revoke and new-key latency distributions, budget overshoot,

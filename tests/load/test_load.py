@@ -5,6 +5,9 @@ churns config, restarts processes and checks every request against Postgres.
 Each scenario runs on a fresh stack so its usage accounting is exact. Every request a
 client made (Locust or the orchestrator's probes) is recorded; usage rows must match them
 per key, status and stream flag.
+
+Times are monotonic, including the records' `t`: this machine's wall clock can step by tens of
+seconds, and these assertions are about elapsed time.
 """
 
 import time
@@ -125,11 +128,11 @@ def test_churn_under_load(stack):
     timeline: dict = {}
     try:
         run.sleep_until(8)
-        step_started = time.time()
+        step_started = time.monotonic()
         # --- revoke keys under load: measured per key from the API call to the first 401.
         revoke_latency = []
         for key in revoked:
-            t0 = time.time()
+            t0 = time.monotonic()
             stack.ok("POST", f"/keys/{key['id']}/revoke")
             seen = probe.until(key, rejected401, 5)
             key["rejected_at"] = seen
@@ -141,7 +144,7 @@ def test_churn_under_load(stack):
         others = [i for i in range(len(fleet.owners)) if i != rl_index]
         for i in range(6):
             owner_id = fleet.owners[others[i % len(others)]]["id"]
-            t0 = time.time()
+            t0 = time.monotonic()
             key = fleet.create_key(owner_id)
             fleet.keys.append(key)
             seen = probe.until(key, ok200, 5)
@@ -173,20 +176,20 @@ def test_churn_under_load(stack):
 
         # --- lower an owner rate limit: 429 + Retry-After only for its keys, never 5xx.
         rl_owner = fleet.owners[rl_index]["policy_path"]
-        t_rl_api = time.time()
+        t_rl_api = time.monotonic()
         stack.ok("PATCH", rl_owner, json={"rpm_limit": 60})
         wait_acked(stack)
-        t_rl = time.time()
+        t_rl = time.monotonic()
         time.sleep(8)
-        t_rl_off_api = time.time()
+        t_rl_off_api = time.monotonic()
         stack.ok("PATCH", rl_owner, json={"rpm_limit": None})
         wait_acked(stack)
-        t_rl_off = time.time()
+        t_rl_off = time.monotonic()
         assert probe.until(rl_keys[0], ok200, 3) is not None, "rate limit cleared but still 429"
 
         # --- many versions quickly.
         burst_start_version = stack.current_version()
-        t0 = time.time()
+        t0 = time.monotonic()
         for i in range(BURST):
             stack.ok(
                 "PATCH",
@@ -194,9 +197,9 @@ def test_churn_under_load(stack):
                 json={"rpm_limit": 100_000 + i},
             )
             time.sleep(BURST_GAP)
-        api_secs = time.time() - t0
+        api_secs = time.monotonic() - t0
         latest = wait_acked(stack, 30)
-        converge_secs = time.time() - t0
+        converge_secs = time.monotonic() - t0
         wait_for(lambda: gw.metric("lumewarp_config_version") == latest, 5, "gateway on the latest")
         burst = {
             "patches": BURST,
@@ -309,8 +312,6 @@ def test_churn_under_load(stack):
     # compiler/publish.py:_publish_locked skips latest[1] >= revision under the scope
     # advisory lock. This scenario only compiles mutations (no rollback publications).
     assert revisions == sorted(set(revisions)), "source_revision not strictly increasing"
-    created = [v["created_at"] for v in versions]
-    assert created == sorted(created), "config_versions created_at not monotonic"
     assert status["acked_version"] == versions[-1]["version"], status
     assert status["quarantined_version"] is None and status["last_nack_code"] is None, status
     assert_accounting(report)
@@ -327,7 +328,7 @@ def test_control_plane_restart_under_load(stack):
     try:
         run.sleep_until(15)
         failed_before = gateway_counter(gw, "lumewarp_usage_events_failed_total")
-        t_stop = time.time()
+        t_stop = time.monotonic()
         stack.stop_cp()
         wait_for(
             lambda: gw.metric("lumewarp_config_stream_connected") == 0, 10, "stream disconnected"
@@ -336,18 +337,18 @@ def test_control_plane_restart_under_load(stack):
         while run.elapsed() < 15 + CP_OUTAGE_SECS:
             peak_queue = max(peak_queue, gateway_counter(gw, "lumewarp_usage_queue_depth"))
             time.sleep(0.5)
-        t_start = time.time()
+        t_start = time.monotonic()
         failed_during = gateway_counter(gw, "lumewarp_usage_events_failed_total") - failed_before
         stack.start_cp()
-        t_cp_ready = time.time()
+        t_cp_ready = time.monotonic()
         wait_acked(stack, 30)
-        t_acked = time.time()
+        t_acked = time.monotonic()
         wait_for(
             lambda: gateway_counter(gw, "lumewarp_usage_queue_depth") < 1000,
             USAGE_DRAIN_BOUND,
             "usage queue drained after the CP came back",
         )
-        t_drained = time.time()
+        t_drained = time.monotonic()
         step_elapsed = run.elapsed()
     except BaseException:
         run.proc.kill()
@@ -405,7 +406,14 @@ def test_budget_under_load(stack, scope):
     run = LoadRun(stack, gw, f"budget-{scope}", fleet.keys, BUDGET_SECS)
     run.start()
 
+    # exceeded_at is the database's wall clock, not comparable with the records. The last poll
+    # that did not see it yet is a monotonic time no later than the budget was seen exceeded,
+    # so a flip is never measured shorter than it was.
+    not_yet = time.monotonic()
+
     def exceeded():
+        nonlocal not_yet
+        asked = time.monotonic()
         rows = pg(
             stack.dsn,
             "SELECT exceeded_at FROM usage_totals WHERE scope_type = $1"
@@ -413,12 +421,15 @@ def test_budget_under_load(stack, scope):
             scope,
             scope_id,
         )
-        return rows[0]["exceeded_at"] if rows else None
+        if rows:
+            return rows[0]["exceeded_at"]
+        not_yet = asked
+        return None
 
     try:
-        step_started = time.time()
-        exceeded_at = wait_for(exceeded, BUDGET_SECS - 15, "owner budget exceeded", interval=0.2)
-        t_exceeded = exceeded_at.timestamp()
+        step_started = time.monotonic()
+        wait_for(exceeded, BUDGET_SECS - 15, "owner budget exceeded", interval=0.02)
+        t_exceeded = not_yet
         step_elapsed = run.elapsed()
     except BaseException:
         run.proc.kill()
@@ -545,17 +556,17 @@ def test_gateway_restart_under_load(stack):
         dropped_before = gateway_counter(gw, DROPPED)
         reported_before = gateway_counter(gw, "lumewarp_usage_events_reported_total")
         log_before = gw.proc.text().count("booting from cached snapshot")
-        t_stop = time.time()
+        t_stop = time.monotonic()
         gw.proc.stop()  # SIGTERM: graceful drain + usage flush
-        t_stopped = time.time()
+        t_stopped = time.monotonic()
         gw.proc.start()  # same argv, same ports, same state dir
         gw.wait_listening()
-        t_listening = time.time()
+        t_listening = time.monotonic()
         boot_version = gw.metric("lumewarp_config_version")
         gw.wait_ready(5)
-        t_ready = time.time()
+        t_ready = time.monotonic()
         acked = wait_acked(stack, 20)
-        t_acked = time.time()
+        t_acked = time.monotonic()
         step_elapsed = run.elapsed()
     except BaseException:
         run.proc.kill()

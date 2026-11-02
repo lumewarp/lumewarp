@@ -4,7 +4,8 @@ Runs in its own Python (uvx locust==2.32.4), never imports the harness. The orch
 (test_load.py) owns the key pool: a JSON file it rewrites atomically while the run goes on
 (revoked keys stay in it, new keys are appended once the gateway accepts them). Every
 request is appended to `<LOAD_OUT>/requests-<pid>.jsonl` so the orchestrator can compare
-what clients saw with what landed in Postgres, key by key.
+what clients saw with what landed in Postgres, key by key. Record times are CLOCK_MONOTONIC, which every process on
+the machine shares and which a wall clock step does not move.
 
 Environment: LOAD_POOL, LOAD_OUT, LOAD_USER_RPS (per user), LOAD_STREAM_SHARE.
 """
@@ -14,7 +15,7 @@ import os
 import random
 import time
 
-from locust import FastHttpUser, constant_throughput, events, task
+from locust import FastHttpUser, events, task
 from locust.runners import WorkerRunner
 
 POOL = os.environ["LOAD_POOL"]
@@ -107,8 +108,24 @@ def _sse_problem(text: str) -> str | None:
     return None
 
 
+def monotonic_throughput(task_runs_per_second: float):
+    """locust.constant_throughput on the monotonic clock. Locust's own reads the wall clock, so
+    a step back of N seconds stalls every user for N seconds, on each step."""
+    interval = 1 / task_runs_per_second
+
+    def wait_time(self) -> float:
+        now = time.monotonic()
+        previous = getattr(self, "_pacing_previous", None)
+        ran = 0.0 if previous is None else now - previous[0] - previous[1]
+        wait = max(0.0, interval - ran)
+        self._pacing_previous = (now, wait)
+        return wait
+
+    return wait_time
+
+
 class GatewayUser(FastHttpUser):
-    wait_time = constant_throughput(USER_RPS)
+    wait_time = monotonic_throughput(USER_RPS)
     # A connection error must surface as status 0, not be retried by the client.
     max_retries = 0
     network_timeout = 30.0
@@ -125,7 +142,7 @@ class GatewayUser(FastHttpUser):
         body = {"model": "mock", "messages": [{"role": "user", "content": "hi"}]}
         if stream:
             body["stream"] = True
-        started = time.time()
+        started = time.monotonic()
         t0 = time.perf_counter()
         with self.client.post(
             "/v1/chat/completions",

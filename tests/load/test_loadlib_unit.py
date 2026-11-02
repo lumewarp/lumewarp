@@ -397,3 +397,18 @@ def test_unit_load_run_checks_final_count_not_periodic_csv(tmp_path, monkeypatch
     else:
         with pytest.raises(AssertionError, match="locust counted 2 requests, records have 1"):
             run.wait()
+
+
+def test_load_window_reads_wall_clock_log_lines_through_the_run_offset():
+    wall = datetime(2026, 10, 24, 12).timestamp()
+    offset = wall - 1000.0
+    stamp = datetime.fromtimestamp(wall + 3).strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+    warning = f"[{stamp}] host/WARNING/root: CPU usage above 90%! Load generator"
+    run = SimpleNamespace(
+        started=1000.0, seconds=10, wall_offset=offset, proc=SimpleNamespace(text=lambda: warning)
+    )
+    records = [record(t=1003.0), record(t=1004.0, stream=True)]
+    result = load_window(run, 9, 2, records, step_started=1002.0)
+    assert result["generator_cpu_warning"] is True
+    assert result["ok"] is True
+
