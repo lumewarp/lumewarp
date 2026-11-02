@@ -93,6 +93,7 @@ uv sync
 uv run lumewarp-control-plane migrate
 uv run lumewarp-control-plane bootstrap --gateway-id gw-local   # prints the lwg-... token once
 LUMEWARP_DEV_MODE=true LUMEWARP_BREAK_GLASS_PASSWORD=dev-break-glass \
+  LUMEWARP_SESSION_COOKIE_SECURE=false \
   uv run lumewarp-control-plane serve
 ```
 
@@ -110,9 +111,10 @@ cargo run --release -- --control-plane http://127.0.0.1:50051 \
   --state-dir /tmp/lumewarp-state --scope default --gateway-id gw-local
 ```
 
-The gateway is not ready until the control plane publishes the first config
-version: `/v1/*` and the admin `/readyz` return 503, and the process never falls
-back to an open router. Open <http://127.0.0.1:8091/>, use the emergency login with the
+The gateway is not ready until it has a first config version (`/v1/*` and the admin
+`/readyz` return 503), and the process never falls back to an open router. The control
+plane publishes an empty version when it starts, so here the gateway is ready at once
+and answers 401 until a key exists. Open <http://127.0.0.1:8091/>, use the emergency login with the
 password `dev-break-glass` (a plaintext password needs `LUMEWARP_DEV_MODE=true`; production
 uses an argon2id hash and OIDC with an admin group, see the
 [control plane README](control-plane/README.md#credentials-and-access-model)), then create:
@@ -124,8 +126,8 @@ uses an argon2id hash and OIDC with an admin group, see the
 - a team and an API key for a service account of that team (the `lw-...` secret is
   shown once).
 
-Creating those resources publishes a snapshot; the gateway becomes ready and
-accepts the key:
+Creating those resources publishes a snapshot; the gateway applies it and accepts
+the key:
 
 ```sh
 curl -sS -H "Authorization: Bearer lw-..." -H 'Content-Type: application/json' \
