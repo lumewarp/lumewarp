@@ -1069,8 +1069,10 @@ test("usage: the upstream model is a text filter, so a name nothing maps to any 
   await signIn(page, request, "/usage");
   const box = page.getByLabel("Upstream model", { exact: true });
   // The catalog only suggests.
-  await expect(page.locator("#usage-upstream-models option[value='Qwen/UseA']")).toHaveCount(1);
-  await expect(page.locator("#usage-upstream-models option[value='Org/Retired']")).toHaveCount(0);
+  await box.click();
+  const suggestions = page.getByRole("listbox", { name: "Suggestions" });
+  await expect(suggestions.getByRole("option", { name: "Qwen/UseA", exact: true })).toHaveCount(1);
+  await expect(suggestions.getByRole("option", { name: "Org/Retired", exact: true })).toHaveCount(0);
   await expect(row(page, "use/retired")).toBeVisible();
   const [req] = await Promise.all([page.waitForRequest((r) => r.url().includes("/api/v1/usage") && r.url().includes("upstream_model=")), box.fill("Org/Retired")]);
   expect(new URL(req.url()).searchParams.get("upstream_model")).toBe("Org/Retired");
