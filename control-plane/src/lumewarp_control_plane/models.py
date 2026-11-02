@@ -1088,18 +1088,22 @@ class UsageEvent(Base):
         Index("ix_usage_events_team_ts", "team_id", "ts"),
         Index("ix_usage_events_owner_ts", "owner_id", "ts"),
         Index("ix_usage_events_key_ts", "key_id", "ts"),
-        *(
-            Index(f"ix_usage_events_{field}_ts", field, "ts")
-            for field in (
-                "model_id",
-                "alias_id",
-                "router_id",
-                "model",
-                "alias",
-                "router",
-                "upstream_model",
-            )
+        Index("ix_usage_events_model_id_ts", "model_id", "ts"),
+        Index("ix_usage_events_team_model_id_ts", "team_id", "model_id", "ts"),
+        Index(
+            "ix_usage_events_alias_id_ts",
+            "alias_id",
+            "ts",
+            postgresql_where=text("alias_id IS NOT NULL"),
         ),
+        Index(
+            "ix_usage_events_router_id_ts",
+            "router_id",
+            "ts",
+            postgresql_where=text("router_id IS NOT NULL"),
+        ),
+        Index("ix_usage_events_model_ts", "model", "ts"),
+        Index("ix_usage_events_upstream_model_ts", "upstream_model", "ts"),
         CheckConstraint("attempts >= 0", name="attempts_nonneg"),
     )
 
