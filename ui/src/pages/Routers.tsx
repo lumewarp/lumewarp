@@ -13,7 +13,7 @@ import { Checkbox } from "../components/ui/checkbox";
 import { Label } from "../components/ui/label";
 import { useAliases, useCan, useModels, useMut, useNames, useRouters, useStrategies } from "../hooks";
 import { matches, routerUpstreamModels } from "../lib/catalog";
-import { cleanValues, parseSchema, settingTitles, unknownKeys, validateValues, type ParsedSchema, type Values as Params } from "../lib/schema";
+import { cleanValues, parseSchema, settingTitles, strategyDescription, strategyTitle, unknownKeys, validateValues, type ParsedSchema, type Values as Params } from "../lib/schema";
 import { useById } from "../hooks";
 
 type Sticky = Router["sticky"];
@@ -333,7 +333,7 @@ export function Routers() {
   const remove = useMut((id: string) => api.deleteRouter(id), "Router deleted");
 
   const open = (r: Router | "new") => {
-    form.reset(r === "new" ? { ...blank, strategy: strategies.data?.[0]?.name ?? blank.strategy } : fromRouter(r));
+    form.reset(r === "new" ? { ...blank, strategy: strategyByName.has(blank.strategy) ? blank.strategy : (strategies.data?.[0]?.name ?? blank.strategy) } : fromRouter(r));
     setSubmitted(false);
     setProblems({});
     setEditing(r);
@@ -359,7 +359,7 @@ export function Routers() {
   const depOptions = models.data ?? [];
   const fallbackOptions = depOptions.filter((m) => !v.fallback_model_ids.includes(m.id));
   const strategyOptions = [
-    ...(strategies.data ?? []).map((s) => ({ value: s.name, label: s.title || s.name })),
+    ...(strategies.data ?? []).map((s) => ({ value: s.name, label: strategyTitle(s) })),
     ...(strategyByName.has(v.strategy) || !v.strategy ? [] : [{ value: v.strategy, label: `${v.strategy} (not reported by any gateway)` }]),
   ];
   const setSplit = (i: number, patch: Partial<Split>) => form.set("splits", v.splits.map((s, j) => (j === i ? { ...s, ...patch } : s)));
@@ -368,6 +368,11 @@ export function Routers() {
     const [item] = next.splice(i, 1);
     next.splice(i + delta, 0, item);
     form.set("fallback_model_ids", next);
+  };
+  const removeSplit = (i: number) => {
+    // The last split going away hands its models back to the router itself.
+    if (v.splits.length === 1) form.set("members", v.splits[0].members);
+    form.set("splits", v.splits.filter((_, j) => j !== i));
   };
   const shares = splitShares(v.splits.map((s) => s.weight ?? 0));
   const paramErrors = (prefix: string, errors: Record<string, string>) => Object.fromEntries(Object.entries(errors).filter(([k]) => k.startsWith(prefix)).map(([k, m]) => [k.slice(prefix.length), m]));
@@ -406,7 +411,7 @@ export function Routers() {
             header: "Strategy",
             cell: (r) => (
               <div className="flex flex-col">
-                <span>{strategyByName.get(r.strategy)?.title || r.strategy}</span>
+                <span>{(() => { const s = strategyByName.get(r.strategy); return s ? strategyTitle(s) : r.strategy; })()}</span>
                 <code className="text-muted-foreground">{r.strategy}</code>
               </div>
             ),
@@ -437,14 +442,15 @@ export function Routers() {
             key: "fallback",
             header: "Fallback",
             cell: (r) =>
-              r.fallback_model_ids.length ? (
+              r.fallback_model_ids.length || r.retry || r.sticky !== "none" ? (
                 <div className="flex flex-wrap gap-1">
                   {r.fallback_model_ids.map((id, i) => (
                     <Badge key={id}>
-                      {r.fallback_model_ids.length > 1 ? `${i + 1}. ` : ""}
-                      {modelName(id)}
+                      {i + 1}. → {modelName(id)}
                     </Badge>
                   ))}
+                  {r.retry && <Badge tone="info">retry ×{r.retry.max_attempts ?? 2}</Badge>}
+                  {r.sticky !== "none" && <Badge>sticky: {r.sticky === "header" ? r.sticky_header : r.sticky}</Badge>}
                 </div>
               ) : (
                 <span className="text-muted-foreground">—</span>
@@ -476,7 +482,7 @@ export function Routers() {
 
       <FormDialog variant="wide-drawer" open={!!editing} title={editing === "new" ? "New router" : "Edit router"} submitLabel={editing === "new" ? "Create" : "Save"} onClose={() => setEditing(null)} onSubmit={submit}>
         <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus hint="The `model` value clients send. Must be unique across models, aliases and routers." />
-        <SelectField label="Strategy" value={v.strategy} onChange={changeStrategy} options={strategyOptions} error={form.errors.strategy} hint={shape.desc?.description || undefined} />
+        <SelectField label="Strategy" value={v.strategy} onChange={changeStrategy} options={strategyOptions} error={form.errors.strategy} hint={shape.desc ? strategyDescription(shape.desc) || undefined : undefined} />
 
         {missing.length > 0 && (
           <Alert variant="warn" data-testid="missing-gateways">
@@ -498,9 +504,15 @@ export function Routers() {
 
         <StrategySettings shape={shape} params={v.params} onChange={(next) => form.set("params", next)} errors={submitted ? paramErrors("params:", schemaErrors) : {}} error={form.errors.params} onProblem={(m) => setProblem("params", m)} idPrefix={`router-${editing === "new" ? "new" : (editing as Router | null)?.id}`} />
 
-        <Field label="Models" error={form.errors.members} hint={v.splits.length ? "Ignored while a traffic split is defined: members are chosen under each split." : shape.usesWeight ? undefined : "This strategy does not use weights."}>
-          {(p) => <MemberEditor id={p.id} invalid={p["aria-invalid"]} scope="m" label="Models" options={depOptions} members={v.members} onChange={(next) => form.set("members", next)} shape={shape} errors={schemaErrors} showErrors={submitted} onProblem={setProblem} />}
-        </Field>
+        {v.splits.length > 0 ? (
+          <p className="field-hint" data-testid="members-in-splits">
+            Traffic split is on: choose the models of each split below.
+          </p>
+        ) : (
+          <Field label="Models" error={form.errors.members} hint={shape.usesWeight ? undefined : "This strategy does not use weights."}>
+            {(p) => <MemberEditor id={p.id} invalid={p["aria-invalid"]} scope="m" label="Models" options={depOptions} members={v.members} onChange={(next) => form.set("members", next)} shape={shape} errors={schemaErrors} showErrors={submitted} onProblem={setProblem} />}
+          </Field>
+        )}
 
         <fieldset className="form-section">
           <legend>Retries</legend>
@@ -563,7 +575,7 @@ export function Routers() {
                 <span className="split-share" aria-label={`Share of split ${i + 1}`}>
                   {shares[i]}
                 </span>
-                <button type="button" className="btn btn-sm btn-danger-ghost" aria-label={`Remove split ${i + 1}`} onClick={() => form.set("splits", v.splits.filter((_, j) => j !== i))}>
+                <button type="button" className="btn btn-sm btn-danger-ghost" aria-label={`Remove split ${i + 1}`} onClick={() => removeSplit(i)}>
                   Remove
                 </button>
               </div>
@@ -653,7 +665,7 @@ function StrategiesTable({ strategies, loading, error, onRetry }: { strategies: 
             header: "Strategy",
             cell: (s) => (
               <div className="flex flex-col">
-                <strong>{s.title || s.name}</strong>
+                <strong>{strategyTitle(s)}</strong>
                 <code className="text-muted-foreground">{s.name}</code>
               </div>
             ),

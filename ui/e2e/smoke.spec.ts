@@ -532,6 +532,8 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
     .click();
   await dialog(page).getByRole("button", { name: "Delete" }).click();
   await expect(page.getByText(/router smoke-main \(fallback\)/)).toBeVisible();
+  // The blocked delete is a dialog listing the referrers; dismiss it to carry on.
+  await dialog(page).getByRole("button", { name: "Got it" }).click();
 
   // Upstream health check and circuit breaker.
   await page.getByRole("link", { name: "Upstreams", exact: true }).click();

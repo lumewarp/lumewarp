@@ -53,7 +53,7 @@ export function ConfirmDialog({ open, title, message, confirmLabel = "Delete", o
       footer={
         blocked ? (
           <Button type="button" onClick={close} autoFocus>
-            Close
+            Got it
           </Button>
         ) : (
           <>

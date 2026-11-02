@@ -198,3 +198,7 @@ export function settingTitles(schema: unknown): string[] {
   const parsed = parseSchema(schema);
   return parsed ? parsed.fields.map((f) => f.title) : [];
 }
+
+/** A strategy's own title and description are as untrusted as its schema: bounded, shown as text. */
+export const strategyTitle = (s: { title: string; name: string }) => clip(s.title, MAX_TITLE) || clip(s.name, MAX_TITLE);
+export const strategyDescription = (s: { description: string }) => clip(s.description, MAX_DESCRIPTION);

@@ -115,7 +115,7 @@ export const useAliases = () => useQuery({ queryKey: ["aliases"], queryFn: () =>
 export const useRouters = () => useQuery({ queryKey: ["routers"], queryFn: () => api.routers() });
 export const useUpstreams = () => useQuery({ queryKey: ["upstreams"], queryFn: () => api.upstreams() });
 export const useStrategies = () => useQuery({ queryKey: ["strategies"], queryFn: () => api.strategies() });
-export const useCatalog = () => useQuery({ queryKey: ["catalog"], queryFn: () => api.catalog() });
+export const useCatalog = (enabled = true) => useQuery({ queryKey: ["catalog"], queryFn: () => api.catalog(), enabled });
 
 /** id → row lookup. */
 export function useById<T extends { id: string }>(rows: T[] | undefined) {

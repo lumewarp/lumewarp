@@ -29,7 +29,8 @@ interface Props {
  * Selected shows every model, alias and router the parent level allows as a checkbox.
  */
 export function PermissionPicker({ isTeam, access, onAccess, selected, onSelected, scope, error }: Props) {
-  const catalog = useCatalog();
+  // Only fetched once there is something to pick from.
+  const catalog = useCatalog(access === "list");
   const inScope = useMemo(() => (scope === null ? null : new Set(scope)), [scope]);
   const entries = useMemo(() => (catalog.data ?? []).filter((e) => inScope === null || inScope.has(e.name)), [catalog.data, inScope]);
   const known = new Set((catalog.data ?? []).map((e) => e.name));
