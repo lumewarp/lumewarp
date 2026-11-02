@@ -88,7 +88,8 @@ async def test_provenance_table_and_budget_by_served_cost(session, path):
         upstream_model="original-upstream-model",
         fallback=path == "fallback",
         attempts=3 if path == "fallback" else 1,
-        # Gateway priced the served snapshot, not the current catalog/alias/router.
+        # CP verifies preservation/accounting of gateway-reported cost only.
+        # Snapshot/model pricing itself is a gateway (c3) responsibility.
         cost_nano_usd=20,
     )
     model.upstream_model = "changed-before-delivery"
@@ -132,8 +133,18 @@ async def test_keep_old_alias_and_reused_model_names_resolve_by_kind_and_time(se
         (original.id, None),
         (original.id, alias.id),
     ]
-    # Ids are derived metadata, not part of deduplication: replay after a rename works.
+    # Replay must preserve the stored identities AND leave accounting unchanged.
+    total = await session.scalar(
+        select(UsageTotal).where(
+            UsageTotal.scope_type == ScopeType.TEAM, UsageTotal.scope_id == key.team_id
+        )
+    )
+    assert (total.request_count, total.cost_nano_usd) == (2, 246)
     assert await ingest(session, "gateway", [before]) == 1
+    await session.refresh(rows[0])
+    await session.refresh(total)
+    assert (rows[0].model_id, rows[0].alias_id) == (original.id, None)
+    assert (total.request_count, total.cost_nano_usd) == (2, 246)
     await rename_at(session, alias, "alias-new", RENAMED + timedelta(hours=2))
     reused = await factories.make_model(session, "old", created_at=RENAMED + timedelta(hours=2))
     later = wire(key, model="old", timestamp=RENAMED + timedelta(hours=3))

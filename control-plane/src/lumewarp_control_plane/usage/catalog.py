@@ -2,14 +2,20 @@
 
 Current names are valid only since their last rename (or creation). A historical
 name owns the half-open interval from the preceding rename/creation to renamed_at.
-This also prevents a newly reused name from stealing a delayed event.
+Resolution uses request start time, with a configurable five-minute grace for a
+unique nearby owner if no interval contains it. Same-kind reuse within that
+window with a lagging gateway can still misattribute within an exact interval;
+this is not a mapping
+from config_version to the serving catalog.
 """
 
 from collections import defaultdict
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import String, Uuid, any_, bindparam, func, or_, select
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +28,13 @@ from lumewarp_control_plane.models import (
     Model,
     Router,
 )
+
+
+class CatalogResolutionSettings(BaseSettings):
+    """Usage-owned settings; keep unrelated process settings outside this module."""
+
+    model_config = SettingsConfigDict(env_prefix="LUMEWARP_USAGE_", extra="ignore")
+    catalog_grace_seconds: float = Field(default=300, ge=0, allow_inf_nan=False)
 
 
 async def resolve_catalog_ids(session: AsyncSession, events: Sequence[dict[str, Any]]) -> None:
@@ -64,7 +77,7 @@ async def resolve_catalog_ids(session: AsyncSession, events: Sequence[dict[str, 
             .order_by(CatalogNameHistory.renamed_at)
         )
     ).all()
-    intervals: dict[tuple[CatalogKind, str], list[tuple[datetime | None, datetime, Any]]] = (
+    intervals: dict[tuple[CatalogKind, str], list[tuple[datetime | None, datetime | None, Any]]] = (
         defaultdict(list)
     )
     previous: dict[Any, datetime] = {}
@@ -75,23 +88,40 @@ async def resolve_catalog_ids(session: AsyncSession, events: Sequence[dict[str, 
             (start, history.renamed_at, history.name_id)
         )
         previous[history.name_id] = history.renamed_at
-    current = {
-        (row.kind, row.name): (row.id, previous.get(row.id, created)) for row, created in rows
-    }
+    for row, created in rows:
+        start = previous.get(row.id, created)
+        if start is not None:
+            intervals[(row.kind, row.name)].append((start, None, row.id))
+    grace = timedelta(seconds=CatalogResolutionSettings().catalog_grace_seconds)
     for event in events:
         # Rejections have no serving model, even if an old gateway supplied a name.
         if not event["model"]:
             continue
-        ts = event["ts"]
+        # The gateway binds the name at start, not at stream completion. Budget
+        # accounting still uses completion time. Legacy gateways may omit start.
+        ts = event.get("started_at") or event["ts"]
         for kind in CatalogKind:
-            key = (kind, event[kind.value])
-            candidate = current.get(key)
-            if candidate and candidate[1] is not None and ts >= candidate[1]:
-                event[f"{kind.value}_id"] = candidate[0]
-                continue
-            for start, end, name_id in intervals.get(key, ()):
-                if (start is None or start <= ts) and ts < end:
-                    item = live.get(name_id)
-                    if item and item[0].kind == kind:
-                        event[f"{kind.value}_id"] = name_id
-                    break
+            owners = intervals.get((kind, event[kind.value]), ())
+            exact = {
+                name_id
+                for start, end, name_id in owners
+                if (start is None or start <= ts) and (end is None or ts < end)
+            }
+            candidates = exact
+            if not exact and grace:
+                # Lag/skew tolerance, not snapshot reconstruction. Count ALL owners
+                # within the window (including deleted ones), not just the nearest:
+                # ambiguity must stay NULL. Reuse while an old gateway lags can
+                # still misattribute, including within this grace window, in the new owner's
+                # exact interval; config_version is deliberately not mapped here.
+                candidates = {
+                    name_id
+                    for start, end, name_id in owners
+                    if (start is not None and ts < start and start - ts <= grace)
+                    or (end is not None and ts >= end and ts - end <= grace)
+                }
+            if len(candidates) == 1:
+                name_id = next(iter(candidates))
+                item = live.get(name_id)
+                if item and item[0].kind == kind:
+                    event[f"{kind.value}_id"] = name_id
