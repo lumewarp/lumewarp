@@ -3,6 +3,9 @@ import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
 import { api, client } from "../api";
 import { TextField } from "../components/Form";
+import { Alert, AlertDescription } from "../components/ui/alert";
+import { Button } from "../components/ui/button";
+import { Card } from "../components/ui/card";
 
 const SSO_ERRORS: Record<string, string> = {
   invalid_state: "Your SSO sign-in expired or was already used. Please try again.",
@@ -54,41 +57,50 @@ export function Login() {
   };
 
   return (
-    <div className="login">
-      <form className="card login-card form" onSubmit={submit} noValidate>
-        <div className="brand">
-          <span className="brand-mark" aria-hidden="true" />
-          Lumewarp
-        </div>
-        <h1>Sign in</h1>
-        <p className="muted">
-          {session.data?.oidc_enabled
-            ? "Sign in with your identity provider."
-            : "Single sign-on is not configured."}
-        </p>
-        {ssoError && <p className="form-error" role="alert">{ssoError}</p>}
-        {session.data?.oidc_enabled && (
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={() => {
-              window.location.assign(`/api/v1/session/oidc/login?next=${encodeURIComponent(next)}`);
-            }}
-          >
-            Sign in with SSO
-          </button>
-        )}
-        {session.data?.break_glass_enabled && (
-          <>
-            <p className="muted">Emergency sign-in · break-glass</p>
-            <TextField label="Break-glass password" type="password" value={password} onChange={setPassword} error={error} autoFocus />
-            <button className={`btn${session.data?.oidc_enabled ? "" : " btn-primary"}`} disabled={busy}>
-              {busy ? "Signing in…" : "Sign in"}
-            </button>
-          </>
-        )}
-        {session.error && <p className="form-error" role="alert">{session.error.message}</p>}
-      </form>
+    <div className="grid min-h-screen place-items-center p-4">
+      <Card className="w-[min(380px,100%)] py-7">
+        <form className="flex flex-col gap-4 px-7" onSubmit={submit} noValidate>
+          <div className="flex items-center gap-2.5 text-base font-bold">
+            <span className="size-5 rounded-md bg-[linear-gradient(135deg,var(--primary),#22d3ee)]" aria-hidden="true" />
+            Lumewarp
+          </div>
+          <h1 className="text-xl font-semibold">Sign in</h1>
+          <p className="text-sm text-muted-foreground">
+            {session.data?.oidc_enabled
+              ? "Sign in with your identity provider."
+              : "Single sign-on is not configured."}
+          </p>
+          {ssoError && (
+            <Alert variant="destructive">
+              <AlertDescription>{ssoError}</AlertDescription>
+            </Alert>
+          )}
+          {session.data?.oidc_enabled && (
+            <Button
+              type="button"
+              onClick={() => {
+                window.location.assign(`/api/v1/session/oidc/login?next=${encodeURIComponent(next)}`);
+              }}
+            >
+              Sign in with SSO
+            </Button>
+          )}
+          {session.data?.break_glass_enabled && (
+            <>
+              <p className="text-sm text-muted-foreground">Emergency sign-in · break-glass</p>
+              <TextField label="Break-glass password" type="password" value={password} onChange={setPassword} error={error} autoFocus />
+              <Button type="submit" variant={session.data?.oidc_enabled ? "outline" : "default"} disabled={busy}>
+                {busy ? "Signing in…" : "Sign in"}
+              </Button>
+            </>
+          )}
+          {session.error && (
+            <Alert variant="destructive">
+              <AlertDescription>{session.error.message}</AlertDescription>
+            </Alert>
+          )}
+        </form>
+      </Card>
     </div>
   );
 }
