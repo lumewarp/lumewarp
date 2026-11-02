@@ -2,8 +2,9 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { api, type UsageQuery, type UsageRow } from "../api";
 import { Badge, fmtUsd, PageHeader } from "../components/Bits";
-import { Field, SelectField, TextField } from "../components/Form";
-import { Input } from "../components/ui/input";
+import { SelectField, TextField } from "../components/Form";
+import { Card } from "../components/ui/card";
+import { ComboboxField } from "../components/ui/combobox-field";
 import { DataTable, type Column } from "../components/Table";
 import { useCatalog, useModels, useNames, useTeamDirectory, useTeams } from "../hooks";
 
@@ -40,13 +41,12 @@ type Row = UsageRow;
 
 export function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="card stat">
-      <div className="muted">{label}</div>
-      <div className="stat-value">{value}</div>
-    </div>
+    <Card className="gap-0 p-3.5">
+      <div className="text-muted-foreground">{label}</div>
+      <div className="text-2xl font-bold tabular-nums">{value}</div>
+    </Card>
   );
 }
-
 
 /*
  * Alias and router filters: a select whose values are tagged, so a catalog name can never be mistaken for a
@@ -207,34 +207,23 @@ export function Usage() {
   return (
     <>
       <PageHeader title="Usage" description="Requests, tokens and spend. Spend is for the model that served each request; alias and router show how it was reached." />
-      <section className="card pad filters">
+      <Card className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3 p-4">
         <TextField label="From" type="date" value={from} onChange={setFrom} />
         <TextField label="To (inclusive)" type="date" value={to} onChange={setTo} />
-        <SelectField label="Team" value={teamId} onChange={setTeamId} options={[{ value: "", label: "All teams" }, ...(teams.data ?? []).map((team) => ({ value: team.id, label: team.name }))]} />
-        <SelectField label="Model" value={model} onChange={setModel} options={[{ value: ANY, label: "All models" }, ...names("model").map((name) => ({ value: name, label: name }))]} />
-        <Field label="Upstream model" hint="Any name, including one no model uses any more.">
-          {(p) => (
-            <>
-              <Input {...p} list="usage-upstream-models" value={upstreamText} placeholder="All upstream models" autoComplete="off" onChange={(e) => setUpstreamText(e.target.value)} />
-              <datalist id="usage-upstream-models">
-                {upstreamSuggestions.map((name) => (
-                  <option key={name} value={name} />
-                ))}
-              </datalist>
-            </>
-          )}
-        </Field>
-        <SelectField label="Alias" value={alias} onChange={setAlias} options={provenanceOptions("alias")} />
-        <SelectField label="Router" value={router} onChange={setRouter} options={provenanceOptions("router")} />
+        <ComboboxField label="Team" value={teamId} onChange={setTeamId} options={[{ value: "", label: "All teams" }, ...(teams.data ?? []).map((team) => ({ value: team.id, label: team.name }))]} />
+        <ComboboxField label="Model" value={model} onChange={setModel} options={[{ value: ANY, label: "All models" }, ...names("model").map((name) => ({ value: name, label: name }))]} />
+        <ComboboxField free label="Upstream model" hint="Any name, including one no model uses any more." placeholder="All upstream models" value={upstreamText} onChange={setUpstreamText} options={upstreamSuggestions.map((name) => ({ value: name, label: name }))} />
+        <ComboboxField label="Alias" value={alias} onChange={setAlias} options={provenanceOptions("alias")} />
+        <ComboboxField label="Router" value={router} onChange={setRouter} options={provenanceOptions("router")} />
         <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={GROUPS} />
-      </section>
-      <div className="stats">
+      </Card>
+      <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
         <Stat label="Requests" value={n(total.requests)} />
         <Stat label="Total tokens" value={n(total.tokens)} />
         <Stat label="Prompt / completion" value={`${n(total.prompt)} / ${n(total.completion)}`} />
         <Stat label="Spend" value={fmtUsd(total.cost)} />
       </div>
-      {total.unpriced > 0 && <p className="muted">{n(total.unpriced)} request(s) had no price configured and are counted at $0.</p>}
+      {total.unpriced > 0 && <p className="text-muted-foreground">{n(total.unpriced)} request(s) had no price configured and are counted at $0.</p>}
       <DataTable
         rows={query.data}
         loading={query.isPending || teams.isPending || directory.isPending}

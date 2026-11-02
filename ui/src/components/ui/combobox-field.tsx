@@ -2,11 +2,12 @@ import { CheckIcon, ChevronsUpDownIcon } from "lucide-react";
 import { useId, useState } from "react";
 
 import { cn } from "@/lib/utils";
-import { applyChoice, MISSING_LABEL, optionKey, selection, UNSET_KEY, type ChoiceProps } from "../choice";
+import { applyChoice, MISSING_LABEL, optionKey, selection, UNSET_KEY, type ChoiceOption, type ChoiceProps } from "../choice";
 import { Field, type ControlProps } from "../Form";
 import { Button } from "./button";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "./command";
-import { Popover, PopoverContent, PopoverTrigger } from "./popover";
+import { Input } from "./input";
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "./popover";
 
 /*
  * Searchable choice for lists whose length comes from data. Same props and same value contract as
@@ -69,10 +70,111 @@ export function Combobox<T>({
   );
 }
 
-export function ComboboxField<T = string>({ label, error, hint, ...choice }: ChoiceProps<T> & { label: string; error?: string; hint?: string; searchLabel?: string; emptyText?: string }) {
+/*
+ * Free-text mode (`free`): the labelled control is the text input itself, and the typed text is the value, so
+ * any string is accepted, including one no suggestion has any more. The suggestions only complete it: picking
+ * one writes its text into the input. There is one control for the label (the input, role combobox); the popup
+ * is a plain listbox that never takes focus, so typing continues while it is open. Enter keeps the typed text
+ * unless an arrow key moved to a suggestion. Nothing is trimmed here: the caller decides what it sends.
+ */
+function FreeCombobox({ value, onChange, options, placeholder, disabled, ...aria }: { value: string; onChange: (v: string) => void; options: ChoiceOption<string>[]; placeholder?: string; disabled?: boolean } & Partial<ControlProps>) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(-1);
+  const generatedId = useId();
+  const id = aria.id ?? generatedId;
+  const listId = `${id}-list`;
+  const needle = value.trim().toLowerCase();
+  const shown = options.filter((o) => o.label.toLowerCase().includes(needle));
+  const visible = open && shown.length > 0;
+  const pickAt = (index: number) => {
+    const o = shown[index];
+    if (o) onChange(o.value);
+    setOpen(false);
+    setActive(-1);
+  };
+  const type = (text: string) => {
+    onChange(text);
+    setOpen(true);
+    setActive(-1);
+  };
+  const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!shown.length) return;
+      setOpen(true);
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      setActive((a) => (a < 0 ? (step > 0 ? 0 : shown.length - 1) : (a + step + shown.length) % shown.length));
+    } else if (e.key === "Enter" && visible) {
+      e.preventDefault();
+      pickAt(active);
+    } else if (e.key === "Escape" && visible) {
+      e.stopPropagation();
+      setOpen(false);
+    }
+  };
+  return (
+    <Popover open={visible} onOpenChange={setOpen}>
+      <PopoverAnchor asChild>
+        <Input
+          {...aria}
+          id={id}
+          role="combobox"
+          aria-expanded={visible}
+          aria-controls={visible ? listId : undefined}
+          aria-autocomplete="list"
+          aria-activedescendant={visible && active >= 0 ? `${listId}-${active}` : undefined}
+          autoComplete="off"
+          value={value}
+          placeholder={placeholder}
+          disabled={disabled}
+          onChange={(e) => type(e.target.value)}
+          onClick={() => setOpen(true)}
+          onBlur={() => setOpen(false)}
+          onKeyDown={onKeyDown}
+        />
+      </PopoverAnchor>
+      <PopoverContent
+        align="start"
+        className="w-(--radix-popover-trigger-width) min-w-48 p-1"
+        onOpenAutoFocus={(e) => e.preventDefault()}
+        onCloseAutoFocus={(e) => e.preventDefault()}
+        onInteractOutside={(e) => {
+          if (e.target instanceof Node && document.getElementById(id)?.contains(e.target)) e.preventDefault();
+        }}
+      >
+        <div id={listId} role="listbox" aria-label="Suggestions" className="max-h-[min(300px,var(--radix-popover-content-available-height))] overflow-y-auto">
+          {shown.map((o, i) => (
+            <div
+              key={o.value}
+              id={`${listId}-${i}`}
+              role="option"
+              aria-selected={i === active}
+              data-active={i === active || undefined}
+              className="flex cursor-default items-center rounded-sm px-2 py-1.5 text-sm select-none data-active:bg-accent data-active:text-accent-foreground hover:bg-accent hover:text-accent-foreground"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => pickAt(i)}
+            >
+              <span className="min-w-0 flex-1 truncate">{o.label}</span>
+            </div>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+type FieldProps<T> = ChoiceProps<T> & { label: string; error?: string; hint?: string; searchLabel?: string; emptyText?: string; free?: boolean };
+
+export function ComboboxField<T = string>({ label, error, hint, free, ...choice }: FieldProps<T>) {
   return (
     <Field label={label} error={error} hint={hint}>
-      {(p) => <Combobox {...choice} searchLabel={choice.searchLabel ?? `Search ${label}`} {...p} />}
+      {(p) =>
+        free ? (
+          <FreeCombobox value={String(choice.value ?? "")} onChange={choice.onChange as (v: string) => void} options={choice.options as unknown as ChoiceOption<string>[]} placeholder={choice.placeholder} disabled={choice.disabled} {...p} />
+        ) : (
+          <Combobox {...choice} searchLabel={choice.searchLabel ?? `Search ${label}`} {...p} />
+        )
+      }
     </Field>
   );
 }
