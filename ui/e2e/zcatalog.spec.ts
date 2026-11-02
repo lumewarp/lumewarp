@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
  *
  * serve.py seeds two connected gateways (e2e-gw has every strategy, e2e-gw-b lacks `priority_failover`),
  * a small catalog (`use-*`, `use/*`) and usage events across every path a request can take.
- * Everything else is created here through the forms or the API. This file sorts after `smoke.spec.ts`
+ * Everything else is created here through the forms or the API. This file is named to sort after `smoke.spec.ts`
  * on purpose: that test lists the first page of routers and models without searching.
  */
 
@@ -63,6 +63,8 @@ async function model(request: APIRequestContext, name: string, upstream_id: stri
 const noOverflow = (page: Page) => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
 
 async function shot(page: Page, name: string) {
+  // Let dialogs finish sliding in before the picture.
+  if (SHOTS) await page.waitForTimeout(400);
   if (SHOTS) await page.screenshot({ path: join(SHOTS, `${name}.png`), fullPage: true });
 }
 
@@ -648,8 +650,11 @@ test("usage: loading, then a refusal (no permission) with a way to retry", async
 
 test("rollback: a 422 about missing strategies offers a forced confirm, other 422s show the error", async ({ page, request }) => {
   const up = await upstream(request, "rb-up");
-  const m = await model(request, "rb/a", up.id);
   const latest = async () => Math.max(...(await items<{ version: number }>(request, "/config/versions")).map((v) => v.version));
+  // Each change is published as a version shortly after it commits: wait for it before the next.
+  const start = await latest();
+  const m = await model(request, "rb/a", up.id);
+  await expect.poll(latest).toBeGreaterThan(start);
   // A router whose strategy e2e-gw-b lacks, saved past the warning: it is in this version ...
   const before = await latest();
   const router = await post<any>(request, "/routers", { name: "rb-router", strategy: "priority_failover", members: [{ model_id: m.id, params: { priority: 1 } }], force: true });
@@ -708,8 +713,13 @@ test("dark mode and phone width", async ({ page, request }) => {
   await page.getByRole("button", { name: "New router" }).click();
   const d = dialog(page);
   await d.getByLabel("Strategy").selectOption("e2e_tuned");
-  const box = await d.boundingBox();
-  expect(box!.x + box!.width).toBeLessThanOrEqual(390.5); // subpixel layout
+  // Once it has slid in, the drawer lies within the screen (subpixel layout).
+  await expect
+    .poll(async () => {
+      const box = await d.boundingBox();
+      return box!.x + box!.width;
+    })
+    .toBeLessThanOrEqual(390.5);
   expect(await noOverflow(page)).toBe(true);
   await d.getByRole("button", { name: "Create" }).scrollIntoViewIfNeeded();
   await shot(page, "phone-dark-router-form");
@@ -729,6 +739,20 @@ test("every page shows an error state when its API fails", async ({ page, reques
     await page.goto(path);
     await expect(page.getByTestId("state-error").first()).toContainText(message);
   }
+});
+
+test("a router whose stored settings no longer fit the strategy shows Config invalid", async ({ page, request }) => {
+  await page.route("**/api/v1/routers?**", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.items[0] = { ...body.items[0], config_invalid: true, config_problems: ["params.max_in_flight: must be at least 1"] };
+    await route.fulfill({ response, json: body });
+  });
+  await signIn(page, request, "/routers");
+  const invalid = page.getByTestId("config-invalid");
+  await expect(invalid).toContainText("Config invalid");
+  await expect(invalid).toContainText("params.max_in_flight: must be at least 1");
+  await shot(page, "routers-config-invalid");
 });
 
 test("empty states: nothing to show and nothing matches", async ({ page, request }) => {

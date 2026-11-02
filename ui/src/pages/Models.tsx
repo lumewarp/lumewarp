@@ -113,8 +113,8 @@ export function Models() {
               );
             },
           },
-          { key: "in", header: "Input / 1M tok", align: "right", cell: (r) => fmtUsd(r.price_input_nano_usd_per_mtok, "unpriced") },
-          { key: "out", header: "Output / 1M tok", align: "right", cell: (r) => fmtUsd(r.price_output_nano_usd_per_mtok, "unpriced") },
+          { key: "in", header: "Input / 1M tok", align: "right", hideBelow: "lg", cell: (r) => fmtUsd(r.price_input_nano_usd_per_mtok, "unpriced") },
+          { key: "out", header: "Output / 1M tok", align: "right", hideBelow: "lg", cell: (r) => fmtUsd(r.price_output_nano_usd_per_mtok, "unpriced") },
           { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isSuper} canDelete={perms.isSuper} onEdit={() => open(r)} onDelete={() => setDeleting(r)} /> },
         ]}
       />

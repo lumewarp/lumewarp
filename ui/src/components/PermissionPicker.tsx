@@ -53,7 +53,7 @@ export function PermissionPicker({ isTeam, access, onAccess, selected, onSelecte
       </RadioGroup>
       <p className="field-hint">{access === "list" ? "Only the names ticked below" + (isTeam ? "." : ", and only within what the team allows. None ticked denies everything.") : first.hint}</p>
       {access === "list" && (
-        <div className="flex flex-col gap-3 rounded-md border p-3" data-testid="permission-options">
+        <div className="flex max-h-72 flex-col gap-3 overflow-y-auto rounded-md border p-3" data-testid="permission-options">
           {catalog.isPending && <Skeleton className="h-4 w-full" />}
           {catalog.error && (
             <p className="field-error" role="alert">

@@ -441,6 +441,7 @@ export function Routers() {
           {
             key: "fallback",
             header: "Fallback",
+            hideBelow: "md",
             cell: (r) =>
               r.fallback_model_ids.length || r.retry || r.sticky !== "none" ? (
                 <div className="flex flex-wrap gap-1">
@@ -459,6 +460,7 @@ export function Routers() {
           {
             key: "aliases",
             header: "Aliases",
+            hideBelow: "md",
             cell: (r) => {
               const names = aliasesOf(r);
               return names.length ? (
@@ -674,6 +676,7 @@ function StrategiesTable({ strategies, loading, error, onRetry }: { strategies: 
           {
             key: "settings",
             header: "Settings",
+            hideBelow: "md",
             cell: (s) => {
               const titles = [...settingTitles(s.params_schema), ...(s.uses_weight ? ["Weight"] : []), ...settingTitles(s.member_schema)];
               return titles.length ? <span>{titles.join(", ")}</span> : <span className="text-muted-foreground">—</span>;

@@ -229,8 +229,8 @@ export function Usage() {
               </span>
             ),
           },
-          { key: "prompt", header: "Prompt", align: "right", cell: (row) => n(row.prompt_tokens) },
-          { key: "completion", header: "Completion", align: "right", cell: (row) => n(row.completion_tokens) },
+          { key: "prompt", header: "Prompt", align: "right", hideBelow: "md", cell: (row) => n(row.prompt_tokens) },
+          { key: "completion", header: "Completion", align: "right", hideBelow: "md", cell: (row) => n(row.completion_tokens) },
           { key: "cost", header: "Cost", align: "right", sort: (a, b) => a.cost_nano_usd - b.cost_nano_usd, cell: (row) => fmtUsd(row.cost_nano_usd) },
         ]}
       />

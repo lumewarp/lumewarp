@@ -14,7 +14,11 @@ export interface Column<T> {
   /** Provide to make the column sortable. */
   sort?: (a: T, b: T) => number;
   align?: "right";
+  /** Hide this column below the given breakpoint so a phone keeps the columns that matter. */
+  hideBelow?: "sm" | "md" | "lg";
 }
+
+const HIDE = { sm: "hidden sm:table-cell", md: "hidden md:table-cell", lg: "hidden lg:table-cell" } as const;
 
 interface Props<T> {
   columns: Column<T>[];
@@ -77,7 +81,7 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
               {columns.map((c) => {
                 const active = sort?.key === c.key;
                 return (
-                  <TableHead key={c.key} scope="col" className={cn(c.align === "right" && "text-right")} aria-sort={active ? (sort.dir === 1 ? "ascending" : "descending") : undefined}>
+                  <TableHead key={c.key} scope="col" className={cn(c.align === "right" && "text-right", c.hideBelow && HIDE[c.hideBelow])} aria-sort={active ? (sort.dir === 1 ? "ascending" : "descending") : undefined}>
                     {c.sort ? (
                       <button type="button" className="inline-flex items-center gap-1 rounded-sm text-left uppercase tracking-[0.04em] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50" onClick={() => toggle(c.key)}>
                         {c.header}
@@ -95,7 +99,7 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
             {visible.map((row) => (
               <TableRow key={rowKey(row)}>
                 {columns.map((c) => (
-                  <TableCell key={c.key} className={cn(c.align === "right" && "text-right tabular-nums")}>
+                  <TableCell key={c.key} className={cn(c.align === "right" && "text-right tabular-nums", c.hideBelow && HIDE[c.hideBelow])}>
                     {c.cell(row)}
                   </TableCell>
                 ))}
