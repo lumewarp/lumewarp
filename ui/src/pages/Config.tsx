@@ -2,14 +2,69 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api";
 import { Badge, fmtDateTime, PageHeader } from "../components/Bits";
-import { ConfirmDialog } from "../components/Confirm";
 import { DataTable } from "../components/Table";
+import { Dialog } from "../components/Dialog";
+import { Button } from "../components/ui/button";
+import { ApiError } from "../api";
 import { useMut } from "../hooks";
+
+/** The control plane refuses a rollback when connected gateways lack a router's strategy, unless forced. */
+const isMissingStrategy = (e: unknown): e is ApiError => e instanceof ApiError && e.status === 422 && /send force/i.test(e.message);
+
+/**
+ * Confirm a rollback. A 422 about strategies gateways lack offers a second, explicit confirmation that
+ * sends `force`; any other failure is shown here with its message.
+ */
+function RollbackDialog({ version, onClose }: { version: number | null; onClose: () => void }) {
+  const [problem, setProblem] = useState<ApiError | Error | null>(null);
+  const [force, setForce] = useState(false);
+  const run = useMut(({ version, force }: { version: number; force: boolean }) => api.rollback(version, force), "Rolled back: a new version was published");
+  const close = () => {
+    setProblem(null);
+    setForce(false);
+    onClose();
+  };
+  const go = async (useForce: boolean) => {
+    try {
+      await run.mutateAsync({ version: version!, force: useForce });
+      close();
+    } catch (e) {
+      setForce(isMissingStrategy(e));
+      setProblem(e instanceof Error ? e : new Error(String(e)));
+    }
+  };
+  return (
+    <Dialog
+      open={version !== null}
+      onClose={close}
+      title="Roll back routing"
+      footer={
+        <>
+          <Button type="button" variant="outline" onClick={close} autoFocus>
+            Cancel
+          </Button>
+          <Button type="button" variant={force ? "destructive" : "default"} disabled={run.isPending || (!!problem && !force)} onClick={() => void go(force)}>
+            {run.isPending ? "Working…" : force ? "Roll back anyway" : "Roll back"}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-3 text-sm">
+        <p className="text-muted-foreground">Restore the routing (models, aliases and routers) from v{version} as a new version? Keys, budgets, policies and access grants are not rolled back.</p>
+        {problem && (
+          <div role="alert" data-testid="rollback-problem" className={force ? "form-warn" : "form-error"}>
+            <p>{problem.message}</p>
+            {force && <p className="mt-1">Gateways that lack it will reject the whole config and stop receiving updates, including key revocations. Roll back anyway only if you are fixing those gateways.</p>}
+          </div>
+        )}
+      </div>
+    </Dialog>
+  );
+}
 
 export function Config() {
   const list = useQuery({ queryKey: ["config-versions"], queryFn: () => api.configVersions() });
   const [target, setTarget] = useState<number | null>(null);
-  const rollback = useMut((v: number) => api.rollback(v), "Rolled back: a new version was published");
   const current = list.data?.reduce((m, v) => Math.max(m, v.version), 0);
   return (
     <>
@@ -41,7 +96,7 @@ export function Config() {
           },
         ]}
       />
-      <ConfirmDialog open={target !== null} title="Roll back routing" confirmLabel="Roll back" message={`Restore the routing from v${target} as a new version? Keys, budgets and policies are not rolled back.`} onConfirm={() => rollback.mutateAsync(target!)} onClose={() => setTarget(null)} />
+      <RollbackDialog version={target} onClose={() => setTarget(null)} />
     </>
   );
 }
