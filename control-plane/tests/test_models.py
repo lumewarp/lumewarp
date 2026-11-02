@@ -288,7 +288,7 @@ async def test_enqueue_recompile(session: AsyncSession) -> None:
         await outbox.enqueue_recompile(session, "nope", "x")
 
 
-async def test_audit_redacts_secrets(session: AsyncSession) -> None:
+async def test_audit_records_only_allowlisted_details(session: AsyncSession) -> None:
     row = audit.record(
         session,
         action="key.create",
@@ -298,6 +298,7 @@ async def test_audit_redacts_secrets(session: AsyncSession) -> None:
         actor_id="test",
         details={
             "name": "k",
+            "owner_kind": "user",
             "secret": "lw-abc",
             "nested": {"Authorization": "Bearer x", "api_key_ref": "OPENAI_KEY"},
             "items": [{"token": "t"}],
@@ -305,9 +306,5 @@ async def test_audit_redacts_secrets(session: AsyncSession) -> None:
     )
     await session.flush()
     stored = await session.get(AuditLog, row.id)
-    assert stored.details == {
-        "name": "k",
-        "secret": "[redacted]",
-        "nested": {"Authorization": "[redacted]", "api_key_ref": "OPENAI_KEY"},
-        "items": [{"token": "[redacted]"}],
-    }
+    # `details` is an allowlist: unclassified keys are not stored at all.
+    assert stored.details == {"name": "k", "owner_kind": "user"}

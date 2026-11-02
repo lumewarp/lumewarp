@@ -8,7 +8,7 @@ import httpx
 import pytest
 from authlib.oidc.core import CodeIDToken
 from joserfc.jwk import RSAKey
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 from sqlalchemy import func, select, update
 from starlette.requests import Request
 
@@ -24,6 +24,7 @@ from lumewarp_control_plane.models import (
     UserSession,
 )
 from lumewarp_control_plane.security import hash_secret
+from lumewarp_control_plane.settings import Settings
 from tests.api.helpers import ADMIN_AUTH, auth, user_with_token
 from tests.auth.idp import ISSUER, FakeIdP
 
@@ -34,6 +35,7 @@ def idp(client, monkeypatch):
     settings.oidc_issuer = ISSUER
     settings.oidc_client_id = "lumewarp"
     settings.oidc_client_secret = SecretStr("client-secret")
+    settings.secret_key = SecretStr("test-login-state-secret-key-0123456789abcdef")
     settings.session_cookie_secure = False
     provider = FakeIdP()
     request = Request({"type": "http", "app": client.app})
@@ -55,6 +57,39 @@ def test_disabled_and_anonymous(client):
     assert response.headers["cache-control"] == "no-store"
     assert client.get("/api/v1/session/oidc/login").status_code == 404
     assert client.get("/api/v1/session/oidc/callback").status_code == 404
+
+
+def test_sso_refuses_to_start_without_a_secret_key():
+    with pytest.raises(ValidationError, match="LUMEWARP_SECRET_KEY"):
+        Settings(oidc_issuer=ISSUER, oidc_client_id="lumewarp", secret_key=None)
+    Settings(
+        oidc_issuer=ISSUER,
+        oidc_client_id="lumewarp",
+        secret_key=SecretStr("test-login-state-secret-key-0123456789abcdef"),
+    )
+
+
+def test_missing_secret_key_disables_the_sso_endpoints(client, idp):
+    client.app.state.settings.secret_key = None
+    login = client.get("/api/v1/session/oidc/login")
+    assert login.status_code == 503
+    assert login.json()["error"]["code"] == "sso_unconfigured"
+    assert client.get("/api/v1/session/oidc/callback").status_code == 503
+    assert idp.requests == []
+
+
+async def test_login_state_secrets_are_not_stored(client, idp, committed):
+    idp.login(client)
+    row = await committed.scalar(select(OIDCLoginState))
+    assert row is not None
+    assert {column.name for column in OIDCLoginState.__table__.columns} == {
+        "id",
+        "state_hash",
+        "return_path",
+        "redirect_uri",
+        "expires_at",
+    }
+    assert not hasattr(row, "nonce") and not hasattr(row, "code_verifier")
 
 
 def test_session_openapi_contract(client):
@@ -82,6 +117,12 @@ def test_login_parameters_and_cached_discovery(client, idp):
     assert "code_verifier" not in params
     cookie = response.headers["set-cookie"]
     assert "HttpOnly" in cookie and "SameSite=lax" in cookie
+    assert "Path=/api/v1/session/oidc" in cookie and "Max-Age=600" in cookie
+    sealed = client.cookies.get(oidc.STATE_COOKIE)
+    # nonce, PKCE verifier and state travel encrypted; only the state echo is in the URL.
+    assert sealed.startswith(oidc.STATE_COOKIE_VERSION)
+    for secret_value in (params["state"][0], params["nonce"][0]):
+        assert secret_value not in sealed
     idp.login(client)
     assert sum(r.url.path.endswith("openid-configuration") for r in idp.requests) == 1
 
@@ -245,26 +286,55 @@ def test_invalid_id_token(client, idp, overrides):
     assert client.get("/api/v1/session").json()["authenticated"] is False
 
 
-@pytest.mark.parametrize("case", ["bad", "missing_cookie", "replay", "expired"])
+@pytest.mark.parametrize(
+    "case", ["bad", "missing_cookie", "replay", "expired", "tampered", "other_key", "other_login"]
+)
 async def test_invalid_state(client, idp, committed, case):
     idp.login(client)
+    state = idp.authorization["state"][0]
+    sealed = client.cookies.get(oidc.STATE_COOKIE)
+    assert sealed is not None
     if case == "bad":
         result = idp.callback(client, state="wrong")
     elif case == "missing_cookie":
         client.cookies.clear()
         result = idp.callback(client)
+    elif case == "tampered":
+        index = len(oidc.STATE_COOKIE_VERSION) + 20
+        replacement = "A" if sealed[index] != "A" else "B"
+        client.cookies.set(
+            oidc.STATE_COOKIE,
+            sealed[:index] + replacement + sealed[index + 1 :],
+            path="/api/v1/session/oidc",
+        )
+        result = idp.callback(client)
+    elif case == "other_key":
+        # A cookie sealed with another LUMEWARP_SECRET_KEY must not authenticate.
+        client.app.state.settings.secret_key = SecretStr(
+            "another-login-state-secret-key-0123456789"
+        )
+        result = idp.callback(client)
+    elif case == "other_login":
+        idp.login(client)
+        second_cookie = client.cookies.get(oidc.STATE_COOKIE)
+        assert second_cookie is not None and second_cookie != sealed
+        # The cookie belongs to the second login, so the first state must not complete.
+        result = idp.callback(client, state=state)
+        assert result.headers["location"] == "/login?error=invalid_state"
+        # The failed attempt did not consume the second login.
+        client.cookies.set(oidc.STATE_COOKIE, second_cookie, path="/api/v1/session/oidc")
+        assert idp.callback(client).headers["location"] == "/"
     elif case == "expired":
         await committed.execute(
             update(OIDCLoginState)
-            .where(OIDCLoginState.state_hash == hash_secret(idp.authorization["state"][0]))
+            .where(OIDCLoginState.state_hash == hash_secret(state))
             .values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
         )
         await committed.commit()
         result = idp.callback(client)
     else:
-        bound = client.cookies.get(oidc.STATE_COOKIE)
         assert idp.callback(client).headers["location"] == "/"
-        client.cookies.set(oidc.STATE_COOKIE, bound, path="/api/v1/session/oidc")
+        client.cookies.set(oidc.STATE_COOKIE, sealed, path="/api/v1/session/oidc")
         result = idp.callback(client)
     assert result.headers["location"] == "/login?error=invalid_state"
 
@@ -415,8 +485,6 @@ async def test_login_cleanup_is_bounded_and_retains_recent_sessions(client, idp,
     for _ in range(105):
         state = OIDCLoginState(
             state_hash=hash_secret(uuid.uuid4().hex),
-            nonce="nonce",
-            code_verifier="verifier",
             return_path="/",
             redirect_uri="https://testserver/api/v1/session/oidc/callback",
             expires_at=now - timedelta(days=1),
@@ -526,7 +594,9 @@ def test_secure_cookie_and_public_client(client, idp):
     remote.client_kwargs["token_endpoint_auth_method"] = "none"
     # HTTPS test origin allows Secure cookies to participate in the callback.
     client.base_url = "https://testserver"
-    idp.login(client)
+    login_response = idp.login(client)
+    assert "Secure" in login_response.headers["set-cookie"]
+    assert "HttpOnly" in login_response.headers["set-cookie"]
     response = idp.callback(client)
     assert response.headers["location"] == "/"
     assert "Secure" in response.headers.get_list("set-cookie")[-1]

@@ -172,7 +172,9 @@ Three token types, stored only as SHA-256 hashes, and two kinds of cookie sessio
 | OIDC session | cookie | A user logged in through [SSO](#sso-login-oidc). The only credential that carries groups from the IdP. |
 | Emergency session | cookie | The [break-glass](#emergency-access-break-glass) login: an installation admin that is not a user. |
 
-The bearer scheme accepts PATs only. Nothing else authenticates to the admin API.
+The bearer scheme accepts PATs only. Nothing else authenticates to the admin API. No
+credential is stored in plaintext: the OIDC nonce and PKCE verifier live only in the
+encrypted login cookie, and webhook channels store an environment variable name.
 
 The first users and teams come from an emergency session or from an admin group member logged
 in through OIDC. An installation admin can issue a PAT for an active user with
@@ -350,6 +352,7 @@ group; team roles never come from it, and no other claim grants anything.
 
 | Setting | Meaning |
 | --- | --- |
+| `LUMEWARP_SECRET_KEY` | At least 32 bytes of random text; **required when SSO is enabled**. Derives the AES-256-GCM key for the login-state cookie. `serve` refuses to start with `LUMEWARP_OIDC_ISSUER` set and no key. Changing it invalidates pending logins only. |
 | `LUMEWARP_OIDC_ISSUER` | Issuer URL; unset disables SSO. |
 | `LUMEWARP_OIDC_CLIENT_ID`, `LUMEWARP_OIDC_CLIENT_SECRET` | Client credentials (secret optional for a public PKCE client). |
 | `LUMEWARP_OIDC_SCOPES` | Default `openid email profile`. Add whatever scope your IdP needs to release groups. |
@@ -371,6 +374,13 @@ group; team roles never come from it, and no other claim grants anything.
   `LUMEWARP_SESSION_TTL_SECONDS` in mind. With an external backend the IAM decides on every
   check instead.
 - Inactive users cannot log in, and their existing sessions stop working immediately.
+- The one-time login state is the encrypted cookie `lumewarp_oidc_state` (HttpOnly,
+  `SameSite=Lax`, `Secure` per `LUMEWARP_SESSION_COOKIE_SECURE`, path
+  `/api/v1/session/oidc`). It carries the state, the OIDC nonce and the PKCE code verifier,
+  sealed with AES-256-GCM under a key derived from `LUMEWARP_SECRET_KEY`. The database row
+  keeps only the sha256 of the state, return path, redirect URI and expiry, and is deleted on
+  first use: a replayed callback, a tampered cookie, a cookie sealed with another key and a
+  state from another login all fail as `invalid_state`.
 - The cookie `lumewarp_session` is httpOnly and `SameSite=Lax`. Cookie-authenticated
   writes need the `X-Lumewarp-CSRF` header with the `csrf_token` from
   `GET /api/v1/session`. Bearer callers (PATs) never need it; if both a
@@ -379,6 +389,18 @@ group; team roles never come from it, and no other claim grants anything.
 - IdP and authorization backend are kept in sync by the deployer: disabling a person in
   the IdP stops new logins, while revoking their team grants (OpenFGA) or removing them
   (built-in) is what suspends their keys.
+
+## Audit log
+
+Every mutation writes an `audit_log` row in the same transaction. `details` is an
+allowlist per action (`DETAIL_ALLOWLIST` in `audit.py`): only fields classified for that
+action are stored, and anything else is dropped rather than redacted. Nested objects such
+as `changes`, `settings` and `traffic_split` have their own field lists, and free-form
+strategy params are never recorded. The failure columns (`config_outbox.last_error`,
+`notifier_outbox.last_error`) keep only the exception class name. A test scans every
+`audit.record(action=...)` call site, so a new action without a classification fails the
+suite, and `tests/test_schema_secrets.py` fails when a new Text/String/JSONB column is not
+classified as non-secret.
 
 ## Admin UI
 
@@ -428,7 +450,10 @@ my-channel = "my_plugin.notifier:Notifier"
 
 Notifier plugins implement `async send(event, config)`: the channel's `config` mapping and a
 `BudgetEvent`; raising makes the outbox retry with backoff. The built-in notifier kind is
-`webhook` (JSON POST of the event).
+`webhook` (JSON POST of the event). Its config is `{"url_ref": "WEBHOOK_URL_ENV",
+"timeout_seconds": 5}`: only the **name** of the environment variable is stored, and the
+outbox resolves it per delivery. A CHECK constraint rejects any other key for kind
+`webhook`, so a literal URL or token cannot be stored there again.
 
 Auth plugins implement `async map_identity(claims) -> IdentityMapping | None`, with
 `IdentityMapping(email, display_name="")`. Anything but a mapping, or an invalid email or name,

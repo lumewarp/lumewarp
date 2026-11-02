@@ -130,6 +130,11 @@ controlPlane:
       value: lumewarp-cp
     - name: LUMEWARP_OIDC_CLIENT_SECRET
       valueFrom: {secretKeyRef: {name: lumewarp-oidc, key: client-secret}}
+    # Required whenever LUMEWARP_OIDC_ISSUER is set: at least 32 random bytes. It seals
+    # the OIDC login-state cookie (nonce + PKCE verifier); rotate it to invalidate pending
+    # logins only. Keep it in a Secret, never in values.yaml.
+    - name: LUMEWARP_SECRET_KEY
+      valueFrom: {secretKeyRef: {name: lumewarp-oidc, key: secret-key}}
     # Optional: grants in OpenFGA instead of the built-in membership table.
     - name: LUMEWARP_AUTHZ_BACKEND
       value: openfga

@@ -5,7 +5,9 @@ Conventions:
 - Money is integer nano-USD (1e-9 USD) in BIGINT, matching `Price` / `UsageEvent` in the protos.
 - Enums are stored as VARCHAR with a CHECK constraint (easy to extend in a migration).
 - Secrets are never stored: API keys, PATs and gateway tokens are kept as sha256 digests
-  (32 bytes) plus a short non-secret display prefix. See security.py for why sha256.
+  (32 bytes) plus a short non-secret display prefix. See security.py for why sha256. The OIDC
+  login nonce and PKCE verifier live only in the AES-GCM sealed login cookie
+  (auth/oidc.py); webhook channels store an env var name, never the URL.
 - The installation serves one config scope (`scopes` row); source tables (teams, routing,
   users, ...) are installation-wide and compile into that scope's snapshots.
 - Hierarchy: team -> members (users) and service accounts -> keys. Every key belongs to
@@ -328,13 +330,15 @@ class UserSession(Base):
 
 
 class OIDCLoginState(Base):
+    """One pending browser login. The OIDC nonce and PKCE verifier are not stored: they are
+    sealed into the encrypted login-state cookie (auth/oidc.py).
+    """
+
     __tablename__ = "oidc_login_states"
     __table_args__ = (_hash32("state_hash"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     state_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
-    nonce: Mapped[str] = mapped_column(Text, nullable=False)
-    code_verifier: Mapped[str] = mapped_column(Text, nullable=False)
     return_path: Mapped[str] = mapped_column(Text, nullable=False)
     redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -1252,10 +1256,22 @@ class AuditLog(Base):
 class NotifierChannel(TimestampMixin, Base):
     """A configured notification target. `kind` is "webhook" (built-in) or the entry-point
     name of a `lumewarp.notifier` plugin. team_id NULL = installation-wide.
+
+    A webhook channel's config holds `url_ref`, the name of an environment variable, never
+    the URL: the outbox loop resolves it at delivery time. The CHECK constraint refuses a
+    literal URL so an inline secret cannot be stored again by mistake.
     """
 
     __tablename__ = "notifier_channels"
-    __table_args__ = (Index(None, "team_id"),)
+    __table_args__ = (
+        Index(None, "team_id"),
+        CheckConstraint(
+            "kind <> 'webhook' OR (jsonb_typeof(config) = 'object'"
+            " AND config ? 'url_ref' AND config->>'url_ref' <> ''"
+            " AND config - 'url_ref' - 'timeout_seconds' = '{}'::jsonb)",
+            name="webhook_config_url_ref",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)

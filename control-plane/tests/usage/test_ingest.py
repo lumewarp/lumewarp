@@ -65,7 +65,7 @@ async def _seed(
     *,
     hard_budget: int | None = None,
     soft_budget: int | None = None,
-    webhook_url: str | None = None,
+    webhook: bool = False,
     owner_kind: KeyOwnerKind = KeyOwnerKind.USER,
 ) -> tuple[str, ApiKey]:
     scope_name = f"usage-{uuid7().hex}"
@@ -85,13 +85,13 @@ async def _seed(
             owner = await factories.make_service_account(session, team)
         key = await factories.make_key(session, team, owner)
         key_id = key.id
-        if webhook_url is not None:
+        if webhook:
             session.add(
                 NotifierChannel(
                     name=f"usage-webhook-{suffix}",
                     kind="webhook",
                     team_id=team.id,
-                    config={"url": webhook_url},
+                    config={"url_ref": "LUMEWARP_TEST_NOTIFY_URL"},
                 )
             )
     async with factory() as session:
@@ -196,7 +196,7 @@ async def test_concurrent_reports_flip_budget_once(session_factory: SessionFacto
         session_factory,
         hard_budget=100,
         soft_budget=50,
-        webhook_url="https://notify.example.test/budget",
+        webhook=True,
     )
     events = [_event(key, cost=60), _event(key, cost=60)]
 
@@ -277,7 +277,7 @@ async def test_late_previous_month_event_uses_its_event_window(session_factory: 
         session_factory,
         hard_budget=1,
         soft_budget=1,
-        webhook_url="https://notify.example.test/budget",
+        webhook=True,
     )
     current_start, _ = month_window(datetime.now(UTC))
     previous = current_start - timedelta(milliseconds=1)

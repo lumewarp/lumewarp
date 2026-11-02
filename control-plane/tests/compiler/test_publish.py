@@ -170,7 +170,8 @@ async def test_compile_failure_keeps_previous_version(factory, monkeypatch) -> N
     assert rows[-1][1] == "failed"
     async with factory() as s:
         err = await s.scalar(select(ConfigOutbox.last_error).order_by(ConfigOutbox.id.desc()))
-    assert "exceed" in err
+    # Only the exception class is kept; the message may quote configuration.
+    assert err == "CompileError"
     assert len(await versions(factory)) == 1
 
     # Fixing the source (any later mutation) publishes again.

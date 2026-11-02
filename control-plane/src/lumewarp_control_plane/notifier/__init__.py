@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -145,9 +146,13 @@ def _event_from_payload(payload: dict) -> BudgetEvent:
 
 async def _deliver(kind: str, config: dict, event: BudgetEvent, plugins: dict[str, object]) -> None:
     if kind == "webhook":
-        url = config.get("url") or config.get("webhook_url")
-        if not isinstance(url, str):
-            raise ValueError("webhook channel has no URL")
+        ref = config.get("url_ref")
+        if not isinstance(ref, str) or not ref:
+            raise ValueError("webhook channel has no url_ref")
+        # Only the environment variable name is stored in the database.
+        url = os.environ.get(ref)
+        if not url:
+            raise LookupError(f"webhook URL environment variable {ref!r} is not set")
         timeout = config.get("timeout_seconds", 5.0)
         if not isinstance(timeout, (int, float)) or timeout <= 0:
             raise ValueError("invalid webhook timeout")
