@@ -9,8 +9,9 @@ import { JsonEditor, NumberInput, SchemaFields } from "../components/SchemaForm"
 import { SearchBox } from "../components/Search";
 import { DataTable } from "../components/Table";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { Button } from "../components/ui/button";
 import { Checkbox } from "../components/ui/checkbox";
-import { Combobox } from "../components/ui/combobox-field";
+import { ComboboxField } from "../components/ui/combobox-field";
 import { Label } from "../components/ui/label";
 import { useAliases, useCan, useModels, useMut, useNames, useRouters, useStrategies } from "../hooks";
 import { matches, routerUpstreamModels } from "../lib/catalog";
@@ -224,7 +225,7 @@ interface MembersProps {
 function MemberEditor({ scope, label, options, members, onChange, shape, errors, showErrors, onProblem, id, invalid }: MembersProps) {
   const patch = (model_id: string, change: Partial<MemberV>) => onChange(members.map((m) => (m.model_id === model_id ? { ...m, ...change } : m)));
   return (
-    <div className="targets" id={id} aria-invalid={invalid} role="group" aria-label={label}>
+    <div className="flex flex-col gap-1.5" id={id} aria-invalid={invalid} role="group" aria-label={label}>
       {options.map((d) => {
         const member = members.find((m) => m.model_id === d.id);
         return (
@@ -265,7 +266,7 @@ function MemberEditor({ scope, label, options, members, onChange, shape, errors,
           </div>
         );
       })}
-      {options.length === 0 && <p className="muted">Create a model first.</p>}
+      {options.length === 0 && <p className="text-muted-foreground">Create a model first.</p>}
     </div>
   );
 }
@@ -504,7 +505,7 @@ export function Routers() {
 
       <FormDialog variant="wide-drawer" open={!!editing} title={editing === "new" ? "New router" : "Edit router"} submitLabel={editing === "new" ? "Create" : "Save"} onClose={() => setEditing(null)} onSubmit={submit}>
         <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus hint="The `model` value clients send. Must be unique across models, aliases and routers." />
-        <SelectField label="Strategy" value={v.strategy} onChange={changeStrategy} options={strategyOptions} error={form.errors.strategy} hint={shape.desc ? strategyDescription(shape.desc) || undefined : undefined} />
+        <ComboboxField label="Strategy" value={v.strategy} onChange={changeStrategy} options={strategyOptions} error={form.errors.strategy} hint={shape.desc ? strategyDescription(shape.desc) || undefined : undefined} />
 
         {missing.length > 0 && (
           <Alert variant="warn" data-testid="missing-gateways">
@@ -516,7 +517,7 @@ export function Routers() {
               </p>
               <CheckField label="Save anyway" checked={v.force} onChange={(x) => form.set("force", x)} />
               {form.errors.force && (
-                <p className="field-error" role="alert">
+                <p className="mt-1 text-[13px] text-destructive" role="alert">
                   {form.errors.force}
                 </p>
               )}
@@ -527,7 +528,7 @@ export function Routers() {
         <StrategySettings shape={shape} strategy={v.strategy} params={v.params} onChange={(next) => form.set("params", next)} errors={submitted ? paramErrors("params:", schemaErrors) : {}} error={form.errors.params} onProblem={(m) => setProblem("params", m)} idPrefix={`router-${editing === "new" ? "new" : (editing as Router | null)?.id}`} />
 
         {v.splits.length > 0 ? (
-          <p className="field-hint" data-testid="members-in-splits">
+          <p className="mt-1 text-[13px] text-muted-foreground" data-testid="members-in-splits">
             Traffic split is on: choose the models of each split below.
           </p>
         ) : (
@@ -536,12 +537,12 @@ export function Routers() {
           </Field>
         )}
 
-        <fieldset className="form-section">
-          <legend>Retries</legend>
+        <fieldset className="m-0 flex min-w-0 flex-col gap-3 rounded-xl border p-3">
+          <legend className="px-1 font-semibold">Retries</legend>
           <CheckField label="Retry failed attempts" checked={v.retry_enabled} onChange={(x) => form.set("retry_enabled", x)} hint="Only before any response byte reached the client: connect errors, timeouts and the statuses below. Streams are not retried once the upstream answered." />
           {v.retry_enabled && (
             <>
-              <div className="field-grid">
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
                 <NumberField label="Max attempts" value={v.retry_max_attempts} onChange={(x) => form.set("retry_max_attempts", x)} error={form.errors.retry_max_attempts} min={1} placeholder="default (2)" hint="Including the first; at most 5." />
                 <NumberField label="Total timeout (ms)" value={v.retry_total_timeout_ms} onChange={(x) => form.set("retry_total_timeout_ms", x)} error={form.errors.retry_total_timeout_ms} min={0} placeholder="none" />
               </div>
@@ -552,25 +553,25 @@ export function Routers() {
 
         <Field label="Fallback model (optional)" error={form.errors.fallback_model_ids} hint="Tried in order once this router's models failed, within this router's attempt budget (enable retries with at least 2 attempts). Clients still see this router's name.">
           {(p) => (
-            <div className="targets" id={p.id} aria-invalid={p["aria-invalid"]}>
+            <div className="flex flex-col gap-1.5" id={p.id} aria-invalid={p["aria-invalid"]}>
               {v.fallback_model_ids.map((id, i) => (
-                <div key={id} className="order-row" data-testid="order-row">
-                  <span>
+                <div key={id} className="flex items-center gap-1.5 rounded-md bg-secondary px-2 py-1" data-testid="order-row">
+                  <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">
                     {i + 1}. {modelName(id)}
                   </span>
-                  <button type="button" className="btn btn-sm" aria-label={`Move ${modelName(id)} up`} disabled={i === 0} onClick={() => moveFallback(i, -1)}>
+                  <Button type="button" variant="outline" size="sm" aria-label={`Move ${modelName(id)} up`} disabled={i === 0} onClick={() => moveFallback(i, -1)}>
                     ↑
-                  </button>
-                  <button type="button" className="btn btn-sm" aria-label={`Move ${modelName(id)} down`} disabled={i === v.fallback_model_ids.length - 1} onClick={() => moveFallback(i, 1)}>
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" aria-label={`Move ${modelName(id)} down`} disabled={i === v.fallback_model_ids.length - 1} onClick={() => moveFallback(i, 1)}>
                     ↓
-                  </button>
-                  <button type="button" className="btn btn-sm btn-danger-ghost" aria-label={`Remove fallback ${modelName(id)}`} onClick={() => form.set("fallback_model_ids", v.fallback_model_ids.filter((x) => x !== id))}>
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10 hover:text-destructive" aria-label={`Remove fallback ${modelName(id)}`} onClick={() => form.set("fallback_model_ids", v.fallback_model_ids.filter((x) => x !== id))}>
                     ✕
-                  </button>
+                  </Button>
                 </div>
               ))}
-              <Combobox
-                aria-label="Add fallback model"
+              <ComboboxField
+                label="Add fallback model"
                 searchLabel="Search fallback models"
                 value={undefined}
                 disabled={!fallbackOptions.length}
@@ -582,33 +583,37 @@ export function Routers() {
           )}
         </Field>
 
-        <fieldset className="form-section">
-          <legend>Traffic split</legend>
-          <p className="field-hint">Send a share of requests to each group of models (canary). With a split on, models are chosen under each split. A retry stays in the chosen split first, then tries the others.</p>
+        <fieldset className="m-0 flex min-w-0 flex-col gap-3 rounded-xl border p-3">
+          <legend className="px-1 font-semibold">Traffic split</legend>
+          <p className="mt-1 text-[13px] text-muted-foreground">Send a share of requests to each group of models (canary). With a split on, models are chosen under each split. A retry stays in the chosen split first, then tries the others.</p>
           {form.errors.splits && (
-            <p className="field-error" role="alert">
+            <p className="mt-1 text-[13px] text-destructive" role="alert">
               {form.errors.splits}
             </p>
           )}
           {v.splits.map((s, i) => (
-            <div key={i} className="split-card" role="group" aria-label={`Split ${i + 1}`}>
-              <div className="split-head">
-                <TextField label="Split name" value={s.name} onChange={(x) => setSplit(i, { name: x })} placeholder={i === 0 ? "stable" : "canary"} />
-                <NumberField label="Weight" value={s.weight} onChange={(x) => setSplit(i, { weight: x })} min={0} placeholder="0" />
-                <span className="split-share" aria-label={`Share of split ${i + 1}`}>
+            <div key={i} className="flex flex-col gap-2 rounded-lg border p-2.5" role="group" aria-label={`Split ${i + 1}`}>
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="min-w-0 flex-[1_1_140px]">
+                  <TextField label="Split name" value={s.name} onChange={(x) => setSplit(i, { name: x })} placeholder={i === 0 ? "stable" : "canary"} />
+                </div>
+                <div className="min-w-0 flex-[1_1_140px]">
+                  <NumberField label="Weight" value={s.weight} onChange={(x) => setSplit(i, { weight: x })} min={0} placeholder="0" />
+                </div>
+                <span className="min-w-14 pb-2 text-right font-semibold tabular-nums" aria-label={`Share of split ${i + 1}`}>
                   {shares[i]}
                 </span>
-                <button type="button" className="btn btn-sm btn-danger-ghost" aria-label={`Remove split ${i + 1}`} onClick={() => removeSplit(i)}>
+                <Button type="button" variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10 hover:text-destructive" aria-label={`Remove split ${i + 1}`} onClick={() => removeSplit(i)}>
                   Remove
-                </button>
+                </Button>
               </div>
               <MemberEditor scope={`s${i}`} label={`Models of split ${i + 1}`} options={depOptions} members={s.members} onChange={(next) => setSplit(i, { members: next })} shape={shape} errors={schemaErrors} showErrors={submitted} onProblem={setProblem} />
             </div>
           ))}
           <div>
-            <button type="button" className="btn btn-sm" disabled={v.splits.length >= MAX_SPLITS} onClick={() => form.set("splits", [...v.splits, { name: v.splits.length ? `split-${v.splits.length + 1}` : "stable", weight: v.splits.length ? 0 : 100, members: v.splits.length ? [] : v.members }])}>
+            <Button type="button" variant="outline" size="sm" disabled={v.splits.length >= MAX_SPLITS} onClick={() => form.set("splits", [...v.splits, { name: v.splits.length ? `split-${v.splits.length + 1}` : "stable", weight: v.splits.length ? 0 : 100, members: v.splits.length ? [] : v.members }])}>
               Add split
-            </button>
+            </Button>
           </div>
           {v.splits.length > 0 && (
             <>
@@ -628,33 +633,33 @@ function StrategySettings({ shape, strategy, params, onChange, errors, error, on
   const { desc } = shape;
   if (shape.params) {
     const extra = unknownKeys(shape.params.fields, params);
-    if (!shape.params.fields.length && !extra.length) return error ? <p className="field-error" role="alert">{error}</p> : null;
+    if (!shape.params.fields.length && !extra.length) return error ? <p className="mt-1 text-[13px] text-destructive" role="alert">{error}</p> : null;
     return (
-      <fieldset className="form-section" data-testid="strategy-settings">
-        <legend>{shape.params.title || "Strategy settings"}</legend>
-        {shape.params.description && <p className="field-hint">{shape.params.description}</p>}
+      <fieldset className="m-0 flex min-w-0 flex-col gap-3 rounded-xl border p-3" data-testid="strategy-settings">
+        <legend className="px-1 font-semibold">{shape.params.title || "Strategy settings"}</legend>
+        {shape.params.description && <p className="mt-1 text-[13px] text-muted-foreground">{shape.params.description}</p>}
         {error && (
-          <p className="field-error" role="alert">
+          <p className="mt-1 text-[13px] text-destructive" role="alert">
             {error}
           </p>
         )}
         <SchemaFields fields={shape.params.fields} values={params} onChange={onChange} errors={errors} idPrefix={idPrefix} />
-        {extra.length > 0 && <p className="field-hint">Also set, and kept as is: {extra.join(", ")}</p>}
+        {extra.length > 0 && <p className="mt-1 text-[13px] text-muted-foreground">Also set, and kept as is: {extra.join(", ")}</p>}
       </fieldset>
     );
   }
   return (
-    <fieldset className="form-section" data-testid="strategy-settings-json">
-      <legend>Strategy settings</legend>
+    <fieldset className="m-0 flex min-w-0 flex-col gap-3 rounded-xl border p-3" data-testid="strategy-settings-json">
+      <legend className="px-1 font-semibold">Strategy settings</legend>
       {desc ? (
         <Alert variant="warn">
           <TriangleAlert aria-hidden="true" />
           <AlertDescription>{desc.params_schema === null ? "No settings schema is known for this strategy." : "The settings schema is outside what the form can show."} Edit the settings as JSON.</AlertDescription>
         </Alert>
       ) : (
-        <p className="field-hint">No gateway reports this strategy, so its settings schema is unknown. Edit the settings as JSON.</p>
+        <p className="mt-1 text-[13px] text-muted-foreground">No gateway reports this strategy, so its settings schema is unknown. Edit the settings as JSON.</p>
       )}
-      {desc && desc.schema_problems.length > 0 && <p className="field-hint">{desc.schema_problems.slice(0, 3).join("; ")}</p>}
+      {desc && desc.schema_problems.length > 0 && <p className="mt-1 text-[13px] text-muted-foreground">{desc.schema_problems.slice(0, 3).join("; ")}</p>}
       <JsonEditor key={`${idPrefix}|${strategy}`} label="Settings (JSON)" value={params} onChange={onChange} onProblem={onProblem} error={error} hint="Settings are stored in config snapshots and audit logs: do not put secrets here." />
     </fieldset>
   );
