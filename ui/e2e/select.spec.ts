@@ -546,3 +546,65 @@ test("confirm dialog: a 409 stays open as Cannot delete with the referrers and f
   await expect(page.getByText("boom from the server")).toBeVisible();
   await expect(page.getByRole("row").filter({ has: page.getByRole("cell", { name: "cf-409/m", exact: true }) })).toBeVisible();
 });
+
+const SHOTS = process.env.E2E_SHOTS;
+
+test("screenshots of forms, open dropdowns and confirmations", async ({ page, request }, info) => {
+  test.skip(!SHOTS, "set E2E_SHOTS to a directory to save screenshots");
+  info.setTimeout(240_000);
+  const { join } = await import("node:path");
+  const up = await upstream(request, "shot-up");
+  const m = await model(request, "shot/m", up.id);
+  for (let i = 0; i < 12; i++) await model(request, `shot/fb-${String(i).padStart(2, "0")}`, up.id);
+  await post(request, "/aliases", { name: "shot-alias", target: m.id });
+  await signIn(page, request, "/models");
+  const modes: [string, number, number, "light" | "dark"][] = [
+    ["desktop-light", 1280, 900, "light"],
+    ["desktop-dark", 1280, 900, "dark"],
+    ["phone-light", 390, 844, "light"],
+    ["phone-dark", 390, 844, "dark"],
+  ];
+  const shot = async (name: string) => {
+    await page.waitForTimeout(450);
+    await page.screenshot({ path: join(SHOTS!, `${name}.png`) });
+  };
+  for (const [label, width, height, theme] of modes) {
+    await page.setViewportSize({ width, height });
+    await page.evaluate((t) => localStorage.setItem("lumewarp.theme", t), theme);
+    await page.goto("/models");
+    await page.getByRole("button", { name: "New model" }).click();
+    await shot(`${label}-model-dialog`);
+    await (await control(dialog(page), "Upstream")).click();
+    await shot(`${label}-model-dialog-select-open`);
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    await page.goto("/upstreams");
+    await page.getByRole("button", { name: "New upstream" }).click();
+    await (await control(dialog(page), "Kind")).click();
+    await shot(`${label}-upstream-drawer-select-open`);
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    await page.goto("/routers");
+    await page.getByRole("button", { name: "New router" }).click();
+    await pick(dialog(page), "Strategy", "E2E tuned");
+    await (await control(dialog(page), "Big list")).click();
+    await shot(`${label}-router-sheet-enum-open`);
+    await page.keyboard.press("Escape");
+    await (await control(dialog(page), "Add fallback model")).click();
+    await shot(`${label}-router-sheet-combobox-open`);
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Create" }).click();
+    await shot(`${label}-router-sheet-errors`);
+    await page.keyboard.press("Escape");
+    await page.goto("/aliases");
+    await openDelete(page, "shot-alias");
+    await shot(`${label}-confirm-delete`);
+    await page.keyboard.press("Escape");
+    await page.goto("/models");
+    await page.getByLabel("Search models").fill("shot/m");
+    await page.getByRole("row").filter({ has: page.getByRole("cell", { name: "shot/m", exact: true }) }).getByRole("button", { name: "Delete" }).click();
+    await confirmDialog(page).getByRole("button", { name: "Delete" }).click();
+    await shot(`${label}-confirm-blocked`);
+    await confirmDialog(page).getByRole("button", { name: "Got it" }).click();
+  }
+});

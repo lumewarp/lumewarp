@@ -58,7 +58,7 @@ export function Dialog({ open, onClose, title, children, footer, variant = "dial
       <UiDialog open={open} onOpenChange={onOpenChange}>
         <DialogContent aria-describedby={undefined} onCloseAutoFocus={onCloseAutoFocus} showCloseButton={false} className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 p-0 sm:max-w-lg">
           <header className={HEADER}>
-            <DialogTitle>{title}</DialogTitle>
+            <DialogTitle className="m-0">{title}</DialogTitle>
             <DialogClose asChild>{close}</DialogClose>
           </header>
           {body}
@@ -71,7 +71,7 @@ export function Dialog({ open, onClose, title, children, footer, variant = "dial
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent aria-describedby={undefined} onCloseAutoFocus={onCloseAutoFocus} showCloseButton={false} side="right" className={cn("w-full gap-0 p-0 data-[state=closed]:duration-200 data-[state=open]:duration-200", variant === "wide-drawer" ? "sm:max-w-xl" : "sm:max-w-md")}>
         <header className={HEADER}>
-          <SheetTitle className="text-base">{title}</SheetTitle>
+          <SheetTitle className="m-0 text-base">{title}</SheetTitle>
           <SheetClose asChild>{close}</SheetClose>
         </header>
         {body}

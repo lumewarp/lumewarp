@@ -56,7 +56,7 @@ export function ConfirmDialog({ open, title, message, confirmLabel = "Delete", o
     <AlertDialog open={open} onOpenChange={(next) => (!next ? close() : undefined)}>
       <AlertDialogContent onCloseAutoFocus={onCloseAutoFocus} {...(blocked ? { "aria-describedby": undefined } : {})}>
         <AlertDialogHeader>
-          <AlertDialogTitle>{blocked ? "Cannot delete" : title}</AlertDialogTitle>
+          <AlertDialogTitle className="m-0">{blocked ? "Cannot delete" : title}</AlertDialogTitle>
           {!blocked && <AlertDialogDescription>{message}</AlertDialogDescription>}
         </AlertDialogHeader>
         {blocked && (
