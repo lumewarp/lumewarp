@@ -1,4 +1,4 @@
-import { useParams } from "@tanstack/react-router";
+import { Link, useParams } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, ApiError, type Key, type Member, type Schemas, type ServiceAccount, type Team } from "../api";
@@ -9,6 +9,12 @@ import { FormDialog, required, SelectField, TextField, useForm } from "../compon
 import { blankPolicy, Budget, PolicyFields, policyBody, policyFrom, PolicySummary, POLICY_ALIAS, type PolicyValues } from "../components/Policy";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
+import { Alert, AlertDescription } from "../components/ui/alert";
+import { Button } from "../components/ui/button";
+import { Card } from "../components/ui/card";
+import { ComboboxField } from "../components/ui/combobox-field";
+import { DescriptionDetails, DescriptionList, DescriptionTerm } from "../components/ui/description-list";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { useAction, useCan, useMe, useMut } from "../hooks";
 
 const TABS = [
@@ -27,9 +33,13 @@ export function TeamDetail() {
   const [externallyManagedTeamId, setExternallyManagedTeamId] = useState<string | null>(null);
   const team = useQuery({ queryKey: ["team", teamId], queryFn: () => api.team(teamId), enabled: !!teamId });
 
-  if (team.isPending) return <div className="state" aria-busy="true">Loading team…</div>;
+  if (team.isPending) return <div className="p-8 text-center text-muted-foreground" aria-busy="true">Loading team…</div>;
   if (team.error || !team.data) {
-    return <div className="state state-error" role="alert">{team.error?.message ?? "Team not found."}</div>;
+    return (
+      <Alert variant="destructive" data-testid="state-error">
+        <AlertDescription>{team.error?.message ?? "Team not found."}</AlertDescription>
+      </Alert>
+    );
   }
 
   return (
@@ -37,37 +47,40 @@ export function TeamDetail() {
       <PageHeader
         title={team.data.name}
         description="Manage the people, service accounts, keys, and usage for this team."
-        actions={<a className="btn" href="/teams">All teams</a>}
+        actions={
+          <Button variant="outline" asChild>
+            <Link to="/teams">All teams</Link>
+          </Button>
+        }
       />
-      <nav className="tabs" role="tablist" aria-label="Team sections">
-        {TABS.map((item) => (
-          <button
-            key={item.id}
-            id={`team-tab-${item.id}`}
-            className="tab-button"
-            type="button"
-            role="tab"
-            aria-selected={tab === item.id}
-            aria-controls="team-panel"
-            onClick={() => setTab(item.id)}
-          >
-            {item.label}
-          </button>
-        ))}
-      </nav>
-      <section id="team-panel" role="tabpanel" aria-labelledby={`team-tab-${tab}`}>
-        {tab === "members" && (
+      <Tabs value={tab} onValueChange={(value) => setTab(value as Tab)} activationMode="manual">
+        <TabsList aria-label="Team sections" className="mb-4 max-w-full justify-start overflow-x-auto">
+          {TABS.map((item) => (
+            <TabsTrigger key={item.id} value={item.id} className="flex-none">
+              {item.label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+        <TabsContent value="members">
           <MembersPanel
             team={team.data}
             managedExternally={externallyManagedTeamId === teamId}
             onManagedExternally={() => setExternallyManagedTeamId(teamId)}
           />
-        )}
-        {tab === "service-accounts" && <ServiceAccountsPanel team={team.data} />}
-        {tab === "keys" && <KeysPanel team={team.data} />}
-        {tab === "usage" && <TeamUsage team={team.data} />}
-        {tab === "settings" && <TeamSettings team={team.data} />}
-      </section>
+        </TabsContent>
+        <TabsContent value="service-accounts">
+          <ServiceAccountsPanel team={team.data} />
+        </TabsContent>
+        <TabsContent value="keys">
+          <KeysPanel team={team.data} />
+        </TabsContent>
+        <TabsContent value="usage">
+          <TeamUsage team={team.data} />
+        </TabsContent>
+        <TabsContent value="settings">
+          <TeamSettings team={team.data} />
+        </TabsContent>
+      </Tabs>
     </>
   );
 }
@@ -176,14 +189,14 @@ function MembersPanel({
 
   return (
     <>
-      <div className="panel-head">
-        <h2>Members</h2>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="m-0">Members</h2>
         <CreateButton can={isAdmin && !memberWritesDisabled} onClick={() => open("new")}>Add member</CreateButton>
       </div>
       {memberWritesDisabled && (
-        <p className="form-warn" role="status">
-          Membership is managed by your identity provider / IAM.
-        </p>
+        <Alert variant="warn" role="status">
+          <AlertDescription>Membership is managed by your identity provider / IAM.</AlertDescription>
+        </Alert>
       )}
       <DataTable
         rows={list.data}
@@ -219,8 +232,12 @@ function MembersPanel({
         onSubmit={submit}
         submitDisabled={memberWritesDisabled}
       >
-        {memberWritesDisabled && <p className="form-warn">Membership is managed by your identity provider / IAM.</p>}
-        <fieldset className="form-fieldset" disabled={memberWritesDisabled}>
+        {memberWritesDisabled && (
+          <Alert variant="warn" role="status">
+            <AlertDescription>Membership is managed by your identity provider / IAM.</AlertDescription>
+          </Alert>
+        )}
+        <fieldset className="m-0 flex min-w-0 flex-col gap-3.5 border-0 p-0" disabled={memberWritesDisabled}>
           {editing === "new" ? (
             <>
               <TextField
@@ -239,7 +256,7 @@ function MembersPanel({
                 autoFocus
               />
               {perms.isSuper && (
-                <SelectField
+                <ComboboxField
                   label="User"
                   value={form.values.user_id}
                   onChange={(value) => {
@@ -332,8 +349,8 @@ function ServiceAccountsPanel({ team }: { team: Team }) {
 
   return (
     <>
-      <div className="panel-head">
-        <h2>Service accounts</h2>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="m-0">Service accounts</h2>
         <CreateButton can={isAdmin} onClick={() => open("new")}>New service account</CreateButton>
       </div>
       <DataTable
@@ -484,8 +501,8 @@ function KeysPanel({ team }: { team: Team }) {
 
   return (
     <>
-      <div className="panel-head">
-        <h2>Keys</h2>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="m-0">Keys</h2>
         <CreateButton can={ownerOptions.length > 0} onClick={() => open("new")}>New key</CreateButton>
       </div>
       <DataTable
@@ -496,7 +513,7 @@ function KeysPanel({ team }: { team: Team }) {
         rowKey={(key) => key.id}
         empty="No keys in this team."
         columns={[
-          { key: "name", header: "Name", sort: (a, b) => a.name.localeCompare(b.name), cell: (key) => <><strong>{key.name}</strong> <code className="muted">{key.display_prefix}…</code></> },
+          { key: "name", header: "Name", sort: (a, b) => a.name.localeCompare(b.name), cell: (key) => <><strong>{key.name}</strong> <code className="text-muted-foreground">{key.display_prefix}…</code></> },
           { key: "owner", header: "Owner", cell: (key) => <>{key.owner_kind === "service_account" ? "Service account: " : ""}{ownerName(key)}</> },
           { key: "lifecycle", header: "Lifecycle", cell: (key) => <><KeyBadge k={key} /><SuspendedReason reason={key.suspended_reason} /></> },
           { key: "expires", header: "Expires", cell: (key) => fmtDate(key.expires_at) },
@@ -513,9 +530,10 @@ function KeysPanel({ team }: { team: Team }) {
                   onEdit={() => open(key)}
                   extra={key.lifecycle === "revoked" ? null : (
                     <>
-                      <button className="btn btn-sm" disabled={!allowed} onClick={() => void rotate(key)}>Rotate</button>
-                      <button
-                        className="btn btn-sm"
+                      <Button variant="outline" size="sm" disabled={!allowed} onClick={() => void rotate(key)}>Rotate</Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
                         disabled={
                           key.lifecycle === "suspended"
                             ? ownerInactive || !canResume(key)
@@ -525,8 +543,8 @@ function KeysPanel({ team }: { team: Team }) {
                         onClick={() => void setLifecycle({ key, lifecycle: key.lifecycle === "suspended" ? "active" : "suspended" })}
                       >
                         {key.lifecycle === "suspended" ? "Resume" : "Suspend"}
-                      </button>
-                      <button className="btn btn-sm btn-danger-ghost" disabled={!allowed} onClick={() => setRevoking(key)}>Revoke</button>
+                      </Button>
+                      <Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10 hover:text-destructive" disabled={!allowed} onClick={() => setRevoking(key)}>Revoke</Button>
                     </>
                   )}
                 />
@@ -543,7 +561,7 @@ function KeysPanel({ team }: { team: Team }) {
         onSubmit={submit}
       >
         {editing === "new" && ownerOptions.length > 1 && (
-          <SelectField
+          <ComboboxField
             label="Owner"
             value={form.values.service_account_id}
             onChange={(value) => form.set("service_account_id", value)}
@@ -557,7 +575,7 @@ function KeysPanel({ team }: { team: Team }) {
         open={!!secret}
         title={secretTitle}
         onClose={() => setSecret(null)}
-        footer={<button className="btn btn-primary" onClick={() => setSecret(null)}>I’ve saved it</button>}
+        footer={<Button onClick={() => setSecret(null)}>I’ve saved it</Button>}
       >
         {secret && <SecretOnce secret={secret} />}
       </Dialog>
@@ -589,9 +607,9 @@ function TeamUsage({ team }: { team: Team }) {
 
   return (
     <>
-      <div className="panel-head">
-        <h2>Usage</h2>
-        <div className="filters">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="m-0">Usage</h2>
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
           <SelectField
             label="Group by"
             value={groupBy}
@@ -648,21 +666,25 @@ function TeamSettings({ team }: { team: Team }) {
 
   return (
     <>
-      <div className="panel-head">
-        <h2>Settings</h2>
-        {perms.teamAdmin(team.id) && <button className="btn" onClick={edit}>Edit team</button>}
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="m-0">Settings</h2>
+        {perms.teamAdmin(team.id) && <Button variant="outline" onClick={edit}>Edit team</Button>}
       </div>
       {!perms.teamAdmin(team.id) && (
-        <p className="muted">Team settings are read-only for members.</p>
+        <p className="text-muted-foreground">Team settings are read-only for members.</p>
       )}
-      <section className="card pad kv">
-        <dl>
-          <dt>Name</dt><dd>{team.name}</dd>
-          <dt>Policy</dt><dd><PolicySummary p={team} /></dd>
-          <dt>Budget</dt><dd><Budget p={team} /></dd>
-          <dt>Created</dt><dd>{fmtDate(team.created_at)}</dd>
-        </dl>
-      </section>
+      <Card className="mb-4 gap-3 p-4 shadow-none">
+        <DescriptionList>
+          <DescriptionTerm>Name</DescriptionTerm>
+          <DescriptionDetails>{team.name}</DescriptionDetails>
+          <DescriptionTerm>Policy</DescriptionTerm>
+          <DescriptionDetails><PolicySummary p={team} /></DescriptionDetails>
+          <DescriptionTerm>Budget</DescriptionTerm>
+          <DescriptionDetails><Budget p={team} /></DescriptionDetails>
+          <DescriptionTerm>Created</DescriptionTerm>
+          <DescriptionDetails>{fmtDate(team.created_at)}</DescriptionDetails>
+        </DescriptionList>
+      </Card>
       <FormDialog open={editing} title="Edit team settings" onClose={() => setEditing(false)} onSubmit={submit}>
         <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
         <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam />
