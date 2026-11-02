@@ -511,16 +511,25 @@ async def compile_scope(
         else:
             status = pb.KEY_STATUS_ACTIVE
 
-        snap.api_keys.append(
-            pb.ApiKey(
-                key_id=str(k.id),
-                key_hash=k.key_hash,
-                team_id=str(k.team_id),
-                status=status,
-                expires_at_unix_ms=expiry_ms(k.expires_at),
-                policy=policy,
-            )
+        api_key = pb.ApiKey(
+            key_id=str(k.id),
+            key_hash=k.key_hash,
+            team_id=str(k.team_id),
+            status=status,
+            expires_at_unix_ms=expiry_ms(k.expires_at),
+            policy=policy,
         )
+        # The previous hash carries its own expiry so a gateway booting from its persisted
+        # snapshot keeps enforcing it while the control plane is down. Once it is past,
+        # this compile omits it and the delta removes it from every gateway.
+        if k.previous_key_hash and k.previous_key_expires_at is not None:
+            previous_expires = expiry_ms(k.previous_key_expires_at)
+            if k.expires_at is not None:
+                previous_expires = min(previous_expires, expiry_ms(k.expires_at))
+            if previous_expires > _ms(now):
+                api_key.previous_key_hash = k.previous_key_hash
+                api_key.previous_key_expires_at_unix_ms = previous_expires
+        snap.api_keys.append(api_key)
 
     snap.required_capabilities.extend(capabilities_used(snap))
 

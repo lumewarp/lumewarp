@@ -208,20 +208,24 @@ class Team(_message.Message):
     def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ...) -> None: ...
 
 class ApiKey(_message.Message):
-    __slots__ = ("key_id", "key_hash", "team_id", "status", "expires_at_unix_ms", "policy")
+    __slots__ = ("key_id", "key_hash", "team_id", "status", "expires_at_unix_ms", "policy", "previous_key_hash", "previous_key_expires_at_unix_ms")
     KEY_ID_FIELD_NUMBER: _ClassVar[int]
     KEY_HASH_FIELD_NUMBER: _ClassVar[int]
     TEAM_ID_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
     EXPIRES_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
     POLICY_FIELD_NUMBER: _ClassVar[int]
+    PREVIOUS_KEY_HASH_FIELD_NUMBER: _ClassVar[int]
+    PREVIOUS_KEY_EXPIRES_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
     key_id: str
     key_hash: bytes
     team_id: str
     status: KeyStatus
     expires_at_unix_ms: int
     policy: EffectivePolicy
-    def __init__(self, key_id: _Optional[str] = ..., key_hash: _Optional[bytes] = ..., team_id: _Optional[str] = ..., status: _Optional[_Union[KeyStatus, str]] = ..., expires_at_unix_ms: _Optional[int] = ..., policy: _Optional[_Union[EffectivePolicy, _Mapping]] = ...) -> None: ...
+    previous_key_hash: bytes
+    previous_key_expires_at_unix_ms: int
+    def __init__(self, key_id: _Optional[str] = ..., key_hash: _Optional[bytes] = ..., team_id: _Optional[str] = ..., status: _Optional[_Union[KeyStatus, str]] = ..., expires_at_unix_ms: _Optional[int] = ..., policy: _Optional[_Union[EffectivePolicy, _Mapping]] = ..., previous_key_hash: _Optional[bytes] = ..., previous_key_expires_at_unix_ms: _Optional[int] = ...) -> None: ...
 
 class EffectivePolicy(_message.Message):
     __slots__ = ("allow_all_models", "allowed_models", "rate_limit_scopes", "budget_window_end_unix_ms")

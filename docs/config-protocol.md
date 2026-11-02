@@ -100,11 +100,23 @@ too. A rename therefore changes affected keys, which go out in the same delta
 with the upserts and removes of the renamed entry and of whatever references it.
 `GET /v1/models` lists every name the key may call, of any kind, sorted.
 
+### Key rotation grace
+
+`ApiKey.previous_key_hash` and `ApiKey.previous_key_expires_at_unix_ms` carry the secret
+being replaced while the control plane's rotation grace is open. The gateway indexes it as
+the same key (same `key_id`, team, status, policy and limiter scopes), so usage during the
+grace is attributed to one key. It stops authenticating at the earlier of its own expiry
+and `ApiKey.expires_at_unix_ms`; a gateway that boots from its persisted snapshot enforces
+that without the control plane. The control plane omits the pair from its next compile
+after it expires, which removes it from every gateway through the normal delta. Only one
+previous hash exists: rotating twice inside the grace ends the older grace immediately.
+Standalone YAML has no previous-hash field.
+
 ### Routing capabilities
 
 The gateway advertises `retry`, `fallbacks`, `health_check`, `circuit_breaker`,
-`traffic_split`, `vllm_load` and `strategy:<name>` for each strategy it has,
-built-ins included. Compilers add a capability only when it is used:
+`traffic_split`, `vllm_load`, `rotation_grace` and `strategy:<name>` for each
+strategy it has, built-ins included. Compilers add a capability only when it is used:
 
 | Capability | Fields |
 | --- | --- |
@@ -114,6 +126,7 @@ built-ins included. Compilers add a capability only when it is used:
 | `circuit_breaker` | Present `Upstream.circuit_breaker`, including an empty message |
 | `traffic_split` | Nonempty split, non-NONE sticky, or nonempty sticky header |
 | `vllm_load` | Nonempty `Upstream.metrics_url` |
+| `rotation_grace` | Nonempty `ApiKey.previous_key_hash` |
 | `strategy:<name>` | Any router with `Router.strategy = <name>`, including `strategy:weighted` |
 
 Using a field without its capability is `INVALID_CONFIG`; requiring an

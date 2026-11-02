@@ -40,6 +40,7 @@ fn key(id: &str, secret: &str) -> ApiKey {
             allow_all_models: true,
             ..Default::default()
         }),
+        ..Default::default()
     }
 }
 

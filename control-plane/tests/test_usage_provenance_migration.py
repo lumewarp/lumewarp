@@ -4,6 +4,7 @@ import hashlib
 import uuid
 from collections import Counter
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from lumewarp_control_plane import migrate
 from lumewarp_control_plane.usage import ingest
 from tests.conftest import create_database, drop_database
-from tests.usage.test_catalog_provenance import key_for, wire
+from tests.usage.test_catalog_provenance import wire
 
 
 async def test_populated_0010_usage_upgrade_and_downgrade():
@@ -24,9 +25,32 @@ async def test_populated_0010_usage_upgrade_and_downgrade():
     }
     try:
         await migrate.upgrade(engine, "0010")
-        async with AsyncSession(engine, expire_on_commit=False) as session, session.begin():
-            key = await key_for(session)
-        ids.update(key=key.id, team=key.team_id, owner=key.owner_id)
+        # The current ORM has columns added after 0010, so seed the hierarchy with SQL that
+        # is valid at this revision; later steps only need these three ids.
+        team_id, account_id, key_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        key_hash = hashlib.sha256(str(key_id).encode()).digest()
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("INSERT INTO teams (id, name) VALUES (:id, 'migration-team')"),
+                {"id": team_id},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO service_accounts (id, team_id, name)"
+                    " VALUES (:id, :team, 'migration-owner')"
+                ),
+                {"id": account_id, "team": team_id},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO api_keys (id, team_id, owner_kind, service_account_id, name,"
+                    " key_hash, display_prefix, lifecycle) VALUES (:id, :team,"
+                    " 'service_account', :owner, 'key', :hash, 'lw-migrat', 'active')"
+                ),
+                {"id": key_id, "team": team_id, "owner": account_id, "hash": key_hash},
+            )
+        key = SimpleNamespace(id=key_id, team_id=team_id)
+        ids.update(key=key.id, team=key.team_id, owner=account_id)
         async with engine.begin() as conn:
             for statement in (
                 "INSERT INTO upstreams (id, name, kind, base_url) "

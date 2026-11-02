@@ -74,6 +74,7 @@ def test_supported_capabilities_match_gateway() -> None:
         "circuit_breaker",
         "traffic_split",
         "vllm_load",
+        "rotation_grace",
         "strategy:weighted",
         "strategy:least_in_flight",
         "strategy:lowest_latency",
@@ -293,7 +294,7 @@ async def test_all_capabilities_together(factory) -> None:
         up.metrics_url = "http://vllm:8000/metrics"
     snap = (await compile_(factory)).snapshot
     assert list(snap.required_capabilities) == sorted(
-        SUPPORTED_CAPABILITIES - {"strategy:weighted", "strategy:least_in_flight"}
+        SUPPORTED_CAPABILITIES - {"strategy:weighted", "strategy:least_in_flight", "rotation_grace"}
     )
 
 
@@ -435,7 +436,8 @@ def test_validate_accepts_full_p2_snapshot() -> None:
     snap.routers[1].strategy = "vllm_load"
     _check(snap)
     assert list(snap.required_capabilities) == sorted(
-        SUPPORTED_CAPABILITIES - {"strategy:least_in_flight", "strategy:lowest_latency"}
+        SUPPORTED_CAPABILITIES
+        - {"strategy:least_in_flight", "strategy:lowest_latency", "rotation_grace"}
     )
 
 

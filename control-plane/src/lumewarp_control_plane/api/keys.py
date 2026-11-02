@@ -7,11 +7,14 @@ service account and carries no policy of its own (the owner's policy applies).
 
 from __future__ import annotations
 
+import time
 import uuid
-from datetime import UTC, datetime
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, status
-from sqlalchemy import Select, select
+from fastapi import APIRouter, Request, status
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import audit
@@ -32,6 +35,7 @@ from lumewarp_control_plane.api.common import (
 )
 from lumewarp_control_plane.api.schemas import (
     KeyCreate,
+    KeyRotate,
     KeyUpdate,
     Page,
 )
@@ -46,19 +50,139 @@ from lumewarp_control_plane.authz import (
     RequestAuthz,
     team_resource,
 )
-from lumewarp_control_plane.errors import forbidden, not_found
+from lumewarp_control_plane.errors import ApiError, forbidden, not_found
 from lumewarp_control_plane.metrics import note_suspended
 from lumewarp_control_plane.models import (
     ApiKey,
     KeyLifecycle,
     KeyOwnerKind,
     ServiceAccount,
+    Team,
     TeamMember,
     User,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
 
 router = APIRouter(tags=["keys"])
+
+# Self-service writes are rate limited per principal and target, in this process. The
+# control plane runs one process (README); a sliding fixed window is enough to stop a
+# runaway client without turning into a database write on every attempt.
+KEY_WRITE_WINDOW_SECONDS = 60
+KEY_CREATE_LIMIT = 10
+KEY_ROTATE_LIMIT = 10
+MAX_LIMITER_ENTRIES = 10_000
+
+
+@dataclass
+class KeyWriteLimiter:
+    events: OrderedDict[str, tuple[int, float]] = field(default_factory=OrderedDict)
+
+    def reserve(self, scope: str, limit: int) -> int:
+        """Count one attempt; return 0 when allowed, else seconds until the window ends."""
+        now = time.monotonic()
+        self.events = OrderedDict((key, row) for key, row in self.events.items() if row[1] > now)
+        count, until = self.events.get(scope, (0, now + KEY_WRITE_WINDOW_SECONDS))
+        if count >= limit:
+            return max(1, int(until - now + 0.999))
+        if scope not in self.events and len(self.events) >= MAX_LIMITER_ENTRIES:
+            self.events.popitem(last=False)
+        self.events[scope] = (count + 1, until)
+        return 0
+
+
+def _limiter(request: Request) -> KeyWriteLimiter:
+    limiter = getattr(request.app.state, "key_write_limiter", None)
+    if limiter is None:
+        limiter = KeyWriteLimiter()
+        request.app.state.key_write_limiter = limiter
+    return limiter
+
+
+def _principal_scope(authz: Authz) -> str:
+    return str(authz.user_id) if authz.user_id is not None else "break_glass"
+
+
+def _rate_limit(
+    request: Request, authz: Authz, scope: str, limit: int, operation: str, metrics: MetricsDep
+) -> None:
+    retry_after = _limiter(request).reserve(f"{operation}:{_principal_scope(authz)}:{scope}", limit)
+    if retry_after:
+        metrics.key_writes.labels(operation, "rate_limited").inc()
+        raise ApiError(
+            429,
+            "rate_limited",
+            f"too many key {operation} attempts; retry later",
+            {"Retry-After": str(retry_after)},
+        )
+
+
+async def _member_key_expiry(
+    session: AsyncSession, team: Team, user_id: uuid.UUID, expires_at: datetime | None
+) -> datetime | None:
+    """Apply the team's per-member key limits to a create. Both are source-only limits."""
+    if team.max_keys_per_member is not None:
+        owned = await session.scalar(
+            select(func.count())
+            .select_from(ApiKey)
+            .where(
+                ApiKey.team_id == team.id,
+                ApiKey.owner_kind == KeyOwnerKind.USER,
+                ApiKey.user_id == user_id,
+                ApiKey.lifecycle != KeyLifecycle.REVOKED,
+            )
+        )
+        if (owned or 0) >= team.max_keys_per_member:
+            raise conflict(
+                f"member key limit reached ({team.max_keys_per_member} per member in this team)"
+            )
+    lifetime = team.max_member_key_lifetime_seconds
+    if lifetime is None:
+        return expires_at
+    deadline = datetime.now(UTC) + timedelta(seconds=lifetime)
+    if expires_at is None:
+        return deadline
+    if expires_at > deadline:
+        raise validation_error("expires_at", f"member keys may not outlive {lifetime} seconds")
+    return expires_at
+
+
+def _check_member_expiry(team: Team, expires_at: datetime | None) -> None:
+    """A member key cannot be extended past the team's current lifetime cap.
+
+    Create and rotate enforce it too; update is included because an owner could otherwise
+    extend or clear the expiry of a key created under a stricter team policy.
+    """
+    lifetime = team.max_member_key_lifetime_seconds
+    if lifetime is None:
+        return
+    if expires_at is None:
+        raise validation_error(
+            "expires_at", "member keys must keep an expiry while the team sets a maximum lifetime"
+        )
+    if expires_at > datetime.now(UTC) + timedelta(seconds=lifetime):
+        raise validation_error("expires_at", f"member keys may not outlive {lifetime} seconds")
+
+
+def _enforce_rotation_lifetime(team: Team, row: ApiKey) -> None:
+    """A rotation may not leave a member key valid past the team's current lifetime cap.
+
+    Existing keys created before the cap are handled without a silent policy change: a
+    never-expiring key gets an expiry at rotation, and one whose expiry is already too far
+    out must be shortened first (422). Team admins are subject to the same rule.
+    """
+    lifetime = team.max_member_key_lifetime_seconds
+    if lifetime is None:
+        return
+    deadline = datetime.now(UTC) + timedelta(seconds=lifetime)
+    if row.expires_at is None:
+        row.expires_at = deadline
+    elif row.expires_at > deadline:
+        raise validation_error(
+            "expires_at",
+            f"rotation would leave the key valid past the {lifetime}-second member lifetime;"
+            " shorten expires_at first",
+        )
 
 
 class KeyOut(KeyOutBase):
@@ -168,10 +292,13 @@ async def list_team_keys(
 async def create_key(
     team_id: uuid.UUID,
     body: KeyCreate,
+    request: Request,
     authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
+    metrics: MetricsDep,
 ) -> KeyCreated:
+    _rate_limit(request, authz, str(team_id), KEY_CREATE_LIMIT, "create", metrics)
     async with mutation(session):
         await lock_scope(session, settings)
         team = await get_team_or_404(session, authz, team_id)
@@ -181,6 +308,7 @@ async def create_key(
             if user_id is None or not await _is_member(session, authz, team.id, user_id):
                 raise validation_error("team_id", "not a member of this team")
             owner = {"owner_kind": KeyOwnerKind.USER, "user_id": user_id}
+            expires_at = await _member_key_expiry(session, team, user_id, body.expires_at)
         else:
             account = await session.get(ServiceAccount, body.service_account_id)
             if account is None or account.team_id != team.id:
@@ -190,6 +318,8 @@ async def create_key(
                 "owner_kind": KeyOwnerKind.SERVICE_ACCOUNT,
                 "service_account_id": account.id,
             }
+            # Member limits do not apply to service accounts (team-admin managed).
+            expires_at = body.expires_at
         new = generate_secret(SecretKind.API_KEY)
         row = ApiKey(
             team_id=team.id,
@@ -197,7 +327,7 @@ async def create_key(
             key_hash=new.hash,
             display_prefix=new.display_prefix,
             lifecycle=KeyLifecycle.ACTIVE,
-            expires_at=body.expires_at,
+            expires_at=expires_at,
             created_by_user_id=authz.user_id,
             **owner,
         )
@@ -215,9 +345,11 @@ async def create_key(
                 "name": row.name,
                 "owner_kind": row.owner_kind.value,
                 "owner_id": row.owner_id,
+                "expires_at": row.expires_at.isoformat() if row.expires_at else None,
             },
         )
         await enqueue_recompile(session, settings, "api.key.create")
+    metrics.key_writes.labels("create", "success").inc()
     return KeyCreated(key=await _out(session, row), secret=new.secret)
 
 
@@ -254,6 +386,11 @@ async def update_key(
         if body.name is not None:
             row.name = body.name
         if "expires_at" in body.model_fields_set:
+            if row.owner_kind is KeyOwnerKind.USER:
+                team = await session.get(Team, row.team_id)
+                if team is None:
+                    raise not_found("team not found")
+                _check_member_expiry(team, body.expires_at)
             row.expires_at = body.expires_at
         admin_action = (
             Action.SERVICE_ACCOUNT_MANAGE
@@ -318,6 +455,9 @@ async def revoke_key(
             row.lifecycle = KeyLifecycle.REVOKED
             row.suspended_reason = None
             row.revoked_at = datetime.now(UTC)
+            # Revoking kills both credentials; never leave a grace hash behind.
+            row.previous_key_hash = None
+            row.previous_key_expires_at = None
             await session.flush()
             await session.refresh(row)
             audit.record(
@@ -336,20 +476,44 @@ async def revoke_key(
 @router.post("/keys/{key_id}/rotate", response_model=KeyCreated, operation_id="rotateKey")
 async def rotate_key(
     key_id: uuid.UUID,
+    request: Request,
     authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
+    metrics: MetricsDep,
+    body: KeyRotate | None = None,
 ) -> KeyCreated:
-    """Replace the secret in place: same key_id, so usage history continues."""
+    """Replace the secret in place: same key_id, so usage history continues.
+
+    With `grace_seconds` > 0 the replaced hash stays valid until its own expiry. Only one
+    previous hash is kept: rotating twice inside the grace drops the older one.
+    """
+    grace = (body or KeyRotate()).grace_seconds
+    _rate_limit(request, authz, str(key_id), KEY_ROTATE_LIMIT, "rotate", metrics)
     async with mutation(session):
         await lock_scope(session, settings)
         row = await _get_key(session, authz, key_id)
         await _require_manage(authz, row)
         if row.lifecycle is KeyLifecycle.REVOKED:
             raise conflict("revoked keys cannot be rotated")
+        if row.owner_kind is KeyOwnerKind.USER:
+            team = await session.get(Team, row.team_id)
+            if team is None:
+                raise not_found("team not found")
+            _enforce_rotation_lifetime(team, row)
         new = generate_secret(SecretKind.API_KEY)
+        old_hash = row.key_hash
         row.key_hash = new.hash
         row.display_prefix = new.display_prefix
+        if grace:
+            previous_expires = datetime.now(UTC) + timedelta(seconds=grace)
+            if row.expires_at is not None:
+                previous_expires = min(previous_expires, row.expires_at)
+            row.previous_key_hash = old_hash
+            row.previous_key_expires_at = previous_expires
+        else:
+            row.previous_key_hash = None
+            row.previous_key_expires_at = None
         await session.flush()
         await session.refresh(row)
         audit.record(
@@ -359,9 +523,17 @@ async def rotate_key(
             resource_id=row.id,
             principal=authz.principal,
             team_id=row.team_id,
-            details={"name": row.name},
+            details={
+                "name": row.name,
+                "grace_seconds": grace,
+                "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+                "previous_key_expires_at": (
+                    row.previous_key_expires_at.isoformat() if row.previous_key_expires_at else None
+                ),
+            },
         )
         await enqueue_recompile(session, settings, "api.key.rotate")
+    metrics.key_writes.labels("rotate", "success").inc()
     return KeyCreated(key=await _out(session, row), secret=new.secret)
 
 

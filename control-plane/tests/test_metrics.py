@@ -34,6 +34,7 @@ CONTRACT = {
     "lumewarp_cp_authz_checks": ("counter", {"backend", "decision"}),
     "lumewarp_cp_keys_suspended": ("counter", {"reason"}),
     "lumewarp_cp_key_reconcile_last_success_timestamp_seconds": ("gauge", set()),
+    "lumewarp_cp_key_writes": ("counter", {"operation", "result"}),
 }
 
 

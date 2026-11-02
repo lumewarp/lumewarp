@@ -64,10 +64,17 @@ async def test_current_user_and_pats(client, committed) -> None:
     assert me.json()["user_id"] == str(user.id)
     assert me.json()["email"] == user.email
     assert me.json()["manages_grants"] is True
-    assert {r["team_id"]: r for r in me.json()["teams"]} == {
-        str(team.id): {"team_id": str(team.id), "team_name": team.name, "role": "admin"},
-        str(other.id): {"team_id": str(other.id), "team_name": other.name, "role": "member"},
+    teams = {r["team_id"]: r for r in me.json()["teams"]}
+    assert {team_id: row["role"] for team_id, row in teams.items()} == {
+        str(team.id): "admin",
+        str(other.id): "member",
     }
+    assert teams[str(team.id)]["team_name"] == team.name
+    for row in teams.values():
+        assert row["all_models"] is True
+        assert row["limits"] == {"rpm_limit": None, "tpm_limit": None, "max_parallel": None}
+        assert row["budget"]["remaining_nano_usd"] is None
+        assert row["budget"]["team_spent_nano_usd"] == 0
     created = client.post(
         "/api/v1/users/me/tokens",
         json={"name": "second", "expires_at": "2099-01-01T00:00:00Z"},

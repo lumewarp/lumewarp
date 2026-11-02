@@ -71,7 +71,11 @@ async def create_team(
     async with mutation(session):
         await lock_scope(session, settings)
         policy = policy_from_fields(body, default_mode=ModelAccess.ALL)
-        row = Team(name=body.name)
+        row = Team(
+            name=body.name,
+            max_keys_per_member=body.max_keys_per_member,
+            max_member_key_lifetime_seconds=body.max_member_key_lifetime_seconds,
+        )
         apply_policy(row, policy)
         session.add(row)
         await session.flush()
@@ -119,6 +123,9 @@ async def update_team(
             await save_grants(session, row, proposed)
         if body.name is not None:
             row.name = body.name
+        for field in ("max_keys_per_member", "max_member_key_lifetime_seconds"):
+            if field in body.model_fields_set:
+                setattr(row, field, getattr(body, field))
         await session.flush()
         await session.refresh(row)
         audit.record(

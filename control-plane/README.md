@@ -204,7 +204,9 @@ or a prompt and prints it for `LUMEWARP_BREAK_GLASS_PASSWORD_HASH`.
 There is exactly one installation and no org or project level:
 
 - **Team**: a name plus policy (`model_access` and `allowed_models`, `rpm_limit`,
-  `tpm_limit`, `max_parallel`, `budget_nano_usd`, `soft_budget_nano_usd`).
+  `tpm_limit`, `max_parallel`, `budget_nano_usd`, `soft_budget_nano_usd`) and the
+  self-service limits `max_keys_per_member` (non-revoked user keys per member; revoking
+  frees a slot) and `max_member_key_lifetime_seconds`.
 - **Team member**: a user in a team with role `admin` or `member` and the member's own
   narrowing policy. For regular users, membership determines team visibility
   (`team_members` for the built-in backend); an installation admin sees every team.
@@ -215,6 +217,33 @@ There is exactly one installation and no org or project level:
   team policy by the owner policy into each key's effective policy. The snapshot carries
   only the key id and hash, team id, status, expiry and effective policy; owner identity
   stays in the control plane.
+
+A member key can be created with an optional `expires_at`. When the team sets
+`max_member_key_lifetime_seconds`, a member key created without one gets an expiry at that
+cap, and a supplied expiry beyond it is a 422. Rotation and `PATCH /keys/{id}` enforce the
+same cap (a never-expiring key gets a deadline at rotation; an existing later expiry must
+be shortened first). Team admins and installation admins are subject to these checks;
+service-account keys are not member keys and are exempt. Lowering the caps never revokes
+existing keys, it only rejects later creates/rotations.
+
+`POST /keys/{id}/rotate` accepts an optional `{"grace_seconds": N}` (0 by default, at most
+86400). With a grace, the replaced hash stays valid until its own expiry (bounded by the
+key's `expires_at`) and authenticates as the same `key_id`, so usage stays on one key. The
+gateway stores it next to the current hash and enforces that expiry from its persisted
+snapshot even while the control plane is down. The control plane drops an expired previous
+hash on its next compile, which sends the delta that removes it. Only one previous hash is
+kept: rotating again inside the grace ends the older grace immediately. Revoking clears
+both hashes. The response exposes `previous_key_expires_at` but never the old secret.
+
+`GET /users/me` returns, for every team the caller belongs to, the effective model names
+(team policy narrowed by the member policy; `all_models` for a universal set), the effective
+rate limits, the team's member-key limits with the caller's current non-revoked key count
+(`key_limits`), and the current UTC-month team/member budgets with remaining amounts. It
+never returns the team's full allowlist to a member whose own policy is narrower.
+
+`POST /teams/{id}/keys` (create) and `POST /keys/{id}/rotate` are rate limited per
+principal and target (10 attempts per minute each) and audited as `key.create` /
+`key.rotate`; a rejected attempt is a 429 `rate_limited` with `Retry-After`.
 
 Removing a member suspends that member's user-owned keys in the team
 (`suspended_reason=owner_removed`); deactivating a user suspends their user-owned keys
@@ -564,6 +593,7 @@ these names.
 | `lumewarp_cp_authz_checks_total` | counter | `backend`, `decision` = `allow` \| `deny` \| `error` | Every `Authorizer.check` and every item of `Authorizer.batch_check` (native batch failures count one `error` per item). `backend` is `LUMEWARP_AUTHZ_BACKEND`. |
 | `lumewarp_cp_keys_suspended_total` | counter | `reason` = `owner_removed` \| `owner_deactivated` \| `admin` \| `owner` | Keys moved from active to suspended: key reconciler and member removal (`owner_removed`), user deactivation (`owner_deactivated`), `PATCH /keys/{id}` (`admin`/`owner`). |
 | `lumewarp_cp_key_reconcile_last_success_timestamp_seconds` | gauge | | Unix time of the key reconciler's last fully successful step: no exception, a decision for every owner checked and, with `changes()`, a readable change stream. 0 until the first success; not exported when `LUMEWARP_KEY_RECONCILE_ENABLED=false`. |
+| `lumewarp_cp_key_writes_total` | counter | `operation` = `create` \| `rotate`, `result` = `success` \| `rate_limited` | Self-service key writes: a successful committed create/rotate, and an attempt rejected by the in-process per-principal limiter. |
 
 ## Deployment
 

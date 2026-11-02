@@ -774,13 +774,12 @@ impl RoutingTable {
                 None => (0, empty.clone()),
             };
             let hash: [u8; 32] = key.key_hash.as_slice().try_into().expect("validated hash");
-            keys.insert(
-                hash,
+            let mut context = |expires_at_ms: i64| {
                 Arc::new(KeyContext {
                     key_id: key.key_id.as_str().into(),
-                    team_id,
+                    team_id: team_id.clone(),
                     status: KeyStatus::try_from(key.status).expect("validated status"),
-                    expires_at_ms: key.expires_at_unix_ms,
+                    expires_at_ms,
                     allow_all_models: policy.allow_all_models,
                     allowed_models: policy
                         .allowed_models
@@ -793,8 +792,25 @@ impl RoutingTable {
                         .map(|s| (intern(&s.id), s.limit.expect("validated limit")))
                         .collect(),
                     team_label,
-                }),
-            );
+                })
+            };
+            keys.insert(hash, context(key.expires_at_unix_ms));
+            if !key.previous_key_hash.is_empty() {
+                let previous: [u8; 32] = key
+                    .previous_key_hash
+                    .as_slice()
+                    .try_into()
+                    .expect("validated previous hash");
+                // The old credential expires at its own deadline, and never outlives the
+                // key itself. Same key_id, team and policy: usage is attributed once.
+                let previous_expires = if key.expires_at_unix_ms == 0 {
+                    key.previous_key_expires_at_unix_ms
+                } else {
+                    key.previous_key_expires_at_unix_ms
+                        .min(key.expires_at_unix_ms)
+                };
+                keys.insert(previous, context(previous_expires));
+            }
         }
 
         let mut listed: Vec<Box<str>> = names.keys().cloned().collect();
