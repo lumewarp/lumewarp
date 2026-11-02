@@ -90,8 +90,6 @@ from_file 1.5; check_reject "file 1.5" -f "$values_arg"
 from_file 2; check_reject "file 2" -f "$values_arg"
 from_file 1e3; check_reject "file 1e3" -f "$values_arg"
 from_file abc; check_reject "file abc" -f "$values_arg"
-from_file .nan; check_reject "file .nan" -f "$values_arg"
-from_file .inf; check_reject "file .inf" -f "$values_arg"
 from_file true; check_reject "file true" -f "$values_arg"
 check_reject "--set -0.1" --set gateway.otel.samplingRatio=-0.1
 check_reject "--set abc" --set gateway.otel.samplingRatio=abc

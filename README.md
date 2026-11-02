@@ -92,7 +92,8 @@ uv sync
 
 uv run lumewarp-control-plane migrate
 uv run lumewarp-control-plane bootstrap --gateway-id gw-local   # prints the lwg-... token once
-LUMEWARP_BOOTSTRAP_TOKEN=dev-admin uv run lumewarp-control-plane serve
+LUMEWARP_DEV_MODE=true LUMEWARP_BREAK_GLASS_PASSWORD=dev-break-glass \
+  uv run lumewarp-control-plane serve
 ```
 
 The HTTP API/UI listens on `127.0.0.1:8091`; gateway-facing gRPC listens on
@@ -111,8 +112,10 @@ cargo run --release -- --control-plane http://127.0.0.1:50051 \
 
 The gateway is not ready until the control plane publishes the first config
 version: `/v1/*` and the admin `/readyz` return 503, and the process never falls
-back to an open router. Open <http://127.0.0.1:8091/> and log in with `dev-admin`,
-then create:
+back to an open router. Open <http://127.0.0.1:8091/>, use the emergency login with the
+password `dev-break-glass` (a plaintext password needs `LUMEWARP_DEV_MODE=true`; production
+uses an argon2id hash and OIDC with an admin group, see the
+[control plane README](control-plane/README.md#credentials-and-access-model)), then create:
 
 - an upstream for `http://127.0.0.1:9100/v1` (kind `openai_compatible`),
 - a model named `mock-local` using upstream model `mock`,

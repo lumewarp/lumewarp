@@ -56,10 +56,11 @@ scale it. If you need more gateway instances, deploy another release (normally i
 separate namespace, or with `controlPlane.enabled=false`) with its own `gateway.gatewayId`
 and token.
 
-Alternatively set `controlPlane.bootstrapToken.secretName` to an existing Secret holding
-`LUMEWARP_BOOTSTRAP_TOKEN` for UI/API superuser access. It does not replace the first
-`bootstrap` call: that command also creates the scope row, and gateway tokens can only be
-created after the scope exists.
+UI/API access comes from OIDC plus `controlPlane.adminGroup` (the IAM group of installation
+admins), or from an emergency login: set `controlPlane.breakGlass.passwordHashSecret.name` to an
+existing Secret holding an argon2id hash (`lumewarp-control-plane hash-password`). Neither
+replaces the first `bootstrap` call: that command creates the scope row, and gateway tokens can
+only be created after the scope exists.
 
 `controlPlane.databaseUrl.secretName` defaults to `lumewarp-control-plane` and
 `gateway.token.secretName` to `lumewarp-gateway`; both must exist before the respective
@@ -182,7 +183,8 @@ Common values (see [`values.yaml`](values.yaml) for the complete list):
 | `controlPlane.replicaCount` | `1` | Must stay 1 in P1. |
 | `controlPlane.image.repository` / `.tag` | `ghcr.io/lumewarp/lumewarp-control-plane` / chart appVersion | Control-plane image. |
 | `controlPlane.databaseUrl.secretName` / `.key` | `lumewarp-control-plane` / `database-url` | Existing Secret with `LUMEWARP_DATABASE_URL`. |
-| `controlPlane.bootstrapToken.secretName` / `.key` | unset / `bootstrap-token` | Optional `LUMEWARP_BOOTSTRAP_TOKEN`. |
+| `controlPlane.adminGroup` | `""` | `LUMEWARP_ADMIN_GROUP`: the IAM group of installation admins. Empty leaves emergency access only. |
+| `controlPlane.breakGlass.passwordHashSecret.name` / `.key` | unset / `password-hash` | Existing Secret with `LUMEWARP_BREAK_GLASS_PASSWORD_HASH` (argon2id). Unset disables the emergency login. |
 | `controlPlane.scope` | `default` | Config scope published to gateways. |
 | `controlPlane.service.httpPort` / `.grpcPort` | `8091` / `50051` | Service and container ports. |
 | `controlPlane.service.metricsPort` | `9465` | Control-plane Prometheus listener (`LUMEWARP_METRICS_BIND`), separate from the API port. |

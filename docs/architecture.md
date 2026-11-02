@@ -69,18 +69,19 @@ flowchart TB
 ### SSO（Keycloak / OIDC）
 
 - control plane 是標準 OIDC RP；Keycloak 是預設但非必要。SAML 交給 Keycloak brokering。
-- 管理端登入：Authorization Code + PKCE 由 control plane 後端完成（Authlib），之後發伺服器端 session（httpOnly、`SameSite=Lax` cookie，寫入需 `X-Lumewarp-CSRF`）；以 `iss`+`sub` 認人，首次登入可 JIT 建立零權限使用者（只接受已驗證 email）。bootstrap token 與 PAT 照舊。
-- IdP 只負責認證，不讀 groups 或任何權限 claim；權限一律在授權後端（見下節）。IdP 與 IAM 的人員狀態同步由部署方負責。
+- 管理端登入：Authorization Code + PKCE 由 control plane 後端完成（Authlib），之後發伺服器端 session（httpOnly、`SameSite=Lax` cookie，寫入需 `X-Lumewarp-CSRF`）；以 `iss`+`sub` 認人，首次登入可 JIT 建立零權限使用者（只接受已驗證 email）。程式呼叫管理 API 用 PAT（bearer 只接受 PAT）。
+- IdP 負責認證，並可由 groups claim（`LUMEWARP_OIDC_GROUPS_CLAIM`，token 沒有時查 userinfo）告知誰在 admin group；內建後端只把這個 group 記在 session，登入時決定。team 權限不來自 IdP，其他 claim 也不授予權限。IdP 與 IAM 的人員狀態同步由部署方負責。
+- 緊急登入（break-glass）：`POST /api/v1/session/break-glass` 用密碼換 session cookie，IdP 或 IAM 故障時仍可管理。生產用 argon2id hash（`LUMEWARP_BREAK_GLASS_PASSWORD_HASH`），明文密碼要 `LUMEWARP_DEV_MODE=true`。這個 session 不是使用者，不問授權後端；有 TTL（預設 1 小時，上限 4 小時）、失敗延遲與次數限制、可限制來源網段，嘗試都寫稽核，換密碼立刻失效。
 - gateway 憑證只有 admin 發出的虛擬 API key（只存 hash）；JWT／mTLS 呼叫 gateway 延後。
 - 停權時推撤銷 delta，所有 gateway 秒級內拒絕：內建後端在移除成員的同一交易停用 key；外部 IAM 由 key reconciler 讀變更串流，約 5 秒內停用；IAM 錯誤或逾時絕不停用 key。
 
 ### Team / Member / Service Account
 
-- 階層：installation（superuser）→ team → member（admin／member）與 service account → API key；沒有 org／project 層級。
+- 階層：team → member（admin／member）與 service account → API key；沒有 org／project 層級。安裝層管理員不是角色：`LUMEWARP_ADMIN_GROUP` 指定的 IAM group 成員，或緊急 session。
 - API key 屬於一個 team，owner 是該 team 的成員或 service account；key 本身不帶 policy，owner 身分也不進快照，compiler 只把展開後的有效策略寫進 key。
 - team 與 key owner（member、service account）各自可設模型清單、限流、預算；owner 只能收窄 team，compiler 預先展開成每個 key 的有效策略。
-- 授權：installation superuser、team admin、team member。member 可讀 team、建立與管理自己的 key；admin 另可改 team 設定、管理成員、service account 與 team 內所有 key；superuser 可建立／刪除 team 與管理安裝層設定。
-- 授權後端可換：內建讀 `users.is_superuser` 與 `team_members`；內附 `openfga` 與 `http` 後端，也可用 `lumewarp.authz` entry point 接外部系統。後端只回答關係（superuser／admin／member），單一 async 函式 `check(user_id, relation, resource) -> Decision`；`admin` 隱含 `member`、`superuser` 隱含所有 team 的 `admin`，由後端保證。`ERROR`（後端不可用或逾時）不是 deny：管理 API 回 503。
+- 授權：安裝層管理員、team admin、team member。member 可讀 team、建立與管理自己的 key；admin 另可改 team 設定、管理成員、service account 與 team 內所有 key；安裝層管理員可建立／刪除 team、管理安裝層設定，並通過所有 team 的檢查。
+- 授權後端可換：內建用 session 的 group 與 `team_members`（所以內建後端下 PAT 不會是安裝層管理員，它沒有 group）；內附 `openfga` 與 `http` 後端，也可用 `lumewarp.authz` entry point 接外部系統。後端只回答關係，單一 async 函式 `check(user_id, relation, resource) -> Decision`：`relation` 是 `admin`（team）或 `member`（team、group），`resource` 是 `group:<admin group>` 或 `team:<uuid>`。`admin` 隱含 `member` 由後端保證；admin group 涵蓋所有 team 由 Lumewarp 自己套用。`ERROR`（後端不可用或逾時）不是 deny：管理 API 回 503。
 - 用量與限流按 team 與 key owner 歸屬：member 的 scope id 是 `uuid5(team_id, user_id)`，service account 用其 id；限流 scope 為 `team:<id>`、`member:<id>`、`sa:<id>`。
 - 預算：依 token 與單價計費，軟上限通知、硬上限拒絕。
 
@@ -108,7 +109,9 @@ flowchart TB
 
 | 擴充點 | 執行位置 | 例子 | 延遲影響 |
 | --- | --- | --- | --- |
-| 認證 plugin | control plane | 公司自有 OAuth、LDAP、自訂 groups 對應；非 JWT 的 IdP 由管理端換發 Lumewarp JWT | 無 |
+| 認證 plugin（`lumewarp.auth`） | control plane，只在首次 SSO 登入 | `map_identity(claims)` 把外部身分對應到 email 與顯示名稱，不授予權限 | 無 |
+| 授權後端（`lumewarp.authz`） | control plane | `check(user_id, relation, resource)` 接公司自有 AAA；介面見 [control plane README](../control-plane/README.md#authorization) | 無 |
+| 通知 plugin（`lumewarp.notifier`） | control plane，outbox 投遞 | `send(event, config)` 送預算通知 | 無 |
 | 逐請求 hook（選用） | gateway 呼叫外部 gRPC 服務 | 依 prompt 分類選模型 | 多一次往返，需明確開啟，有逾時與預設路由 |
 
 ## vLLM / OpenAI 一級支援
@@ -159,17 +162,17 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 
 ## P1 已實作
 
-P1 的 control plane、設定串流、Team 模型與 Admin UI 第一版已實作；SSO 與進階路由仍屬 P2。以下只列現況，設計內容以上文為準。
+P1 的 control plane、設定串流、Team 模型與 Admin UI 第一版已實作；SSO 與進階路由仍屬 P2。以下是 P1 完成時的紀錄，設計內容以上文為準。其中 bootstrap token 與 superuser 已被 P2.5 取代（見上文 SSO 與 Team 兩節）。
 
 **Control plane（`control-plane/`）**
 
 - 單一 Python 程序：FastAPI（HTTP 8091）＋ gRPC（50051）的 ConfigService／UsageService／health，加上 compiler loop、月結 rollover 與 notifier outbox；`/readyz` 檢查 DB、migration head 與背景服務，`/healthz` 為 liveness，gRPC 意外停止會讓程序結束。
-- Postgres schema 由 Alembic 管理（單一 scope）；bootstrap token（安裝層 superuser）與每人 PAT；授權為 installation superuser 與 team admin／member，成員關係在 `team_members`，也可換成外部 `lumewarp.authz` 後端。
+- Postgres schema 由 Alembic 管理（單一 scope）；bootstrap token（安裝層 superuser，P2.5 已移除）與每人 PAT；授權為 installation superuser（P2.5 已移除）與 team admin／member，成員關係在 `team_members`，也可換成外部 `lumewarp.authz` 後端。
 - REST `/api/v1`：team／member／service account／key（含撤銷與輪替）、預算／限流／模型 allowlist、upstream／model／router（含價格）、使用者、usage 聚合、audit、gateway 狀態與 token、config versions 與 routing rollback。
 - 設定發布：寫入交易內同時寫 outbox；compiler 以 advisory lock 序列化，產生不可變版本快照；gRPC 串流支援全量／delta、digest、ACK／NACK、base mismatch 重送全量、壞版本隔離與 persist 重試，舊版 payload 依保留策略壓縮。
 - 用量與預算：`UsageService.Report` 以 `request_id` 冪等寫入，同一交易累計 team 與 owner（member／service account）的 UTC 月總額並評估預算；超額把 key 翻成 `BUDGET_EXCEEDED` 並推新版本（eventual，約 5 秒內；不切斷進行中的串流）。soft limit 走 notifier outbox（內建 webhook，可換 plugin）。
 - Plugin：`lumewarp.notifier`（outbox 投遞）已接上；`lumewarp.auth` 只有 protocol，P1 不呼叫。P1 當時的 `lumewarp.router` 已移除，策略改成 Rust crate。
-- Admin UI：Vite 靜態檔由 control plane 掛在 `/`，登入用 bootstrap token 或 PAT；API 文件在 `/docs`，OpenAPI 可離線輸出。UI 沒 build 時只有 API。
+- Admin UI：Vite 靜態檔由 control plane 掛在 `/`，登入當時用 bootstrap token 或 PAT（P2.5 起改為 SSO 或緊急登入）；API 文件在 `/docs`，OpenAPI 可離線輸出。UI 沒 build 時只有 API。
 
 **Gateway（`gateway/`）**
 
@@ -194,14 +197,14 @@ P1 的 control plane、設定串流、Team 模型與 Admin UI 第一版已實作
 
 ## P2 已實作
 
-P2 把權限模型縮成 team → member／service account，加上 SSO、可抽換的授權後端、路由韌性與可觀測性。以下只列現況，設計內容以上文為準。
+P2 把權限模型縮成 team → member／service account，加上 SSO、可抽換的授權後端、路由韌性與可觀測性。以下是 P2 完成時的紀錄，設計內容以上文為準。其中 superuser、bootstrap token 與「不讀 IdP groups」已被 P2.5 取代（見上文 SSO 與 Team 兩節）。
 
 **權限與 SSO（control plane）**
 
-- 模型：installation superuser → team → member（admin／member）與 service account → API key；org 與 project 已移除（新的 Alembic baseline，不相容 P1 資料）。
+- 模型：installation superuser（P2.5 已移除）→ team → member（admin／member）與 service account → API key；org 與 project 已移除（新的 Alembic baseline，不相容 P1 資料）。
 - 授權：`Authorizer.check(user_id, relation, resource)`；內建 `builtin`、`openfga`（Check／BatchCheck／ListObjects／ReadChanges，`HIGHER_CONSISTENCY`）、`http`，或 `lumewarp.authz` entry point。每次呼叫有逾時（`LUMEWARP_AUTHZ_TIMEOUT_SECONDS`），逾時即 `ERROR` → 管理 API 503。共用情境測試 `authz/contract_tests.py`。
 - key reconciler：有 `changes()` 時每 2 秒輪詢、只重算變動的使用者，另每 5 分鐘全掃；明確 deny → `SUSPENDED`（`owner_removed`）並推新版本。恢復權限不自動復原；service account 的 key 不受影響。
-- OIDC 登入、伺服器端 session 與 CSRF 見上文 SSO 一節；superuser 不能以 email 自動連結，只能用 bootstrap token 或 PAT。
+- OIDC 登入、伺服器端 session 與 CSRF 見上文 SSO 一節；當時 superuser 不能以 email 自動連結，只能用 bootstrap token 或 PAT（P2.5 起是 admin group 成員不能以 email 自動連結）。
 - 成員可用 email 加入；成員與 key 顯示擁有者是否仍啟用。
 
 **路由（gateway + control plane）**
@@ -238,7 +241,7 @@ P2 把權限模型縮成 team → member／service account，加上 SSO、可抽
 
 **尚未包含（延後）**
 
-- JWT／mTLS 呼叫 gateway、讀 IdP groups／claims 做授權、SCIM、IdP→IAM 人員同步、更細的角色、key 層級限制。
+- JWT／mTLS 呼叫 gateway、讀 IdP claims 做 team 授權（admin group 已於 P2.5 實作）、SCIM、IdP→IAM 人員同步、更細的角色、key 層級限制。
 - 跨 gateway 共享限流（Redis）、設定版本 canary、cache 親和、依 header／token 數條件分流、逐請求外部 hook、LoRA 自動探索。
 - control plane 的 OTLP traces／metrics。
 - MCP／A2A（P3）。
@@ -251,7 +254,7 @@ P2.5 把 deployment／route 換成 model、alias、router。計畫、已定的�
 - **快照：** `Snapshot` 直接帶 models、aliases、routers，gateway 在套用時建成一張名字表，請求路徑仍是一次查表。`Router.strategy` 是字串。`ApiKey.allowed_models` 由 control plane 展開成當下的名字。
 - **Rollback：** 依 id 還原目錄（`config_versions.catalog_state`），已刪除的項目用原 id 重建；授權不還原。
 - **回應改寫：** 不緩衝的掃描器（`rewrite.rs`）把 JSON 與 SSE 最外層的 `model` 換成呼叫的名字，大小不設上限。呼叫的名字等於 `upstream_model` 時走快速路徑。需要改寫時移除送往上游的 `Accept-Encoding`；上游仍壓縮就原樣轉發並累加 metric。契約見 [config protocol](config-protocol.md)。
-- **Usage：** `requested`、`model`、`alias`、`router`、`upstream`、`upstream_model`、`fallback`、`attempts`、`endpoint`，加上 control plane 解析的 `model_id`、`alias_id`、`router_id`。`GET /usage` 依這些維度篩選與分組，改名前後的用量連續。
+- **Usage：** 每筆 event 保存 `requested`、`model`、`alias`、`router`、`upstream`、`upstream_model`、`fallback`、`attempts`、`endpoint`，加上 control plane 解析的 `model_id`、`alias_id`、`router_id`。`GET /usage` 不是每個欄位都能查：`group_by` 支援 `day`、`requested`、`model`、`upstream_model`、`alias`、`router`、`team`、`owner`、`key`；篩選支援 `from`、`to`、`team_id`、`user_id`、`service_account_id`、`key_id`、`requested`、`model`、`upstream_model`、`alias`、`router`、`model_id`、`alias_id`、`router_id`、`alias_missing`、`router_missing`。`upstream`、`fallback`、`attempts`、`endpoint` 只能從資料列讀。改名前後的用量連續。
 - **策略：** `register!` 宣告 params 與成員欄位，schema 從 struct 產生，在 `Hello` 回報，存進 `gateway_strategies`；寫入時依 schema 驗證，內建策略有 commit 的 manifest。見 [router strategies](router-strategies.md)。
 - **用 OTel 查請求：** gateway 不寫 access log。回應帶 `x-lumewarp-request-id`，等於 usage 的 `request_id` 與 span 的 `request_id`。`request` span 帶呼叫的名字、alias、router、最後的 model 與 attempts，每次嘗試一個 `upstream_attempt`。前提：沒設 OTLP endpoint 就沒有紀錄；取樣低於 100% 或 exporter 佇列滿了會查不到，要當 access log 建議 100%；保留多久由 OTel 後端決定。Sampler 不聽從用戶端 `traceparent` 的 sampled flag。Helm 的設定是 `gateway.otel.endpoint`、`gateway.otel.samplingRatio`。
 - **Metrics：** 標籤 `model` 是實際服務的 model，`requested` 是呼叫的名字，`endpoint` 是 API 路徑。改名後 label 換成新名字，舊名字的時間序列就此結束，這是 Prometheus 的正常行為。

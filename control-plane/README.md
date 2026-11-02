@@ -143,8 +143,14 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 | `LUMEWARP_GRPC_BIND` | `127.0.0.1:50051` | Gateway-facing gRPC bind address. |
 | `LUMEWARP_METRICS_BIND` | `127.0.0.1:9465` | Prometheus metrics listener started by `serve` (`host:port`); empty string disables it. Not the admin API port, and not 9464 (the gateway admin listener's default). A bind failure aborts startup. |
 | `LUMEWARP_GRPC_TLS_CERT_FILE` / `LUMEWARP_GRPC_TLS_KEY_FILE` | unset | PEM certificate chain and key. Both or neither; unset means plaintext gRPC. |
-| `LUMEWARP_BOOTSTRAP_TOKEN` | unset | Installation-level superuser Bearer token. Compared in constant time, never stored. Unset disables bootstrap access; PATs still work. |
-| `LUMEWARP_AUTHZ_BACKEND` | `builtin` | Authorization backend: `builtin` (users and `team_members`) or a `lumewarp.authz` entry-point name. See [Authorization](#authorization). |
+| `LUMEWARP_ADMIN_GROUP` | unset | IAM group whose members are installation admins. Unset leaves emergency sessions as the only admin access. |
+| `LUMEWARP_BREAK_GLASS_PASSWORD_HASH` | unset | Argon2id hash of the emergency password (`lumewarp-control-plane hash-password`); an invalid hash aborts startup. See [Emergency access](#emergency-access-break-glass). |
+| `LUMEWARP_BREAK_GLASS_PASSWORD` | unset | Plaintext emergency password; refused unless `LUMEWARP_DEV_MODE=true`. The hash wins if both are set. |
+| `LUMEWARP_DEV_MODE` | `false` | Development only: allows the plaintext password above. |
+| `LUMEWARP_BREAK_GLASS_SESSION_TTL_SECONDS` | `3600` | Emergency session lifetime, 60–14400. |
+| `LUMEWARP_BREAK_GLASS_ALLOWED_CIDRS` | empty (any) | Client networks allowed to use the emergency login; others get 404. |
+| `LUMEWARP_TRUSTED_PROXIES` | empty | Proxy networks whose `X-Forwarded-For` is followed to find the client address for the two limits above. |
+| `LUMEWARP_AUTHZ_BACKEND` | `builtin` | Authorization backend: `builtin` (session groups and `team_members`), `openfga`, `http` or a `lumewarp.authz` entry-point name. See [Authorization](#authorization). |
 | `LUMEWARP_SCOPE` | `default` | `Snapshot.scope` this installation publishes. Gateways must use the same value. |
 | `LUMEWARP_MAX_SNAPSHOT_BYTES` | `67108864` (64 MiB) | Compilation fails above this serialized size. |
 | `LUMEWARP_MAX_SNAPSHOT_KEYS` | `200000` | Compilation fails above this key count. |
@@ -156,22 +162,42 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 
 ## Credentials and access model
 
-There are four credential types, all stored only as SHA-256 hashes except the bootstrap
-token, which is never stored:
+Three token types, stored only as SHA-256 hashes, and two kinds of cookie session:
 
 | Credential | Prefix | Used by |
 | --- | --- | --- |
-| Bootstrap token | none | Installation superuser over the admin API/UI; comes from `LUMEWARP_BOOTSTRAP_TOKEN`. |
 | Personal access token (PAT) | `lwp-` | A user over the admin API/UI; created under Settings in the UI or `POST /api/v1/users/me/tokens`. |
 | Gateway token | `lwg-` | A gateway for the config stream and usage reporting; the first one comes from `bootstrap` (which also creates the scope), later ones from the gateways API/UI. |
 | Virtual API key | `lw-` | Clients calling the gateway; owned by a team member or a service account of a team; the gateway only receives its hash in the snapshot. |
+| OIDC session | cookie | A user logged in through [SSO](#sso-login-oidc). The only credential that carries groups from the IdP. |
+| Emergency session | cookie | The [break-glass](#emergency-access-break-glass) login: an installation admin that is not a user. |
 
-The bootstrap token is not tied to a user: it is an installation superuser, has no PATs of
-its own, and is meant to create the first users and teams. Installation superusers
-(bootstrap or a superuser PAT) can issue a PAT for an active user with
+The bearer scheme accepts PATs only. Nothing else authenticates to the admin API.
+
+The first users and teams come from an emergency session or from an admin group member logged
+in through OIDC. An installation admin can issue a PAT for an active user with
 `POST /api/v1/users/{user_id}/tokens` using `{"name":"initial access"}` (optional
 `expires_at`). The secret is returned only on creation; issuance is audited with the
 actor and target user, never the secret. Team admins cannot use this endpoint.
+
+### Emergency access (break-glass)
+
+For when the IdP or the IAM is down, or before either exists. `POST /api/v1/session/break-glass`
+with `{"password": ...}` (the UI's emergency login) sets the same `lumewarp_session` cookie as
+OIDC, and writes need the same CSRF header:
+
+- The session is an installation admin with no user behind it: it passes every check without
+  asking the authorization backend, so it works while the backend is down. It has no PATs and
+  belongs to no team.
+- It ends at its TTL, on logout, and at once when the configured credential changes.
+- Failed attempts are delayed and limited per client address (429 `rate_limited`). The endpoint
+  answers 404 when no credential is configured or the address is outside
+  `LUMEWARP_BREAK_GLASS_ALLOWED_CIDRS`.
+- Attempts are audited as `session.break_glass.login` with actor type `break_glass` (a burst of
+  rate-limited ones as one summary row), and counted in `lumewarp_cp_break_glass_logins_total`.
+
+Production uses the hash: `lumewarp-control-plane hash-password` reads the password from stdin
+or a prompt and prints it for `LUMEWARP_BREAK_GLASS_PASSWORD_HASH`.
 
 ### Tenancy model
 
@@ -181,7 +207,7 @@ There is exactly one installation and no org or project level:
   `tpm_limit`, `max_parallel`, `budget_nano_usd`, `soft_budget_nano_usd`).
 - **Team member**: a user in a team with role `admin` or `member` and the member's own
   narrowing policy. For regular users, membership determines team visibility
-  (`team_members` for the built-in backend); a superuser sees every team.
+  (`team_members` for the built-in backend); an installation admin sees every team.
 - **Service account**: a non-human key owner in one team, with its own narrowing policy,
   managed by the team's admins. It is unaffected by people joining or leaving.
 - **API key**: belongs to one team and is owned by a member (`owner_kind=user`) or a service
@@ -215,25 +241,30 @@ With an external authorization backend, `GET /api/v1/teams/{id}/members` still
 lists local `team_members` rows, not the external directory. An externally
 managed team with no local rows returns `{"items": [], "next_cursor": null}`;
 membership writes remain disabled. Session discovery and `/users/me` resolve
-superuser status through the configured backend. On backend ERROR, session
-discovery falls back to the local flag for display only; `/users/me` and
-privileged API operations continue to fail closed with HTTP 503.
+`is_admin` through the configured backend. On backend ERROR both report `is_admin: false` with
+`authz_unavailable: true` for display, and privileged API operations fail closed with HTTP 503.
 
 Authorization has two layers. The action matrix below stays in Lumewarp; a backend only
-answers relation questions. A superuser passes every check, and an admin has every member
-permission. `admin` implies `member`, and an installation `superuser` implies `admin` of
-every team.
+answers relation questions. A team `admin` has every member permission (`admin` implies
+`member`).
+
+An *installation admin* is an emergency session, or a user for whom the backend answers `member`
+of `group:<LUMEWARP_ADMIN_GROUP>`. Lumewarp applies this itself: an installation admin passes
+every action, on every team, whatever the backend says about that team. With no admin group
+configured only emergency sessions are installation admins. There is no superuser role or flag.
 
 | Action | Who |
 | --- | --- |
-| `TEAM_CREATE`, `TEAM_DELETE`, `USER_MANAGE`, `ROUTING_MANAGE`, `GATEWAY_TOKEN_MANAGE`, `GATEWAY_READ`, `CONFIG_READ`, `CONFIG_ROLLBACK`, `NOTIFIER_MANAGE` | Installation superuser |
+| `TEAM_CREATE`, `TEAM_DELETE`, `USER_MANAGE`, `ROUTING_MANAGE`, `GATEWAY_TOKEN_MANAGE`, `GATEWAY_READ`, `CONFIG_READ`, `CONFIG_ROLLBACK`, `NOTIFIER_MANAGE` | Installation admin |
 | `ROUTING_READ`, `OWN_TOKENS` | Any authenticated caller |
 | `TEAM_UPDATE`, `TEAM_MEMBERS_MANAGE`, `SERVICE_ACCOUNT_MANAGE`, `KEY_MANAGE_ANY` | Team admin |
 | `TEAM_READ`, `KEY_CREATE_OWN`, `KEY_MANAGE_OWN` | Team member |
 
-`LUMEWARP_AUTHZ_BACKEND` selects the backend: `builtin` (the default) reads
-`users.is_superuser` and `team_members`; any other value names a `lumewarp.authz` entry
-point. The entry point may be an async `check` function, an object with an async `check`
+`LUMEWARP_AUTHZ_BACKEND` selects the backend: `builtin` (the default), `openfga`, `http`, or
+any other value naming a `lumewarp.authz` entry point. `builtin` answers teams from `team_members`
+and the admin group from the groups of the current OIDC session, so with `builtin` **a PAT is never
+an installation admin**: it carries no groups, whoever holds it. External backends answer the group
+from the IAM, for sessions and PATs alike. The entry point may be an async `check` function, an object with an async `check`
 method, or a class/zero-argument factory returning one; it is loaded once at startup. An
 unknown name with no matching entry point aborts startup.
 
@@ -246,8 +277,9 @@ from lumewarp_control_plane.authz import Decision, Relation, Resource
 async def check(user_id: str, relation: Relation, resource: Resource) -> Decision: ...
 ```
 
-`Relation` is `superuser` (installation only), `admin` or `member` (team). `Resource` is
-`installation:default` or a team. Return `Decision.ALLOW`, `Decision.DENY` or
+`Relation` is `admin` (team only) or `member` (team or group). `Resource` has a `type`, `group`
+or `team`, and an `id`: the group is the value of `LUMEWARP_ADMIN_GROUP` as configured, the team
+its UUID. Answer `member` of the group for its members and `DENY` for `admin` of a group. Return `Decision.ALLOW`, `Decision.DENY` or
 `Decision.ERROR`. `ERROR` means the backend is unavailable or timed out: the admin API
 answers `503 authz_unavailable` and background jobs skip the round; it is never treated
 as a deny. The gateway never calls the backend; it only sees compiled snapshots.
@@ -280,7 +312,7 @@ Two external backends ship with the control plane:
 
 - `openfga`: `LUMEWARP_OPENFGA_URL`, `LUMEWARP_OPENFGA_STORE_ID`,
   `LUMEWARP_OPENFGA_MODEL_ID`, optional `LUMEWARP_OPENFGA_API_TOKEN`. Users are
-  `user:<lumewarp user uuid>`, resources `installation:default` and `team:<uuid>`; the
+  `user:<lumewarp user uuid>`, resources `group:<admin group>` and `team:<uuid>`; the
   model is `deploy/openfga/model.fga`. Implements `batch_check`, `list_teams`
   (ListObjects) and `changes` (ReadChanges). `scripts/dev-idp.sh up` starts a local
   OpenFGA, writes the model and prints these variables.
@@ -313,28 +345,35 @@ backend already suspends keys in the same transaction that removes the member):
 
 The admin UI can sign in through any OIDC provider (Keycloak in dev). The control plane
 runs the authorization code flow with PKCE itself (Authlib) and issues a server-side
-session cookie; the IdP only authenticates, it never grants permissions (no groups or
-role claims are read).
+session cookie. The IdP authenticates and, with the built-in backend, can say who is in the admin
+group; team roles never come from it, and no other claim grants anything.
 
 | Setting | Meaning |
 | --- | --- |
 | `LUMEWARP_OIDC_ISSUER` | Issuer URL; unset disables SSO. |
 | `LUMEWARP_OIDC_CLIENT_ID`, `LUMEWARP_OIDC_CLIENT_SECRET` | Client credentials (secret optional for a public PKCE client). |
-| `LUMEWARP_OIDC_SCOPES` | Default `openid email profile`. |
+| `LUMEWARP_OIDC_SCOPES` | Default `openid email profile`. Add whatever scope your IdP needs to release groups. |
+| `LUMEWARP_OIDC_GROUPS_CLAIM` | Dotted path of the groups claim, default `groups`. Read from the ID token, or from userinfo when the token does not have it. |
 | `LUMEWARP_PUBLIC_URL` | External base URL; the redirect URI is `<public_url>/api/v1/session/oidc/callback`. |
 | `LUMEWARP_OIDC_JIT_USERS` | Create a user with no grants on first login (default true). |
 | `LUMEWARP_SESSION_TTL_SECONDS` | Absolute session lifetime (default 12 h). |
 | `LUMEWARP_SESSION_COOKIE_SECURE` | `Secure` cookie flag (default true; turn off only for plain-http dev). |
 
 - Users are identified by the token's `iss` + `sub`. On a first login with a verified
-  email, the identity links to an existing non-superuser account with that email that
+  email, the identity links to an existing account with that email that
   has no identity from this issuer yet; otherwise a new user is created (JIT, only with a
-  verified email). Superusers cannot be linked by email; they keep using the bootstrap
-  token or a PAT.
+  verified email). An installation admin is never linked by email: a login is refused when the
+  claims put the person in the admin group, or the backend does not answer a plain `DENY` for
+  the existing account.
+- The groups claim is a string or a list of strings; a leading `/` (Keycloak group paths) is
+  ignored on both sides, anything else is treated as no groups. Only the admin group is kept, on
+  the session and captured at login: losing the group takes effect at the next login, so keep
+  `LUMEWARP_SESSION_TTL_SECONDS` in mind. With an external backend the IAM decides on every
+  check instead.
 - Inactive users cannot log in, and their existing sessions stop working immediately.
 - The cookie `lumewarp_session` is httpOnly and `SameSite=Lax`. Cookie-authenticated
   writes need the `X-Lumewarp-CSRF` header with the `csrf_token` from
-  `GET /api/v1/session`. Bearer callers (bootstrap token, PATs) never need it; if both a
+  `GET /api/v1/session`. Bearer callers (PATs) never need it; if both a
   bearer and a cookie are sent, the bearer wins.
 - `POST /api/v1/session/logout` ends the Lumewarp session (not the IdP session).
 - IdP and authorization backend are kept in sync by the deployer: disabling a person in
@@ -358,7 +397,7 @@ SPA; missing assets are JSON 404s. Without a build the control plane still serve
 and docs, and logs a warning at startup. Restart the process after copying a new build. The
 wheel build includes the static directory as package data.
 
-Log in at `/` with a PAT or the bootstrap token. The API types in `ui/src/api/schema.d.ts`
+Log in at `/` through SSO or the emergency login, whichever is configured. The API types in `ui/src/api/schema.d.ts`
 are generated from this service's OpenAPI document (`pnpm gen:api`).
 
 ## Plugins
@@ -372,11 +411,12 @@ install -e ./your-plugin`) and restart `serve`:
 | --- | --- | --- |
 | `lumewarp.notifier` | Deliver budget notifications for channels whose `kind` is the entry-point name. | Called by the notifier outbox loop. |
 | `lumewarp.auth` | Map an external identity (OIDC, LDAP, ...) to a user's email and display name. | Called on a first SSO login; the first plugin (by entry-point name) wins. |
+| `lumewarp.authz` | Answer relation questions. | Named by `LUMEWARP_AUTHZ_BACKEND`, see [Authorization](#authorization), which has its own contract (no `api_version`). |
 
 Router policies are not Python plugins: a strategy is a Rust crate compiled into the
 gateway, see [router strategies](../docs/router-strategies.md).
 
-Every plugin declares `api_version = 1`; other versions are skipped with a warning, as are
+Every notifier and auth plugin declares `api_version = 1`; other versions are skipped with a warning, as are
 plugins that fail to import. Entry points may name an instance, a class or a zero-argument
 factory (classes/factories are called once at load).
 
@@ -386,8 +426,14 @@ factory (classes/factories are called once at load).
 my-channel = "my_plugin.notifier:Notifier"
 ```
 
-Notifier plugins get the channel's `config` mapping and a `BudgetEvent`; raising makes the
-outbox retry with backoff. The built-in notifier kind is `webhook` (JSON POST of the event).
+Notifier plugins implement `async send(event, config)`: the channel's `config` mapping and a
+`BudgetEvent`; raising makes the outbox retry with backoff. The built-in notifier kind is
+`webhook` (JSON POST of the event).
+
+Auth plugins implement `async map_identity(claims) -> IdentityMapping | None`, with
+`IdentityMapping(email, display_name="")`. Anything but a mapping, or an invalid email or name,
+refuses the login. The mapping says who the user is and grants nothing; the email must still be
+verified by the IdP.
 
 ## Routing
 
