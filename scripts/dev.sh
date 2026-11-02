@@ -67,6 +67,7 @@ prepare() {
     {
       echo "export LUMEWARP_PUBLIC_URL=$ui_url"
       echo "export LUMEWARP_SESSION_COOKIE_SECURE=false"
+      echo "export LUMEWARP_SECRET_KEY=dev-only-lumewarp-secret-key-0123456789abcdef"
       if [[ $authz == openfga ]]; then echo "export LUMEWARP_AUTHZ_BACKEND=openfga"; fi
     } >>"$env"
   elif [[ $authz != builtin ]]; then

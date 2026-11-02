@@ -88,9 +88,14 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
     "gateway_token.create": {"gateway_id": None, "name": None},
     "gateway_token.revoke": {"gateway_id": None, "name": None},
     "grant.delete": {"name": None, "name_id": None, "user_id": None, "service_account_id": None},
-    "key.create": {"name": None, "owner_kind": None, "owner_id": None},
+    "key.create": {"name": None, "owner_kind": None, "owner_id": None, "expires_at": None},
     "key.revoke": {"name": None},
-    "key.rotate": {"name": None},
+    "key.rotate": {
+        "name": None,
+        "grace_seconds": None,
+        "expires_at": None,
+        "previous_key_expires_at": None,
+    },
     "key.suspend": {"name": None, "user_id": None, "reason": None},
     "key.update": {"name": None, "changes": {"name": None, "expires_at": None, "lifecycle": None}},
     "member.add": {"user_id": None, "role": None},
@@ -136,7 +141,15 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
     "session.break_glass.request": {"method": None, "path": None, "status": None},
     "team.create": {"name": None},
     "team.delete": {"name": None},
-    "team.update": {"name": None, "policy_changed": None, "changes": _POLICY_CHANGES},
+    "team.update": {
+        "name": None,
+        "policy_changed": None,
+        "changes": {
+            **_POLICY_CHANGES,
+            "max_keys_per_member": None,
+            "max_member_key_lifetime_seconds": None,
+        },
+    },
     "upstream.create": {"name": None, "base_url": None},
     "upstream.delete": {"name": None},
     "upstream.update": {

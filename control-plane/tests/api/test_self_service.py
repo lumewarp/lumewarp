@@ -356,3 +356,32 @@ async def test_create_and_rotate_are_rate_limited_and_audited(client, committed)
         )
         == 1
     )
+
+
+async def test_audit_keeps_the_key_limit_and_grace_details(client, committed) -> None:
+    team = await make_team(committed)
+    created = client.post(
+        f"/api/v1/teams/{team.id}/keys", json={"name": "audited"}, headers=ADMIN_AUTH
+    )
+    assert created.status_code == 201, created.text
+    key_id = created.json()["id"]
+    rotated = client.post(
+        f"/api/v1/keys/{key_id}/rotate", json={"grace_seconds": 60}, headers=ADMIN_AUTH
+    )
+    assert rotated.status_code == 200, rotated.text
+    updated = client.patch(
+        f"/api/v1/teams/{team.id}",
+        json={"max_keys_per_member": 3, "max_member_key_lifetime_seconds": 3600},
+        headers=ADMIN_AUTH,
+    )
+    assert updated.status_code == 200, updated.text
+
+    rows = (await committed.scalars(select(AuditLog).where(AuditLog.team_id == team.id))).all()
+    by_action = {row.action: row.details for row in rows}
+    assert "expires_at" in by_action["key.create"]
+    assert by_action["key.rotate"]["grace_seconds"] == 60
+    assert by_action["key.rotate"]["previous_key_expires_at"]
+    assert by_action["team.update"]["changes"] == {
+        "max_keys_per_member": 3,
+        "max_member_key_lifetime_seconds": 3600,
+    }
