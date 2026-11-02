@@ -123,6 +123,20 @@ for (const [where, width] of [["desktop", 1280], ["390 px", 390]] as const) {
     // Tab leaves the tablist for the panel.
     await page.keyboard.press("Tab");
     await expect(page.getByRole("tabpanel")).toBeFocused();
+    // Shift+Tab comes back to the tab that had focus, which need not be the selected one, and selects nothing.
+    await page.keyboard.press("Shift+Tab");
+    await expect(members).toBeFocused();
+    await page.keyboard.press("End");
+    await expect(settings).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("tabpanel")).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(settings).toBeFocused();
+    await expect(settings).toHaveAttribute("aria-selected", "false");
+    await expect(members).toHaveAttribute("aria-selected", "true");
+    // Once more leaves the list altogether, with no second stop inside it.
+    await page.keyboard.press("Shift+Tab");
+    await expect.poll(() => page.evaluate(() => !!document.activeElement?.closest("[role=tablist]"))).toBe(false);
 
     // A panel that is left and entered again starts fresh: its content was unmounted, so state did not survive.
     const groupBy = page.getByRole("combobox", { name: "Group by", exact: true });
@@ -171,6 +185,27 @@ test("adding a member: the User Combobox sends the picked user id", async ({ pag
 
   await expect(d).toHaveCount(0);
   await expect(page.getByRole("cell", { name: picked.email, exact: true })).toBeVisible();
+});
+
+test("key actions at 390 px: the table scrolls inside its card and the last action can be reached, without the page scrolling sideways", async ({ page, request }) => {
+  const team = await post<{ id: string; name: string }>(request, "/teams", { name: "s6-phone-keys" });
+  const account = await post<{ id: string }>(request, `/teams/${team.id}/service-accounts`, { name: "s6-phone-agent", description: "Phone" });
+  await post(request, `/teams/${team.id}/keys`, { name: "s6-phone-key", service_account_id: account.id });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await signIn(page);
+  await page.goto(`/teams/${team.id}`);
+  await page.getByRole("tab", { name: "Keys", exact: true }).click();
+  await expect(page.getByRole("cell", { name: /s6-phone-key/ })).toBeVisible();
+  const container = page.getByRole("tabpanel").locator("[data-slot=table-container]");
+  expect(await container.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+  for (const name of ["Rotate", "Suspend", "Revoke", "Edit"]) {
+    const action = page.getByRole("tabpanel").getByRole("button", { name, exact: true });
+    await action.scrollIntoViewIfNeeded();
+    await expect(action).toBeInViewport({ ratio: 1 });
+    await action.click({ trial: true });
+  }
+  expect(await container.evaluate((el) => el.scrollLeft)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
 test("screenshots: TeamDetail tabs, desktop and phone, light and dark", async ({ page, request }) => {

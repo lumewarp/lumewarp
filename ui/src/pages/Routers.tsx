@@ -219,13 +219,14 @@ interface MembersProps {
   onProblem: (key: string, message: string | null) => void;
   id?: string;
   invalid?: boolean;
+  describedBy?: string;
 }
 
 /** Pick models for a router (or one split) and fill in what the strategy asks of each member. */
-function MemberEditor({ scope, label, options, members, onChange, shape, errors, showErrors, onProblem, id, invalid }: MembersProps) {
+function MemberEditor({ scope, label, options, members, onChange, shape, errors, showErrors, onProblem, id, invalid, describedBy }: MembersProps) {
   const patch = (model_id: string, change: Partial<MemberV>) => onChange(members.map((m) => (m.model_id === model_id ? { ...m, ...change } : m)));
   return (
-    <div className="flex flex-col gap-1.5" id={id} aria-invalid={invalid} role="group" aria-label={label}>
+    <div className="flex flex-col gap-1.5" id={id} aria-invalid={invalid} aria-describedby={describedBy} role="group" aria-label={label}>
       {options.map((d) => {
         const member = members.find((m) => m.model_id === d.id);
         return (
@@ -533,7 +534,7 @@ export function Routers() {
           </p>
         ) : (
           <Field label="Models" error={form.errors.members} hint={shape.usesWeight ? undefined : "This strategy does not use weights."}>
-            {(p) => <MemberEditor id={p.id} invalid={p["aria-invalid"]} scope="m" label="Models" options={depOptions} members={v.members} onChange={(next) => form.set("members", next)} shape={shape} errors={schemaErrors} showErrors={submitted} onProblem={setProblem} />}
+            {(p) => <MemberEditor id={p.id} invalid={p["aria-invalid"]} describedBy={p["aria-describedby"]} scope="m" label="Models" options={depOptions} members={v.members} onChange={(next) => form.set("members", next)} shape={shape} errors={schemaErrors} showErrors={submitted} onProblem={setProblem} />}
           </Field>
         )}
 
@@ -553,7 +554,7 @@ export function Routers() {
 
         <Field label="Fallback model (optional)" error={form.errors.fallback_model_ids} hint="Tried in order once this router's models failed, within this router's attempt budget (enable retries with at least 2 attempts). Clients still see this router's name.">
           {(p) => (
-            <div className="flex flex-col gap-1.5" id={p.id} aria-invalid={p["aria-invalid"]}>
+            <div className="flex flex-col gap-1.5">
               {v.fallback_model_ids.map((id, i) => (
                 <div key={id} className="flex items-center gap-1.5 rounded-md bg-secondary px-2 py-1" data-testid="order-row">
                   <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">
@@ -571,6 +572,7 @@ export function Routers() {
                 </div>
               ))}
               <Combobox
+                {...p}
                 aria-label="Add fallback model"
                 searchLabel="Search fallback models"
                 value={undefined}
