@@ -226,7 +226,9 @@ cap, and a supplied expiry beyond it is a 422. Rotation and `PATCH /keys/{id}` e
 same cap (a never-expiring key gets a deadline at rotation; an existing later expiry must
 be shortened first). Team admins and installation admins are subject to these checks;
 service-account keys are not member keys and are exempt. Lowering the caps never revokes
-existing keys, it only rejects later creates/rotations.
+existing keys: lowering the lifetime cap rejects later creates, rotations or expiry
+extensions that would exceed it, while lowering the count cap only rejects later creates,
+because rotation does not add a key.
 
 `POST /keys/{id}/rotate` accepts an optional `{"grace_seconds": N}` (0 by default, at most
 86400). With a grace, the replaced hash stays valid until its own expiry (bounded by the
@@ -238,14 +240,20 @@ kept: rotating again inside the grace ends the older grace immediately. Revoking
 both hashes. The response exposes `previous_key_expires_at` but never the old secret.
 
 `GET /users/me` returns, for every team the caller belongs to, the effective model names
-(team policy narrowed by the member policy; `all_models` for a universal set), the effective
-rate limits, the team's member-key limits with the caller's current non-revoked key count
-(`key_limits`), and the current UTC-month team/member budgets with remaining amounts. It
-never returns the team's full allowlist to a member whose own policy is narrower.
+(the compiler's intersection of team and member policies; `all_models` when that
+intersection is universal), the effective rate limits, the team's member-key limits with
+the caller's current non-revoked key count (`key_limits`), and the current UTC-month
+team/member budgets with remaining amounts. It never returns the team's full allowlist to a
+member whose own policy is narrower.
 
 `POST /teams/{id}/keys` (create) and `POST /keys/{id}/rotate` are rate limited per
-principal and target (10 attempts per minute each) and audited as `key.create` /
-`key.rotate`; a rejected attempt is a 429 `rate_limited` with `Retry-After`.
+principal and operation: 30 attempts per minute each, independent of the target team or
+key. The check runs after authentication, before target lookup and authorization.
+Installation admins (members of the configured admin group) and break-glass sessions are
+exempt; a member who is only a team admin is not. A refusal is a 429 `rate_limited` with
+`Retry-After`, counted in `lumewarp_cp_key_writes_total{result="rate_limited"}` and
+deliberately not audited: only successful writes are audited as `key.create` /
+`key.rotate`, so a client cannot flood the audit table.
 
 Removing a member suspends that member's user-owned keys in the team
 (`suspended_reason=owner_removed`); deactivating a user suspends their user-owned keys
@@ -618,7 +626,7 @@ these names.
 | `lumewarp_cp_authz_checks_total` | counter | `backend`, `decision` = `allow` \| `deny` \| `error` | Every `Authorizer.check` and every item of `Authorizer.batch_check` (native batch failures count one `error` per item). `backend` is `LUMEWARP_AUTHZ_BACKEND`. |
 | `lumewarp_cp_keys_suspended_total` | counter | `reason` = `owner_removed` \| `owner_deactivated` \| `admin` \| `owner` | Keys moved from active to suspended: key reconciler and member removal (`owner_removed`), user deactivation (`owner_deactivated`), `PATCH /keys/{id}` (`admin`/`owner`). |
 | `lumewarp_cp_key_reconcile_last_success_timestamp_seconds` | gauge | | Unix time of the key reconciler's last fully successful step: no exception, a decision for every owner checked and, with `changes()`, a readable change stream. 0 until the first success; not exported when `LUMEWARP_KEY_RECONCILE_ENABLED=false`. |
-| `lumewarp_cp_key_writes_total` | counter | `operation` = `create` \| `rotate`, `result` = `success` \| `rate_limited` | Self-service key writes: a successful committed create/rotate, and an attempt rejected by the in-process per-principal limiter. |
+| `lumewarp_cp_key_writes_total` | counter | `operation` = `create` \| `rotate`, `result` = `success` \| `rate_limited` | Self-service key writes: a successful committed create/rotate, and an attempt rejected by the in-process per-principal, per-operation limiter. |
 
 ## Deployment
 

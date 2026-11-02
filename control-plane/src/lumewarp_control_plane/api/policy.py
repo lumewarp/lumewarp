@@ -138,14 +138,19 @@ def _limit(parent: int | None, own: int | None) -> int | None:
 
 
 def effective(parent: Effective | None, policy: Policy) -> Effective:
-    """Resolve one level, including INHERIT, against its parent's effective policy."""
-    if policy.model_access is ModelAccess.INHERIT:
-        models = parent.models if parent is not None else _MODEL_UNIVERSAL
-    elif policy.model_access is ModelAccess.ALL:
-        models = _MODEL_UNIVERSAL
-    else:
+    """Resolve one level, including INHERIT and ALL, against its parent's effective policy.
+
+    ALL keeps the parent's set, exactly like the compiler's `narrow()`. Only the root
+    (no parent) makes ALL universal. Source can legitimately hold a member at ALL under a
+    team that later shrank to LIST: team updates deliberately do not rewrite owner lists,
+    and the compiler's intersection still limits the key, so this function must not widen
+    that member back to the whole catalog.
+    """
+    if policy.model_access is ModelAccess.LIST:
         own = frozenset(policy.allowed_models)
         models = own if parent is None or parent.models is None else parent.models & own
+    else:
+        models = parent.models if parent is not None else _MODEL_UNIVERSAL
     if parent is None:
         return Effective(
             models=models,
