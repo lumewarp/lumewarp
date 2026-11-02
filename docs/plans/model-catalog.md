@@ -1,6 +1,6 @@
 # 模型目錄計畫：Upstream、Model、Alias、Router
 
-狀態：已實作（c0–c5、c7、c8；UI c6 另行合併），與計畫不同之處見「實作差異」。基準：`p25/w1` @ 12cdc01。UI 稿：<https://claude.ai/artifact/QABCtDXssnaZFkGbc7eLhU>
+狀態：已實作（c0–c8），與計畫不同之處見「實作差異」。基準：`p25/w1` @ 12cdc01。UI 稿：<https://claude.ai/artifact/QABCtDXssnaZFkGbc7eLhU>
 
 ## 為什麼要改
 
