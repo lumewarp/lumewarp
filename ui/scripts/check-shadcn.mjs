@@ -35,7 +35,19 @@ export const LEGACY_CLASSES = new Set(
 );
 
 export const NATIVE_ELEMENTS = new Set(["button", "select", "input", "textarea", "table", "datalist", "option"]);
+/** Radix may be imported anywhere in here. */
 export const PRIMITIVES_DIR = "src/components/ui/";
+/**
+ * The files shadcn generated (the older ones carry this project's variants and theme). Only these are exempt from the
+ * native element rule. Anything else in the directory, e.g. combobox-field.tsx, is ours: it goes through `adapters`
+ * like any other hand-written file, and a new generated file is added here on purpose, in review.
+ */
+export const GENERATED_PRIMITIVES = new Set(
+  [
+    "alert-dialog", "alert", "badge", "button", "card", "checkbox", "command", "dialog", "empty", "field", "input", "label",
+    "popover", "radio-group", "select", "separator", "sheet", "sidebar", "skeleton", "sonner", "table", "tabs", "textarea", "tooltip",
+  ].map((n) => `${PRIMITIVES_DIR}${n}.tsx`),
+);
 export const RULES = ["legacy-class", "native-element", "native-input-type", "radix-import", "dynamic-class", "css-layer"];
 
 const CLASS_FUNCTIONS = new Set(["cn", "clsx", "cva", "twMerge", "cx", "classNames", "tv"]);
@@ -86,7 +98,9 @@ function classTokens(text) {
       if (!t.includes("[")) t = t.slice(t.lastIndexOf(":") + 1);
       t = t.replace(/^!+/, "").replace(/!+$/, "");
       return { token: t, partial: t.includes(HOLE) };
-    });
+    })
+    // A token that is nothing but unknown parts says nothing about which class it is.
+    .filter((t) => t.token.replaceAll(HOLE, "") !== "");
 }
 
 function partialMatchesLegacy(token) {
@@ -119,6 +133,30 @@ export function loadProject(root, srcDir = "src") {
 }
 
 function indexFile(f) {
+  // What the module exports: name -> {local} | {source, name} (re-export) | {expr}; plus `export *` sources.
+  f.stars = [];
+  for (const n of f.ast.program.body) {
+    if (n.type === "ExportNamedDeclaration") {
+      if (n.declaration?.type === "VariableDeclaration") {
+        for (const d of n.declaration.declarations) if (d.id.type === "Identifier") f.exports.set(d.id.name, { local: d.id.name });
+      } else if (n.declaration) {
+        const id = n.declaration.id?.name;
+        if (id) f.exports.set(id, { opaque: true }); // function, class, enum, type: nothing to evaluate
+      }
+      for (const sp of n.specifiers ?? []) {
+        if (sp.type !== "ExportSpecifier") continue;
+        const out = sp.exported.name ?? sp.exported.value;
+        const inn = sp.local.name ?? sp.local.value;
+        f.exports.set(out, n.source ? { source: n.source.value, name: inn } : { local: inn });
+      }
+    } else if (n.type === "ExportAllDeclaration") {
+      if (n.exported) f.exports.set(n.exported.name ?? n.exported.value, { opaque: true });
+      else f.stars.push(n.source.value);
+    } else if (n.type === "ExportDefaultDeclaration") {
+      const d = unwrap(n.declaration);
+      f.exports.set("default", d.type === "Identifier" ? { local: d.name } : d.type.endsWith("Expression") || d.type.endsWith("Literal") ? { expr: d } : { opaque: true });
+    }
+  }
   walk(f.ast.program, (n) => {
     if (n.type === "VariableDeclarator" && n.id.type === "Identifier" && n.init) {
       const list = f.consts.get(n.id.name) ?? [];
@@ -147,19 +185,141 @@ function resolveModule(project, from, source) {
   return null;
 }
 
-/** Initialisers an identifier may refer to: same-file consts, or exported consts of an imported module. */
-function resolveIdentifier(project, f, name) {
+/**
+ * What a name refers to in file `f`.
+ *   {status:"ok", file, inits}   constants it may hold
+ *   {status:"namespace", file}   `import * as ns`: the module whose exports are reachable through it
+ *   {status:"external"}          an import from outside the project (a package, a css file): not ours to follow
+ *   {status:"unresolved"}        an import into the project that is not a constant we can evaluate
+ *   null                         not a module-level binding: a parameter or a global, checked where it is produced
+ */
+function resolveBinding(project, f, name) {
   const local = f.consts.get(name);
-  if (local) return { file: f, inits: local };
+  if (local) return { status: "ok", file: f, inits: local };
   const imp = f.imports.get(name);
-  if (imp) {
-    const target = resolveModule(project, f, imp.source);
-    if (target && imp.name !== "*" && imp.name !== "default") {
-      const inits = target.consts.get(imp.name);
-      if (inits) return { file: target, inits };
+  if (!imp) return null;
+  const target = resolveModule(project, f, imp.source);
+  if (!target) return { status: "external" };
+  if (imp.name === "*") return { status: "namespace", file: target };
+  return lookupExport(project, target, imp.name, new Set());
+}
+
+/** The constants behind export `name` of `file`, following aliases, `export default`, `export { } from` and `export *`. */
+function lookupExport(project, file, name, seen) {
+  const key = `${file.rel}#${name}`;
+  if (seen.has(key)) return { status: "unresolved" };
+  seen.add(key);
+  const spec = file.exports.get(name);
+  if (spec?.expr) return { status: "ok", file, inits: [spec.expr] };
+  if (spec?.local) {
+    const consts = file.consts.get(spec.local);
+    if (consts) return { status: "ok", file, inits: consts };
+    if (file.imports.has(spec.local)) return resolveBinding(project, file, spec.local) ?? { status: "unresolved" };
+    return { status: "unresolved" };
+  }
+  if (spec?.source) {
+    const target = resolveModule(project, file, spec.source);
+    return target ? lookupExport(project, target, spec.name, seen) : { status: "external" };
+  }
+  if (spec) return { status: "unresolved" };
+  if (name !== "default") {
+    for (const source of file.stars) {
+      const target = resolveModule(project, file, source);
+      if (!target) continue;
+      const hit = lookupExport(project, target, name, seen);
+      if (hit.status === "ok" || hit.status === "external") return hit;
     }
   }
-  return null;
+  return { status: "unresolved" };
+}
+
+/** Every exported constant of a module (a namespace used without a static member name). */
+function allExports(project, file) {
+  const out = [];
+  const names = new Set(file.exports.keys());
+  for (const source of file.stars) {
+    const target = resolveModule(project, file, source);
+    if (target) for (const n of target.exports.keys()) names.add(n);
+  }
+  for (const n of names) {
+    const hit = lookupExport(project, file, n, new Set());
+    if (hit.status === "ok") out.push(hit);
+  }
+  return out;
+}
+
+const memberName = (m) => (m.computed ? (m.property.type === "StringLiteral" ? m.property.value : null) : m.property.type === "Identifier" ? m.property.name : null);
+
+/** The initialisers an identifier or member chain refers to, with an outcome for what could not be followed. */
+function resolveRef(project, f, node) {
+  node = unwrap(node);
+  const id = rootIdentifier(node);
+  if (!id) return { hits: [], unresolved: false };
+  const b = resolveBinding(project, f, id.name);
+  if (!b || b.status === "external") return { hits: [], unresolved: false };
+  if (b.status === "unresolved") return { hits: [], unresolved: true };
+  if (b.status === "namespace") {
+    // ns.member: that export; ns[x] or ns alone: all of them
+    const direct = node.type === "MemberExpression" && unwrap(node.object) === id ? memberName(node) : null;
+    if (direct) {
+      const hit = lookupExport(project, b.file, direct, new Set());
+      return hit.status === "ok" ? { hits: [{ ...hit, name: direct }], unresolved: false } : { hits: [], unresolved: hit.status === "unresolved" };
+    }
+    return { hits: allExports(project, b.file), unresolved: false };
+  }
+  return { hits: [{ ...b, name: id.name }], unresolved: false };
+}
+
+/**
+ * Fold an expression to the string it builds. Parts that cannot be known are HOLEs, so "b" + "tn" is "btn" and
+ * "b" + prop is "b<hole>". Only the shapes that build strings are folded; the rest is a hole.
+ */
+function fold(project, f, node, seen = new Set()) {
+  node = unwrap(node);
+  if (!node) return HOLE;
+  switch (node.type) {
+    case "StringLiteral":
+      return node.value;
+    case "TemplateLiteral":
+      return node.quasis.map((q, i) => (q.value.cooked ?? q.value.raw) + (i < node.expressions.length ? fold(project, f, node.expressions[i], seen) : "")).join("");
+    case "BinaryExpression":
+      return node.operator === "+" ? fold(project, f, node.left, seen) + fold(project, f, node.right, seen) : HOLE;
+    case "Identifier":
+    case "MemberExpression": {
+      const { hits } = resolveRef(project, f, node);
+      if (hits.length !== 1 || hits[0].inits.length !== 1) return HOLE;
+      const key = `${hits[0].file.rel}#${hits[0].name}`;
+      if (seen.has(key)) return HOLE;
+      const next = new Set(seen).add(key);
+      let init = unwrap(hits[0].inits[0]);
+      // obj.prop of a constant object: that property
+      if (node.type === "MemberExpression" && init.type === "ObjectExpression") {
+        const want = memberName(node);
+        const prop = init.properties.find((q) => q.type === "ObjectProperty" && propName(q) === want);
+        return want && prop ? fold(project, hits[0].file, prop.value, next) : HOLE;
+      }
+      return node.type === "Identifier" ? fold(project, hits[0].file, init, next) : HOLE;
+    }
+    case "CallExpression": {
+      const c = unwrap(node.callee);
+      if (c.type !== "MemberExpression") return HOLE;
+      const m = memberName(c);
+      if (m === "join") {
+        let arr = unwrap(c.object);
+        while (arr.type === "CallExpression" && unwrap(arr.callee).type === "MemberExpression" && memberName(unwrap(arr.callee)) === "filter") arr = unwrap(unwrap(arr.callee).object);
+        const list = arr.type === "ArrayExpression" ? arr : null;
+        const sepArg = node.arguments[0];
+        const sep = sepArg ? fold(project, f, sepArg, seen) : ",";
+        if (!list) return HOLE;
+        return list.elements.map((e) => (e && e.type !== "SpreadElement" ? fold(project, f, e, seen) : HOLE)).join(sep);
+      }
+      if (m === "concat") return fold(project, f, c.object, seen) + node.arguments.map((a) => fold(project, f, a, seen)).join("");
+      if (m === "trim" || m === "trimStart" || m === "trimEnd" || m === "toString") return fold(project, f, c.object, seen);
+      return HOLE;
+    }
+    default:
+      return HOLE;
+  }
 }
 
 function rootIdentifier(node) {
@@ -180,16 +340,10 @@ function collectClass(project, f, node, mode, out, seen) {
     case "StringLiteral":
       out.texts.push({ text: node.value, loc: node.loc, file: f });
       return;
-    case "TemplateLiteral": {
-      let text = "";
-      node.quasis.forEach((q, i) => {
-        text += q.value.cooked ?? q.value.raw;
-        if (i < node.expressions.length) text += HOLE;
-      });
-      out.texts.push({ text, loc: node.loc, file: f });
+    case "TemplateLiteral":
+      out.texts.push({ text: fold(project, f, node), loc: node.loc, file: f });
       for (const e of node.expressions) collectClass(project, f, e, mode, out, seen);
       return;
-    }
     case "JSXExpressionContainer":
       collectClass(project, f, node.expression, mode, out, seen);
       return;
@@ -197,8 +351,18 @@ function collectClass(project, f, node, mode, out, seen) {
       collectClass(project, f, node.consequent, mode, out, seen);
       collectClass(project, f, node.alternate, mode, out, seen);
       return;
-    case "LogicalExpression":
     case "BinaryExpression":
+      if (node.operator === "+") {
+        // The whole sum is what lands in the class list: "b" + "tn" is btn. Its operands are looked at as well.
+        out.texts.push({ text: fold(project, f, node), loc: node.loc, file: f });
+        for (const side of [node.left, node.right]) {
+          const n = unwrap(side);
+          if (n.type !== "StringLiteral") collectClass(project, f, n, mode, out, seen);
+        }
+        return;
+      }
+      return;
+    case "LogicalExpression":
       collectClass(project, f, node.left, mode, out, seen);
       collectClass(project, f, node.right, mode, out, seen);
       return;
@@ -220,14 +384,15 @@ function collectClass(project, f, node, mode, out, seen) {
     case "Identifier":
     case "MemberExpression":
     case "OptionalMemberExpression": {
-      const id = rootIdentifier(node);
-      if (!id) return;
-      const hit = resolveIdentifier(project, f, id.name);
-      if (!hit) return; // parameter, prop, global: checked where the value is produced
-      const key = hit.file.rel + "#" + id.name;
-      if (seen.has(key)) return;
-      seen.add(key);
-      for (const init of hit.inits) collectClass(project, hit.file, init, "ref", out, seen);
+      const { hits, unresolved } = resolveRef(project, f, node);
+      // An import into the project that is not a constant we can evaluate (a function, a class, a cycle): say so.
+      if (unresolved) out.dynamic.push({ loc: node.loc, file: f });
+      for (const hit of hits) {
+        const key = hit.file.rel + "#" + hit.name;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        for (const init of hit.inits) collectClass(project, hit.file, init, "ref", out, seen);
+      }
       return;
     }
     case "CallExpression":
@@ -240,13 +405,15 @@ function collectClass(project, f, node, mode, out, seen) {
       }
       // buttonVariants({...}): a cva() result; its own definition is scanned wherever it appears
       if (calleeName) {
-        const hit = resolveIdentifier(project, f, calleeName);
-        if (hit && hit.inits.some((i) => isCvaCall(i))) return;
+        const hit = resolveBinding(project, f, calleeName);
+        if (hit?.status === "ok" && hit.inits.some((i) => isCvaCall(i))) return;
       }
       if (calleeName && CLASS_FUNCTIONS.has(calleeName)) {
         for (const a of node.arguments) collectClass(project, f, a.type === "SpreadElement" ? a.argument : a, "direct", out, seen);
         return;
       }
+      // [..].join(..) and "..".concat(..) build one string: look at what they build as well as at the parts
+      if (callee.type === "MemberExpression" && ["join", "concat"].includes(memberName(callee) ?? "")) out.texts.push({ text: fold(project, f, node), loc: node.loc, file: f });
       // member chain pass-through: [...].filter(Boolean).join(" ")
       if (callee.type === "MemberExpression" && !callee.computed && callee.property.type === "Identifier" && PASS_THROUGH_METHODS.has(callee.property.name)) {
         collectClass(project, f, callee.object, mode, out, seen);
@@ -419,7 +586,7 @@ export function checkProject(root, config = {}, srcDir = "src") {
     return !(ex.includes("*") || ex.some((e) => v.detail === `<${e}>`));
   });
   // primitives: native elements are what shadcn generates
-  all = all.filter((v) => !(v.rule === "native-element" && v.file.startsWith(PRIMITIVES_DIR)));
+  all = all.filter((v) => !(v.rule === "native-element" && GENERATED_PRIMITIVES.has(v.file)));
 
   const counts = new Map(); // file -> rule -> n
   for (const v of all) {

@@ -75,6 +75,64 @@ describe("legacy classes: each way to write one is caught", () => {
   test("tagged template is reported", () => flags(page("<i className={tw`flex`} />"), "dynamic-class"));
 });
 
+describe("legacy classes: a class built from pieces is judged by what it builds", () => {
+  test('"b" + "tn"', () => flags(page(`<div className={"b" + "tn"} />`), "legacy-class", '"btn"'));
+  test("sum with a space-free tail", () => flags(page(`<div className={"flex " + "pa" + "ger"} />`), "legacy-class", '"pager"'));
+  test('["b", "tn"].join("")', () => flags(page(`<div className={["b", "tn"].join("")} />`), "legacy-class", '"btn"'));
+  test("join after filter(Boolean)", () => flags(page(`<div className={["b", cond && "tn"].filter(Boolean).join("")} />`), "legacy-class", "btn"));
+  test('"b".concat("tn")', () => flags(page(`<div className={"b".concat("tn")} />`), "legacy-class", '"btn"'));
+  test("template with a constant part", () => flags(page("<div className={`b${\"tn\"}`} />"), "legacy-class", '"btn"'));
+  test("constants added together", () => flags(page(`<div className={A + B} />`, `const A = "b"; const B = "tn";`), "legacy-class", '"btn"'));
+  test("constant from another module added to a literal", () =>
+    flags({ "src/lib/s.ts": `export const TAIL = "tn";`, ...page(`<div className={"b" + TAIL} />`, `import { TAIL } from "@/lib/s";`) }, "legacy-class", '"btn"'));
+  test("member of a constant object", () => flags(page(`<div className={"b" + PARTS.tail} />`, `const PARTS = { tail: "tn" };`), "legacy-class", '"btn"'));
+  test("an unknown tail that could complete a legacy class", () => flags(page(`<div className={"bt" + suffix} />`), "legacy-class", "can produce"));
+  test("an unknown head that could complete a legacy class", () => flags(page(`<div className={prefix + "-sm"} />`), "legacy-class", "btn-sm"));
+  test("sum whose part is a conditional", () => flags(page(`<div className={"b" + (x ? "tn" : "")} />`), "legacy-class"));
+  test("sum of unrelated pieces is fine", () => clean(page(`<div className={"flex " + x + " px-2" + ["a", "b"].join(" ")} />`)));
+  test("sums that are not classes are fine", () => clean(page(`<div className={"bg-" + tone + "-100"} />`)));
+  test("a lone unknown part in a template is fine", () => clean(page("<div className={`flex ${x} gap-2`} />")));
+});
+
+describe("legacy classes: through exports, imports and re-exports", () => {
+  const consumer = (head) => page(`<div className={X} />`, head);
+  test("export { LEGACY as alias }", () =>
+    flags({ "src/lib/s.ts": `const LEGACY = "btn";\nexport { LEGACY as buttonClass };`, ...page(`<div className={buttonClass} />`, `import { buttonClass } from "../lib/s";`) }, "legacy-class", '"btn"'));
+  test("export default of a name, default import", () =>
+    flags({ "src/lib/s.ts": `const LEGACY = "btn";\nexport default LEGACY;`, ...page(`<div className={cls} />`, `import cls from "../lib/s";`) }, "legacy-class", '"btn"'));
+  test("export default of an expression", () =>
+    flags({ "src/lib/s.ts": `export default "card pad";`, ...page(`<div className={cls} />`, `import cls from "@/lib/s";`) }, "legacy-class", '"card"'));
+  test("export default of an object, member used", () =>
+    flags({ "src/lib/s.ts": `export default { row: "target-row" };`, ...page(`<div className={S.row} />`, `import S from "@/lib/s";`) }, "legacy-class", '"target-row"'));
+  test("barrel: export { A } from", () =>
+    flags({ "src/lib/a.ts": `export const A = "kv";`, "src/lib/index.ts": `export { A } from "./a";`, ...page(`<div className={A} />`, `import { A } from "@/lib";`) }, "legacy-class", '"kv"'));
+  test("barrel: export { A as B } from", () =>
+    flags({ "src/lib/a.ts": `export const A = "kv";`, "src/lib/index.ts": `export { A as B } from "./a";`, ...page(`<div className={B} />`, `import { B } from "@/lib";`) }, "legacy-class", '"kv"'));
+  test("barrel: export * from, two levels", () =>
+    flags(
+      { "src/lib/a.ts": `export const A = "kv";`, "src/lib/b.ts": `export * from "./a";`, "src/lib/index.ts": `export * from "./b";`, ...page(`<div className={A} />`, `import { A } from "@/lib";`) },
+      "legacy-class",
+      '"kv"',
+    ));
+  test("an imported name exported again", () =>
+    flags({ "src/lib/a.ts": `export const A = "kv";`, "src/lib/b.ts": `import { A } from "./a";\nexport { A };`, ...page(`<div className={A} />`, `import { A } from "@/lib/b";`) }, "legacy-class", '"kv"'));
+  test("namespace import, named member", () =>
+    flags({ "src/lib/s.ts": `export const row = "target-row";`, ...page(`<div className={S.row} />`, `import * as S from "@/lib/s";`) }, "legacy-class", '"target-row"'));
+  test("namespace import, computed member sees every export", () =>
+    flags({ "src/lib/s.ts": `export const row = "target-row";`, ...page(`<div className={S[k]} />`, `import * as S from "@/lib/s";`) }, "legacy-class", '"target-row"'));
+  test("a cycle is not followed forever and is reported", () =>
+    flags({ "src/lib/a.ts": `export { A } from "./b";`, "src/lib/b.ts": `export { A } from "./a";`, ...page(`<div className={A} />`, `import { A } from "@/lib/a";`) }, "dynamic-class"));
+  test("an import into the project that is not a constant is dynamic-class", () =>
+    flags({ "src/lib/s.ts": `export function cls() { return "btn"; }`, ...page(`<div className={cls} />`, `import { cls } from "@/lib/s";`) }, "dynamic-class"));
+  test("an import of a name the module does not export is dynamic-class", () =>
+    flags({ "src/lib/s.ts": `export const other = "x";`, ...page(`<div className={missing} />`, `import { missing } from "@/lib/s";`) }, "dynamic-class"));
+  test("a package import is not ours to follow", () => clean(page(`<div className={cls} />`, `import cls from "some-package";`)));
+  test("an import that is a plain constant of other text is fine", () =>
+    clean({ "src/lib/s.ts": `const OK = "flex gap-2";\nexport { OK as row };\nexport default OK;`, ...consumer(`import X from "@/lib/s";`) }));
+  test("the checked file is not blamed for a dynamic import elsewhere", () =>
+    clean({ "src/lib/s.ts": `export function cls() { return "x"; }`, "src/pages/Q.tsx": `export const Q = () => <i />;` }));
+});
+
 describe("legacy classes: look-alikes are not flagged", () => {
   test("text-muted-foreground and friends", () => clean(page(`<p className="text-muted-foreground bg-muted/50 muted-foo foo-muted btn2 card-title" />`)));
   test('variant "muted" is a name, not a class', () => clean(page(`<Badge variant="muted" />`)));
@@ -101,6 +159,25 @@ describe("native elements", () => {
   test("<Input type={'checkbox'}>", () => flags(page(`<Input type={"checkbox"} />`), "native-input-type"));
   test('<Input type="text"> and <Input type="date"> are fine', () => clean(page(`<><Input type="text" /><Input type="date" /><Input type={t} /></>`)));
   test("shadcn primitives may use native elements", () => clean({ "src/components/ui/table.tsx": `export const T = () => <table><tbody /></table>;` }));
+  test("generated select may use <select> and <option>", () => clean({ "src/components/ui/select.tsx": `export const S = () => <select><option /></select>;` }));
+  test("a hand-written file in components/ui is not exempt: combobox-field", () => {
+    const r = run({ "src/components/ui/combobox-field.tsx": `export const C = () => <><select><option /></select><button /></>;` });
+    assert.deepEqual(rulesOf(r), ["native-element", "native-element", "native-element"]);
+  });
+  test("a file we add to components/ui is not exempt until it is listed", () => flags({ "src/components/ui/description-list.tsx": `export const D = () => <table />;` }, "native-element"));
+  test("a hand-written ui file can be exempt through adapters, narrowly", () => {
+    const files = { "src/components/ui/combobox-field.tsx": `export const C = () => <><input /><button /></>;` };
+    const r = run(files, { adapters: { "src/components/ui/combobox-field.tsx": ["input"] } });
+    assert.deepEqual(r.violations.map((v) => v.detail), ["<button>"]);
+  });
+  test("the generated list names files that exist in the repo", async () => {
+    const { GENERATED_PRIMITIVES } = await import("./check-shadcn.mjs");
+    const { existsSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+    for (const f of GENERATED_PRIMITIVES) assert.ok(existsSync(join(root, f)), `${f} is listed as generated but missing`);
+    assert.ok(!GENERATED_PRIMITIVES.has("src/components/ui/combobox-field.tsx"));
+  });
   test("primitives are not exempt from legacy classes", () => flags({ "src/components/ui/x.tsx": `export const T = () => <div className="btn" />;` }, "legacy-class"));
   test("adapter exemption covers only the named element", () => {
     const files = { "src/components/Hidden.tsx": `export const H = () => <><input /><button /></>;` };
