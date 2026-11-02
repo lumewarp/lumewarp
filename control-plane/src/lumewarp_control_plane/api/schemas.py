@@ -759,9 +759,34 @@ class TokenCreated(ApiModel):
 # --------------------------------------------------------------------------- usage
 
 
+class UsageNameOut(ApiModel):
+    """Current catalog name, or the recorded spelling if the item no longer exists."""
+
+    id: uuid.UUID | None = None
+    name: str
+
+
 class UsageRowOut(ApiModel):
+    """Aggregated usage with current catalog names and immutable upstream names.
+
+    Singular model/alias/router fields are set for one distinct value; mixed groups
+    use the corresponding lists. Their empty string means no provenance, while null
+    means mixed/unavailable. Lists omit empty values. Served by lists actual models.
+    """
+
     date: date_type | None = None
     requested: str | None = None
+    model: str | None = None
+    model_id: uuid.UUID | None = None
+    upstream_model: str | None = None
+    alias: str | None = None
+    alias_id: uuid.UUID | None = None
+    router: str | None = None
+    router_id: uuid.UUID | None = None
+    upstream_models: list[str] = Field(default_factory=list)
+    via_aliases: list[UsageNameOut] = Field(default_factory=list)
+    via_routers: list[UsageNameOut] = Field(default_factory=list)
+    served_by: list[UsageNameOut] = Field(default_factory=list)
     team_id: uuid.UUID | None = None
     owner_kind: KeyOwnerKind | None = None
     owner_id: uuid.UUID | None = None
@@ -785,6 +810,15 @@ class UsageEventOut(ReadModel):
     owner_id: uuid.UUID
     requested: str
     model: str
+    model_id: uuid.UUID | None = None
+    alias: str
+    alias_id: uuid.UUID | None = None
+    router: str
+    router_id: uuid.UUID | None = None
+    upstream: str
+    upstream_model: str
+    fallback: bool
+    attempts: int
     endpoint: str
     status: int
     stream: bool

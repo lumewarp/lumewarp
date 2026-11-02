@@ -1,7 +1,8 @@
 """Usage aggregation: monthly `usage_totals` fast path plus recent `usage_events`.
 
 `from`/`to` are a half-open UTC range. `group_by` is a comma-separated subset of
-`day,requested,team,owner,key`; the default is `day,requested`. `owner` groups by the key owner
+`day,requested,model,upstream_model,alias,router,team,owner,key`; the default is
+`day,requested`. `owner` groups by the key owner
 (`owner_kind`, `owner_id`: a user or a service account). A admin group member's single `team`
 dimension over whole UTC months is served from the pre-aggregated `usage_totals` table;
 everything else is aggregated from `usage_events`, limited to the caller's readable teams.
@@ -16,8 +17,10 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
-from sqlalchemy import case, func, select, tuple_
+from sqlalchemy import String, case, cast, distinct, func, or_, select, tuple_
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from lumewarp_control_plane.api.common import (
     LimitDep,
@@ -34,6 +37,8 @@ from lumewarp_control_plane.authz import Authz
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import (
     ApiKey,
+    CatalogKind,
+    CatalogName,
     KeyOwnerKind,
     ScopeType,
     Team,
@@ -43,11 +48,25 @@ from lumewarp_control_plane.models import (
 
 router = APIRouter(tags=["usage"])
 
-DIMENSIONS = ("day", "requested", "team", "owner", "key")
+DIMENSIONS = (
+    "day",
+    "requested",
+    "model",
+    "upstream_model",
+    "alias",
+    "router",
+    "team",
+    "owner",
+    "key",
+)
 # Output columns behind each dimension, in cursor order.
 COLUMNS = {
     "day": ("day",),
     "requested": ("requested",),
+    "model": ("model",),
+    "upstream_model": ("upstream_model",),
+    "alias": ("alias",),
+    "router": ("router",),
     "team": ("team",),
     "owner": ("owner_kind", "owner_id"),
     "key": ("key",),
@@ -206,6 +225,19 @@ async def _events_page(
         "owner_id": UsageEvent.owner_id,
         "key": UsageEvent.key_id,
     }
+    catalogs = {kind.value: aliased(CatalogName) for kind in CatalogKind}
+    refs = {}
+    for name, catalog in catalogs.items():
+        # Non-null, collision-free identity keys keep pagination stable even for
+        # missing provenance. A live id and an orphan's spelling never coalesce.
+        fields[name] = case(
+            (catalog.id.is_not(None), "id:" + cast(catalog.id, String)),
+            else_="name:" + getattr(UsageEvent, name),
+        )
+        refs[name] = func.jsonb_build_object(
+            "id", catalog.id, "name", func.coalesce(catalog.name, getattr(UsageEvent, name))
+        )
+    fields["upstream_model"] = UsageEvent.upstream_model
     names = [column for group in groups for column in COLUMNS[group]]
     group_columns = [fields[name] for name in names]
     aggregates = [
@@ -217,7 +249,13 @@ async def _events_page(
             "unknown_cost_count"
         ),
     ]
+    aggregates.extend(cast(func.jsonb_agg(distinct(refs[name])), JSONB) for name in catalogs)
+    aggregates.append(func.array_agg(distinct(UsageEvent.upstream_model)))
     stmt = select(*group_columns, *aggregates).where(UsageEvent.ts >= from_, UsageEvent.ts < to_)
+    for name, catalog in catalogs.items():
+        stmt = stmt.outerjoin(
+            catalog, (catalog.id == getattr(UsageEvent, f"{name}_id")) & (catalog.kind == name)
+        )
     for condition in filters:
         stmt = stmt.where(condition)
     if readable is not None:
@@ -246,8 +284,24 @@ async def _events_page(
     items: list[UsageRowOut] = []
     for row in rows[:limit]:
         values = {name: row[index] for index, name in enumerate(names)}
+        provenance: dict[str, Any] = {}
+        for index, name in enumerate(catalogs):
+            entries = sorted(
+                row[n + 5 + index] or [], key=lambda item: (item["name"], item["id"] or "")
+            )
+            if len(entries) == 1:
+                provenance[name] = entries[0]["name"]
+                provenance[f"{name}_id"] = entries[0]["id"]
+            provenance[
+                {"model": "served_by", "alias": "via_aliases", "router": "via_routers"}[name]
+            ] = [entry for entry in entries if entry["name"]]
+        upstream_models = sorted(value for value in (row[n + 8] or []) if value)
+        provenance["upstream_models"] = upstream_models
+        if len(upstream_models) == 1:
+            provenance["upstream_model"] = upstream_models[0]
         items.append(
             UsageRowOut(
+                **provenance,
                 date=values["day"].date() if "day" in values else None,
                 requested=values.get("requested"),
                 team_id=values.get("team"),
@@ -287,6 +341,31 @@ async def get_usage(
     service_account_id: uuid.UUID | None = None,
     key_id: uuid.UUID | None = None,
     requested: str | None = None,
+    model: str | None = None,
+    upstream_model: str | None = None,
+    alias: str | None = None,
+    router: str | None = None,
+    model_id: uuid.UUID | None = None,
+    alias_id: uuid.UUID | None = None,
+    router_id: uuid.UUID | None = None,
+    alias_missing: Annotated[
+        bool | None,
+        Query(
+            description=(
+                "true: no alias; false: via any alias. "
+                "alias=none selects the literal catalog name 'none'."
+            )
+        ),
+    ] = None,
+    router_missing: Annotated[
+        bool | None,
+        Query(
+            description=(
+                "true: no router; false: via any router. "
+                "Independent of catalog names, including 'none'."
+            )
+        ),
+    ] = None,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[UsageRowOut]:
@@ -310,6 +389,20 @@ async def get_usage(
         is_admin
         and groups == ["team"]
         and requested is None
+        and all(
+            value is None
+            for value in (
+                model,
+                upstream_model,
+                alias,
+                router,
+                model_id,
+                alias_id,
+                router_id,
+                alias_missing,
+                router_missing,
+            )
+        )
         and user_id is None
         and service_account_id is None
         and key_id is None
@@ -319,6 +412,34 @@ async def get_usage(
         return await _totals_page(session, start, end, team_id, limit, cursor)
     ensure_range(start, end)
     filters: list[Any] = []
+    for kind, name, name_id in (
+        (CatalogKind.MODEL, model, model_id),
+        (CatalogKind.ALIAS, alias, alias_id),
+        (CatalogKind.ROUTER, router, router_id),
+    ):
+        column = getattr(UsageEvent, kind.value)
+        id_column = getattr(UsageEvent, f"{kind.value}_id")
+        if name_id is not None:
+            filters.append(id_column == name_id)
+        if name is not None:
+            current_id = await session.scalar(
+                select(CatalogName.id).where(CatalogName.kind == kind, CatalogName.name == name)
+            )
+            if current_id is not None:
+                filters.append(id_column == current_id)
+            else:
+                # Do not mix a renamed, still-live item into a deleted item's
+                # historical spelling. Clients select the live item by current name/id.
+                live_ids = select(CatalogName.id).where(CatalogName.kind == kind)
+                filters.append(
+                    (column == name) & or_(id_column.is_(None), id_column.not_in(live_ids))
+                )
+    if upstream_model is not None:
+        filters.append(UsageEvent.upstream_model == upstream_model)
+    for name, missing in (("alias", alias_missing), ("router", router_missing)):
+        if missing is not None:
+            column = getattr(UsageEvent, name)
+            filters.append(column == "" if missing else column != "")
     if requested is not None:
         filters.append(UsageEvent.requested == requested)
     if scoped_team is not None:

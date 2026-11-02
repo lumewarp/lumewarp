@@ -1894,12 +1894,51 @@ export interface components {
             /** Metrics Url */
             metrics_url?: string | null;
         };
-        /** UsageRowOut */
+        /**
+         * UsageNameOut
+         * @description Current catalog name, or the recorded spelling if the item no longer exists.
+         */
+        UsageNameOut: {
+            /** Id */
+            id?: string | null;
+            /** Name */
+            name: string;
+        };
+        /**
+         * UsageRowOut
+         * @description Aggregated usage with current catalog names and immutable upstream names.
+         *
+         *     Singular model/alias/router fields are set for one distinct value; mixed groups
+         *     use the corresponding lists. Their empty string means no provenance, while null
+         *     means mixed/unavailable. Lists omit empty values. Served by lists actual models.
+         */
         UsageRowOut: {
             /** Date */
             date?: string | null;
             /** Requested */
             requested?: string | null;
+            /** Model */
+            model?: string | null;
+            /** Model Id */
+            model_id?: string | null;
+            /** Upstream Model */
+            upstream_model?: string | null;
+            /** Alias */
+            alias?: string | null;
+            /** Alias Id */
+            alias_id?: string | null;
+            /** Router */
+            router?: string | null;
+            /** Router Id */
+            router_id?: string | null;
+            /** Upstream Models */
+            upstream_models?: string[];
+            /** Via Aliases */
+            via_aliases?: components["schemas"]["UsageNameOut"][];
+            /** Via Routers */
+            via_routers?: components["schemas"]["UsageNameOut"][];
+            /** Served By */
+            served_by?: components["schemas"]["UsageNameOut"][];
             /** Team Id */
             team_id?: string | null;
             owner_kind?: components["schemas"]["KeyOwnerKind"] | null;
@@ -5625,6 +5664,17 @@ export interface operations {
                 service_account_id?: string | null;
                 key_id?: string | null;
                 requested?: string | null;
+                model?: string | null;
+                upstream_model?: string | null;
+                alias?: string | null;
+                router?: string | null;
+                model_id?: string | null;
+                alias_id?: string | null;
+                router_id?: string | null;
+                /** @description true: no alias; false: via any alias. alias=none selects the literal catalog name 'none'. */
+                alias_missing?: boolean | null;
+                /** @description true: no router; false: via any router. Independent of catalog names, including 'none'. */
+                router_missing?: boolean | null;
                 limit?: number;
                 cursor?: string | null;
             };

@@ -5,9 +5,19 @@ from datetime import UTC, datetime
 
 import pytest
 
-from lumewarp_control_plane.models import ScopeType
+from lumewarp_control_plane.models import CatalogName, ScopeType
+from lumewarp_control_plane.usage import ingest
 from tests.api.helpers import ADMIN_AUTH, auth, usage_event, usage_total, user_with_token
-from tests.factories import make_key, make_member, make_service_account, make_team
+from tests.factories import (
+    make_alias,
+    make_key,
+    make_member,
+    make_model,
+    make_router,
+    make_service_account,
+    make_team,
+)
+from tests.usage.test_catalog_provenance import CREATED, RENAMED, key_for, rename_at, wire
 
 START = datetime(2026, 3, 1, tzinfo=UTC)
 END = datetime(2026, 4, 1, tzinfo=UTC)
@@ -151,6 +161,134 @@ async def test_usage_visibility_and_filter_rules(client, committed) -> None:
     outsider, outsider_token = await user_with_token(committed)
     await committed.commit()
     assert query(client, auth(outsider_token)).json()["items"] == []
+
+
+async def test_catalog_filters_grouping_rename_and_pagination(client, committed):
+    key = await key_for(committed)
+    suffix = uuid.uuid4().hex
+    original = f"old-{suffix}"
+    current = f"new-{suffix}"
+    model = await make_model(committed, original, created_at=CREATED)
+    pool = await make_router(committed, f"pool-{suffix}", members=[model], created_at=CREATED)
+    alias = await make_alias(committed, f"nick-{suffix}", pool)
+    alias.created_at = CREATED
+    await committed.flush()
+    first = wire(key, model=original, upstream_model="upstream-before")
+    await rename_at(committed, model, current)
+    second = wire(
+        key,
+        model=current,
+        alias=f"nick-{suffix}",
+        router=f"pool-{suffix}",
+        upstream_model="upstream-after",
+        timestamp=RENAMED,
+    )
+    # Delayed pre-rename event and post-rename event enter through real ingest.
+    assert await ingest(committed, "gateway", [first, second]) == 2
+    old_alias = f"nick-{suffix}"
+    old_router = f"pool-{suffix}"
+    await rename_at(committed, alias, f"nick-new-{suffix}")
+    await rename_at(committed, pool, f"pool-new-{suffix}")
+    await committed.commit()
+    base = {"team_id": str(key.team_id)}
+    for filters, expected in (
+        ({"model": current}, 2),
+        ({"model_id": str(model.id)}, 2),
+        ({"upstream_model": "upstream-before"}, 1),
+        ({"alias": f"nick-new-{suffix}"}, 1),
+        ({"alias_id": str(alias.id)}, 1),
+        ({"router": f"pool-new-{suffix}"}, 1),
+        ({"router_id": str(pool.id)}, 1),
+        ({"alias_missing": "true"}, 1),
+        ({"router_missing": "true"}, 1),
+        ({"alias_missing": "false"}, 1),
+        ({"router_missing": "false"}, 1),
+        ({"model": original}, 0),
+    ):
+        response = query(client, group_by="", **base, **filters)
+        assert response.status_code == 200, response.text
+        assert response.json()["items"][0]["requests"] == expected
+    grouped = query(client, group_by="model", **base).json()["items"]
+    assert len(grouped) == 1
+    assert (grouped[0]["model"], grouped[0]["model_id"], grouped[0]["requests"]) == (
+        current,
+        str(model.id),
+        2,
+    )
+    assert grouped[0]["upstream_models"] == ["upstream-after", "upstream-before"]
+    assert grouped[0]["via_aliases"] == [{"id": str(alias.id), "name": f"nick-new-{suffix}"}]
+    assert grouped[0]["via_routers"] == [{"id": str(pool.id), "name": f"pool-new-{suffix}"}]
+    assert old_alias != grouped[0]["via_aliases"][0]["name"]
+    assert old_router != grouped[0]["via_routers"][0]["name"]
+    for groups in ("alias", "router", "upstream_model", "model,alias,router"):
+        whole = query(client, group_by=groups, **base).json()["items"]
+        first_page = query(client, group_by=groups, limit=1, **base).json()
+        assert first_page["next_cursor"] is not None
+        rest = query(client, group_by=groups, cursor=first_page["next_cursor"], **base).json()
+        assert first_page["items"] + rest["items"] == whole
+        assert all(row["served_by"] == [{"id": str(model.id), "name": current}] for row in whole)
+
+
+async def test_literal_none_distinct_from_missing_and_deleted_names(client, committed):
+    key = await key_for(committed)
+    model = await make_model(committed, f"served-{uuid.uuid4().hex}", created_at=CREATED)
+    alias = await make_alias(committed, "none", model)
+    alias.created_at = CREATED
+    await committed.flush()
+    assert (
+        await ingest(
+            committed,
+            "gateway",
+            [
+                wire(key, model=model.name),
+                wire(key, model=model.name, alias="none"),
+            ],
+        )
+        == 2
+    )
+    await committed.commit()
+    base = {"team_id": str(key.team_id), "group_by": "alias"}
+    missing = query(client, alias_missing="true", **base).json()["items"]
+    named = query(client, alias="none", **base).json()["items"]
+    assert [(r["alias"], r["requests"]) for r in missing] == [("", 1)]
+    assert [(r["alias"], r["requests"]) for r in named] == [("none", 1)]
+    await committed.delete(await committed.get(CatalogName, alias.id))
+    await committed.commit()
+    deleted = query(client, alias="none", **base).json()["items"]
+    assert (deleted[0]["alias"], deleted[0]["alias_id"]) == ("none", None)
+    pool = await make_router(committed, "none", members=[model], created_at=CREATED)
+    assert await ingest(committed, "gateway", [wire(key, model=model.name, router="none")]) == 1
+    await committed.commit()
+    base = {"team_id": str(key.team_id), "group_by": "router"}
+    named = query(client, router="none", **base).json()["items"]
+    missing = query(client, router_missing="true", **base).json()["items"]
+    assert [(r["router"], r["router_id"], r["requests"]) for r in named] == [
+        ("none", str(pool.id), 1)
+    ]
+    assert [(r["router"], r["requests"]) for r in missing] == [("", 2)]
+
+
+@pytest.mark.parametrize("dimension", ["model", "upstream_model", "alias", "router"])
+async def test_new_dimensions_keep_permission_scope(client, committed, dimension):
+    team = await make_team(committed)
+    owner, token = await user_with_token(committed)
+    await make_member(committed, team, owner)
+    own = await make_key(committed, team, owner)
+    foreign = await key_for(committed)
+    unique = uuid.uuid4().hex
+    for key, name in ((own, f"own-{unique}"), (foreign, f"foreign-{unique}")):
+        event = wire(key, **{dimension: name})
+        assert await ingest(committed, "gateway", [event]) == 1
+    await committed.commit()
+    response = query(client, auth(token), group_by=dimension)
+    assert response.status_code == 200, response.text
+    assert [(r[dimension], r["requests"]) for r in response.json()["items"]] == [
+        (f"own-{unique}", 1)
+    ]
+    hidden = query(client, auth(token), group_by=dimension, **{dimension: f"foreign-{unique}"})
+    assert hidden.json()["items"] == []
+    forbidden = query(client, auth(token), group_by=dimension, team_id=str(foreign.team_id))
+    assert forbidden.status_code == 404
 
 
 @pytest.mark.parametrize(
