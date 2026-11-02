@@ -14,7 +14,7 @@ Normative rules for `lumewarp.config.v1.ConfigService` and `lumewarp.usage.v1.Us
 1. Every source mutation (API write, budget flip, rollover) and its audit row commit in one DB transaction together with an outbox row "recompile scope".
 2. A single compiler loop per scope (serialized with a Postgres advisory lock) reads source state at one consistent snapshot, compiles, validates and stores `config_versions(scope, version, payload, digest, source_revision, created_at)`. A compile failure leaves the previous version current and marks the outbox row failed with a reason; it never publishes a partial snapshot.
 3. A later compile always sees a later source revision; a slower, older compile must not publish after a newer one (check `source_revision` under the lock).
-4. Rollback re-publishes an older version's **routing** content (upstreams, models, routers) as a new version; API keys, teams, policies and statuses are always taken from current source state, so a revoked key can never be revived by a rollback.
+4. Rollback re-publishes an older version's **routing** content (upstreams, models, routers) as a new version; API keys, teams, policies and statuses are always taken from current source state, so a revoked key can never be revived by a rollback. Restored routers meet the same strategy rules as a router write, against the gateways of today: a rejection is a 422 that changes nothing, and `force` saves past connected gateways lacking a strategy, with the same audit.
 5. Retention: keep the latest version, the last 50 versions and anything referenced by a connected session; older payloads may be compacted. A gateway whose base was compacted gets a full snapshot.
 6. Limits: a snapshot larger than 64 MiB or with more than 200k keys fails compilation. gRPC max message size is 64 MiB on both sides.
 
@@ -22,7 +22,7 @@ Normative rules for `lumewarp.config.v1.ConfigService` and `lumewarp.usage.v1.Us
 
 ```
 gateway                                   control plane
-  |-- Hello{gateway_id, have_version, scope, supported_capabilities} -->
+  |-- Hello{gateway_id, have_version, scope, supported_capabilities, strategies} -->
   |                                       authenticate token; bind gateway_id
   |<-- full(desired) or delta(have_version -> desired) ---------------
   |   apply privately, persist, swap
@@ -34,6 +34,10 @@ gateway                                   control plane
 - The base of a delta is always the session's ACKed version (or Hello.have_version before the first ACK) — never a global "last sent" version.
 - The first update after Hello is a delta only when `Hello.scope` matches, `have_version` is retained, `have_version <= desired` and `Hello.have_digest` equals the stored digest of `have_version`; otherwise full. Until the first ACK after a full, the session has **no** delta base (a NACKed full is never followed by a delta).
 - Digest = `config_versions.digest` (sha256 of the control plane's serialized payload). It is sent as `ConfigUpdate.target_digest`; the gateway treats it as opaque, persists it with the snapshot and echoes it in `Hello.have_digest` (serialization is not byte-identical across languages, so the gateway never recomputes it). `have_version > desired` (control plane restored from backup) → full.
+- `Hello.strategies` lists a `StrategyDescriptor` (name, title, description, uses_weight, needs, params and member JSON Schema, digest) for every strategy compiled into the gateway, built-ins included. It is untrusted and only informs the API and router validation: nothing in it can end the stream, and it does not gate snapshots, which `supported_capabilities` and the gateway's own `configure` still do. `docs/router-strategies.md` has the schema rules.
+  - Normalized off the event loop: at most 128 strategies per gateway, descriptors first, then `strategy:<name>` capabilities, names matching `^[a-z][a-z0-9_]{0,62}$`; each schema capped at 16 KiB and restricted to a subset, or dropped. The rest is ignored, logged and counted in `lumewarp_cp_gateway_strategies_ignored_total`. Other capabilities are capped at 64, of at most 128 characters each. The session's stored capabilities list every kept strategy.
+  - The status row and the stored descriptors change in one transaction, under that row's lock, and only for the session owning the row. Session ids move forward, so a slower older connection neither overwrites a newer one's report nor replaces its stream: it ends with `UNAVAILABLE`. A reader sees one Hello, never parts of two.
+  - A Hello replaces all the gateway reported before. A gateway counts while the token of its latest Hello is unrevoked and it is connected or was seen in the last 30 days; a report counts while the token that made it is unrevoked. A connected gateway has what its latest Hello lists, an offline one what it last reported.
 - ACK/NACK must name the session's pending version; anything else is a protocol error and the control plane closes the stream.
 - NACK handling:
   - `BASE_MISMATCH` → send full(desired).
