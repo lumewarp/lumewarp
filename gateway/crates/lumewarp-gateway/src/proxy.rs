@@ -35,7 +35,7 @@ use crate::{
     metrics::{Observation, RequestMetrics, UpstreamError, ATTEMPT_OUTCOMES},
     ratelimit::clock,
     ratelimit::Permit,
-    rewrite::{ModelRewriter, RewriteBody},
+    rewrite::{strip_representation_fields, ModelRewriter, RewriteBody},
     router::{InFlight, Model, RoutingTable, Skipped},
     telemetry,
     usage::{
@@ -729,21 +729,27 @@ pub async fn forward(
     let meter = Meter::select(&parts, stream, inject, include_usage.requested());
     let mut capture = pending.take();
     capture.status = parts.status.as_u16();
-    let rewriter = (parts.status.is_success() && needs_rewrite(&called.name, &guard.model))
-        .then(|| {
-            if content_encoded(&parts.headers) {
+    let rewriter = if parts.status.is_success() && needs_rewrite(&called.name, &guard.model) {
+        match rewrite_format(&parts.headers, stream) {
+            None => None,
+            Some(_) if content_encoded(&parts.headers) => {
                 routing_table
                     .runtime
                     .metrics
                     .response_rewrite_compressed(&guard.model.name);
-                return None;
+                None
             }
-            Some(ModelRewriter::new(
-                Bytes::from(serde_json::to_vec(&*called.name).expect("name serializes")),
-                sse_response(&parts.headers, stream),
-            ))
-        })
-        .flatten();
+            Some(format) => {
+                strip_representation_fields(&mut parts.headers);
+                Some(ModelRewriter::new(
+                    Bytes::from(serde_json::to_vec(&*called.name).expect("name serializes")),
+                    format == BodyFormat::Sse,
+                ))
+            }
+        }
+    } else {
+        None
+    };
     // The meter reads the upstream's bytes, before the rewrite; forwarded bytes
     // go through the SSE filter first, which only ever drops whole events.
     let body = MeteredBody {
@@ -769,24 +775,57 @@ fn needs_rewrite(called: &str, model: &Model) -> bool {
     called != &*model.upstream_model
 }
 
+/// Whether any content coding other than `identity` applies, across every
+/// `Content-Encoding` field and every item of their lists.
 fn content_encoded(headers: &HeaderMap) -> bool {
     headers
-        .get(header::CONTENT_ENCODING)
-        .is_some_and(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
+        .get_all(header::CONTENT_ENCODING)
+        .iter()
+        .flat_map(|value| value.as_bytes().split(|&byte| byte == b','))
+        .map(<[u8]>::trim_ascii)
+        .any(|coding| !coding.is_empty() && !coding.eq_ignore_ascii_case(b"identity"))
 }
 
-/// Whether a response body is an SSE stream rather than one JSON document. A
-/// stream request answered with JSON is JSON, as for the meter.
-fn sse_response(headers: &HeaderMap, stream: bool) -> bool {
-    let content_type = headers
-        .get(header::CONTENT_TYPE)
-        .map_or(&b""[..], |value| value.as_bytes());
-    let starts_with = |prefix: &[u8]| {
-        content_type
-            .get(..prefix.len())
-            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyFormat {
+    Json,
+    Sse,
+}
+
+/// How to scan a response for its `model`; `None` leaves it opaque. Only a
+/// declared JSON or SSE media type is scanned, whatever the request's `stream`
+/// flag. Compatible servers do not all declare one, so without `Content-Type`
+/// the flag decides. Conflicting `Content-Type` fields are opaque.
+fn rewrite_format(headers: &HeaderMap, stream: bool) -> Option<BodyFormat> {
+    let mut fields = headers.get_all(header::CONTENT_TYPE).iter();
+    let Some(field) = fields.next() else {
+        return Some(if stream {
+            BodyFormat::Sse
+        } else {
+            BodyFormat::Json
+        });
     };
-    starts_with(b"text/event-stream") || (stream && !starts_with(b"application/json"))
+    if fields.next().is_some() {
+        return None;
+    }
+    let value = field.as_bytes();
+    let media_type = value
+        .split(|&byte| byte == b';')
+        .next()
+        .unwrap_or(value)
+        .trim_ascii();
+    if media_type.eq_ignore_ascii_case(b"text/event-stream") {
+        return Some(BodyFormat::Sse);
+    }
+    if media_type.eq_ignore_ascii_case(b"application/json") {
+        return Some(BodyFormat::Json);
+    }
+    const PREFIX: &[u8] = b"application/";
+    const SUFFIX: &[u8] = b"+json";
+    let structured = media_type.len() > PREFIX.len() + SUFFIX.len()
+        && media_type[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
+        && media_type[media_type.len() - SUFFIX.len()..].eq_ignore_ascii_case(SUFFIX);
+    structured.then_some(BodyFormat::Json)
 }
 
 fn retry_status(policy: Option<&lumewarp_proto::config::v1::RetryPolicy>, status: u16) -> bool {
@@ -1368,6 +1407,111 @@ routers:
             assert!(!headers.contains_key(name));
         }
         assert_eq!(headers["traceparent"], "opaque");
+    }
+
+    fn fields(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for &(name, value) in pairs {
+            headers.append(name, value.parse().unwrap());
+        }
+        headers
+    }
+
+    #[test]
+    fn content_encoded_reads_every_field_and_list_item() {
+        for (values, encoded) in [
+            (&[][..], false),
+            (&["identity"][..], false),
+            (&["IDENTITY"][..], false),
+            (&["identity", "Identity"][..], false),
+            (&[" identity ,identity"][..], false),
+            (&[""][..], false),
+            (&["gzip"][..], true),
+            (&["GZip"][..], true),
+            (&["identity", "gzip"][..], true),
+            (&["gzip", "identity"][..], true),
+            (&["identity, gzip"][..], true),
+            (&["identity,\tbr"][..], true),
+            (&[",,x-custom,"][..], true),
+        ] {
+            let pairs: Vec<_> = values.iter().map(|v| ("content-encoding", *v)).collect();
+            assert_eq!(content_encoded(&fields(&pairs)), encoded, "{values:?}");
+        }
+    }
+
+    #[test]
+    fn rewrite_format_follows_the_declared_media_type() {
+        use BodyFormat::{Json, Sse};
+        for (value, expected) in [
+            ("application/json", Some(Json)),
+            ("Application/JSON; charset=utf-8", Some(Json)),
+            (" application/json ;x=y", Some(Json)),
+            ("application/vnd.api+json", Some(Json)),
+            ("APPLICATION/PROBLEM+JSON;charset=utf-8", Some(Json)),
+            ("text/event-stream", Some(Sse)),
+            ("Text/Event-Stream; charset=utf-8", Some(Sse)),
+            ("application/+json", None),
+            ("application/jsonl", None),
+            ("application/json-seq", None),
+            ("application/x-ndjson", None),
+            ("text/json", None),
+            ("text/plain", None),
+            ("text/event-streams", None),
+            ("application/octet-stream", None),
+            ("multipart/form-data; boundary=x", None),
+            ("application/json, text/plain", None),
+            ("", None),
+        ] {
+            for stream in [false, true] {
+                assert_eq!(
+                    rewrite_format(&fields(&[("content-type", value)]), stream),
+                    expected,
+                    "{value:?} stream={stream}"
+                );
+            }
+        }
+        // Undeclared: the request's flag decides.
+        assert_eq!(rewrite_format(&HeaderMap::new(), false), Some(Json));
+        assert_eq!(rewrite_format(&HeaderMap::new(), true), Some(Sse));
+        // A second field makes it ambiguous, even when the first is JSON.
+        let two = fields(&[
+            ("content-type", "application/json"),
+            ("content-type", "text/plain"),
+        ]);
+        assert_eq!(rewrite_format(&two, false), None);
+    }
+
+    #[test]
+    fn response_header_checks_do_not_allocate() {
+        let encoded = fields(&[
+            ("content-encoding", "identity"),
+            ("content-encoding", "identity, gzip"),
+            ("content-type", "application/vnd.api+json; charset=utf-8"),
+            ("content-md5", "x"),
+            ("digest", "x"),
+            ("content-digest", "x"),
+            ("repr-digest", "x"),
+            ("etag", "x"),
+            ("x-other", "x"),
+        ]);
+        let mut stripped = encoded.clone();
+        let empty = HeaderMap::new();
+        let ((allocations, _), checks) = crate::test_alloc::count(|| {
+            let checks = (
+                content_encoded(&encoded),
+                rewrite_format(&encoded, true),
+                rewrite_format(&empty, true),
+            );
+            strip_representation_fields(&mut stripped);
+            checks
+        });
+        assert_eq!(allocations, 0);
+        assert_eq!(
+            checks,
+            (true, Some(BodyFormat::Json), Some(BodyFormat::Sse))
+        );
+        assert!(!stripped.contains_key("etag"));
+        assert!(stripped.contains_key("x-other"));
     }
 
     #[test]

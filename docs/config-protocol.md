@@ -136,17 +136,30 @@ retry or fallback included, makes no difference. There are three exceptions:
   dated `gpt-4o-2024-08-06`). `Content-Length` and the client's `Accept-Encoding`
   are kept.
 - **Compressed anyway.** When a rewrite is needed the gateway removes the client's
-  `Accept-Encoding` from that upstream attempt. An upstream that still sets a
-  `Content-Encoding` other than `identity` is passed through byte for byte, not
-  decompressed: the client sees the upstream's name, usage is
+  `Accept-Encoding` from that upstream attempt. An upstream whose `Content-Encoding`
+  still names anything other than `identity`, in any field or list item, is passed
+  through byte for byte, not decompressed: the client sees the upstream's name, usage is
   `USAGE_STATE_INVALID` as for any encoded body, and
   `lumewarp_response_model_rewrite_compressed_total{model}` increments.
 - **Errors.** Non-2xx responses are forwarded unchanged and may name the upstream
   model.
+- **Not JSON or SSE.** Only `application/json`, `application/*+json` and
+  `text/event-stream` are scanned, compared case-insensitively with parameters
+  ignored. Any other declared `Content-Type`, an empty one, or more than one field
+  makes the body opaque: the scanner leaves it alone, even for a `stream: true`
+  request. Without a `Content-Type` the request decides, because OpenAI-compatible
+  servers vary: `stream: true` is scanned as SSE, otherwise as JSON. Usage metering
+  does not depend on this and still follows the `stream` flag and
+  `application/json`, so an opaque answer to a `stream: true` request with forced
+  usage stays under the SSE filter: it has no `Content-Length`, and an event in it
+  that looks like the forced usage event is dropped.
 
 The rewrite never buffers: bytes are forwarded as each frame is scanned, whatever
 the size of the body, and the length changes, so `Content-Length` is dropped and
-the response is chunked. The scanner follows the structure, it does not validate:
+the response is chunked. `Content-MD5`, `Digest`, `Content-Digest`, `Repr-Digest`
+and `ETag` describe the upstream's bytes, so a rewritten response drops them from
+its headers and trailers; other trailers stay. All the exceptions above keep them.
+The scanner follows the structure, it does not validate:
 
 | Upstream sends | Result |
 | --- | --- |
@@ -155,7 +168,7 @@ the response is chunked. The scanner follows the structure, it does not validate
 | Duplicate top-level `model` | All replaced |
 | `model` with a non-string value | Unchanged |
 | No top-level `model`, or only nested ones | Unchanged, none added |
-| Body that is not a JSON object | Unchanged |
+| Body that is not a JSON object, including JSON preceded by a UTF-8 byte order mark | Unchanged |
 | Invalid structure of the top-level object, mismatched brackets, nesting deeper than 128 | Unchanged from that byte on; a `model` already passed stays replaced, and the connection is not failed |
 | Invalid scalars, commas in nested values, or string contents | Not checked: a later `model` is still replaced in a body that stays invalid |
 | `model` string cut by EOF, or holding a raw control byte | The called name in full, then unchanged from the control byte on |
@@ -164,8 +177,9 @@ the response is chunked. The scanner follows the structure, it does not validate
 SSE: the `data` lines of one event form one document, joined by a newline, and
 each event starts over at the blank line. Comments and other fields pass through,
 also between `data` lines. CR, LF and CRLF end a line. `[DONE]` and any other
-non-object data, and events with no data, are unchanged. A byte order mark before
-the first field hides that one event from the scanner. The meter reads upstream
+non-object data, and events with no data, are unchanged. One UTF-8 byte order
+mark at the very start of the body is skipped when reading fields and forwarded;
+later it is part of an unknown field. The meter reads upstream
 bytes before the rewrite, so token counts are unaffected; the SSE filter that
 drops the forced usage event runs before it too.
 

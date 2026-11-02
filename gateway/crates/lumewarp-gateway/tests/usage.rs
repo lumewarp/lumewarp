@@ -1702,3 +1702,295 @@ async fn invalid_json_from_an_upstream_reaches_the_client_unchanged() {
     assert_eq!(bytes(response).await, BROKEN);
     assert_eq!(cp.event().await.usage_state(), UsageState::Invalid);
 }
+
+/// RFC 1952 gzip around one stored DEFLATE block, so `payload` is readable in
+/// the wire bytes and any edit there breaks the block's CRC.
+fn gzip_stored(payload: &[u8]) -> Vec<u8> {
+    let crc = !payload.iter().fold(u32::MAX, |crc, &byte| {
+        (0..8).fold(crc ^ u32::from(byte), |crc, _| {
+            (crc >> 1) ^ (0xedb8_8320 & (crc & 1).wrapping_neg())
+        })
+    });
+    let length = u16::try_from(payload.len()).unwrap();
+    let mut out = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, 1];
+    out.extend_from_slice(&length.to_le_bytes());
+    out.extend_from_slice(&(!length).to_le_bytes());
+    out.extend_from_slice(payload);
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(&u32::from(length).to_le_bytes());
+    out
+}
+
+#[tokio::test]
+async fn every_content_encoding_field_and_list_item_counts() {
+    let (mut cp, mut upstream, gateway) = catalog_setup().await;
+    // A real gzip SSE stream whose wire bytes contain a line a scanner would edit.
+    let gzipped = gzip_stored(b"\ndata: {\"model\":\"up\"}\n\ndata: [DONE]\n\n");
+    assert!(gzipped.windows(4).any(|window| window == b"\"up\""));
+    let cases: [&[&'static str]; 4] = [
+        &["identity", "gzip"],
+        &["gzip", "identity"],
+        &["identity, gzip"],
+        &["identity,\tGZIP"],
+    ];
+    for (index, codings) in cases.into_iter().enumerate() {
+        let mut headers = vec![("content-type", "text/event-stream")];
+        headers.extend(codings.iter().map(|coding| ("content-encoding", *coding)));
+        upstream.push(200, headers, frames(&[&gzipped]));
+        let response = gateway
+            .post(
+                "/v1/chat/completions",
+                KEY,
+                r#"{"model":"to-model","stream":true,"stream_options":{"include_usage":true}}"#,
+            )
+            .await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response
+                .headers()
+                .get_all("content-encoding")
+                .iter()
+                .count(),
+            codings.len(),
+            "{codings:?}"
+        );
+        assert_eq!(bytes(response).await, gzipped.as_slice(), "{codings:?}");
+        assert_eq!(
+            cp.event().await.usage_state(),
+            UsageState::Invalid,
+            "{codings:?}"
+        );
+        upstream.received().await;
+        assert_eq!(
+            gateway.metrics().await.value(
+                "lumewarp_response_model_rewrite_compressed_total",
+                &[("model", "d")]
+            ),
+            (index + 1) as f64,
+            "{codings:?}"
+        );
+    }
+
+    // `identity` in any form is not an encoding: the rewrite goes on.
+    upstream.push(
+        200,
+        vec![
+            ("content-type", "application/json"),
+            ("content-encoding", "identity"),
+            ("content-encoding", "Identity, identity"),
+        ],
+        frames(&[NAMED_CHAT_JSON]),
+    );
+    let response = gateway
+        .post("/v1/chat/completions", KEY, r#"{"model":"to-model"}"#)
+        .await;
+    assert_eq!(json(&bytes(response).await)["model"], "to-model");
+    assert_eq!(cp.event().await.usage_state(), UsageState::Reported);
+}
+
+const CHECKSUMS: [(&str, &str); 6] = [
+    ("content-md5", "stale"),
+    ("digest", "sha-256=stale"),
+    ("content-digest", "sha-256=:stale:"),
+    ("repr-digest", "sha-256=:stale:"),
+    ("etag", "\"stale\""),
+    ("x-upstream", "kept"),
+];
+
+fn assert_checksums(response: &Response<Incoming>, kept: bool, case: &str) {
+    for (name, value) in CHECKSUMS {
+        if name == "x-upstream" || kept {
+            assert_eq!(response.headers()[name], value, "{case}: {name}");
+        } else {
+            assert!(!response.headers().contains_key(name), "{case}: {name}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn checksums_are_stripped_only_when_the_body_is_rewritten() {
+    let (mut cp, upstream, gateway) = catalog_setup().await;
+    let with_checksums = |pairs: &[(&'static str, &'static str)]| {
+        let mut headers = pairs.to_vec();
+        headers.extend_from_slice(&CHECKSUMS);
+        headers
+    };
+    let json_type = [("content-type", "application/json")];
+
+    upstream.push(200, with_checksums(&json_type), frames(&[NAMED_CHAT_JSON]));
+    let response = gateway
+        .post("/v1/chat/completions", KEY, r#"{"model":"to-model"}"#)
+        .await;
+    assert_checksums(&response, false, "rewritten");
+    assert_eq!(json(&bytes(response).await)["model"], "to-model");
+    cp.event().await;
+
+    upstream.push(200, with_checksums(&json_type), frames(&[NAMED_CHAT_JSON]));
+    let response = gateway
+        .post("/v1/chat/completions", KEY, r#"{"model":"actual"}"#)
+        .await;
+    assert_checksums(&response, true, "fast path");
+    assert_eq!(bytes(response).await, NAMED_CHAT_JSON);
+    cp.event().await;
+
+    upstream.push(400, with_checksums(&json_type), frames(&[NAMED_CHAT_JSON]));
+    let response = gateway
+        .post("/v1/chat/completions", KEY, r#"{"model":"to-model"}"#)
+        .await;
+    assert_eq!(response.status(), 400);
+    assert_checksums(&response, true, "error");
+    assert_eq!(bytes(response).await, NAMED_CHAT_JSON);
+    cp.event().await;
+
+    upstream.push(
+        200,
+        with_checksums(&[
+            ("content-type", "application/json"),
+            ("content-encoding", "gzip"),
+        ]),
+        frames(&[b"gzipped"]),
+    );
+    let response = gateway
+        .post("/v1/chat/completions", KEY, r#"{"model":"to-model"}"#)
+        .await;
+    assert_checksums(&response, true, "compressed");
+    assert_eq!(bytes(response).await, &b"gzipped"[..]);
+    cp.event().await;
+
+    upstream.push(
+        200,
+        with_checksums(&[("content-type", "application/octet-stream")]),
+        frames(&[NAMED_CHAT_JSON]),
+    );
+    let response = gateway
+        .post("/v1/chat/completions", KEY, r#"{"model":"to-model"}"#)
+        .await;
+    assert_checksums(&response, true, "opaque");
+    assert_eq!(bytes(response).await, NAMED_CHAT_JSON);
+    cp.event().await;
+}
+
+#[tokio::test]
+async fn only_json_and_sse_media_types_are_rewritten() {
+    let (mut cp, upstream, gateway) = catalog_setup().await;
+    const BINARY: &[u8] = b"{\"model\":\"up\"}\x00\xff";
+    const TEXT: &[u8] = b"{\"model\":\"up\"}";
+    const EVENTS: &[u8] = b"data: {\"model\":\"up\"}\n\n";
+    let non_stream = r#"{"model":"to-model"}"#;
+    let stream = r#"{"model":"to-model","stream":true}"#;
+    // Declared as something else: byte for byte.
+    for (content_type, body, request, path) in [
+        (
+            "application/octet-stream",
+            BINARY,
+            non_stream,
+            "/v1/embeddings",
+        ),
+        ("text/plain", TEXT, non_stream, "/v1/chat/completions"),
+        (
+            "text/plain; charset=utf-8",
+            EVENTS,
+            stream,
+            "/v1/chat/completions",
+        ),
+        (
+            "application/octet-stream",
+            EVENTS,
+            stream,
+            "/v1/chat/completions",
+        ),
+        (
+            "multipart/form-data; boundary=x",
+            TEXT,
+            non_stream,
+            "/v1/chat/completions",
+        ),
+        (
+            "multipart/mixed; boundary=x",
+            EVENTS,
+            stream,
+            "/v1/chat/completions",
+        ),
+    ] {
+        upstream.push(200, sized_headers(content_type, body, &[]), frames(&[body]));
+        let response = gateway.post(path, KEY, request).await;
+        assert_eq!(response.status(), 200, "{content_type}");
+        // A stream request stays under the SSE meter, as before, which may drop
+        // the usage event it forced and so does not promise a length.
+        if request == non_stream {
+            assert_eq!(
+                response.headers()["content-length"],
+                body.len().to_string().as_str(),
+                "{content_type}"
+            );
+        }
+        assert_eq!(bytes(response).await, body, "{content_type}");
+        cp.event().await;
+    }
+    // Opaque bodies were never going to be rewritten: not a compressed exception.
+    upstream.push(
+        200,
+        vec![
+            ("content-type", "application/octet-stream"),
+            ("content-encoding", "gzip"),
+        ],
+        frames(&[BINARY]),
+    );
+    let response = gateway.post("/v1/embeddings", KEY, non_stream).await;
+    assert_eq!(bytes(response).await, BINARY);
+    cp.event().await;
+    assert_eq!(
+        gateway
+            .metrics()
+            .await
+            .sum("lumewarp_response_model_rewrite_compressed_total", &[]),
+        0.
+    );
+
+    // Declared JSON or SSE, whatever the case and parameters.
+    for (content_type, body, request, expected) in [
+        (
+            "Application/JSON; charset=utf-8",
+            TEXT,
+            non_stream,
+            &br#"{"model":"to-model"}"#[..],
+        ),
+        (
+            "application/vnd.api+json",
+            TEXT,
+            non_stream,
+            br#"{"model":"to-model"}"#,
+        ),
+        ("application/json", TEXT, stream, br#"{"model":"to-model"}"#),
+        (
+            "TEXT/EVENT-STREAM; charset=utf-8",
+            EVENTS,
+            stream,
+            b"data: {\"model\":\"to-model\"}\n\n",
+        ),
+        (
+            "text/event-stream",
+            EVENTS,
+            non_stream,
+            b"data: {\"model\":\"to-model\"}\n\n",
+        ),
+    ] {
+        upstream.push(200, vec![("content-type", content_type)], frames(&[body]));
+        let response = gateway.post("/v1/chat/completions", KEY, request).await;
+        assert_eq!(bytes(response).await, expected, "{content_type}");
+        cp.event().await;
+    }
+
+    // No Content-Type: the request's flag decides.
+    upstream.push(200, Vec::new(), frames(&[TEXT]));
+    let response = gateway.post("/v1/chat/completions", KEY, non_stream).await;
+    assert_eq!(bytes(response).await, &br#"{"model":"to-model"}"#[..]);
+    cp.event().await;
+    upstream.push(200, Vec::new(), frames(&[EVENTS]));
+    let response = gateway.post("/v1/chat/completions", KEY, stream).await;
+    assert_eq!(
+        bytes(response).await,
+        &b"data: {\"model\":\"to-model\"}\n\n"[..]
+    );
+    cp.event().await;
+}

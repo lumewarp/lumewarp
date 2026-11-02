@@ -27,8 +27,12 @@
 //! the SSE format says, and the scanner restarts at each blank line. Comments
 //! and other fields pass through, and may sit between `data` lines. CR, LF and
 //! CRLF all end a line. An event whose data is not an object (`[DONE]`) and an
-//! event with no data pass through unchanged. A byte order mark before the
-//! first field makes that line an unknown field, so that event is not rewritten.
+//! event with no data pass through unchanged. One byte order mark at the very
+//! start of the body is skipped when reading fields and is forwarded; anywhere
+//! later it is part of an unknown field, as the format says.
+//!
+//! A JSON body starting with a byte order mark is not an object to the scanner
+//! and is forwarded unchanged: JSON producers must not send one.
 
 use std::{
     pin::Pin,
@@ -36,13 +40,34 @@ use std::{
 };
 
 use bytes::{Buf, Bytes};
-use hyper::body::{Body, Frame};
+use hyper::{
+    body::{Body, Frame},
+    HeaderMap,
+};
 
 const MODEL: &[u8; 5] = b"model";
 /// `key_at` once the current key can no longer be `model`.
 const NOT_MODEL: u8 = u8::MAX;
 /// Levels of nesting below the top-level object tracked in `containers`.
 const MAX_NESTING: u8 = 128;
+const BOM: &[u8; 3] = b"\xef\xbb\xbf";
+
+/// Fields that describe the exact bytes of the upstream's body. A rewrite makes
+/// them false, and the new value is not known until the body has ended.
+const REPRESENTATION_FIELDS: [&str; 5] = [
+    "content-md5",
+    "digest",
+    "content-digest",
+    "repr-digest",
+    "etag",
+];
+
+/// Removes `REPRESENTATION_FIELDS`, from headers or trailers of a rewritten body.
+pub fn strip_representation_fields(fields: &mut HeaderMap) {
+    for name in REPRESENTATION_FIELDS {
+        fields.remove(name);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
@@ -388,6 +413,8 @@ impl JsonScanner {
 /// Where the SSE scanner is within a line.
 #[derive(Clone, Copy)]
 enum Line {
+    /// At the very start of the body: how many bytes of a BOM it has matched.
+    Bom(u8),
     /// In the field name: how many bytes of `data` it has matched; 0 at the
     /// start of a line.
     Name(u8),
@@ -424,7 +451,7 @@ impl ModelRewriter {
             name,
             json: JsonScanner::new(),
             sse: sse.then_some(SseLines {
-                line: Line::Name(0),
+                line: Line::Bom(0),
                 after_cr: false,
             }),
             rest: Bytes::new(),
@@ -484,6 +511,21 @@ impl ModelRewriter {
                 continue;
             }
             match lines.line {
+                Line::Bom(matched) => {
+                    if BOM.get(usize::from(matched)) == Some(&byte) {
+                        at += 1;
+                        lines.line = if usize::from(matched) + 1 == BOM.len() {
+                            Line::Name(0)
+                        } else {
+                            Line::Bom(matched + 1)
+                        };
+                    } else if matched == 0 {
+                        lines.line = Line::Name(0);
+                    } else {
+                        // Part of a BOM is the start of an unknown field.
+                        lines.line = Line::Other;
+                    }
+                }
                 Line::Name(matched) => {
                     at += 1;
                     match byte {
@@ -564,7 +606,15 @@ impl<B: Body<Data = Bytes> + Unpin> Body for RewriteBody<B> {
             match ready!(Pin::new(&mut this.body).poll_frame(cx)) {
                 Some(Ok(frame)) => match frame.into_data() {
                     Ok(data) => this.rewriter.push(data),
-                    Err(trailers) => return Poll::Ready(Some(Ok(trailers))),
+                    Err(frame) => match frame.into_trailers() {
+                        Ok(mut trailers) => {
+                            strip_representation_fields(&mut trailers);
+                            if !trailers.is_empty() {
+                                return Poll::Ready(Some(Ok(Frame::trailers(trailers))));
+                            }
+                        }
+                        Err(frame) => return Poll::Ready(Some(Ok(frame))),
+                    },
                 },
                 end => return Poll::Ready(end),
             }
@@ -1275,6 +1325,114 @@ mod tests {
         frames: Vec<Result<Frame<Bytes>, std::io::Error>>,
     ) -> impl Body<Data = Bytes, Error = std::io::Error> + Unpin {
         StreamBody::new(tokio_stream::iter(frames))
+    }
+
+    #[test]
+    fn a_bom_at_the_start_of_sse_is_skipped_and_forwarded() {
+        let input = b"\xef\xbb\xbfdata: {\"model\":\"up\"}\n\ndata: {\"model\":\"up\"}\n\n";
+        let expected =
+            b"\xef\xbb\xbfdata: {\"model\":\"called\"}\n\ndata: {\"model\":\"called\"}\n\n";
+        for first in 0..=input.len() {
+            assert_eq!(run(input, true, &[first]), expected, "split at {first}");
+        }
+        // Every way of cutting the BOM itself, one byte per frame included.
+        for first in 0..=3 {
+            for second in first..=3 {
+                assert_eq!(
+                    run(input, true, &[first, second]),
+                    expected,
+                    "split at {first}, {second}"
+                );
+            }
+        }
+        // A BOM followed by a comment, a blank line or nothing.
+        for (input, expected) in [
+            (
+                &b"\xef\xbb\xbf: c\n\ndata: {\"model\":\"up\"}\n\n"[..],
+                &b"\xef\xbb\xbf: c\n\ndata: {\"model\":\"called\"}\n\n"[..],
+            ),
+            (
+                b"\xef\xbb\xbf\r\ndata: {\"model\":\"up\"}\r\n\r\n",
+                b"\xef\xbb\xbf\r\ndata: {\"model\":\"called\"}\r\n\r\n",
+            ),
+            (b"\xef\xbb\xbf", b"\xef\xbb\xbf"),
+        ] {
+            for split in 0..=input.len() {
+                assert_eq!(run(input, true, &[split]), expected, "{input:?} at {split}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_whole_bom_at_the_very_start_is_skipped() {
+        for (input, expected) in [
+            // Later in the stream it is part of an unknown field.
+            (
+                &b"data: {\"model\":\"up\"}\n\n\xef\xbb\xbfdata: {\"model\":\"up\"}\n\n"[..],
+                &b"data: {\"model\":\"called\"}\n\n\xef\xbb\xbfdata: {\"model\":\"up\"}\n\n"[..],
+            ),
+            // Only one is skipped.
+            (
+                b"\xef\xbb\xbf\xef\xbb\xbfdata: {\"model\":\"up\"}\n\n",
+                b"\xef\xbb\xbf\xef\xbb\xbfdata: {\"model\":\"up\"}\n\n",
+            ),
+            // Part of one ends with its line; the next line is read normally.
+            (
+                b"\xef\xbbdata: {\"model\":\"up\"}\ndata: x\n\ndata: {\"model\":\"up\"}\n\n",
+                b"\xef\xbbdata: {\"model\":\"up\"}\ndata: x\n\ndata: {\"model\":\"called\"}\n\n",
+            ),
+            (
+                b"\xef\ndata: {\"model\":\"up\"}\n\n",
+                b"\xef\ndata: {\"model\":\"called\"}\n\n",
+            ),
+        ] {
+            for split in 0..=input.len() {
+                assert_eq!(run(input, true, &[split]), expected, "{input:?} at {split}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_json_body_with_a_bom_is_forwarded_unchanged() {
+        let input = b"\xef\xbb\xbf{\"model\":\"up\"}";
+        for split in 0..=input.len() {
+            assert_eq!(run(input, false, &[split]), input);
+        }
+    }
+
+    #[tokio::test]
+    async fn checksums_are_dropped_from_trailers() {
+        let mut trailers = hyper::HeaderMap::new();
+        for name in REPRESENTATION_FIELDS {
+            trailers.append(name, "stale".parse().unwrap());
+        }
+        trailers.append("digest", "stale-too".parse().unwrap());
+        trailers.insert("x-end", "1".parse().unwrap());
+        let body = RewriteBody::new(
+            body_of(vec![
+                Ok(Frame::data(Bytes::from_static(b"{\"model\":\"up\"}"))),
+                Ok(Frame::trailers(trailers)),
+            ]),
+            ModelRewriter::new(name(), false),
+        );
+        let collected = body.collect().await.unwrap();
+        let kept = collected.trailers().unwrap();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept["x-end"], "1");
+
+        // Trailers holding nothing else disappear, and the body still ends.
+        let mut trailers = hyper::HeaderMap::new();
+        trailers.insert("etag", "stale".parse().unwrap());
+        let body = RewriteBody::new(
+            body_of(vec![
+                Ok(Frame::data(Bytes::from_static(b"{\"model\":\"up\"}"))),
+                Ok(Frame::trailers(trailers)),
+            ]),
+            ModelRewriter::new(name(), false),
+        );
+        let collected = body.collect().await.unwrap();
+        assert!(collected.trailers().is_none());
+        assert_eq!(collected.to_bytes(), &br#"{"model":"called"}"#[..]);
     }
 
     #[tokio::test]
