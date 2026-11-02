@@ -85,6 +85,33 @@ Readiness/liveness:
   healthy during a control-plane outage so Kubernetes does not restart a gateway that is
   correctly serving its cached config.
 
+## Looking up a request (OTel)
+
+The gateway writes no access log. Each response carries `x-lumewarp-request-id`, the same
+id as its usage event, and the `request` span carries it as `request_id`, with the called
+name, alias, router, final model and one `upstream_attempt` child per try. To turn this on:
+
+```yaml
+gateway:
+  otel:
+    endpoint: http://otel-collector.observability:4318
+    samplingRatio: 1
+```
+
+What the lookup depends on:
+
+- With `gateway.otel.endpoint` empty there is no record at all.
+- With `samplingRatio` below 1, or a full exporter queue, some requests cannot be found.
+  Use 1 if this serves as an access log. A slow collector loses spans without any log line
+  or metric; the queue is tuned with `OTEL_BSP_MAX_QUEUE_SIZE`,
+  `OTEL_BSP_SCHEDULE_DELAY` and `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` in `gateway.extraEnv`
+  (measurements in the [gateway README](../../../gateway/README.md)).
+- Retention is whatever the OTel backend keeps.
+- The gateway ignores the sampled flag of a client's `traceparent`, so a client cannot erase
+  its own record; it still joins the client's trace.
+
+Usage events do not depend on any of this, but they have no per-attempt detail.
+
 ## SSO and authorization backend
 
 The control plane reads every setting from `LUMEWARP_*` environment variables (see the

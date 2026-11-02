@@ -133,6 +133,16 @@ gateway:
     type: ClusterIP
     port: 4000
     adminPort: 9464
+  # OTLP/HTTP traces. The gateway writes no access log: this is where one request is looked
+  # up, by the x-lumewarp-request-id of its response. See "Looking up a request" in the
+  # chart README for what the lookup depends on.
+  otel:
+    # Base URL, for example http://otel-collector.observability:4318 (/v1/traces is
+    # appended). Empty = no traces, and nothing to look a request up in.
+    endpoint: ""
+    # Share of requests exported, 0 to 1, decided by the gateway and not by the client's
+    # traceparent. Keep 1 if this is used as an access log.
+    samplingRatio: 1
   # Must exceed server.shutdownGraceMs / 1000 + 5 s (OTLP exporter shutdown) + margin.
   terminationGracePeriodSeconds: 35
   podAnnotations: {}

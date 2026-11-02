@@ -19,6 +19,10 @@
 {{- $controlPlaneUrl = printf "%s://%s:%v" $scheme (include "lumewarp.controlPlane.name" .) .Values.controlPlane.service.grpcPort }}
 {{- end }}
 {{- $scope := default .Values.controlPlane.scope .Values.gateway.scope }}
+{{- $samplingRatio := toString .Values.gateway.otel.samplingRatio }}
+{{- if not (regexMatch "^(0(\\.[0-9]+)?|1(\\.0+)?)$" $samplingRatio) }}
+{{- fail (printf "gateway.otel.samplingRatio must be a number from 0 to 1, got %s" $samplingRatio) }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -88,6 +92,14 @@ spec:
                 secretKeyRef:
                   name: {{ required "gateway.token.secretName is required" .Values.gateway.token.secretName }}
                   key: {{ .Values.gateway.token.key }}
+            {{- with .Values.gateway.otel.endpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ . | quote }}
+            - name: OTEL_TRACES_SAMPLER
+              value: traceidratio
+            - name: OTEL_TRACES_SAMPLER_ARG
+              value: {{ $samplingRatio | quote }}
+            {{- end }}
             {{- with .Values.gateway.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
