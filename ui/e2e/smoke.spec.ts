@@ -428,7 +428,9 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await expect(viewerPage.getByRole("tab", { name: "Members" })).toBeVisible();
   await viewerPage.getByRole("button", { name: "Toggle navigation" }).click();
   await expect(viewerPage.getByRole("link", { name: "Teams", exact: true })).toBeVisible();
-  await viewerPage.getByRole("button", { name: "Toggle navigation" }).click();
+  // The open navigation is a modal sheet over the toggle, so it closes with Escape.
+  await viewerPage.keyboard.press("Escape");
+  await expect(viewerPage.getByRole("link", { name: "Teams", exact: true })).toHaveCount(0);
   await viewerPage.getByRole("button", { name: "Theme: Auto" }).click();
   await expect(viewerPage.locator("html")).toHaveAttribute("data-theme", "light");
   await viewerPage.screenshot({ path: "/tmp/lumewarp-team-detail-mobile-light.png", fullPage: true });

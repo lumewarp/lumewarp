@@ -4,60 +4,16 @@
     "src/components/Form.tsx": {
       "legacy-class": 1
     },
-    "src/components/Layout.tsx": {
-      "legacy-class": 1,
-      "native-element": 1
-    },
-    "src/components/PermissionPicker.tsx": {
-      "legacy-class": 3
-    },
     "src/components/SchemaForm.tsx": {
       "legacy-class": 7
-    },
-    "src/pages/Audit.tsx": {
-      "legacy-class": 6
-    },
-    "src/pages/Config.tsx": {
-      "legacy-class": 6,
-      "native-element": 1
-    },
-    "src/pages/Gateways.tsx": {
-      "legacy-class": 9,
-      "native-element": 2
-    },
-    "src/pages/Keys.tsx": {
-      "legacy-class": 13,
-      "native-element": 4
-    },
-    "src/pages/Login.tsx": {
-      "legacy-class": 14,
-      "native-element": 2
-    },
-    "src/pages/Overview.tsx": {
-      "legacy-class": 2
     },
     "src/pages/Routers.tsx": {
       "legacy-class": 34,
       "native-element": 5
     },
-    "src/pages/Settings.tsx": {
-      "legacy-class": 19,
-      "native-element": 3
-    },
     "src/pages/TeamDetail.tsx": {
       "legacy-class": 30,
       "native-element": 6
-    },
-    "src/pages/Upstreams.tsx": {
-      "legacy-class": 6
-    },
-    "src/pages/Usage.tsx": {
-      "legacy-class": 9,
-      "native-element": 2
-    },
-    "src/pages/Users.tsx": {
-      "legacy-class": 17,
-      "native-element": 4
     },
     "src/styles.css": {
       "css-layer": 1

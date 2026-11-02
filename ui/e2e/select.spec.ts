@@ -357,9 +357,9 @@ test("select inside a dialog and a drawer: Esc, focus return and scrolling at th
   await expect.poll(() => page.evaluate(() => document.body.hasAttribute("data-scroll-locked"))).toBe(false);
 });
 
-test("long lists at 390 px: a 65 entry Select in a dialog, a 64 entry Select and a 65 entry Combobox in a sheet reach their first and last entries", async ({ page, request }) => {
+test("long lists at 390 px: a 65 entry Combobox in a dialog, a 64 entry Select and a 65 entry Combobox in a sheet reach their first and last entries", async ({ page, request }) => {
   await page.setViewportSize({ width: 390, height: 700 });
-  // A 65 entry Select inside a Dialog: the model form's upstream list.
+  // A 65 entry Combobox inside a Dialog: the model form's upstream list.
   const ups = [] as { id: string; name: string }[];
   for (let i = 0; i < 65; i++) ups.push(await upstream(request, `lng-${String(i).padStart(2, "0")}-up`));
   await signIn(page, request, "/models");
@@ -374,7 +374,7 @@ test("long lists at 390 px: a 65 entry Select in a dialog, a 64 entry Select and
   await expect(await control(d, "Upstream")).toHaveText(lngs[lngs.length - 1]);
   // The list scrolls with the wheel too, inside the dialog's scroll lock.
   const { popup } = await openPopup(page, d, "Upstream");
-  const scroller = popup.locator("[data-radix-select-viewport]");
+  const scroller = popup.locator("[cmdk-list]");
   await scroller.hover();
   await page.mouse.wheel(0, 400);
   await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
