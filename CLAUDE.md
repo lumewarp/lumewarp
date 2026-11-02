@@ -40,7 +40,7 @@ The model catalog (`docs/architecture.md`, "模型目錄已實作") delivered:
 
 Acceptance suites: `scripts/e2e-p1.sh`, `scripts/e2e-p2.sh` (needs `scripts/dev-idp.sh up`), `scripts/load-e2e.sh`, and `bench/` A6 for request-path changes.
 
-Next: the rest of P2.5 (`docs/plans/p25.md`), then P3 (MCP / A2A), not planned yet.
+Next: the rest of P2.5, then P3 (MCP / A2A), not planned yet.
 
 Decided: license Apache-2.0; MVP usage data in Postgres (ClickHouse later).
 
