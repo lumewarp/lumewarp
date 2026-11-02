@@ -360,13 +360,16 @@ async def test_create_and_rotate_are_rate_limited_and_audited(client, committed)
 
 async def test_audit_keeps_the_key_limit_and_grace_details(client, committed) -> None:
     team = await make_team(committed)
+    user, token = await user_with_token(committed)
+    await make_member(committed, team, user)
+    await committed.commit()
     created = client.post(
-        f"/api/v1/teams/{team.id}/keys", json={"name": "audited"}, headers=ADMIN_AUTH
+        f"/api/v1/teams/{team.id}/keys", json={"name": "audited"}, headers=auth(token)
     )
     assert created.status_code == 201, created.text
-    key_id = created.json()["id"]
+    key_id = created.json()["key"]["id"]
     rotated = client.post(
-        f"/api/v1/keys/{key_id}/rotate", json={"grace_seconds": 60}, headers=ADMIN_AUTH
+        f"/api/v1/keys/{key_id}/rotate", json={"grace_seconds": 60}, headers=auth(token)
     )
     assert rotated.status_code == 200, rotated.text
     updated = client.patch(
