@@ -156,6 +156,7 @@ def test_churn_under_load(stack):
         a = fleet.models["mock-a"]
         timeline["before_b"] = stack.current_version()
         b = fleet.create_model("mock-b")
+
         def set_weights(a_weight: int, b_weight: int) -> None:
             members = [{"model_id": a, "weight": a_weight}, {"model_id": b, "weight": b_weight}]
             stack.ok("PATCH", f"/routers/{fleet.router_id}", json={"members": members})

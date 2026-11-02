@@ -221,7 +221,7 @@ def test_renames_end_the_old_name_unless_a_model_keeps_it(stack):
     kept = _model(stack, "kept", upstream)
     pool = _router(stack, "pool", plain)
     nick = _alias(stack, "nick", pool)
-    to_plain = _alias(stack, "to-plain", plain)
+    _alias(stack, "to-plain", plain)
     _, limited = _limited_key(stack, seeded.team_id, "limited", ["plain", "kept", "pool", "nick"])
     every = ["plain", "kept", "pool", "nick", "to-plain"]
     _wait_names(gw, seeded.a.secret, every)
