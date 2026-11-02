@@ -84,6 +84,43 @@ test("upstream model free text: arrows move through suggestions, Enter picks the
   await expect(box).toHaveValue("Qwen");
 });
 
+for (const [where, width] of [["desktop", 1280], ["390 px", 390]] as const) {
+  test(`upstream model free text (${where}): the highlighted suggestion of a long list stays in view and Enter takes it`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 700 });
+    // Only the suggestions are long: answered here so the shared catalog stays as the other tests expect it.
+    await page.route(/\/api\/v1\/models(\?|$)/, async (route) => {
+      const response = await route.fetch();
+      const body = (await response.json()) as { items: Record<string, unknown>[] };
+      const extra = Array.from({ length: 65 }, (_, i) => ({ ...body.items[0], id: `long-${i}`, upstream_model: `Long/${String(i).padStart(2, "0")}` }));
+      await route.fulfill({ response, json: { ...body, items: [...body.items, ...extra] } });
+    });
+    await page.reload();
+    const box = upstream(page);
+    await box.fill("Long/");
+    const options = page.getByRole("option");
+    await expect(options).toHaveCount(65);
+    const inView = async (name: string) => {
+      const list = await page.getByRole("listbox", { name: "Suggestions" }).boundingBox();
+      const row = await page.getByRole("option", { name, exact: true }).boundingBox();
+      return row!.y >= list!.y - 1 && row!.y + row!.height <= list!.y + list!.height + 1;
+    };
+    // From nothing highlighted, ArrowUp goes to the last entry, far below the first screen.
+    await box.press("ArrowUp");
+    await expect(page.getByRole("option", { name: "Long/64", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect.poll(() => inView("Long/64")).toBe(true);
+    // It wraps round to the first, and walking down keeps the highlight in view.
+    await box.press("ArrowDown");
+    await expect(options.first()).toHaveAttribute("aria-selected", "true");
+    await expect.poll(() => inView("Long/00")).toBe(true);
+    for (let i = 0; i < 20; i++) await box.press("ArrowDown");
+    await expect(page.getByRole("option", { name: "Long/20", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect.poll(() => inView("Long/20")).toBe(true);
+    await expect.poll(() => box.getAttribute("aria-activedescendant")).toBe(await page.getByRole("option", { name: "Long/20", exact: true }).getAttribute("id"));
+    await box.press("Enter");
+    await expect(box).toHaveValue("Long/20");
+  });
+}
+
 test("usage filters: Team, Model, Alias and Router are searchable comboboxes that keep their 'all' row", async ({ page }) => {
   for (const [label, all] of [["Team", "All teams"], ["Model", "All models"], ["Alias", "Any"], ["Router", "Any"]] as const) {
     await expect(page.getByRole("combobox", { name: label, exact: true })).toHaveText(all);

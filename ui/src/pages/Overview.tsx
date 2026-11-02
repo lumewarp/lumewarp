@@ -50,8 +50,8 @@ function SampleUsage() {
         <svg
           role="img"
           aria-label="Sample data, not real usage: stacked bars of tokens per two-hour slot for three example models"
-          viewBox={`0 0 ${CHART_W} ${CHART_H + 20}`}
-          className="h-auto w-full text-muted-foreground"
+          viewBox={`0 0 ${CHART_W} ${CHART_H + 1}`}
+          className="h-auto w-full"
         >
           {[0.25, 0.5, 0.75, 1].map((f) => (
             <line key={f} x1={0} x2={CHART_W} y1={CHART_H - CHART_H * f} y2={CHART_H - CHART_H * f} className="stroke-border" strokeWidth={1} />
@@ -67,13 +67,16 @@ function SampleUsage() {
                   y -= height;
                   return <rect key={s.name} x={x} y={y} width={BAR_W} height={height} rx={2} className={s.fill} />;
                 })}
-                <text x={x + BAR_W / 2} y={CHART_H + 14} textAnchor="middle" fontSize={10} className="fill-current">
-                  {hour}
-                </text>
               </g>
             );
           })}
         </svg>
+        {/* In HTML, not the SVG, so the labels stay at text size however the chart scales. */}
+        <div className="-mt-2 grid grid-cols-12 text-center text-xs text-muted-foreground" aria-hidden="true">
+          {SAMPLE_HOURS.map((hour) => (
+            <span key={hour}>{hour}</span>
+          ))}
+        </div>
       </CardContent>
     </Card>
   );

@@ -37,6 +37,44 @@ test("phone: the navigation opens, closes on Esc and returns focus", async ({ pa
   expect(await page.evaluate(() => getComputedStyle(document.body).overflow)).not.toBe("hidden");
 });
 
+test("phone: the Close button shuts the navigation in place and returns focus", async ({ page }) => {
+  await toggle(page).click();
+  const nav = page.getByRole("navigation", { name: "Main" });
+  await expect(nav).toBeVisible();
+  await page.getByRole("button", { name: "Close" }).click();
+  await expect(nav).toHaveCount(0);
+  await expect(page).toHaveURL(/\/$/);
+  await expect(toggle(page)).toBeFocused();
+  await expect(toggle(page)).toHaveAttribute("aria-expanded", "false");
+});
+
+test("the navigation is reachable on both sides of the breakpoint, and with a larger browser font", async ({ page }) => {
+  // Below md: the toggle opens the sheet. From md up: the sidebar is there and there is no toggle.
+  const assertPhone = async () => {
+    await expect(toggle(page)).toBeVisible();
+    await toggle(page).click();
+    await expect(page.getByRole("navigation", { name: "Main" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("navigation", { name: "Main" })).toHaveCount(0);
+  };
+  const assertDesktop = async () => {
+    await expect(toggle(page)).toBeHidden();
+    await expect(page.getByRole("navigation", { name: "Main" })).toBeVisible();
+  };
+  await page.setViewportSize({ width: 767, height: 800 });
+  await assertPhone();
+  await page.setViewportSize({ width: 768, height: 800 });
+  await assertDesktop();
+  // At a 20px browser font 48rem is 960px, so 800px is below md for CSS and has to be for the script too.
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Page.setFontSizes", { fontSizes: { standard: 20, fixed: 16 } });
+  await page.setViewportSize({ width: 800, height: 800 });
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  expect(await page.evaluate(() => window.matchMedia("(min-width: 48rem)").matches)).toBe(false);
+  await assertPhone();
+});
+
 test("phone: clicking the overlay or a link closes the navigation", async ({ page }) => {
   await toggle(page).click();
   await expect(page.getByRole("navigation", { name: "Main" })).toBeVisible();

@@ -77,15 +77,24 @@ export function Combobox<T>({
  * is a plain listbox that never takes focus, so typing continues while it is open. Enter keeps the typed text
  * unless an arrow key moved to a suggestion. Nothing is trimmed here: the caller decides what it sends.
  */
+function keepInView(el: HTMLElement | null) {
+  const list = el?.parentElement;
+  if (!el || !list) return;
+  if (el.offsetTop < list.scrollTop) list.scrollTop = el.offsetTop;
+  else if (el.offsetTop + el.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = el.offsetTop + el.offsetHeight - list.clientHeight;
+}
+
 function FreeCombobox({ value, onChange, options, placeholder, disabled, ...aria }: { value: string; onChange: (v: string) => void; options: ChoiceOption<string>[]; placeholder?: string; disabled?: boolean } & Partial<ControlProps>) {
   const [open, setOpen] = useState(false);
-  const [active, setActive] = useState(-1);
+  const [highlight, setActive] = useState(-1);
   const generatedId = useId();
   const id = aria.id ?? generatedId;
   const listId = `${id}-list`;
   const needle = value.trim().toLowerCase();
   const shown = options.filter((o) => o.label.toLowerCase().includes(needle));
   const visible = open && shown.length > 0;
+  // Suggestions can change under the highlight when they reload.
+  const active = highlight < shown.length ? highlight : -1;
   const pickAt = (index: number) => {
     const o = shown[index];
     if (o) onChange(o.value);
@@ -103,7 +112,7 @@ function FreeCombobox({ value, onChange, options, placeholder, disabled, ...aria
       if (!shown.length) return;
       setOpen(true);
       const step = e.key === "ArrowDown" ? 1 : -1;
-      setActive((a) => (a < 0 ? (step > 0 ? 0 : shown.length - 1) : (a + step + shown.length) % shown.length));
+      setActive(active < 0 ? (step > 0 ? 0 : shown.length - 1) : (active + step + shown.length) % shown.length);
     } else if (e.key === "Enter" && visible) {
       e.preventDefault();
       pickAt(active);
@@ -142,10 +151,11 @@ function FreeCombobox({ value, onChange, options, placeholder, disabled, ...aria
           if (e.target instanceof Node && document.getElementById(id)?.contains(e.target)) e.preventDefault();
         }}
       >
-        <div id={listId} role="listbox" aria-label="Suggestions" className="max-h-[min(300px,var(--radix-popover-content-available-height))] overflow-y-auto">
+        <div id={listId} role="listbox" aria-label="Suggestions" className="relative max-h-[min(300px,var(--radix-popover-content-available-height,300px))] overflow-y-auto">
           {shown.map((o, i) => (
             <div
               key={o.value}
+              ref={i === active ? keepInView : undefined}
               id={`${listId}-${i}`}
               role="option"
               aria-selected={i === active}

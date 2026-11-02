@@ -1,17 +1,18 @@
 import * as React from "react"
 
-const MOBILE_BREAKPOINT = 768
+// Tailwind's md, in the same unit: a browser font size other than 16px moves both together.
+const DESKTOP_QUERY = "(min-width: 48rem)"
 
 export function useIsMobile() {
   const [isMobile, setIsMobile] = React.useState<boolean | undefined>(undefined)
 
   React.useEffect(() => {
-    const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`)
+    const mql = window.matchMedia(DESKTOP_QUERY)
     const onChange = () => {
-      setIsMobile(window.innerWidth < MOBILE_BREAKPOINT)
+      setIsMobile(!mql.matches)
     }
     mql.addEventListener("change", onChange)
-    setIsMobile(window.innerWidth < MOBILE_BREAKPOINT)
+    onChange()
     return () => mql.removeEventListener("change", onChange)
   }, [])
 

@@ -28,15 +28,23 @@ async function signIn(page: Page, path: string) {
 
 test("audit: the Team filter is a combobox that sends team_id, and the log narrows to that team", async ({ page, request }) => {
   const team = await (await request.post("/api/v1/teams", { headers: admin, data: { name: "s2-audit-team" } })).json();
+  await request.post("/api/v1/teams", { headers: admin, data: { name: "s2-audit-other" } });
+  const cell = (name: string) => page.getByRole("cell", { name, exact: true }).first();
   await signIn(page, "/audit");
   await expect(page.getByRole("heading", { name: "Audit log" })).toBeVisible();
+  await expect(cell("s2-audit-team")).toBeVisible();
+  await expect(cell("s2-audit-other")).toBeVisible();
   const filtered = page.waitForRequest((r) => new URL(r.url()).pathname === "/api/v1/audit" && new URL(r.url()).searchParams.get("team_id") === team.id);
   await pick(page, "Team", "s2-audit-team");
   await filtered;
   await expect(page.getByRole("combobox", { name: "Team" })).toContainText("s2-audit-team");
+  await expect(cell("s2-audit-other")).toHaveCount(0);
+  await expect(cell("s2-audit-team")).toBeVisible();
   // The unfiltered query is cached, so clearing may not hit the network: assert the control, not a request.
   await pick(page, "Team", "All teams");
   await expect(page.getByRole("combobox", { name: "Team" })).toContainText("All teams");
+  await expect(cell("s2-audit-other")).toBeVisible();
+  await expect(cell("s2-audit-team")).toBeVisible();
 });
 
 test("settings and users: description list, buttons and pager render and work", async ({ page }) => {
@@ -52,8 +60,8 @@ test("settings and users: description list, buttons and pager render and work", 
   await expect(page.getByText(/Showing \d+ users/)).toBeVisible();
 });
 
-test.skip(!SHOTS, "screenshots only with E2E_SHOTS");
 test("screenshots: s2 pages, desktop and phone, light and dark", async ({ page, request }) => {
+  test.skip(!SHOTS, "screenshots only with E2E_SHOTS");
   await request.post("/api/v1/teams", { headers: admin, data: { name: "s2-shot-team" } });
   await signIn(page, "/");
   const modes: [string, number, number, string][] = [
