@@ -31,6 +31,11 @@
     {"type": "object", "required": ["missing"]},
     {"type": "object", "additionalProperties": {"type": "string"}},
     {"type": "object", "patternProperties": {"^a": {"type": "string"}}},
-    {"type": "object", "if": {"type": "object"}}
+    {"type": "object", "if": {"type": "object"}},
+    {"type": "object", "title": 5},
+    {"type": "object", "properties": {"a": {"type": "integer", "description": ["x"]}}},
+    {"type": "object", "properties": {"a": {"type": "boolean", "enum": [true]}}},
+    {"type": "object", "properties": {"a": {"type": "integer", "minimum": true}}},
+    {"type": "object", "properties": {"a": {"type": "integer", "enum": [1.5]}}}
   ]
 }

@@ -110,6 +110,15 @@ fn add_integer_bounds(schema: &mut Map<String, Value>, format: &str) {
 
 const COMMON_KEYWORDS: &[&str] = &["type", "title", "description", "default"];
 
+fn text_problem(path: &str, schema: &Map<String, Value>) -> Option<String> {
+    ["title", "description"].iter().find_map(|keyword| {
+        schema
+            .get(*keyword)
+            .is_some_and(|text| !text.is_string())
+            .then(|| format!("{path}: {keyword} must be a string"))
+    })
+}
+
 /// Why `schema` is outside the subset, or `None` when it is inside.
 pub fn subset_problem(schema: &Value) -> Option<String> {
     if serde_json::to_vec(schema).map_or(true, |text| text.len() > MAX_SCHEMA_BYTES) {
@@ -133,6 +142,9 @@ fn object_problem(path: &str, schema: &Value, may_nest: bool) -> Option<String> 
             )
     }) {
         return Some(format!("{path}: keyword {key:?} is outside the subset"));
+    }
+    if let Some(problem) = text_problem(path, object) {
+        return Some(problem);
     }
     if object
         .get("additionalProperties")
@@ -182,6 +194,9 @@ fn scalar_problem(path: &str, schema: &Value) -> Option<String> {
         .find(|key| !COMMON_KEYWORDS.contains(&key.as_str()) && !allowed.contains(&key.as_str()))
     {
         return Some(format!("{path}: keyword {key:?} is outside the subset"));
+    }
+    if let Some(problem) = text_problem(path, object) {
+        return Some(problem);
     }
     for bound in ["minimum", "maximum"] {
         if object.get(bound).is_some_and(|value| !value.is_number()) {

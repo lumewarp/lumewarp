@@ -628,6 +628,14 @@ Splits = Annotated[list[TrafficSplitIn], AfterValidator(_check_splits)]
 StrategyName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")]
 
 
+def _force_field() -> Any:
+    # default_factory: an OpenAPI `default` would make it required in the generated UI client.
+    return Field(
+        default_factory=lambda: False,
+        description="Save although connected gateways lack the strategy; they will NACK.",
+    )
+
+
 class RouterCreate(ApiModel):
     name: ModelName
     strategy: StrategyName = "weighted"
@@ -643,10 +651,7 @@ class RouterCreate(ApiModel):
     traffic_split: Splits = Field(default_factory=list)
     sticky: StickyBy = StickyBy.NONE
     sticky_header: StickyHeader | None = None
-    force: bool = Field(
-        default=False,
-        description="Save although connected gateways lack the strategy; they will NACK.",
-    )
+    force: bool = _force_field()
 
     @field_validator("sticky_header")
     @classmethod
@@ -668,10 +673,7 @@ class RouterUpdate(ApiModel):
     traffic_split: Splits | None = None
     sticky: StickyBy | None = None
     sticky_header: StickyHeader | None = None
-    force: bool = Field(
-        default=False,
-        description="Save although connected gateways lack the strategy; they will NACK.",
-    )
+    force: bool = _force_field()
 
     @field_validator("sticky_header")
     @classmethod

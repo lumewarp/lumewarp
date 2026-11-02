@@ -16,6 +16,7 @@ WORKDIR /src
 
 COPY gateway/Cargo.toml gateway/Cargo.lock ./gateway/
 COPY gateway/crates ./gateway/crates
+COPY gateway/strategies ./gateway/strategies
 COPY proto ./proto
 
 WORKDIR /src/gateway

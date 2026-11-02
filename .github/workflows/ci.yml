@@ -81,6 +81,13 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - name: Built-in strategy manifest matches the control plane's copy
+        run: |
+          manifest=../control-plane/src/lumewarp_control_plane/compiler/builtin_strategies.json
+          if ! cargo run --locked -q -p lumewarp-gateway -- strategies --json | diff - "$manifest"; then
+            echo "::error::regenerate with: cd gateway && cargo run -p lumewarp-gateway -- strategies --json > $manifest"
+            exit 1
+          fi
 
   bench-crate:
     if: github.event_name == 'push' || github.event_name == 'pull_request'

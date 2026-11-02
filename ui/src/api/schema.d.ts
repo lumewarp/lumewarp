@@ -370,6 +370,23 @@ export interface paths {
         patch: operations["updateRouter"];
         trace?: never;
     };
+    "/api/v1/strategies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Strategies */
+        get: operations["listStrategies"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/users": {
         parameters: {
             query?: never;
@@ -1359,6 +1376,13 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
+        /** Page[StrategyOut] */
+        Page_StrategyOut_: {
+            /** Items */
+            items: components["schemas"]["StrategyOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
         /** Page[TeamOut] */
         Page_TeamOut_: {
             /** Items */
@@ -1468,6 +1492,11 @@ export interface components {
             sticky: components["schemas"]["StickyBy"];
             /** Sticky Header */
             sticky_header?: string | null;
+            /**
+             * Force
+             * @description Save although connected gateways lack the strategy; they will NACK.
+             */
+            force?: boolean;
         };
         /** RouterMemberIn */
         RouterMemberIn: {
@@ -1530,6 +1559,13 @@ export interface components {
             /** Sticky Header */
             sticky_header: string | null;
             /**
+             * Config Invalid
+             * @description Stored settings fail the strategy's current schema, or nothing reports it.
+             */
+            config_invalid: boolean;
+            /** Config Problems */
+            config_problems: string[];
+            /**
              * Created At
              * Format: date-time
              */
@@ -1564,6 +1600,11 @@ export interface components {
             sticky?: components["schemas"]["StickyBy"] | null;
             /** Sticky Header */
             sticky_header?: string | null;
+            /**
+             * Force
+             * @description Save although connected gateways lack the strategy; they will NACK.
+             */
+            force?: boolean;
         };
         /** ServiceAccountCreate */
         ServiceAccountCreate: {
@@ -1692,6 +1733,64 @@ export interface components {
          * @enum {string}
          */
         StickyBy: "none" | "header" | "team" | "key";
+        /** StrategyGatewayOut */
+        StrategyGatewayOut: {
+            /** Gateway Id */
+            gateway_id: string;
+            /** Connected */
+            connected: boolean;
+            /**
+             * Digest
+             * @description Null when known only from its capabilities.
+             */
+            digest: string | null;
+            /** Seen At */
+            seen_at: string | null;
+        };
+        /**
+         * StrategyOut
+         * @description Everything but `name` and `builtin` is data from a gateway: render it as plain text.
+         */
+        StrategyOut: {
+            /** Name */
+            name: string;
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Uses Weight */
+            uses_weight: boolean;
+            /** Needs */
+            needs: string[];
+            /**
+             * Params Schema
+             * @description Null when unusable or not reported: settings then cannot be validated here.
+             */
+            params_schema: {
+                [key: string]: unknown;
+            } | null;
+            /** Member Schema */
+            member_schema: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Schema Problems
+             * @description Why a schema reported is not usable.
+             */
+            schema_problems: string[];
+            /** Builtin */
+            builtin: boolean;
+            /**
+             * Gateways
+             * @description Gateways that have it, newest first.
+             */
+            gateways: components["schemas"]["StrategyGatewayOut"][];
+            /**
+             * Missing Gateways
+             * @description Connected gateways that do not have it.
+             */
+            missing_gateways: string[];
+        };
         /**
          * StreamUsageMode
          * @enum {string}
@@ -4942,6 +5041,71 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RouterOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listStrategies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_StrategyOut_"];
                 };
             };
             /** @description Missing or invalid credentials */

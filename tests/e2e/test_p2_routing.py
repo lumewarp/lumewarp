@@ -39,16 +39,22 @@ def test_unregistered_custom_strategy_nacks_and_keeps_last_snapshot(stack):
         }
         upstream = _upstream_id(stack, "mock")
         dep = _model(stack, "custom-model", upstream)
-        stack.ok(
-            "POST",
-            "/routers",
-            json={
-                "name": "custom-test",
-                "members": [{"model_id": dep}],
-                "strategy": "header_pin",
-                "params": {"headers": ["x-pin"]},
-            },
-        )
+        body = {
+            "name": "custom-test",
+            "members": [{"model_id": dep}],
+            "strategy": "header_pin",
+            "params": {"headers": ["x-pin"]},
+        }
+        # Nothing reports it: refused up front, where it used to take a NACK to find out.
+        refused = stack.api("POST", "/routers", json=body)
+        assert refused.status_code == 422, refused.text
+        assert "no gateway reports" in refused.text
+        # Another gateway has it, offline: this connected one lacks it and needs force.
+        _offline_gateway_with(stack, "header_pin")
+        refused = stack.api("POST", "/routers", json=body)
+        assert refused.status_code == 422, refused.text
+        assert "force" in refused.text
+        stack.ok("POST", "/routers", json={**body, "force": True})
         revision = pg(
             stack.dsn, "SELECT source_revision FROM scopes WHERE name = 'e2e'"
         )[0][0]
@@ -99,6 +105,25 @@ def test_alias_and_direct_model_through_the_control_plane(stack):
     stack.ok("PATCH", f"/aliases/{alias['id']}", json={"name": "nick2"})
     wait_for(lambda: gw.chat(seeded.a.secret, model="nick2").status_code == 200, 10, "new name")
     assert gw.chat(seeded.a.secret, model="nick").status_code == 404
+
+
+def _offline_gateway_with(stack, strategy: str) -> None:
+    gateway = "offline-with-strategy"
+    stack.ok("POST", "/gateways", json={"gateway_id": gateway})
+    pg(
+        stack.dsn,
+        "INSERT INTO gateway_sessions (scope, gateway_id, connected, last_seen_at)"
+        " VALUES ('e2e', $1, false, now())",
+        gateway,
+    )
+    pg(
+        stack.dsn,
+        "INSERT INTO gateway_strategies (scope, gateway_id, name, digest, descriptor, seen_at)"
+        " VALUES ('e2e', $1, $2, 'aa', $3, now())",
+        gateway,
+        strategy,
+        json.dumps({"name": strategy, "params_schema": None, "member_schema": None}),
+    )
 
 
 def _upstream_id(stack, name: str) -> str:
