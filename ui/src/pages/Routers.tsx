@@ -11,7 +11,7 @@ import { DataTable } from "../components/Table";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Checkbox } from "../components/ui/checkbox";
-import { ComboboxField } from "../components/ui/combobox-field";
+import { Combobox, ComboboxField } from "../components/ui/combobox-field";
 import { Label } from "../components/ui/label";
 import { useAliases, useCan, useModels, useMut, useNames, useRouters, useStrategies } from "../hooks";
 import { matches, routerUpstreamModels } from "../lib/catalog";
@@ -570,8 +570,8 @@ export function Routers() {
                   </Button>
                 </div>
               ))}
-              <ComboboxField
-                label="Add fallback model"
+              <Combobox
+                aria-label="Add fallback model"
                 searchLabel="Search fallback models"
                 value={undefined}
                 disabled={!fallbackOptions.length}

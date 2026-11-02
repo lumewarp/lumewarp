@@ -4,17 +4,6 @@
     "src/components/Form.tsx": {
       "legacy-class": 1
     },
-    "src/components/SchemaForm.tsx": {
-      "legacy-class": 7
-    },
-    "src/pages/Routers.tsx": {
-      "legacy-class": 34,
-      "native-element": 5
-    },
-    "src/pages/TeamDetail.tsx": {
-      "legacy-class": 30,
-      "native-element": 6
-    },
     "src/styles.css": {
       "css-layer": 1
     }
