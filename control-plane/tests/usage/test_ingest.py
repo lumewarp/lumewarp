@@ -661,7 +661,7 @@ async def test_usage_report_metrics_count_committed_events(
     assert skipped("invalid_event") == 2
 
 
-async def test_provenance_fields_are_accepted_and_ignored_until_they_are_stored(
+async def test_provenance_fields_are_stored_with_rejected_requests(
     session_factory: SessionFactory,
 ):
     scope_name, key = await _seed(session_factory)
@@ -683,3 +683,22 @@ async def test_provenance_fields_are_accepted_and_ignored_until_they_are_stored(
     batch = [event, rejected]
     async with session_factory() as session, session.begin():
         assert await ingest(session, "gateway-a", batch, scope_name=scope_name) == 2
+        row = await session.scalar(
+            select(UsageEventRow).where(UsageEventRow.request_id == uuid.UUID(event.request_id))
+        )
+        assert (row.alias, row.router, row.upstream, row.upstream_model) == (
+            "nick",
+            "pool",
+            "up",
+            "real",
+        )
+        assert (row.fallback, row.attempts) == (True, 2)
+        rejected_row = await session.scalar(
+            select(UsageEventRow).where(UsageEventRow.request_id == uuid.UUID(rejected.request_id))
+        )
+        assert (rejected_row.requested, rejected_row.model) == ("n" * 400, "")
+        assert (rejected_row.model_id, rejected_row.alias_id, rejected_row.router_id) == (
+            None,
+            None,
+            None,
+        )

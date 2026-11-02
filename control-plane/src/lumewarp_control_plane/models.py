@@ -1088,6 +1088,19 @@ class UsageEvent(Base):
         Index("ix_usage_events_team_ts", "team_id", "ts"),
         Index("ix_usage_events_owner_ts", "owner_id", "ts"),
         Index("ix_usage_events_key_ts", "key_id", "ts"),
+        *(
+            Index(f"ix_usage_events_{field}_ts", field, "ts")
+            for field in (
+                "model_id",
+                "alias_id",
+                "router_id",
+                "model",
+                "alias",
+                "router",
+                "upstream_model",
+            )
+        ),
+        CheckConstraint("attempts >= 0", name="attempts_nonneg"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
@@ -1106,7 +1119,22 @@ class UsageEvent(Base):
     )
     owner_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     requested: Mapped[str] = mapped_column(String(400), nullable=False)
-    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    model: Mapped[str] = mapped_column(String(400), nullable=False)
+    alias: Mapped[str] = mapped_column(String(400), nullable=False, default="", server_default="")
+    router: Mapped[str] = mapped_column(String(400), nullable=False, default="", server_default="")
+    upstream: Mapped[str] = mapped_column(
+        String(200), nullable=False, default="", server_default=""
+    )
+    upstream_model: Mapped[str] = mapped_column(
+        String(400), nullable=False, default="", server_default=""
+    )
+    fallback: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    attempts: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    model_id: Mapped[uuid.UUID | None] = mapped_column()
+    alias_id: Mapped[uuid.UUID | None] = mapped_column()
+    router_id: Mapped[uuid.UUID | None] = mapped_column()
     endpoint: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     stream: Mapped[bool] = mapped_column(Boolean, nullable=False)

@@ -38,7 +38,9 @@ async def test_upgrade_downgrade_upgrade() -> None:
         with pytest.raises(NotImplementedError, match="irreversible"):
             await migrate.downgrade(engine, "0009")
         async with engine.connect() as conn:
-            assert await migrate.current_revision(conn) == migrate.head_revision()
+            # Later reversible revisions have already been downgraded when
+            # Alembic reaches the irreversible catalog conversion.
+            assert await migrate.current_revision(conn) == "0010"
         await drop_database(url)
         url = await create_database()
         await engine.dispose()

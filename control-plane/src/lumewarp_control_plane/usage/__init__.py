@@ -35,12 +35,13 @@ from lumewarp_control_plane.models import (
     member_scope_id,
 )
 from lumewarp_control_plane.settings import Settings, get_settings
+from lumewarp_control_plane.usage.catalog import resolve_catalog_ids
 from lumewarp_control_plane.windows import month_window
 
 log = logging.getLogger(__name__)
 _MAX_BIGINT = 2**63 - 1
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-# asyncpg caps one statement at 32767 bind parameters; 21 columns per event row.
+# asyncpg caps one statement at 32767 bind parameters; 30 columns per event row.
 _INSERT_CHUNK_EVENTS = 1000
 # Fields taken from the wire; the key owner is added from api_keys after validation.
 _EVENT_FIELDS = (
@@ -52,6 +53,12 @@ _EVENT_FIELDS = (
     "team_id",
     "requested",
     "model",
+    "alias",
+    "router",
+    "upstream",
+    "upstream_model",
+    "fallback",
+    "attempts",
     "endpoint",
     "status",
     "stream",
@@ -121,14 +128,22 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
     team_id = _uuid(event.team_id, "team_id")
     # A rejected request may never reach routing: authentication runs before the body is
     # read (no requested name) and policy rejections happen before a model is chosen. The
-    # provenance fields (alias, router, upstream, upstream_model, fallback, attempts) are
-    # stored by c5; they are ignored here until then.
+    # provenance fields are retained verbatim; ids are resolved in bulk after validation.
     rejected = event.outcome == usage_pb2.REQUEST_OUTCOME_REJECTED
     # `requested` is client input on rejected requests; Postgres text cannot hold NUL.
     if len(event.requested) > 400 or "\x00" in event.requested or not (event.requested or rejected):
         raise InvalidUsageBatch("invalid requested")
-    if len(event.model) > 200 or not (event.model or rejected):
+    if len(event.model) > 400 or "\x00" in event.model or not (event.model or rejected):
         raise InvalidUsageBatch("invalid model")
+    for field, maximum in (
+        ("alias", 400),
+        ("router", 400),
+        ("upstream", 200),
+        ("upstream_model", 400),
+    ):
+        value = getattr(event, field)
+        if len(value) > maximum or "\x00" in value:
+            raise InvalidUsageBatch(f"invalid {field}")
     if not event.endpoint or len(event.endpoint) > 64:
         raise InvalidUsageBatch("invalid endpoint")
     if event.status > 599:
@@ -172,7 +187,13 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
         "key_id": key_id,
         "team_id": team_id,
         "requested": event.requested,
-        "model": event.model,
+        "model": "" if rejected else event.model,
+        "alias": event.alias,
+        "router": event.router,
+        "upstream": event.upstream,
+        "upstream_model": event.upstream_model,
+        "fallback": event.fallback,
+        "attempts": event.attempts,
         "endpoint": event.endpoint,
         "status": event.status,
         "stream": event.stream,
@@ -535,6 +556,7 @@ async def ingest(
         # The savepoint keeps a failed persist from leaving partial usage writes if the
         # caller catches the exception and continues its outer transaction.
         async with session.begin_nested():
+            await resolve_catalog_ids(session, [item.values for item in by_id.values()])
             return await _persist_events(
                 session,
                 gateway_id,
