@@ -506,14 +506,11 @@ impl ModelRewriter {
                         _ => lines.line = Line::Other,
                     }
                 }
-                Line::Other => match memchr::memchr2(b'\r', b'\n', &bytes[at..]) {
-                    Some(found) => {
-                        at += found + 1;
-                        lines.after_cr = bytes[at - 1] == b'\r';
-                        lines.line = Line::Name(0);
-                    }
-                    None => return None,
-                },
+                Line::Other => {
+                    at += memchr::memchr2(b'\r', b'\n', &bytes[at..])? + 1;
+                    lines.after_cr = bytes[at - 1] == b'\r';
+                    lines.line = Line::Name(0);
+                }
                 Line::ValueStart => {
                     lines.line = Line::Value;
                     at += usize::from(byte == b' ');
@@ -524,9 +521,8 @@ impl ModelRewriter {
                     if let Some(value) = self.json.scan(&bytes[at..end]) {
                         return Some(at + value);
                     }
-                    if found.is_none() {
-                        return None;
-                    }
+                    // The line goes on in the next frame.
+                    found?;
                     // The newline that joins this line to the next `data` line.
                     self.json.scan(b"\n");
                     lines.after_cr = bytes[end] == b'\r';
