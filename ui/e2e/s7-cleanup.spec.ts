@@ -1,5 +1,6 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
-import { readdirSync } from "node:fs";
+import { existsSync, readdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 
 import { confirmDialog, control, dialog, pick, SHOTS, shot } from "./helpers";
 
@@ -69,6 +70,8 @@ async function post<T = { id: string; name: string }>(request: APIRequestContext
 test("screenshots: the whole matrix, desktop and 390 px, light and dark", async ({ page, browser, request }, info) => {
   test.skip(!SHOTS, "set E2E_SHOTS to a directory to save screenshots");
   info.setTimeout(900_000);
+  // Start from a clean s7-* set: a stale file from an earlier run would hide a missing shot from this one.
+  if (existsSync(SHOTS!)) for (const name of readdirSync(SHOTS!)) if (name.startsWith("s7-") && name.endsWith(".png")) rmSync(join(SHOTS!, name));
   const team = await post(request, "/teams", { name: "s7-shots" });
   await post(request, `/teams/${team.id}/members`, { email: "viewer@e2e.test", role: "member" });
   const account = await post(request, `/teams/${team.id}/service-accounts`, { name: "s7-agent", description: "Screenshots" });
