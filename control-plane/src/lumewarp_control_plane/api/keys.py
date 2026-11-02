@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections import OrderedDict
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from math import ceil
 
 from fastapi import APIRouter, Request, status
 from sqlalchemy import Select, func, select
@@ -65,29 +66,62 @@ from lumewarp_control_plane.security import SecretKind, generate_secret
 
 router = APIRouter(tags=["keys"])
 
-# Self-service writes are rate limited per principal and target, in this process. The
-# control plane runs one process (README); a sliding fixed window is enough to stop a
-# runaway client without turning into a database write on every attempt.
+# Self-service writes are rate limited per principal and operation, in this process. The
+# target (team or key) is deliberately not part of the scope: otherwise a caller with many
+# keys or teams could multiply the quota, and unknown UUIDs would allocate entries. The
+# control plane runs one process (README); a fixed window is enough to stop a runaway
+# client without a database write per attempt.
 KEY_WRITE_WINDOW_SECONDS = 60
-KEY_CREATE_LIMIT = 10
-KEY_ROTATE_LIMIT = 10
+KEY_CREATE_LIMIT = 30
+KEY_ROTATE_LIMIT = 30
 MAX_LIMITER_ENTRIES = 10_000
 
 
 @dataclass
 class KeyWriteLimiter:
-    events: OrderedDict[str, tuple[int, float]] = field(default_factory=OrderedDict)
+    """Per-scope fixed-window counters with amortized, incremental expiry.
+
+    `entries` is the live table and `expiries` is ordered by expiry (every counter keeps its
+    original deadline), so a call only pops the expired front instead of rebuilding the
+    table. At most two entries exist per principal (create and rotate), so the capacity
+    bounds principals. Normal hits and refusals are O(1). A full table refuses a new scope
+    and never evicts a live counter: no one can free another principal's quota by creating
+    targets.
+    """
+
+    capacity: int = MAX_LIMITER_ENTRIES
+    window_seconds: float = KEY_WRITE_WINDOW_SECONDS
+    entries: dict[str, tuple[int, float]] = field(default_factory=dict)
+    expiries: deque[tuple[str, float]] = field(default_factory=deque)
+
+    def _purge(self, now: float) -> None:
+        while self.expiries and self.expiries[0][1] <= now:
+            scope, until = self.expiries.popleft()
+            current = self.entries.get(scope)
+            if current is not None and current[1] == until:
+                del self.entries[scope]
+
+    def _retry_after(self, now: float) -> int:
+        if not self.expiries:
+            return max(1, ceil(self.window_seconds))
+        return max(1, ceil(self.expiries[0][1] - now))
 
     def reserve(self, scope: str, limit: int) -> int:
         """Count one attempt; return 0 when allowed, else seconds until the window ends."""
         now = time.monotonic()
-        self.events = OrderedDict((key, row) for key, row in self.events.items() if row[1] > now)
-        count, until = self.events.get(scope, (0, now + KEY_WRITE_WINDOW_SECONDS))
+        self._purge(now)
+        row = self.entries.get(scope)
+        if row is None:
+            if len(self.entries) >= self.capacity:
+                return self._retry_after(now)
+            until = now + self.window_seconds
+            self.entries[scope] = (1, until)
+            self.expiries.append((scope, until))
+            return 0
+        count, until = row
         if count >= limit:
-            return max(1, int(until - now + 0.999))
-        if scope not in self.events and len(self.events) >= MAX_LIMITER_ENTRIES:
-            self.events.popitem(last=False)
-        self.events[scope] = (count + 1, until)
+            return max(1, ceil(until - now))
+        self.entries[scope] = (count + 1, until)
         return 0
 
 
@@ -103,11 +137,23 @@ def _principal_scope(authz: Authz) -> str:
     return str(authz.user_id) if authz.user_id is not None else "break_glass"
 
 
-def _rate_limit(
-    request: Request, authz: Authz, scope: str, limit: int, operation: str, metrics: MetricsDep
+async def _rate_limit(
+    request: Request, authz: Authz, operation: str, limit: int, metrics: MetricsDep
 ) -> None:
-    retry_after = _limiter(request).reserve(f"{operation}:{_principal_scope(authz)}:{scope}", limit)
+    """Rate limit after authentication, before target lookup and authorization.
+
+    Installation admins (the configured admin group or a break-glass session) provision in
+    bulk and are exempt; `RequestAuthz.is_admin()` is the same check the rest of the API
+    uses. A team admin is only an admin of that team, so this returns False and they stay
+    limited. The scope contains no target, so a missing or foreign UUID cannot buy quota or
+    allocate an entry; running before the target lookup keeps refusals cheap.
+    """
+    if await authz.is_admin():
+        return
+    retry_after = _limiter(request).reserve(f"{operation}:{_principal_scope(authz)}", limit)
     if retry_after:
+        # Deliberately no audit row: 429s are cheap to trigger and would let a client flood
+        # the audit table. The metric still records the refusal.
         metrics.key_writes.labels(operation, "rate_limited").inc()
         raise ApiError(
             429,
@@ -298,7 +344,7 @@ async def create_key(
     settings: SettingsDep,
     metrics: MetricsDep,
 ) -> KeyCreated:
-    _rate_limit(request, authz, str(team_id), KEY_CREATE_LIMIT, "create", metrics)
+    await _rate_limit(request, authz, "create", KEY_CREATE_LIMIT, metrics)
     async with mutation(session):
         await lock_scope(session, settings)
         team = await get_team_or_404(session, authz, team_id)
@@ -489,7 +535,7 @@ async def rotate_key(
     previous hash is kept: rotating twice inside the grace drops the older one.
     """
     grace = (body or KeyRotate()).grace_seconds
-    _rate_limit(request, authz, str(key_id), KEY_ROTATE_LIMIT, "rotate", metrics)
+    await _rate_limit(request, authz, "rotate", KEY_ROTATE_LIMIT, metrics)
     async with mutation(session):
         await lock_scope(session, settings)
         row = await _get_key(session, authz, key_id)

@@ -1,12 +1,16 @@
 """Self-service key limits: /users/me details, expiry, rotation grace and rate limits."""
 
+import time
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane.api import keys as keys_module
 from lumewarp_control_plane.authz import Authorizer, Decision, Relation
+from lumewarp_control_plane.compiler import compile_scope
 from lumewarp_control_plane.models import (
     ApiKey,
     AuditLog,
@@ -35,6 +39,14 @@ def parse_ts(value: str | None) -> datetime | None:
     if value is None:
         return None
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+async def _audit_count(session, team_ids, action: str) -> int:
+    return await session.scalar(
+        select(func.count())
+        .select_from(AuditLog)
+        .where(AuditLog.team_id.in_(team_ids), AuditLog.action == action)
+    )
 
 
 async def test_me_reports_effective_models_limits_and_budget(client, committed) -> None:
@@ -118,6 +130,39 @@ async def test_me_reports_effective_models_limits_and_budget(client, committed) 
     narrowed_all = teams[str(universal.id)]
     assert narrowed_all["models"] == [names[1]]
     assert narrowed_all["all_models"] is False
+
+
+async def test_me_matches_the_compiled_snapshot_after_team_narrowing(
+    client, committed, api_engine
+) -> None:
+    """A member left at ALL must follow the team's new LIST, not the whole catalog."""
+    name = f"m-{suffix()}"
+    team = await make_team(committed, allowed_models=[name])
+    user, token = await user_with_token(committed)
+    await make_member(committed, team, user, model_access=ModelAccess.ALL)
+    await committed.commit()
+    created = client.post(
+        f"/api/v1/teams/{team.id}/keys", json={"name": "compiled"}, headers=auth(token)
+    )
+    assert created.status_code == 201, created.text
+    key_id = created.json()["key"]["id"]
+    narrowed = client.patch(
+        f"/api/v1/teams/{team.id}",
+        json={"model_access": "list", "allowed_models": [name]},
+        headers=ADMIN_AUTH,
+    )
+    assert narrowed.status_code == 200, narrowed.text
+
+    async with AsyncSession(api_engine, expire_on_commit=False) as session:
+        compiled = await compile_scope(session, "api-test", require_local_membership=True)
+    published = next(k for k in compiled.snapshot.api_keys if k.key_id == key_id)
+    me = client.get("/api/v1/users/me", headers=auth(token))
+    assert me.status_code == 200, me.text
+    row = next(r for r in me.json()["teams"] if r["team_id"] == str(team.id))
+    assert row["all_models"] is published.policy.allow_all_models
+    assert row["models"] == list(published.policy.allowed_models)
+    assert row["all_models"] is False
+    assert row["models"] == [name]
 
 
 async def test_me_external_member_uses_only_the_team_policy(client, committed, monkeypatch) -> None:
@@ -314,47 +359,153 @@ async def test_rotate_rejects_an_expiry_beyond_the_cap_even_for_admins(client, c
     assert client.post(key_path + "/rotate", headers=ADMIN_AUTH).status_code == 200
 
 
-async def test_create_and_rotate_are_rate_limited_and_audited(client, committed) -> None:
-    team = await make_team(committed)
+@pytest.mark.parametrize("role", ["member", "admin"])
+async def test_rate_limits_are_per_principal_not_per_target_and_429_is_not_audited(
+    client, committed, role
+) -> None:
+    teams = [await make_team(committed) for _ in range(2)]
     user, token = await user_with_token(committed)
-    await make_member(committed, team, user)
+    for team in teams:
+        await make_member(committed, team, user, role=TeamRole(role))
     await committed.commit()
-    path = f"/api/v1/teams/{team.id}/keys"
+    headers = auth(token)
+    team_ids = [team.id for team in teams]
+
     key_ids = []
-    for _ in range(keys_module.KEY_CREATE_LIMIT):
-        response = client.post(path, json={"name": "many"}, headers=auth(token))
+    for i in range(keys_module.KEY_CREATE_LIMIT):
+        team = teams[i % len(teams)]
+        response = client.post(
+            f"/api/v1/teams/{team.id}/keys", json={"name": f"many-{i}"}, headers=headers
+        )
         assert response.status_code == 201, response.text
         key_ids.append(response.json()["key"]["id"])
-    limited = client.post(path, json={"name": "too many"}, headers=auth(token))
-    assert limited.status_code == 429, limited.text
-    assert limited.json()["error"]["code"] == "rate_limited"
-    assert int(limited.headers["Retry-After"]) >= 1
+    created_audits = await _audit_count(committed, team_ids, "key.create")
+    assert created_audits == keys_module.KEY_CREATE_LIMIT
+    # A different team does not buy more create quota.
+    for team in teams:
+        limited = client.post(
+            f"/api/v1/teams/{team.id}/keys", json={"name": "too many"}, headers=headers
+        )
+        assert limited.status_code == 429, limited.text
+        assert limited.json()["error"]["code"] == "rate_limited"
+        assert int(limited.headers["Retry-After"]) >= 1
+    assert await _audit_count(committed, team_ids, "key.create") == created_audits
 
-    key_path = f"/api/v1/keys/{key_ids[0]}"
+    # A different key does not buy more rotate quota.
     for _ in range(keys_module.KEY_ROTATE_LIMIT):
-        assert client.post(key_path + "/rotate", headers=auth(token)).status_code == 200
-    limited_rotate = client.post(key_path + "/rotate", headers=auth(token))
+        assert client.post(f"/api/v1/keys/{key_ids[0]}/rotate", headers=headers).status_code == 200
+    rotated_audits = await _audit_count(committed, team_ids, "key.rotate")
+    assert rotated_audits == keys_module.KEY_ROTATE_LIMIT
+    limited_rotate = client.post(f"/api/v1/keys/{key_ids[1]}/rotate", headers=headers)
     assert limited_rotate.status_code == 429, limited_rotate.text
     assert limited_rotate.json()["error"]["code"] == "rate_limited"
+    # 429s are metric-only: no audit row for the refusal.
+    assert await _audit_count(committed, team_ids, "key.rotate") == rotated_audits
 
-    actions = set(
-        await committed.scalars(
-            select(AuditLog.action).where(AuditLog.action.in_(["key.create", "key.rotate"]))
-        )
-    )
-    assert actions == {"key.create", "key.rotate"}
     metrics = client.app.state.metrics
-    assert (
-        metrics.value(
-            "lumewarp_cp_key_writes_total", {"operation": "create", "result": "rate_limited"}
-        )
-        == 1
-    )
+    assert metrics.value(
+        "lumewarp_cp_key_writes_total", {"operation": "create", "result": "rate_limited"}
+    ) == len(teams)
     assert (
         metrics.value(
             "lumewarp_cp_key_writes_total", {"operation": "rotate", "result": "rate_limited"}
         )
         == 1
+    )
+
+
+@pytest.mark.parametrize("caller", ["break_glass", "group_admin"])
+async def test_installation_admin_and_break_glass_bypass_the_limiter(
+    client, committed, monkeypatch, caller
+) -> None:
+    monkeypatch.setattr(keys_module, "KEY_CREATE_LIMIT", 2)
+    monkeypatch.setattr(keys_module, "KEY_ROTATE_LIMIT", 2)
+    team = await make_team(committed)
+    account = await make_service_account(committed, team)
+    if caller == "group_admin":
+        _, token = await user_with_token(committed, group_admin=True)
+        headers = auth(token)
+    else:
+        headers = ADMIN_AUTH
+    await committed.commit()
+    path = f"/api/v1/teams/{team.id}/keys"
+    key_ids = []
+    for i in range(keys_module.KEY_CREATE_LIMIT + 1):
+        response = client.post(
+            path,
+            json={"name": f"admin-{i}", "service_account_id": str(account.id)},
+            headers=headers,
+        )
+        assert response.status_code == 201, response.text
+        key_ids.append(response.json()["key"]["id"])
+    for _ in range(keys_module.KEY_ROTATE_LIMIT + 1):
+        assert client.post(f"/api/v1/keys/{key_ids[0]}/rotate", headers=headers).status_code == 200
+    limiter = getattr(client.app.state, "key_write_limiter", None)
+    assert limiter is None or not limiter.entries
+
+
+async def test_unknown_targets_allocate_no_limiter_entries(client, committed) -> None:
+    user, token = await user_with_token(committed)
+    await committed.commit()
+    headers = auth(token)
+    for _ in range(5):
+        unknown_team = uuid.uuid4()
+        response = client.post(
+            f"/api/v1/teams/{unknown_team}/keys", json={"name": "unknown"}, headers=headers
+        )
+        assert response.status_code == 404, response.text
+        response = client.post(f"/api/v1/keys/{uuid.uuid4()}/rotate", headers=headers)
+        assert response.status_code == 404, response.text
+    limiter = client.app.state.key_write_limiter
+    assert set(limiter.entries) == {f"create:{user.id}", f"rotate:{user.id}"}
+
+
+def test_limiter_window_resets_without_rebuilding_the_table() -> None:
+    limiter = keys_module.KeyWriteLimiter(window_seconds=0.05)
+    for _ in range(keys_module.KEY_CREATE_LIMIT):
+        assert limiter.reserve("create:user", keys_module.KEY_CREATE_LIMIT) == 0
+    assert limiter.reserve("create:user", keys_module.KEY_CREATE_LIMIT) >= 1
+    time.sleep(0.06)
+    assert limiter.reserve("create:user", keys_module.KEY_CREATE_LIMIT) == 0
+    assert len(limiter.entries) == 1
+
+
+def test_full_limiter_refuses_a_new_scope_without_evicting_live_counters() -> None:
+    limiter = keys_module.KeyWriteLimiter(capacity=2, window_seconds=60)
+    assert limiter.reserve("create:a", keys_module.KEY_CREATE_LIMIT) == 0
+    assert limiter.reserve("create:b", keys_module.KEY_CREATE_LIMIT) == 0
+    assert limiter.reserve("create:c", keys_module.KEY_CREATE_LIMIT) >= 1
+    assert set(limiter.entries) == {"create:a", "create:b"}
+    for _ in range(keys_module.KEY_CREATE_LIMIT - 1):
+        assert limiter.reserve("create:a", keys_module.KEY_CREATE_LIMIT) == 0
+    assert limiter.reserve("create:a", keys_module.KEY_CREATE_LIMIT) >= 1
+
+
+async def test_lowering_the_count_cap_refuses_create_but_still_allows_rotate(
+    client, committed
+) -> None:
+    team = await make_team(committed, max_keys_per_member=3)
+    user, token = await user_with_token(committed)
+    await make_member(committed, team, user)
+    await committed.commit()
+    path = f"/api/v1/teams/{team.id}/keys"
+    key_ids = []
+    for i in range(3):
+        response = client.post(path, json={"name": f"existing-{i}"}, headers=auth(token))
+        assert response.status_code == 201, response.text
+        key_ids.append(response.json()["key"]["id"])
+    lowered = client.patch(
+        f"/api/v1/teams/{team.id}", json={"max_keys_per_member": 1}, headers=ADMIN_AUTH
+    )
+    assert lowered.status_code == 200, lowered.text
+    refused = client.post(path, json={"name": "over the cap"}, headers=auth(token))
+    assert refused.status_code == 409, refused.text
+    # Rotation does not add a key, so the count cap does not refuse it.
+    for key_id in key_ids:
+        assert client.post(f"/api/v1/keys/{key_id}/rotate", headers=auth(token)).status_code == 200
+    assert (
+        client.post(path, json={"name": "still over the cap"}, headers=auth(token)).status_code
+        == 409
     )
 
 
