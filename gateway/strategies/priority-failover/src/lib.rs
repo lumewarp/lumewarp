@@ -1,6 +1,9 @@
 //! Picks the eligible member with the lowest `priority`. This crate is all a
 //! strategy needs: nothing in the proto, the control plane or the UI names it.
 //! Built into a gateway with `--features strategy-priority-failover`.
+//!
+//! A `schemars` annotation only shapes the schema, so `configure` checks the
+//! same ranges itself: standalone YAML has no control plane in front of it.
 
 use lumewarp_router_api::{
     Candidates, ConfigError, Configure, Needs, RequestInfo, RngCore, RouterInfo, Strategy,
@@ -36,6 +39,12 @@ impl Configure<Params, MemberParams> for PriorityFailover {
         params: Params,
         members: &[MemberParams],
     ) -> Result<Self, ConfigError> {
+        if params.max_in_flight == Some(0) {
+            return Err(ConfigError("max_in_flight must be at least 1".into()));
+        }
+        if members.iter().any(|m| m.priority == 0) {
+            return Err(ConfigError("priority must be at least 1".into()));
+        }
         Ok(Self {
             max_in_flight: params.max_in_flight.map_or(usize::MAX, |max| max as usize),
             priorities: members.iter().map(|m| m.priority).collect(),
@@ -196,6 +205,30 @@ mod tests {
             "priority is required"
         );
         assert!(create(json!({}), &[json!({"priority": "1"})]).is_err());
+    }
+
+    /// The same payloads go through the control plane and standalone in
+    /// `tests/e2e/test_strategy_crate.py`.
+    #[test]
+    fn configure_agrees_with_the_schema_at_the_boundaries() {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/boundaries.json")).unwrap();
+        let factory = lookup("priority_failover").unwrap().unwrap();
+        let info = RouterInfo {
+            name: "r",
+            members: &MEMBERS[..1],
+        };
+        let cases = cases.as_array().unwrap();
+        assert!(cases.iter().any(|c| c["ok"] == json!(true)));
+        assert!(cases.iter().any(|c| c["ok"] == json!(false)));
+        for case in cases {
+            let created = (factory.create)(
+                &info,
+                &case["params"],
+                std::slice::from_ref(&case["member"]),
+            );
+            assert_eq!(created.is_ok(), case["ok"].as_bool().unwrap(), "{case}");
+        }
     }
 
     #[test]

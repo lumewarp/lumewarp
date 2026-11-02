@@ -1,0 +1,17 @@
+[
+  {"params": {}, "member": {"priority": 1}, "ok": true},
+  {"params": {"max_in_flight": 1}, "member": {"priority": 1}, "ok": true},
+  {"params": {"max_in_flight": 4294967295}, "member": {"priority": 4294967295}, "ok": true},
+  {"params": {"max_in_flight": 0}, "member": {"priority": 1}, "ok": false},
+  {"params": {"max_in_flight": -1}, "member": {"priority": 1}, "ok": false},
+  {"params": {"max_in_flight": 4294967296}, "member": {"priority": 1}, "ok": false},
+  {"params": {"max_in_flight": 1.0}, "member": {"priority": 1}, "ok": false},
+  {"params": {"max_in_flight": "1"}, "member": {"priority": 1}, "ok": false},
+  {"params": {"other": 1}, "member": {"priority": 1}, "ok": false},
+  {"params": {}, "member": {"priority": 0}, "ok": false},
+  {"params": {}, "member": {"priority": -1}, "ok": false},
+  {"params": {}, "member": {"priority": 4294967296}, "ok": false},
+  {"params": {}, "member": {"priority": 1.0}, "ok": false},
+  {"params": {}, "member": {"other": 1, "priority": 1}, "ok": false},
+  {"params": {}, "member": {}, "ok": false}
+]

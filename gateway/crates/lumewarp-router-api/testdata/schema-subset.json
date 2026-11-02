@@ -3,6 +3,7 @@
     {"type": "object", "additionalProperties": false},
     {"type": "object", "description": "Root text.", "properties": {"n": {"type": "integer", "title": "N", "description": "Count.", "default": 3, "minimum": 0, "maximum": 10}}, "required": ["n"], "additionalProperties": false},
     {"type": "object", "properties": {"ratio": {"type": "number", "minimum": 0.5}, "on": {"type": "boolean", "default": true}, "name": {"type": "string", "default": "a"}, "mode": {"type": "string", "enum": ["a", "b"]}, "level": {"type": "integer", "enum": [1, 2]}}},
+    {"type": "object", "properties": {"a": {"type": "integer", "minimum": 4, "maximum": 4}}},
     {"type": "object", "properties": {"tags": {"type": "array", "items": {"type": "string"}, "default": []}, "hdrs": {"type": "array", "items": {"type": "string"}, "x-lumewarp-widget": "header-list"}}},
     {"type": "object", "properties": {"nested": {"type": "object", "title": "Nested", "properties": {"n": {"type": "integer"}}, "required": ["n"], "additionalProperties": false}}}
   ],
@@ -33,6 +34,9 @@
     {"type": "object", "patternProperties": {"^a": {"type": "string"}}},
     {"type": "object", "if": {"type": "object"}},
     {"type": "object", "title": 5},
+    {"type": "object", "properties": {"a": {"type": "integer", "minimum": 5, "maximum": 4}}},
+    {"type": "object", "properties": {"a": {"type": "number", "minimum": 1.5, "maximum": 1.25}}},
+    {"type": "object", "properties": {"a": {"type": "string", "format": "ipv4"}}},
     {"type": "object", "properties": {"a": {"type": "integer", "description": ["x"]}}},
     {"type": "object", "properties": {"a": {"type": "boolean", "enum": [true]}}},
     {"type": "object", "properties": {"a": {"type": "integer", "minimum": true}}},

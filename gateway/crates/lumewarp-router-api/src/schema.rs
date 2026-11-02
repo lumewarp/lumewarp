@@ -31,8 +31,9 @@ pub fn schema_for<T: JsonSchema>() -> Value {
 }
 
 /// `Option<T>` becomes a plain `T`, which is optional by not being `required`;
-/// `format` becomes the bounds serde enforces; doc-commented enum variants
-/// become a plain `enum`.
+/// a known numeric `format` becomes the bounds serde enforces; doc-commented
+/// enum variants become a plain `enum`. Any other `format` stays, which leaves
+/// the subset: nothing here could validate it, and serde would (`ipv4`).
 fn normalize(value: &mut Value) {
     let Some(schema) = value.as_object_mut() else {
         return;
@@ -48,9 +49,7 @@ fn normalize(value: &mut Value) {
     if schema.get("default") == Some(&Value::Null) {
         schema.remove("default");
     }
-    if let Some(Value::String(format)) = schema.remove("format") {
-        add_integer_bounds(schema, &format);
-    }
+    normalize_format(schema);
     if let Some(Value::Object(properties)) = schema.get_mut("properties") {
         properties.values_mut().for_each(normalize);
     }
@@ -92,20 +91,68 @@ fn unify_const_one_of(schema: &mut Map<String, Value>) {
     }
 }
 
-fn add_integer_bounds(schema: &mut Map<String, Value>, format: &str) {
-    let (minimum, maximum) = match format {
-        "uint8" => (json!(0), json!(u8::MAX)),
-        "uint16" => (json!(0), json!(u16::MAX)),
-        "uint32" => (json!(0), json!(u32::MAX)),
-        "uint64" | "uint" => (json!(0), json!(u64::MAX)),
-        "int8" => (json!(i8::MIN), json!(i8::MAX)),
-        "int16" => (json!(i16::MIN), json!(i16::MAX)),
-        "int32" => (json!(i32::MIN), json!(i32::MAX)),
-        "int64" | "int" => (json!(i64::MIN), json!(i64::MAX)),
+fn normalize_format(schema: &mut Map<String, Value>) {
+    let kind = schema.get("type").and_then(Value::as_str);
+    let Some(format) = schema.get("format").and_then(Value::as_str) else {
+        return;
+    };
+    let integer = match (kind, format) {
+        (Some("number"), "float" | "double") => None,
+        (Some("integer"), "uint8") => Some((0, i128::from(u8::MAX))),
+        (Some("integer"), "uint16") => Some((0, i128::from(u16::MAX))),
+        (Some("integer"), "uint32") => Some((0, i128::from(u32::MAX))),
+        (Some("integer"), "uint64" | "uint") => Some((0, i128::from(u64::MAX))),
+        (Some("integer"), "int8") => Some((i128::from(i8::MIN), i128::from(i8::MAX))),
+        (Some("integer"), "int16") => Some((i128::from(i16::MIN), i128::from(i16::MAX))),
+        (Some("integer"), "int32") => Some((i128::from(i32::MIN), i128::from(i32::MAX))),
+        (Some("integer"), "int64" | "int") => Some((i128::from(i64::MIN), i128::from(i64::MAX))),
         _ => return,
     };
-    schema.entry("minimum").or_insert(minimum);
-    schema.entry("maximum").or_insert(maximum);
+    schema.remove("format");
+    if let Some((minimum, maximum)) = integer {
+        narrow_bound(schema, "minimum", minimum, true);
+        narrow_bound(schema, "maximum", maximum, false);
+    }
+}
+
+/// The bound serde enforces, unless an annotation is already tighter: a range
+/// annotation replaces the type's bound, and may be wider than the type allows.
+fn narrow_bound(schema: &mut Map<String, Value>, keyword: &str, limit: i128, lower: bool) {
+    let tighter = schema.get(keyword).is_some_and(|existing| {
+        let Some(value) = existing.as_f64() else {
+            return false;
+        };
+        match as_integer(existing) {
+            Some(value) if lower => value > limit,
+            Some(value) => value < limit,
+            None if lower => value > limit as f64,
+            None => value < limit as f64,
+        }
+    });
+    if !tighter {
+        let limit = i64::try_from(limit)
+            .map(Value::from)
+            .unwrap_or_else(|_| Value::from(limit as u64));
+        schema.insert(keyword.into(), limit);
+    }
+}
+
+fn as_integer(value: &Value) -> Option<i128> {
+    value
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| value.as_u64().map(i128::from))
+}
+
+/// `minimum > maximum`: a field no value can satisfy.
+fn empty_range(schema: &Map<String, Value>) -> bool {
+    let (Some(minimum), Some(maximum)) = (schema.get("minimum"), schema.get("maximum")) else {
+        return false;
+    };
+    match (as_integer(minimum), as_integer(maximum)) {
+        (Some(minimum), Some(maximum)) => minimum > maximum,
+        _ => minimum.as_f64() > maximum.as_f64(),
+    }
 }
 
 const COMMON_KEYWORDS: &[&str] = &["type", "title", "description", "default"];
@@ -202,6 +249,9 @@ fn scalar_problem(path: &str, schema: &Value) -> Option<String> {
         if object.get(bound).is_some_and(|value| !value.is_number()) {
             return Some(format!("{path}: {bound} must be a number"));
         }
+    }
+    if empty_range(object) {
+        return Some(format!("{path}: minimum is above maximum"));
     }
     if let Some(values) = object.get("enum") {
         let matches_type = |value: &Value| match kind {
@@ -399,6 +449,201 @@ mod tests {
     #[should_panic(expected = "outside the strategy schema subset")]
     fn a_data_enum_fails_the_helper() {
         assert_schema_subset::<Tagged>();
+    }
+
+    #[derive(Deserialize, JsonSchema)]
+    #[allow(dead_code)]
+    struct Address {
+        ip: std::net::Ipv4Addr,
+    }
+
+    #[derive(Deserialize, JsonSchema)]
+    #[allow(dead_code)]
+    struct OptionalAddress {
+        ip: Option<std::net::IpAddr>,
+    }
+
+    #[derive(Deserialize, JsonSchema)]
+    #[allow(dead_code)]
+    struct Addresses {
+        ips: Vec<std::net::Ipv4Addr>,
+    }
+
+    #[derive(Deserialize, JsonSchema)]
+    #[allow(dead_code)]
+    struct Unknown {
+        #[schemars(extend("format" = "made-up"))]
+        name: String,
+    }
+
+    #[derive(Deserialize, JsonSchema)]
+    #[allow(dead_code)]
+    struct FloatFormatOnAnInteger {
+        #[schemars(extend("format" = "double"))]
+        n: i32,
+    }
+
+    #[test]
+    #[should_panic(expected = "\"format\" is outside")]
+    fn ipv4_fails_the_helper() {
+        assert_schema_subset::<Address>();
+    }
+
+    #[test]
+    #[should_panic(expected = "\"format\" is outside")]
+    fn optional_ip_fails_the_helper() {
+        assert_schema_subset::<OptionalAddress>();
+    }
+
+    #[test]
+    #[should_panic(expected = "only arrays of strings")]
+    fn a_list_of_addresses_fails_the_helper() {
+        assert_schema_subset::<Addresses>();
+    }
+
+    #[test]
+    #[should_panic(expected = "\"format\" is outside")]
+    fn an_unknown_format_fails_the_helper() {
+        assert_schema_subset::<Unknown>();
+    }
+
+    #[test]
+    #[should_panic(expected = "\"format\" is outside")]
+    fn a_format_on_the_wrong_type_fails_the_helper() {
+        assert_schema_subset::<FloatFormatOnAnInteger>();
+    }
+
+    /// `#[schemars(range)]` replaces a type's bound rather than narrowing it.
+    #[derive(Deserialize, JsonSchema)]
+    #[allow(dead_code)]
+    struct Annotated {
+        #[schemars(range(max = 1000))]
+        wide_max: u8,
+        #[schemars(range(min = -5))]
+        wide_min: u8,
+        #[schemars(range(min = 2, max = 7))]
+        narrow: u8,
+        #[schemars(range(min = 0.5))]
+        fractional: u8,
+        #[schemars(range(max = 300))]
+        optional: Option<u8>,
+    }
+
+    #[derive(Deserialize, JsonSchema)]
+    #[allow(dead_code)]
+    struct Impossible {
+        #[schemars(range(min = 300))]
+        n: u8,
+    }
+
+    #[derive(Deserialize, JsonSchema)]
+    #[allow(dead_code)]
+    struct Inverted {
+        #[schemars(range(min = 9, max = 3))]
+        n: u32,
+    }
+
+    #[test]
+    fn annotations_cannot_widen_what_the_type_accepts() {
+        let schema = schema_for::<Annotated>();
+        assert_eq!(subset_problem(&schema), None, "{schema:#}");
+        let bounds = |name: &str| {
+            let field = &schema["properties"][name];
+            (field["minimum"].clone(), field["maximum"].clone())
+        };
+        assert_eq!(bounds("wide_max"), (json!(0), json!(255)));
+        assert_eq!(bounds("wide_min"), (json!(0), json!(255)));
+        assert_eq!(bounds("narrow"), (json!(2), json!(7)));
+        assert_eq!(bounds("fractional"), (json!(0.5), json!(255)));
+        assert_eq!(bounds("optional"), (json!(0), json!(255)));
+    }
+
+    #[test]
+    #[should_panic(expected = "minimum is above maximum")]
+    fn a_range_outside_the_type_fails_the_helper() {
+        assert_schema_subset::<Impossible>();
+    }
+
+    #[test]
+    #[should_panic(expected = "minimum is above maximum")]
+    fn an_inverted_range_fails_the_helper() {
+        assert_schema_subset::<Inverted>();
+    }
+
+    /// What the control plane's validator decides for a number, from the schema.
+    fn schema_accepts(schema: &Value, value: i128) -> bool {
+        let above = schema["minimum"]
+            .as_f64()
+            .is_none_or(|_| as_integer(&schema["minimum"]).is_none_or(|min| value >= min));
+        let below = schema["maximum"]
+            .as_f64()
+            .is_none_or(|_| as_integer(&schema["maximum"]).is_none_or(|max| value <= max));
+        above && below
+    }
+
+    fn serde_accepts<T: serde::de::DeserializeOwned>(value: i128) -> bool {
+        serde_json::from_str::<T>(&format!("{{\"n\":{value}}}")).is_ok()
+    }
+
+    macro_rules! boundaries_agree {
+        ($($int:ident),* $(,)?) => {$({
+            #[derive(Deserialize, JsonSchema)]
+            #[serde(deny_unknown_fields)]
+            #[allow(dead_code)]
+            struct Plain {
+                n: $int,
+            }
+            #[derive(Deserialize, JsonSchema)]
+            #[serde(deny_unknown_fields)]
+            #[allow(dead_code)]
+            struct WiderAnnotation {
+                #[schemars(range(min = -100000, max = 100000))]
+                n: $int,
+            }
+            let (min, max) = (i128::from($int::MIN), i128::from($int::MAX));
+            let plain = schema_for::<Plain>();
+            assert_eq!(subset_problem(&plain), None, "{plain:#}");
+            let plain = &plain["properties"]["n"];
+            for value in [min - 1, min, min + 1, 0, max - 1, max, max + 1] {
+                assert_eq!(
+                    schema_accepts(plain, value),
+                    serde_accepts::<Plain>(value),
+                    "{} at {value}: {plain}",
+                    stringify!($int),
+                );
+            }
+            let wider = schema_for::<WiderAnnotation>();
+            if subset_problem(&wider).is_none() {
+                let wider = &wider["properties"]["n"];
+                for value in [-100001, -100000, -1, 0, 255, 256, 65536, 100000, 100001, min, max] {
+                    // The annotation only narrows, and never admits what serde refuses.
+                    assert!(
+                        !schema_accepts(wider, value) || serde_accepts::<WiderAnnotation>(value),
+                        "{} at {value}: {wider}",
+                        stringify!($int),
+                    );
+                }
+            }
+        })*};
+    }
+
+    #[test]
+    fn schema_and_deserialize_agree_at_every_integer_boundary() {
+        boundaries_agree!(u8, u16, u32, u64, i8, i16, i32, i64);
+    }
+
+    #[test]
+    fn a_float_is_a_plain_number_that_serde_accepts() {
+        #[derive(Deserialize, JsonSchema)]
+        #[allow(dead_code)]
+        struct Floats {
+            single: f32,
+            double: f64,
+        }
+        let schema = schema_for::<Floats>();
+        assert_eq!(schema["properties"]["single"], json!({"type": "number"}));
+        assert_eq!(schema["properties"]["double"], json!({"type": "number"}));
+        assert!(serde_json::from_str::<Floats>(r#"{"single":1,"double":1.5}"#).is_ok());
     }
 
     #[test]
