@@ -29,6 +29,10 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import (
     snapshot_pb2,
 )
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2, usage_pb2_grpc
+from lumewarp_control_plane.compiler.strategy import (
+    clean_reported_strategies,
+    replace_gateway_strategies,
+)
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.ids import uuid7
 from lumewarp_control_plane.metrics import DISCARD, Metrics
@@ -396,6 +400,23 @@ class SessionRegistry:
         async with self.session_factory() as session, session.begin():
             await session.execute(stmt)
 
+    async def _store_strategies(self, state: _StreamState, hello: config_service_pb2.Hello) -> None:
+        """Keep what the Hello reports. It is the gateway's data and only informs the API, so
+        no failure here may affect the stream; parsing is off the event loop.
+        """
+        if self.session_factory is None:
+            return
+        try:
+            reported = await asyncio.to_thread(clean_reported_strategies, list(hello.strategies))
+            async with self.session_factory() as session, session.begin():
+                await replace_gateway_strategies(
+                    session, state.scope, state.gateway_id, reported, datetime.now(UTC)
+                )
+        except Exception:
+            log.exception(
+                "could not store the strategies of gateway %s/%s", state.scope, state.gateway_id
+            )
+
     @asynccontextmanager
     async def stream(
         self,
@@ -449,6 +470,7 @@ class SessionRegistry:
             self.metrics.gateway_sessions.set(len(self._sessions))
         try:
             await self._mirror(state)
+            await self._store_strategies(state, hello)
             yield state
         finally:
             async with self._lock:

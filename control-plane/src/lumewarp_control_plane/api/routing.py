@@ -53,7 +53,12 @@ from lumewarp_control_plane.api.schemas import (
     UpstreamUpdate,
 )
 from lumewarp_control_plane.authz import Action, Authz
-from lumewarp_control_plane.compiler.strategy import params_problem, strategy_problem
+from lumewarp_control_plane.compiler.strategy import (
+    StrategyRegistry,
+    load_strategies,
+    params_problem,
+    strategy_problem,
+)
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import (
     Alias,
@@ -147,8 +152,8 @@ class RouterSpec:
     sticky_header: str | None = None
 
 
-async def _load_spec(session: AsyncSession, row: Router) -> RouterSpec:
-    out = (await _routers_out(session, [row]))[0]
+async def _load_spec(session: AsyncSession, scope: str, row: Router) -> RouterSpec:
+    out = await _router_out(session, scope, row)
     return RouterSpec(
         strategy=out.strategy,
         params=out.params,
@@ -208,6 +213,55 @@ async def _validate_spec(session: AsyncSession, spec: RouterSpec) -> None:
     await _existing_models(session, spec.fallback_model_ids, "fallback_model_ids")
 
 
+def _member_settings(members: list[Any], splits: list[Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Each member's params with the path errors name it by, split members included."""
+    settings = [(f"members[{i}].params", m.params) for i, m in enumerate(members)]
+    for s, split in enumerate(splits):
+        settings += [
+            (f"traffic_split[{s}].members[{i}].params", m.params)
+            for i, m in enumerate(split.members)
+        ]
+    return settings
+
+
+async def _validate_strategy(
+    session: AsyncSession, settings: Any, spec: RouterSpec, *, force: bool
+) -> list[str]:
+    """422 unless the gateways can serve the strategy with these settings. Returns the
+    connected gateways that `force` is saving past, which the caller audits.
+    """
+    registry = await load_strategies(session, settings.scope)
+    if not registry.known(spec.strategy):
+        raise validation_error("strategy", f"no gateway reports strategy {spec.strategy!r}")
+    missing = registry.missing(spec.strategy)
+    if missing and not force:
+        raise validation_error(
+            "strategy",
+            f"connected gateways lack {spec.strategy!r} and would reject the whole config: "
+            f"{', '.join(missing)}; send force to save anyway",
+        )
+    problems = registry.router_problems(
+        spec.strategy, spec.params, _member_settings(spec.members, spec.traffic_split)
+    )
+    if problems:
+        raise validation_error("params", "; ".join(problems[:10]))
+    return missing
+
+
+def _audit_forced(
+    session: AsyncSession, authz: Any, row: Router, strategy: str, missing: list[str]
+) -> None:
+    if missing:
+        audit.record(
+            session,
+            action="router.force_save",
+            resource_type="router",
+            resource_id=row.id,
+            principal=authz.principal,
+            details={"name": row.name, "strategy": strategy, "missing_gateways": missing},
+        )
+
+
 async def _write_children(
     session: AsyncSession, row: Router, spec: RouterSpec, fields: set[str]
 ) -> None:
@@ -260,8 +314,18 @@ def _apply_scalars(row: Router, spec: RouterSpec) -> None:
     row.sticky_header = spec.sticky_header
 
 
-async def _routers_out(session: AsyncSession, rows: list[Router]) -> list[RouterOut]:
+def _router_out_problems(
+    registry: StrategyRegistry,
+    row: Router,
+    members: list[RouterMemberOut],
+    splits: list[TrafficSplitOut],
+) -> list[str]:
+    return registry.router_problems(row.strategy, row.params, _member_settings(members, splits))
+
+
+async def _routers_out(session: AsyncSession, scope: str, rows: list[Router]) -> list[RouterOut]:
     ids = [row.id for row in rows]
+    registry = await load_strategies(session, scope)
     members: dict[uuid.UUID, list[RouterMemberOut]] = {i: [] for i in ids}
     fallbacks: dict[uuid.UUID, list[uuid.UUID]] = {i: [] for i in ids}
     splits: dict[uuid.UUID, list[TrafficSplitOut]] = {i: [] for i in ids}
@@ -297,6 +361,9 @@ async def _routers_out(session: AsyncSession, rows: list[Router]) -> list[Router
             splits[s.router_id].append(
                 TrafficSplitOut(name=s.name, weight=s.weight, members=split_members[s.id])
             )
+    problems = {
+        row.id: _router_out_problems(registry, row, members[row.id], splits[row.id]) for row in rows
+    }
     return [
         RouterOut(
             id=row.id,
@@ -315,6 +382,8 @@ async def _routers_out(session: AsyncSession, rows: list[Router]) -> list[Router
             traffic_split=splits[row.id],
             sticky=row.sticky,
             sticky_header=row.sticky_header,
+            config_invalid=bool(problems[row.id]),
+            config_problems=problems[row.id],
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -322,8 +391,8 @@ async def _routers_out(session: AsyncSession, rows: list[Router]) -> list[Router
     ]
 
 
-async def _router_out(session: AsyncSession, row: Router) -> RouterOut:
-    return (await _routers_out(session, [row]))[0]
+async def _router_out(session: AsyncSession, scope: str, row: Router) -> RouterOut:
+    return (await _routers_out(session, scope, [row]))[0]
 
 
 # --------------------------------------------------------------------------- upstreams
@@ -836,13 +905,16 @@ async def delete_alias(
 async def list_routers(
     authz: Authz,
     session: SessionDep,
+    settings: SettingsDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[RouterOut]:
     await authz.require(Action.ROUTING_READ)
     stmt = select(Router).order_by(Router.name_id)
     rows, next_cursor = await uuid_page(session, stmt, Router.name_id, limit, cursor)
-    return Page[RouterOut](items=await _routers_out(session, rows), next_cursor=next_cursor)
+    return Page[RouterOut](
+        items=await _routers_out(session, settings.scope, rows), next_cursor=next_cursor
+    )
 
 
 @router.post(
@@ -871,6 +943,7 @@ async def create_router(
     async with mutation(session):
         await lock_scope(session, settings)
         await _validate_spec(session, spec)
+        forced = await _validate_strategy(session, settings, spec, force=body.force)
         name = await _claim(session, body.name, CatalogKind.ROUTER)
         row = Router(name_id=name.id)
         _apply_scalars(row, spec)
@@ -894,6 +967,7 @@ async def create_router(
                     mode="json",
                     exclude={
                         "name": True,
+                        "force": True,
                         "params": True,
                         "members": True,
                         "traffic_split": {"__all__": {"members": {"__all__": {"params"}}}},
@@ -902,17 +976,20 @@ async def create_router(
                 ),
             },
         )
+        _audit_forced(session, authz, row, spec.strategy, forced)
         await enqueue_recompile(session, settings, "api.router.create")
-    return await _router_out(session, row)
+    return await _router_out(session, settings.scope, row)
 
 
 @router.get("/routers/{router_id}", response_model=RouterOut, operation_id="getRouter")
-async def get_router(router_id: uuid.UUID, authz: Authz, session: SessionDep) -> RouterOut:
+async def get_router(
+    router_id: uuid.UUID, authz: Authz, session: SessionDep, settings: SettingsDep
+) -> RouterOut:
     await authz.require(Action.ROUTING_READ)
     row = await session.get(Router, router_id)
     if row is None:
         raise not_found("router not found")
-    return await _router_out(session, row)
+    return await _router_out(session, settings.scope, row)
 
 
 @router.patch("/routers/{router_id}", response_model=RouterOut, operation_id="updateRouter")
@@ -940,8 +1017,8 @@ async def update_router(
         row = await session.get(Router, router_id)
         if row is None:
             raise not_found("router not found")
-        spec = await _load_spec(session, row)
-        for name in fields - {"name"}:
+        spec = await _load_spec(session, settings.scope, row)
+        for name in fields - {"name", "force"}:
             setattr(spec, name, getattr(body, name))
         # Params belong to one strategy: changing it drops them unless the body sends new ones.
         if "strategy" in fields and "params" not in fields and body.strategy != row.strategy:
@@ -950,6 +1027,11 @@ async def update_router(
         if spec.sticky is not StickyBy.HEADER and "sticky_header" not in fields:
             spec.sticky_header = None
         await _validate_spec(session, spec)
+        # Settings already stored stay as they are (`config_invalid`) until they are changed:
+        # an upgraded schema must not block a rename or a retry change.
+        forced = []
+        if fields & {"strategy", "params", "members", "traffic_split"}:
+            forced = await _validate_strategy(session, settings, spec, force=body.force)
         if body.name is not None and body.name != row.name:
             old_name = await _rename(session, row.id, body.name)
             row.updated_at = func.now()
@@ -977,6 +1059,7 @@ async def update_router(
                     exclude_unset=True,
                     mode="json",
                     exclude={
+                        "force": True,
                         "params": True,
                         "members": {"__all__": {"params"}},
                         "traffic_split": {"__all__": {"members": {"__all__": {"params"}}}},
@@ -984,8 +1067,9 @@ async def update_router(
                 ),
             },
         )
+        _audit_forced(session, authz, row, spec.strategy, forced)
         await enqueue_recompile(session, settings, "api.router.update")
-    return await _router_out(session, row)
+    return await _router_out(session, settings.scope, row)
 
 
 @router.delete(

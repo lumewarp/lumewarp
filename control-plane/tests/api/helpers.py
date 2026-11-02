@@ -126,3 +126,75 @@ def usage_total(
         cost_nano_usd=cost_nano_usd,
         unknown_cost_count=unknown_cost_count,
     )
+
+
+async def report_strategies(
+    session,
+    scope: str,
+    gateway_id: str,
+    strategies: dict[str, tuple[dict | str, dict | str]],
+    *,
+    connected: bool = False,
+    last_seen_at=None,
+    revoked: bool = False,
+    capabilities: list[str] | None = None,
+) -> None:
+    """A gateway as Hello leaves it: a session, a token and its reports. A strategy maps to
+    (params schema, member schema), each a dict or the raw text a gateway sends.
+    """
+    import hashlib
+    import json
+    from datetime import UTC, datetime
+
+    from sqlalchemy.dialects.postgresql import insert
+
+    from lumewarp_control_plane._proto.lumewarp.config.v1 import config_service_pb2 as cpb
+    from lumewarp_control_plane.compiler.strategy import (
+        BUILTIN_STRATEGIES,
+        clean_reported_strategies,
+        replace_gateway_strategies,
+    )
+    from lumewarp_control_plane.models import GatewaySession, GatewayToken
+    from lumewarp_control_plane.security import SecretKind, generate_secret
+
+    now = datetime.now(UTC)
+    if capabilities is None:
+        capabilities = [f"strategy:{name}" for name in (*BUILTIN_STRATEGIES, *strategies)]
+    values = {
+        "connected": connected,
+        "capabilities": capabilities,
+        "last_seen_at": last_seen_at or now,
+        "connected_at": now,
+    }
+    await session.execute(
+        insert(GatewaySession)
+        .values(scope=scope, gateway_id=gateway_id, **values)
+        .on_conflict_do_update(index_elements=["scope", "gateway_id"], set_=values)
+    )
+    secret = generate_secret(SecretKind.GATEWAY_TOKEN)
+    session.add(
+        GatewayToken(
+            scope=scope,
+            gateway_id=gateway_id,
+            name=gateway_id,
+            token_hash=secret.hash,
+            display_prefix=secret.display_prefix,
+            revoked_at=now if revoked else None,
+        )
+    )
+    text = lambda schema: schema if isinstance(schema, str) else json.dumps(schema)  # noqa: E731
+    reported = [
+        cpb.StrategyDescriptor(
+            name=name,
+            title=name.title(),
+            description="Reported.",
+            params_schema_json=text(params),
+            member_schema_json=text(member),
+            digest=hashlib.sha256(text(params).encode() + text(member).encode()).hexdigest(),
+        )
+        for name, (params, member) in strategies.items()
+    ]
+    await replace_gateway_strategies(
+        session, scope, gateway_id, clean_reported_strategies(reported), now
+    )
+    await session.commit()

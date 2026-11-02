@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from datetime import UTC, datetime
 
 import grpc
@@ -27,11 +28,16 @@ from lumewarp_control_plane.models import (
     ConfigVersion,
     ConfigVersionKind,
     GatewaySession,
+    GatewayStrategy,
     GatewayToken,
     Scope,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
 from lumewarp_control_plane.settings import Settings
+
+CATASTROPHIC = json.dumps(
+    {"type": "object", "properties": {"a": {"type": "string", "pattern": "^(a+)+$"}}}
+)
 
 
 @pytest.fixture(scope="module")
@@ -157,6 +163,7 @@ async def _open_stream(
     have_version: int = 0,
     scope: str = "",
     have_digest: bytes | None = None,
+    strategies: tuple[cpb.StrategyDescriptor, ...] = (),
 ):
     """Hello; by default have_digest is the stored digest of have_version (if any)."""
     if have_digest is None:
@@ -170,6 +177,7 @@ async def _open_stream(
                 have_digest=have_digest,
                 gateway_version="test-gateway",
                 scope=scope,
+                strategies=strategies,
             )
         )
     )
@@ -852,6 +860,134 @@ async def test_session_and_ack_metrics(session_factory: SessionFactory):
                 await asyncio.sleep(0.01)
         assert value("lumewarp_cp_gateway_acks_total", result="ack") == 1
         assert value("lumewarp_cp_gateway_acks_total", result="nack") == 1
+    finally:
+        await channel.close()
+        await server.stop(0)
+
+
+def _descriptor(
+    name: str, digest: str, params: str = '{"type":"object"}'
+) -> cpb.StrategyDescriptor:
+    return cpb.StrategyDescriptor(
+        name=name,
+        title=name.title(),
+        description="A strategy.",
+        needs=["latency"],
+        params_schema_json=params,
+        member_schema_json='{"type":"object"}',
+        digest=digest,
+    )
+
+
+async def _stored(
+    factory: SessionFactory, scope: str, gateway_id: str
+) -> dict[str, GatewayStrategy]:
+    async with factory() as session:
+        rows = await session.scalars(
+            select(GatewayStrategy).where(
+                GatewayStrategy.scope == scope, GatewayStrategy.gateway_id == gateway_id
+            )
+        )
+        return {row.name: row for row in rows}
+
+
+async def _close(call) -> None:
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call.read()
+
+
+async def test_hello_descriptors_are_stored_and_replaced_on_reconnect(
+    session_factory: SessionFactory,
+):
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    try:
+        call = await _open_stream(
+            stub,
+            tokens["gateway-a"],
+            "gateway-a",
+            strategies=(_descriptor("one", "aa"), _descriptor("two", "bb")),
+        )
+        assert (await call.read()).WhichOneof("update") == "full"
+        stored = await _stored(session_factory, scope, "gateway-a")
+        assert {name: row.digest for name, row in stored.items()} == {"one": "aa", "two": "bb"}
+        assert stored["one"].descriptor["needs"] == ["latency"]
+        assert stored["one"].descriptor["params_schema"] == {"type": "object"}
+        await _close(call)
+
+        # A new build: one schema changed (new digest), one strategy gone, one added.
+        changed = '{"type":"object","properties":{"n":{"type":"integer"}}}'
+        call = await _open_stream(
+            stub,
+            tokens["gateway-a"],
+            "gateway-a",
+            strategies=(_descriptor("one", "cc", changed), _descriptor("three", "dd")),
+        )
+        await call.read()
+        stored = await _stored(session_factory, scope, "gateway-a")
+        assert {name: row.digest for name, row in stored.items()} == {"one": "cc", "three": "dd"}
+        assert "n" in stored["one"].descriptor["params_schema"]["properties"]
+        await _close(call)
+    finally:
+        await channel.close()
+        await server.stop(0)
+
+
+async def test_hello_with_hostile_schemas_keeps_the_stream_working(
+    session_factory: SessionFactory,
+):
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    oversized = json.dumps({"type": "object", "description": "x" * (17 * 1024)})
+    try:
+        call = await _open_stream(
+            stub,
+            tokens["gateway-a"],
+            "gateway-a",
+            strategies=(
+                _descriptor("oversized", "a1", oversized),
+                _descriptor("not_json", "a2", "{"),
+                _descriptor("remote_ref", "a3", '{"$ref":"http://169.254.169.254/x"}'),
+                _descriptor("catastrophic", "a4", CATASTROPHIC),
+                _descriptor("nul", "a5", '{"type":"object","title":"a\\u0000b"}'),
+                _descriptor("bad_digest", "not hex!"),
+                _descriptor("Bad Name", "a7"),
+                cpb.StrategyDescriptor(name="nul_title", title="a\x00b", digest="a8"),
+            ),
+        )
+        # The stream is unaffected: the snapshot arrives.
+        assert (await call.read()).WhichOneof("update") == "full"
+        stored = await _stored(session_factory, scope, "gateway-a")
+        assert "Bad Name" not in stored
+        for name in ("oversized", "not_json", "remote_ref", "catastrophic", "nul"):
+            assert stored[name].descriptor["params_schema"] is None, name
+            assert stored[name].descriptor["schema_problems"], name
+        assert stored["nul_title"].descriptor["title"] == "ab"
+        assert len(stored["bad_digest"].digest) == 64
+        await _close(call)
+    finally:
+        await channel.close()
+        await server.stop(0)
+
+
+async def test_failure_to_store_descriptors_does_not_break_the_stream(
+    session_factory: SessionFactory, monkeypatch
+):
+    import lumewarp_control_plane.grpc as module
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("database is unhappy")
+
+    monkeypatch.setattr(module, "replace_gateway_strategies", fail)
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    try:
+        call = await _open_stream(
+            stub, tokens["gateway-a"], "gateway-a", strategies=(_descriptor("one", "aa"),)
+        )
+        assert (await call.read()).WhichOneof("update") == "full"
+        await _close(call)
     finally:
         await channel.close()
         await server.stop(0)

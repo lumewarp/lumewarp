@@ -1070,6 +1070,29 @@ class GatewaySession(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class GatewayStrategy(Base):
+    """A strategy a gateway reported in Hello. Untrusted data, kept so forms and validation
+    work while it is offline; `compiler.strategy.load_strategies` decides what still counts.
+    """
+
+    __tablename__ = "gateway_strategies"
+    __table_args__ = (
+        PrimaryKeyConstraint("scope", "gateway_id", "name"),
+        ForeignKeyConstraint(
+            ["scope", "gateway_id"],
+            ["gateway_sessions.scope", "gateway_sessions.gateway_id"],
+            ondelete="CASCADE",
+        ),
+    )
+
+    scope: Mapped[str] = mapped_column(String(128), nullable=False)
+    gateway_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    name: Mapped[str] = mapped_column(String(63), nullable=False)
+    digest: Mapped[str] = mapped_column(String(128), nullable=False)
+    descriptor: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 # --------------------------------------------------------------------------- usage
 
 

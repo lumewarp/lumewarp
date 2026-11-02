@@ -34,6 +34,13 @@ async def test_upgrade_downgrade_upgrade() -> None:
         async with engine.connect() as conn:
             assert await migrate.current_revision(conn) == migrate.head_revision()
 
+        # What came after 0010 goes down and comes back.
+        await migrate.downgrade(engine, "0010")
+        assert "gateway_strategies" not in await _tables(engine)
+        await migrate.upgrade(engine)
+        assert "gateway_strategies" in await _tables(engine)
+        await migrate.downgrade(engine, "0010")
+
         # 0010 is irreversible: everything below it still goes down.
         with pytest.raises(NotImplementedError, match="irreversible"):
             await migrate.downgrade(engine, "0009")

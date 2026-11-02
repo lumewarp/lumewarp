@@ -643,6 +643,10 @@ class RouterCreate(ApiModel):
     traffic_split: Splits = Field(default_factory=list)
     sticky: StickyBy = StickyBy.NONE
     sticky_header: StickyHeader | None = None
+    force: bool = Field(
+        default=False,
+        description="Save although connected gateways lack the strategy; they will NACK.",
+    )
 
     @field_validator("sticky_header")
     @classmethod
@@ -664,6 +668,10 @@ class RouterUpdate(ApiModel):
     traffic_split: Splits | None = None
     sticky: StickyBy | None = None
     sticky_header: StickyHeader | None = None
+    force: bool = Field(
+        default=False,
+        description="Save although connected gateways lack the strategy; they will NACK.",
+    )
 
     @field_validator("sticky_header")
     @classmethod
@@ -682,8 +690,37 @@ class RouterOut(ReadModel):
     traffic_split: list[TrafficSplitOut]
     sticky: StickyBy
     sticky_header: str | None
+    config_invalid: bool = Field(
+        description="Stored settings fail the strategy's current schema, or nothing reports it."
+    )
+    config_problems: list[str]
     created_at: datetime
     updated_at: datetime
+
+
+class StrategyGatewayOut(ReadModel):
+    gateway_id: str
+    connected: bool
+    digest: str | None = Field(description="Null when known only from its capabilities.")
+    seen_at: datetime | None
+
+
+class StrategyOut(ReadModel):
+    """Everything but `name` and `builtin` is data from a gateway: render it as plain text."""
+
+    name: str
+    title: str
+    description: str
+    uses_weight: bool
+    needs: list[str]
+    params_schema: dict[str, Any] | None = Field(
+        description="Null when unusable or not reported: settings then cannot be validated here."
+    )
+    member_schema: dict[str, Any] | None
+    schema_problems: list[str] = Field(description="Why a schema reported is not usable.")
+    builtin: bool
+    gateways: list[StrategyGatewayOut] = Field(description="Gateways that have it, newest first.")
+    missing_gateways: list[str] = Field(description="Connected gateways that do not have it.")
 
 
 # --------------------------------------------------------------------------- users

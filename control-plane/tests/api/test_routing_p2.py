@@ -19,9 +19,23 @@ from lumewarp_control_plane.authz import RequestAuthz
 from lumewarp_control_plane.errors import ApiError
 from lumewarp_control_plane.models import AuditLog, CatalogName, ConfigOutbox, Model
 from lumewarp_control_plane.security import Principal, PrincipalKind
-from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, report_strategies, suffix, user_with_token
 
 H = ADMIN_AUTH
+
+
+@pytest.fixture(autouse=True)
+async def _reported_custom_strategies(committed: AsyncSession, api_scope: str) -> None:
+    """An offline gateway has these, with schemas that accept anything: this file tests what
+    routing does with a custom strategy, test_strategies.py what validates it.
+    """
+    anything = ({"type": "object"}, {"type": "object"})
+    await report_strategies(
+        committed,
+        api_scope,
+        "offline-custom",
+        {"header_pin": anything, "ok": anything},
+    )
 
 
 def _upstream(client, **body):
