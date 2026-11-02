@@ -8,7 +8,7 @@ The owner, Andy, writes in Traditional Chinese — reply to him in Traditional C
 
 - `gateway/` — data plane, Rust (tokio, hyper, rustls, arc-swap). Cargo workspace.
 - `control-plane/` — Python 3.12+, FastAPI, SQLAlchemy + Alembic, Authlib, grpcio. Managed with uv.
-- `ui/` — Admin UI, React + Vite static SPA (TanStack Query/Router). Built output is served by the control plane; no Node at runtime.
+- `ui/` — Admin UI, React + Vite static SPA (TanStack Query/Router), components are shadcn/ui on Radix. Built output is served by the control plane; no Node at runtime. `pnpm check` runs the type check and `scripts/check-shadcn.mjs` (no legacy classes, no native elements or Radix imports outside `components/ui/`, no `@layer components`; no allowlist), and CI runs Playwright.
 - `proto/` — protobuf schema for the config snapshot and the config-stream gRPC service. Single source of truth for types on both sides.
 - `bench/` — mock upstream (fixed latency, SSE streaming) and load scripts comparing Lumewarp vs LiteLLM.
 - `deploy/` — Helm chart, Prometheus rules, Grafana dashboards.

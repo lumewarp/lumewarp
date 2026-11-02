@@ -26,7 +26,7 @@ and names can be renamed without breaking references. New router strategies are 
 | --- | --- |
 | `gateway/` | Data plane (Rust) |
 | `control-plane/` | Management API, config compiler, plugins (Python, uv) |
-| `ui/` | Admin UI (React + Vite, static; served by the control plane) |
+| `ui/` | Admin UI (React + Vite with shadcn/ui on Radix, static; served by the control plane) |
 | `proto/` | Config snapshot + config/usage gRPC schema |
 | `bench/` | Mock upstream and Lumewarp-vs-LiteLLM load tests |
 | `deploy/` | Helm chart, dev compose, Prometheus/Grafana scaffolding |
@@ -87,8 +87,10 @@ cd control-plane
 uv sync
 
 # Build the Admin UI once (Node 24 + pnpm); the control plane serves it at /.
+# `pnpm check` runs the type check and the component guard (shadcn/ui only, no legacy
+# classes or native elements outside ui/src/components/ui).
 # Skip this for an API-only setup.
-(cd ../ui && pnpm install && pnpm build:cp)
+(cd ../ui && pnpm install && pnpm check && pnpm build:cp)
 
 uv run lumewarp-control-plane migrate
 uv run lumewarp-control-plane bootstrap --gateway-id gw-local   # prints the lwg-... token once
