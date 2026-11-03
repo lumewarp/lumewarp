@@ -651,15 +651,23 @@ test("a background 401 keeps the one-time secret above the login page", async ({
 
   await expect(page).toHaveURL(/\/login/);
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "My keys" })).toHaveCount(0);
-  await expect(page.getByRole("navigation", { name: "Main" })).toHaveCount(0);
+  // The open modal hides the page from the accessibility tree, so these must count hidden elements too.
+  await expect(page.getByRole("heading", { name: "My keys", includeHidden: true })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "Main", includeHidden: true })).toHaveCount(0);
+  await expect(page.getByTestId("team-s8-401")).toHaveCount(0);
   await expect(secret.getByTestId("secret-value")).toHaveText(value!);
   await secret.getByRole("button", { name: "Copy" }).click();
   await expect(secret.getByRole("button", { name: "Copied" })).toBeVisible();
   await secret.getByRole("button", { name: /saved it/ }).click();
   await expect(page.getByTestId("secret-value")).toHaveCount(0);
-  await expect(page.getByLabel("Break-glass password")).toBeVisible();
   expect(await page.content()).not.toContain(value!);
+
+  // The login form works once the secret is closed: it validates a submit and takes input.
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page.getByText("Password is required")).toBeVisible();
+  const password = page.getByLabel("Break-glass password");
+  await password.fill("typed");
+  await expect(password).toHaveValue("typed");
 });
 
 test("the real Sign out button drops a create still in flight", async ({ page }) => {
@@ -708,7 +716,8 @@ test("the real Sign out button drops a create still in flight", async ({ page })
   releaseResponse();
   await postResponse;
   await delivered;
-  await page.waitForTimeout(150);
+  // Nothing signals "the dropped secret was not shown"; allow a broken build time to show it.
+  await page.waitForTimeout(500);
   await expect(page.getByTestId("secret-value")).toHaveCount(0);
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.getByLabel("Break-glass password")).toBeVisible();
