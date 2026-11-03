@@ -137,7 +137,12 @@ class GatewayUser(FastHttpUser):
         if not keys:
             time.sleep(0.1)
             return
-        key = random.choice(keys)
+        # `w` keeps a rotated key's total sampling weight the same while both of its
+        # secrets are in the pool (0.5 each); `g` records which generation served.
+        if len(keys) == 1:
+            key = keys[0]
+        else:
+            key = random.choices(keys, weights=[float(k.get("w", 1)) for k in keys], k=1)[0]
         stream = random.random() < STREAM_SHARE
         body = {"model": "mock", "messages": [{"role": "user", "content": "hi"}]}
         if stream:
@@ -153,7 +158,14 @@ class GatewayUser(FastHttpUser):
         ) as resp:
             elapsed = time.perf_counter() - t0
             status = resp.status_code or 0
-            record = {"t": started, "d": elapsed, "k": key["id"], "s": stream, "st": status}
+            record = {
+                "t": started,
+                "d": elapsed,
+                "k": key["id"],
+                "g": key.get("gen", 0),
+                "s": stream,
+                "st": status,
+            }
             try:
                 self._check(resp, record, stream, status)
             except Exception as err:  # noqa: BLE001 - never lose a record to a checker bug

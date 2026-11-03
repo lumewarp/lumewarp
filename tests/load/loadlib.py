@@ -19,7 +19,7 @@ from pathlib import Path
 
 import httpx
 from loadpacing import CPU_WARNING_FILES
-from stack import ROOT, SCOPE, Gateway, Proc, Stack, free_port, pg, record_secret, wait_for
+from stack import ROOT, SCOPE, Gateway, Proc, Stack, free_port, pg, wait_for
 
 
 def env_int(name: str, default: int) -> int:
@@ -172,7 +172,7 @@ class Fleet:
             json=body,
         )
         assert created["key"]["owner_kind"] == owner["owner_kind"]
-        record_secret(created["secret"], "API key")
+        # The secret is recorded at Stack.ok's response boundary, not here.
         return {
             "id": created["key"]["id"],
             "secret": created["secret"],
@@ -248,7 +248,15 @@ class Probe:
     def chat(self, key: dict) -> tuple[int, str | None]:
         started = time.monotonic()
         t0 = time.perf_counter()
-        record = {"t": started, "k": key["id"], "s": False, "probe": True}
+        # The generation marker (0 before a rotation, 1 after) says which secret served;
+        # it is not derived from the secret and is safe to report.
+        record = {
+            "t": started,
+            "k": key["id"],
+            "g": key.get("gen", 0),
+            "s": False,
+            "probe": True,
+        }
         try:
             r = self.http.post(
                 self.gw.url("/v1/chat/completions"),
@@ -337,7 +345,21 @@ class LoadRun:
 
     def set_keys(self, keys: list[dict]) -> None:
         tmp = self.pool.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"keys": [{"id": k["id"], "secret": k["secret"]} for k in keys]}))
+        tmp.write_text(
+            json.dumps(
+                {
+                    "keys": [
+                        {
+                            "id": k["id"],
+                            "secret": k["secret"],
+                            "gen": k.get("gen", 0),
+                            "w": k.get("w", 1),
+                        }
+                        for k in keys
+                    ]
+                }
+            )
+        )
         os.replace(tmp, self.pool)
 
     def start(self) -> None:
@@ -525,6 +547,58 @@ def summarize(records: list[dict], seconds: float) -> dict:
         "latency_ms": dist([r["d"] for r in ok if not r["s"]], 1000),
         "stream_latency_ms": dist([r["d"] for r in ok if r["s"]], 1000),
     }
+
+
+def generation_counts(records: list[dict], key_id: str) -> dict[int, int]:
+    """Requests per credential generation for one rotated key (0 before, 1 after)."""
+    counts: Counter = Counter(r.get("g", 0) for r in records if r["k"] == key_id)
+    return dict(sorted(counts.items()))
+
+
+def generation_statuses(records: list[dict], key_id: str) -> dict[int, dict[int, int]]:
+    """Response counts per credential generation and status, for the load report."""
+    counts: dict[int, Counter] = {}
+    for r in records:
+        if r["k"] == key_id:
+            counts.setdefault(r.get("g", 0), Counter())[r["st"]] += 1
+    return {gen: dict(sorted(counter.items())) for gen, counter in sorted(counts.items())}
+
+
+def rotation_errors(
+    records: list[dict],
+    key_id: str,
+    *,
+    since: float,
+    new_secret_since: float | None = None,
+) -> list[dict]:
+    """Responses on a rotated key after the grace began that are not an allowed answer.
+
+    Both generations must keep serving for the grace: the old secret's 401 is a failure,
+    not churn to be tolerated. A 429 rate_limit_exceeded is an existing allowed answer for
+    a key whose owner is being rate-limited; a 5xx, a connection error, another 4xx, a
+    malformed body, or a 401/403 is an error.
+
+    `new_secret_since` is when the gateway first accepted the issued secret, as observed
+    by the probe that polls for it: the 401s before that are the snapshot propagating, not
+    a rejection of a secret the gateway had already accepted.
+    """
+    errors = []
+    for r in records:
+        if r["k"] != key_id or r["t"] < since:
+            continue
+        if (
+            new_secret_since is not None
+            and r.get("g", 0) == 1
+            and r["st"] == 401
+            and r["t"] < new_secret_since
+        ):
+            continue
+        if r["st"] == 200:
+            continue
+        if r["st"] == 429 and r.get("c") == "rate_limit_exceeded":
+            continue
+        errors.append(r)
+    return errors
 
 
 def hard_errors(records: list[dict], allow_conn: tuple[float, float] | None = None) -> list[dict]:
