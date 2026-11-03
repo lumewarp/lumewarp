@@ -19,13 +19,16 @@ import {
   ShieldCheck,
   Sun,
   Users,
+  type LucideIcon,
 } from "lucide-react";
 
 import { api } from "../api";
 import { clearCsrfToken } from "../auth";
 import type { Me } from "../api";
-import { useCan, useMe } from "../hooks";
+import { hasAccess, useCan, useMe, type Access } from "../hooks";
 import { useTheme } from "../theme";
+import { AuthzNotice } from "../pages/Access";
+import { useClearSecrets } from "./SecretProvider";
 import { Badge } from "./Bits";
 import { useToast } from "./Toast";
 import { Button } from "./ui/button";
@@ -43,41 +46,50 @@ import {
   useSidebar,
 } from "./ui/sidebar";
 
-const NAV = [
-  { group: null, items: [{ to: "/", label: "Overview", icon: LayoutDashboard }] },
+type NavItem = { to: string; label: string; icon: LucideIcon; access?: Access };
+
+// My keys is first and for everyone. Admin pages are shown to an installation admin, or to a team admin
+// when the page is about a team they can administer.
+const NAV: { group: string | null; items: NavItem[] }[] = [
+  {
+    group: null,
+    items: [
+      { to: "/my-keys", label: "My keys", icon: KeyRound },
+      { to: "/", label: "Overview", icon: LayoutDashboard, access: "teamAdmin" },
+    ],
+  },
   {
     group: "Access",
     items: [
-      { to: "/keys", label: "My keys", icon: KeyRound },
-      { to: "/teams", label: "Teams", icon: Users },
-      { to: "/users", label: "Users", icon: ShieldCheck, superOnly: true },
+      { to: "/teams", label: "Teams", icon: Users, access: "teamAdmin" },
+      { to: "/users", label: "Users", icon: ShieldCheck, access: "installationAdmin" },
     ],
   },
   {
     group: "Routing",
     items: [
-      { to: "/upstreams", label: "Upstreams", icon: Server },
-      { to: "/models", label: "Models", icon: Boxes },
-      { to: "/aliases", label: "Aliases", icon: CornerDownRight },
-      { to: "/routers", label: "Routers", icon: Route },
+      { to: "/upstreams", label: "Upstreams", icon: Server, access: "installationAdmin" },
+      { to: "/models", label: "Models", icon: Boxes, access: "installationAdmin" },
+      { to: "/aliases", label: "Aliases", icon: CornerDownRight, access: "installationAdmin" },
+      { to: "/routers", label: "Routers", icon: Route, access: "installationAdmin" },
     ],
   },
   {
     group: "Activity",
     items: [
       { to: "/usage", label: "Usage", icon: BarChart3 },
-      { to: "/audit", label: "Audit log", icon: ScrollText },
+      { to: "/audit", label: "Audit log", icon: ScrollText, access: "teamAdmin" },
     ],
   },
   {
     group: "Data plane",
     items: [
-      { to: "/gateways", label: "Gateways", icon: Radio, superOnly: true },
-      { to: "/config", label: "Config versions", icon: History, superOnly: true },
+      { to: "/gateways", label: "Gateways", icon: Radio, access: "installationAdmin" },
+      { to: "/config", label: "Config versions", icon: History, access: "installationAdmin" },
       { to: "/settings", label: "Settings", icon: Settings },
     ],
   },
-] as const;
+];
 
 function roleLabel(me: Me) {
   if (me.kind === "break_glass") return "break-glass";
@@ -98,8 +110,9 @@ function NavToggle() {
   );
 }
 
-function NavSidebar({ isSuper }: { isSuper: boolean }) {
+function NavSidebar({ installationAdmin, teamAdmin }: { installationAdmin: boolean; teamAdmin: boolean }) {
   const { setOpenMobile } = useSidebar();
+  const perms = { isInstallationAdmin: installationAdmin, isTeamAdmin: teamAdmin };
   return (
     <Sidebar>
       <SidebarHeader className="px-5 pt-4 pb-1">
@@ -111,7 +124,7 @@ function NavSidebar({ isSuper }: { isSuper: boolean }) {
       <SidebarContent>
         <nav aria-label="Main" className="flex min-h-0 flex-col gap-1 overflow-y-auto">
           {NAV.map((section) => {
-            const items = section.items.filter((n) => !("superOnly" in n) || isSuper);
+            const items = section.items.filter((n) => hasAccess(perms, n.access ?? "member"));
             if (!items.length) return null;
             return (
               <SidebarGroup key={section.group ?? "top"} role="group" aria-label={section.group ?? undefined}>
@@ -152,6 +165,7 @@ export function Layout() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const toast = useToast();
+  const clearSecrets = useClearSecrets();
   const ThemeIcon = THEME_ICON[theme];
 
   const logout = async () => {
@@ -161,6 +175,7 @@ export function Layout() {
       toast("error", error instanceof Error ? error.message : "Unable to sign out");
       return;
     }
+    clearSecrets();
     clearCsrfToken();
     qc.clear();
     void navigate({ to: "/login" });
@@ -174,7 +189,7 @@ export function Layout() {
       >
         Skip to content
       </a>
-      <NavSidebar isSuper={perms.isSuper} />
+      <NavSidebar installationAdmin={perms.isInstallationAdmin} teamAdmin={perms.isTeamAdmin} />
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-40 flex items-center gap-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur md:px-6">
           <NavToggle />
@@ -194,6 +209,13 @@ export function Layout() {
             <span className="sr-only sm:not-sr-only">Sign out</span>
           </Button>
         </header>
+        {me.data?.authz_unavailable && (
+          <div className="border-b bg-background px-4 py-3 md:px-6">
+            <div className="mx-auto w-full max-w-[1200px]">
+              <AuthzNotice />
+            </div>
+          </div>
+        )}
         <main id="main" className="mx-auto w-full max-w-[1200px] flex-1 px-4 py-6 outline-none md:px-6" tabIndex={-1}>
           <Outlet />
         </main>

@@ -1,7 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Key, type Me, type Team } from "./api";
+import { api, type Key, type Me, type Schemas, type Team } from "./api";
 import { useMemo } from "react";
 import { useToast } from "./components/Toast";
+import { runSecretMutation } from "./lib/keySecret";
+import { ownerResumableReason } from "./lib/keyState";
 
 export function useMe() {
   return useQuery({ queryKey: ["me"], queryFn: () => api.me(), staleTime: 5 * 60_000 });
@@ -12,34 +14,45 @@ export function useMe() {
  * disable actions. Purely cosmetic: the server enforces every request.
  */
 export function can(me: Me | undefined) {
-  const isSuper = !!me?.is_admin || me?.kind === "break_glass";
+  const isInstallationAdmin = !!me?.is_admin || me?.kind === "break_glass";
+  const isTeamAdmin = !!me?.teams.some((team) => team.role === "admin");
   const teamRole = (teamId: string) => me?.teams.find((t) => t.team_id === teamId)?.role;
   const canManageKey = (key: Key) =>
-    isSuper ||
+    isInstallationAdmin ||
     teamRole(key.team_id) === "admin" ||
     (teamRole(key.team_id) !== undefined && key.owner_kind === "user" && key.user_id === me?.user_id);
   return {
-    isSuper,
+    isInstallationAdmin,
+    isTeamAdmin,
     teamRole,
-    teamRead: (teamId: string) => isSuper || teamRole(teamId) !== undefined,
-    teamAdmin: (teamId: string) => isSuper || teamRole(teamId) === "admin",
+    teamRead: (teamId: string) => isInstallationAdmin || teamRole(teamId) !== undefined,
+    teamAdmin: (teamId: string) => isInstallationAdmin || teamRole(teamId) === "admin",
     teamMember: (teamId: string) => teamRole(teamId) !== undefined,
     canCreateOwnKey: (teamId: string) => teamRole(teamId) !== undefined,
     canManageKey,
     canResumeKey: (key: Key) =>
+      // The API refuses to activate a key whose owner is inactive, even for a team admin.
+      key.owner_active !== false &&
       canManageKey(key) &&
-      (isSuper ||
-        teamRole(key.team_id) === "admin" ||
-        key.suspended_reason === null ||
-        key.suspended_reason === "owner" ||
-        // An owner who is back on the team may resume keys suspended by their removal.
-        key.suspended_reason === "owner_removed"),
+      (isInstallationAdmin || teamRole(key.team_id) === "admin" || ownerResumableReason(key)),
   };
 }
 
 export function useCan() {
   const { data } = useMe();
   return can(data);
+}
+
+/** What a route or navigation entry requires; purely cosmetic, the API enforces every request. */
+export type Access = "installationAdmin" | "teamAdmin" | "member";
+
+export function hasAccess(
+  perms: Pick<ReturnType<typeof can>, "isInstallationAdmin" | "isTeamAdmin">,
+  need: Access,
+) {
+  if (need === "member") return true;
+  if (need === "installationAdmin") return perms.isInstallationAdmin;
+  return perms.isInstallationAdmin || perms.isTeamAdmin;
 }
 
 /** Every mutation refreshes all cached lists: what one page changes (names, policies) shows up in others. */
@@ -64,6 +77,18 @@ export function useAction<A, R>(
   const toast = useToast();
   const m = useMut(fn, success);
   return (arg: A) => m.mutateAsync(arg).catch((e: Error) => toast("error", e.message));
+}
+
+/**
+ * Create or rotate a key without keeping the secret in the mutation cache. `onSecret` receives it once;
+ * the cached mutation result is the key.
+ */
+export function useSecretMut<A>(
+  fn: (arg: A) => Promise<Schemas["KeyCreated"]>,
+  onSecret: (secret: string, key: Key) => void,
+  success?: string,
+) {
+  return useMut((arg: A) => runSecretMutation(() => fn(arg), onSecret), success);
 }
 
 export function useTeams() {
@@ -109,6 +134,8 @@ export function useNames(rows: { id: string; name: string }[] | undefined) {
 export function useRoutersQuery() {
   return useQuery({ queryKey: ["routers"], queryFn: () => api.routers(), retry: false, structuralSharing: false });
 }
+
+export const useOwnKeys = () => useQuery({ queryKey: ["own-keys"], queryFn: () => api.ownKeys() });
 
 export const useModels = () => useQuery({ queryKey: ["models"], queryFn: () => api.models() });
 export const useAliases = () => useQuery({ queryKey: ["aliases"], queryFn: () => api.aliases() });

@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { confirmDialog, dialog, optionNames, pick, shot } from "./helpers";
+import { confirmDialog, dialog, pick, shot } from "./helpers";
 
 const BREAK_GLASS = "e2e-break-glass-password";
 const VIEWER = "e2e-viewer-session-0123456789abcdef";
@@ -212,8 +212,8 @@ test("cookie session: CSRF on writes, inline member errors, key owner state, log
 });
 
 test("team, member, service-account, and key flows", async ({ page, browser, request }) => {
-  await page.goto("/keys");
-  await expect(page).toHaveURL(/\/login\?next=%2Fkeys$/);
+  await page.goto("/my-keys");
+  await expect(page).toHaveURL(/\/login\?next=%2Fmy-keys$/);
   await login(page, "not-a-token");
   await expect(page.getByRole("alert")).toBeVisible();
 
@@ -257,7 +257,10 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await page.getByRole("button", { name: "New team" }).click();
   await dialog(page).getByLabel("Name").fill("Research");
   await dialog(page).getByRole("button", { name: "Create" }).click();
-  await expect(page.getByRole("cell", { name: "Research" })).toBeVisible();
+  // Earlier specs may have left teams that cannot be deleted (a key blocks deletion): sort by name so the
+  // new team is on the first page instead of wherever its id falls.
+  await page.getByRole("button", { name: "Name", exact: true }).click();
+  await expect(page.getByRole("cell", { name: "Research", exact: true })).toBeVisible();
   await page.getByRole("link", { name: "Research" }).click();
   await expect(page.getByRole("tab", { name: "Members" })).toHaveAttribute("aria-selected", "true");
 
@@ -357,10 +360,13 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   const viewerContext = await browser.newContext({ baseURL: page.url().split("/").slice(0, 3).join("/") });
   const viewerPage = await viewerContext.newPage();
   await login(viewerPage, VIEWER);
-  await expect(viewerPage.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(viewerPage.getByRole("heading", { name: "My keys" })).toBeVisible();
+  await expect(viewerPage).toHaveURL(/\/my-keys$/);
   await expect(viewerPage.getByRole("link", { name: "Users", exact: true })).toHaveCount(0);
+  await expect(viewerPage.getByRole("link", { name: "Overview", exact: true })).toHaveCount(0);
   await viewerPage.goto("/users");
-  await expect(viewerPage.getByRole("alert")).toContainText("Admin group access is required");
+  await expect(viewerPage.getByRole("heading", { name: "You do not have access to this page" })).toBeVisible();
+  await expect(viewerPage.getByTestId("state-error")).toHaveCount(0);
   await viewerPage.goto(`/teams/${team.id}`);
   await expect(viewerPage.getByRole("heading", { name: "Research" })).toBeVisible();
   await expect(viewerPage.getByRole("button", { name: "Add member" })).toBeDisabled();
@@ -384,9 +390,10 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await expect(personalRow).toContainText("Active");
   const oldPrefix = await personalRow.locator("code").textContent();
 
-  await viewerPage.getByRole("link", { name: "My keys" }).click();
+  await viewerPage.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "My keys" }).click();
   await expect(viewerPage.getByRole("heading", { name: "My keys" })).toBeVisible();
-  await expect(viewerPage.getByRole("cell", { name: "personal-key" })).toBeVisible();
+  const research = viewerPage.getByTestId("team-Research");
+  await expect(research.getByRole("cell", { name: /personal-key/ })).toBeVisible();
   await viewerPage.route("**/api/v1/keys/*/rotate", async (route) => {
     await route.fulfill({
       status: 409,
@@ -395,17 +402,20 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
     });
   });
   await personalRow.getByRole("button", { name: "Rotate" }).click();
+  await dialog(viewerPage).getByRole("button", { name: "Rotate key" }).click();
   await expect(viewerPage.getByText("rotation unavailable")).toBeVisible();
+  await dialog(viewerPage).getByRole("button", { name: "Cancel" }).click();
   await viewerPage.unroute("**/api/v1/keys/*/rotate");
-  await viewerPage.getByRole("button", { name: "New key" }).click();
+  await research.getByRole("button", { name: "New key" }).click();
   await dialog(viewerPage).getByLabel("Name").fill("central-key");
   await dialog(viewerPage).getByRole("button", { name: "Create key" }).click();
   const centralSecret = (await dialog(viewerPage).getByTestId("secret-value").textContent()) ?? "";
   expect(centralSecret).toMatch(/^lw-/);
   await dialog(viewerPage).getByRole("button", { name: /saved it/ }).click();
-  await expect(viewerPage.getByRole("cell", { name: "central-key" })).toBeVisible();
+  await expect(research.getByRole("cell", { name: /central-key/ })).toBeVisible();
 
   await personalRow.getByRole("button", { name: "Rotate" }).click();
+  await dialog(viewerPage).getByRole("button", { name: "Rotate key" }).click();
   const rotatedSecret = (await dialog(viewerPage).getByTestId("secret-value").textContent()) ?? "";
   expect(rotatedSecret).toMatch(/^lw-/);
   await dialog(viewerPage).getByRole("button", { name: /saved it/ }).click();
@@ -419,18 +429,17 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await viewerPage.getByRole("link", { name: "Usage" }).click();
   await pick(viewerPage, "Group by", "Team × owner × key");
   await expect(viewerPage.getByRole("heading", { name: "Usage" })).toBeVisible();
-  await viewerPage.getByRole("link", { name: "Audit log" }).click();
-  expect(await optionNames(viewerPage, "Team")).toContain("Research");
 
   // The team view works at narrow and wide widths in both explicit themes.
   await viewerPage.setViewportSize({ width: 390, height: 844 });
   await viewerPage.goto(`/teams/${team.id}`);
   await expect(viewerPage.getByRole("tab", { name: "Members" })).toBeVisible();
   await viewerPage.getByRole("button", { name: "Toggle navigation" }).click();
-  await expect(viewerPage.getByRole("link", { name: "Teams", exact: true })).toBeVisible();
+  const viewerNav = viewerPage.getByRole("navigation", { name: "Main" });
+  await expect(viewerNav.getByRole("link", { name: "My keys", exact: true })).toBeVisible();
   // The open navigation is a modal sheet over the toggle, so it closes with Escape.
   await viewerPage.keyboard.press("Escape");
-  await expect(viewerPage.getByRole("link", { name: "Teams", exact: true })).toHaveCount(0);
+  await expect(viewerNav.getByRole("link", { name: "My keys", exact: true })).toHaveCount(0);
   await viewerPage.getByRole("button", { name: "Theme: Auto" }).click();
   await expect(viewerPage.locator("html")).toHaveAttribute("data-theme", "light");
   await shot(viewerPage, "smoke-team-detail-phone-light");
@@ -467,8 +476,8 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
 
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page).toHaveURL(/\/login$/);
-  await page.goto("/keys");
-  await expect(page).toHaveURL(/\/login\?next=%2Fkeys$/);
+  await page.goto("/my-keys");
+  await expect(page).toHaveURL(/\/login\?next=%2Fmy-keys$/);
 });
 
 test("router edit: retry, ordered fallback and a traffic split shown as percentages", async ({ page, request }) => {

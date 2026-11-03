@@ -68,7 +68,7 @@ export function Models() {
 
   return (
     <>
-      <PageHeader title="Models" description="A public name mapped to one model on one upstream, with the price used to compute request cost." actions={<CreateButton can={perms.isSuper} onClick={() => open("new")}>New model</CreateButton>} />
+      <PageHeader title="Models" description="A public name mapped to one model on one upstream, with the price used to compute request cost." actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => open("new")}>New model</CreateButton>} />
       <SearchBox value={search} onChange={setSearch} label="Search models" placeholder="Name or upstream model" />
       <DataTable
         rows={rows}
@@ -116,7 +116,7 @@ export function Models() {
           },
           { key: "in", header: "Input / 1M tok", align: "right", hideBelow: "lg", cell: (r) => fmtUsd(r.price_input_nano_usd_per_mtok, "unpriced") },
           { key: "out", header: "Output / 1M tok", align: "right", hideBelow: "lg", cell: (r) => fmtUsd(r.price_output_nano_usd_per_mtok, "unpriced") },
-          { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isSuper} canDelete={perms.isSuper} onEdit={() => open(r)} onDelete={() => setDeleting(r)} /> },
+          { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => open(r)} onDelete={() => setDeleting(r)} /> },
         ]}
       />
       <FormDialog open={!!editing} title={editing === "new" ? "New model" : "Edit model"} submitLabel={editing === "new" ? "Create" : "Save"} onClose={() => setEditing(null)} onSubmit={submit}>

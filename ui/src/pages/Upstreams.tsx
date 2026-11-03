@@ -142,7 +142,7 @@ export function Upstreams() {
 
   return (
     <>
-      <PageHeader title="Upstreams" description="OpenAI-compatible endpoints (vLLM, OpenAI, …). Credentials are referenced by environment variable name; the secret itself is never stored here." actions={<CreateButton can={perms.isSuper} onClick={() => open("new")}>New upstream</CreateButton>} />
+      <PageHeader title="Upstreams" description="OpenAI-compatible endpoints (vLLM, OpenAI, …). Credentials are referenced by environment variable name; the secret itself is never stored here." actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => open("new")}>New upstream</CreateButton>} />
       <DataTable
         rows={list.data}
         loading={list.isPending}
@@ -170,7 +170,7 @@ export function Upstreams() {
                 <span className="text-muted-foreground">—</span>
               ),
           },
-          { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isSuper} canDelete={perms.isSuper} onEdit={() => open(r)} onDelete={() => setDeleting(r)} /> },
+          { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => open(r)} onDelete={() => setDeleting(r)} /> },
         ]}
       />
       <FormDialog variant="drawer" open={!!editing} title={editing === "new" ? "New upstream" : "Edit upstream"} submitLabel={editing === "new" ? "Create" : "Save"} onClose={() => setEditing(null)} onSubmit={submit}>

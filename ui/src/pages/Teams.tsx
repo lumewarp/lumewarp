@@ -39,7 +39,7 @@ export function Teams() {
       <PageHeader
         title="Teams"
         description="Teams group members, service accounts, keys, and usage."
-        actions={<CreateButton can={perms.isSuper} onClick={() => open("new")}>New team</CreateButton>}
+        actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => open("new")}>New team</CreateButton>}
       />
       <DataTable
         rows={teams.data}
@@ -63,7 +63,7 @@ export function Teams() {
             cell: (row) => (
               <RowActions
                 canEdit={perms.teamAdmin(row.id)}
-                canDelete={perms.isSuper}
+                canDelete={perms.isInstallationAdmin}
                 onEdit={() => open(row)}
                 onDelete={() => setDeleting(row)}
               />

@@ -2,8 +2,8 @@
 
 Run via `uv run --project ../control-plane python e2e/serve.py` (see playwright.config.ts). Creates
 `lumewarp_test_e2e_<hex>` on the dev Postgres (or LUMEWARP_TEST_DATABASE_URL), migrates and
-bootstraps it, seeds a viewer user with a known cookie session, serves until signalled, then
-drops the database.
+bootstraps it, seeds the users the UI specs sign in as (each with a known cookie session), serves
+until signalled, then drops the database.
 """
 
 import asyncio
@@ -39,8 +39,18 @@ from sqlalchemy.ext.asyncio import create_async_engine
 HTTP_PORT = os.environ.get("E2E_HTTP_PORT", "8992")
 GRPC_PORT = os.environ.get("E2E_GRPC_PORT", "50952")
 BREAK_GLASS_PASSWORD = "e2e-break-glass-password"
+# Users without a team: a spec adds them where it needs them. Their sessions are seeded here because the
+# login is OIDC (or break-glass); a cookie session is the only way a spec can act as a regular member.
 VIEWER_EMAIL = "viewer@e2e.test"
 VIEWER_TOKEN = "e2e-viewer-session-0123456789abcdef"
+MEMBER_EMAIL = "member@e2e.test"
+MEMBER_TOKEN = "e2e-member-session-0123456789abcdef"
+OUTSIDER_EMAIL = "outsider@e2e.test"
+OUTSIDER_TOKEN = "e2e-outsider-session-0123456789abcdef"
+TEAM_ADMIN_EMAIL = "teamadmin@e2e.test"
+TEAM_ADMIN_TOKEN = "e2e-teamadmin-session-0123456789abcdef"
+SHOTS_EMAIL = "shots@e2e.test"
+SHOTS_TOKEN = "e2e-shots-session-0123456789abcdef"
 SERVER_URL = os.environ.get("LUMEWARP_TEST_DATABASE_URL", DEV_DATABASE_URL)
 
 
@@ -53,23 +63,30 @@ async def admin(sql: str) -> None:
         await engine.dispose()
 
 
-async def seed_viewer(url: str) -> None:
+async def seed_users(url: str) -> None:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     engine = create_async_engine(url)
     try:
         async with AsyncSession(engine) as session, session.begin():
-            user = User(email=VIEWER_EMAIL, display_name="E2E Viewer")
-            session.add(user)
-            await session.flush()
-            session.add(
-                UserSession(
-                    user_id=user.id,
-                    token_hash=hash_secret(VIEWER_TOKEN),
-                    csrf_hash=hash_secret(csrf_token(VIEWER_TOKEN)),
-                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+            for email, display_name, token in (
+                (VIEWER_EMAIL, "E2E Viewer", VIEWER_TOKEN),
+                (MEMBER_EMAIL, "E2E Member", MEMBER_TOKEN),
+                (OUTSIDER_EMAIL, "E2E Outsider", OUTSIDER_TOKEN),
+                (TEAM_ADMIN_EMAIL, "E2E Team Admin", TEAM_ADMIN_TOKEN),
+                (SHOTS_EMAIL, "E2E Shots", SHOTS_TOKEN),
+            ):
+                user = User(email=email, display_name=display_name)
+                session.add(user)
+                await session.flush()
+                session.add(
+                    UserSession(
+                        user_id=user.id,
+                        token_hash=hash_secret(token),
+                        csrf_hash=hash_secret(csrf_token(token)),
+                        expires_at=datetime.now(UTC) + timedelta(hours=1),
+                    )
                 )
-            )
     finally:
         await engine.dispose()
 
@@ -440,7 +457,7 @@ def main() -> None:
     try:
         cp("migrate", env=env)
         cp("bootstrap", "--gateway-id", "e2e-gw", env=env)
-        asyncio.run(seed_viewer(url))
+        asyncio.run(seed_users(url))
         server = subprocess.Popen(
             [sys.executable, "-m", "lumewarp_control_plane", "serve"], env=env
         )

@@ -14,6 +14,8 @@ interface Props {
   footer?: ReactNode;
   /** `drawer` slides in from the right. */
   variant?: "dialog" | "drawer" | "wide-drawer";
+  /** The dialog variant only: false keeps Esc, an outside click and the header X from closing it. */
+  dismissible?: boolean;
 }
 
 /**
@@ -39,7 +41,7 @@ const HEADER = "flex shrink-0 flex-row items-center justify-between gap-3 border
  * Focus trap, Esc, backdrop close and inert background come from Radix (via ui/dialog and ui/sheet). The
  * header and footer stay put and only the body scrolls, so a long form can always be cancelled or saved.
  */
-export function Dialog({ open, onClose, title, children, footer, variant = "dialog" }: Props) {
+export function Dialog({ open, onClose, title, children, footer, variant = "dialog", dismissible = true }: Props) {
   const onOpenChange = (next: boolean) => (!next ? onClose() : undefined);
   const onCloseAutoFocus = useReturnFocus(open);
   const body = (
@@ -56,10 +58,21 @@ export function Dialog({ open, onClose, title, children, footer, variant = "dial
   if (variant === "dialog") {
     return (
       <UiDialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent aria-describedby={undefined} onCloseAutoFocus={onCloseAutoFocus} showCloseButton={false} className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 p-0 sm:max-w-lg">
+        <DialogContent
+          aria-describedby={undefined}
+          onCloseAutoFocus={onCloseAutoFocus}
+          showCloseButton={false}
+          className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 p-0 sm:max-w-lg"
+          {...(dismissible
+            ? {}
+            : {
+                onEscapeKeyDown: (event: KeyboardEvent) => event.preventDefault(),
+                onInteractOutside: (event: Event) => event.preventDefault(),
+              })}
+        >
           <header className={HEADER}>
             <DialogTitle className="m-0">{title}</DialogTitle>
-            <DialogClose asChild>{close}</DialogClose>
+            {dismissible && <DialogClose asChild>{close}</DialogClose>}
           </header>
           {body}
         </DialogContent>

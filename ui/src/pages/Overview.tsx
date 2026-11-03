@@ -87,8 +87,8 @@ export function Overview() {
   const teams = useTeams();
   const keys = useAllTeamKeys(teams.data);
   const routers = useQuery({ queryKey: ["routers"], queryFn: () => api.routers() });
-  const gateways = useQuery({ queryKey: ["gateways"], queryFn: () => api.gateways(), enabled: perms.isSuper });
-  const versions = useQuery({ queryKey: ["config-versions"], queryFn: () => api.configVersions(), enabled: perms.isSuper });
+  const gateways = useQuery({ queryKey: ["gateways"], queryFn: () => api.gateways(), enabled: perms.isInstallationAdmin });
+  const versions = useQuery({ queryKey: ["config-versions"], queryFn: () => api.configVersions(), enabled: perms.isInstallationAdmin });
 
   const dash = (v: number | undefined) => (v === undefined ? "…" : String(v));
   const latest = versions.data?.reduce((m, v) => Math.max(m, v.version), 0);
@@ -101,8 +101,8 @@ export function Overview() {
         <Counter label="Teams" value={dash(teams.data?.length)} />
         <Counter label="Active keys" value={dash(active)} />
         <Counter label="Routers" value={dash(routers.data?.length)} />
-        {perms.isSuper && <Counter label="Config version" value={latest ? `v${latest}` : "…"} />}
-        {perms.isSuper && <Counter label="Gateways connected" value={gateways.data ? `${gateways.data.filter((g) => g.connected).length} / ${gateways.data.length}` : "…"} />}
+        {perms.isInstallationAdmin && <Counter label="Config version" value={latest ? `v${latest}` : "…"} />}
+        {perms.isInstallationAdmin && <Counter label="Gateways connected" value={gateways.data ? `${gateways.data.filter((g) => g.connected).length} / ${gateways.data.length}` : "…"} />}
       </div>
       {(teams.error || keys.error) && (
         <Alert variant="destructive" className="mt-4" data-testid="state-error">

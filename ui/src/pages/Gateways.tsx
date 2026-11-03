@@ -1,14 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api";
-import { Badge, fmtDateTime, PageHeader, SecretOnce } from "../components/Bits";
+import { Badge, fmtDateTime, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
-import { Dialog } from "../components/Dialog";
 import { FormDialog, required, TextField, useForm } from "../components/Form";
 import { Button } from "../components/ui/button";
 import { CreateButton } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { useMut } from "../hooks";
+import { runTokenSecretMutation } from "../lib/keySecret";
+import { useShowSecret } from "../components/SecretProvider";
 
 type Gateway = Awaited<ReturnType<typeof api.gateways>>[number];
 type GwToken = Gateway["tokens"][number];
@@ -17,11 +18,13 @@ export function Gateways() {
   const list = useQuery({ queryKey: ["gateways"], queryFn: () => api.gateways(), refetchInterval: 10_000 });
   const versions = useQuery({ queryKey: ["config-versions"], queryFn: () => api.configVersions() });
   const latest = versions.data?.reduce((m, v) => Math.max(m, v.version), 0);
+  const showSecret = useShowSecret();
   const [creating, setCreating] = useState(false);
-  const [secret, setSecret] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<{ gateway: string; token: GwToken } | null>(null);
   const form = useForm({ gateway_id: "", name: "" }, { gateway_id: required("Gateway id") });
-  const create = useMut((v: { gateway_id: string; name: string }) => api.createGatewayToken(v), (r) => setSecret(r.secret));
+  const create = useMut((v: { gateway_id: string; name: string }) =>
+    runTokenSecretMutation(() => api.createGatewayToken(v), (value) => showSecret({ value, title: "Gateway token created" })),
+  );
   const revoke = useMut(({ g, t }: { g: string; t: string }) => api.revokeGatewayToken(g, t), "Token revoked");
 
   return (
@@ -85,9 +88,6 @@ export function Gateways() {
         <TextField label="Gateway id" value={form.values.gateway_id} onChange={(v) => form.set("gateway_id", v)} error={form.errors.gateway_id} autoFocus hint="Identifier the gateway reports, e.g. gw-eu-1." />
         <TextField label="Label" value={form.values.name} onChange={(v) => form.set("name", v)} />
       </FormDialog>
-      <Dialog open={!!secret} title="Gateway token created" onClose={() => setSecret(null)} footer={<Button onClick={() => setSecret(null)}>I’ve saved it</Button>}>
-        {secret && <SecretOnce secret={secret} />}
-      </Dialog>
       <ConfirmDialog open={!!revoking} title="Revoke gateway token" confirmLabel="Revoke" message="The gateway using this token can no longer connect. It keeps serving its last good config." onConfirm={() => revoke.mutateAsync({ g: revoking!.gateway, t: revoking!.token.id })} onClose={() => setRevoking(null)} />
     </>
   );

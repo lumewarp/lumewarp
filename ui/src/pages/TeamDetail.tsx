@@ -2,10 +2,9 @@ import { Link, useParams } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, ApiError, type Key, type Member, type Schemas, type ServiceAccount, type Team } from "../api";
-import { Badge, fmtDate, fmtUsd, KeyBadge, PageHeader, SecretOnce, SuspendedReason } from "../components/Bits";
+import { Badge, fmtDate, fmtUsd, KeyBadge, PageHeader, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
-import { Dialog } from "../components/Dialog";
-import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
+import { FormDialog, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
 import { blankPolicy, Budget, PolicyFields, policyBody, policyFrom, PolicySummary, POLICY_ALIAS, type PolicyValues } from "../components/Policy";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
@@ -15,7 +14,10 @@ import { Card } from "../components/ui/card";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { DescriptionDetails, DescriptionList, DescriptionTerm } from "../components/ui/description-list";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
-import { useAction, useCan, useMe, useMut } from "../hooks";
+import { useAction, useCan, useMe, useMut, useSecretMut } from "../hooks";
+import { useShowSecret } from "../components/SecretProvider";
+import { useToast } from "../components/Toast";
+import { expiryFromDay, fmtLifetime, lastExpiryDay, localDayOf } from "./keyText";
 
 const TABS = [
   { id: "members", label: "Members" },
@@ -29,6 +31,8 @@ type Tab = (typeof TABS)[number]["id"];
 
 export function TeamDetail() {
   const { teamId } = useParams({ strict: false }) as { teamId: string };
+  const perms = useCan();
+  const canListTeams = perms.isInstallationAdmin || perms.isTeamAdmin;
   const [tab, setTab] = useState<Tab>("members");
   const [externallyManagedTeamId, setExternallyManagedTeamId] = useState<string | null>(null);
   const team = useQuery({ queryKey: ["team", teamId], queryFn: () => api.team(teamId), enabled: !!teamId });
@@ -49,7 +53,7 @@ export function TeamDetail() {
         description="Manage the people, service accounts, keys, and usage for this team."
         actions={
           <Button variant="outline" asChild>
-            <Link to="/teams">All teams</Link>
+            {canListTeams ? <Link to="/teams">All teams</Link> : <Link to="/my-keys">My keys</Link>}
           </Button>
         }
       />
@@ -123,7 +127,7 @@ function MembersPanel({
   const userDirectory = useQuery({
     queryKey: ["user-directory"],
     queryFn: () => api.users(),
-    enabled: perms.isSuper,
+    enabled: perms.isInstallationAdmin,
   });
   const [editing, setEditing] = useState<Member | "new" | null>(null);
   const [deleting, setDeleting] = useState<Member | null>(null);
@@ -249,13 +253,13 @@ function MembersPanel({
                 }}
                 error={form.errors.email}
                 hint={
-                  perms.isSuper
+                  perms.isInstallationAdmin
                     ? "Enter an existing user's email address, or pick a matching user below."
                     : "Enter the email address of an existing user."
                 }
                 autoFocus
               />
-              {perms.isSuper && (
+              {perms.isInstallationAdmin && (
                 <ComboboxField
                   label="User"
                   value={form.values.user_id}
@@ -404,21 +408,17 @@ function ServiceAccountsPanel({ team }: { team: Team }) {
 type KeyValues = { name: string; service_account_id: string; expires: string };
 const blankKey: KeyValues = { name: "", service_account_id: "", expires: "" };
 
-function expiresAt(value: string) {
-  return value ? new Date(`${value}T23:59:59`).toISOString() : null;
-}
-
 function KeysPanel({ team }: { team: Team }) {
   const me = useMe();
   const perms = useCan();
+  const toast = useToast();
+  const showSecret = useShowSecret();
   const isAdmin = perms.teamAdmin(team.id);
   const members = useQuery({ queryKey: ["members", team.id], queryFn: () => api.members(team.id) });
   const accounts = useQuery({ queryKey: ["service-accounts", team.id], queryFn: () => api.serviceAccounts(team.id) });
   const keys = useQuery({ queryKey: ["team-keys", team.id], queryFn: () => api.teamKeys(team.id) });
   const [editing, setEditing] = useState<Key | "new" | null>(null);
   const [revoking, setRevoking] = useState<Key | null>(null);
-  const [secret, setSecret] = useState<string | null>(null);
-  const [secretTitle, setSecretTitle] = useState("API key created");
   const ownerOptions = [
     ...(perms.canCreateOwnKey(team.id) && !!me.data?.user_id
       ? [{ value: "", label: me.data.email ?? "My account" }]
@@ -426,23 +426,20 @@ function KeysPanel({ team }: { team: Team }) {
     ...(isAdmin ? (accounts.data ?? []).map((account) => ({ value: account.id, label: account.name })) : []),
   ];
   const form = useForm<KeyValues>(blankKey, { name: required("Name") });
-  const create = useMut(
+  const create = useSecretMut(
     (values: KeyValues) =>
       api.createKey(team.id, {
         name: values.name,
-        expires_at: expiresAt(values.expires),
+        expires_at: expiryFromDay(values.expires),
         service_account_id: values.service_account_id || null,
       }),
-    (result) => {
-      setSecretTitle("API key created");
-      setSecret(result.secret);
-    },
+    (value) => showSecret({ value, title: "API key created" }),
   );
   const update = useMut(
     ({ key, values }: { key: Key; values: KeyValues }) => {
       const body: Schemas["KeyUpdate"] = { name: values.name };
-      if (values.expires !== (key.expires_at?.slice(0, 10) ?? "")) {
-        body.expires_at = expiresAt(values.expires);
+      if (values.expires !== localDayOf(key.expires_at)) {
+        body.expires_at = expiryFromDay(values.expires);
       }
       return api.updateKey(key.id, body);
     },
@@ -454,23 +451,30 @@ function KeysPanel({ team }: { team: Team }) {
     "Key updated",
   );
   const revoke = useMut((key: Key) => api.revokeKey(key.id), "Key revoked");
-  const rotate = useAction(
+  const rotate = useSecretMut(
     (key: Key) => api.rotateKey(key.id),
-    (result) => {
-      setSecretTitle("API key rotated");
-      setSecret(result.secret);
-    },
+    (value) => showSecret({ value, title: "API key rotated" }),
   );
+  const rotateKey = (key: Key) => void rotate.mutateAsync(key).catch((e: Error) => toast("error", e.message));
 
   const open = (key: Key | "new") => {
     const defaultOwner = ownerOptions[0]?.value ?? "";
     form.reset(
       key === "new"
         ? { ...blankKey, service_account_id: defaultOwner }
-        : { name: key.name, service_account_id: key.service_account_id ?? "", expires: key.expires_at?.slice(0, 10) ?? "" },
+        : { name: key.name, service_account_id: key.service_account_id ?? "", expires: localDayOf(key.expires_at) },
     );
     setEditing(key);
   };
+  const memberKey = editing === "new" ? !form.values.service_account_id : editing?.owner_kind === "user";
+  const lifetime = memberKey ? (team.max_member_key_lifetime_seconds ?? null) : null;
+  const expiryMax = lifetime === null ? undefined : lastExpiryDay(lifetime);
+  const expiryHint =
+    lifetime === null
+      ? "Empty means the key never expires."
+      : editing === "new"
+        ? `Optional. This team limits member keys to ${fmtLifetime(lifetime)}; empty uses that limit. The latest day is ${expiryMax}.`
+        : `Required. This team limits member keys to ${fmtLifetime(lifetime)}; the latest day is ${expiryMax}.`;
   const submit = async () => {
     if (!form.validate()) return false;
     return form.run(() =>
@@ -530,7 +534,7 @@ function KeysPanel({ team }: { team: Team }) {
                   onEdit={() => open(key)}
                   extra={key.lifecycle === "revoked" ? null : (
                     <>
-                      <Button variant="outline" size="sm" disabled={!allowed} onClick={() => void rotate(key)}>Rotate</Button>
+                      <Button variant="outline" size="sm" disabled={!allowed} onClick={() => rotateKey(key)}>Rotate</Button>
                       <Button
                         variant="outline"
                         size="sm"
@@ -569,16 +573,8 @@ function KeysPanel({ team }: { team: Team }) {
           />
         )}
         <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
-        <TextField label="Expires" type="date" value={form.values.expires} onChange={(value) => form.set("expires", value)} hint="Empty means the key never expires." />
+        <TextField label="Expires" type="date" value={form.values.expires} max={expiryMax} onChange={(value) => form.set("expires", value)} hint={expiryHint} />
       </FormDialog>
-      <Dialog
-        open={!!secret}
-        title={secretTitle}
-        onClose={() => setSecret(null)}
-        footer={<Button onClick={() => setSecret(null)}>I’ve saved it</Button>}
-      >
-        {secret && <SecretOnce secret={secret} />}
-      </Dialog>
       <ConfirmDialog
         open={!!revoking}
         title="Revoke key"
@@ -643,20 +639,38 @@ function TeamUsage({ team }: { team: Team }) {
   );
 }
 
+type TeamSettingsValues = PolicyValues & {
+  name: string;
+  max_keys_per_member: number | null;
+  max_member_key_lifetime_seconds: number | null;
+};
+
+const teamSettingsFrom = (team: Team): TeamSettingsValues => ({
+  name: team.name,
+  ...policyFrom(team, true),
+  max_keys_per_member: team.max_keys_per_member ?? null,
+  max_member_key_lifetime_seconds: team.max_member_key_lifetime_seconds ?? null,
+});
+
 function TeamSettings({ team }: { team: Team }) {
   const perms = useCan();
   const [editing, setEditing] = useState(false);
-  const form = useForm<PolicyValues & { name: string }>(
-    { name: team.name, ...policyFrom(team, true) },
-    { name: required("Name") },
-  );
+  const form = useForm<TeamSettingsValues>(teamSettingsFrom(team), {
+    name: required("Name"),
+  });
   const update = useMut(
-    (values: PolicyValues & { name: string }) => api.updateTeam(team.id, { name: values.name, ...policyBody(values) }),
+    (values: TeamSettingsValues) =>
+      api.updateTeam(team.id, {
+        name: values.name,
+        ...policyBody(values),
+        max_keys_per_member: values.max_keys_per_member,
+        max_member_key_lifetime_seconds: values.max_member_key_lifetime_seconds,
+      }),
     "Team settings saved",
   );
 
   const edit = () => {
-    form.reset({ name: team.name, ...policyFrom(team, true) });
+    form.reset(teamSettingsFrom(team));
     setEditing(true);
   };
   const submit = async () => {
@@ -681,6 +695,14 @@ function TeamSettings({ team }: { team: Team }) {
           <DescriptionDetails><PolicySummary p={team} /></DescriptionDetails>
           <DescriptionTerm>Budget</DescriptionTerm>
           <DescriptionDetails><Budget p={team} /></DescriptionDetails>
+          {perms.teamAdmin(team.id) && (
+            <>
+              <DescriptionTerm>Keys per member</DescriptionTerm>
+              <DescriptionDetails>{team.max_keys_per_member ?? "No limit"}</DescriptionDetails>
+              <DescriptionTerm>Longest member key lifetime</DescriptionTerm>
+              <DescriptionDetails>{fmtLifetime(team.max_member_key_lifetime_seconds)}</DescriptionDetails>
+            </>
+          )}
           <DescriptionTerm>Created</DescriptionTerm>
           <DescriptionDetails>{fmtDate(team.created_at)}</DescriptionDetails>
         </DescriptionList>
@@ -688,6 +710,26 @@ function TeamSettings({ team }: { team: Team }) {
       <FormDialog open={editing} title="Edit team settings" onClose={() => setEditing(false)} onSubmit={submit}>
         <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
         <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam />
+        <NumberField
+          label="Max keys per member"
+          min={1}
+          value={form.values.max_keys_per_member}
+          onChange={(value) => form.set("max_keys_per_member", value)}
+          error={form.errors.max_keys_per_member}
+          hint="Blank means no limit. Revoking a key frees a slot; the cap is checked when a key is created."
+        />
+        <NumberField
+          label="Longest member key lifetime (seconds)"
+          min={1}
+          value={form.values.max_member_key_lifetime_seconds}
+          onChange={(value) => form.set("max_member_key_lifetime_seconds", value)}
+          error={form.errors.max_member_key_lifetime_seconds}
+          hint={
+            form.values.max_member_key_lifetime_seconds
+              ? `${fmtLifetime(form.values.max_member_key_lifetime_seconds)}. Blank means no limit.`
+              : "Blank means no limit. Member keys must expire within this many seconds."
+          }
+        />
       </FormDialog>
     </>
   );
