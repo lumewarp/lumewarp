@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 
 import type { UsageRow } from "../api";
 import { daysBetween } from "../lib/days";
@@ -23,10 +23,6 @@ const MIN_SLOT = 22;
 /** The surface gap between stacked segments, and the widest a bar gets. */
 const GAP = 2;
 const BAR = 26;
-/** The tooltip shows the biggest rows that fit this many lines; the rest are counted and live in the table. */
-const TIP_LINES = 6;
-/** Characters one tooltip line holds at the tooltip's width, for the line budget above. */
-const TIP_CHARS = 34;
 
 /** The named models drawn by the last render, by slot: a survivor outranks anything remembered. */
 let drawnLast = new Map<string, number>();
@@ -246,12 +242,33 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
   const { series, totals, dayRequests, peak, unpriced, unknown } = useMemo(() => build(rows, days, metric), [rows, days, metric]);
   const axis = axisFor(peak);
 
-  // Three sources of a shown day, kept apart: a keyboard focus owns the tab stop, a pointer hovers, a finger
-  // pins. The tooltip prefers the finger's choice, then the pointer's, then the focus.
-  const [focused, setFocused] = useState<number | null>(null);
-  const [hovered, setHovered] = useState<number | null>(null);
-  const [pinned, setPinned] = useState<number | null>(null);
-  const shown = pinned ?? hovered ?? focused;
+  // One shown day and the input that chose it: whichever came last wins, so a keyboard move is not hidden by
+  // a mouse that is standing still, and moving the mouse takes the day back. The tab stop follows the focus.
+  const [focusedDay, setFocusedDay] = useState<string | null>(null);
+  const [shown, setShown] = useState<{ day: string; source: "focus" | "hover" | "pin" } | null>(null);
+  const at = useMemo(() => new Map(days.map((day, index) => [day, index])), [days]);
+  const shownAt = shown ? at.get(shown.day) ?? null : null;
+  const focusedAt = focusedDay ? at.get(focusedDay) ?? null : null;
+  const focusedSafe = focusedAt === null ? null : days[focusedAt];
+  // A new range drops a selection it no longer holds; the derived indices above already ignore stale dates.
+  useEffect(() => {
+    setShown((current) => (current && !at.has(current.day) ? null : current));
+    setFocusedDay((current) => (current && !at.has(current) ? null : current));
+  }, [at]);
+
+  // The room the tooltip has: the plot's own height, measured, so a short plot or a zoomed page is respected.
+  const [svgEl, setSvgEl] = useState<SVGSVGElement | null>(null);
+  const [room, setRoom] = useState(0);
+  useLayoutEffect(() => {
+    if (!svgEl) return;
+    setRoom(svgEl.getBoundingClientRect().height);
+    const observer = new ResizeObserver(() => setRoom(svgEl.getBoundingClientRect().height));
+    observer.observe(svgEl);
+    return () => observer.disconnect();
+  }, [svgEl]);
+  // Rows hidden to fit; reset whenever the day, the metric, the card or the plot changes.
+  const [tipState, setTipState] = useState({ key: "", hidden: 0 });
+  const tipRef = useRef<HTMLDivElement | null>(null);
 
   const [open, setOpen] = useState(false);
   const [scroll, setScroll] = useState(0);
@@ -295,25 +312,27 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
   // The tooltip sits beside the shown slot — on its left in the right half, on its right in the left half,
   // and centred over the slot only when the card is too narrow for either side (a phone).
   const tipWidth = Math.min(260, column - 8);
-  const centre = slot * ((shown ?? 0) + 0.5) - scroll;
+  const centre = slot * ((shownAt ?? 0) + 0.5) - scroll;
   const fits = (left: number) => left >= 4 && left + tipWidth <= column - 4;
   const leftHalf = centre < column / 2;
   const beside = leftHalf ? centre + slot / 2 + 8 : centre - slot / 2 - 8 - tipWidth;
   const across = leftHalf ? centre - slot / 2 - 8 - tipWidth : centre + slot / 2 + 8;
   const tipLeft = fits(beside) ? beside : fits(across) ? across : Math.min(Math.max(4, centre - tipWidth / 2), Math.max(4, column - tipWidth - 4));
 
-  // Rows by value, as many as the plot's height holds; the rest are named in one row and live in the table.
-  const dayRows = shown === null ? [] : series.filter((s) => s.counts[shown] > 0).sort((a, b) => b.cells[shown] - a.cells[shown] || a.name.localeCompare(b.name));
-  const rowLines = (s: Series) => Math.min(2, Math.ceil(s.name.length / TIP_CHARS)) + (s.members.length ? 1 : 0);
-  const tipRows: Series[] = [];
-  let lines = 0;
-  for (const s of dayRows) {
-    const cost = rowLines(s);
-    if (lines + cost > TIP_LINES) break;
-    lines += cost;
-    tipRows.push(s);
-  }
-  const more = dayRows.length - tipRows.length;
+  // Rows by value. How many fit is decided after they are laid out: the effect below drops the smallest into
+  // "N more in the data table" until the real tooltip fits the real plot, so no estimate can be wrong.
+  const dayRows = shownAt === null ? [] : series.filter((s) => s.counts[shownAt] > 0).sort((a, b) => b.cells[shownAt] - a.cells[shownAt] || a.name.localeCompare(b.name));
+  const tipKey = `${shownAt}|${metric}|${Math.round(width)}|${Math.round(room)}|${dayRows.length}`;
+  const hidden = tipState.key === tipKey ? Math.min(tipState.hidden, dayRows.length) : 0;
+  const tipRows = dayRows.slice(0, dayRows.length - hidden);
+  const more = hidden;
+  useLayoutEffect(() => {
+    const element = tipRef.current;
+    if (!element || shownAt === null || !room) return;
+    // One row at a time, before paint, and never past the last row: header, "more" and total stay visible.
+    if (element.getBoundingClientRect().height <= room || hidden >= dayRows.length) return;
+    setTipState({ key: tipKey, hidden: hidden + 1 });
+  }, [tipKey, hidden, room, shownAt, dayRows.length]);
 
   const dayLabel = (at: number) => {
     const parts = series.filter((s) => s.cells[at]).map((s) => `${s.name} ${exact(s.cells[at], metric)}`);
@@ -375,48 +394,61 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
               className="overflow-x-auto"
               onScroll={(event) => {
                 setScroll(event.currentTarget.scrollLeft);
-                // A pointer's choice belongs to a place on screen that just moved; keyboard focus moves with its day.
-                setHovered(null);
-                setPinned(null);
+                // A pointer's choice belongs to a place on screen that moved; a keyboard focus does not.
+                setShown((current) =>
+                  current && current.source !== "focus" ? (focusedSafe ? { day: focusedSafe, source: "focus" } : null) : current,
+                );
               }}
             >
-              <svg width={inner + PAD.right} height={base + PAD.bottom} data-max={axis.max} role="group" aria-label={`${METRIC_LABEL[metric]} per UTC day, by model, ${from} to ${to}`} className="block max-w-none">
+              <svg ref={setSvgEl} width={inner + PAD.right} height={base + PAD.bottom} data-max={axis.max} role="group" aria-label={`${METRIC_LABEL[metric]} per UTC day, by model, ${from} to ${to}`} className="block max-w-none">
                 {axis.ticks.length > 1 && <path d={ticks.filter((t) => t.value).map((t) => `M0 ${t.y}H${inner}`).join("")} className="stroke-border" strokeDasharray="3 3" />}
                 <line x1={0} x2={inner} y1={base} y2={base} className="stroke-border" />
-                {shown !== null && <rect x={slot * shown} y={PAD.top} width={slot} height={PLOT_H} className="fill-muted/60" />}
+                {shownAt !== null && <rect x={slot * shownAt} y={PAD.top} width={slot} height={PLOT_H} className="fill-muted/60" />}
                 {bars.map((b, at) => (
                   <path key={at} data-testid="usage-chart-bar" data-bar-day={b.day} data-bar-series={b.name} d={barPath(b.x, b.y, bar, b.h, b.top ? 3 : 0)} style={{ fill: paint(b.slot) }} />
                 ))}
-                {days.map((day, at) => (
+                {days.map((day, index) => (
                   <rect
                     key={day}
                     ref={(element) => {
-                      nodes.current[at] = element;
+                      nodes.current[index] = element;
                     }}
                     data-testid="usage-day"
                     data-day={day}
                     role="img"
-                    aria-label={dayLabel(at)}
-                    tabIndex={focused === at || (focused === null && at === 0) ? 0 : -1}
-                    x={slot * at}
+                    aria-label={dayLabel(index)}
+                    tabIndex={focusedAt === index || (focusedAt === null && index === 0) ? 0 : -1}
+                    x={slot * index}
                     y={PAD.top}
                     width={slot}
                     height={PLOT_H}
                     fill="transparent"
                     className="cursor-default outline-none"
-                    onFocus={() => setFocused(at)}
-                    onBlur={() => setFocused((current) => (current === at ? null : current))}
+                    // Whichever input came last decides; a keyboard move clears a hover or a pin by taking over.
+                    onFocus={() => {
+                      setFocusedDay(day);
+                      setShown({ day, source: "focus" });
+                    }}
+                    onBlur={() => {
+                      setFocusedDay((current) => (current === day ? null : current));
+                      setShown((current) => (current?.source === "focus" && current.day === day ? null : current));
+                    }}
                     // A pen hovers like a mouse; only a finger pins, so one gesture never takes two paths.
-                    onPointerEnter={(event: PointerEvent<SVGRectElement>) => event.pointerType !== "touch" && setHovered(at)}
-                    onPointerLeave={(event: PointerEvent<SVGRectElement>) => event.pointerType !== "touch" && setHovered((current) => (current === at ? null : current))}
+                    onPointerEnter={(event: PointerEvent<SVGRectElement>) => event.pointerType !== "touch" && setShown({ day, source: "hover" })}
+                    onPointerLeave={(event: PointerEvent<SVGRectElement>) =>
+                      event.pointerType !== "touch" &&
+                      setShown((current) => (current?.source === "hover" && current.day === day ? (focusedSafe ? { day: focusedSafe, source: "focus" } : null) : current))
+                    }
                     onPointerDown={(event: PointerEvent<SVGRectElement>) => {
                       if (event.pointerType !== "touch") return;
                       // A finger pins the day; it does not also give it keyboard focus, or the pin could
                       // never be released by scrolling the plot.
                       event.preventDefault();
-                      setPinned((current) => (current === at ? null : at));
+                      setShown((current) => (current?.source === "pin" && current.day === day ? null : { day, source: "pin" }));
                     }}
-                    onKeyDown={(event) => onKeyDown(event, at)}
+                    // A gesture that became a scroll never comes back here: let the pin go.
+                    onPointerCancel={() => setShown((current) => (current?.source === "pin" ? null : current))}
+                    onKeyDown={(event) => onKeyDown(event, index)}
                   />
                 ))}
                 {days.map((day, at) =>
@@ -428,14 +460,14 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
                 )}
               </svg>
             </div>
-            {shown !== null && (
-              <div role="tooltip" data-testid="usage-chart-tooltip" className="pointer-events-none absolute top-0 z-10 rounded-lg border bg-popover p-2 text-xs text-popover-foreground shadow-md" style={{ left: tipLeft, width: tipWidth }}>
+            {shownAt !== null && (
+              <div ref={tipRef} role="tooltip" data-testid="usage-chart-tooltip" data-hidden-rows={more} className="pointer-events-none absolute top-0 z-10 rounded-lg border bg-popover p-2 text-xs text-popover-foreground shadow-md" style={{ left: tipLeft, width: tipWidth }}>
                 <div className="mb-1 flex justify-between gap-2 font-medium">
-                  <span>{days[shown]}</span>
+                  <span>{days[shownAt]}</span>
                   <span className="font-normal text-muted-foreground">UTC</span>
                 </div>
                 {dayRows.length === 0 ? (
-                  <div className="text-muted-foreground">{dayRequests[shown] > 0 ? "No priced usage" : "No usage"}</div>
+                  <div className="text-muted-foreground">{dayRequests[shownAt] > 0 ? "No priced usage" : "No usage"}</div>
                 ) : (
                   <ul className="flex flex-col gap-1">
                     {tipRows.map((s) => (
@@ -445,10 +477,10 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
                           <span aria-hidden="true" data-testid="usage-chart-tooltip-swatch" className="mt-1 size-2 shrink-0 rounded-sm" style={{ background: paint(s.slot) }} />
                           <span className="max-h-[2lh] overflow-hidden break-all">
                             <span data-testid="usage-chart-tooltip-name">{s.name}</span>
-                            {s.members.length > 0 && <span className="block text-muted-foreground">{s.members.filter((m) => m.requests[shown] > 0).map((m) => m.name).join(", ")}</span>}
+                            {s.members.length > 0 && <span className="block text-muted-foreground">{s.members.filter((m) => m.requests[shownAt] > 0).map((m) => m.name).join(", ")}</span>}
                           </span>
                         </span>
-                        <span className="shrink-0 tabular-nums">{exact(s.cells[shown], metric)}</span>
+                        <span className="shrink-0 tabular-nums">{exact(s.cells[shownAt], metric)}</span>
                       </li>
                     ))}
                     {more > 0 && (
@@ -461,7 +493,7 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
                 {dayRows.length > 1 && (
                   <div className="mt-1 flex justify-between gap-2 border-t pt-1 font-medium">
                     <span>Total</span>
-                    <span className="tabular-nums">{exact(totals[shown], metric)}</span>
+                    <span className="tabular-nums">{exact(totals[shownAt], metric)}</span>
                   </div>
                 )}
               </div>

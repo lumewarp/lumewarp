@@ -85,7 +85,7 @@ async function barSegments(page: Page, day: string) {
   );
 }
 
-/** Pixels per unit, from the axis it drew: the "0" label's centre and the top tick's. */
+/** Pixels per unit, from the axis it drew: the "0" label's centre (the baseline) and the top tick's. */
 async function yScale(page: Page) {
   const labels = await page.getByTestId("usage-chart-yaxis").locator("span").evaluateAll((nodes) =>
     nodes.map((node) => {
@@ -98,7 +98,7 @@ async function yScale(page: Page) {
   const zero = labels.find((label) => label.text === "0" || label.text === "$0");
   expect(zero, "the axis has a zero label").toBeTruthy();
   const top = labels[labels.length - 1];
-  return { max, pxPerUnit: (zero!.centre - top.centre) / max };
+  return { max, baseline: zero!.centre, top: top.centre, pxPerUnit: (zero!.centre - top.centre) / max };
 }
 
 /**
@@ -111,16 +111,27 @@ async function expectBarGeometry(page: Page, day: string, values: Map<string, nu
   const segments = await barSegments(page, day);
   const expected = [...values].filter(([, value]) => value > 0);
   expect(segments.map((segment) => segment.series).sort(), `segments on ${day}`).toEqual(expected.map(([name]) => name).sort());
+  if (!expected.length) return;
   const legend = await legendColours(page);
   for (const segment of segments) {
     expect(segment.fill, `${segment.series} is painted with its legend colour`).toBe(legend.get(segment.series));
     const drawn = (values.get(segment.series) ?? 0) * scale.pxPerUnit;
     expect(drawn, `${segment.series} has a value`).toBeGreaterThan(0);
     expect(Math.abs(segment.height - drawn), `${segment.series} height`).toBeLessThanOrEqual(2.5);
+    // In the plot: no segment floats above the top tick or sinks below the baseline.
+    expect(segment.top, `${segment.series} starts inside the plot`).toBeGreaterThanOrEqual(scale.top - 1.5);
+    expect(segment.top + segment.height, `${segment.series} ends inside the plot`).toBeLessThanOrEqual(scale.baseline + 1.5);
+  }
+  // Stacked from the baseline up: the lowest segment sits on it and each next one continues the stack.
+  const up = [...segments].sort((a, b) => b.top - a.top);
+  expect(Math.abs(up[0].top + up[0].height - scale.baseline), `${day} starts at the baseline`).toBeLessThanOrEqual(1.5);
+  for (let index = 1; index < up.length; index++) {
+    expect(Math.abs(up[index].top + up[index].height - up[index - 1].top), `${day} stacks`).toBeLessThanOrEqual(2.5);
   }
   const total = expected.reduce((sum, [, value]) => sum + value, 0);
-  const stacked = segments.reduce((sum, segment) => sum + segment.height, 0) + 2 * Math.max(0, segments.length - 1);
-  expect(Math.abs(stacked - total * scale.pxPerUnit), `${day} stack height`).toBeLessThanOrEqual(2.5);
+  // The stack's real extent: from the baseline to the top of the tallest piece plus the gaps between them.
+  const extent = scale.baseline - up[up.length - 1].top;
+  expect(Math.abs(extent - total * scale.pxPerUnit), `${day} stack extent`).toBeLessThanOrEqual(2.5);
 }
 
 async function signInAsAdmin(page: Page, request: APIRequestContext) {
@@ -923,4 +934,155 @@ test("table toggle: aria-controls names an element in both states", async ({ pag
   expect(await target()).toEqual({ found: true, hidden: false });
   await toggle.click();
   expect(await target()).toEqual({ found: true, hidden: true });
+});
+
+test("keys: the last input decides which day is shown", async ({ page, request, browser }) => {
+  await signInAsAdmin(page, request);
+  const today = isoDay(new Date());
+  await page.goto("/usage");
+  await expect(daySlots(page)).toHaveCount(30);
+
+  // A stationary mouse does not hide a keyboard move.
+  await daySlots(page).last().hover();
+  await expect(tooltip(page)).toContainText(today);
+  await daySlots(page).last().focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(daySlots(page).nth(28)).toBeFocused();
+  await expect(tooltip(page)).toContainText(isoDay(new Date(Date.now() - 86_400_000)));
+  await expect(tooltip(page)).not.toContainText(today);
+
+  // Moving the mouse again takes the day back, and leaving it falls back to the focus. The pointer is still
+  // on the last day from the first hover, so it has to leave before entering again counts as a move.
+  await page.mouse.move(1, 1);
+  await daySlots(page).last().hover();
+  await expect(tooltip(page)).toContainText(today);
+  await page.mouse.move(1, 1);
+  await expect(tooltip(page)).toContainText(isoDay(new Date(Date.now() - 86_400_000)));
+  await expect(daySlots(page).nth(28)).toBeFocused();
+
+  // A finger pins, the keyboard takes over, and a shorter range leaves no stale selection behind.
+  const touch = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true });
+  await touch.addCookies((await request.storageState()).cookies);
+  const phone = await touch.newPage();
+  try {
+    await phone.goto("/usage");
+    await expect(daySlots(phone)).toHaveCount(30);
+    await daySlots(phone).last().tap();
+    await expect(tooltip(phone)).toContainText(today);
+    await daySlots(phone).last().focus();
+    await phone.keyboard.press("ArrowLeft");
+    await expect(daySlots(phone).nth(28)).toBeFocused();
+    await expect(tooltip(phone)).toContainText(isoDay(new Date(Date.now() - 86_400_000)));
+    // One day only: the selection has nowhere to point, so nothing is shown, and focus lands on the one day.
+    await setRange(phone, today, today);
+    await expect(daySlots(phone)).toHaveCount(1);
+    await expect(tooltip(phone)).toHaveCount(0);
+    await daySlots(phone).first().focus();
+    await expect(tooltip(phone)).toContainText(today);
+  } finally {
+    await touch.close();
+  }
+});
+
+test("touch: a vertical page gesture releases the pin, and so do a second tap and a scroll", async ({ page, request, browser }) => {
+  await signInAsAdmin(page, request);
+  const touch = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  await touch.addCookies((await request.storageState()).cookies);
+  const phone = await touch.newPage();
+  const swipe = async (x: number, y: number, dx: number, dy: number) => {
+    const cdp = await touch.newCDPSession(phone);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+    for (let step = 1; step <= 8; step++) {
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: x + (dx * step) / 8, y: y + (dy * step) / 8 }] });
+      await phone.waitForTimeout(20);
+    }
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await phone.waitForTimeout(250);
+  };
+  try {
+    await phone.goto("/usage");
+    await expect(daySlots(phone)).toHaveCount(30);
+    const last = daySlots(phone).last();
+    await last.scrollIntoViewIfNeeded();
+    await last.tap();
+    await expect(tooltip(phone)).toBeVisible();
+    // A second tap on the same day lets it go.
+    await last.tap();
+    await expect(tooltip(phone)).toHaveCount(0);
+    // A vertical swipe over the plot scrolls the page and releases the pin.
+    await last.tap();
+    await expect(tooltip(phone)).toBeVisible();
+    // The plot is wider than the phone and scrolled to its end, so start inside the scroller's visible box.
+    const scroller = (await phone.getByTestId("usage-chart").locator("div.overflow-x-auto").boundingBox())!;
+    const before = await phone.evaluate(() => scrollY);
+    await swipe(scroller.x + scroller.width / 2, scroller.y + scroller.height / 2, 0, -120);
+    expect(await phone.evaluate(() => scrollY)).toBeGreaterThan(before);
+    await expect(tooltip(phone)).toHaveCount(0);
+  } finally {
+    await touch.close();
+  }
+});
+
+test("tooltip: measured, not estimated, so two-line names stay inside a 390 px plot", async ({ page, request }) => {
+  await signInAsAdmin(page, request);
+  await page.setViewportSize({ width: 390, height: 844 });
+  // Twelve names that each wrap to two lines in a 390 px card, plus Other and its member line.
+  const names = Array.from({ length: 12 }, (_, index) => `model${String(index).padStart(2, "0")}-${"W".repeat(28)}`);
+  await mockChart(page, names.map((name, index) => usageRow(isoDay(new Date()), name, 100_000_000 + index, 1000)));
+  await page.goto("/usage");
+  await expect(daySlots(page)).toHaveCount(30);
+  await daySlots(page).last().hover();
+  const geometry = async () => {
+    const tip = (await tooltip(page).boundingBox())!;
+    const plot = (await chart(page).locator("svg").boundingBox())!;
+    const toggle = (await page.getByTestId("usage-chart-table-toggle").boundingBox())!;
+    const total = (await tooltip(page).locator("div.border-t").boundingBox())!;
+    return { tip, plot, toggle, total };
+  };
+  // It fits the plot, the total stays visible, and nothing covers the table's toggle.
+  await expect.poll(async () => {
+    const { tip, plot } = await geometry();
+    return Math.round(tip.y + tip.height) <= Math.round(plot.y + plot.height);
+  }).toBe(true);
+  const { tip, plot, toggle, total } = await geometry();
+  expect(total.y + total.height).toBeLessThanOrEqual(plot.y + plot.height);
+  expect(total.y + total.height).toBeLessThanOrEqual(toggle.y);
+  expect(tip.y).toBeGreaterThanOrEqual(plot.y);
+  await expect(tooltip(page).getByTestId("usage-chart-tooltip-more")).toBeVisible();
+  // The total still covers every row, hidden or not.
+  const all = names.reduce((sum, _, index) => sum + 100_000_000 + index, 0);
+  await expect(tooltip(page)).toContainText(`${all.toLocaleString()} tokens`);
+
+  // Six short names fit, so measuring does not over-cut.
+  await page.unroute("**/api/v1/usage?*");
+  const short = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
+  await mockChart(page, short.map((name) => usageRow(isoDay(new Date()), name, 100, 1000)));
+  await setRange(page, daysAgo(2), isoDay(new Date()));
+  await daySlots(page).last().hover();
+  await expect(tooltip(page).getByTestId("usage-chart-tooltip-name")).toHaveCount(6);
+  await expect(tooltip(page).getByTestId("usage-chart-tooltip-more")).toHaveCount(0);
+});
+
+test("tooltip: a short plot still keeps the tooltip off the table toggle", async ({ page, request }) => {
+  await signInAsAdmin(page, request);
+  await page.setViewportSize({ width: 390, height: 500 });
+  // The plot is only as tall as its SVG; squashing the SVG is the reviewer's short-plot case, without
+  // rewriting the bundle.
+  await page.addStyleTag({ content: '[data-testid="usage-chart"] svg { height: 120px; }' });
+  const names = Array.from({ length: 12 }, (_, index) => `model${String(index).padStart(2, "0")}-${"W".repeat(28)}`);
+  await mockChart(page, names.map((name, index) => usageRow(isoDay(new Date()), name, 100_000_000 + index, 1000)));
+  await page.goto("/usage");
+  await expect(daySlots(page)).toHaveCount(30);
+  await daySlots(page).last().hover();
+  await expect(tooltip(page)).toBeVisible();
+  await expect.poll(async () => {
+    const tip = (await tooltip(page).boundingBox())!;
+    const plot = (await chart(page).locator("svg").boundingBox())!;
+    return Math.round(tip.y + tip.height) - Math.round(plot.y + plot.height);
+  }).toBeLessThanOrEqual(0);
+  const toggle = (await page.getByTestId("usage-chart-table-toggle").boundingBox())!;
+  const total = (await tooltip(page).locator("div.border-t").boundingBox())!;
+  expect(total.y + total.height).toBeLessThanOrEqual(toggle.y);
+  // Even with no room for a row, the count of what is missing stays on screen.
+  expect(Number(await tooltip(page).getAttribute("data-hidden-rows"))).toBeGreaterThan(0);
 });
