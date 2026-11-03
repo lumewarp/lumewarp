@@ -33,6 +33,13 @@ model's price, filter by every dimension and stay continuous across a rename. An
 OTLP sink proves a request is found by its `x-lumewarp-request-id`, with every attempt, without
 the prompt, the response or the key, and that `traceparent` sampled=0 does not erase it.
 
+`test_mcp_mock.py` is stack-free and covers `bench/mock-mcp` itself: the modern
+2026-07-28 schema is pinned in `tests/e2e/fixtures/` and every modern response is
+validated against it, the official Python `mcp` SDK drives both eras (list, call,
+progress, cancellation, MRTR), and every header rule, fault, session and recording
+path has a test. Start it with the rest of the suite; the fixture builds the release
+binary on demand, or set `E2E_MCP_MOCK_BIN`. It never uses Postgres or port 9000.
+
 ## P2: real OIDC and authorization exit gate
 
     scripts/e2e-p2.sh
