@@ -102,7 +102,7 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 
 - 選單依角色出現，API 仍是最後的權限來源。member 看到 My keys、Usage、Settings；team admin 多 Overview、Teams（含單一 team 的 Members／Service accounts／Keys／Usage／Settings 分頁）與 Audit log；安裝層管理員多 Users、Upstreams、Models、Aliases、Routers、Gateways 與 Config versions。既非安裝層管理員也不是 team admin 的人首頁是 `/my-keys`，其餘是 Overview；緊急 session 不擁有 key，My keys 只說明這件事。
 - 沒有獨立的 `/keys` 管理頁：整個 team 的 key 在 team 的 Keys 分頁。team admin 可管理別人的 key 與 service account 的 key；member 看得到同 team 的 key，但只能改自己的。
-- My keys 逐 team（只列自己所属的 team）顯示可呼叫的 model（取交集後的實際清單）、限流、本月剩餘預算、key 上限與最長效期，並可建立、改名、改到期日、輪替（可選寬限）、暫停、恢復與撤銷自己的 key，下方是本月個人用量。
+- My keys 逐 team（只列自己所屬的 team）顯示可呼叫的 model（取交集後的實際清單）、限流、本月剩餘預算、key 上限與最長效期，並可建立、改名、改到期日、輪替（可選寬限）、暫停、恢復與撤銷自己的 key，下方是本月個人用量。
 - 存取變更：受保護頁面每次進入都重驗 `/users/me`。快取允許時頁面先掛上，背景重驗發現權限被收回就換成「沒有權限」；快取拒絕時先等重驗。用網址打開看不到的頁面只顯示說明，不對該 team 發請求。
 - 授權後端不可用時顯示「暫時無法確認、這不是拒絕」的狀態（`authz_unavailable`），管理 API 回 503；My keys 不會把它當成「沒有 team」。
 - 一次性 secret：建立或輪替 key、建立 PAT 與 gateway token 的 secret 由 root 的同一個對話框顯示，只有「I've saved it」能關（Esc、點擊外部、標頭的 X 都無效）。它在換頁、背景檢查失敗與 session 過期（401 轉到登入頁）後仍顯示，因為對話框在 router 與 guard 之上；登出會清掉，重新載入頁面則消失。secret 不進 query cache；mutation 快取裡只有不含 secret 的結果。
