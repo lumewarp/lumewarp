@@ -21,11 +21,11 @@ import httpx
 
 from secret_scan import (
     DB_PREFIX,
+    MIN_CREDENTIAL_CHARS,
     RUN_ID_ENV,
     RUN_ID_FILE,
     SCAN_REPORT_ENV,
     SECRET_LOG_ENV,
-    STACKS_FILE,
     scan_disabled,
 )
 
@@ -52,15 +52,67 @@ def record_secret(value: str | None, kind: str) -> None:
     Append-only and 0600 inside the run directory, which the e2e scripts delete after
     scanning. With E2E_SECRET_LOG unset nothing is recorded; the session fixture sets it
     for a direct pytest run, and a scan without it is a hard failure.
+
+    A credential shorter than `secret_scan.MIN_CREDENTIAL_CHARS` is a hard failure: the
+    scan cannot search it without matching ordinary dump text, and silently dropping it
+    would let a real leak pass. The message names the kind, never the value.
     """
-    if not isinstance(value, str) or len(value) < 8:
+    if not isinstance(value, str) or not value:
         return
     path = os.environ.get(SECRET_LOG_ENV)
     if not path:
         return
+    if len(value) < MIN_CREDENTIAL_CHARS:
+        raise RuntimeError(
+            f"cannot record {kind}: a credential shorter than {MIN_CREDENTIAL_CHARS}"
+            " characters cannot be searched reliably"
+        )
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(fd, "a") as out:
         out.write(json.dumps({"kind": kind, "value": value}) + "\n")
+
+
+# `cp_env` names that merely contain a credential word but hold a setting, not a secret.
+# Matching is by suffix so an ordinary TTL ("60") or boolean ("true") neither trips the
+# minimum length nor is searched as noise; a real credential's name does not end in one of
+# these. Do not exclude by value length: that is the bug this replaces.
+NON_SECRET_ENV_SUFFIXES = (
+    "_TTL",
+    "_SECONDS",
+    "_MILLISECONDS",
+    "_INTERVAL",
+    "_TIMEOUT",
+    "_ENABLED",
+    "_DISABLED",
+    "_REQUIRED",
+    "_LIMIT",
+    "_COUNT",
+    "_REF",
+    "_NAME",
+    "_ID",
+)
+
+CREDENTIAL_ENV_PARTS = ("SECRET", "PASSWORD", "TOKEN", "API_KEY")
+
+
+def is_secret_env_name(name: str) -> bool:
+    """Whether a control-plane env var holds a credential (by name, never by value)."""
+    upper = name.upper()
+    if not any(part in upper for part in CREDENTIAL_ENV_PARTS):
+        return False
+    return not upper.endswith(NON_SECRET_ENV_SUFFIXES)
+
+
+def record_env_secrets(env, source: str = "control-plane env") -> None:
+    """Record credentials that reach only the control plane's environment.
+
+    A value that also matches the name filter but is a setting (a TTL, a boolean) is
+    excluded by `is_secret_env_name` before the length rule applies, so the rule only
+    ever sees credentials.
+    """
+    for name, value in env.items():
+        if is_secret_env_name(name):
+            record_secret(value, f"{source} {name}")
 
 
 # Credential-bearing response fields. `token` is included because a token response can
@@ -102,7 +154,9 @@ def record_response_secrets(payload, source: str = "") -> None:
         if isinstance(node, dict):
             for key, value in node.items():
                 field = RESPONSE_SECRET_FIELDS.get(key.lower()) if isinstance(key, str) else None
-                if field and isinstance(value, str) and len(value) >= 8:
+                if field and isinstance(value, str):
+                    # record_secret fails the run on a value too short to search, rather
+                    # than dropping it here and reporting a clean database.
                     record_secret(value, f"{field} from {where}" if where else field)
                 elif isinstance(value, (dict, list)):
                     walk(value, where)
@@ -317,9 +371,6 @@ class Stack:
         # The run id in the name is what lets the finalizer find a database whose creator
         # forgot to register it, and tell it apart from another run's databases.
         self.db_name = f"{DB_PREFIX}{run_id()}_{uuid.uuid4().hex[:12]}"
-        if run_dir := os.environ.get("E2E_RUN_DIR"):
-            with open(Path(run_dir) / STACKS_FILE, "a") as stacks:
-                stacks.write(f"{self.db_name}\n")
         self.http_port = free_port()
         self.grpc_port = free_port()
         self.metrics_port = free_port()
@@ -378,13 +429,9 @@ class Stack:
             (Path(run_dir) / RUN_ID_FILE).write_text(run_id() + "\n")
         # A credential that only reaches the control plane's environment (an OIDC client
         # secret, the secret key that seals the login cookie, ...) is still a database
-        # leak if it is stored there, so record those values too.
-        for name, value in self.cp_env.items():
-            upper = name.upper()
-            if isinstance(value, str) and any(
-                part in upper for part in ("SECRET", "PASSWORD", "TOKEN", "API_KEY")
-            ):
-                record_secret(value, f"control-plane env {name}")
+        # leak if it is stored there, so record those values too. Non-secret names (a TTL,
+        # a boolean) are excluded by name before the length rule applies.
+        record_env_secrets(self.cp_env)
         pg(PG_DSN, f'CREATE DATABASE "{self.db_name}"')
         self.db_created = True
         self._run_cli("migrate")

@@ -1,4 +1,8 @@
-"""Analysis helpers without processes, binaries, or live database connections."""
+"""Analysis helpers without processes, binaries, or live database connections.
+
+`stack_free`: a run that collected only these tests builds no `Stack`, so the session's
+credential-scan finalizer must not connect to Postgres.
+"""
 
 import json
 import logging
@@ -26,6 +30,8 @@ from loadlib import (
     summarize,
 )
 from loadpacing import CpuWarningRecorder, Pacer
+
+pytestmark = pytest.mark.stack_free
 
 
 def record(status=200, *, key="key", stream=False, **extra):

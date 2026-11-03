@@ -100,7 +100,9 @@ def _fmt(d: dict | None) -> str:
 def pytest_sessionfinish(session, exitstatus) -> None:
     # Finalize the credential scan first: a hit or an unchecked database fails the run
     # even when there is no load report to write.
-    session.exitstatus = secret_scan_session.finish_run_context(exitstatus)
+    session.exitstatus = secret_scan_session.finish_run_context(
+        exitstatus, stack_free=secret_scan_session.run_is_stack_free(session.items)
+    )
     reports = sorted(RESULTS.glob("*.json")) if RESULTS.exists() else []
     if not reports:
         return

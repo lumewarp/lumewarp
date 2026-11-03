@@ -3,6 +3,9 @@
 The real `pg_dump` cases run against a disposable database on the dev server when it is
 reachable and `pg_dump` exists (they are skipped otherwise); the e2e scripts run this file
 with both available, so the escaping, bytea and large-object cases are exercised there.
+
+The whole module is `stack_free`: it never builds a `Stack`, so a run that collected only
+these tests needs no Postgres for the session's final scan.
 """
 
 import base64
@@ -32,7 +35,10 @@ from secret_scan import (
     scan_database,
     scan_text,
 )
-from stack import PG_DSN, Stack, pg
+from secret_scan_session import run_is_stack_free
+from stack import PG_DSN, Stack, pg, record_env_secrets, record_response_secrets
+
+pytestmark = pytest.mark.stack_free
 
 CHARS = "ABCdef0123456789-_" * 4
 DISPLAY = "lw-AbCdEf"
@@ -346,6 +352,11 @@ def test_a_missing_or_corrupt_recorded_secret_log_is_a_hard_failure(tmp_path, mo
     corrupt.write_text('{"kind": "API key"}\n')
     with pytest.raises(ValueError, match="corrupt"):
         load_literals(str(corrupt))
+    # A hand-edited credential below the searchable floor is a hard failure, not a needle
+    # that would match ordinary dump text.
+    corrupt.write_text('{"kind": "API key", "value": "short"}\n')
+    with pytest.raises(ValueError, match="shorter than 8"):
+        load_literals(str(corrupt))
 
 
 def test_a_missing_pg_dump_binary_is_a_hard_failure(monkeypatch):
@@ -371,22 +382,45 @@ def test_a_failed_env_reference_query_is_a_hard_failure(monkeypatch):
 def run_dir(tmp_path, monkeypatch, *, run_id="feedface", manifest=(), log=""):
     (tmp_path / "dbs").write_text("".join(f"{name}\n" for name in manifest))
     (tmp_path / "secrets.jsonl").write_text(log)
-    # A real-stack run always builds at least one Stack, which writes this marker.
-    (tmp_path / "stacks").write_text("lumewarp_e2e_feedface_marker\n")
     monkeypatch.setenv("E2E_RUN_ID", run_id)
     monkeypatch.setenv("E2E_SECRET_LOG", str(tmp_path / "secrets.jsonl"))
     return tmp_path
 
 
-def test_finalize_without_a_stack_needs_no_database_server(tmp_path, monkeypatch):
+def test_a_run_is_stack_free_only_when_every_collected_test_is_marked():
+    class Item:
+        def __init__(self, marked: bool) -> None:
+            self.marked = marked
+
+        def get_closest_marker(self, name: str):
+            assert name == "stack_free"
+            return object() if self.marked else None
+
+    # An empty collection is not a stack-free run: there is nothing to prove either way.
+    assert not run_is_stack_free([])
+    assert run_is_stack_free([Item(True), Item(True)])
+    assert not run_is_stack_free([Item(True), Item(False)])
+
+
+def test_finalize_stack_free_needs_no_database_server(tmp_path, monkeypatch):
     directory = run_dir(tmp_path, monkeypatch)
-    (directory / "stacks").unlink()
 
     def no_server(url):
-        raise AssertionError("the scanner connected to Postgres for a no-stack run")
+        raise AssertionError("the scanner connected to Postgres for a stack-free run")
 
     monkeypatch.setattr(secret_scan, "_existing_databases", no_server)
-    assert finalize(str(directory), "postgresql://server/lumewarp") == 0
+    assert finalize(str(directory), "postgresql://127.0.0.1:1/none", stack_free=True) == 0
+
+
+def test_finalize_refuses_a_stack_free_run_that_lists_a_database(tmp_path, monkeypatch):
+    name = "lumewarp_e2e_feedface_aaaaaaaaaaaa"
+    directory = run_dir(tmp_path, monkeypatch, manifest=[name])
+
+    def no_server(url):
+        raise AssertionError("no server for a stack-free run")
+
+    monkeypatch.setattr(secret_scan, "_existing_databases", no_server)
+    assert finalize(str(directory), "postgresql://127.0.0.1:1/none", stack_free=True) == 1
 
 
 def clean_result(name: str) -> dict:
@@ -441,7 +475,6 @@ def test_finalize_fails_when_a_registered_database_vanished_unscanned(tmp_path, 
 
 def test_finalize_refuses_to_run_without_a_run_id(tmp_path, monkeypatch):
     directory = run_dir(tmp_path, monkeypatch, manifest=["lumewarp_e2e_other_aaaaaaaaaaaa"])
-    (directory / "stacks").touch()
     monkeypatch.delenv("E2E_RUN_ID")
     with pytest.raises(RuntimeError, match="E2E_RUN_ID"):
         finalize(str(directory), "postgresql://server/lumewarp")
@@ -509,7 +542,9 @@ def test_a_real_pg_dump_of_bytea_and_a_large_object_is_a_hit(real_dump):
     assert_no_secret(describe(hits), [token], "the scan report contains the secret")
 
 
-def test_finalize_finds_an_unregistered_database_with_a_plaintext_token(real_dump, tmp_path, monkeypatch):
+def test_finalize_finds_an_unregistered_database_with_a_plaintext_token(
+    real_dump, tmp_path, monkeypatch
+):
     run_id = uuid4().hex[:8]
     name = f"lumewarp_e2e_{run_id}_{uuid4().hex[:12]}"
     base, _, _ = PG_DSN.rpartition("/")
@@ -523,8 +558,98 @@ def test_finalize_finds_an_unregistered_database_with_a_plaintext_token(real_dum
         pg(dsn, "CREATE TABLE leaked (value text)")
         pg(dsn, "INSERT INTO leaked VALUES ($1)", full_token("lw-", "unregistered"))
         directory = run_dir(tmp_path, monkeypatch, run_id=run_id)
-        # No manifest entry: the finalizer has to discover the database by its name.
+        # No Stack was built and nothing wrote a marker: the only evidence is the name.
+        assert not (directory / "stacks").exists()
+        assert (directory / "dbs").read_text() == ""
         assert finalize(str(directory), PG_DSN) == 1
         assert name in (directory / "dbs").read_text().split()
     finally:
         pg(PG_DSN, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+
+# ------------------------------------------- short credentials must still be searched
+
+# The review's 8-character credential: punctuation makes it unambiguous in dump text.
+SHORT_VALUE = "aB9!xY2?"
+
+
+@contextmanager
+def short_credential_database():
+    """A disposable database that `scan_database` can query for env references."""
+    with disposable_database() as dsn:
+        # scan_database asks the database for env references; without these tables the
+        # scan fails before it looks, which would not exercise the needle.
+        pg(dsn, "CREATE TABLE upstreams (api_key_ref text)")
+        pg(dsn, "CREATE TABLE notifier_channels (kind text, config jsonb)")
+        pg(dsn, "CREATE TABLE leaked (value text)")
+        yield dsn
+
+
+def assert_short_value_is_a_hit(dsn, log, value, kind_prefix):
+    pg(dsn, "INSERT INTO leaked VALUES ($1)", value)
+    result = scan_database(dsn, log)
+    [hit] = result["hits"]
+    assert hit["table"] == "leaked"
+    assert hit["kind"].startswith(kind_prefix), hit["kind"]
+    assert_no_secret(describe(result["hits"]), [value], "the scan report contains the secret")
+
+
+@pytest.mark.parametrize("length", [8, 9, 11])
+def test_an_8_to_11_character_response_credential_is_a_hit_in_a_real_dump(
+    real_dump, tmp_path, monkeypatch, length
+):
+    value = (SHORT_VALUE + "zab")[:length]
+    log = tmp_path / "secrets.jsonl"
+    log.touch()
+    monkeypatch.setenv("E2E_SECRET_LOG", str(log))
+    record_response_secrets({"secret": value})
+    assert [item["value"] for item in load_literals(str(log))] == [value]
+    with short_credential_database() as dsn:
+        assert_short_value_is_a_hit(dsn, str(log), value, "credential")
+
+
+@pytest.mark.parametrize("length", [8, 9, 11])
+def test_an_8_to_11_character_cp_env_credential_is_a_hit_in_a_real_dump(
+    real_dump, tmp_path, monkeypatch, length
+):
+    value = (SHORT_VALUE + "zab")[:length]
+    log = tmp_path / "secrets.jsonl"
+    log.touch()
+    monkeypatch.setenv("E2E_SECRET_LOG", str(log))
+    record_env_secrets({"LUMEWARP_OIDC_CLIENT_SECRET": value})
+    assert [item["value"] for item in load_literals(str(log))] == [value]
+    with short_credential_database() as dsn:
+        assert_short_value_is_a_hit(dsn, str(log), value, "control-plane env")
+
+
+def test_a_credential_below_the_floor_fails_the_run_instead_of_being_dropped(
+    tmp_path, monkeypatch
+):
+    log = tmp_path / "secrets.jsonl"
+    log.touch()
+    monkeypatch.setenv("E2E_SECRET_LOG", str(log))
+    short = SHORT_VALUE[:-1]  # 7 characters, one below the floor
+    for record in (
+        lambda: record_response_secrets({"secret": short}),
+        lambda: record_env_secrets({"LUMEWARP_OIDC_CLIENT_SECRET": short}),
+    ):
+        with pytest.raises(RuntimeError, match="shorter than 8") as caught:
+            record()
+        assert_no_secret(str(caught.value), [short], "the failure names the short credential")
+    assert load_literals(str(log)) == []
+
+
+def test_non_secret_env_names_are_excluded_before_the_length_rule(tmp_path, monkeypatch):
+    log = tmp_path / "secrets.jsonl"
+    log.touch()
+    monkeypatch.setenv("E2E_SECRET_LOG", str(log))
+    # A TTL and a boolean match the credential-word filter but are not credentials; the
+    # rule must not fail or search them. The 8-character client secret is recorded.
+    record_env_secrets(
+        {
+            "LUMEWARP_TOKEN_TTL_SECONDS": "60",
+            "LUMEWARP_API_KEY_ENABLED": "true",
+            "LUMEWARP_OIDC_CLIENT_SECRET": SHORT_VALUE,
+        }
+    )
+    assert [item["value"] for item in load_literals(str(log))] == [SHORT_VALUE]
