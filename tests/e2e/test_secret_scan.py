@@ -643,13 +643,17 @@ def test_non_secret_env_names_are_excluded_before_the_length_rule(tmp_path, monk
     log = tmp_path / "secrets.jsonl"
     log.touch()
     monkeypatch.setenv("E2E_SECRET_LOG", str(log))
-    # A TTL and a boolean match the credential-word filter but are not credentials; the
-    # rule must not fail or search them. The 8-character client secret is recorded.
+    # A listed setting matches the credential-word filter but is not a credential: the rule
+    # must not fail or search it. Names that only look like settings are still credentials.
+    vault = "c8262aa4-3f9a-40e2-8812-72fa3b720c65"
     record_env_secrets(
         {
-            "LUMEWARP_TOKEN_TTL_SECONDS": "60",
-            "LUMEWARP_API_KEY_ENABLED": "true",
+            "E2E_SKIP_SECRET_SCAN": "1",
             "LUMEWARP_OIDC_CLIENT_SECRET": SHORT_VALUE,
+            "VAULT_SECRET_ID": vault,
         }
     )
-    assert [item["value"] for item in load_literals(str(log))] == [SHORT_VALUE]
+    literals = load_literals(str(log))
+    assert [item["value"] for item in literals] == [SHORT_VALUE, vault]
+    dump = "COPY public.teams (name) FROM stdin;\n" + vault + "\n\\.\n"
+    assert scan_text(dump, literals)

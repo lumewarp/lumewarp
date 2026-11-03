@@ -73,24 +73,9 @@ def record_secret(value: str | None, kind: str) -> None:
 
 
 # `cp_env` names that merely contain a credential word but hold a setting, not a secret.
-# Matching is by suffix so an ordinary TTL ("60") or boolean ("true") neither trips the
-# minimum length nor is searched as noise; a real credential's name does not end in one of
-# these. Do not exclude by value length: that is the bug this replaces.
-NON_SECRET_ENV_SUFFIXES = (
-    "_TTL",
-    "_SECONDS",
-    "_MILLISECONDS",
-    "_INTERVAL",
-    "_TIMEOUT",
-    "_ENABLED",
-    "_DISABLED",
-    "_REQUIRED",
-    "_LIMIT",
-    "_COUNT",
-    "_REF",
-    "_NAME",
-    "_ID",
-)
+# Listed by full name: a suffix would also exclude a credential such as VAULT_SECRET_ID,
+# and a value's length says nothing about whether it is a credential.
+NON_SECRET_ENV_NAMES = frozenset({"E2E_SECRET_LOG", "E2E_SECRET_SCAN", "E2E_SKIP_SECRET_SCAN"})
 
 CREDENTIAL_ENV_PARTS = ("SECRET", "PASSWORD", "TOKEN", "API_KEY")
 
@@ -100,15 +85,15 @@ def is_secret_env_name(name: str) -> bool:
     upper = name.upper()
     if not any(part in upper for part in CREDENTIAL_ENV_PARTS):
         return False
-    return not upper.endswith(NON_SECRET_ENV_SUFFIXES)
+    return upper not in NON_SECRET_ENV_NAMES
 
 
 def record_env_secrets(env, source: str = "control-plane env") -> None:
     """Record credentials that reach only the control plane's environment.
 
-    A value that also matches the name filter but is a setting (a TTL, a boolean) is
-    excluded by `is_secret_env_name` before the length rule applies, so the rule only
-    ever sees credentials.
+    A setting whose name merely matches the filter is excluded by its full name, never by a
+    suffix: `VAULT_SECRET_ID` is a credential. An unlisted setting with a short value fails
+    the run loudly, and is then added to the list.
     """
     for name, value in env.items():
         if is_secret_env_name(name):
