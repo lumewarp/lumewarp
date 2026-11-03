@@ -45,7 +45,7 @@ The self-service keys and credential work of P2.5 (`docs/architecture.md`, "Admi
 - Admin UI: `/my-keys` is a plain member's home, a team's Keys tab manages its keys, access states are not denials, and one dialog above the router shows every one-time secret.
 - Credentials at rest: only sha256 hashes and environment references, the OIDC nonce/PKCE in an AES-GCM cookie, webhook `url_ref`, `metrics_url` without a query, and an allowlist for audit details.
 
-Acceptance suites: `scripts/e2e-p1.sh`, `scripts/e2e-p2.sh` (needs `scripts/dev-idp.sh up`), `scripts/load-e2e.sh`, `ui/` Playwright (`pnpm test:e2e`), and `bench/` A6 for request-path changes. The e2e suite scans each test database for plaintext credentials.
+Acceptance suites: `scripts/e2e-p1.sh`, `scripts/e2e-p2.sh` (needs `scripts/dev-idp.sh up`), `scripts/load-e2e.sh`, `ui/` Playwright (`pnpm test:e2e`), and `bench/` A6 for request-path changes. The e2e suite scans the database for plaintext credentials.
 
 Next: P3 (MCP / A2A), not planned yet.
 
