@@ -23,32 +23,47 @@ const MIN_SLOT = 22;
 /** The surface gap between stacked segments, and the widest a bar gets. */
 const GAP = 2;
 const BAR = 26;
+/** The tooltip shows the biggest rows that fit this many lines; the rest are counted and live in the table. */
+const TIP_LINES = 6;
+/** Characters one tooltip line holds at the tooltip's width, for the line budget above. */
+const TIP_CHARS = 34;
 
-/**
- * Slot per model name, for the life of the page. A model that has a slot keeps it, so neither a filter nor a
- * step through another range repaints anything that is drawn in both; a newcomer takes the lowest slot free
- * among the models drawn now (a model nobody draws does not hold a colour hostage), and the eight or fewer
- * drawn models always get distinct slots from the palette's fixed order.
- */
+/** The named models drawn by the last render, by slot: a survivor outranks anything remembered. */
+let drawnLast = new Map<string, number>();
+/** Every model that has ever been drawn named, so its colour comes back if it does. */
 const slots = new Map<string, number>();
 
+/**
+ * Slot per model, in sorted drawing order and in the palette's fixed slot order. The models drawn in the
+ * previous render keep their slots first (a filter or a different page repaints nothing that survives), then a
+ * model that is back after a gap takes its old slot if it is still free, and anything else takes the lowest
+ * free slot. At most eight are named, so the drawn models always get distinct slots.
+ */
 function slotMap(names: string[]) {
+  // A render that draws nothing (loading, empty) says nothing about survival: keep the last real drawing.
+  if (!names.length) return new Map<string, number>();
   const taken = new Set<number>();
   const out = new Map<string, number>();
+  const give = (name: string, slot: number) => {
+    out.set(name, slot);
+    taken.add(slot);
+  };
   for (const name of names) {
+    const slot = drawnLast.get(name);
+    if (slot !== undefined) give(name, slot);
+  }
+  for (const name of names) {
+    if (out.has(name)) continue;
     const slot = slots.get(name);
-    if (slot !== undefined && !taken.has(slot)) {
-      out.set(name, slot);
-      taken.add(slot);
-    }
+    if (slot !== undefined && !taken.has(slot)) give(name, slot);
   }
   for (const name of names) {
     if (out.has(name)) continue;
     let slot = 0;
     while (taken.has(slot)) slot++;
-    out.set(name, slot);
-    taken.add(slot);
+    give(name, slot);
   }
+  drawnLast = new Map(out);
   for (const [name, slot] of out) slots.set(name, slot);
   return out;
 }
@@ -56,9 +71,10 @@ function slotMap(names: string[]) {
 interface Model {
   tokens: number[];
   costs: number[];
+  requests: number[];
   tokenTotal: number;
   costTotal: number;
-  /** Some request had a price, so the cost is known for part of it. */
+  /** Some request had a known price. A price of zero is known: a free request is not an unpriced one. */
   priced: boolean;
   /** Requests with no price: recorded when no price was configured. */
   unknown: number;
@@ -70,14 +86,17 @@ interface Series {
   slot: number | null;
   /** One value per day of the range, in the drawn metric. */
   cells: number[];
+  /** Requests per day, whatever the metric: they decide whether a day has usage at all. */
+  counts: number[];
   /** For Other: the folded models, so the tooltip can name them. */
-  members: { name: string; cells: number[] }[];
+  members: { name: string; cells: number[]; requests: number[] }[];
 }
 
 /**
- * Series and their per-day values. `UsageRowOut` gives `cost_nano_usd` (the priced part) and
- * `unknown_cost_count`, so a model with no price at all is reported instead of drawn as a zero bar. The eight
- * named models are ranked by total tokens whichever metric is drawn, so a toggle cannot change who is named.
+ * Series and their per-day values. `UsageRowOut` gives `cost_nano_usd` as the priced part and
+ * `unknown_cost_count`, so a model whose requests all have an unknown price is reported instead of drawn as a
+ * zero bar, while a model priced at zero is drawn and says $0. The eight named models are ranked by total
+ * tokens whichever metric is drawn, so a toggle cannot change who is named.
  */
 function build(rows: UsageRow[] | undefined, days: string[], metric: UsageMetric) {
   const index = new Map(days.map((day, at) => [day, at]));
@@ -89,14 +108,15 @@ function build(rows: UsageRow[] | undefined, days: string[], metric: UsageMetric
     const name = row.model || "—";
     let model = models.get(name);
     if (!model) {
-      model = { tokens: zeroes(), costs: zeroes(), tokenTotal: 0, costTotal: 0, priced: false, unknown: 0 };
+      model = { tokens: zeroes(), costs: zeroes(), requests: zeroes(), tokenTotal: 0, costTotal: 0, priced: false, unknown: 0 };
       models.set(name, model);
     }
     model.tokens[at] += row.total_tokens;
     model.costs[at] += row.cost_nano_usd;
+    model.requests[at] += row.requests;
     model.tokenTotal += row.total_tokens;
     model.costTotal += row.cost_nano_usd;
-    model.priced ||= row.cost_nano_usd > 0;
+    model.priced ||= row.requests - row.unknown_cost_count > 0;
     model.unknown += row.unknown_cost_count;
   }
 
@@ -106,18 +126,26 @@ function build(rows: UsageRow[] | undefined, days: string[], metric: UsageMetric
   const unpriced = metric === "cost" ? names.filter((name) => !models.get(name)!.priced && models.get(name)!.unknown > 0) : [];
   const drawn = names.filter((name) => !unpriced.includes(name));
   const cells = (name: string) => (metric === "tokens" ? models.get(name)!.tokens : models.get(name)!.costs);
+  const requests = (name: string) => models.get(name)!.requests;
   const assigned = slotMap(drawn.filter((name) => top.has(name)));
   const series: Series[] = drawn
     .filter((name) => top.has(name))
-    .map((name) => ({ name, slot: assigned.get(name) ?? 0, cells: cells(name), members: [] }));
+    .map((name) => ({ name, slot: assigned.get(name) ?? 0, cells: cells(name), counts: requests(name), members: [] }));
   const folded = drawn.filter((name) => !top.has(name));
   if (folded.length) {
-    const sum = days.map((_, at) => folded.reduce((total, name) => total + cells(name)[at], 0));
-    series.push({ name: "Other", slot: null, cells: sum, members: folded.map((name) => ({ name, cells: cells(name) })) });
+    series.push({
+      name: "Other",
+      slot: null,
+      cells: days.map((_, at) => folded.reduce((total, name) => total + cells(name)[at], 0)),
+      counts: days.map((_, at) => folded.reduce((total, name) => total + requests(name)[at], 0)),
+      members: folded.map((name) => ({ name, cells: cells(name), requests: requests(name) })),
+    });
   }
   const totals = days.map((_, at) => series.reduce((sum, s) => sum + s.cells[at], 0));
+  // The day's requests over every model, drawn or not: it is what "no usage" must be about.
+  const dayRequests = days.map((_, at) => names.reduce((sum, name) => sum + requests(name)[at], 0));
   const unknown = metric === "cost" ? drawn.reduce((sum, name) => sum + models.get(name)!.unknown, 0) : 0;
-  return { series, totals, peak: Math.max(0, ...totals), unpriced, unknown };
+  return { series, totals, dayRequests, peak: Math.max(0, ...totals), unpriced, unknown };
 }
 
 /**
@@ -156,9 +184,19 @@ function tickLabel(value: number, metric: UsageMetric, step: number) {
   return digits <= 5 ? `$${usd.toFixed(digits)}` : `$${usd.toExponential(1)}`;
 }
 
-const exact = (value: number, metric: UsageMetric) => (metric === "tokens" ? `${fmtNumber(value)} tokens` : fmtUsd(value));
+/**
+ * Money in the chart's own voice: the table's currency format, except that an amount it would round to zero
+ * (less than half a millionth of a dollar, the last digit it prints) keeps its magnitude in exponent form.
+ */
+function money(nano: number) {
+  if (nano === 0) return "$0";
+  const usd = nanoToUsd(nano) ?? 0;
+  return Math.abs(usd) < 5e-7 ? `$${usd.toExponential(1)}` : fmtUsd(nano);
+}
+
+const exact = (value: number, metric: UsageMetric) => (metric === "tokens" ? `${fmtNumber(value)} tokens` : money(value));
 /** The same numbers without the unit: a table cell says it in its header. */
-const number = (value: number, metric: UsageMetric) => (metric === "tokens" ? fmtNumber(value) : fmtUsd(value));
+const number = (value: number, metric: UsageMetric) => (metric === "tokens" ? fmtNumber(value) : money(value));
 
 /** A series colour: the palette tokens have light and dark values of their own. */
 const paint = (slot: number | null) => (slot === null ? "var(--series-other)" : `var(--series-${slot + 1})`);
@@ -205,10 +243,16 @@ export interface UsageChartProps {
 
 export function UsageChart({ rows, from, to, metric, onMetricChange, loading, error, onRetry, empty = "No usage in this period.", title = "Usage by day", footer }: UsageChartProps) {
   const days = useMemo(() => daysBetween(from, to), [from, to]);
-  const { series, totals, peak, unpriced, unknown } = useMemo(() => build(rows, days, metric), [rows, days, metric]);
+  const { series, totals, dayRequests, peak, unpriced, unknown } = useMemo(() => build(rows, days, metric), [rows, days, metric]);
   const axis = axisFor(peak);
 
-  const [active, setActive] = useState<number | null>(null);
+  // Three sources of a shown day, kept apart: a keyboard focus owns the tab stop, a pointer hovers, a finger
+  // pins. The tooltip prefers the finger's choice, then the pointer's, then the focus.
+  const [focused, setFocused] = useState<number | null>(null);
+  const [hovered, setHovered] = useState<number | null>(null);
+  const [pinned, setPinned] = useState<number | null>(null);
+  const shown = pinned ?? hovered ?? focused;
+
   const [open, setOpen] = useState(false);
   const [scroll, setScroll] = useState(0);
   const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
@@ -231,13 +275,13 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
   }, [scroller, inner]);
 
   // One pass per day: the stack from the baseline up, with the gap between segments and the top end marked.
-  const bars: { x: number; y: number; h: number; slot: number | null; top: boolean }[] = [];
-  days.forEach((_, at) => {
+  const bars: { x: number; y: number; h: number; slot: number | null; day: string; name: string; top: boolean }[] = [];
+  days.forEach((day, at) => {
     let up = 0;
     for (const s of series) {
       if (!s.cells[at]) continue;
       const h = (s.cells[at] / axis.max) * PLOT_H;
-      bars.push({ x: slot * at + (slot - bar) / 2, y: base - up - h, h, slot: s.slot, top: false });
+      bars.push({ x: slot * at + (slot - bar) / 2, y: base - up - h, h, slot: s.slot, day, name: s.name, top: false });
       up += h;
     }
     if (up) bars[bars.length - 1].top = true;
@@ -248,16 +292,28 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
     b.h = Math.max(1, b.h - GAP);
   }
 
-  // The tooltip sits beside the active slot — on the left in the right half, on the right in the left half,
+  // The tooltip sits beside the shown slot — on its left in the right half, on its right in the left half,
   // and centred over the slot only when the card is too narrow for either side (a phone).
-  const tipRows = active === null ? [] : series.filter((s) => s.cells[active] > 0);
   const tipWidth = Math.min(260, column - 8);
-  const centre = slot * ((active ?? 0) + 0.5) - scroll;
+  const centre = slot * ((shown ?? 0) + 0.5) - scroll;
   const fits = (left: number) => left >= 4 && left + tipWidth <= column - 4;
   const leftHalf = centre < column / 2;
   const beside = leftHalf ? centre + slot / 2 + 8 : centre - slot / 2 - 8 - tipWidth;
   const across = leftHalf ? centre - slot / 2 - 8 - tipWidth : centre + slot / 2 + 8;
   const tipLeft = fits(beside) ? beside : fits(across) ? across : Math.min(Math.max(4, centre - tipWidth / 2), Math.max(4, column - tipWidth - 4));
+
+  // Rows by value, as many as the plot's height holds; the rest are named in one row and live in the table.
+  const dayRows = shown === null ? [] : series.filter((s) => s.counts[shown] > 0).sort((a, b) => b.cells[shown] - a.cells[shown] || a.name.localeCompare(b.name));
+  const rowLines = (s: Series) => Math.min(2, Math.ceil(s.name.length / TIP_CHARS)) + (s.members.length ? 1 : 0);
+  const tipRows: Series[] = [];
+  let lines = 0;
+  for (const s of dayRows) {
+    const cost = rowLines(s);
+    if (lines + cost > TIP_LINES) break;
+    lines += cost;
+    tipRows.push(s);
+  }
+  const more = dayRows.length - tipRows.length;
 
   const dayLabel = (at: number) => {
     const parts = series.filter((s) => s.cells[at]).map((s) => `${s.name} ${exact(s.cells[at], metric)}`);
@@ -299,7 +355,7 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
             {series.map((s) => (
               <li key={s.name} data-series={s.name} className="inline-flex min-w-0 items-center gap-1.5" title={s.members.length ? s.members.map((m) => m.name).join(", ") : undefined}>
                 <span aria-hidden="true" className="size-2.5 shrink-0 rounded-sm" style={{ background: paint(s.slot) }} />
-                <span className="break-all">{s.name}</span>
+                <span className="max-h-[2lh] overflow-hidden break-all">{s.name}</span>
               </li>
             ))}
           </ul>
@@ -314,13 +370,22 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
             ))}
           </div>
           <div className="relative min-w-0 flex-1">
-            <div ref={setScroller} className="overflow-x-auto" onScroll={(event) => setScroll(event.currentTarget.scrollLeft)}>
-              <svg width={inner + PAD.right} height={base + PAD.bottom} role="group" aria-label={`${METRIC_LABEL[metric]} per UTC day, by model, ${from} to ${to}`} className="block max-w-none">
+            <div
+              ref={setScroller}
+              className="overflow-x-auto"
+              onScroll={(event) => {
+                setScroll(event.currentTarget.scrollLeft);
+                // A pointer's choice belongs to a place on screen that just moved; keyboard focus moves with its day.
+                setHovered(null);
+                setPinned(null);
+              }}
+            >
+              <svg width={inner + PAD.right} height={base + PAD.bottom} data-max={axis.max} role="group" aria-label={`${METRIC_LABEL[metric]} per UTC day, by model, ${from} to ${to}`} className="block max-w-none">
                 {axis.ticks.length > 1 && <path d={ticks.filter((t) => t.value).map((t) => `M0 ${t.y}H${inner}`).join("")} className="stroke-border" strokeDasharray="3 3" />}
                 <line x1={0} x2={inner} y1={base} y2={base} className="stroke-border" />
-                {active !== null && <rect x={slot * active} y={PAD.top} width={slot} height={PLOT_H} className="fill-muted/60" />}
+                {shown !== null && <rect x={slot * shown} y={PAD.top} width={slot} height={PLOT_H} className="fill-muted/60" />}
                 {bars.map((b, at) => (
-                  <path key={at} d={barPath(b.x, b.y, bar, b.h, b.top ? 3 : 0)} style={{ fill: paint(b.slot) }} />
+                  <path key={at} data-testid="usage-chart-bar" data-bar-day={b.day} data-bar-series={b.name} d={barPath(b.x, b.y, bar, b.h, b.top ? 3 : 0)} style={{ fill: paint(b.slot) }} />
                 ))}
                 {days.map((day, at) => (
                   <rect
@@ -332,18 +397,25 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
                     data-day={day}
                     role="img"
                     aria-label={dayLabel(at)}
-                    tabIndex={active === at || (active === null && at === 0) ? 0 : -1}
+                    tabIndex={focused === at || (focused === null && at === 0) ? 0 : -1}
                     x={slot * at}
                     y={PAD.top}
                     width={slot}
                     height={PLOT_H}
                     fill="transparent"
                     className="cursor-default outline-none"
-                    onFocus={() => setActive(at)}
-                    onBlur={() => setActive((current) => (current === at ? null : current))}
-                    onPointerEnter={(event: PointerEvent<SVGRectElement>) => event.pointerType !== "touch" && setActive(at)}
-                    onPointerLeave={(event: PointerEvent<SVGRectElement>) => event.pointerType !== "touch" && setActive((current) => (current === at ? null : current))}
-                    onPointerDown={(event: PointerEvent<SVGRectElement>) => event.pointerType !== "mouse" && setActive((current) => (current === at ? null : at))}
+                    onFocus={() => setFocused(at)}
+                    onBlur={() => setFocused((current) => (current === at ? null : current))}
+                    // A pen hovers like a mouse; only a finger pins, so one gesture never takes two paths.
+                    onPointerEnter={(event: PointerEvent<SVGRectElement>) => event.pointerType !== "touch" && setHovered(at)}
+                    onPointerLeave={(event: PointerEvent<SVGRectElement>) => event.pointerType !== "touch" && setHovered((current) => (current === at ? null : current))}
+                    onPointerDown={(event: PointerEvent<SVGRectElement>) => {
+                      if (event.pointerType !== "touch") return;
+                      // A finger pins the day; it does not also give it keyboard focus, or the pin could
+                      // never be released by scrolling the plot.
+                      event.preventDefault();
+                      setPinned((current) => (current === at ? null : at));
+                    }}
                     onKeyDown={(event) => onKeyDown(event, at)}
                   />
                 ))}
@@ -356,35 +428,40 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
                 )}
               </svg>
             </div>
-            {active !== null && (
+            {shown !== null && (
               <div role="tooltip" data-testid="usage-chart-tooltip" className="pointer-events-none absolute top-0 z-10 rounded-lg border bg-popover p-2 text-xs text-popover-foreground shadow-md" style={{ left: tipLeft, width: tipWidth }}>
                 <div className="mb-1 flex justify-between gap-2 font-medium">
-                  <span>{days[active]}</span>
+                  <span>{days[shown]}</span>
                   <span className="font-normal text-muted-foreground">UTC</span>
                 </div>
-                {tipRows.length === 0 ? (
-                  <div className="text-muted-foreground">No usage</div>
+                {dayRows.length === 0 ? (
+                  <div className="text-muted-foreground">{dayRequests[shown] > 0 ? "No priced usage" : "No usage"}</div>
                 ) : (
-                  <ul className="flex max-h-44 flex-col gap-1 overflow-y-auto">
+                  <ul className="flex flex-col gap-1">
                     {tipRows.map((s) => (
                       <li key={s.name} className="flex justify-between gap-2">
                         <span className="flex min-w-0 gap-1.5">
                           {/* The colour links the row to its bar, as the legend does. */}
                           <span aria-hidden="true" data-testid="usage-chart-tooltip-swatch" className="mt-1 size-2 shrink-0 rounded-sm" style={{ background: paint(s.slot) }} />
-                          <span className="break-all">
+                          <span className="max-h-[2lh] overflow-hidden break-all">
                             <span data-testid="usage-chart-tooltip-name">{s.name}</span>
-                            {s.members.length > 0 && <span className="block text-muted-foreground">{s.members.filter((m) => m.cells[active] > 0).map((m) => m.name).join(", ")}</span>}
+                            {s.members.length > 0 && <span className="block text-muted-foreground">{s.members.filter((m) => m.requests[shown] > 0).map((m) => m.name).join(", ")}</span>}
                           </span>
                         </span>
-                        <span className="shrink-0 tabular-nums">{exact(s.cells[active], metric)}</span>
+                        <span className="shrink-0 tabular-nums">{exact(s.cells[shown], metric)}</span>
                       </li>
                     ))}
+                    {more > 0 && (
+                      <li data-testid="usage-chart-tooltip-more" className="text-muted-foreground">
+                        {more} more in the data table
+                      </li>
+                    )}
                   </ul>
                 )}
-                {tipRows.length > 1 && (
+                {dayRows.length > 1 && (
                   <div className="mt-1 flex justify-between gap-2 border-t pt-1 font-medium">
                     <span>Total</span>
-                    <span className="tabular-nums">{exact(totals[active], metric)}</span>
+                    <span className="tabular-nums">{exact(totals[shown], metric)}</span>
                   </div>
                 )}
               </div>
@@ -403,8 +480,9 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
             {open ? "Hide data table" : "Show data table"}
           </Button>
         </div>
-        {open && (
-          <div id={`${id}-table`} data-testid="usage-chart-table">
+        {/* The wrapper stays in the document, so the toggle's aria-controls always names it. */}
+        <div id={`${id}-table`} data-testid="usage-chart-table" hidden={!open}>
+          {open && (
             <Table>
               <TableHeader>
                 <TableRow>
@@ -431,8 +509,8 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
                 ))}
               </TableBody>
             </Table>
-          </div>
-        )}
+          )}
+        </div>
       </>
     );
   }

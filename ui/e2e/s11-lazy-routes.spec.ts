@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { gzipSync } from "node:zlib";
 
 import { signIn, VIEWER } from "./selfService";
 
@@ -10,6 +11,8 @@ import { signIn, VIEWER } from "./selfService";
  */
 
 const BREAK_GLASS = "e2e-break-glass-password";
+/** The JS a visitor downloads on arrival must stay at or under this many gzip-9 bytes. */
+const BUDGET = 219_415;
 
 /** The JS files a page actually requested, by basename. */
 function jsRequests(page: Page) {
@@ -19,6 +22,12 @@ function jsRequests(page: Page) {
     if (path.startsWith("/assets/") && path.endsWith(".js")) seen.push(path.slice("/assets/".length));
   });
   return seen;
+}
+
+async function signInAsAdmin(page: Page, request: import("@playwright/test").APIRequestContext) {
+  const response = await request.post("/api/v1/session/break-glass", { data: { password: BREAK_GLASS } });
+  expect(response.status()).toBe(204);
+  await page.context().addCookies((await request.storageState()).cookies);
 }
 
 /** A page chunk: the shell and the shared chunks are not pages. */
@@ -35,6 +44,16 @@ test("landing: an installation admin downloads the shell only, and a page chunk 
   await page.waitForLoadState("networkidle");
   expect(requested.filter(pageChunk), "no admin page is fetched on arrival").toEqual([]);
   expect(requested.some((name) => name.startsWith("index-")), "the entry chunk is fetched").toBe(true);
+
+  // What actually arrived, gzipped at level 9 as the browser would send it: the budget guard.
+  let bytes = 0;
+  for (const name of new Set(requested)) {
+    const served = await request.get(`/assets/${name}`);
+    expect(served.status(), name).toBe(200);
+    bytes += gzipSync(await served.body(), { level: 9 }).length;
+  }
+  expect(bytes, `landing JS gzip-9 (${bytes}) is at or under ${BUDGET}`).toBeLessThanOrEqual(BUDGET);
+  expect(bytes).toBeGreaterThan(100_000);
 
   // Opening the page fetches exactly its chunk (and whatever that chunk shares).
   await page.getByRole("link", { name: "Routers", exact: true }).click();
@@ -56,9 +75,49 @@ test("a chunk that fails to load is a recoverable error, never a blank page", as
   expect(await page.locator("#root").evaluate((root) => root.textContent!.trim().length)).toBeGreaterThan(0);
 
   // The action fixes it: with the chunk reachable again, a reload lands on the page.
+  await expect(failed).toHaveAttribute("data-reason", "chunk");
+  await expect(failed).toContainText("Reload is the way back");
+
+  // A rejected import stays rejected: coming back without a reload shows the same state and asks for nothing.
+  let chunks = 0;
+  page.on("request", (request) => {
+    if (/\/assets\/Routers-.*\.js/.test(request.url())) chunks++;
+  });
+  await page.getByRole("link", { name: "Usage", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
+  await page.getByRole("link", { name: "Routers", exact: true }).click();
+  await expect(failed).toBeVisible();
+  expect(chunks).toBe(0);
+  await page.screenshot({ path: "/tmp/usage-shots4/chunk-failed.png", fullPage: true }).catch(() => undefined);
+
   await page.unroute("**/assets/Routers-*.js");
   await failed.getByRole("button", { name: "Reload" }).click();
   await expect(page.getByRole("heading", { name: "Routers", level: 1 })).toBeVisible();
+});
+
+test("a page whose module loads and whose render throws is not blamed on a deploy", async ({ page, request }) => {
+  await signInAsAdmin(page, request);
+  const errors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  // A router row without the fields the page renders: the chunk is fine, the render is not.
+  await page.route("**/api/v1/routers?*", (route) => route.fulfill({ status: 200, json: { items: [{ id: "broken", name: "broken" }], next_cursor: null } }));
+  await page.goto("/routers");
+  const failed = page.getByTestId("page-load-failed");
+  await expect(failed).toHaveAttribute("data-reason", "render");
+  await expect(failed).toContainText("This page could not be shown");
+  await expect(failed).not.toContainText("did not arrive");
+  await expect(failed).not.toContainText("deployed");
+  // The failure is still reported to the console, not swallowed.
+  expect(errors.length, "React logged the error").toBeGreaterThan(0);
+
+  // Another page is unaffected, and coming back hits the same broken data with the same honest wording.
+  await page.getByRole("link", { name: "Usage", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
+  await page.getByRole("link", { name: "Routers", exact: true }).click();
+  await expect(failed).toHaveAttribute("data-reason", "render");
+  await expect(page.getByRole("button", { name: "Reload" })).toBeVisible();
 });
 
 test("a caller without the right sees the no-permission state and never fetches the page chunk", async ({ browser }) => {
