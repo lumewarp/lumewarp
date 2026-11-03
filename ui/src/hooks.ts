@@ -3,6 +3,7 @@ import { api, type Key, type Me, type Schemas, type Team } from "./api";
 import { useMemo } from "react";
 import { useToast } from "./components/Toast";
 import { runSecretMutation } from "./lib/keySecret";
+import { ownerResumableReason } from "./lib/keyState";
 
 export function useMe() {
   return useQuery({ queryKey: ["me"], queryFn: () => api.me(), staleTime: 5 * 60_000 });
@@ -30,13 +31,10 @@ export function can(me: Me | undefined) {
     canCreateOwnKey: (teamId: string) => teamRole(teamId) !== undefined,
     canManageKey,
     canResumeKey: (key: Key) =>
+      // The API refuses to activate a key whose owner is inactive, even for a team admin.
+      key.owner_active !== false &&
       canManageKey(key) &&
-      (isInstallationAdmin ||
-        teamRole(key.team_id) === "admin" ||
-        key.suspended_reason === null ||
-        key.suspended_reason === "owner" ||
-        // An owner who is back on the team may resume keys suspended by their removal.
-        key.suspended_reason === "owner_removed"),
+      (isInstallationAdmin || teamRole(key.team_id) === "admin" || ownerResumableReason(key)),
   };
 }
 

@@ -623,26 +623,139 @@ test("a one-time secret survives losing the role, while the page becomes no-acce
   expect(await page.content()).not.toContain(value!);
 });
 
-test("signing out drops an open secret", async ({ page }) => {
-  const team = await admin.ensureTeam("s8-signout");
-  // The member's own session: logging it out must not affect the viewer's session used by later tests.
+test("a background 401 keeps the one-time secret above the login page", async ({ page }) => {
+  const team = await admin.ensureTeam("s8-401");
   await admin.putMember(team.id, MEMBER_EMAIL);
   await signIn(page, MEMBER, "/my-keys");
-  await page.getByTestId("team-s8-signout").getByRole("button", { name: "New key" }).click();
-  const form = page.getByRole("dialog", { name: "New key in s8-signout" });
-  await form.getByLabel("Name").fill("s8-signout-key");
+  await expect(page.getByTestId("team-s8-401")).toBeVisible();
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+
+  // The create's post-success invalidation gets a 401; the login page's discovery is unauthenticated.
+  await page.route("**/api/v1/users/me", (route) =>
+    route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ error: { code: "unauthenticated", message: "session expired" } }) }),
+  );
+  await page.route("**/api/v1/session", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ oidc_enabled: false, break_glass_enabled: true, authenticated: false }),
+    }),
+  );
+  await page.getByTestId("team-s8-401").getByRole("button", { name: "New key" }).click();
+  const form = page.getByRole("dialog", { name: "New key in s8-401" });
+  await form.getByLabel("Name").fill("s8-401-key");
   await form.getByRole("button", { name: "Create key" }).click();
   const secret = page.getByRole("dialog", { name: "API key created" });
   await expect(secret.getByTestId("secret-value")).toHaveText(/^lw-/);
   const value = await secret.getByTestId("secret-value").textContent();
 
-  await page.evaluate(async () => {
-    const session = await (await fetch("/api/v1/session")).json();
-    await fetch("/api/v1/session/logout", { method: "POST", headers: { "X-Lumewarp-CSRF": session.csrf_token } });
-  });
-  // The next guarded entry refetches /users/me; the 401 signs the SPA out and unmounts the layout.
-  await routeChange(page, "/teams");
   await expect(page).toHaveURL(/\/login/);
+  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "My keys" })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "Main" })).toHaveCount(0);
+  await expect(secret.getByTestId("secret-value")).toHaveText(value!);
+  await secret.getByRole("button", { name: "Copy" }).click();
+  await expect(secret.getByRole("button", { name: "Copied" })).toBeVisible();
+  await secret.getByRole("button", { name: /saved it/ }).click();
+  await expect(page.getByTestId("secret-value")).toHaveCount(0);
+  await expect(page.getByLabel("Break-glass password")).toBeVisible();
+  expect(await page.content()).not.toContain(value!);
+});
+
+test("the real Sign out button drops a create still in flight", async ({ page }) => {
+  const team = await admin.ensureTeam("s8-inflight-signout");
+  await admin.putMember(team.id, MEMBER_EMAIL);
+  await signIn(page, MEMBER, `/teams/${team.id}`);
+  await page.getByRole("tab", { name: "Keys" }).click();
+
+  let releaseResponse!: () => void;
+  const hold = new Promise<void>((resolve) => {
+    releaseResponse = resolve;
+  });
+  let responseFetched!: () => void;
+  const fetched = new Promise<void>((resolve) => {
+    responseFetched = resolve;
+  });
+  let responseDelivered!: () => void;
+  const delivered = new Promise<void>((resolve) => {
+    responseDelivered = resolve;
+  });
+  await page.route(`**/api/v1/teams/${team.id}/keys**`, async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    responseFetched();
+    await hold;
+    await route.fulfill({ response });
+    responseDelivered();
+  });
+
+  await page.getByRole("button", { name: "New key" }).click();
+  const form = page.getByRole("dialog", { name: "New API key" });
+  await form.getByLabel("Name").fill("s8-inflight-key");
+  await form.getByRole("button", { name: "Create key" }).click();
+  await fetched;
+  await page.keyboard.press("Escape");
+  await expect(form).toBeHidden();
+
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page).toHaveURL(/\/login/);
+  const postResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === `/api/v1/teams/${team.id}/keys` && response.request().method() === "POST",
+  );
+  releaseResponse();
+  await postResponse;
+  await delivered;
+  await page.waitForTimeout(150);
+  await expect(page.getByTestId("secret-value")).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByLabel("Break-glass password")).toBeVisible();
+});
+
+test("a failed sign-out keeps the page and a later secret still shows", async ({ page }) => {
+  const team = await admin.ensureTeam("s8-failed-logout");
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  await signIn(page, VIEWER, "/my-keys");
+  await page.route("**/api/v1/session/logout", (route) =>
+    route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { code: "server_error", message: "logout failed" } }),
+    }),
+  );
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page.getByText("logout failed")).toBeVisible();
+  await expect(page).toHaveURL(/\/my-keys$/);
+  await expect(page.getByRole("heading", { name: "My keys" })).toBeVisible();
+
+  await page.getByTestId("team-s8-failed-logout").getByRole("button", { name: "New key" }).click();
+  const form = page.getByRole("dialog", { name: "New key in s8-failed-logout" });
+  await form.getByLabel("Name").fill("s8-after-failed-logout");
+  await form.getByRole("button", { name: "Create key" }).click();
+  const secret = page.getByRole("dialog", { name: "API key created" });
+  await expect(secret.getByTestId("secret-value")).toHaveText(/^lw-/);
+  await secret.getByRole("button", { name: /saved it/ }).click();
+});
+
+test("a one-time secret dialog cannot be dismissed by Escape or a click outside", async ({ page }) => {
+  const team = await admin.ensureTeam("s8-dismiss");
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  await signIn(page, VIEWER);
+  await page.getByTestId("team-s8-dismiss").getByRole("button", { name: "New key" }).click();
+  const form = page.getByRole("dialog", { name: "New key in s8-dismiss" });
+  await form.getByLabel("Name").fill("s8-dismiss-key");
+  await form.getByRole("button", { name: "Create key" }).click();
+  const secret = page.getByRole("dialog", { name: "API key created" });
+  const value = await secret.getByTestId("secret-value").textContent();
+
+  await expect(page.getByRole("button", { name: "Close" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(secret.getByTestId("secret-value")).toHaveText(value!);
+  await page.mouse.click(5, 5);
+  await expect(secret.getByTestId("secret-value")).toHaveText(value!);
+  await secret.getByRole("button", { name: /saved it/ }).click();
   await expect(page.getByTestId("secret-value")).toHaveCount(0);
   expect(await page.content()).not.toContain(value!);
 });
@@ -652,29 +765,46 @@ test("two secrets arriving in a row are both shown, the second after the first i
   await admin.putMember(team.id, VIEWER_EMAIL);
   await signIn(page, VIEWER, `/teams/${team.id}`);
   await page.getByRole("tab", { name: "Keys" }).click();
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
 
   let teamSecret = "";
-  let delayedDone = false;
+  let releaseTeam!: () => void;
+  const teamGate = new Promise<void>((resolve) => {
+    releaseTeam = resolve;
+  });
+  let teamFetched!: () => void;
+  const fetchedGate = new Promise<void>((resolve) => {
+    teamFetched = resolve;
+  });
+  let teamDelivered!: () => void;
+  const deliveredGate = new Promise<void>((resolve) => {
+    teamDelivered = resolve;
+  });
   await page.route(`**/api/v1/teams/${team.id}/keys**`, async (route) => {
-    if (route.request().method() !== "POST") {
+    if (route.request().method() !== "POST" || (route.request().postDataJSON() as { name?: string }).name !== "s8-team-secret") {
       await route.continue();
       return;
     }
     const response = await route.fetch();
     const body = await response.json();
     teamSecret = body.secret;
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    teamFetched();
+    await teamGate;
     await route.fulfill({ response, body: JSON.stringify(body) });
-    delayedDone = true;
+    teamDelivered();
   });
+
+  // Hold only the team create; close its busy form while the mutation is in flight.
   await page.getByRole("button", { name: "New key" }).click();
   let form = page.getByRole("dialog", { name: "New API key" });
   await form.getByLabel("Name").fill("s8-team-secret");
   await form.getByRole("button", { name: "Create key" }).click();
-  // Close the busy form; the delayed mutation continues in the background.
+  await fetchedGate;
   await page.keyboard.press("Escape");
   await expect(form).toBeHidden();
 
+  // The My keys create is not held: it shows the first secret while the team one is pending.
+  const myKeysMe = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/users/me");
   await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "My keys" }).click();
   await expect(page.getByRole("heading", { name: "My keys" })).toBeVisible();
   await page.getByTestId("team-s8-two-secrets").getByRole("button", { name: "New key" }).click();
@@ -684,14 +814,23 @@ test("two secrets arriving in a row are both shown, the second after the first i
   const first = page.getByRole("dialog", { name: "API key created" });
   await expect(first.getByTestId("secret-value")).toHaveText(/^lw-/);
   const firstSecret = await first.getByTestId("secret-value").textContent();
+  await myKeysMe;
 
-  await expect.poll(() => delayedDone).toBe(true);
-  // The second arrived while the first was open: the first is still the visible one.
+  expect(teamSecret).toMatch(/^lw-/);
+  expect(firstSecret).not.toBe(teamSecret);
+  const teamInvalidated = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/v1/users/me");
+  releaseTeam();
+  await teamInvalidated;
+  await deliveredGate;
+  // The team secret arrived while the first was open: the first is still the visible one.
   await expect(first.getByTestId("secret-value")).toHaveText(firstSecret!);
+  await first.getByRole("button", { name: "Copy" }).click();
+  await expect(first.getByRole("button", { name: "Copied" })).toBeVisible();
   await first.getByRole("button", { name: /saved it/ }).click();
   const second = page.getByRole("dialog", { name: "API key created" });
-  expect(teamSecret).toMatch(/^lw-/);
   await expect(second.getByTestId("secret-value")).toHaveText(teamSecret);
+  // The copy state belongs to the previous secret and must reset for this one.
+  await expect(second.getByRole("button", { name: "Copy" })).toBeVisible();
   await second.getByRole("button", { name: /saved it/ }).click();
   await expect(page.getByTestId("secret-value")).toHaveCount(0);
 });
@@ -801,6 +940,62 @@ test("an administrator-suspended key says an administrator must resume it", asyn
   const secret = page.getByRole("dialog", { name: "API key rotated" });
   await expect(secret.getByTestId("secret-note")).toContainText(/an administrator resumes/i);
   await secret.getByRole("button", { name: /saved it/ }).click();
+});
+
+test("a reactivated owner's key still needs an administrator to resume it", async ({ page, browser }) => {
+  const team = await admin.ensureTeam("s8-reactivated");
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  await memberKey(browser, VIEWER, team.id, "s8-reactivated-key");
+  const user = await admin.user(VIEWER_EMAIL);
+  await admin.patch(`/users/${user.id}`, { is_active: false });
+  await admin.patch(`/users/${user.id}`, { is_active: true });
+  await signIn(page, VIEWER);
+
+  const row = rowOf(page.getByTestId("team-s8-reactivated"), "s8-reactivated-key");
+  await expect(row.getByText("Suspended", { exact: true })).toBeVisible();
+  await expect(row.getByText(/owner deactivated/i)).toBeVisible();
+  await expect(row.getByRole("button", { name: "Resume" })).toBeDisabled();
+  await row.getByRole("button", { name: "Rotate" }).click();
+  const dialog = page.getByRole("dialog", { name: /^Rotate/ });
+  await expect(dialog.getByTestId("rotate-notice")).toContainText(/an administrator must resume it/i);
+  await expect(dialog.getByTestId("rotate-notice")).not.toContainText(/Use Resume/i);
+  // The owner is active again, so the reactivation sentence must not appear.
+  await expect(dialog.getByTestId("rotate-notice")).not.toContainText(/account must be reactivated/i);
+  await dialog.getByRole("button", { name: "Rotate key" }).click();
+  const secret = page.getByRole("dialog", { name: "API key rotated" });
+  await expect(secret.getByTestId("secret-note")).toContainText(/an administrator resumes/i);
+  await expect(secret.getByTestId("secret-note")).not.toContainText(/account must be reactivated/i);
+  await secret.getByRole("button", { name: /saved it/ }).click();
+});
+
+test("an unknown suspension reason gets the conservative administrator text", async ({ page, browser }) => {
+  const team = await admin.ensureTeam("s8-unknown-reason");
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  const created = await memberKey(browser, VIEWER, team.id, "s8-unknown-key");
+  await memberUpdate(browser, VIEWER, created.key.id, { lifecycle: "suspended" });
+  await page.route("**/api/v1/users/me/keys*", async (route) => {
+    const response = await route.fetch();
+    const body = (await response.json()) as {
+      items: { id: string; suspended_reason: string | null; owner_active: boolean | null }[];
+    };
+    for (const item of body.items) {
+      if (item.id === created.key.id) {
+        item.suspended_reason = "future_reason";
+        item.owner_active = false;
+      }
+    }
+    await route.fulfill({ response, body: JSON.stringify(body) });
+  });
+  await signIn(page, VIEWER);
+
+  const row = rowOf(page.getByTestId("team-s8-unknown-reason"), "s8-unknown-key");
+  await expect(row.getByText("Suspended", { exact: true })).toBeVisible();
+  await expect(row.getByRole("button", { name: "Resume" })).toBeDisabled();
+  await row.getByRole("button", { name: "Rotate" }).click();
+  const dialog = page.getByRole("dialog", { name: /^Rotate/ });
+  await expect(dialog.getByTestId("rotate-notice")).toContainText(/an administrator must resume it/i);
+  await expect(dialog.getByTestId("rotate-notice")).toContainText(/account must be reactivated first/i);
+  await expect(dialog.getByTestId("rotate-notice")).not.toContainText(/Use Resume/i);
 });
 
 test("a suspended key with a retained previous secret warns that the retention ends now", async ({ page, browser }) => {

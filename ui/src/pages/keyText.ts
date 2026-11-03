@@ -78,18 +78,32 @@ export function graceText(key: Key) {
 }
 
 const suspended = (key: Key) => key.lifecycle === "suspended";
-const adminSuspended = (key: Key) => key.suspended_reason === "admin";
 
-/** One sentence per condition: suspension and expiry are checked separately and additively. */
-function suspensionText(key: Key) {
+export type Recovery = { self: boolean; adminSuspended: boolean; reactivate: boolean };
+
+/**
+ * The one recovery condition shared by the confirmation, the success note and the row note.
+ * `canSelfResume` is `canResumeKey` from hooks.ts (which already includes the owner-active check).
+ * The reactivation sentence comes from the key's current `owner_active`, never from the historical
+ * suspension reason: a reactivated owner with `owner_deactivated` still needs an administrator.
+ */
+export function recoveryCondition(key: Key, canSelfResume: boolean): Recovery | null {
   if (!suspended(key)) return null;
-  if (adminSuspended(key)) {
-    return "This key was suspended by an administrator: an administrator must resume it.";
+  return {
+    self: canSelfResume,
+    adminSuspended: key.suspended_reason === "admin",
+    reactivate: !canSelfResume && key.owner_active === false,
+  };
+}
+
+function recoverySentence(recovery: Recovery) {
+  if (recovery.self) {
+    return "This key is suspended: rotating does not resume it. Use Resume to make a new secret usable.";
   }
-  if (key.suspended_reason === "owner_deactivated") {
-    return "This key is suspended because its owner is inactive: the account must be reactivated before it can be resumed.";
-  }
-  return "This key is suspended: rotating does not resume it. Use Resume to make a new secret usable.";
+  const text = recovery.adminSuspended
+    ? "This key was suspended by an administrator: an administrator must resume it."
+    : "This key was suspended and a member cannot resume it: an administrator must resume it.";
+  return text + (recovery.reactivate ? " The account must be reactivated first." : "");
 }
 
 function expiryText(key: Key) {
@@ -108,9 +122,12 @@ function graceEnd(key: Key, graceSeconds: number, now: Date) {
  * neither. The older-grace warning uses the server's retained previous secret, so a suspended key is
  * told its retention ends at once without claiming the older secret works now.
  */
-export function rotationConfirmation(key: Key, graceSeconds: number, now = new Date()) {
+export function rotationConfirmation(key: Key, graceSeconds: number, canSelfResume: boolean, now = new Date()) {
   const parts: string[] = [];
-  for (const text of [suspensionText(key), expiryText(key)]) if (text) parts.push(text);
+  const recovery = recoveryCondition(key, canSelfResume);
+  if (recovery) parts.push(recoverySentence(recovery));
+  const expiry = expiryText(key);
+  if (expiry) parts.push(expiry);
   if (hasPreviousSecret(key)) {
     const until = fmtDateTime(key.previous_key_expires_at!);
     parts.push(
@@ -135,13 +152,14 @@ export function rotationConfirmation(key: Key, graceSeconds: number, now = new D
 }
 
 /** The success dialog: every condition that keeps the new secret unusable, not just the grace window. */
-export function rotationNote(key: Key) {
+export function rotationNote(key: Key, canSelfResume: boolean) {
   const parts: string[] = [];
-  if (suspended(key)) {
+  const recovery = recoveryCondition(key, canSelfResume);
+  if (recovery) {
     parts.push(
-      adminSuspended(key)
-        ? "The new secret will not work until an administrator resumes this key."
-        : "The new secret will not work until this key is resumed. Rotating does not resume it; use Resume.",
+      recovery.self
+        ? "The new secret will not work until this key is resumed. Rotating does not resume it; use Resume."
+        : `The new secret will not work until an administrator resumes this key.${recovery.reactivate ? " The account must be reactivated first." : ""}`,
     );
   }
   if (isExpired(key)) {
@@ -157,12 +175,14 @@ export function rotationNote(key: Key) {
 }
 
 /** The row note. Never claims a secret works for a suspended or expired key. */
-export function rotationRowNote(key: Key) {
+export function rotationRowNote(key: Key, canSelfResume: boolean) {
   if (inGrace(key)) return graceText(key);
   if (suspended(key) && hasPreviousSecret(key)) {
-    return `Previous secret kept until ${fmtDateTime(key.previous_key_expires_at!)}; ${
-      adminSuspended(key) ? "an administrator must resume the key" : "the key is suspended"
-    }.`;
+    const recovery = recoveryCondition(key, canSelfResume);
+    const how = recovery?.self
+      ? "use Resume to make the new secret usable"
+      : `an administrator must resume the key${recovery?.reactivate ? " after the account is reactivated" : ""}`;
+    return `Previous secret kept until ${fmtDateTime(key.previous_key_expires_at!)}; ${how}.`;
   }
   return null;
 }

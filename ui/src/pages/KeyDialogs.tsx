@@ -6,7 +6,7 @@ import { Dialog } from "../components/Dialog";
 import { SelectField } from "../components/Form";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
-import { useSecretMut } from "../hooks";
+import { useCan, useSecretMut } from "../hooks";
 import { refusalText, rotationConfirmation } from "./keyText";
 
 /** The secret is in a dialog's children only while `secret` is set; closing drops it from React state. */
@@ -26,6 +26,7 @@ export function SecretDialog({
       open={!!secret}
       title={title}
       onClose={onClose}
+      dismissible={false}
       footer={<Button onClick={onClose}>I’ve saved it</Button>}
     >
       {secret && (
@@ -64,6 +65,8 @@ export function RotateKeyDialog({
 }) {
   const [grace, setGrace] = useState("0");
   const [error, setError] = useState<string | null>(null);
+  const perms = useCan();
+  const canSelfResume = target ? perms.canResumeKey(target) : false;
   const rotate = useSecretMut(
     ({ key, seconds }: { key: Key; seconds: number }) => api.rotateKey(key.id, { grace_seconds: seconds }),
     (secret, key) => onRotated(secret, key),
@@ -112,7 +115,7 @@ export function RotateKeyDialog({
           hint="The new secret replaces it in place; usage stays on this key."
         />
         <p className="m-0" data-testid="rotate-notice">
-          {target ? rotationConfirmation(target, seconds) : ""}
+          {target ? rotationConfirmation(target, seconds, canSelfResume) : ""}
         </p>
         {error && (
           <Alert variant="destructive" data-testid="rotate-error">

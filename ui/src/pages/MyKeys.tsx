@@ -230,7 +230,7 @@ function TeamSection({
             key: "status",
             header: "Status",
             cell: (key) => {
-              const note = rotationRowNote(key);
+              const note = rotationRowNote(key, perms.canResumeKey(key));
               return (
                 <span className="flex flex-col gap-0.5 [overflow-wrap:anywhere]">
                   <span>
@@ -255,7 +255,7 @@ function TeamSection({
               const canManage = perms.canManageKey(key);
               const ownerInactive = key.owner_kind === "user" && key.owner_active === false;
               const suspended = key.lifecycle === "suspended";
-              const canResume = suspended && perms.canResumeKey(key) && !ownerInactive;
+              const canResume = suspended && perms.canResumeKey(key);
               return (
                 <div className="flex flex-col items-end gap-1 whitespace-nowrap sm:flex-row sm:justify-end sm:gap-1.5">
                   <Button variant="outline" size="sm" disabled={!canManage} onClick={() => setEditing(key)}>
@@ -302,7 +302,7 @@ function TeamSection({
         onClose={() => setRotating(null)}
         onRotated={(value, key) => {
           setRotating(null);
-          showSecret({ value, title: "API key rotated", note: rotationNote(key) });
+          showSecret({ value, title: "API key rotated", note: rotationNote(key, perms.canResumeKey(key)) });
         }}
       />
       <ConfirmDialog

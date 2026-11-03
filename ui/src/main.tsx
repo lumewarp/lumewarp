@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { ApiError } from "./api";
 import { setUnauthorizedHandler } from "./auth";
 import { ToastProvider } from "./components/Toast";
+import { SecretProvider } from "./components/SecretProvider";
 import { router } from "./router";
 import "./styles.css";
 
@@ -41,7 +42,9 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <ToastProvider>
-        <RouterProvider router={router} />
+        <SecretProvider>
+          <RouterProvider router={router} />
+        </SecretProvider>
       </ToastProvider>
     </QueryClientProvider>
   </StrictMode>,
