@@ -5,8 +5,6 @@ gate: Lumewarp p99 overhead clearly below LiteLLM's).
 
 - `mock-upstream/` — Rust mock upstream with fixed latency and SSE streaming,
   plus `sse-bench` (concurrent SSE clients).
-- `mock-mcp/` — Rust MCP upstream for the MCP gateway tests: modern/legacy,
-  JSON/SSE, fault injection and request recording. Not part of the LLM A6 run.
 - `scripts/run.sh` — the benchmark driver: builds release binaries, starts mock /
   Lumewarp / LiteLLM, runs the load, samples CPU/PSS, aggregates results.
 - `scripts/ci_check.py` — CI gate over the latest `results.json` (used by the
@@ -327,16 +325,6 @@ bench/results/<RUN_ID>/locust`. `--ci-check` reads the already aggregated
 Lumewarp has any flagged repetition — failures, an achieved rate or step below
 90%, generator saturation, a step whose users were never reached — or when
 Lumewarp accepts a negative request. Latency is not gated there.
-
-## MCP mock upstream
-
-`mock-mcp/` is a separate Rust project for the MCP tests, not a benchmark
-target. One process serves any number of named instances at `/s/<name>/mcp`;
-the admin API changes tools or faults while running and reads a bounded record of
-what every request carried. `tests/e2e/mcp_mock.py` starts it for pytest. Its own
-README has the API, the fault table and the measured JSON/SSE throughput; with
-recording off it is far above the gateway's A6 rate (1000 RPS), so a mixed MCP
-run measures Lumewarp rather than the mock.
 
 ## Notes
 
