@@ -3,6 +3,7 @@ upstream and gateway, all real processes on ephemeral ports.
 """
 
 import asyncio
+import json
 import os
 import shutil
 import signal
@@ -24,6 +25,23 @@ SCOPE = "e2e"
 GATEWAY_ID = "gw-e2e"
 FORBIDDEN_PORTS = {9000, 5432, 8080, 8081}
 DB_PREFIX = "lumewarp_e2e_"
+SECRET_LOG_ENV = "E2E_SECRET_LOG"
+
+
+def record_secret(value: str | None, kind: str) -> None:
+    """Remember a secret the run issued or received, for the post-run pg_dump scan.
+
+    Append-only and 0600 inside the run directory, which the e2e scripts delete after
+    scanning. With E2E_SECRET_LOG unset (a manual pytest run) nothing is recorded.
+    """
+    if not isinstance(value, str) or len(value) < 8:
+        return
+    path = os.environ.get(SECRET_LOG_ENV)
+    if not path:
+        return
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a") as out:
+        out.write(json.dumps({"kind": kind, "value": value}) + "\n")
 
 
 def env_path(name: str, default: str) -> Path:
@@ -232,6 +250,7 @@ class Stack:
         self.grpc_port = free_port()
         self.metrics_port = free_port()
         self.mock_port = free_port()
+        self.db_created = False
         self.gateways: list[Gateway] = []
         self.extra_mocks: list[Proc] = []
         self.api_url = f"http://127.0.0.1:{self.http_port}/api/v1"
@@ -283,10 +302,13 @@ class Stack:
             with open(Path(run_dir) / "dbs", "a") as dbs:
                 dbs.write(f"{self.db_name}\n")
         pg(PG_DSN, f'CREATE DATABASE "{self.db_name}"')
+        self.db_created = True
         self._run_cli("migrate")
         out = self._run_cli("bootstrap", "--gateway-id", GATEWAY_ID, "--scope", SCOPE)
         self.gateway_token = out.strip().splitlines()[-1]
         assert self.gateway_token.startswith("lwg-"), out
+        record_secret(self.gateway_token, "gateway token")
+        record_secret(BREAK_GLASS_PASSWORD, "break-glass password")
         self.mock.start()
         wait_for(
             lambda: (
@@ -320,6 +342,10 @@ class Stack:
         assert response.status_code == 204, response.text
         info = self.admin.get(self.api_url + "/session").json()
         self.admin.headers["X-Lumewarp-CSRF"] = info["csrf_token"]
+        from lumewarp_control_plane.auth.sessions import COOKIE_NAME
+
+        record_secret(self.admin.cookies.get(COOKIE_NAME), "Lumewarp session cookie")
+        record_secret(info["csrf_token"], "Lumewarp CSRF token")
 
     def start_mock(self, tag: str, *args: str) -> int:
         """Start another mock upstream (e.g. with fault injection); returns its port."""
@@ -368,10 +394,33 @@ class Stack:
         for proc in self.extra_mocks:
             proc.stop()
         self.admin.close()
+        # This database is dropped per test/stack, so the pg_dump scan has to run here:
+        # after the run, no test database is left to scan. The scripts' finalizer verifies
+        # that every created database has a scan result and rescans leftovers.
+        leak = None
+        try:
+            leak = self._scan_secrets() if self.db_created else None
+        except Exception as err:  # noqa: BLE001 - still drop, but fail the test
+            leak = f"{self.db_name}: secret scan failed: {err}"
         try:
             pg(PG_DSN, f'DROP DATABASE IF EXISTS "{self.db_name}" WITH (FORCE)')
         except Exception as err:  # noqa: BLE001
             print(f"warning: could not drop {self.db_name}: {err}", file=sys.stderr)
+        if leak is not None:
+            print(f"secret scan: {leak}", file=sys.stderr)
+            raise AssertionError(leak)
+
+    def _scan_secrets(self) -> str | None:
+        """Dump before the drop; a report string when a plaintext credential is present."""
+        if os.environ.get("E2E_SECRET_SCAN") != "1":
+            return None
+        from secret_scan import append_result, describe, scan_database
+
+        result = scan_database(self.dsn, os.environ.get(SECRET_LOG_ENV))
+        append_result(os.environ.get("E2E_SCAN_REPORT"), result)
+        if result["hits"]:
+            return f"{self.db_name}: {describe(result['hits'])}"
+        return None
 
     def logs(self) -> str:
         parts = []
@@ -455,6 +504,7 @@ class Stack:
                 json={"name": f"key-{name}", **key_body},
             )
             assert created["key"]["owner_kind"] == owner_kind
+            record_secret(created["secret"], "API key")
             keys[name] = Key(created["key"]["id"], created["secret"])
         self.wait_key_count(2)
         return Seeded(team["id"], owner_id, keys["a"], keys["b"])
@@ -471,6 +521,7 @@ class Stack:
             json={"role": role},
         )
         new = generate_secret(SecretKind.PAT)
+        record_secret(new.secret, "personal access token")
         pg(
             self.dsn,
             "INSERT INTO personal_access_tokens (id, user_id, name, token_hash, display_prefix) "

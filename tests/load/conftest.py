@@ -53,8 +53,11 @@ def stack(request, binaries):
         ) or not hasattr(request.node, "rep_call")
         if failed:
             print("\n" + s.logs(), file=sys.stderr)
-        s.teardown()
-        s.cleanup_dir()
+        try:
+            s.teardown()
+        finally:
+            # teardown raises on a secret-scan hit; the directory still has to go.
+            s.cleanup_dir()
 
 
 @pytest.fixture
@@ -73,8 +76,10 @@ def stack_factory(binaries):
             print("\n" + s.logs(), file=sys.stderr)
             raise
         finally:
-            s.teardown()
-            s.cleanup_dir()
+            try:
+                s.teardown()
+            finally:
+                s.cleanup_dir()
 
     return fresh
 
