@@ -1086,3 +1086,102 @@ test("tooltip: a short plot still keeps the tooltip off the table toggle", async
   // Even with no room for a row, the count of what is missing stays on screen.
   expect(Number(await tooltip(page).getAttribute("data-hidden-rows"))).toBeGreaterThan(0);
 });
+
+test("tooltip: a refetch that keeps the row count measures the new text", async ({ page, request }) => {
+  await signInAsAdmin(page, request);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const today = isoDay(new Date());
+  const names = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
+  let long = false;
+  let hits = 0;
+  await page.route("**/api/v1/usage?*", async (route) => {
+    if (new URL(route.request().url()).searchParams.get("group_by") !== "day,model") return route.continue();
+    hits++;
+    await route.fulfill({
+      json: {
+        items: names.map((name) => usageRow(today, long ? `${name}-${"W".repeat(28)}` : name, long ? 100_000_000 : 100, 1000)),
+        next_cursor: null,
+      },
+    });
+  });
+  // A real background refresh of the same query: past the stale window, then a visibility change.
+  let clock = false;
+  const refresh = async () => {
+    const prior = hits;
+    if (!clock) {
+      await page.clock.install();
+      clock = true;
+    }
+    await page.clock.fastForward(16_000);
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+      document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
+      Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+      document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
+      delete (document as any).visibilityState;
+    });
+    await expect.poll(() => hits).toBeGreaterThan(prior);
+  };
+  const tip = tooltip(page);
+  const snap = async () => {
+    const t = (await tip.boundingBox())!;
+    const plot = (await chart(page).locator("svg").boundingBox())!;
+    const toggle = (await page.getByTestId("usage-chart-table-toggle").boundingBox())!;
+    const total = (await tip.locator("div.border-t").boundingBox())!;
+    return {
+      overflow: Math.round(t.y + t.height) - Math.round(plot.y + plot.height),
+      hidden: Number(await tip.getAttribute("data-hidden-rows")),
+      rows: await tip.getByTestId("usage-chart-tooltip-name").count(),
+      totalBottom: Math.round(total.y + total.height),
+      toggleTop: Math.round(toggle.y),
+      height: Math.round(t.height),
+    };
+  };
+
+  await page.goto("/usage");
+  await expect(daySlots(page)).toHaveCount(30);
+  await daySlots(page).last().focus();
+  await expect(tip).toContainText("600 tokens");
+  const short = await snap();
+  expect(short.rows).toBe(6);
+  expect(short.hidden).toBe(0);
+  expect(short.overflow).toBeLessThanOrEqual(0);
+
+  // Short → long with the same six rows: the text is longer, so the tooltip must measure again and drop rows.
+  long = true;
+  await refresh();
+  await expect(tip).toContainText("600,000,000 tokens");
+  await expect.poll(async () => (await snap()).overflow).toBeLessThanOrEqual(0);
+  const wide = await snap();
+  expect(wide.hidden).toBeGreaterThan(0);
+  expect(wide.rows).toBeLessThan(6);
+  expect(wide.totalBottom).toBeLessThanOrEqual(wide.toggleTop);
+  await expect(tip.getByTestId("usage-chart-tooltip-more")).toHaveText(`${wide.hidden} more in the data table`);
+
+  // The same answer again changes nothing: no remeasure, no reset, no DOM churn in the open tooltip.
+  await page.evaluate(() => {
+    const element = document.querySelector('[data-testid="usage-chart-tooltip"]')!;
+    const watched = window as unknown as { __tip: Element; __churn: number };
+    watched.__tip = element;
+    watched.__churn = 0;
+    new MutationObserver((records) => {
+      watched.__churn += records.length;
+    }).observe(element, { attributes: true, childList: true, subtree: true, characterData: true });
+  });
+  await refresh();
+  await page.waitForTimeout(300);
+  const churn = await page.evaluate(() => (window as unknown as { __churn: number }).__churn);
+  const sameNode = await page.evaluate(() => document.querySelector('[data-testid="usage-chart-tooltip"]') === (window as unknown as { __tip: Element }).__tip);
+  expect(churn, "an identical refetch does not touch the tooltip").toBe(0);
+  expect(sameNode).toBe(true);
+  expect(await snap()).toEqual(wide);
+
+  // Long → short: the rows come back.
+  long = false;
+  await refresh();
+  await expect(tip).toContainText("600 tokens");
+  await expect.poll(async () => (await snap()).hidden).toBe(0);
+  const back = await snap();
+  expect(back.rows).toBe(6);
+  expect(back.overflow).toBeLessThanOrEqual(0);
+});

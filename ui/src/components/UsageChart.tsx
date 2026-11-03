@@ -322,7 +322,18 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
   // Rows by value. How many fit is decided after they are laid out: the effect below drops the smallest into
   // "N more in the data table" until the real tooltip fits the real plot, so no estimate can be wrong.
   const dayRows = shownAt === null ? [] : series.filter((s) => s.counts[shownAt] > 0).sort((a, b) => b.cells[shownAt] - a.cells[shownAt] || a.name.localeCompare(b.name));
-  const tipKey = `${shownAt}|${metric}|${Math.round(width)}|${Math.round(room)}|${dayRows.length}`;
+  // The key covers everything the tooltip renders — the date and every row's name, value and member line —
+  // so a refetch that keeps the row count but changes the text measures again, while an identical refetch does not.
+  const tipKey =
+    shownAt === null
+      ? ""
+      : [
+          days[shownAt],
+          metric,
+          Math.round(width),
+          Math.round(room),
+          ...dayRows.map((s) => `${s.name} ${s.cells[shownAt]} ${s.members.filter((m) => m.requests[shownAt] > 0).map((m) => m.name).join(", ")}`),
+        ].join("|");
   const hidden = tipState.key === tipKey ? Math.min(tipState.hidden, dayRows.length) : 0;
   const tipRows = dayRows.slice(0, dayRows.length - hidden);
   const more = hidden;
