@@ -464,8 +464,9 @@ wheel build includes the static directory as package data.
 
 Log in at `/` through SSO or the emergency login, whichever is configured. `/my-keys` is the home
 of a user who is neither an installation admin nor a team admin: their teams' effective models,
-limits and remaining budget, and the keys they own. A team's **Keys** tab manages every key in
-that team; there is no separate `/keys` page. The API types in `ui/src/api/schema.d.ts`
+limits and remaining budget, and the keys they own. A team's **Keys** tab lists every key in
+that team and is where a team admin manages them; there is no separate `/keys` page. The API
+types in `ui/src/api/schema.d.ts`
 are generated from this service's OpenAPI document (`pnpm gen:api`).
 
 ## Plugins
