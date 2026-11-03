@@ -12,7 +12,9 @@ virtual keys, budgets and rate limits, usage accounting, plugins and the Admin U
 (P1); plus OIDC login for the Admin UI, pluggable authorization (built-in, OpenFGA
 or HTTP) with automatic key suspension, retries/fallbacks/circuit breaking/health
 checks, latency- and vLLM-load-aware routing, traffic splits, alert rules and
-dashboards (P2). See the [architecture document](docs/architecture.md) for the
+dashboards (P2). P2.5 adds self-service API keys: any IdP user can sign in and
+manage their own keys in their teams, with per-team key caps and rotation grace. See
+the [architecture document](docs/architecture.md) for the
 design and its “P1 已實作” / “P2 已實作” / “模型目錄已實作” status; deferred work includes
 JWT/mTLS client auth, MCP/A2A and an HA control plane.
 
