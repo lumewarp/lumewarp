@@ -156,6 +156,27 @@ def test_churn_under_load(stack):
             pool.append(key)
             run.set_keys(pool)
 
+        # --- rotate a pooled key with a grace: both secrets serve as the same key, so
+        # usage stays attributed to one key id while clients use either secret.
+        revoked_ids = {key["id"] for key in revoked}
+        rotated_key = next(
+            key for key in pool if key["id"] not in revoked_ids and key["id"] not in rl_ids
+        )
+        t0 = time.monotonic()
+        rotation = stack.ok(
+            "POST",
+            f"/keys/{rotated_key['id']}/rotate",
+            json={"grace_seconds": 3600},
+        )
+        assert rotation["key"]["id"] == rotated_key["id"]
+        replacement = {"id": rotated_key["id"], "secret": rotation["secret"]}
+        seen = probe.until(replacement, ok200, 5)
+        rotate_latency = None if seen is None else seen - t0
+        # Keep both secrets in the pool (the grace allows it) and prove the old one serves.
+        pool.append(replacement)
+        run.set_keys(pool)
+        old_status = probe.chat(rotated_key)[0]
+
         # --- models and weights: a+b (1:1) -> b only (a weight 0) -> a only.
         a = fleet.models["mock-a"]
         timeline["before_b"] = stack.current_version()
@@ -259,6 +280,15 @@ def test_churn_under_load(stack):
         "revoke_latency_raw": [None if x is None else round(x, 3) for x in revoke_latency],
         "new_key_latency_s": dist([x for x in new_latency if x is not None], 1, 3),
         "new_key_latency_raw": [None if x is None else round(x, 3) for x in new_latency],
+        "rotation": {
+            "key": rotated_key["id"],
+            "grace_seconds": 3600,
+            "new_secret_served_after_s": (
+                None if rotate_latency is None else round(rotate_latency, 3)
+            ),
+            "old_secret_still_served": old_status,
+            "requests_on_rotated_key": sum(1 for r in records if r["k"] == rotated_key["id"]),
+        },
         "traffic_by_phase": {k: dict(v) for k, v in phases.items()},
         "rate_limit": {
             "requests_429": len(rl_429),
@@ -294,6 +324,11 @@ def test_churn_under_load(stack):
     # New keys.
     assert None not in new_latency, f"a new key was not accepted within 5 s: {new_latency}"
     assert max(new_latency) < NEW_KEY_BOUND, new_latency
+    # Rotation with a grace: the new secret serves within the same bound and the replaced
+    # one keeps serving, both as the same key (accounting above is by key id).
+    assert rotate_latency is not None, "the rotated secret was not accepted within 5 s"
+    assert rotate_latency < NEW_KEY_BOUND, rotate_latency
+    assert old_status == 200, old_status
     # Models.
     assert set(phases["a_before"]) == {"mock-a"}, phases
     ab = phases["a_and_b"]

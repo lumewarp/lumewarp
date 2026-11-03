@@ -19,7 +19,7 @@ from pathlib import Path
 
 import httpx
 from loadpacing import CPU_WARNING_FILES
-from stack import ROOT, SCOPE, Gateway, Proc, Stack, free_port, pg, wait_for
+from stack import ROOT, SCOPE, Gateway, Proc, Stack, free_port, pg, record_secret, wait_for
 
 
 def env_int(name: str, default: int) -> int:
@@ -172,6 +172,7 @@ class Fleet:
             json=body,
         )
         assert created["key"]["owner_kind"] == owner["owner_kind"]
+        record_secret(created["secret"], "API key")
         return {
             "id": created["key"]["id"],
             "secret": created["secret"],
