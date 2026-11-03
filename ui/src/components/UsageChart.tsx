@@ -368,9 +368,13 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
                   <ul className="flex max-h-44 flex-col gap-1 overflow-y-auto">
                     {tipRows.map((s) => (
                       <li key={s.name} className="flex justify-between gap-2">
-                        <span data-testid="usage-chart-tooltip-name" className="break-all">
-                          {s.name}
-                          {s.members.length > 0 && <span className="block break-all text-muted-foreground">{s.members.filter((m) => m.cells[active] > 0).map((m) => m.name).join(", ")}</span>}
+                        <span className="flex min-w-0 gap-1.5">
+                          {/* The colour links the row to its bar, as the legend does. */}
+                          <span aria-hidden="true" data-testid="usage-chart-tooltip-swatch" className="mt-1 size-2 shrink-0 rounded-sm" style={{ background: paint(s.slot) }} />
+                          <span className="break-all">
+                            <span data-testid="usage-chart-tooltip-name">{s.name}</span>
+                            {s.members.length > 0 && <span className="block text-muted-foreground">{s.members.filter((m) => m.cells[active] > 0).map((m) => m.name).join(", ")}</span>}
+                          </span>
                         </span>
                         <span className="shrink-0 tabular-nums">{exact(s.cells[active], metric)}</span>
                       </li>

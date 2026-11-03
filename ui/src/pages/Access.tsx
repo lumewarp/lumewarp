@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { useEffect, useState, type ReactNode } from "react";
+import { Component, useEffect, useState, type ReactNode } from "react";
 
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
@@ -62,6 +62,34 @@ export function PageLoading({ label = "Loading…" }: { label?: string }) {
       {label}
     </p>
   );
+}
+
+/**
+ * A route's code arrives as its own chunk. When that download fails — a deploy replaced the hashed files
+ * while this tab was open — the page would otherwise be blank: offer the only thing that can fix it.
+ */
+export function PageLoadFailed() {
+  return (
+    <Card className="mx-auto max-w-lg items-start gap-3 p-6" data-testid="page-load-failed">
+      <h1 className="m-0">This page could not be loaded</h1>
+      <p className="m-0 text-sm text-muted-foreground">
+        Its code did not arrive. That usually means a new version was deployed while this tab was open. Reload
+        to get the current version.
+      </p>
+      <Button onClick={() => location.reload()}>Reload</Button>
+    </Card>
+  );
+}
+
+/** Catches a page that failed to load or to render, so a route never leaves a blank screen. */
+export class PageBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  render() {
+    return this.state.failed ? <PageLoadFailed /> : this.props.children;
+  }
 }
 
 /** A failed background check keeps the cached page; this notice offers the retry. */

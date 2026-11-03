@@ -1,25 +1,46 @@
 import { createRootRoute, createRoute, createRouter, Navigate, Outlet, redirect, useParams } from "@tanstack/react-router";
+import { lazy, Suspense, type ReactNode } from "react";
+
 import { api } from "./api";
 import { getCsrfToken } from "./auth";
 import { Layout } from "./components/Layout";
 import { Alert, AlertDescription } from "./components/ui/alert";
 import { useCan, useMe, type Access } from "./hooks";
-import { Aliases } from "./pages/Aliases";
-import { Audit } from "./pages/Audit";
-import { Config } from "./pages/Config";
-import { Models } from "./pages/Models";
-import { Gateways } from "./pages/Gateways";
+import { AuthzTemporary, CheckFailed, PageBoundary, PageLoading, RequireAccess, RequireTeamRead } from "./pages/Access";
 import { Login } from "./pages/Login";
 import { MyKeys } from "./pages/MyKeys";
 import { Overview } from "./pages/Overview";
-import { AuthzTemporary, CheckFailed, PageLoading, RequireAccess, RequireTeamRead } from "./pages/Access";
-import { Routers } from "./pages/Routers";
-import { Settings } from "./pages/Settings";
-import { TeamDetail } from "./pages/TeamDetail";
-import { Teams } from "./pages/Teams";
-import { Upstreams } from "./pages/Upstreams";
 import { Usage } from "./pages/Usage";
-import { Users } from "./pages/Users";
+
+/*
+ * The screens nobody needs on arrival are their own chunks. A visitor lands on Login, Overview or My keys, so
+ * an admin page's code is downloaded when its route is opened and not before — and a caller without the right
+ * to see it never mounts the page at all, so the chunk is never requested (the guard wraps the lazy element).
+ */
+const RoutersPage = lazy(() => import("./pages/Routers").then((module) => ({ default: module.Routers })));
+const UpstreamsPage = lazy(() => import("./pages/Upstreams").then((module) => ({ default: module.Upstreams })));
+const ModelsPage = lazy(() => import("./pages/Models").then((module) => ({ default: module.Models })));
+const AliasesPage = lazy(() => import("./pages/Aliases").then((module) => ({ default: module.Aliases })));
+const GatewaysPage = lazy(() => import("./pages/Gateways").then((module) => ({ default: module.Gateways })));
+const ConfigPage = lazy(() => import("./pages/Config").then((module) => ({ default: module.Config })));
+const UsersPage = lazy(() => import("./pages/Users").then((module) => ({ default: module.Users })));
+const AuditPage = lazy(() => import("./pages/Audit").then((module) => ({ default: module.Audit })));
+const TeamsPage = lazy(() => import("./pages/Teams").then((module) => ({ default: module.Teams })));
+const SettingsPage = lazy(() => import("./pages/Settings").then((module) => ({ default: module.Settings })));
+const TeamDetailPage = lazy(() => import("./pages/TeamDetail").then((module) => ({ default: module.TeamDetail })));
+
+/** A chunk in flight shows the shell's loading line; a chunk that fails shows its own error, not a blank page. */
+function suspended(Page: () => ReactNode) {
+  return function SuspendedPage() {
+    return (
+      <PageBoundary>
+        <Suspense fallback={<PageLoading />}>
+          <Page />
+        </Suspense>
+      </PageBoundary>
+    );
+  };
+}
 
 const rootRoute = createRootRoute({ component: Outlet });
 
@@ -73,28 +94,33 @@ function Home() {
   );
 }
 
-function guarded(Page: () => React.ReactNode, need: Access) {
+/** The guard renders the page (and so fetches its chunk) only when the caller may see it. */
+function guarded(Page: () => ReactNode, need: Access) {
+  const Page1 = suspended(Page);
   function GuardedPage() {
     return (
       <RequireAccess need={need}>
-        <Page />
+        <Page1 />
       </RequireAccess>
     );
   }
   return GuardedPage;
 }
 
-const page = <P extends string>(path: P, component: () => React.ReactNode, need: Access = "member") =>
+const page = <P extends string>(path: P, component: () => ReactNode, need?: Access) =>
   createRoute({
     getParentRoute: () => appRoute,
     path,
-    component: need === "member" ? component : guarded(component, need),
+    component: need ? guarded(component, need) : component,
   });
+
+const SuspendedTeamDetail = suspended(() => <TeamDetailPage />);
+
 function TeamDetailRoute() {
   const { teamId } = useParams({ strict: false }) as { teamId: string };
   return (
     <RequireTeamRead key={teamId} teamId={teamId}>
-      <TeamDetail />
+      <SuspendedTeamDetail />
     </RequireTeamRead>
   );
 }
@@ -110,18 +136,18 @@ const routeTree = rootRoute.addChildren([
   appRoute.addChildren([
     page("/", Home),
     page("/my-keys", MyKeys),
-    page("/teams", Teams, "teamAdmin"),
+    page("/teams", () => <TeamsPage />, "teamAdmin"),
     teamDetailRoute,
-    page("/users", Users, "installationAdmin"),
-    page("/routers", Routers, "installationAdmin"),
-    page("/models", Models, "installationAdmin"),
-    page("/aliases", Aliases, "installationAdmin"),
-    page("/upstreams", Upstreams, "installationAdmin"),
+    page("/users", () => <UsersPage />, "installationAdmin"),
+    page("/routers", () => <RoutersPage />, "installationAdmin"),
+    page("/models", () => <ModelsPage />, "installationAdmin"),
+    page("/aliases", () => <AliasesPage />, "installationAdmin"),
+    page("/upstreams", () => <UpstreamsPage />, "installationAdmin"),
     page("/usage", Usage),
-    page("/audit", Audit, "teamAdmin"),
-    page("/gateways", Gateways, "installationAdmin"),
-    page("/config", Config, "installationAdmin"),
-    page("/settings", Settings),
+    page("/audit", () => <AuditPage />, "teamAdmin"),
+    page("/gateways", () => <GatewaysPage />, "installationAdmin"),
+    page("/config", () => <ConfigPage />, "installationAdmin"),
+    page("/settings", suspended(() => <SettingsPage />)),
   ]),
 ]);
 

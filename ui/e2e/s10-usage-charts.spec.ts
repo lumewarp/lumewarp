@@ -287,6 +287,28 @@ test("tooltip: by hover and by keyboard focus, one per day", async ({ page, requ
   await expect(tooltip(page)).toBeVisible();
   await expect(tooltip(page)).toContainText(`${today}`);
   await expect(tooltip(page)).toContainText("UTC");
+
+  // Every row carries the colour of its bar, and Other carries the neutral.
+  const legend = await legendColours(page);
+  const rows = await tooltip(page).locator("li").evaluateAll((items) =>
+    items.map((item) => [
+      item.querySelector('[data-testid="usage-chart-tooltip-name"]')!.textContent,
+      getComputedStyle(item.querySelector('[data-testid="usage-chart-tooltip-swatch"]')!).backgroundColor,
+    ] as [string, string]),
+  );
+  expect(rows.length).toBeGreaterThan(1);
+  for (const [name, colour] of rows) expect([name, colour]).toEqual([name, legend.get(name)]);
+  const other = rows.find(([name]) => name === "Other");
+  expect(other).toBeTruthy();
+  const neutral = await page.evaluate(() => {
+    const probe = document.createElement("div");
+    probe.style.background = "var(--series-other)";
+    document.body.append(probe);
+    const colour = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return colour;
+  });
+  expect(other![1]).toBe(neutral);
   // Leaving the chart closes it.
   await chart(page).getByText("All times UTC").hover();
   await expect(tooltip(page)).toHaveCount(0);
