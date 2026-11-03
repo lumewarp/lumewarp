@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Key, type Me, type Team } from "./api";
+import { api, type Key, type Me, type Schemas, type Team } from "./api";
 import { useMemo } from "react";
 import { useToast } from "./components/Toast";
+import { runSecretMutation } from "./lib/keySecret";
 
 export function useMe() {
   return useQuery({ queryKey: ["me"], queryFn: () => api.me(), staleTime: 5 * 60_000 });
@@ -78,6 +79,18 @@ export function useAction<A, R>(
   const toast = useToast();
   const m = useMut(fn, success);
   return (arg: A) => m.mutateAsync(arg).catch((e: Error) => toast("error", e.message));
+}
+
+/**
+ * Create or rotate a key without keeping the secret in the mutation cache. `onSecret` receives it once;
+ * the cached mutation result is the key.
+ */
+export function useSecretMut<A>(
+  fn: (arg: A) => Promise<Schemas["KeyCreated"]>,
+  onSecret: (secret: string, key: Key) => void,
+  success?: string,
+) {
+  return useMut((arg: A) => runSecretMutation(() => fn(arg), onSecret), success);
 }
 
 export function useTeams() {

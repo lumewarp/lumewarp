@@ -97,11 +97,14 @@ interface TextProps {
   type?: "text" | "password" | "url" | "date";
   placeholder?: string;
   autoFocus?: boolean;
+  /** For date inputs: the accepted range, as `YYYY-MM-DD`. */
+  min?: string;
+  max?: string;
 }
-export function TextField({ label, value, onChange, error, hint, type = "text", placeholder, autoFocus }: TextProps) {
+export function TextField({ label, value, onChange, error, hint, type = "text", placeholder, autoFocus, min, max }: TextProps) {
   return (
     <Field label={label} error={error} hint={hint}>
-      {(p) => <Input {...p} type={type} value={value} placeholder={placeholder} autoFocus={autoFocus} onChange={(e) => onChange(e.target.value)} />}
+      {(p) => <Input {...p} type={type} value={value} min={min} max={max} placeholder={placeholder} autoFocus={autoFocus} onChange={(e) => onChange(e.target.value)} />}
     </Field>
   );
 }

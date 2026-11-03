@@ -6,7 +6,6 @@ import {
   CornerDownRight,
   History,
   KeyRound,
-  KeySquare,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -61,7 +60,6 @@ const NAV: { group: string | null; items: NavItem[] }[] = [
   {
     group: "Access",
     items: [
-      { to: "/keys", label: "Keys", icon: KeySquare, access: "teamAdmin" },
       { to: "/teams", label: "Teams", icon: Users, access: "teamAdmin" },
       { to: "/users", label: "Users", icon: ShieldCheck, access: "installationAdmin" },
     ],

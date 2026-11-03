@@ -16,13 +16,12 @@ import { confirmDialog, control, deleteTeams, dialog, pick, SHOTS, shot } from "
 const BREAK_GLASS = "e2e-break-glass-password";
 const admin: Record<string, string> = {};
 
-/** The 13 pages whose whole body is the screenshot. Login is shot in a session-less context, the team detail as
+/** The 12 pages whose whole body is the screenshot. Login is shot in a session-less context, the team detail as
  * its five tabs. */
 const PAGES: [string, string][] = [
   ["overview", "/"],
   ["teams", "/teams"],
   ["users", "/users"],
-  ["keys", "/keys"],
   ["routers", "/routers"],
   ["models", "/models"],
   ["aliases", "/aliases"],
@@ -190,10 +189,10 @@ test("screenshots: the whole matrix, desktop and 390 px, light and dark", async 
     await expect(confirmDialog(page)).toHaveCount(0);
   }
 
-  // The matrix, exactly. 15 pages: the 13 whole pages here, the team detail (its five tabs), and login. Plus the
+  // The matrix, exactly. 14 pages: the 12 whole pages here, the team detail (its five tabs), and login. Plus the
   // two catalog forms, the picker, both open dropdowns, the confirmation and the 409, each in four modes.
   const expected = MODES.flatMap(([label]) => [...PAGES.map(([name]) => `s7-${label}-page-${name}`), ...TABS.map((tab) => `s7-${label}-team-${slug(tab)}`), ...SPECIALS.map((name) => `s7-${label}-${name}`)]).map((n) => `${n}.png`);
-  expect(expected).toHaveLength(104);
+  expect(expected).toHaveLength(100);
   expect(new Set(expected).size).toBe(expected.length);
   const found = readdirSync(SHOTS!).filter((name) => name.startsWith("s7-") && name.endsWith(".png"));
   expect(found.sort()).toEqual(expected.sort());

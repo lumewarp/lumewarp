@@ -733,7 +733,7 @@ test("dark mode and phone width", async ({ page, request }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await signIn(page, request, "/models");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  for (const [path, heading] of [["/models", "Models"], ["/aliases", "Aliases"], ["/routers", "Routers"], ["/usage", "Usage"], ["/keys", "Keys"], ["/config", "Config versions"]] as const) {
+  for (const [path, heading] of [["/models", "Models"], ["/aliases", "Aliases"], ["/routers", "Routers"], ["/usage", "Usage"], ["/config", "Config versions"]] as const) {
     await page.goto(path);
     await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
     await expect(page.locator("body")).toHaveCSS("background-color", /rgb\(\s*(?:[0-3]?\d)\b/); // a dark page
@@ -1097,7 +1097,7 @@ test("screenshots", async ({ page, request }, info) => {
   for (const [label, width, height, theme] of modes) {
     await page.setViewportSize({ width, height });
     await page.evaluate((t) => localStorage.setItem("lumewarp.theme", t), theme);
-    for (const [path, name] of [["/models", "models"], ["/aliases", "aliases"], ["/routers", "routers"], ["/usage", "usage"], ["/keys", "keys"], ["/config", "config"]]) {
+    for (const [path, name] of [["/models", "models"], ["/aliases", "aliases"], ["/routers", "routers"], ["/usage", "usage"], ["/config", "config"]]) {
       await page.goto(path);
       await page.getByRole("heading").first().waitFor();
       await page.waitForTimeout(300);

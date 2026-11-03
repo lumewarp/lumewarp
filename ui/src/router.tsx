@@ -1,4 +1,4 @@
-import { createRootRoute, createRoute, createRouter, Navigate, Outlet, redirect } from "@tanstack/react-router";
+import { createRootRoute, createRoute, createRouter, Navigate, Outlet, redirect, useParams } from "@tanstack/react-router";
 import { api } from "./api";
 import { getCsrfToken } from "./auth";
 import { Layout } from "./components/Layout";
@@ -9,11 +9,10 @@ import { Audit } from "./pages/Audit";
 import { Config } from "./pages/Config";
 import { Models } from "./pages/Models";
 import { Gateways } from "./pages/Gateways";
-import { Keys } from "./pages/Keys";
 import { Login } from "./pages/Login";
 import { MyKeys } from "./pages/MyKeys";
 import { Overview } from "./pages/Overview";
-import { PageLoading, RequireAccess } from "./pages/Access";
+import { AuthzTemporary, PageLoading, RequireAccess, RequireTeamRead } from "./pages/Access";
 import { Routers } from "./pages/Routers";
 import { Settings } from "./pages/Settings";
 import { TeamDetail } from "./pages/TeamDetail";
@@ -56,6 +55,7 @@ function Home() {
       </Alert>
     );
   }
+  if (me.data?.authz_unavailable) return <AuthzTemporary onRetry={() => void me.refetch()} />;
   if (!perms.isInstallationAdmin && !perms.isTeamAdmin) return <Navigate to="/my-keys" replace />;
   return <Overview />;
 }
@@ -77,10 +77,19 @@ const page = <P extends string>(path: P, component: () => React.ReactNode, need:
     path,
     component: need === "member" ? component : guarded(component, need),
   });
+function TeamDetailRoute() {
+  const { teamId } = useParams({ strict: false }) as { teamId: string };
+  return (
+    <RequireTeamRead key={teamId} teamId={teamId}>
+      <TeamDetail />
+    </RequireTeamRead>
+  );
+}
+
 const teamDetailRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/teams/$teamId",
-  component: TeamDetail,
+  component: TeamDetailRoute,
 });
 
 const routeTree = rootRoute.addChildren([
@@ -91,7 +100,6 @@ const routeTree = rootRoute.addChildren([
     page("/teams", Teams, "teamAdmin"),
     teamDetailRoute,
     page("/users", Users, "installationAdmin"),
-    page("/keys", Keys, "teamAdmin"),
     page("/routers", Routers, "installationAdmin"),
     page("/models", Models, "installationAdmin"),
     page("/aliases", Aliases, "installationAdmin"),

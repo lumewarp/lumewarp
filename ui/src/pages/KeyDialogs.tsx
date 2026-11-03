@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 
-import { api, type Key, type Schemas } from "../api";
-import { fmtDateTime, SecretOnce } from "../components/Bits";
+import { api, type Key } from "../api";
+import { SecretOnce } from "../components/Bits";
 import { Dialog } from "../components/Dialog";
 import { SelectField } from "../components/Form";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
-import { useMut } from "../hooks";
-import { refusalText } from "./keyText";
+import { useSecretMut } from "../hooks";
+import { refusalText, rotationConfirmation } from "./keyText";
 
 /** The secret is in a dialog's children only while `secret` is set; closing drops it from React state. */
 export function SecretDialog({
@@ -49,8 +49,9 @@ const GRACE = [
 ];
 
 /**
- * Rotate in place, with an optional grace for the old secret. The confirmation says what happens to the old
- * secret before anything is sent; a refusal (a 429 with a wait, a 422 past the team's lifetime) stays here.
+ * Rotate in place, with an optional grace for the old secret. The confirmation is built from the key's
+ * real state: a suspended or expired key is not made usable by rotating, and a second rotation ends an
+ * older grace at once. The secret goes to `onRotated` and is never a mutation result.
  */
 export function RotateKeyDialog({
   target,
@@ -59,13 +60,13 @@ export function RotateKeyDialog({
 }: {
   target: Key | null;
   onClose: () => void;
-  onRotated: (created: Schemas["KeyCreated"]) => void;
+  onRotated: (secret: string, key: Key) => void;
 }) {
   const [grace, setGrace] = useState("0");
   const [error, setError] = useState<string | null>(null);
-  const rotate = useMut(
+  const rotate = useSecretMut(
     ({ key, seconds }: { key: Key; seconds: number }) => api.rotateKey(key.id, { grace_seconds: seconds }),
-    (created) => onRotated(created),
+    (secret, key) => onRotated(secret, key),
   );
   useEffect(() => {
     setGrace("0");
@@ -82,17 +83,14 @@ export function RotateKeyDialog({
     setError(null);
     try {
       await rotate.mutateAsync({ key: target, seconds });
-      // The new secret is passed to the caller; drop it from the mutation cache as well.
-      rotate.reset();
     } catch (e) {
       setError(refusalText(e));
     }
   };
-  const until = new Date(Date.now() + seconds * 1000);
   return (
     <Dialog
       open={!!target}
-      title={target ? `Rotate “${target.name}”` : "Rotate key"}
+      title={target ? `Rotate “${target.name}” (${target.display_prefix}…)` : "Rotate key"}
       onClose={close}
       footer={
         <>
@@ -114,9 +112,7 @@ export function RotateKeyDialog({
           hint="The new secret replaces it in place; usage stays on this key."
         />
         <p className="m-0" data-testid="rotate-notice">
-          {seconds === 0
-            ? "The old secret stops working right away."
-            : `The old secret keeps working until ${fmtDateTime(until.toISOString())}, or the key's expiry if sooner.`}
+          {target ? rotationConfirmation(target, seconds) : ""}
         </p>
         {error && (
           <Alert variant="destructive" data-testid="rotate-error">

@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 
-import { api, type Key, type Me } from "../api";
+import { api, type Key, type Me, type Schemas } from "../api";
 import { Badge, fmtDate, fmtUsd, KeyBadge, PageHeader, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
@@ -10,10 +10,17 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge as UiBadge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
-import { useMe, useMut, useOwnKeys } from "../hooks";
-import { PageLoading } from "./Access";
+import { useAction, useCan, useMe, useMut, useOwnKeys, useSecretMut } from "../hooks";
+import { AuthzTemporary, BreakGlassNoKeys, PageLoading } from "./Access";
 import { RotateKeyDialog, SecretDialog } from "./KeyDialogs";
-import { expiryFromDay, fmtLifetime, graceText, inGrace, refusalText, rotationNote } from "./keyText";
+import {
+  expiryFromDay,
+  fmtLifetime,
+  lastExpiryDay,
+  refusalText,
+  rotationNote,
+  rotationRowNote,
+} from "./keyText";
 
 type Team = Me["teams"][number];
 
@@ -36,7 +43,11 @@ export function MyKeys() {
         title="My keys"
         description="Your teams, the models you can call, and the API keys you own. A secret is shown once, when a key is created or rotated."
       />
-      {teams.length === 0 ? (
+      {me.data?.authz_unavailable ? (
+        <AuthzTemporary onRetry={() => void me.refetch()} />
+      ) : me.data?.kind === "break_glass" ? (
+        <BreakGlassNoKeys />
+      ) : teams.length === 0 ? (
         <NoTeams />
       ) : (
         <>
@@ -114,6 +125,11 @@ function rateLimits(team: Team) {
   return parts.length ? <span>{parts.join(" · ")}</span> : <span className="text-muted-foreground">No limits</span>;
 }
 
+/**
+ * `remaining_nano_usd` is the minimum across the team and member budgets that are set. A single
+ * denominator would name one scope as if it were the binding one, so only the remaining amount is
+ * shown; the fact's hint names both scopes.
+ */
 function remainingBudget(team: Team) {
   const budget = team.budget;
   if (budget.remaining_nano_usd === null) return <span className="text-muted-foreground">No budget</span>;
@@ -137,12 +153,20 @@ function TeamSection({
   error: Error | null;
   onRetry: () => void;
 }) {
+  const perms = useCan();
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<Key | null>(null);
   const [rotating, setRotating] = useState<Key | null>(null);
   const [revoking, setRevoking] = useState<Key | null>(null);
   const [secret, setSecret] = useState<{ value: string; title: string; note?: string } | null>(null);
+  const setLifecycle = useAction(
+    ({ key, lifecycle }: { key: Key; lifecycle: "active" | "suspended" }) =>
+      api.updateKey(key.id, { lifecycle }),
+    "Key updated",
+  );
   const revoke = useMut((key: Key) => api.revokeKey(key.id), "Key revoked");
   const limits = team.key_limits;
+  const lifetime = limits.max_member_key_lifetime_seconds;
   const atCap = limits.max_keys_per_member !== null && limits.key_count >= limits.max_keys_per_member;
   return (
     <Card className="mb-5 gap-4 p-4 shadow-none" data-testid={`team-${team.team_name}`}>
@@ -161,16 +185,19 @@ function TeamSection({
         <Fact label="Remaining budget" hint="This month, for the team and your own budget">
           {remainingBudget(team)}
         </Fact>
-        <Fact label="Key limit" hint={`Longest lifetime: ${fmtLifetime(limits.max_member_key_lifetime_seconds)}`}>
+        <Fact
+          label="Key limit"
+          hint={`Non-revoked keys only: revoked keys stay in the list but do not count. Longest lifetime: ${fmtLifetime(lifetime)}`}
+        >
           {limits.max_keys_per_member === null
-            ? `${limits.key_count} ${limits.key_count === 1 ? "key" : "keys"}, no cap`
-            : `${limits.key_count} of ${limits.max_keys_per_member} keys`}
+            ? `${limits.key_count} non-revoked ${limits.key_count === 1 ? "key" : "keys"}, no cap`
+            : `${limits.key_count} of ${limits.max_keys_per_member} non-revoked keys`}
         </Fact>
       </div>
       {atCap && (
         <p className="m-0 text-sm text-muted-foreground">
-          You hold this team's maximum of {limits.max_keys_per_member} keys. Revoke one to make room; until then the
-          server refuses a new key.
+          You hold this team's maximum of {limits.max_keys_per_member} non-revoked keys. Revoke one to make room;
+          until then the server refuses a new key.
         </p>
       )}
       <DataTable
@@ -189,49 +216,72 @@ function TeamSection({
             cell: (key) => (
               <>
                 <strong className="[overflow-wrap:anywhere]">{key.name}</strong>{" "}
-                <code className="hidden text-muted-foreground sm:inline">{key.display_prefix}…</code>
+                <span className="block text-xs text-muted-foreground sm:ml-1 sm:inline sm:text-sm">
+                  <code className="[overflow-wrap:anywhere]">{key.display_prefix}…</code>
+                  <span className="sm:hidden"> · expires {fmtDate(key.expires_at)}</span>
+                </span>
               </>
             ),
           },
           {
             key: "status",
             header: "Status",
-            cell: (key) => (
-              <span className="flex flex-col gap-0.5 [overflow-wrap:anywhere]">
-                <span>
-                  <KeyBadge k={key} />
-                  <SuspendedReason reason={key.suspended_reason} />
-                </span>
-                {inGrace(key) && (
-                  <span className="text-xs text-muted-foreground" data-testid="grace">
-                    {graceText(key)}
+            cell: (key) => {
+              const note = rotationRowNote(key);
+              return (
+                <span className="flex flex-col gap-0.5 [overflow-wrap:anywhere]">
+                  <span>
+                    <KeyBadge k={key} />
+                    <SuspendedReason reason={key.suspended_reason} />
                   </span>
-                )}
-              </span>
-            ),
+                  {note && (
+                    <span className="text-xs text-muted-foreground" data-testid={note.startsWith("Old secret") ? "grace" : "rotation-note"}>
+                      {note}
+                    </span>
+                  )}
+                </span>
+              );
+            },
           },
           { key: "expires", header: "Expires", hideBelow: "sm", cell: (key) => fmtDate(key.expires_at) },
           {
             key: "actions",
             header: "",
-            cell: (key) =>
-              key.lifecycle === "revoked" ? (
-                <span className="text-muted-foreground">—</span>
-              ) : (
+            cell: (key) => {
+              if (key.lifecycle === "revoked") return <span className="text-muted-foreground">—</span>;
+              const canManage = perms.canManageKey(key);
+              const ownerInactive = key.owner_kind === "user" && key.owner_active === false;
+              const suspended = key.lifecycle === "suspended";
+              const canResume = suspended && perms.canResumeKey(key) && !ownerInactive;
+              return (
                 <div className="flex flex-col items-end gap-1 whitespace-nowrap sm:flex-row sm:justify-end sm:gap-1.5">
-                  <Button variant="outline" size="sm" onClick={() => setRotating(key)}>
+                  <Button variant="outline" size="sm" disabled={!canManage} onClick={() => setEditing(key)}>
+                    Edit
+                  </Button>
+                  <Button variant="outline" size="sm" disabled={!canManage} onClick={() => setRotating(key)}>
                     Rotate
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={suspended ? !canResume : !canManage}
+                    title={suspended && ownerInactive ? "Cannot resume because the owner is inactive" : undefined}
+                    onClick={() => void setLifecycle({ key, lifecycle: suspended ? "active" : "suspended" })}
+                  >
+                    {suspended ? "Resume" : "Suspend"}
                   </Button>
                   <Button
                     variant="ghost"
                     size="sm"
                     className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    disabled={!canManage}
                     onClick={() => setRevoking(key)}
                   >
                     Revoke
                   </Button>
                 </div>
-              ),
+              );
+            },
           },
         ]}
       />
@@ -241,12 +291,15 @@ function TeamSection({
         onClose={() => setCreating(false)}
         onCreated={(value) => setSecret({ value, title: "API key created" })}
       />
+      {editing && (
+        <EditKeyDialog key={editing.id} team={team} target={editing} onClose={() => setEditing(null)} />
+      )}
       <RotateKeyDialog
         target={rotating}
         onClose={() => setRotating(null)}
-        onRotated={(created) => {
+        onRotated={(value, key) => {
           setRotating(null);
-          setSecret({ value: created.secret, title: "API key rotated", note: rotationNote(created.key) });
+          setSecret({ value, title: "API key rotated", note: rotationNote(key) });
         }}
       />
       <SecretDialog
@@ -259,7 +312,7 @@ function TeamSection({
         open={!!revoking}
         title="Revoke key"
         confirmLabel="Revoke"
-        message={`Revoke “${revoking?.name}”? Requests using it stop working immediately. This cannot be undone.`}
+        message={`Revoke “${revoking?.name}” (${revoking?.display_prefix}…)? Requests using it stop working immediately. This cannot be undone.`}
         onConfirm={() => revoke.mutateAsync(revoking!)}
         onClose={() => setRevoking(null)}
       />
@@ -282,12 +335,13 @@ function CreateKeyDialog({
   onCreated: (secret: string) => void;
 }) {
   const form = useForm<CreateValues>(blankCreate, { name: required("Name") });
-  const create = useMut(
+  const create = useSecretMut(
     (values: CreateValues) =>
       api.createKey(team.team_id, { name: values.name.trim(), expires_at: expiryFromDay(values.expires) }),
-    (created) => onCreated(created.secret),
+    (secret) => onCreated(secret),
   );
   const lifetime = team.key_limits.max_member_key_lifetime_seconds;
+  const max = lifetime === null ? undefined : lastExpiryDay(lifetime);
   const close = () => {
     form.reset(blankCreate);
     onClose();
@@ -295,10 +349,7 @@ function CreateKeyDialog({
   const submit = async () => {
     if (!form.validate()) return false;
     try {
-      const result = await form.run(() => create.mutateAsync(form.values), { expires_at: "expires" });
-      // The secret is handed to the dialog's own state; do not also keep it in the mutation cache.
-      create.reset();
-      return result;
+      return await form.run(() => create.mutateAsync(form.values), { expires_at: "expires" });
     } catch (e) {
       // A 409 (the cap) or a 429 (with its wait) is the server's own message, kept in the dialog.
       throw new Error(refusalText(e));
@@ -323,18 +374,73 @@ function CreateKeyDialog({
         label="Expires"
         type="date"
         value={form.values.expires}
+        max={max}
         onChange={(value) => form.set("expires", value)}
         error={form.errors.expires}
         hint={
           lifetime === null
             ? "Empty means the key never expires."
-            : `Optional. This team limits member keys to ${fmtLifetime(lifetime)}; leave empty to use that limit.`
+            : `Optional. This team limits member keys to ${fmtLifetime(lifetime)}; empty uses that limit. The latest day is ${max}.`
         }
       />
       <div className="flex flex-col gap-1.5">
         <span className="text-sm font-semibold">This key can call</span>
         <CallableModels team={team} />
       </div>
+    </FormDialog>
+  );
+}
+
+type EditValues = { name: string; expires: string };
+
+function EditKeyDialog({ team, target, onClose }: { team: Team; target: Key; onClose: () => void }) {
+  const initial: EditValues = { name: target.name, expires: target.expires_at?.slice(0, 10) ?? "" };
+  const form = useForm<EditValues>(initial, { name: required("Name") });
+  const update = useMut((values: EditValues) => {
+    const body: Schemas["KeyUpdate"] = { name: values.name.trim() };
+    if (values.expires !== (target.expires_at?.slice(0, 10) ?? "")) {
+      body.expires_at = expiryFromDay(values.expires);
+    }
+    return api.updateKey(target.id, body);
+  }, "Key saved");
+  const lifetime = team.key_limits.max_member_key_lifetime_seconds;
+  const max = lifetime === null ? undefined : lastExpiryDay(lifetime);
+  const close = () => {
+    form.reset(initial);
+    onClose();
+  };
+  const submit = async () => {
+    if (!form.validate()) return false;
+    return form.run(() => update.mutateAsync(form.values), { expires_at: "expires" });
+  };
+  return (
+    <FormDialog
+      open
+      title={`Edit “${target.name}” (${target.display_prefix}…)`}
+      submitLabel="Save"
+      onClose={close}
+      onSubmit={submit}
+    >
+      <TextField
+        label="Name"
+        value={form.values.name}
+        onChange={(value) => form.set("name", value)}
+        error={form.errors.name}
+        autoFocus
+      />
+      <TextField
+        label="Expires"
+        type="date"
+        value={form.values.expires}
+        max={max}
+        onChange={(value) => form.set("expires", value)}
+        error={form.errors.expires}
+        hint={
+          lifetime === null
+            ? "Empty means the key never expires."
+            : `This team limits member keys to ${fmtLifetime(lifetime)}; the latest day is ${max}.`
+        }
+      />
     </FormDialog>
   );
 }

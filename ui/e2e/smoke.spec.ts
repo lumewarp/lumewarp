@@ -212,8 +212,8 @@ test("cookie session: CSRF on writes, inline member errors, key owner state, log
 });
 
 test("team, member, service-account, and key flows", async ({ page, browser, request }) => {
-  await page.goto("/keys");
-  await expect(page).toHaveURL(/\/login\?next=%2Fkeys$/);
+  await page.goto("/my-keys");
+  await expect(page).toHaveURL(/\/login\?next=%2Fmy-keys$/);
   await login(page, "not-a-token");
   await expect(page.getByRole("alert")).toBeVisible();
 
@@ -390,7 +390,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await expect(personalRow).toContainText("Active");
   const oldPrefix = await personalRow.locator("code").textContent();
 
-  await viewerPage.getByRole("link", { name: "My keys" }).click();
+  await viewerPage.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "My keys" }).click();
   await expect(viewerPage.getByRole("heading", { name: "My keys" })).toBeVisible();
   const research = viewerPage.getByTestId("team-Research");
   await expect(research.getByRole("cell", { name: /personal-key/ })).toBeVisible();
@@ -435,10 +435,11 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await viewerPage.goto(`/teams/${team.id}`);
   await expect(viewerPage.getByRole("tab", { name: "Members" })).toBeVisible();
   await viewerPage.getByRole("button", { name: "Toggle navigation" }).click();
-  await expect(viewerPage.getByRole("link", { name: "My keys", exact: true })).toBeVisible();
+  const viewerNav = viewerPage.getByRole("navigation", { name: "Main" });
+  await expect(viewerNav.getByRole("link", { name: "My keys", exact: true })).toBeVisible();
   // The open navigation is a modal sheet over the toggle, so it closes with Escape.
   await viewerPage.keyboard.press("Escape");
-  await expect(viewerPage.getByRole("link", { name: "My keys", exact: true })).toHaveCount(0);
+  await expect(viewerNav.getByRole("link", { name: "My keys", exact: true })).toHaveCount(0);
   await viewerPage.getByRole("button", { name: "Theme: Auto" }).click();
   await expect(viewerPage.locator("html")).toHaveAttribute("data-theme", "light");
   await shot(viewerPage, "smoke-team-detail-phone-light");
@@ -475,8 +476,8 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
 
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page).toHaveURL(/\/login$/);
-  await page.goto("/keys");
-  await expect(page).toHaveURL(/\/login\?next=%2Fkeys$/);
+  await page.goto("/my-keys");
+  await expect(page).toHaveURL(/\/login\?next=%2Fmy-keys$/);
 });
 
 test("router edit: retry, ordered fallback and a traffic split shown as percentages", async ({ page, request }) => {

@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
@@ -15,6 +15,32 @@ export function AuthzNotice({ className }: { className?: string }) {
         decision. Reload to try again.
       </AlertDescription>
     </Alert>
+  );
+}
+
+/** The temporary state on My keys: the caller's teams are unknown, which is not "no teams". */
+export function AuthzTemporary({ onRetry }: { onRetry: () => void }) {
+  return (
+    <Card className="mx-auto max-w-lg items-start gap-3 p-6" data-testid="authz-temporary">
+      <h1 className="m-0">Your access cannot be verified right now</h1>
+      <p className="m-0 text-sm text-muted-foreground">
+        Authorization is temporarily unavailable, so your teams and keys cannot be shown. This is not a
+        permission decision.
+      </p>
+      <Button onClick={onRetry}>Retry</Button>
+    </Card>
+  );
+}
+
+/** The emergency session has no user, so it owns no keys and cannot join a team. */
+export function BreakGlassNoKeys() {
+  return (
+    <Card className="items-start gap-2 p-6" data-testid="break-glass-no-keys">
+      <h2 className="m-0">The emergency session does not own API keys</h2>
+      <p className="m-0 text-sm text-muted-foreground">
+        Keys belong to a user account. Sign in with your own account to create or manage keys.
+      </p>
+    </Card>
   );
 }
 
@@ -38,14 +64,57 @@ export function PageLoading({ label = "Loading…" }: { label?: string }) {
   );
 }
 
+function AuthzBlocked({ onRetry }: { onRetry: () => void }) {
+  return (
+    <Card className="mx-auto max-w-lg items-start gap-3 p-6" data-testid="authz-blocked">
+      <h1 className="m-0">This page cannot be verified right now</h1>
+      <p className="m-0 text-sm text-muted-foreground">
+        Authorization is temporarily unavailable, so access cannot be checked. This is not a permission
+        decision.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button onClick={onRetry}>Retry</Button>
+        <Button variant="outline" asChild>
+          <Link to="/my-keys">Go to My keys</Link>
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * Revalidate `/users/me` on entering a guarded route. The five-minute query cache is for display, not
+ * for deciding access: a cached allow mounts the page while a background check runs (and replaces it
+ * with the no-access state if access was taken away), and a cached deny waits for the check before it
+ * says no. `entry` is the route requirement or the team id: it re-runs the check for a new target.
+ */
+function useRevalidated(allowed: boolean, entry: string) {
+  const me = useMe();
+  const [checking, setChecking] = useState(!allowed);
+  useEffect(() => {
+    if (me.isPending) return;
+    let active = true;
+    void me.refetch().finally(() => {
+      if (active) setChecking(false);
+    });
+    return () => {
+      active = false;
+    };
+    // `allowed` is derived from the data; including it would refetch on every result.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entry, me.isPending]);
+  return { me, checking };
+}
+
 /**
  * Renders a page only when the caller may see it. A hidden page opened by URL shows a short explanation
  * instead of mounting the page, so it makes no failing requests and shows no empty tables. Not security:
  * the API refuses the same actions.
  */
 export function RequireAccess({ need, children }: { need: Access; children: ReactNode }) {
-  const me = useMe();
   const perms = useCan();
+  const allowed = hasAccess(perms, need);
+  const { me, checking } = useRevalidated(allowed, need);
   if (me.isPending) return <PageLoading />;
   if (me.error) {
     return (
@@ -54,19 +123,25 @@ export function RequireAccess({ need, children }: { need: Access; children: Reac
       </Alert>
     );
   }
-  if (me.data?.authz_unavailable) {
+  if (me.data?.authz_unavailable) return <AuthzBlocked onRetry={() => void me.refetch()} />;
+  if (!allowed && checking) return <PageLoading label="Checking access…" />;
+  return allowed ? <>{children}</> : <NoAccess />;
+}
+
+/** The team-specific guard: an unreadable team mounts no panels and makes no team request. */
+export function RequireTeamRead({ teamId, children }: { teamId: string; children: ReactNode }) {
+  const perms = useCan();
+  const allowed = perms.teamRead(teamId);
+  const { me, checking } = useRevalidated(allowed, teamId);
+  if (me.isPending) return <PageLoading />;
+  if (me.error) {
     return (
-      <Card className="mx-auto max-w-lg items-start gap-3 p-6" data-testid="authz-blocked">
-        <h1 className="m-0">Admin pages are unavailable right now</h1>
-        <p className="m-0 text-sm text-muted-foreground">
-          Authorization is temporarily unavailable, so admin access cannot be checked. This is not a permission
-          decision.
-        </p>
-        <Button asChild>
-          <Link to="/my-keys">Go to My keys</Link>
-        </Button>
-      </Card>
+      <Alert variant="destructive" data-testid="state-error">
+        <AlertDescription>{me.error.message}</AlertDescription>
+      </Alert>
     );
   }
-  return hasAccess(perms, need) ? <>{children}</> : <NoAccess />;
+  if (me.data?.authz_unavailable) return <AuthzBlocked onRetry={() => void me.refetch()} />;
+  if (!allowed && checking) return <PageLoading label="Checking access…" />;
+  return allowed ? <>{children}</> : <NoAccess />;
 }

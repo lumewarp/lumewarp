@@ -1,6 +1,27 @@
-import { expect, test, type APIRequestContext, type Browser, type Locator, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
 import { confirmDialog, pick, SHOTS, shot } from "./helpers";
+import {
+  Admin,
+  daysFromNow,
+  isoDay,
+  MEMBER,
+  MEMBER_EMAIL,
+  memberKey,
+  memberRotate,
+  memberSession,
+  memberUpdate,
+  OUTSIDER,
+  rowOf,
+  SHOTS_EMAIL,
+  SHOTS_TOKEN,
+  signIn,
+  TEAM_ADMIN,
+  TEAM_ADMIN_EMAIL,
+  VIEWER,
+  VIEWER_EMAIL,
+  WEEK,
+} from "./selfService";
 
 /*
  * Self-service keys as a regular member against the real control plane. serve.py seeds the users and
@@ -11,106 +32,26 @@ import { confirmDialog, pick, SHOTS, shot } from "./helpers";
  * admin of one team only, and `outsider` is on no team at all.
  */
 
-const BREAK_GLASS = "e2e-break-glass-password";
-const VIEWER = "e2e-viewer-session-0123456789abcdef";
-const MEMBER = "e2e-member-session-0123456789abcdef";
-const TEAM_ADMIN = "e2e-teamadmin-session-0123456789abcdef";
-const OUTSIDER = "e2e-outsider-session-0123456789abcdef";
-const SHOTS_TOKEN = "e2e-shots-session-0123456789abcdef";
-const VIEWER_EMAIL = "viewer@e2e.test";
-const MEMBER_EMAIL = "member@e2e.test";
-const TEAM_ADMIN_EMAIL = "teamadmin@e2e.test";
-const SHOTS_EMAIL = "shots@e2e.test";
-const WEEK = 604_800;
-
-const admin: Record<string, string> = {};
+let admin: Admin;
 
 test.beforeEach(async ({ request }) => {
-  const response = await request.post("/api/v1/session/break-glass", { data: { password: BREAK_GLASS } });
-  expect(response.status()).toBe(204);
-  admin["X-Lumewarp-CSRF"] = (await (await request.get("/api/v1/session")).json()).csrf_token;
+  admin = await Admin.login(request);
 });
 
-async function post<T = { id: string; name: string }>(request: APIRequestContext, path: string, data: object): Promise<T> {
-  const response = await request.post(`/api/v1${path}`, { headers: admin, data });
-  expect(response.status(), await response.text()).toBe(201);
-  return (await response.json()) as T;
-}
+const localDay = (date: Date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+const plusDays = (days: number) => {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return date;
+};
 
-/** Idempotent: a later test may run alone or after the one that first made the team and the membership. */
-async function ensureTeam(
-  request: APIRequestContext,
-  name: string,
-  limits: { max_keys_per_member?: number; max_member_key_lifetime_seconds?: number } = {},
-) {
-  const response = await request.get("/api/v1/teams?limit=200", { headers: admin });
-  expect(response.status(), await response.text()).toBe(200);
-  const found = ((await response.json()) as { items: { id: string; name: string }[] }).items.find((team) => team.name === name);
-  if (found) return found;
-  return post(request, "/teams", { name, ...limits });
-}
-
-async function putMember(request: APIRequestContext, teamId: string, email: string, role: "admin" | "member" = "member") {
-  const response = await request.get("/api/v1/users?limit=200", { headers: admin });
-  expect(response.status(), await response.text()).toBe(200);
-  const user = ((await response.json()) as { items: { id: string; email: string }[] }).items.find((item) => item.email === email);
-  expect(user, `${email} exists`).toBeTruthy();
-  const put = await request.put(`/api/v1/teams/${teamId}/members/${user!.id}`, { headers: admin, data: { role } });
-  expect(put.ok(), await put.text()).toBe(true);
-}
-
-/** A cookie session's API context: the only way a spec can act as a member (no password, no OIDC). */
-async function memberSession(browser: Browser, token: string) {
-  const baseURL = test.info().project.use.baseURL!;
-  const context = await browser.newContext({ baseURL });
-  await context.addCookies([{ name: "lumewarp_session", value: token, url: baseURL }]);
-  const session = await (await context.request.get("/api/v1/session")).json();
-  expect(session.authenticated).toBe(true);
-  return { context, csrf: session.csrf_token as string };
-}
-
-async function memberKey(browser: Browser, token: string, teamId: string, name: string) {
-  const { context, csrf } = await memberSession(browser, token);
-  try {
-    const response = await context.request.post(`/api/v1/teams/${teamId}/keys`, {
-      headers: { "X-Lumewarp-CSRF": csrf },
-      data: { name },
-    });
-    expect(response.status(), await response.text()).toBe(201);
-    return (await response.json()) as { secret: string; key: { id: string; display_prefix: string } };
-  } finally {
-    await context.close();
-  }
-}
-
-async function memberRotate(browser: Browser, token: string, keyId: string, graceSeconds: number) {
-  const { context, csrf } = await memberSession(browser, token);
-  try {
-    const response = await context.request.post(`/api/v1/keys/${keyId}/rotate`, {
-      headers: { "X-Lumewarp-CSRF": csrf },
-      data: { grace_seconds: graceSeconds },
-    });
-    expect(response.status(), await response.text()).toBe(200);
-  } finally {
-    await context.close();
-  }
-}
-
-async function signIn(page: Page, token: string, path = "/") {
-  await page.context().addCookies([{ name: "lumewarp_session", value: token, url: test.info().project.use.baseURL! }]);
-  await page.goto(path);
-}
-
-const isoDay = (date: Date) => date.toISOString().slice(0, 10);
-const daysFromNow = (days: number) => new Date(Date.now() + days * 86_400_000);
-const rowOf = (scope: Page | Locator, name: string) => scope.getByRole("row").filter({ hasText: name });
-
-test("a regular member lands on My keys and sees only their teams and own keys", async ({ page, browser, request }) => {
-  const mine = await ensureTeam(request, "s8-mine");
-  const elsewhere = await ensureTeam(request, "s8-elsewhere");
-  await putMember(request, mine.id, VIEWER_EMAIL);
-  await putMember(request, mine.id, MEMBER_EMAIL);
-  await putMember(request, elsewhere.id, MEMBER_EMAIL);
+test("a regular member lands on My keys and sees only their teams and own keys", async ({ page, browser }) => {
+  const mine = await admin.ensureTeam("s8-mine");
+  const elsewhere = await admin.ensureTeam("s8-elsewhere");
+  await admin.putMember(mine.id, VIEWER_EMAIL);
+  await admin.putMember(mine.id, MEMBER_EMAIL);
+  await admin.putMember(elsewhere.id, MEMBER_EMAIL);
   await memberKey(browser, VIEWER, mine.id, "s8-viewer-key");
   await memberKey(browser, MEMBER, mine.id, "s8-other-key");
   await memberKey(browser, MEMBER, elsewhere.id, "s8-hidden-key");
@@ -127,6 +68,7 @@ test("a regular member lands on My keys and sees only their teams and own keys",
   const nav = page.getByRole("navigation", { name: "Main" });
   await expect(nav.getByRole("link").first()).toHaveText("My keys");
   await expect(nav.getByRole("link", { name: "Teams", exact: true })).toHaveCount(0);
+  await expect(nav.getByRole("link", { name: "Keys", exact: true })).toHaveCount(0);
   await expect(nav.getByRole("link", { name: "Users", exact: true })).toHaveCount(0);
 
   // The home entry was replaced: Back does not land on / (and bounce forward again).
@@ -136,9 +78,9 @@ test("a regular member lands on My keys and sees only their teams and own keys",
   await expect(page).toHaveURL(/\/my-keys$/);
 });
 
-test("create with expiry: the secret is shown once and gone after closing", async ({ page, request }) => {
-  const team = await ensureTeam(request, "s8-keys");
-  await putMember(request, team.id, VIEWER_EMAIL);
+test("create with expiry: the secret is shown once and gone after closing", async ({ page }) => {
+  const team = await admin.ensureTeam("s8-keys");
+  await admin.putMember(team.id, VIEWER_EMAIL);
   await signIn(page, VIEWER);
 
   const section = page.getByTestId("team-s8-keys");
@@ -160,9 +102,9 @@ test("create with expiry: the secret is shown once and gone after closing", asyn
   await expect(rowOf(section, "s8-created")).toBeVisible();
 });
 
-test("the create dialog refuses an expiry past the team's limit with the API's message", async ({ page, request }) => {
-  const team = await ensureTeam(request, "s8-limit", { max_member_key_lifetime_seconds: WEEK });
-  await putMember(request, team.id, VIEWER_EMAIL);
+test("the create dialog refuses an expiry past the team's limit with the API's message", async ({ page }) => {
+  const team = await admin.ensureTeam("s8-limit", { max_member_key_lifetime_seconds: WEEK });
+  await admin.putMember(team.id, VIEWER_EMAIL);
   await signIn(page, VIEWER);
 
   const section = page.getByTestId("team-s8-limit");
@@ -177,9 +119,26 @@ test("the create dialog refuses an expiry past the team's limit with the API's m
   await form.getByRole("button", { name: "Cancel" }).click();
 });
 
-test("rotate with a one hour grace, then with no grace", async ({ page, browser, request }) => {
-  const team = await ensureTeam(request, "s8-keys");
-  await putMember(request, team.id, VIEWER_EMAIL);
+test("the expiry input's max is a day the server accepts", async ({ page }) => {
+  const team = await admin.ensureTeam("s8-maxday", { max_member_key_lifetime_seconds: WEEK });
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  await signIn(page, VIEWER);
+
+  await page.getByTestId("team-s8-maxday").getByRole("button", { name: "New key" }).click();
+  const form = page.getByRole("dialog", { name: "New key in s8-maxday" });
+  const max = await form.getByLabel("Expires").getAttribute("max");
+  expect(max).toBe(localDay(plusDays(6)));
+  await form.getByLabel("Name").fill("s8-maxday-key");
+  await form.getByLabel("Expires").fill(max!);
+  await form.getByRole("button", { name: "Create key" }).click();
+  const secret = page.getByRole("dialog", { name: "API key created" });
+  await expect(secret.getByTestId("secret-value")).toBeVisible();
+  await secret.getByRole("button", { name: /saved it/ }).click();
+});
+
+test("rotate with a one hour grace, then with no grace", async ({ page, browser }) => {
+  const team = await admin.ensureTeam("s8-keys");
+  await admin.putMember(team.id, VIEWER_EMAIL);
   const created = await memberKey(browser, VIEWER, team.id, "s8-rotate-key");
   await signIn(page, VIEWER);
 
@@ -203,7 +162,8 @@ test("rotate with a one hour grace, then with no grace", async ({ page, browser,
   // With no grace the old secret stops at once and the row no longer claims a grace.
   await row.getByRole("button", { name: "Rotate" }).click();
   const second = page.getByRole("dialog", { name: /^Rotate/ });
-  await expect(second.getByTestId("rotate-notice")).toHaveText("The old secret stops working right away.");
+  await expect(second.getByTestId("rotate-notice")).toContainText("The old secret stops working right away.");
+  await expect(second.getByTestId("rotate-notice")).toContainText(/already has a previous secret in grace until/i);
   await second.getByRole("button", { name: "Rotate key" }).click();
   const rotatedAgain = page.getByRole("dialog", { name: "API key rotated" });
   await expect(rotatedAgain.getByTestId("secret-note")).toHaveText("The previous secret stopped working immediately.");
@@ -211,9 +171,166 @@ test("rotate with a one hour grace, then with no grace", async ({ page, browser,
   await expect(section.getByTestId("grace")).toHaveCount(0);
 });
 
-test("revoke a key after a confirmation", async ({ page, browser, request }) => {
-  const team = await ensureTeam(request, "s8-keys");
-  await putMember(request, team.id, VIEWER_EMAIL);
+test("rotating during a grace ends the older one immediately", async ({ page, browser }) => {
+  const team = await admin.ensureTeam("s8-grace2");
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  await memberKey(browser, VIEWER, team.id, "s8-grace-key");
+  await signIn(page, VIEWER);
+
+  const section = page.getByTestId("team-s8-grace2");
+  const row = rowOf(section, "s8-grace-key");
+  await row.getByRole("button", { name: "Rotate" }).click();
+  let dialog = page.getByRole("dialog", { name: /^Rotate/ });
+  await pick(dialog, "Old secret", "24 hours");
+  await dialog.getByRole("button", { name: "Rotate key" }).click();
+  let secret = page.getByRole("dialog", { name: "API key rotated" });
+  await secret.getByRole("button", { name: /saved it/ }).click();
+  const oldGrace = (await section.getByTestId("grace").textContent()) ?? "";
+  expect(oldGrace).toMatch(/Old secret works until /);
+
+  // A second rotation has only one previous hash to keep: the older grace is dropped at once.
+  await row.getByRole("button", { name: "Rotate" }).click();
+  dialog = page.getByRole("dialog", { name: /^Rotate/ });
+  const notice = dialog.getByTestId("rotate-notice");
+  await expect(notice).toContainText(/already has a previous secret in grace until/i);
+  await expect(notice).toContainText(oldGrace.replace("Old secret works until ", ""));
+  await expect(notice).toContainText(/ends that grace immediately/i);
+  await expect(notice).toContainText(/older secret stops working right away/i);
+  await pick(dialog, "Old secret", "1 hour");
+  await dialog.getByRole("button", { name: "Rotate key" }).click();
+  secret = page.getByRole("dialog", { name: "API key rotated" });
+  await expect(secret.getByTestId("secret-note")).toContainText(/previous secret works until/i);
+  await secret.getByRole("button", { name: /saved it/ }).click();
+  await expect(section.getByTestId("grace")).not.toHaveText(oldGrace);
+});
+
+test("rotating a suspended key does not claim it works", async ({ page, browser }) => {
+  const team = await admin.ensureTeam("s8-suspended");
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  const created = await memberKey(browser, VIEWER, team.id, "s8-suspended-key");
+  await memberUpdate(browser, VIEWER, created.key.id, { lifecycle: "suspended" });
+  await signIn(page, VIEWER);
+
+  const section = page.getByTestId("team-s8-suspended");
+  const row = rowOf(section, "s8-suspended-key");
+  await expect(row.getByText("Suspended", { exact: true })).toBeVisible();
+  await row.getByRole("button", { name: "Rotate" }).click();
+  const dialog = page.getByRole("dialog", { name: /^Rotate/ });
+  await expect(dialog.getByTestId("rotate-notice")).toContainText(/suspended/i);
+  await expect(dialog.getByTestId("rotate-notice")).toContainText(/does not resume it/i);
+  await expect(dialog.getByTestId("rotate-notice")).toContainText(/Use Resume/i);
+  await pick(dialog, "Old secret", "1 hour");
+  await expect(dialog.getByTestId("rotate-notice")).toContainText(/neither secret can be used while the key is suspended/i);
+  await expect(dialog.getByTestId("rotate-notice")).not.toContainText(/keeps working/i);
+  await dialog.getByRole("button", { name: "Rotate key" }).click();
+
+  const secret = page.getByRole("dialog", { name: "API key rotated" });
+  await expect(secret.getByTestId("secret-note")).toContainText(/will not work until this key is resumed/i);
+  await expect(secret.getByTestId("secret-note")).toContainText(/use Resume/i);
+  await secret.getByRole("button", { name: /saved it/ }).click();
+  await expect(section.getByTestId("grace")).toHaveCount(0);
+  await expect(row.getByText("Suspended", { exact: true })).toBeVisible();
+});
+
+test("rotating an expired key does not extend it", async ({ page, browser }) => {
+  const team = await admin.ensureTeam("s8-expired");
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  const created = await memberKey(browser, VIEWER, team.id, "s8-expired-key", daysFromNow(2).toISOString());
+  await memberUpdate(browser, VIEWER, created.key.id, { expires_at: new Date(Date.now() - 86_400_000).toISOString() });
+  await signIn(page, VIEWER);
+
+  const section = page.getByTestId("team-s8-expired");
+  const row = rowOf(section, "s8-expired-key");
+  await expect(row.getByText("Expired", { exact: true })).toBeVisible();
+  await row.getByRole("button", { name: "Rotate" }).click();
+  const dialog = page.getByRole("dialog", { name: /^Rotate/ });
+  await expect(dialog.getByTestId("rotate-notice")).toContainText(/has expired/i);
+  await expect(dialog.getByTestId("rotate-notice")).toContainText(/does not extend its expiry/i);
+  await expect(dialog.getByTestId("rotate-notice")).toContainText(/Edit the expiry/i);
+  await pick(dialog, "Old secret", "1 hour");
+  await expect(dialog.getByTestId("rotate-notice")).toContainText(/already expired with the key/i);
+  await expect(dialog.getByTestId("rotate-notice")).not.toContainText(/keeps working/i);
+  await dialog.getByRole("button", { name: "Rotate key" }).click();
+
+  const secret = page.getByRole("dialog", { name: "API key rotated" });
+  await expect(secret.getByTestId("secret-note")).toContainText(/still expired/i);
+  await expect(secret.getByTestId("secret-note")).toContainText(/edit it/i);
+  await secret.getByRole("button", { name: /saved it/ }).click();
+  await expect(section.getByTestId("grace")).toHaveCount(0);
+  await expect(row.getByText("Expired", { exact: true })).toBeVisible();
+});
+
+test("edit, suspend and resume an own key", async ({ page, browser }) => {
+  const team = await admin.ensureTeam("s8-edit");
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  const created = await memberKey(browser, VIEWER, team.id, "s8-editable");
+  await signIn(page, VIEWER);
+
+  const section = page.getByTestId("team-s8-edit");
+  let row = rowOf(section, "s8-editable");
+  await row.getByRole("button", { name: "Edit" }).click();
+  const edit = page.getByRole("dialog", { name: new RegExp(`Edit “s8-editable” \\(${created.key.display_prefix}`) });
+  await edit.getByLabel("Name").fill("s8-renamed");
+  await edit.getByLabel("Expires").fill(isoDay(daysFromNow(3)));
+  await edit.getByRole("button", { name: "Save" }).click();
+  await expect(edit).toBeHidden();
+  row = rowOf(section, "s8-renamed");
+  await expect(row).toBeVisible();
+
+  await row.getByRole("button", { name: "Suspend" }).click();
+  await expect(row.getByText("Suspended", { exact: true })).toBeVisible();
+  await row.getByRole("button", { name: "Resume" }).click();
+  await expect(row.getByText("Active", { exact: true })).toBeVisible();
+});
+
+test("a lowered lifetime is fixed with Edit, then rotate succeeds", async ({ page, browser }) => {
+  const team = await admin.ensureTeam("s8-lower", { max_member_key_lifetime_seconds: 30 * 86_400 });
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  await memberKey(browser, VIEWER, team.id, "s8-lower-key", new Date(Date.now() + 29 * 86_400_000).toISOString());
+  await admin.patch(`/teams/${team.id}`, { max_member_key_lifetime_seconds: WEEK });
+  await signIn(page, VIEWER);
+
+  const section = page.getByTestId("team-s8-lower");
+  const row = rowOf(section, "s8-lower-key");
+  await row.getByRole("button", { name: "Rotate" }).click();
+  let dialog = page.getByRole("dialog", { name: /^Rotate/ });
+  await dialog.getByRole("button", { name: "Rotate key" }).click();
+  await expect(dialog.getByTestId("rotate-error")).toContainText(/shorten expires_at first/i);
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+
+  // Edit is the way out: shorten the expiry inside the new cap, then rotate.
+  await row.getByRole("button", { name: "Edit" }).click();
+  const edit = page.getByRole("dialog", { name: /^Edit “s8-lower-key”/ });
+  await edit.getByLabel("Expires").fill(isoDay(daysFromNow(2)));
+  await edit.getByRole("button", { name: "Save" }).click();
+  await expect(edit).toBeHidden();
+  await row.getByRole("button", { name: "Rotate" }).click();
+  dialog = page.getByRole("dialog", { name: /^Rotate/ });
+  await dialog.getByRole("button", { name: "Rotate key" }).click();
+  const secret = page.getByRole("dialog", { name: "API key rotated" });
+  await expect(secret.getByTestId("secret-value")).toHaveText(/^lw-/);
+  await secret.getByRole("button", { name: /saved it/ }).click();
+});
+
+test("a removed and re-added member resumes their owner_removed key", async ({ page, browser }) => {
+  const team = await admin.ensureTeam("s8-removed");
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  await memberKey(browser, VIEWER, team.id, "s8-removed-key");
+  await admin.removeMember(team.id, VIEWER_EMAIL);
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  await signIn(page, VIEWER);
+
+  const section = page.getByTestId("team-s8-removed");
+  const row = rowOf(section, "s8-removed-key");
+  await expect(row.getByText("Suspended", { exact: true })).toBeVisible();
+  await expect(row.getByText(/owner removed from team/i)).toBeVisible();
+  await row.getByRole("button", { name: "Resume" }).click();
+  await expect(row.getByText("Active", { exact: true })).toBeVisible();
+});
+
+test("revoke a key after a confirmation", async ({ page, browser }) => {
+  const team = await admin.ensureTeam("s8-keys");
+  await admin.putMember(team.id, VIEWER_EMAIL);
   await memberKey(browser, VIEWER, team.id, "s8-revoked-key");
   await signIn(page, VIEWER);
 
@@ -226,14 +343,14 @@ test("revoke a key after a confirmation", async ({ page, browser, request }) => 
   await expect(row.getByRole("button", { name: "Rotate" })).toHaveCount(0);
 });
 
-test("a 409 from the per-member cap is shown as text", async ({ page, browser, request }) => {
-  const team = await ensureTeam(request, "s8-cap", { max_keys_per_member: 1 });
-  await putMember(request, team.id, VIEWER_EMAIL);
+test("a 409 from the per-member cap is shown as text", async ({ page, browser }) => {
+  const team = await admin.ensureTeam("s8-cap", { max_keys_per_member: 1 });
+  await admin.putMember(team.id, VIEWER_EMAIL);
   await memberKey(browser, VIEWER, team.id, "s8-cap-first");
   await signIn(page, VIEWER);
 
   const section = page.getByTestId("team-s8-cap");
-  await expect(section).toContainText("1 of 1 keys");
+  await expect(section).toContainText("1 of 1 non-revoked keys");
   await section.getByRole("button", { name: "New key" }).click();
   const form = page.getByRole("dialog", { name: "New key in s8-cap" });
   await form.getByLabel("Name").fill("s8-cap-second");
@@ -243,9 +360,40 @@ test("a 409 from the per-member cap is shown as text", async ({ page, browser, r
   await form.getByRole("button", { name: "Cancel" }).click();
 });
 
-test("a hidden page opened by URL explains instead of failing", async ({ page, request }) => {
-  const team = await ensureTeam(request, "s8-keys");
-  await putMember(request, team.id, VIEWER_EMAIL);
+test("phone: two same-name keys stay identifiable, including the rotate and revoke dialogs", async ({ page, browser }) => {
+  const team = await admin.ensureTeam("s8-phone");
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  const first = await memberKey(browser, VIEWER, team.id, "production", daysFromNow(3).toISOString());
+  const second = await memberKey(browser, VIEWER, team.id, "production", daysFromNow(5).toISOString());
+  await signIn(page, VIEWER);
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  const section = page.getByTestId("team-s8-phone");
+  const row = (prefix: string) => section.getByRole("row").filter({ hasText: prefix });
+  const firstRow = row(first.key.display_prefix);
+  const secondRow = row(second.key.display_prefix);
+  await expect(firstRow).toBeVisible();
+  await expect(secondRow).toBeVisible();
+  await expect(firstRow.getByText(first.key.display_prefix, { exact: false })).toBeVisible();
+  await expect(secondRow.getByText(second.key.display_prefix, { exact: false })).toBeVisible();
+  await expect(firstRow).toContainText(/expires/);
+  await expect(secondRow).toContainText(/expires/);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  await secondRow.getByRole("button", { name: "Rotate" }).click();
+  const rotate = page.getByRole("dialog", { name: new RegExp(`Rotate .*${second.key.display_prefix}`) });
+  await expect(rotate).toBeVisible();
+  await expect(rotate.getByRole("heading")).toContainText(second.key.display_prefix);
+  await rotate.getByRole("button", { name: "Cancel" }).click();
+
+  await secondRow.getByRole("button", { name: "Revoke" }).click();
+  await expect(confirmDialog(page).getByText(second.key.display_prefix, { exact: false })).toBeVisible();
+  await confirmDialog(page).getByRole("button", { name: "Cancel" }).click();
+});
+
+test("a hidden page opened by URL explains instead of failing", async ({ page }) => {
+  const team = await admin.ensureTeam("s8-keys");
+  await admin.putMember(team.id, VIEWER_EMAIL);
   await signIn(page, VIEWER);
 
   await page.goto("/users");
@@ -257,25 +405,37 @@ test("a hidden page opened by URL explains instead of failing", async ({ page, r
   await expect(page).toHaveURL(/\/my-keys$/);
 });
 
-test("an unavailable authorization backend is a notice, not 'no access'", async ({ page, request }) => {
-  const team = await ensureTeam(request, "s8-keys");
-  await putMember(request, team.id, VIEWER_EMAIL);
+test("an authorization outage shows a temporary state with retry, not 'no team'", async ({ page, browser }) => {
+  const team = await admin.ensureTeam("s8-keys");
+  await admin.putMember(team.id, VIEWER_EMAIL);
   await signIn(page, VIEWER);
+
+  const { context, csrf } = await memberSession(browser, VIEWER);
+  const real = await (await context.request.get("/api/v1/users/me", { headers: { "X-Lumewarp-CSRF": csrf } })).json();
+  await context.close();
+
+  let meRequests = 0;
   await page.route("**/api/v1/users/me", async (route) => {
-    const response = await route.fetch();
-    const body = await response.json();
+    meRequests++;
     await route.fulfill({
-      status: response.status(),
+      status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ ...body, authz_unavailable: true }),
+      body: JSON.stringify({ ...real, authz_unavailable: true, teams: [] }),
     });
   });
-  await page.goto("/users");
-  await expect(page.getByTestId("authz-unavailable")).toBeVisible();
-  await expect(page.getByTestId("authz-blocked")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "You do not have access to this page" })).toHaveCount(0);
   await page.goto("/my-keys");
+  await expect(page.getByTestId("authz-temporary")).toBeVisible();
   await expect(page.getByTestId("authz-unavailable")).toBeVisible();
+  await expect(page.getByText(/cannot be verified right now/i)).toBeVisible();
+  await expect(page.getByTestId("no-teams")).toHaveCount(0);
+  await expect(page.getByText(/Ask an administrator to add you to a team/i)).toHaveCount(0);
+  await expect(page.getByTestId("team-s8-keys")).toHaveCount(0);
+  expect(meRequests).toBeGreaterThan(0);
+
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect.poll(() => meRequests).toBeGreaterThan(1);
+  await page.unroute("**/api/v1/users/me");
+  await page.getByRole("button", { name: "Retry" }).click();
   await expect(page.getByTestId("team-s8-keys")).toBeVisible();
 });
 
@@ -287,15 +447,26 @@ test("a user on no team sees an empty state, not an empty table", async ({ page 
   await expect(page.getByRole("link", { name: "Overview", exact: true })).toHaveCount(0);
 });
 
-test("a team admin's own keys rotate and revoke; the admin key view lists the team", async ({ page, browser, request }) => {
-  const team = await ensureTeam(request, "s8-admin");
-  await putMember(request, team.id, TEAM_ADMIN_EMAIL, "admin");
-  await putMember(request, team.id, VIEWER_EMAIL);
+test("the emergency session has its own text, not the ask-an-admin state", async ({ page, request }) => {
+  await page.context().addCookies((await request.storageState()).cookies);
+  await page.goto("/my-keys");
+  await expect(page.getByTestId("break-glass-no-keys")).toBeVisible();
+  await expect(page.getByText(/does not own API keys/i)).toBeVisible();
+  await expect(page.getByTestId("no-teams")).toHaveCount(0);
+  await expect(page.getByText(/Ask an administrator to add you to a team/i)).toHaveCount(0);
+});
+
+test("a team admin's own keys rotate and revoke; the team page lists every key", async ({ page, browser }) => {
+  const team = await admin.ensureTeam("s8-admin");
+  await admin.putMember(team.id, TEAM_ADMIN_EMAIL, "admin");
+  await admin.putMember(team.id, VIEWER_EMAIL);
   await memberKey(browser, TEAM_ADMIN, team.id, "s8-admin-key");
   await memberKey(browser, VIEWER, team.id, "s8-admin-other");
 
   await signIn(page, TEAM_ADMIN, "/");
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  const nav = page.getByRole("navigation", { name: "Main" });
+  await expect(nav.getByRole("link", { name: "Keys", exact: true })).toHaveCount(0);
   await page.goto("/my-keys");
   const section = page.getByTestId("team-s8-admin");
   const row = rowOf(section, "s8-admin-key");
@@ -312,16 +483,16 @@ test("a team admin's own keys rotate and revoke; the admin key view lists the te
   await confirmDialog(page).getByRole("button", { name: "Revoke" }).click();
   await expect(row.getByText("Revoked", { exact: true })).toBeVisible();
 
-  // The admin view lists every key in the team, including another member's.
-  await page.getByRole("link", { name: "Keys", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Keys", level: 1 })).toBeVisible();
+  // Other members' keys are managed on the team page, which still lists every key.
+  await page.goto(`/teams/${team.id}`);
+  await page.getByRole("tab", { name: "Keys" }).click();
   await expect(rowOf(page, "s8-admin-other")).toBeVisible();
   await expect(rowOf(page, "s8-admin-key")).toBeVisible();
 });
 
 test("a team admin sets the member key limits from the team settings", async ({ page, request }) => {
-  const team = await ensureTeam(request, "s8-limits");
-  await putMember(request, team.id, TEAM_ADMIN_EMAIL, "admin");
+  const team = await admin.ensureTeam("s8-limits");
+  await admin.putMember(team.id, TEAM_ADMIN_EMAIL, "admin");
   await signIn(page, TEAM_ADMIN, `/teams/${team.id}`);
   await page.getByRole("tab", { name: "Settings" }).click();
   await expect(page.getByText("Keys per member")).toBeVisible();
@@ -331,20 +502,20 @@ test("a team admin sets the member key limits from the team settings", async ({ 
   await form.getByLabel("Longest member key lifetime (seconds)").fill("3600");
   await form.getByRole("button", { name: "Save" }).click();
   await expect(form).toBeHidden();
-  const saved = await (await request.get(`/api/v1/teams/${team.id}`, { headers: admin })).json();
+  const saved = await (await request.get(`/api/v1/teams/${team.id}`, { headers: admin.headers })).json();
   expect(saved.max_keys_per_member).toBe(3);
   expect(saved.max_member_key_lifetime_seconds).toBe(3600);
   await expect(page.getByText("1 hour", { exact: true })).toBeVisible();
   await page.goto("/my-keys");
-  await expect(page.getByTestId("team-s8-limits")).toContainText("0 of 3 keys");
+  await expect(page.getByTestId("team-s8-limits")).toContainText("0 of 3 non-revoked keys");
   await expect(page.getByTestId("team-s8-limits")).toContainText("Longest lifetime: 1 hour");
 });
 
-test("screenshots: My keys, no team, the secret and the rotate dialog", async ({ page, browser, request }) => {
+test("screenshots: My keys, no team, the secret and the rotate dialog", async ({ page, browser }) => {
   test.skip(!SHOTS, "set E2E_SHOTS to a directory to save screenshots");
   test.setTimeout(240_000);
-  const team = await ensureTeam(request, "s8-shots", { max_keys_per_member: 20, max_member_key_lifetime_seconds: WEEK });
-  await putMember(request, team.id, SHOTS_EMAIL);
+  const team = await admin.ensureTeam("s8-shots", { max_keys_per_member: 20, max_member_key_lifetime_seconds: WEEK });
+  await admin.putMember(team.id, SHOTS_EMAIL);
   await memberKey(browser, SHOTS_TOKEN, team.id, "s8-shots-key");
   const rotated = await memberKey(browser, SHOTS_TOKEN, team.id, "s8-shots-rotated");
   await memberRotate(browser, SHOTS_TOKEN, rotated.key.id, 3600);
