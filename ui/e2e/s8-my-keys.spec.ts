@@ -726,6 +726,38 @@ test("a failed background check keeps an open create-key form and its draft", as
   await expect(form.getByLabel("Expires")).toHaveValue(expiry);
 });
 
+test("a failed guard check keeps the guarded page and an open create-key form", async ({ page }) => {
+  const team = await admin.ensureTeam("s8-guard-draft");
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  await signIn(page, VIEWER, `/teams/${team.id}`);
+  await page.getByRole("tab", { name: "Keys" }).click();
+  await page.getByRole("button", { name: "New key" }).click();
+  const form = page.getByRole("dialog", { name: "New API key" });
+  await form.getByLabel("Name").fill("s8-guard-draft");
+
+  // Stale the team keys query, fail its focus refetch; its 403 revalidates /users/me, which fails too.
+  await page.waitForTimeout(16_000);
+  const forbidden = { status: 403, contentType: "application/json", body: JSON.stringify({ error: { code: "forbidden", message: "temporary" } }) };
+  await page.route(`**/api/v1/teams/${team.id}/keys*`, (route) => route.fulfill(forbidden));
+  await page.route("**/api/v1/users/me", (route) => route.fulfill(forbidden));
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("blur"));
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    window.dispatchEvent(new Event("visibilitychange"));
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    window.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect(page.getByTestId("me-check-failed")).toBeVisible();
+  await expect(form).toBeVisible();
+  await expect(form.getByLabel("Name")).toHaveValue("s8-guard-draft");
+  await page.keyboard.press("Escape");
+  await expect(form).toBeHidden();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByTestId("me-check-failed")).toBeVisible();
+  await shot(page, "s8-me-check-failed", { fullPage: true });
+});
+
 test("a key that is both suspended and expired names both conditions", async ({ page, browser }) => {
   const team = await admin.ensureTeam("s8-cross");
   await admin.putMember(team.id, VIEWER_EMAIL);

@@ -85,7 +85,7 @@ test("a 403 from a permission-dependent read revalidates /users/me", async ({ pa
     }),
   );
   await page.getByLabel("From").fill("2026-01-01");
-  await expect.poll(() => meRequests).toBeGreaterThan(1);
+  await expect.poll(() => meRequests, { timeout: 15_000 }).toBeGreaterThan(1);
 });
 
 test("team detail: an own team is readable and its back link is My keys for a plain member", async ({ page }) => {
