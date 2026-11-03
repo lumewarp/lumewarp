@@ -15,11 +15,13 @@ import json
 import os
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from no_secret import assert_no_secret
-from p2_identity import cookie_api, grant, identity_stack
+from p2_identity import cookie_api, grant, identity_stack, login
 from secret_scan import scan_text
 from stack import pg, record_secret, wait_for
 
@@ -409,15 +411,32 @@ def refused(p25, foreign_team, lifecycle):
     return result
 
 
+@contextmanager
+def clean_principal(p25):
+    """A logged-in member whose key-write limiter windows are both untouched.
+
+    The limiter is per principal and per process (`KEY_WRITE_WINDOW_SECONDS`), and Bob has
+    already created and rotated keys in this module, so the exact-quota tests need a
+    principal whose first write is the one under test. Each call logs in a separate
+    temporary Keycloak user (removed when the module ends) with no team grants, so every
+    attempt is refused after the limiter and never writes a row.
+    """
+    with p25.idp.temporary_user() as (username, _user_url):
+        with httpx.Client(timeout=15, trust_env=False) as browser:
+            login(browser, p25.stack, username)
+            yield browser
+
+
 @pytest.fixture(scope="module")
 def rotate_limited(p25, refused):
     """Exhaust the rotate bucket through a target refused after the limiter.
 
-    Alice's key is readable but not manageable by Bob: every attempt stops at 403 after
-    the limiter has counted it, so this costs no rows and no rotation. The create bucket
-    must be untouched by it, and neither key may change.
+    Alice's key is not readable by the clean principal, so every attempt stops at 404
+    after the limiter has counted it, costing no rows and no rotation. The bucket starts
+    empty, so exactly `KEY_ROTATE_LIMIT` attempts pass and the next is a 429; the create
+    bucket must be untouched by it, and Alice's key may not change.
     """
-    from lumewarp_control_plane.api.keys import KEY_ROTATE_LIMIT
+    from lumewarp_control_plane.api.keys import KEY_ROTATE_LIMIT, KEY_WRITE_WINDOW_SECONDS
 
     stack = p25.stack
     alice_id = refused["alice_key_id"]
@@ -428,26 +447,36 @@ def rotate_limited(p25, refused):
             uuid.UUID(alice_id),
         )[0]
     )
-    bob_before = key_row(stack, refused["third_key_id"])
-    started = time.monotonic()
-    statuses = []
-    response = None
-    for _ in range(KEY_ROTATE_LIMIT + 10):
-        attempt = p25.member.post(
-            stack.api_url + f"/keys/{alice_id}/rotate", json={"grace_seconds": 3600}
+    with clean_principal(p25) as browser:
+        started = time.monotonic()
+        statuses = []
+        response = None
+        # Exactly one attempt past the limit: the count is the product's, not a tolerance.
+        for _ in range(KEY_ROTATE_LIMIT + 1):
+            attempt = browser.post(
+                stack.api_url + f"/keys/{alice_id}/rotate", json={"grace_seconds": 3600}
+            )
+            statuses.append(attempt.status_code)
+            if attempt.status_code == 429:
+                response = attempt
+                break
+        result = {
+            "statuses": statuses,
+            "elapsed": time.monotonic() - started,
+            "limit": KEY_ROTATE_LIMIT,
+            "window": KEY_WRITE_WINDOW_SECONDS,
+            "allowed_before_429": sum(1 for status in statuses if status != 429),
+            "code": response.json()["error"]["code"] if response is not None else None,
+            "retry_after": response.headers.get("retry-after") if response is not None else None,
+        }
+        # One create attempt while rotate is exhausted: the buckets are separate, so this
+        # is the foreign-team refusal from the target lookup, never a 429. It also proves
+        # the exhausted rotate bucket did not leak into the create scope.
+        create = browser.post(
+            stack.api_url + f"/teams/{p25.team['id']}/keys", json={"name": "after-rotate"}
         )
-        statuses.append(attempt.status_code)
-        if attempt.status_code == 429:
-            response = attempt
-            break
-    result = {
-        "statuses": statuses,
-        "elapsed": time.monotonic() - started,
-        "limit": KEY_ROTATE_LIMIT,
-        "allowed_before_429": sum(1 for status in statuses if status == 403),
-        "code": response.json()["error"]["code"] if response is not None else None,
-        "retry_after": response.headers.get("retry-after") if response is not None else None,
-    }
+        result["create_status"] = create.status_code
+        result["create_code"] = create.json().get("error", {}).get("code")
     result["alice_row_unchanged"] = (
         tuple(
             pg(
@@ -458,41 +487,39 @@ def rotate_limited(p25, refused):
         )
         == alice_before
     )
-    result["bob_row_unchanged"] = key_row(stack, refused["third_key_id"]) == bob_before
     result["alice_still_serves"] = p25.gateway.chat(refused["alice_secret"]).status_code
-    # One create attempt while rotate is exhausted: the bucket is separate, so this gets
-    # the member key-count refusal, not 429. It is the key count, not the limiter.
-    create = p25.member.post(
-        stack.api_url + f"/teams/{p25.team['id']}/keys", json={"name": "after-rotate"}
-    )
-    result["create_status"] = create.status_code
-    result["create_code"] = create.json().get("error", {}).get("code")
     return result
 
 
 @pytest.fixture(scope="module")
 def rate_limited(p25, foreign_team, refused):
+    from lumewarp_control_plane.api.keys import KEY_CREATE_LIMIT, KEY_WRITE_WINDOW_SECONDS
+
     stack = p25.stack
-    # Failed attempts count too, so a team Bob cannot create in is enough to exhaust the
-    # window without creating anything (the refusal comes after the limiter).
-    started = time.monotonic()
-    statuses = []
-    response = None
-    for _ in range(40):
-        attempt = p25.member.post(
-            stack.api_url + f"/teams/{foreign_team}/keys", json={"name": "rate-limit"}
-        )
-        statuses.append(attempt.status_code)
-        if attempt.status_code == 429:
-            response = attempt
-            break
-    elapsed = time.monotonic() - started
-    result = {
-        "statuses": statuses,
-        "elapsed": elapsed,
-        "code": response.json()["error"]["code"] if response is not None else None,
-        "retry_after": response.headers.get("retry-after") if response is not None else None,
-    }
+    # A foreign team refuses the write after the limiter has counted it, so the clean
+    # principal's create window can be exhausted without creating anything.
+    with clean_principal(p25) as browser:
+        started = time.monotonic()
+        statuses = []
+        response = None
+        for _ in range(KEY_CREATE_LIMIT + 1):
+            attempt = browser.post(
+                stack.api_url + f"/teams/{foreign_team}/keys", json={"name": "rate-limit"}
+            )
+            statuses.append(attempt.status_code)
+            if attempt.status_code == 429:
+                response = attempt
+                break
+        elapsed = time.monotonic() - started
+        result = {
+            "statuses": statuses,
+            "elapsed": elapsed,
+            "limit": KEY_CREATE_LIMIT,
+            "window": KEY_WRITE_WINDOW_SECONDS,
+            "allowed_before_429": sum(1 for status in statuses if status != 429),
+            "code": response.json()["error"]["code"] if response is not None else None,
+            "retry_after": response.headers.get("retry-after") if response is not None else None,
+        }
     # The member was not written to: his existing key still serves.
     result["still_serves"] = p25.gateway.chat(refused["third_secret"]).status_code
     return result
@@ -623,28 +650,32 @@ def test_08_refusals_stay_inside_the_team_and_its_limits(refused):
 def test_09_rotate_has_its_own_rate_limit(rotate_limited):
     limited = rotate_limited
     assert limited["statuses"][-1] == 429, limited["statuses"]
-    assert set(limited["statuses"][:-1]) == {403}, limited["statuses"]
-    # The earlier rotations of this module (key creation, the grace cases, the post-revoke
-    # 409) already counted on the same bucket, so this is not exactly the limit.
-    assert limited["allowed_before_429"] >= limited["limit"] - 10, limited
-    assert len(limited["statuses"]) <= limited["limit"] + 10, limited
+    # The clean principal cannot read Alice's key: every allowed attempt is a 404 from
+    # the target lookup, which is after the limiter. Exactly the product's limit passes.
+    assert set(limited["statuses"][:-1]) == {404}, limited["statuses"]
+    assert limited["allowed_before_429"] == limited["limit"], limited
+    assert len(limited["statuses"]) == limited["limit"] + 1, limited["statuses"]
+    # Every attempt has to fall inside one fixed window, or the count could roll over.
+    assert limited["elapsed"] < limited["window"], limited
     assert limited["code"] == "rate_limited"
     assert int(limited["retry_after"]) >= 1
     # Cheap enough to keep the suite short, and the refused target did not change.
-    assert limited["elapsed"] < 15
-    assert limited["alice_row_unchanged"] and limited["bob_row_unchanged"]
+    assert limited["alice_row_unchanged"]
     assert limited["alice_still_serves"] == 200
     # The create bucket was not exhausted with the rotate bucket.
-    assert (limited["create_status"], limited["create_code"]) == (409, "conflict")
+    assert (limited["create_status"], limited["create_code"]) == (404, "not_found")
 
 
 def test_10_key_writes_past_the_rate_limit_get_429(rate_limited):
     assert rate_limited["statuses"][-1] == 429, rate_limited["statuses"]
-    assert 404 in rate_limited["statuses"], "the limiter must run before the target lookup"
+    # A foreign team is refused in the target lookup, after the limiter.
+    assert set(rate_limited["statuses"][:-1]) == {404}, rate_limited["statuses"]
+    assert rate_limited["allowed_before_429"] == rate_limited["limit"], rate_limited
+    assert len(rate_limited["statuses"]) == rate_limited["limit"] + 1, rate_limited["statuses"]
+    assert rate_limited["elapsed"] < rate_limited["window"], rate_limited
     assert rate_limited["code"] == "rate_limited"
     assert int(rate_limited["retry_after"]) >= 1
     # Fast enough to keep the suite short, and the refusal did not disturb serving.
-    assert rate_limited["elapsed"] < 15
     assert rate_limited["still_serves"] == 200
 
 
