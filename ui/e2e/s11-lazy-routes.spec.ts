@@ -1,6 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
+import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 
+import { SHOTS } from "./helpers";
 import { signIn, VIEWER } from "./selfService";
 
 /*
@@ -88,7 +90,7 @@ test("a chunk that fails to load is a recoverable error, never a blank page", as
   await page.getByRole("link", { name: "Routers", exact: true }).click();
   await expect(failed).toBeVisible();
   expect(chunks).toBe(0);
-  await page.screenshot({ path: "/tmp/usage-shots4/chunk-failed.png", fullPage: true }).catch(() => undefined);
+  if (SHOTS) await page.screenshot({ path: join(SHOTS, "s11-chunk-failed.png"), fullPage: true });
 
   await page.unroute("**/assets/Routers-*.js");
   await failed.getByRole("button", { name: "Reload" }).click();
