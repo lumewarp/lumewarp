@@ -15,9 +15,9 @@ import { ComboboxField } from "../components/ui/combobox-field";
 import { DescriptionDetails, DescriptionList, DescriptionTerm } from "../components/ui/description-list";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { useAction, useCan, useMe, useMut, useSecretMut } from "../hooks";
+import { useShowSecret } from "../components/SecretProvider";
 import { useToast } from "../components/Toast";
-import { SecretDialog } from "./KeyDialogs";
-import { expiryFromDay, fmtLifetime, lastExpiryDay } from "./keyText";
+import { expiryFromDay, fmtLifetime, lastExpiryDay, localDayOf } from "./keyText";
 
 const TABS = [
   { id: "members", label: "Members" },
@@ -412,14 +412,13 @@ function KeysPanel({ team }: { team: Team }) {
   const me = useMe();
   const perms = useCan();
   const toast = useToast();
+  const showSecret = useShowSecret();
   const isAdmin = perms.teamAdmin(team.id);
   const members = useQuery({ queryKey: ["members", team.id], queryFn: () => api.members(team.id) });
   const accounts = useQuery({ queryKey: ["service-accounts", team.id], queryFn: () => api.serviceAccounts(team.id) });
   const keys = useQuery({ queryKey: ["team-keys", team.id], queryFn: () => api.teamKeys(team.id) });
   const [editing, setEditing] = useState<Key | "new" | null>(null);
   const [revoking, setRevoking] = useState<Key | null>(null);
-  const [secret, setSecret] = useState<string | null>(null);
-  const [secretTitle, setSecretTitle] = useState("API key created");
   const ownerOptions = [
     ...(perms.canCreateOwnKey(team.id) && !!me.data?.user_id
       ? [{ value: "", label: me.data.email ?? "My account" }]
@@ -434,15 +433,12 @@ function KeysPanel({ team }: { team: Team }) {
         expires_at: expiryFromDay(values.expires),
         service_account_id: values.service_account_id || null,
       }),
-    (value) => {
-      setSecretTitle("API key created");
-      setSecret(value);
-    },
+    (value) => showSecret({ value, title: "API key created" }),
   );
   const update = useMut(
     ({ key, values }: { key: Key; values: KeyValues }) => {
       const body: Schemas["KeyUpdate"] = { name: values.name };
-      if (values.expires !== (key.expires_at?.slice(0, 10) ?? "")) {
+      if (values.expires !== localDayOf(key.expires_at)) {
         body.expires_at = expiryFromDay(values.expires);
       }
       return api.updateKey(key.id, body);
@@ -457,10 +453,7 @@ function KeysPanel({ team }: { team: Team }) {
   const revoke = useMut((key: Key) => api.revokeKey(key.id), "Key revoked");
   const rotate = useSecretMut(
     (key: Key) => api.rotateKey(key.id),
-    (value) => {
-      setSecretTitle("API key rotated");
-      setSecret(value);
-    },
+    (value) => showSecret({ value, title: "API key rotated" }),
   );
   const rotateKey = (key: Key) => void rotate.mutateAsync(key).catch((e: Error) => toast("error", e.message));
 
@@ -469,7 +462,7 @@ function KeysPanel({ team }: { team: Team }) {
     form.reset(
       key === "new"
         ? { ...blankKey, service_account_id: defaultOwner }
-        : { name: key.name, service_account_id: key.service_account_id ?? "", expires: key.expires_at?.slice(0, 10) ?? "" },
+        : { name: key.name, service_account_id: key.service_account_id ?? "", expires: localDayOf(key.expires_at) },
     );
     setEditing(key);
   };
@@ -582,7 +575,6 @@ function KeysPanel({ team }: { team: Team }) {
         <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
         <TextField label="Expires" type="date" value={form.values.expires} max={expiryMax} onChange={(value) => form.set("expires", value)} hint={expiryHint} />
       </FormDialog>
-      <SecretDialog secret={secret} title={secretTitle} onClose={() => setSecret(null)} />
       <ConfirmDialog
         open={!!revoking}
         title="Revoke key"

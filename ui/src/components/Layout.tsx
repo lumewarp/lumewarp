@@ -28,6 +28,7 @@ import type { Me } from "../api";
 import { hasAccess, useCan, useMe, type Access } from "../hooks";
 import { useTheme } from "../theme";
 import { AuthzNotice } from "../pages/Access";
+import { SecretProvider } from "./SecretProvider";
 import { Badge } from "./Bits";
 import { useToast } from "./Toast";
 import { Button } from "./ui/button";
@@ -179,6 +180,7 @@ export function Layout() {
   };
 
   return (
+    <SecretProvider>
     <SidebarProvider className="bg-background">
       <a
         className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:rounded-md focus:border focus:bg-background focus:px-3 focus:py-2 focus:shadow"
@@ -218,5 +220,6 @@ export function Layout() {
         </main>
       </div>
     </SidebarProvider>
+    </SecretProvider>
   );
 }

@@ -152,3 +152,11 @@ export async function signIn(page: Page, token: string, path = "/") {
 export const isoDay = (date: Date) => date.toISOString().slice(0, 10);
 export const daysFromNow = (days: number) => new Date(Date.now() + days * 86_400_000);
 export const rowOf = (scope: Page | Locator, name: string) => scope.getByRole("row").filter({ hasText: name });
+
+/** An SPA route change without a reload: the layout (and its secret provider) stays mounted. */
+export async function routeChange(page: Page, path: string) {
+  await page.evaluate((target) => {
+    history.pushState({}, "", target);
+    window.dispatchEvent(new PopStateEvent("popstate", { state: {} }));
+  }, path);
+}

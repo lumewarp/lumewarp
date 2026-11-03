@@ -12,7 +12,7 @@ import { Gateways } from "./pages/Gateways";
 import { Login } from "./pages/Login";
 import { MyKeys } from "./pages/MyKeys";
 import { Overview } from "./pages/Overview";
-import { AuthzTemporary, PageLoading, RequireAccess, RequireTeamRead } from "./pages/Access";
+import { AuthzTemporary, CheckFailed, PageLoading, RequireAccess, RequireTeamRead } from "./pages/Access";
 import { Routers } from "./pages/Routers";
 import { Settings } from "./pages/Settings";
 import { TeamDetail } from "./pages/TeamDetail";
@@ -48,16 +48,29 @@ function Home() {
   const me = useMe();
   const perms = useCan();
   if (me.isPending) return <PageLoading />;
-  if (me.error) {
+  if (me.error && !me.data) {
     return (
       <Alert variant="destructive" data-testid="state-error">
         <AlertDescription>{me.error.message}</AlertDescription>
       </Alert>
     );
   }
-  if (me.data?.authz_unavailable) return <AuthzTemporary onRetry={() => void me.refetch()} />;
+  const notice = me.error && me.data ? <CheckFailed onRetry={() => void me.refetch()} /> : null;
+  if (me.data?.authz_unavailable) {
+    return (
+      <>
+        {notice}
+        <AuthzTemporary onRetry={() => void me.refetch()} />
+      </>
+    );
+  }
   if (!perms.isInstallationAdmin && !perms.isTeamAdmin) return <Navigate to="/my-keys" replace />;
-  return <Overview />;
+  return (
+    <>
+      {notice}
+      <Overview />
+    </>
+  );
 }
 
 function guarded(Page: () => React.ReactNode, need: Access) {

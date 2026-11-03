@@ -11,12 +11,14 @@ import { Badge as UiBadge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
 import { useAction, useCan, useMe, useMut, useOwnKeys, useSecretMut } from "../hooks";
-import { AuthzTemporary, BreakGlassNoKeys, PageLoading } from "./Access";
-import { RotateKeyDialog, SecretDialog } from "./KeyDialogs";
+import { useShowSecret } from "../components/SecretProvider";
+import { AuthzTemporary, BreakGlassNoKeys, CheckFailed, PageLoading } from "./Access";
+import { RotateKeyDialog } from "./KeyDialogs";
 import {
   expiryFromDay,
   fmtLifetime,
   lastExpiryDay,
+  localDayOf,
   refusalText,
   rotationNote,
   rotationRowNote,
@@ -29,7 +31,7 @@ export function MyKeys() {
   const me = useMe();
   const keys = useOwnKeys();
   if (me.isPending) return <PageLoading label="Loading your access…" />;
-  if (me.error) {
+  if (me.error && !me.data) {
     return (
       <Alert variant="destructive" data-testid="state-error">
         <AlertDescription>{me.error.message}</AlertDescription>
@@ -43,6 +45,7 @@ export function MyKeys() {
         title="My keys"
         description="Your teams, the models you can call, and the API keys you own. A secret is shown once, when a key is created or rotated."
       />
+      {me.error && me.data && <CheckFailed onRetry={() => void me.refetch()} />}
       {me.data?.authz_unavailable ? (
         <AuthzTemporary onRetry={() => void me.refetch()} />
       ) : me.data?.kind === "break_glass" ? (
@@ -154,11 +157,11 @@ function TeamSection({
   onRetry: () => void;
 }) {
   const perms = useCan();
+  const showSecret = useShowSecret();
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<Key | null>(null);
   const [rotating, setRotating] = useState<Key | null>(null);
   const [revoking, setRevoking] = useState<Key | null>(null);
-  const [secret, setSecret] = useState<{ value: string; title: string; note?: string } | null>(null);
   const setLifecycle = useAction(
     ({ key, lifecycle }: { key: Key; lifecycle: "active" | "suspended" }) =>
       api.updateKey(key.id, { lifecycle }),
@@ -218,7 +221,7 @@ function TeamSection({
                 <strong className="[overflow-wrap:anywhere]">{key.name}</strong>{" "}
                 <span className="block text-xs text-muted-foreground sm:ml-1 sm:inline sm:text-sm">
                   <code className="[overflow-wrap:anywhere]">{key.display_prefix}…</code>
-                  <span className="sm:hidden"> · expires {fmtDate(key.expires_at)}</span>
+                  <span className="sm:hidden" data-testid="phone-expiry"> · expires {fmtDate(key.expires_at)}</span>
                 </span>
               </>
             ),
@@ -289,7 +292,7 @@ function TeamSection({
         team={team}
         open={creating}
         onClose={() => setCreating(false)}
-        onCreated={(value) => setSecret({ value, title: "API key created" })}
+        onCreated={(value) => showSecret({ value, title: "API key created" })}
       />
       {editing && (
         <EditKeyDialog key={editing.id} team={team} target={editing} onClose={() => setEditing(null)} />
@@ -299,14 +302,8 @@ function TeamSection({
         onClose={() => setRotating(null)}
         onRotated={(value, key) => {
           setRotating(null);
-          setSecret({ value, title: "API key rotated", note: rotationNote(key) });
+          showSecret({ value, title: "API key rotated", note: rotationNote(key) });
         }}
-      />
-      <SecretDialog
-        secret={secret?.value ?? null}
-        title={secret?.title ?? ""}
-        note={secret?.note}
-        onClose={() => setSecret(null)}
       />
       <ConfirmDialog
         open={!!revoking}
@@ -394,11 +391,12 @@ function CreateKeyDialog({
 type EditValues = { name: string; expires: string };
 
 function EditKeyDialog({ team, target, onClose }: { team: Team; target: Key; onClose: () => void }) {
-  const initial: EditValues = { name: target.name, expires: target.expires_at?.slice(0, 10) ?? "" };
+  const initialExpiry = localDayOf(target.expires_at);
+  const initial: EditValues = { name: target.name, expires: initialExpiry };
   const form = useForm<EditValues>(initial, { name: required("Name") });
   const update = useMut((values: EditValues) => {
     const body: Schemas["KeyUpdate"] = { name: values.name.trim() };
-    if (values.expires !== (target.expires_at?.slice(0, 10) ?? "")) {
+    if (values.expires !== initialExpiry) {
       body.expires_at = expiryFromDay(values.expires);
     }
     return api.updateKey(target.id, body);

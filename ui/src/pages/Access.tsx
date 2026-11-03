@@ -64,6 +64,22 @@ export function PageLoading({ label = "Loading…" }: { label?: string }) {
   );
 }
 
+/** A failed background check keeps the cached page; this notice offers the retry. */
+export function CheckFailed({ onRetry }: { onRetry: () => void }) {
+  return (
+    <Alert variant="warn" role="status" data-testid="me-check-failed" className="mb-4">
+      <AlertDescription>
+        <div className="flex flex-wrap items-center gap-2">
+          <span>Your access could not be refreshed. The page shows the last known state.</span>
+          <Button size="sm" variant="outline" onClick={onRetry}>
+            Retry
+          </Button>
+        </div>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 function AuthzBlocked({ onRetry }: { onRetry: () => void }) {
   return (
     <Card className="mx-auto max-w-lg items-start gap-3 p-6" data-testid="authz-blocked">
@@ -116,16 +132,36 @@ export function RequireAccess({ need, children }: { need: Access; children: Reac
   const allowed = hasAccess(perms, need);
   const { me, checking } = useRevalidated(allowed, need);
   if (me.isPending) return <PageLoading />;
-  if (me.error) {
+  if (me.error && !me.data) {
     return (
       <Alert variant="destructive" data-testid="state-error">
         <AlertDescription>{me.error.message}</AlertDescription>
       </Alert>
     );
   }
-  if (me.data?.authz_unavailable) return <AuthzBlocked onRetry={() => void me.refetch()} />;
-  if (!allowed && checking) return <PageLoading label="Checking access…" />;
-  return allowed ? <>{children}</> : <NoAccess />;
+  const notice = me.error && me.data ? <CheckFailed onRetry={() => void me.refetch()} /> : null;
+  if (me.data?.authz_unavailable) {
+    return (
+      <>
+        {notice}
+        <AuthzBlocked onRetry={() => void me.refetch()} />
+      </>
+    );
+  }
+  if (!allowed && checking) {
+    return (
+      <>
+        {notice}
+        <PageLoading label="Checking access…" />
+      </>
+    );
+  }
+  return (
+    <>
+      {notice}
+      {allowed ? <>{children}</> : <NoAccess />}
+    </>
+  );
 }
 
 /** The team-specific guard: an unreadable team mounts no panels and makes no team request. */
@@ -134,14 +170,34 @@ export function RequireTeamRead({ teamId, children }: { teamId: string; children
   const allowed = perms.teamRead(teamId);
   const { me, checking } = useRevalidated(allowed, teamId);
   if (me.isPending) return <PageLoading />;
-  if (me.error) {
+  if (me.error && !me.data) {
     return (
       <Alert variant="destructive" data-testid="state-error">
         <AlertDescription>{me.error.message}</AlertDescription>
       </Alert>
     );
   }
-  if (me.data?.authz_unavailable) return <AuthzBlocked onRetry={() => void me.refetch()} />;
-  if (!allowed && checking) return <PageLoading label="Checking access…" />;
-  return allowed ? <>{children}</> : <NoAccess />;
+  const notice = me.error && me.data ? <CheckFailed onRetry={() => void me.refetch()} /> : null;
+  if (me.data?.authz_unavailable) {
+    return (
+      <>
+        {notice}
+        <AuthzBlocked onRetry={() => void me.refetch()} />
+      </>
+    );
+  }
+  if (!allowed && checking) {
+    return (
+      <>
+        {notice}
+        <PageLoading label="Checking access…" />
+      </>
+    );
+  }
+  return (
+    <>
+      {notice}
+      {allowed ? <>{children}</> : <NoAccess />}
+    </>
+  );
 }

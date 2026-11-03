@@ -30,7 +30,7 @@ export function SecretDialog({
     >
       {secret && (
         <>
-          <SecretOnce secret={secret} />
+          <SecretOnce key={secret} secret={secret} />
           {note && (
             <p className="mt-3 text-sm text-muted-foreground" data-testid="secret-note">
               {note}
