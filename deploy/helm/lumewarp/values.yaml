@@ -75,6 +75,7 @@ controlPlane:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  # SSO needs LUMEWARP_SECRET_KEY, passed here with a secretKeyRef (see the chart README).
   extraEnv: []
   extraArgs: []
   # Readiness drains background services; uvicorn allows about 10 s of graceful shutdown.

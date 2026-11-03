@@ -260,8 +260,10 @@ Removing a member suspends that member's user-owned keys in the team
 (`owner_deactivated`). Revoked keys are kept for usage history. A key or a service
 account prevents team deletion.
 
-An active owner who regains team membership may resume their own `owner_removed`
-key. An `admin` suspension still requires team-admin permission to resume.
+An active owner may resume a key they suspended themselves (`owner`) and, once they
+are a member again, one suspended by their removal (`owner_removed`). An `admin`
+suspension needs a team admin; `owner_deactivated` needs an administrator after the
+account is reactivated. Nothing can be resumed while the key's owner is inactive.
 
 Usage is attributed to the key's team and owner: the event's `team_id` must match the
 key, and the owner (member or service account) is read from the key. A member's
@@ -399,6 +401,10 @@ group; team roles never come from it, and no other claim grants anything.
 | `LUMEWARP_SESSION_TTL_SECONDS` | Absolute session lifetime (default 12 h). |
 | `LUMEWARP_SESSION_COOKIE_SECURE` | `Secure` cookie flag (default true; turn off only for plain-http dev). |
 
+With the Helm chart, pass `LUMEWARP_SECRET_KEY` through `controlPlane.extraEnv` with a
+`secretKeyRef`, as in the [chart README's SSO
+example](../deploy/helm/lumewarp/README.md#sso-and-authorization-backend).
+
 - Users are identified by the token's `iss` + `sub`. On a first login with a verified
   email, the identity links to an existing account with that email that
   has no identity from this issuer yet; otherwise a new user is created (JIT, only with a
@@ -456,7 +462,11 @@ SPA; missing assets are JSON 404s. Without a build the control plane still serve
 and docs, and logs a warning at startup. Restart the process after copying a new build. The
 wheel build includes the static directory as package data.
 
-Log in at `/` through SSO or the emergency login, whichever is configured. The API types in `ui/src/api/schema.d.ts`
+Log in at `/` through SSO or the emergency login, whichever is configured. `/my-keys` is the home
+of a user who is neither an installation admin nor a team admin: their teams' effective models,
+limits and remaining budget, and the keys they own. A team's **Keys** tab lists every key in
+that team and is where a team admin manages them; there is no separate `/keys` page. The API
+types in `ui/src/api/schema.d.ts`
 are generated from this service's OpenAPI document (`pnpm gen:api`).
 
 ## Plugins
