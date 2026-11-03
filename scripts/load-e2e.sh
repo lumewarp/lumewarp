@@ -24,6 +24,18 @@ run_dir="$(mktemp -d "${TMPDIR:-/tmp}/lumewarp-load-run.XXXXXX")"
 export E2E_RUN_DIR="$run_dir"
 touch "$run_dir/pids" "$run_dir/dbs"
 
+# Same pg_dump scan as scripts/e2e-p1.sh: each disposable database is scanned in
+# tests/e2e/stack.py::teardown before it is dropped, and the finalizer below covers
+# leftovers, databases matching this run's names that no test registered, and fails the
+# script on a hit. The run id in the database names is what makes that discovery possible.
+run_id="$(head -c 4 /dev/urandom | od -An -tx1 | tr -d '[:space:]')"
+export E2E_RUN_ID="$run_id"
+echo "$run_id" >"$run_dir/run-id"
+export E2E_SECRET_LOG="$run_dir/secrets.jsonl"
+export E2E_SCAN_REPORT="$run_dir/secret-scans.jsonl"
+: >"$E2E_SECRET_LOG"
+: >"$E2E_SCAN_REPORT"
+
 cleanup() {
   status=$?
   trap - EXIT INT TERM
@@ -38,6 +50,16 @@ cleanup() {
   while read -r pid; do
     [[ -n "$pid" ]] && kill -KILL -- "-$pid" 2>/dev/null || true
   done <"$run_dir/pids"
+  # After the tests and before the reaper drops anything: no plaintext credential may
+  # have reached any database this run created. A hit, a missing scan result or a scan
+  # error fails the script. The only opt-out is E2E_SKIP_SECRET_SCAN=1.
+  if [[ "${E2E_SKIP_SECRET_SCAN:-0}" != 1 ]]; then
+    if ! (cd "$root" && uv run --frozen --project control-plane python \
+        tests/e2e/secret_scan.py finalize --run-dir "$run_dir" --pg-url "$E2E_PG_URL"); then
+      echo "error: plaintext credentials found in the load e2e databases" >&2
+      status=1
+    fi
+  fi
   if [[ -s "$run_dir/dbs" ]]; then
     (cd "$root/control-plane" && uv run --frozen python - "$E2E_PG_URL" "$run_dir/dbs" <<'PY' || true
 import asyncio, sys

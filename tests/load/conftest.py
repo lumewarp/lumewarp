@@ -10,6 +10,7 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent / "e2e"))
 sys.path.insert(0, str(HERE))
 
+import secret_scan_session  # noqa: E402
 from loadlib import RESULTS, ClockStepped  # noqa: E402
 from stack import GATEWAY_BIN, MOCK_BIN, Proc, Stack  # noqa: E402
 
@@ -19,6 +20,12 @@ def pytest_runtest_makereport(item, call):
     report = yield
     setattr(item, f"rep_{report.when}", report)
     return report
+
+
+@pytest.fixture(scope="session", autouse=True)
+def secret_scan_run() -> None:
+    """Create the scan's run context even when `pytest` ran without a script."""
+    secret_scan_session.ensure_run_context()
 
 
 @pytest.fixture(scope="session")
@@ -53,8 +60,11 @@ def stack(request, binaries):
         ) or not hasattr(request.node, "rep_call")
         if failed:
             print("\n" + s.logs(), file=sys.stderr)
-        s.teardown()
-        s.cleanup_dir()
+        try:
+            s.teardown()
+        finally:
+            # teardown raises on a secret-scan hit; the directory still has to go.
+            s.cleanup_dir()
 
 
 @pytest.fixture
@@ -73,8 +83,10 @@ def stack_factory(binaries):
             print("\n" + s.logs(), file=sys.stderr)
             raise
         finally:
-            s.teardown()
-            s.cleanup_dir()
+            try:
+                s.teardown()
+            finally:
+                s.cleanup_dir()
 
     return fresh
 
@@ -86,6 +98,9 @@ def _fmt(d: dict | None) -> str:
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:
+    # Finalize the credential scan first: a hit or an unchecked database fails the run
+    # even when there is no load report to write.
+    session.exitstatus = secret_scan_session.finish_run_context(exitstatus)
     reports = sorted(RESULTS.glob("*.json")) if RESULTS.exists() else []
     if not reports:
         return

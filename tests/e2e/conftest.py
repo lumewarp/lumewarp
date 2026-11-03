@@ -6,9 +6,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import secret_scan_session  # noqa: E402
 from stack import GATEWAY_BIN, MOCK_BIN, Stack  # noqa: E402
 
-collect_ignore = [] if os.environ.get("E2E_P2") == "1" else ["test_p2_exit_gate.py"]
+LIVE_IDP_TESTS = ["test_p2_exit_gate.py", "test_p25_self_service.py"]
+collect_ignore = [] if os.environ.get("E2E_P2") == "1" else LIVE_IDP_TESTS
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
@@ -19,6 +21,12 @@ def pytest_runtest_makereport(item, call):
 
 
 @pytest.fixture(scope="session", autouse=True)
+def secret_scan_run() -> None:
+    """Create the scan's run context even when `pytest` ran without a script."""
+    secret_scan_session.ensure_run_context()
+
+
+@pytest.fixture(scope="session")
 def binaries() -> None:
     for binary in (GATEWAY_BIN, MOCK_BIN):
         if not binary.exists():
@@ -26,7 +34,7 @@ def binaries() -> None:
 
 
 @pytest.fixture
-def stack(request):
+def stack(request, binaries):
     s = Stack()
     try:
         s.setup()
@@ -39,5 +47,13 @@ def stack(request):
         ) or not hasattr(request.node, "rep_call")
         if failed:
             print("\n" + s.logs(), file=sys.stderr)
-        s.teardown()
-        s.cleanup_dir()
+        try:
+            s.teardown()
+        finally:
+            # teardown raises on a secret-scan hit; the directory still has to go.
+            s.cleanup_dir()
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:
+    """Finalize the scan; a hit or an unchecked database fails the session."""
+    session.exitstatus = secret_scan_session.finish_run_context(exitstatus)

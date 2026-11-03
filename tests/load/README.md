@@ -38,7 +38,7 @@ show a positive queue depth or an increase in usage report retry events during t
 | scenario | what it asserts |
 | --- | --- |
 | `test_steady_mixed_load` | 60 keys over 6 teams × 2 owners (one service account and one member using a PAT) × 5 keys, chat + stream mix: zero 5xx, zero connection errors, well-formed bodies/SSE (no leaked usage-only chunk), exact usage + cost accounting at team and owner scopes, no dropped events, config stream stays up. |
-| `test_churn_under_load` | Under load: revoke keys (each rejected < 2 s, measured per key, never accepted after the first 401), create keys (accepted < 2 s), add model `mock-b` (1:1 split), weight `mock-a` to 0 (all `mock-b`), remove `mock-b` (all `mock-a`) — checked by the config version each request was served under; lower an owner rpm limit (429 `rate_limit_exceeded` + `Retry-After` only for that owner's keys and window, never 5xx), clear it; publish 40 versions back to back through owner policy changes (gateway ACKs the latest, `source_revision` strictly increasing, nothing quarantined). |
+| `test_churn_under_load` | Under load: revoke keys (each rejected < 2 s, measured per key, never accepted after the first 401), create keys (accepted < 2 s), rotate a pooled key with a one-hour grace (the new secret is accepted within the same bound, both secrets keep serving as the same key id, and every response for either credential generation after the rotation is 200 or the allowed rate-limit answer — a late 401 on the replaced secret fails the run), add model `mock-b` (1:1 split), weight `mock-a` to 0 (all `mock-b`), remove `mock-b` (all `mock-a`) — checked by the config version each request was served under; lower an owner rpm limit (429 `rate_limit_exceeded` + `Retry-After` only for that owner's keys and window, never 5xx), clear it; publish 40 versions back to back through owner policy changes (gateway ACKs the latest, `source_revision` strictly increasing, nothing quarantined). |
 | `test_control_plane_restart_under_load` | CP stopped for 20 s mid-run: every request still 200, usage queued meanwhile is delivered after restart (exact counts, drop counter 0), gateway reconnects and ACKs. |
 | `test_budget_under_load` | Separate service-account, member and team cases with a 0.01 USD budget: every affected key flips to 429 `insufficient_quota` < 5 s after the budget was exceeded at ingestion and is never accepted after its flip; keys outside the scope remain unaffected; overshoot recorded. |
 | `test_rate_limit_under_load` | A service account and member each share an RPM limiter across their keys: 429 `rate_limit_exceeded` with `Retry-After`, unrelated owners unaffected, clearing both limits restores service, exact usage and cost accounting. |
@@ -68,6 +68,25 @@ latency p50/p90/p99/max, revoke and new-key latency distributions, budget oversh
 restart timings; Locust CSVs and log per scenario). Final request counts come from Locust's
 quit event after users and workers drain, not the last periodic CSV snapshot.
 Failing tests print every process log.
+
+Every disposable database this run creates (the 60-key fleet, PATs, session and the mock
+upstream's state) is dumped with `pg_dump` in `Stack.teardown` and scanned for full
+`lw-`/`lwp-`/`lwg-` tokens and for every secret the harness recorded, before the database
+is dropped; the fleet's keys are recorded at the API response boundary, not by this file.
+`scripts/load-e2e.sh` also runs `tests/e2e/secret_scan.py finalize` after pytest and fails
+on any hit or unchecked database. A direct `pytest tests/load` without the script scans too
+(an autouse session fixture creates the run context) and prints a warning only when
+`E2E_SKIP_SECRET_SCAN=1` explicitly disables it. See `tests/e2e/README.md` ("No plaintext
+credentials in the database").
+
+The churn rotation keeps the rotated key's sampling weight unchanged: both of its secrets
+are pool entries with weight `0.5` each (`random.choices`), so adding the replacement entry
+does not double that key's share of the load compared with the other keys. Each request
+records a non-secret generation marker `g` (`0` before the rotation, `1` after), and the
+report lists requests served per generation. The probe that polls for the issued secret
+records the 401s the gateway returns until the new snapshot is applied; the rejection
+check starts at the probe's first 200, while the old generation's 401 is always a failure
+after the rotation call.
 
 Environment (all optional):
 

@@ -17,10 +17,12 @@ from loadlib import (
     budget_flips,
     cost,
     cost_check,
+    generation_counts,
     hard_errors,
     load_window,
     pct,
     retry_unmeasurable,
+    rotation_errors,
     summarize,
 )
 from loadpacing import CpuWarningRecorder, Pacer
@@ -101,6 +103,58 @@ def test_unit_hard_errors():
         malformed,
         bad[-1],
     ]
+
+
+def test_unit_rotation_errors_allows_both_generations_and_rate_limits():
+    records = [
+        record(200, key="rot", g=0, t=100.0),
+        record(200, key="rot", g=1, t=101.0),
+        record(429, key="rot", g=0, t=102.0, c="rate_limit_exceeded"),
+        record(200, key="other", g=0, t=103.0),
+        # Before the grace began: not part of the rotation window.
+        record(401, key="rot", g=0, t=99.0, c="invalid_api_key"),
+    ]
+    assert rotation_errors(records, "rot", since=100.0) == []
+    assert generation_counts(records, "rot") == {0: 3, 1: 1}
+
+
+def test_unit_rotation_errors_flags_a_late_401_on_the_old_generation():
+    # The review's failing input: the gateway accepts both secrets at the first probe,
+    # then silently stops accepting the old one while the grace still has an hour to run.
+    # A churn-tolerated 401 would let this pass; the generation-aware check must fail it.
+    late = record(401, key="rot", g=0, t=110.0, c="invalid_api_key")
+    records = [
+        record(200, key="rot", g=0, t=100.0),
+        record(200, key="rot", g=1, t=101.0),
+        late,
+        record(200, key="rot", g=1, t=111.0),
+    ]
+    assert rotation_errors(records, "rot", since=100.0) == [late]
+    assert generation_counts(records, "rot") == {0: 2, 1: 2}
+
+
+def test_unit_rotation_errors_skips_the_new_secret_propagation_401s():
+    # The probe that waits for a rotation sees 401 for the issued secret until the new
+    # snapshot is applied; only a 401 after that first acceptance is a rejection.
+    early = record(401, key="rot", g=1, t=100.5, c="invalid_api_key")
+    accepted_at = 101.0
+    late = record(401, key="rot", g=1, t=102.0, c="invalid_api_key")
+    old = record(401, key="rot", g=0, t=100.5, c="invalid_api_key")
+    records = [record(200, key="rot", g=0, t=100.0), early, old, late]
+    assert rotation_errors(records, "rot", since=100.0, new_secret_since=accepted_at) == [
+        old,
+        late,
+    ]
+
+
+def test_unit_rotation_errors_flags_a_late_5xx_or_connection_error():
+    records = [
+        record(200, key="rot", g=0, t=100.0),
+        record(503, key="rot", g=1, t=101.0),
+        record(0, key="rot", g=0, t=102.0),
+        record(403, key="rot", g=1, t=103.0, c="model_not_allowed"),
+    ]
+    assert rotation_errors(records, "rot", since=100.0) == records[1:]
 
 
 @pytest.mark.parametrize(

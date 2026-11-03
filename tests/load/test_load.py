@@ -28,9 +28,12 @@ from loadlib import (
     env_float,
     env_int,
     gateway_counter,
+    generation_counts,
+    generation_statuses,
     hard_errors,
     load_window,
     retry_unmeasurable,
+    rotation_errors,
     settle_usage,
     stream_resets,
     summarize,
@@ -156,6 +159,36 @@ def test_churn_under_load(stack):
             pool.append(key)
             run.set_keys(pool)
 
+        # --- rotate a pooled key with a grace: both secrets serve as the same key, so
+        # usage stays attributed to one key id while clients use either secret.
+        revoked_ids = {key["id"] for key in revoked}
+        rotated_key = next(
+            key for key in pool if key["id"] not in revoked_ids and key["id"] not in rl_ids
+        )
+        rotation_started = time.monotonic()
+        rotation = stack.ok(
+            "POST",
+            f"/keys/{rotated_key['id']}/rotate",
+            json={"grace_seconds": 3600},
+        )
+        assert rotation["key"]["id"] == rotated_key["id"]
+        # Two secrets of one key: each carries half the weight so the rotated key keeps the
+        # same share of the traffic it had before (an extra full entry would double it).
+        rotated_key["gen"] = 0
+        rotated_key["w"] = 0.5
+        replacement = {
+            "id": rotated_key["id"],
+            "secret": rotation["secret"],
+            "gen": 1,
+            "w": 0.5,
+        }
+        seen = probe.until(replacement, ok200, 5)
+        rotate_latency = None if seen is None else seen - rotation_started
+        # Keep both secrets in the pool (the grace allows it) and prove the old one serves.
+        pool.append(replacement)
+        run.set_keys(pool)
+        old_status = probe.chat(rotated_key)[0]
+
         # --- models and weights: a+b (1:1) -> b only (a weight 0) -> a only.
         a = fleet.models["mock-a"]
         timeline["before_b"] = stack.current_version()
@@ -222,6 +255,16 @@ def test_churn_under_load(stack):
         probe.close()
 
     records = finish(stack, run, probes)
+    # Both generations of the rotated key must serve for the whole grace window. `g` is a
+    # non-secret marker: 0 is the replaced secret, 1 the one the rotation issued.
+    generation_requests = generation_counts(records, rotated_key["id"])
+    generation_error_records = rotation_errors(
+        records,
+        rotated_key["id"],
+        since=rotation_started,
+        new_secret_since=seen,
+    )
+    generation_response_counts = generation_statuses(records, rotated_key["id"])
     versions = pg(
         stack.dsn,
         "SELECT version, source_revision, created_at FROM config_versions WHERE scope = $1"
@@ -259,6 +302,31 @@ def test_churn_under_load(stack):
         "revoke_latency_raw": [None if x is None else round(x, 3) for x in revoke_latency],
         "new_key_latency_s": dist([x for x in new_latency if x is not None], 1, 3),
         "new_key_latency_raw": [None if x is None else round(x, 3) for x in new_latency],
+        "rotation": {
+            "key": rotated_key["id"],
+            "grace_seconds": 3600,
+            "new_secret_served_after_s": (
+                None if rotate_latency is None else round(rotate_latency, 3)
+            ),
+            "old_secret_still_served": old_status,
+            "requests_on_rotated_key": sum(1 for r in records if r["k"] == rotated_key["id"]),
+            # Requests served per credential generation, and every response that was not
+            # 200 (or the allowed rate-limit answer) during the grace.
+            "requests_by_generation": generation_requests,
+            "responses_by_generation": generation_response_counts,
+            "generation_errors": len(generation_error_records),
+            "generation_error_samples": [
+                {
+                    "generation": r.get("g", 0),
+                    "status": r["st"],
+                    "code": r.get("c"),
+                    "probe": bool(r.get("probe")),
+                    "after_rotation_s": round(r["t"] - rotation_started, 2),
+                }
+                for r in generation_error_records[:10]
+            ],
+            "pool_weight_per_generation": 0.5,
+        },
         "traffic_by_phase": {k: dict(v) for k, v in phases.items()},
         "rate_limit": {
             "requests_429": len(rl_429),
@@ -294,6 +362,20 @@ def test_churn_under_load(stack):
     # New keys.
     assert None not in new_latency, f"a new key was not accepted within 5 s: {new_latency}"
     assert max(new_latency) < NEW_KEY_BOUND, new_latency
+    # Rotation with a grace: the new secret serves within the same bound and the replaced
+    # one keeps serving, both as the same key (accounting above is by key id).
+    assert rotate_latency is not None, "the rotated secret was not accepted within 5 s"
+    assert rotate_latency < NEW_KEY_BOUND, rotate_latency
+    assert old_status == 200, old_status
+    # A late 401 on the old generation is a hard error, not churn to tolerate: the grace is
+    # one hour, so both secrets have to keep serving until the run ends.
+    assert not generation_error_records, (
+        "the rotated key did not serve both generations during its grace:"
+        f" {report['rotation']['generation_error_samples']}"
+    )
+    assert generation_requests.get(0, 0) > 0 and generation_requests.get(1, 0) > 0, (
+        generation_requests
+    )
     # Models.
     assert set(phases["a_before"]) == {"mock-a"}, phases
     ab = phases["a_and_b"]

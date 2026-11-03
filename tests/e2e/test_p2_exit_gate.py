@@ -2,26 +2,13 @@
 
 import time
 import uuid
-from contextlib import ExitStack
-from types import SimpleNamespace
 
 import httpx
 import pytest
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2
 from p2_events import DatabaseEvents
-from p2_identity import FGAProxy, KeycloakAdmin, fga_store, login
-from stack import Stack, pg
-
-
-def cookie_api(browser, stack, method, path, **kwargs):
-    response = browser.request(method, stack.api_url + path, **kwargs)
-    assert response.status_code in (200, 201, 204), (
-        method,
-        path,
-        response.status_code,
-        response.text,
-    )
-    return response.json() if response.content else None
+from p2_identity import cookie_api, grant, identity_stack, login
+from stack import pg
 
 
 def assert_stream(response):
@@ -32,95 +19,18 @@ def assert_stream(response):
 
 
 @pytest.fixture(scope="module", params=["builtin", "openfga"])
-def p2(request):
-    stack = Stack()
-    with ExitStack() as cleanup:
-        cleanup.callback(stack.cleanup_dir)
-        cleanup.callback(stack.teardown)
-        idp = KeycloakAdmin()
-        cleanup.callback(idp.http.close)
-        cleanup.enter_context(idp.redirect(stack.api_url))
-        stack.cp_env.update(
-            {
-                "LUMEWARP_AUTHZ_BACKEND": request.param,
-                "LUMEWARP_OIDC_ISSUER": "http://127.0.0.1:18080/realms/lumewarp",
-                "LUMEWARP_OIDC_CLIENT_ID": "lumewarp-cp",
-                "LUMEWARP_OIDC_CLIENT_SECRET": "lumewarp-dev-secret",
-                "LUMEWARP_SESSION_COOKIE_SECURE": "false",
-                "LUMEWARP_PUBLIC_URL": f"http://127.0.0.1:{stack.http_port}",
-                "LUMEWARP_KEY_RECONCILE_POLL_SECONDS": "1",
-                "LUMEWARP_KEY_RECONCILE_FULL_SECONDS": "1",
-            }
-        )
-        state = SimpleNamespace(stack=stack, backend=request.param, idp=idp)
-        if request.param == "openfga":
-            state.store, model = cleanup.enter_context(fga_store())
-            state.proxy = FGAProxy()
-            cleanup.callback(state.proxy.close)
-            stack.cp_env.update(
-                {
-                    "LUMEWARP_OPENFGA_URL": state.proxy.url,
-                    "LUMEWARP_OPENFGA_STORE_ID": state.store,
-                    "LUMEWARP_OPENFGA_MODEL_ID": model,
-                }
-            )
-        try:
-            stack.setup()
-            state.events = cleanup.enter_context(DatabaseEvents(stack.dsn))
-            state.member = cleanup.enter_context(httpx.Client(timeout=15, trust_env=False))
-            state.admin = cleanup.enter_context(httpx.Client(timeout=15, trust_env=False))
-            state.user = login(state.member, stack, "bob@example.com")
-            state.admin_user = login(state.admin, stack, "alice@example.com")
-            if state.backend == "openfga":
-                httpx.post(
-                    f"http://127.0.0.1:18081/stores/{state.store}/write",
-                    json={"writes": {"tuple_keys": [{
-                        "user": f"user:{state.admin_user['id']}",
-                        "relation": "member",
-                        "object": "group:lumewarp-admins",
-                    }]}},
-                    timeout=10,
-                    trust_env=False,
-                ).raise_for_status()
-            assert cookie_api(state.admin, stack, "GET", "/users/me")["is_admin"]
-            # JIT creates no team memberships; the configured group grants admin access.
-            for browser in (state.member, state.admin):
-                assert cookie_api(browser, stack, "GET", "/teams")["items"] == []
-            assert pg(stack.dsn, "SELECT count(*) AS n FROM team_members")[0]["n"] == 0
-            state.team = cookie_api(state.admin, stack, "POST", "/teams", json={"name": "p2", "model_access": "all"})[
-                "id"
-            ]
-            yield state
-        finally:
-            # Preserve useful diagnostics even when a prerequisite fixture fails.
-            print(f"\n===== P2 {request.param} process diagnostics =====\n{stack.logs()}")
-
-
-def grant(state, user, role, *, delete=False):
-    if state.backend == "builtin":
-        method = "DELETE" if delete else "PUT"
-        kwargs = {} if delete else {"json": {"role": role}}
-        response = state.stack.api(method, f"/teams/{state.team}/members/{user['id']}", **kwargs)
-        assert response.status_code in (200, 201, 204), response.text
-    else:
-        body = {
-            "deletes" if delete else "writes": {
-                "tuple_keys": [
-                    {
-                        "user": f"user:{user['id']}",
-                        "relation": role,
-                        "object": f"team:{state.team}",
-                    }
-                ]
-            }
-        }
-        response = httpx.post(
-            f"http://127.0.0.1:18081/stores/{state.store}/write",
-            json=body,
-            timeout=10,
-            trust_env=False,
-        )
-        response.raise_for_status()
+def p2(request, binaries):
+    with identity_stack(request.param) as state:
+        stack = state.stack
+        state.events = state.cleanup.enter_context(DatabaseEvents(stack.dsn))
+        # JIT creates no team memberships; the configured group grants admin access.
+        for browser in (state.member, state.admin):
+            assert cookie_api(browser, stack, "GET", "/teams")["items"] == []
+        assert pg(stack.dsn, "SELECT count(*) AS n FROM team_members")[0]["n"] == 0
+        state.team = cookie_api(
+            state.admin, stack, "POST", "/teams", json={"name": "p2", "model_access": "all"}
+        )["id"]
+        yield state
 
 
 @pytest.fixture(scope="module")
