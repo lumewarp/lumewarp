@@ -40,6 +40,21 @@
   --sidebar-accent-foreground: #1a1d23;
   --sidebar-border: #dfe3e8;
   --sidebar-ring: #4f46e5;
+
+  /*
+   * Usage-chart series. A categorical set with its own light and dark values: indigo leads (it is the
+   * product colour), the rest stay away from the status hues so a bar never reads as success, warning,
+   * info or an error, and "Other" is a neutral. Never reuse these for status.
+   */
+  --series-1: #4f46e5;
+  --series-2: #0e7490;
+  --series-3: #a21caf;
+  --series-4: #0369a1;
+  --series-5: #b45309;
+  --series-6: #4d7c0f;
+  --series-7: #9f1239;
+  --series-8: #475569;
+  --series-other: #b9c0cb;
 }
 
 .dark {
@@ -76,6 +91,16 @@
   --sidebar-accent-foreground: #e8eaee;
   --sidebar-border: #2b303b;
   --sidebar-ring: #7c83ff;
+
+  --series-1: #8c93fb;
+  --series-2: #2dd4bf;
+  --series-3: #e879f9;
+  --series-4: #38bdf8;
+  --series-5: #f4a261;
+  --series-6: #a3e635;
+  --series-7: #f43f5e;
+  --series-8: #94a3b8;
+  --series-other: #5d6876;
 }
 
 @theme inline {
@@ -112,6 +137,15 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+  --color-series-3: var(--series-3);
+  --color-series-4: var(--series-4);
+  --color-series-5: var(--series-5);
+  --color-series-6: var(--series-6);
+  --color-series-7: var(--series-7);
+  --color-series-8: var(--series-8);
+  --color-series-other: var(--series-other);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);

@@ -34,8 +34,11 @@ export function SuspendedReason({ reason }: { reason: string | null }) {
 export const NANO = 1_000_000_000;
 export const nanoToUsd = (n: number | null | undefined) => (n === null || n === undefined ? null : n / NANO);
 export const usdToNano = (u: number | null) => (u === null ? null : Math.round(u * NANO));
+/** Money, in the reader's currency format. */
 export const fmtUsd = (nano: number | null | undefined, empty = "—") =>
   nano === null || nano === undefined ? empty : (nano / NANO).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6 });
+/** Counts and token totals, in the reader's locale. The table and the charts share it. */
+export const fmtNumber = (value: number) => value.toLocaleString();
 
 /** Shows a secret exactly once, with copy. Parent decides when to drop it. */
 export function SecretOnce({ secret }: { secret: string }) {

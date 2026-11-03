@@ -34,6 +34,8 @@ const PAGES: [string, string][] = [
 ];
 const TABS = ["Members", "Service accounts", "Keys", "Usage", "Settings"];
 const SPECIALS = ["page-login", "router-form", "upstream-form", "permission-picker", "select-open", "combobox-open", "confirm", "conflict-409"];
+/** The usage chart's own states; each is a picture of the card, not of the page. */
+const CHARTS = ["usage-chart", "usage-chart-cost", "usage-chart-tooltip", "usage-chart-table"];
 const MODES = [
   ["desktop-light", 1280, 900, "light"],
   ["desktop-dark", 1280, 900, "dark"],
@@ -91,6 +93,10 @@ test("screenshots: the whole matrix, desktop and 390 px, light and dark", async 
     const body = dialog(page).locator("div.overflow-y-auto").first();
     if (await body.count()) await body.evaluate((el) => (el.scrollTop = 0));
   };
+  const chart = page.getByTestId("usage-chart");
+  const chartShot = async (name: string) => {
+    if (SHOTS) await chart.screenshot({ path: join(SHOTS, `${name}.png`) });
+  };
   const theme = async (name: "light" | "dark") => {
     // The theme is read from localStorage at start-up: write it, then reload.
     await page.evaluate((t) => localStorage.setItem("lumewarp.theme", t), name);
@@ -119,6 +125,27 @@ test("screenshots: the whole matrix, desktop and 390 px, light and dark", async 
       await noOverflow(`${label} ${name}`);
       await shot(page, `s7-${label}-page-${name}`, { settle: 300 });
     }
+
+    // The usage chart: its three metrics states and its data table.
+    await page.goto("/usage");
+    await expect(chart).toBeVisible();
+    await expect(page.getByTestId("usage-day")).toHaveCount(30);
+    await chartShot(`s7-${label}-usage-chart`);
+    const metricButton = (name: string) => page.getByTestId("usage-chart-metric").getByRole("button", { name, exact: true });
+    await metricButton("Cost").click();
+    await page.waitForTimeout(300);
+    await chartShot(`s7-${label}-usage-chart-cost`);
+    await metricButton("Tokens").click();
+    // Hover after scrolling the card into view: scrolling afterwards would move the pointer off the bar.
+    await chart.scrollIntoViewIfNeeded();
+    await page.getByTestId("usage-day").last().hover();
+    await page.waitForTimeout(250);
+    await chartShot(`s7-${label}-usage-chart-tooltip`);
+    await page.getByLabel("From").fill(new Date(Date.now() - 6 * 86_400_000).toISOString().slice(0, 10));
+    await page.mouse.move(2, 2);
+    await page.getByTestId("usage-chart-table-toggle").click();
+    await page.waitForTimeout(250);
+    await chartShot(`s7-${label}-usage-chart-table`);
 
     await page.goto(`/teams/${team.id}`);
     for (const tab of TABS) {
@@ -190,9 +217,10 @@ test("screenshots: the whole matrix, desktop and 390 px, light and dark", async 
   }
 
   // The matrix, exactly. 14 pages: the 12 whole pages here, the team detail (its five tabs), and login. Plus the
-  // two catalog forms, the picker, both open dropdowns, the confirmation and the 409, each in four modes.
-  const expected = MODES.flatMap(([label]) => [...PAGES.map(([name]) => `s7-${label}-page-${name}`), ...TABS.map((tab) => `s7-${label}-team-${slug(tab)}`), ...SPECIALS.map((name) => `s7-${label}-${name}`)]).map((n) => `${n}.png`);
-  expect(expected).toHaveLength(100);
+  // two catalog forms, the picker, both open dropdowns, the confirmation and the 409, and the usage chart in each
+  // of its four states, each in four modes.
+  const expected = MODES.flatMap(([label]) => [...PAGES.map(([name]) => `s7-${label}-page-${name}`), ...TABS.map((tab) => `s7-${label}-team-${slug(tab)}`), ...SPECIALS.map((name) => `s7-${label}-${name}`), ...CHARTS.map((name) => `s7-${label}-${name}`)]).map((n) => `${n}.png`);
+  expect(expected).toHaveLength(116);
   expect(new Set(expected).size).toBe(expected.length);
   const found = readdirSync(SHOTS!).filter((name) => name.startsWith("s7-") && name.endsWith(".png"));
   expect(found.sort()).toEqual(expected.sort());

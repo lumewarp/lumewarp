@@ -351,6 +351,10 @@ class Api:
 async def seed_usage(url: str) -> None:
     """A catalog with traffic through every kind of path:
     direct, via an alias, via a router, via an alias to a router, and mixed groups.
+
+    Plus a trend across UTC days for the charts: a day with no usage (day -3), a model whose requests
+    have no price, a model priced only partly, and nine models on one days-ago slot so the chart has to
+    fold the tail into "Other".
     """
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -368,7 +372,7 @@ async def seed_usage(url: str) -> None:
     alias = api.call("POST", "/aliases", {"name": "use-alias", "target": router["id"]})
     direct_alias = api.call("POST", "/aliases", {"name": "use-direct", "target": model["use/c"]["id"]})
 
-    now = datetime.now(UTC)
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
     owner, team, key = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     events = [
         # (requested, model, alias, router, tokens, count)
@@ -379,45 +383,64 @@ async def seed_usage(url: str) -> None:
         ("use/retired", "use/retired", None, None, 100, 1),
         ("use-direct", "use/c", direct_alias, None, 300, 1),
     ]
+    # (days_ago, model, tokens, cost known?). Day -3 stays empty: the chart draws an empty slot for it.
+    trend = [
+        (0, "trend/unpriced", 900, False),
+        (0, "trend/partial", 300, False),
+        (1, "trend/a", 4000, True),
+        (1, "trend/b", 1000, True),
+        (1, "trend/partial", 500, True),
+        (2, "trend/a", 2500, True),
+        (4, "trend/c", 1200, True),
+        (5, "trend/a", 800, True),
+        # Nine models, strictly decreasing, on one day outside the default 30-day window: 8 hues + Other.
+        *[(40, f"fold/m{n}", 1000 - n * 100, True) for n in range(1, 10)],
+    ]
     engine = create_async_engine(url)
     try:
         async with AsyncSession(engine) as session, session.begin():
+            def add(ts: datetime, requested: str, name: str, via_alias: dict | None, via_router: dict | None, tokens: int, known: bool) -> None:
+                session.add(
+                    UsageEvent(
+                        request_id=uuid.uuid4(),
+                        gateway_id="e2e-gw",
+                        ts=ts,
+                        started_at=ts - timedelta(seconds=1),
+                        key_id=key,
+                        team_id=team,
+                        owner_kind=KeyOwnerKind.USER,
+                        owner_id=owner,
+                        requested=requested,
+                        model=name,
+                        alias=via_alias["name"] if via_alias else "",
+                        router=via_router["name"] if via_router else "",
+                        upstream="use-up",
+                        upstream_model=model[name]["upstream_model"] if name in model else "Trend/Model",
+                        fallback=False,
+                        attempts=1,
+                        model_id=uuid.UUID(model[name]["id"]) if name in model else None,
+                        alias_id=uuid.UUID(via_alias["id"]) if via_alias else None,
+                        router_id=uuid.UUID(via_router["id"]) if via_router else None,
+                        endpoint="chat.completions",
+                        status=200,
+                        stream=False,
+                        prompt_tokens=tokens,
+                        completion_tokens=tokens // 2,
+                        cost_nano_usd=tokens * 1000 if known else 0,
+                        cost_known=known,
+                        duration_ms=120,
+                        config_version=1,
+                        usage_state=UsageState.REPORTED,
+                        outcome=RequestOutcome.COMPLETED,
+                    )
+                )
+
             for requested, name, via_alias, via_router, tokens, count in events:
                 for n in range(count):
-                    session.add(
-                        UsageEvent(
-                            request_id=uuid.uuid4(),
-                            gateway_id="e2e-gw",
-                            ts=now - timedelta(minutes=5 + n),
-                            started_at=now - timedelta(minutes=5 + n, seconds=1),
-                            key_id=key,
-                            team_id=team,
-                            owner_kind=KeyOwnerKind.USER,
-                            owner_id=owner,
-                            requested=requested,
-                            model=name,
-                            alias=via_alias["name"] if via_alias else "",
-                            router=via_router["name"] if via_router else "",
-                            upstream="use-up",
-                            upstream_model=model[name]["upstream_model"],
-                            fallback=False,
-                            attempts=1,
-                            model_id=uuid.UUID(model[name]["id"]),
-                            alias_id=uuid.UUID(via_alias["id"]) if via_alias else None,
-                            router_id=uuid.UUID(via_router["id"]) if via_router else None,
-                            endpoint="chat.completions",
-                            status=200,
-                            stream=False,
-                            prompt_tokens=tokens,
-                            completion_tokens=tokens // 2,
-                            cost_nano_usd=tokens * 1000,
-                            cost_known=True,
-                            duration_ms=120,
-                            config_version=1,
-                            usage_state=UsageState.REPORTED,
-                            outcome=RequestOutcome.COMPLETED,
-                        )
-                    )
+                    add(now - timedelta(minutes=5 + n), requested, name, via_alias, via_router, tokens, True)
+            for days_ago, name, tokens, known in trend:
+                # Noon UTC, so a run at midnight cannot land two events on one day or split a bucket.
+                add((now - timedelta(days=days_ago)).replace(hour=12), name, name, None, None, tokens, known)
     finally:
         await engine.dispose()
 
