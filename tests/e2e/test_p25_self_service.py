@@ -18,6 +18,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from no_secret import assert_no_secret
 from p2_identity import cookie_api, grant, identity_stack
 from secret_scan import scan_text
 from stack import pg, record_secret, wait_for
@@ -348,6 +349,8 @@ def refused(p25, foreign_team, lifecycle):
     p25.issued_secrets.append(alice["secret"])
     wait_chat(gw, alice["secret"], 200, what="Alice's key on the gateway")
     alice_id = alice["key"]["id"]
+    result["alice_key_id"] = alice_id
+    result["alice_secret"] = alice["secret"]
     result["alice"] = {
         "get": p25.member.get(stack.api_url + f"/keys/{alice_id}").status_code,
         "patch": p25.member.patch(
@@ -401,7 +404,69 @@ def refused(p25, foreign_team, lifecycle):
         ]["key_count"],
     }
     result["third_secret"] = created[-1]["secret"]
+    result["third_key_id"] = created[-1]["key"]["id"]
     wait_chat(gw, result["third_secret"], 200, what="second key on the gateway")
+    return result
+
+
+@pytest.fixture(scope="module")
+def rotate_limited(p25, refused):
+    """Exhaust the rotate bucket through a target refused after the limiter.
+
+    Alice's key is readable but not manageable by Bob: every attempt stops at 403 after
+    the limiter has counted it, so this costs no rows and no rotation. The create bucket
+    must be untouched by it, and neither key may change.
+    """
+    from lumewarp_control_plane.api.keys import KEY_ROTATE_LIMIT
+
+    stack = p25.stack
+    alice_id = refused["alice_key_id"]
+    alice_before = tuple(
+        pg(
+            stack.dsn,
+            "SELECT updated_at, key_hash, previous_key_hash FROM api_keys WHERE id = $1",
+            uuid.UUID(alice_id),
+        )[0]
+    )
+    bob_before = key_row(stack, refused["third_key_id"])
+    started = time.monotonic()
+    statuses = []
+    response = None
+    for _ in range(KEY_ROTATE_LIMIT + 10):
+        attempt = p25.member.post(
+            stack.api_url + f"/keys/{alice_id}/rotate", json={"grace_seconds": 3600}
+        )
+        statuses.append(attempt.status_code)
+        if attempt.status_code == 429:
+            response = attempt
+            break
+    result = {
+        "statuses": statuses,
+        "elapsed": time.monotonic() - started,
+        "limit": KEY_ROTATE_LIMIT,
+        "allowed_before_429": sum(1 for status in statuses if status == 403),
+        "code": response.json()["error"]["code"] if response is not None else None,
+        "retry_after": response.headers.get("retry-after") if response is not None else None,
+    }
+    result["alice_row_unchanged"] = (
+        tuple(
+            pg(
+                stack.dsn,
+                "SELECT updated_at, key_hash, previous_key_hash FROM api_keys WHERE id = $1",
+                uuid.UUID(alice_id),
+            )[0]
+        )
+        == alice_before
+    )
+    result["bob_row_unchanged"] = key_row(stack, refused["third_key_id"]) == bob_before
+    result["alice_still_serves"] = p25.gateway.chat(refused["alice_secret"]).status_code
+    # One create attempt while rotate is exhausted: the bucket is separate, so this gets
+    # the member key-count refusal, not 429. It is the key count, not the limiter.
+    create = p25.member.post(
+        stack.api_url + f"/teams/{p25.team['id']}/keys", json={"name": "after-rotate"}
+    )
+    result["create_status"] = create.status_code
+    result["create_code"] = create.json().get("error", {}).get("code")
     return result
 
 
@@ -555,7 +620,25 @@ def test_08_refusals_stay_inside_the_team_and_its_limits(refused):
     assert refused["max_keys"]["count_after"] == MAX_KEYS
 
 
-def test_09_key_writes_past_the_rate_limit_get_429(rate_limited):
+def test_09_rotate_has_its_own_rate_limit(rotate_limited):
+    limited = rotate_limited
+    assert limited["statuses"][-1] == 429, limited["statuses"]
+    assert set(limited["statuses"][:-1]) == {403}, limited["statuses"]
+    # The earlier rotations of this module (key creation, the grace cases, the post-revoke
+    # 409) already counted on the same bucket, so this is not exactly the limit.
+    assert limited["allowed_before_429"] >= limited["limit"] - 10, limited
+    assert len(limited["statuses"]) <= limited["limit"] + 10, limited
+    assert limited["code"] == "rate_limited"
+    assert int(limited["retry_after"]) >= 1
+    # Cheap enough to keep the suite short, and the refused target did not change.
+    assert limited["elapsed"] < 15
+    assert limited["alice_row_unchanged"] and limited["bob_row_unchanged"]
+    assert limited["alice_still_serves"] == 200
+    # The create bucket was not exhausted with the rotate bucket.
+    assert (limited["create_status"], limited["create_code"]) == (409, "conflict")
+
+
+def test_10_key_writes_past_the_rate_limit_get_429(rate_limited):
     assert rate_limited["statuses"][-1] == 429, rate_limited["statuses"]
     assert 404 in rate_limited["statuses"], "the limiter must run before the target lookup"
     assert rate_limited["code"] == "rate_limited"
@@ -565,7 +648,7 @@ def test_09_key_writes_past_the_rate_limit_get_429(rate_limited):
     assert rate_limited["still_serves"] == 200
 
 
-def test_10_audit_rows_exist_and_contain_no_secret(p25):
+def test_11_audit_rows_exist_and_contain_no_secret(p25):
     stack = p25.stack
     rows = pg(
         stack.dsn,
@@ -578,8 +661,7 @@ def test_10_audit_rows_exist_and_contain_no_secret(p25):
     # asyncpg returns jsonb as text unless a codec is installed.
     details = [json.loads(row["details"]) for row in rows]
     text = json.dumps(details, default=str)
-    for secret in p25.issued_secrets:
-        assert secret not in text, "an audit row contains a full secret"
+    assert_no_secret(text, p25.issued_secrets, "an audit row contains a full secret")
     assert not scan_text(text, []), "an audit row contains a full token"
     # The create details keep the owner and expiry, the rotate details the grace.
     actions_details = zip(rows, details, strict=True)
@@ -598,5 +680,4 @@ def test_10_audit_rows_exist_and_contain_no_secret(p25):
     )["items"]
     assert items
     api_details = json.dumps([item["details"] for item in items], default=str)
-    for secret in p25.issued_secrets:
-        assert secret not in api_details
+    assert_no_secret(api_details, p25.issued_secrets, "the audit API contains a full secret")

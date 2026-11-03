@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 from pydantic import SecretStr
-from stack import ROOT, Stack, record_secret
+from stack import ROOT, Stack, record_response_secrets, record_secret
 
 KEYCLOAK = "http://127.0.0.1:18080"
 OPENFGA = "http://127.0.0.1:18081"
@@ -20,8 +20,14 @@ ADMIN_GROUP = "group:lumewarp-admins"
 
 
 def cookie_api(browser, stack, method, path, **kwargs):
-    """A cookie-session request the test expects to succeed; returns its JSON body."""
+    """A cookie-session request the test expects to succeed; returns its JSON body.
+
+    Any credential the response carries is recorded before this returns, so the tests that
+    create or rotate keys through a browser session do not have to remember it for the
+    pg_dump scan.
+    """
     response = browser.request(method, stack.api_url + path, **kwargs)
+    record_response_secrets(response, f"{method.upper()} {path}")
     assert response.status_code in (200, 201, 204), (
         method,
         path,
@@ -102,6 +108,9 @@ def login(browser, stack, username, *, enabled=True):
         assert response.status_code in (302, 303), response.text
         target = str(response.url.join(response.headers["location"]))
         assert target.startswith((KEYCLOAK + "/", stack.api_url + "/session/oidc/callback"))
+        if urlparse(target).path == "/api/v1/session/oidc/callback":
+            for code in parse_qs(urlparse(target).query).get("code", []):
+                record_secret(code, "OIDC authorization code")
         response = browser.get(target)
         if urlparse(target).path == "/api/v1/session/oidc/callback":
             break
@@ -114,7 +123,7 @@ def login(browser, stack, username, *, enabled=True):
     session = browser.get(stack.api_url + "/session").json()
     assert session["authenticated"] and session["csrf_token"]
     record_secret(browser.cookies.get(COOKIE_NAME), "Lumewarp session cookie")
-    record_secret(session["csrf_token"], "Lumewarp CSRF token")
+    record_response_secrets(session, "GET /session")
     browser.headers["X-Lumewarp-CSRF"] = session["csrf_token"]
     return session["user"]
 

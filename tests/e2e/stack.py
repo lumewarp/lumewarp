@@ -19,20 +19,39 @@ from pathlib import Path
 import asyncpg
 import httpx
 
+from secret_scan import (
+    DB_PREFIX,
+    RUN_ID_ENV,
+    RUN_ID_FILE,
+    SCAN_REPORT_ENV,
+    SECRET_LOG_ENV,
+    STACKS_FILE,
+    scan_disabled,
+)
+
 ROOT = Path(__file__).resolve().parents[2]
 BREAK_GLASS_PASSWORD = "e2e-break-glass-password"
 SCOPE = "e2e"
 GATEWAY_ID = "gw-e2e"
 FORBIDDEN_PORTS = {9000, 5432, 8080, 8081}
-DB_PREFIX = "lumewarp_e2e_"
-SECRET_LOG_ENV = "E2E_SECRET_LOG"
+
+
+def run_id() -> str:
+    """The id that makes this run's database names recognisable to the finalizer."""
+    value = os.environ.get(RUN_ID_ENV)
+    if value:
+        return value
+    value = uuid.uuid4().hex[:8]
+    os.environ[RUN_ID_ENV] = value
+    return value
 
 
 def record_secret(value: str | None, kind: str) -> None:
     """Remember a secret the run issued or received, for the post-run pg_dump scan.
 
     Append-only and 0600 inside the run directory, which the e2e scripts delete after
-    scanning. With E2E_SECRET_LOG unset (a manual pytest run) nothing is recorded.
+    scanning. With E2E_SECRET_LOG unset nothing is recorded; the session fixture sets it
+    for a direct pytest run, and a scan without it is a hard failure.
     """
     if not isinstance(value, str) or len(value) < 8:
         return
@@ -42,6 +61,56 @@ def record_secret(value: str | None, kind: str) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(fd, "a") as out:
         out.write(json.dumps({"kind": kind, "value": value}) + "\n")
+
+
+# Credential-bearing response fields. `token` is included because a token response can
+# carry the value directly; a nested object (the token's metadata) is walked, not recorded.
+RESPONSE_SECRET_FIELDS = {
+    "secret": "credential",
+    "csrf_token": "CSRF token",
+    "access_token": "access token",
+    "id_token": "ID token",
+    "refresh_token": "refresh token",
+    "token": "token",
+    "api_key": "API key",
+    "password": "password",
+    "client_secret": "client secret",
+    "code_verifier": "PKCE code_verifier",
+    "nonce": "nonce",
+    "state": "state",
+}
+
+
+def record_response_secrets(payload, source: str = "") -> None:
+    """Record every credential an API response hands back, at the boundary.
+
+    Called on the response path (Stack.api/ok and the cookie-session helper) so no test
+    has to remember the new secret: a create or rotate response is recorded before the
+    caller can use it.
+    """
+    if payload is None:
+        return
+    if not isinstance(payload, (dict, list)):
+        try:
+            if not payload.content:
+                return
+            payload = payload.json()
+        except (AttributeError, ValueError):
+            return
+
+    def walk(node, where: str) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                field = RESPONSE_SECRET_FIELDS.get(key.lower()) if isinstance(key, str) else None
+                if field and isinstance(value, str) and len(value) >= 8:
+                    record_secret(value, f"{field} from {where}" if where else field)
+                elif isinstance(value, (dict, list)):
+                    walk(value, where)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, where)
+
+    walk(payload, source)
 
 
 def env_path(name: str, default: str) -> Path:
@@ -245,7 +314,12 @@ class Stack:
 
     def __init__(self) -> None:
         self.dir = Path(tempfile.mkdtemp(prefix="lumewarp-e2e-", dir=os.environ.get("E2E_RUN_DIR")))
-        self.db_name = DB_PREFIX + uuid.uuid4().hex[:12]
+        # The run id in the name is what lets the finalizer find a database whose creator
+        # forgot to register it, and tell it apart from another run's databases.
+        self.db_name = f"{DB_PREFIX}{run_id()}_{uuid.uuid4().hex[:12]}"
+        if run_dir := os.environ.get("E2E_RUN_DIR"):
+            with open(Path(run_dir) / STACKS_FILE, "a") as stacks:
+                stacks.write(f"{self.db_name}\n")
         self.http_port = free_port()
         self.grpc_port = free_port()
         self.metrics_port = free_port()
@@ -301,6 +375,16 @@ class Stack:
         if run_dir := os.environ.get("E2E_RUN_DIR"):
             with open(Path(run_dir) / "dbs", "a") as dbs:
                 dbs.write(f"{self.db_name}\n")
+            (Path(run_dir) / RUN_ID_FILE).write_text(run_id() + "\n")
+        # A credential that only reaches the control plane's environment (an OIDC client
+        # secret, the secret key that seals the login cookie, ...) is still a database
+        # leak if it is stored there, so record those values too.
+        for name, value in self.cp_env.items():
+            upper = name.upper()
+            if isinstance(value, str) and any(
+                part in upper for part in ("SECRET", "PASSWORD", "TOKEN", "API_KEY")
+            ):
+                record_secret(value, f"control-plane env {name}")
         pg(PG_DSN, f'CREATE DATABASE "{self.db_name}"')
         self.db_created = True
         self._run_cli("migrate")
@@ -345,7 +429,7 @@ class Stack:
         from lumewarp_control_plane.auth.sessions import COOKIE_NAME
 
         record_secret(self.admin.cookies.get(COOKIE_NAME), "Lumewarp session cookie")
-        record_secret(info["csrf_token"], "Lumewarp CSRF token")
+        record_response_secrets(info, "GET /session")
 
     def start_mock(self, tag: str, *args: str) -> int:
         """Start another mock upstream (e.g. with fault injection); returns its port."""
@@ -395,13 +479,16 @@ class Stack:
             proc.stop()
         self.admin.close()
         # This database is dropped per test/stack, so the pg_dump scan has to run here:
-        # after the run, no test database is left to scan. The scripts' finalizer verifies
-        # that every created database has a scan result and rescans leftovers.
+        # after the run, no test database is left to scan. The scripts' (and a direct
+        # pytest session's) finalizer verifies that every created database has a scan
+        # result and rescans leftovers. Scanning is the default; only the documented
+        # opt-out turns it off.
         leak = None
         try:
-            leak = self._scan_secrets() if self.db_created else None
+            if self.db_created and not scan_disabled():
+                leak = self._scan_secrets()
         except Exception as err:  # noqa: BLE001 - still drop, but fail the test
-            leak = f"{self.db_name}: secret scan failed: {err}"
+            leak = f"{self.db_name}: secret scan failed: {type(err).__name__}: {err}"
         try:
             pg(PG_DSN, f'DROP DATABASE IF EXISTS "{self.db_name}" WITH (FORCE)')
         except Exception as err:  # noqa: BLE001
@@ -412,12 +499,14 @@ class Stack:
 
     def _scan_secrets(self) -> str | None:
         """Dump before the drop; a report string when a plaintext credential is present."""
-        if os.environ.get("E2E_SECRET_SCAN") != "1":
-            return None
+        log = os.environ.get(SECRET_LOG_ENV)
+        report = os.environ.get(SCAN_REPORT_ENV)
+        if not log or not report:
+            raise RuntimeError(f"{SECRET_LOG_ENV} and {SCAN_REPORT_ENV} must be set")
         from secret_scan import append_result, describe, scan_database
 
-        result = scan_database(self.dsn, os.environ.get(SECRET_LOG_ENV))
-        append_result(os.environ.get("E2E_SCAN_REPORT"), result)
+        result = scan_database(self.dsn, log)
+        append_result(report, result)
         if result["hits"]:
             return f"{self.db_name}: {describe(result['hits'])}"
         return None
@@ -439,12 +528,15 @@ class Stack:
     # REST --------------------------------------------------------------------------
 
     def api(self, method: str, path: str, token: str | None = None, **kwargs) -> httpx.Response:
-        return self.admin.request(
+        response = self.admin.request(
             method,
             self.api_url + path,
             headers={"authorization": f"Bearer {token}"} if token is not None else {},
             **kwargs,
         )
+        # Every credential an endpoint issues is recorded here, before the caller sees it.
+        record_response_secrets(response, f"{method.upper()} {path}")
+        return response
 
     def ok(self, method: str, path: str, token: str | None = None, **kwargs) -> dict:
         r = self.api(method, path, token, **kwargs)
@@ -504,7 +596,6 @@ class Stack:
                 json={"name": f"key-{name}", **key_body},
             )
             assert created["key"]["owner_kind"] == owner_kind
-            record_secret(created["secret"], "API key")
             keys[name] = Key(created["key"]["id"], created["secret"])
         self.wait_key_count(2)
         return Seeded(team["id"], owner_id, keys["a"], keys["b"])

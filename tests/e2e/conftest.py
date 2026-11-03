@@ -6,6 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import secret_scan_session  # noqa: E402
 from stack import GATEWAY_BIN, MOCK_BIN, Stack  # noqa: E402
 
 LIVE_IDP_TESTS = ["test_p2_exit_gate.py", "test_p25_self_service.py"]
@@ -17,6 +18,12 @@ def pytest_runtest_makereport(item, call):
     report = yield
     setattr(item, f"rep_{report.when}", report)
     return report
+
+
+@pytest.fixture(scope="session", autouse=True)
+def secret_scan_run() -> None:
+    """Create the scan's run context even when `pytest` ran without a script."""
+    secret_scan_session.ensure_run_context()
 
 
 @pytest.fixture(scope="session")
@@ -45,3 +52,8 @@ def stack(request, binaries):
         finally:
             # teardown raises on a secret-scan hit; the directory still has to go.
             s.cleanup_dir()
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:
+    """Finalize the scan; a hit or an unchecked database fails the session."""
+    session.exitstatus = secret_scan_session.finish_run_context(exitstatus)

@@ -23,9 +23,16 @@ touch "$run_dir/pids" "$run_dir/dbs"
 # Every disposable database is scanned with pg_dump before it is dropped (per stack, in
 # tests/e2e/stack.py::teardown, so this covers per-test databases too). The secrets the
 # harness issued or received and the per-database scan results live in the run directory.
-export E2E_SECRET_SCAN=1
+# The run id is part of every database name, so the finalizer can recognise databases
+# whose creator never registered them. Scanning is the default; E2E_SKIP_SECRET_SCAN=1
+# is the only opt-out and makes pytest print a warning.
+run_id="$(head -c 4 /dev/urandom | od -An -tx1 | tr -d '[:space:]')"
+export E2E_RUN_ID="$run_id"
+echo "$run_id" >"$run_dir/run-id"
 export E2E_SECRET_LOG="$run_dir/secrets.jsonl"
 export E2E_SCAN_REPORT="$run_dir/secret-scans.jsonl"
+: >"$E2E_SECRET_LOG"
+: >"$E2E_SCAN_REPORT"
 
 cleanup() {
   status=$?
@@ -41,9 +48,11 @@ cleanup() {
     [[ -n "$pid" ]] && kill -KILL -- "-$pid" 2>/dev/null || true
   done <"$run_dir/pids"
   # After the tests and before the reaper drops anything: prove no plaintext credential
-  # reached the database. Scans leftovers from a hard kill and verifies every database the
-  # run created has a clean result. A failure here fails the script.
-  if [[ "${E2E_SECRET_SCAN:-0}" == 1 ]]; then
+  # reached the database. Scans leftovers from a hard kill (and databases matching this
+  # run's names that no test registered) and verifies every database the run created has
+  # a clean result. A failure here fails the script. If the scan is explicitly disabled,
+  # pytest already printed the warning; do not silently imply it ran.
+  if [[ "${E2E_SKIP_SECRET_SCAN:-0}" != 1 ]]; then
     if ! (cd "$root" && uv run --frozen --project control-plane python \
         tests/e2e/secret_scan.py finalize --run-dir "$run_dir" --pg-url "$E2E_PG_URL"); then
       echo "error: plaintext credentials found in the e2e databases" >&2

@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
+from no_secret import assert_no_secret
 from stack import free_port, pg, wait_for
 
 # nano-USD per million tokens: multiples of 1e6, so the cost per token is exact.
@@ -846,10 +847,11 @@ def test_a_request_is_found_in_otel_by_the_id_in_its_response(stack, otlp):
     # What must not be in a span: the prompt, the response, the API key.
     answer = response.json()["choices"][0]["message"]["content"]
     exported = b"".join(otlp.raw)
-    assert prompt.encode() not in exported
-    assert answer.encode() not in exported
-    assert seeded.a.secret.encode() not in exported
-    assert seeded.a.secret[-12:].encode() not in exported
+    assert_no_secret(
+        exported,
+        [prompt.encode(), answer.encode(), seeded.a.secret.encode(), seeded.a.secret[-12:].encode()],
+        "a span contains request data or the API key",
+    )
 
     # A client's traceparent with sampled=0 keeps the trace id and cannot erase the record.
     parent = "1" * 32
