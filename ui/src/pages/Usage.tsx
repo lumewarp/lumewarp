@@ -155,6 +155,8 @@ export function Usage() {
     retry: false,
   });
   const [metric, setMetric] = useUsageMetric();
+  // A half-filled range is not an error: the query stays disabled and the chart says what is missing.
+  const ranged = !!from && !!to;
 
   const total = useMemo(
     () =>
@@ -236,15 +238,15 @@ export function Usage() {
       {total.unpriced > 0 && <p className="text-muted-foreground">{n(total.unpriced)} request(s) had no price configured and are counted at $0.</p>}
       <div className="my-4">
         <UsageChart
-          rows={chart.data}
+          rows={ranged ? chart.data : []}
           from={from}
           to={to}
           metric={metric}
           onMetricChange={setMetric}
-          loading={chart.isPending}
+          loading={ranged && chart.isPending}
           error={chart.error}
           onRetry={() => void chart.refetch()}
-          empty="No usage in this range."
+          empty={ranged ? "No usage in this range." : "Choose a date range."}
           title="Usage by day"
         />
       </div>

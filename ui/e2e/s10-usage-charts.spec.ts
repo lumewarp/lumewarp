@@ -31,6 +31,50 @@ async function apiRows(request: APIRequestContext, from: string, to: string): Pr
 
 const sumBy = (rows: ApiRow[], key: keyof ApiRow) => rows.reduce((sum, row) => sum + Number(row[key] ?? 0), 0);
 
+/** Answer only the chart's own query (`group_by=day,model`) with crafted rows. */
+async function mockChart(page: Page, items: Record<string, unknown>[]) {
+  await page.route("**/api/v1/usage?*", async (route) => {
+    if (new URL(route.request().url()).searchParams.get("group_by") !== "day,model") return route.continue();
+    await route.fulfill({ status: 200, json: { items, next_cursor: null } });
+  });
+}
+
+const usageRow = (day: string, model: string, tokens: number, cost: number, unpriced = 0) => ({
+  date: day,
+  model,
+  requests: 1,
+  prompt_tokens: tokens,
+  completion_tokens: 0,
+  total_tokens: tokens,
+  cost_nano_usd: cost,
+  unknown_cost_count: unpriced,
+});
+
+/** The y axis labels, from the baseline up. */
+const yLabels = async (page: Page) => (await page.getByTestId("usage-chart-yaxis").locator("span").allTextContents()).map((label) => label.trim());
+
+/** The palette slots as the browser resolves them, in slot order. */
+async function palette(page: Page) {
+  return page.evaluate(() =>
+    Array.from({ length: 8 }, (_, index) => {
+      const probe = document.createElement("div");
+      probe.style.background = `var(--series-${index + 1})`;
+      document.body.append(probe);
+      const colour = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return colour;
+    }),
+  );
+}
+
+/** name → swatch colour, in legend order. */
+async function legendColours(page: Page) {
+  const items = await page.getByTestId("usage-chart-legend").locator("[data-series]").evaluateAll((nodes) =>
+    nodes.map((node) => [node.getAttribute("data-series"), getComputedStyle(node.querySelector("span")!).backgroundColor] as [string, string]),
+  );
+  return new Map(items);
+}
+
 async function signInAsAdmin(page: Page, request: APIRequestContext) {
   const response = await request.post("/api/v1/session/break-glass", { data: { password: BREAK_GLASS } });
   expect(response.status()).toBe(204);
@@ -299,6 +343,238 @@ test("a plain member's Usage page still works, and is empty rather than broken",
     await expect(member.getByText("No usage in this period.")).toBeVisible();
     await metric(member, "Cost").click();
     await expect(metric(member, "Cost")).toHaveAttribute("aria-pressed", "true");
+  } finally {
+    await context.close();
+  }
+});
+
+test("y axis: the labels stay pinned while a phone scrolls the plot", async ({ page, request, browser }) => {
+  await signInAsAdmin(page, request);
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await context.addCookies((await request.storageState()).cookies);
+  const phone = await context.newPage();
+  try {
+    await phone.goto("/usage");
+    await expect(daySlots(phone)).toHaveCount(30);
+    const axis = phone.getByTestId("usage-chart-yaxis");
+    await expect(axis).toBeVisible();
+    // The axis is not inside the scroller, and the plot has scrolled to its recent end.
+    expect(await axis.evaluate((node) => node.closest(".overflow-x-auto") === null)).toBe(true);
+    const scroller = phone.getByTestId("usage-chart").locator("div.overflow-x-auto");
+    expect(await scroller.evaluate((node) => node.scrollLeft)).toBeGreaterThan(0);
+    // Every label is inside the card's visible box, not pushed off the left edge by the scroll.
+    const card = await phone.getByTestId("usage-chart").boundingBox();
+    for (const label of await axis.locator("span").all()) {
+      const box = await label.boundingBox();
+      expect(box, "a y label is rendered").not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(card!.x);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(card!.x + card!.width);
+    }
+  } finally {
+    await context.close();
+  }
+});
+
+test("palette: the validated reference slots, with their own light and dark values", async ({ page, request }) => {
+  await signInAsAdmin(page, request);
+  await page.goto("/usage");
+  await expect(daySlots(page).first()).toBeVisible();
+  const light = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"];
+  const dark = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"];
+  const resolve = async (hexes: string[]) =>
+    page.evaluate((list) => list.map((hex) => {
+      const probe = document.createElement("div");
+      probe.style.background = hex;
+      document.body.append(probe);
+      const colour = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return colour;
+    }), hexes);
+  // The legend paints with those slots, in slot order.
+  const names = ["trend/a", "trend/b", "trend/c", "trend/partial", "trend/unpriced", "use/a", "use/b", "use/c"];
+  const lightSlots = await palette(page);
+  expect(lightSlots).toEqual(await resolve(light));
+  const colours = await legendColours(page);
+  names.forEach((name, index) => expect([name, colours.get(name)]).toEqual([name, lightSlots[index]]));
+
+  await page.evaluate(() => localStorage.setItem("lumewarp.theme", "dark"));
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(daySlots(page).first()).toBeVisible();
+  const darkSlots = await palette(page);
+  expect(darkSlots).toEqual(await resolve(dark));
+  const darkColours = await legendColours(page);
+  names.forEach((name, index) => expect([name, darkColours.get(name)]).toEqual([name, darkSlots[index]]));
+  await page.evaluate(() => localStorage.setItem("lumewarp.theme", "light"));
+});
+
+test("slots: the drawn models take the palette in order, and a filter keeps a survivor's colour", async ({ page, request }) => {
+  await signInAsAdmin(page, request);
+  await page.goto("/usage");
+  const day = daysAgo(40);
+  await setRange(page, day, day);
+  const legend = chart(page).getByTestId("usage-chart-legend");
+  await expect(legend.locator("[data-series]")).toHaveCount(9);
+  const assigned = await legendColours(page);
+  const slots = await palette(page);
+  const named = (await legend.locator("[data-series]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-series") ?? ""))).filter((name) => name !== "Other");
+  expect(named).toEqual(["fold/m1", "fold/m2", "fold/m3", "fold/m4", "fold/m5", "fold/m6", "fold/m7", "fold/m8"]);
+  named.forEach((name, index) => expect([name, assigned.get(name)]).toEqual([name, slots[index]]));
+  // Other is the neutral, not a slot.
+  expect(assigned.get("Other")).not.toBe(slots[0]);
+
+  // A narrower range that keeps some of them keeps their colours: the survivors are not repainted.
+  await setRange(page, daysAgo(39), daysAgo(39));
+  await expect(legend.locator("[data-series]")).toHaveCount(3);
+  const survivors = await legendColours(page);
+  for (const name of ["fold/m1", "fold/m3"]) expect([name, survivors.get(name)]).toEqual([name, assigned.get(name)]);
+});
+
+test("ranking: tokens decide the named eight, so the toggle names the same models with the same colours", async ({ page, request }) => {
+  await signInAsAdmin(page, request);
+  await page.goto("/usage");
+  const day = daysAgo(50);
+  await setRange(page, day, day);
+  const legend = chart(page).getByTestId("usage-chart-legend");
+  await expect(legend.locator("[data-series]")).toHaveCount(9);
+  const tokens = await legendColours(page);
+  const other = page.locator('[data-series="Other"]');
+  await expect(other).toHaveAttribute("title", "rank/m10, rank/m9");
+
+  await metric(page, "Cost").click();
+  await expect(page.getByTestId("usage-chart-unpriced")).toHaveCount(0);
+  const cost = await legendColours(page);
+  expect([...cost.keys()].sort()).toEqual([...tokens.keys()].sort());
+  for (const [name, colour] of cost) expect(tokens.get(name), name).toBe(colour);
+  // The tail stays folded in both modes: m10 outranks everything on cost but not on tokens.
+  await expect(other).toHaveAttribute("title", "rank/m10, rank/m9");
+});
+
+test("axis: exact labels for tiny token peaks, tiny costs and no usage at all", async ({ page, request }) => {
+  await signInAsAdmin(page, request);
+  await page.goto("/usage");
+  const today = isoDay(new Date());
+  // A different range each time: the same query key would answer from the cache.
+  let step = 1;
+  const setPeak = async (items: Record<string, unknown>[]) => {
+    await page.unroute("**/api/v1/usage?*").catch(() => undefined);
+    await mockChart(page, items);
+    await setRange(page, daysAgo(step++), today);
+  };
+
+  // Two tokens: whole-number steps, no 0, 1, 1, 2, 2.
+  await setPeak([usageRow(today, "tiny/a", 2, 0)]);
+  await expect.poll(() => yLabels(page)).toEqual(["0", "1", "2"]);
+  // One token.
+  await setPeak([usageRow(today, "tiny/a", 1, 0)]);
+  await expect.poll(() => yLabels(page)).toEqual(["0", "1"]);
+
+  // $0.00002: distinct labels, not four printings of the same value.
+  await setPeak([usageRow(today, "tiny/a", 1, 20_000)]);
+  await metric(page, "Cost").click();
+  await expect.poll(() => yLabels(page)).toEqual(["$0", "$5.0e-6", "$1.0e-5", "$1.5e-5", "$2.0e-5"]);
+  // Nothing clips: every label sits inside the card, however wide its text.
+  const card = (await chart(page).boundingBox())!;
+  for (const label of await page.getByTestId("usage-chart-yaxis").locator("span").all()) {
+    const box = (await label.boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(card.x);
+    expect(box.x + box.width).toBeLessThanOrEqual(card.x + card.width);
+  }
+  // One nano-USD, the smallest cost there is.
+  await setPeak([usageRow(today, "tiny/a", 1, 1)]);
+  await expect.poll(() => yLabels(page)).toEqual(["$0", "$1.0e-9"]);
+
+  // No usage at all: one baseline label, no invented scale.
+  await setPeak([usageRow(today, "tiny/a", 0, 0)]);
+  await expect.poll(() => yLabels(page)).toEqual(["$0"]);
+  await metric(page, "Tokens").click();
+  await expect.poll(() => yLabels(page)).toEqual(["0"]);
+  // Every model unpriced in cost is the same empty scale, with the note that says why.
+  await metric(page, "Cost").click();
+  await setPeak([usageRow(today, "tiny/a", 900, 0, 1)]);
+  await metric(page, "Cost").click();
+  await expect(page.getByTestId("usage-chart-unpriced")).toContainText("1 model has no price");
+  await expect.poll(() => yLabels(page)).toEqual(["$0"]);
+});
+
+test("dates: clearing a field is not a crash, and an impossible range is the API's refusal", async ({ page, request }) => {
+  await signInAsAdmin(page, request);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/usage");
+  await expect(daySlots(page).first()).toBeVisible();
+
+  await page.getByLabel("From").fill("");
+  await page.getByLabel("To (inclusive)").fill("");
+  await expect(chart(page).getByTestId("usage-chart-empty")).toHaveText("Choose a date range.");
+  expect(errors).toEqual([]);
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
+
+  // A range that runs backwards is refused by the API and shown, not swallowed.
+  await setRange(page, isoDay(new Date()), daysAgo(5));
+  await expect(chart(page).getByTestId("usage-chart-error")).toContainText("must be after from");
+  // A range past the API's 400 days: the refusal, and no 740,000 day slots built on the way.
+  await setRange(page, "0002-01-01", isoDay(new Date()));
+  await expect(chart(page).getByTestId("usage-chart-error")).toContainText("400 days");
+  await expect(daySlots(page)).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("tooltip: a long model name is shown whole, not truncated", async ({ page, request }) => {
+  await signInAsAdmin(page, request);
+  await page.goto("/usage");
+  const day = daysAgo(8);
+  const name = "trend/a-very-long-model-name-for-the-tooltip";
+  await setRange(page, day, day);
+  await hoverSlot(page, day);
+  const label = tooltip(page).getByTestId("usage-chart-tooltip-name");
+  await expect(label).toHaveText(name);
+  const box = await label.evaluate((node) => ({ scroll: node.scrollWidth, client: node.clientWidth }));
+  expect(box.scroll).toBeLessThanOrEqual(box.client + 1);
+});
+
+test("tooltip: beside the slot, on the far side of the halving line", async ({ page, request }) => {
+  await signInAsAdmin(page, request);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/usage");
+  await expect(daySlots(page)).toHaveCount(30);
+  const card = (await chart(page).boundingBox())!;
+
+  // Right half: the tooltip ends before the slot starts.
+  const last = page.getByTestId("usage-day").last();
+  await hoverSlot(page, isoDay(new Date()));
+  const tip = (await tooltip(page).boundingBox())!;
+  const slotBox = (await last.boundingBox())!;
+  expect(tip.x + tip.width).toBeLessThanOrEqual(slotBox.x);
+  expect(tip.x).toBeGreaterThanOrEqual(card.x);
+  expect(tip.x + tip.width).toBeLessThanOrEqual(card.x + card.width);
+
+  // Left half: it starts after the slot ends.
+  await page.mouse.move(2, 2);
+  await page.getByLabel("From").fill(daysAgo(9));
+  await expect(daySlots(page)).toHaveCount(10);
+  const first = page.getByTestId("usage-day").first();
+  await hoverSlot(page, daysAgo(9));
+  const tip2 = (await tooltip(page).boundingBox())!;
+  const firstBox = (await first.boundingBox())!;
+  expect(tip2.x).toBeGreaterThanOrEqual(firstBox.x + firstBox.width);
+  expect(tip2.x + tip2.width).toBeLessThanOrEqual(card.x + card.width);
+});
+
+test("subtitle: the date range never breaks across lines on a phone", async ({ page, request, browser }) => {
+  await signInAsAdmin(page, request);
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await context.addCookies((await request.storageState()).cookies);
+  const phone = await context.newPage();
+  try {
+    await phone.goto("/usage");
+    const range = phone.getByTestId("usage-chart-range");
+    await expect(range).toBeVisible();
+    // A wrapped range would be two lines; text-sm is 20px, so one line is well under 26.
+    const box = (await range.boundingBox())!;
+    expect(box.height).toBeLessThan(26);
+    expect(box.width).toBeGreaterThan(120);
+    expect(await phone.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   } finally {
     await context.close();
   }

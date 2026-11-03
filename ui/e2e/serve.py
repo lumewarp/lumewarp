@@ -393,13 +393,23 @@ async def seed_usage(url: str) -> None:
         (2, "trend/a", 2500, True),
         (4, "trend/c", 1200, True),
         (5, "trend/a", 800, True),
+        # A name long enough to wrap in the tooltip.
+        (8, "trend/a-very-long-model-name-for-the-tooltip", 40, True),
         # Nine models, strictly decreasing, on one day outside the default 30-day window: 8 hues + Other.
         *[(40, f"fold/m{n}", 1000 - n * 100, True) for n in range(1, 10)],
+        # A subset of the same models a day later: a range change must not repaint the survivors.
+        (39, "fold/m1", 700, True),
+        (39, "fold/m3", 500, True),
+        (39, "fold/m9", 300, True),
     ]
+    # (days_ago, model, tokens, cost_nano_usd): m10 is last by tokens and first by cost, so the token rank and
+    # the cost rank give different top eights. A chart that ranks by the drawn metric then names other models.
+    rank = [(50, f"rank/m{n}", 1000 - n * 100, True, (1000 - n * 100) * 1000) for n in range(1, 10)]
+    rank.append((50, "rank/m10", 10, True, 900_000_000))
     engine = create_async_engine(url)
     try:
         async with AsyncSession(engine) as session, session.begin():
-            def add(ts: datetime, requested: str, name: str, via_alias: dict | None, via_router: dict | None, tokens: int, known: bool) -> None:
+            def add(ts: datetime, requested: str, name: str, via_alias: dict | None, via_router: dict | None, tokens: int, known: bool, cost: int | None = None) -> None:
                 session.add(
                     UsageEvent(
                         request_id=uuid.uuid4(),
@@ -426,7 +436,7 @@ async def seed_usage(url: str) -> None:
                         stream=False,
                         prompt_tokens=tokens,
                         completion_tokens=tokens // 2,
-                        cost_nano_usd=tokens * 1000 if known else 0,
+                        cost_nano_usd=cost if cost is not None else (tokens * 1000 if known else 0),
                         cost_known=known,
                         duration_ms=120,
                         config_version=1,
@@ -438,9 +448,10 @@ async def seed_usage(url: str) -> None:
             for requested, name, via_alias, via_router, tokens, count in events:
                 for n in range(count):
                     add(now - timedelta(minutes=5 + n), requested, name, via_alias, via_router, tokens, True)
-            for days_ago, name, tokens, known in trend:
+            for days_ago, name, tokens, known, *explicit in trend + rank:
                 # Noon UTC, so a run at midnight cannot land two events on one day or split a bucket.
-                add((now - timedelta(days=days_ago)).replace(hour=12), name, name, None, None, tokens, known)
+                cost = explicit[0] if explicit else None
+                add((now - timedelta(days=days_ago)).replace(hour=12), name, name, None, None, tokens, known, cost)
     finally:
         await engine.dispose()
 

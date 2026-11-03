@@ -42,18 +42,18 @@
   --sidebar-ring: #4f46e5;
 
   /*
-   * Usage-chart series. A categorical set with its own light and dark values: indigo leads (it is the
-   * product colour), the rest stay away from the status hues so a bar never reads as success, warning,
-   * info or an error, and "Other" is a neutral. Never reuse these for status.
+   * Usage-chart series: the validated reference categorical palette, in its documented slot order (blue,
+   * orange, aqua, yellow, magenta, green, violet, red), each with its own dark value. Ordering is the
+   * colour-blind-safety mechanism, so never reorder or substitute a slot. "Other" is a neutral, not a slot.
    */
-  --series-1: #4f46e5;
-  --series-2: #0e7490;
-  --series-3: #a21caf;
-  --series-4: #0369a1;
-  --series-5: #b45309;
-  --series-6: #4d7c0f;
-  --series-7: #9f1239;
-  --series-8: #475569;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #6250d6;
+  --series-8: #e34948;
   --series-other: #b9c0cb;
 }
 
@@ -92,14 +92,14 @@
   --sidebar-border: #2b303b;
   --sidebar-ring: #7c83ff;
 
-  --series-1: #8c93fb;
-  --series-2: #2dd4bf;
-  --series-3: #e879f9;
-  --series-4: #38bdf8;
-  --series-5: #f4a261;
-  --series-6: #a3e635;
-  --series-7: #f43f5e;
-  --series-8: #94a3b8;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
   --series-other: #5d6876;
 }
 
@@ -137,15 +137,6 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  --color-series-1: var(--series-1);
-  --color-series-2: var(--series-2);
-  --color-series-3: var(--series-3);
-  --color-series-4: var(--series-4);
-  --color-series-5: var(--series-5);
-  --color-series-6: var(--series-6);
-  --color-series-7: var(--series-7);
-  --color-series-8: var(--series-8);
-  --color-series-other: var(--series-other);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
