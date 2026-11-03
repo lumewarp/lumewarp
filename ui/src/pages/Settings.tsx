@@ -12,6 +12,7 @@ import { CreateButton } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { useMe, useMut } from "../hooks";
 import { useTheme } from "../theme";
+import { runTokenSecretMutation } from "../lib/keySecret";
 
 const CARD = "mb-4 gap-3 p-4 shadow-none";
 
@@ -61,7 +62,7 @@ function Tokens() {
   const [secret, setSecret] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
   const form = useForm({ name: "" }, { name: required("Name") });
-  const create = useMut((name: string) => api.createToken({ name }), (r) => setSecret(r.secret));
+  const create = useMut((name: string) => runTokenSecretMutation(() => api.createToken({ name }), setSecret));
   const revoke = useMut((id: string) => api.revokeToken(id), "Token revoked");
 
   if (me.data && !me.data.user_id) return <p className="text-muted-foreground">The break-glass session is not tied to a user, so it has no personal access tokens.</p>;

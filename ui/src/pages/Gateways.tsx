@@ -9,6 +9,7 @@ import { Button } from "../components/ui/button";
 import { CreateButton } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { useMut } from "../hooks";
+import { runTokenSecretMutation } from "../lib/keySecret";
 
 type Gateway = Awaited<ReturnType<typeof api.gateways>>[number];
 type GwToken = Gateway["tokens"][number];
@@ -21,7 +22,7 @@ export function Gateways() {
   const [secret, setSecret] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<{ gateway: string; token: GwToken } | null>(null);
   const form = useForm({ gateway_id: "", name: "" }, { gateway_id: required("Gateway id") });
-  const create = useMut((v: { gateway_id: string; name: string }) => api.createGatewayToken(v), (r) => setSecret(r.secret));
+  const create = useMut((v: { gateway_id: string; name: string }) => runTokenSecretMutation(() => api.createGatewayToken(v), setSecret));
   const revoke = useMut(({ g, t }: { g: string; t: string }) => api.revokeGatewayToken(g, t), "Token revoked");
 
   return (
