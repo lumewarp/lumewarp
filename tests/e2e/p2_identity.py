@@ -4,16 +4,31 @@ import json
 import subprocess
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 
 import httpx
-from stack import ROOT
+from pydantic import SecretStr
+from stack import ROOT, Stack, record_secret
 
 KEYCLOAK = "http://127.0.0.1:18080"
 OPENFGA = "http://127.0.0.1:18081"
+ADMIN_GROUP = "group:lumewarp-admins"
+
+
+def cookie_api(browser, stack, method, path, **kwargs):
+    """A cookie-session request the test expects to succeed; returns its JSON body."""
+    response = browser.request(method, stack.api_url + path, **kwargs)
+    assert response.status_code in (200, 201, 204), (
+        method,
+        path,
+        response.status_code,
+        response.text,
+    )
+    return response.json() if response.content else None
 
 
 class LoginForm(HTMLParser):
@@ -28,12 +43,40 @@ class LoginForm(HTMLParser):
             self.action = attrs["action"]
 
 
+def _record_login_secrets(browser, stack, location):
+    """Record the OIDC state and what the sealed login-state cookie carries.
+
+    The nonce and PKCE verifier exist only inside the cookie (the database keeps a hash of
+    the state), so decrypting it here is the only way the scan can look for them.
+    """
+    from lumewarp_control_plane.auth.oidc import (
+        STATE_COOKIE,
+        LoginStateInvalid,
+        open_login_state,
+    )
+
+    for state in parse_qs(urlparse(location).query).get("state", []):
+        record_secret(state, "OIDC state")
+    sealed = browser.cookies.get(STATE_COOKIE)
+    if not sealed or not stack.cp_env.get("LUMEWARP_SECRET_KEY"):
+        return
+    settings = SimpleNamespace(secret_key=SecretStr(stack.cp_env["LUMEWARP_SECRET_KEY"]))
+    try:
+        login_state = open_login_state(settings, sealed)
+    except LoginStateInvalid:
+        return
+    record_secret(login_state.state, "OIDC state")
+    record_secret(login_state.nonce, "OIDC nonce")
+    record_secret(login_state.code_verifier, "OIDC PKCE code_verifier")
+
+
 def login(browser, stack, username, *, enabled=True):
     response = browser.get(stack.api_url + "/session/oidc/login")
     assert response.status_code == 302, response.text
     location = response.headers["location"]
     assert location.startswith(KEYCLOAK + "/realms/lumewarp/")
     assert "code_challenge_method=S256" in location
+    _record_login_secrets(browser, stack, location)
     response = browser.get(location, follow_redirects=True)
     assert response.status_code == 200, response.text
     # Keycloak marks its restart cookie Secure even in start-dev. Browsers treat
@@ -65,11 +108,106 @@ def login(browser, stack, username, *, enabled=True):
     else:
         raise AssertionError("OIDC callback was not reached")
     assert response.status_code == 302 and response.headers["location"] == "/", response.text
-    assert browser.cookies.get("lumewarp_session")
+    from lumewarp_control_plane.auth.sessions import COOKIE_NAME
+
+    assert browser.cookies.get(COOKIE_NAME)
     session = browser.get(stack.api_url + "/session").json()
     assert session["authenticated"] and session["csrf_token"]
+    record_secret(browser.cookies.get(COOKIE_NAME), "Lumewarp session cookie")
+    record_secret(session["csrf_token"], "Lumewarp CSRF token")
     browser.headers["X-Lumewarp-CSRF"] = session["csrf_token"]
     return session["user"]
+
+
+@contextmanager
+def identity_stack(backend: str, *, label: str = "P2"):
+    """Real Keycloak + an isolated OpenFGA store + a control plane configured for OIDC.
+
+    Yields a namespace with the stack, the IdP, Bob's and Alice's cookie sessions and (for
+    openfga) the store and fault proxy. Alice is a member of the configured admin group in
+    the backend; Bob has no grants. Callers use `state.cleanup` (an ExitStack) for anything
+    they add, and create the team(s) and grants their tests need.
+    """
+    stack = Stack()
+    with ExitStack() as cleanup:
+        cleanup.callback(stack.cleanup_dir)
+        cleanup.callback(stack.teardown)
+        idp = KeycloakAdmin()
+        cleanup.callback(idp.http.close)
+        cleanup.enter_context(idp.redirect(stack.api_url))
+        stack.cp_env.update(
+            {
+                "LUMEWARP_AUTHZ_BACKEND": backend,
+                "LUMEWARP_OIDC_ISSUER": "http://127.0.0.1:18080/realms/lumewarp",
+                "LUMEWARP_OIDC_CLIENT_ID": "lumewarp-cp",
+                "LUMEWARP_OIDC_CLIENT_SECRET": "lumewarp-dev-secret",
+                "LUMEWARP_SESSION_COOKIE_SECURE": "false",
+                "LUMEWARP_PUBLIC_URL": f"http://127.0.0.1:{stack.http_port}",
+                "LUMEWARP_KEY_RECONCILE_POLL_SECONDS": "1",
+                "LUMEWARP_KEY_RECONCILE_FULL_SECONDS": "1",
+            }
+        )
+        state = SimpleNamespace(stack=stack, backend=backend, idp=idp, cleanup=cleanup)
+        if backend == "openfga":
+            state.store, model = cleanup.enter_context(fga_store())
+            state.proxy = FGAProxy()
+            cleanup.callback(state.proxy.close)
+            stack.cp_env.update(
+                {
+                    "LUMEWARP_OPENFGA_URL": state.proxy.url,
+                    "LUMEWARP_OPENFGA_STORE_ID": state.store,
+                    "LUMEWARP_OPENFGA_MODEL_ID": model,
+                }
+            )
+        try:
+            stack.setup()
+            state.member = cleanup.enter_context(httpx.Client(timeout=15, trust_env=False))
+            state.admin = cleanup.enter_context(httpx.Client(timeout=15, trust_env=False))
+            state.user = login(state.member, stack, "bob@example.com")
+            state.admin_user = login(state.admin, stack, "alice@example.com")
+            if backend == "openfga":
+                fga_write(
+                    state,
+                    writes=[
+                        {
+                            "user": f"user:{state.admin_user['id']}",
+                            "relation": "member",
+                            "object": ADMIN_GROUP,
+                        }
+                    ],
+                )
+            assert cookie_api(state.admin, stack, "GET", "/users/me")["is_admin"]
+            yield state
+        finally:
+            # Preserve useful diagnostics even when a prerequisite fixture fails.
+            print(f"\n===== {label} {backend} process diagnostics =====\n{stack.logs()}")
+
+
+def fga_write(state, *, writes=(), deletes=()) -> None:
+    body = {}
+    if writes:
+        body["writes"] = {"tuple_keys": list(writes)}
+    if deletes:
+        body["deletes"] = {"tuple_keys": list(deletes)}
+    if not body:
+        return
+    response = httpx.post(
+        f"{OPENFGA}/stores/{state.store}/write", json=body, timeout=10, trust_env=False
+    )
+    response.raise_for_status()
+
+
+def grant(state, user, role, *, delete=False):
+    """Give (or remove) a team relation through the backend that owns memberships."""
+    team_id = state.team["id"] if isinstance(state.team, dict) else state.team
+    if state.backend == "builtin":
+        method = "DELETE" if delete else "PUT"
+        kwargs = {} if delete else {"json": {"role": role}}
+        response = state.stack.api(method, f"/teams/{team_id}/members/{user['id']}", **kwargs)
+        assert response.status_code in (200, 201, 204), response.text
+    else:
+        key = {"user": f"user:{user['id']}", "relation": role, "object": f"team:{team_id}"}
+        fga_write(state, deletes=[key] if delete else [], writes=[] if delete else [key])
 
 
 class KeycloakAdmin:
