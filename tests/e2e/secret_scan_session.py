@@ -5,6 +5,11 @@ The e2e and load scripts export `E2E_RUN_DIR`, `E2E_RUN_ID`, `E2E_SECRET_LOG` an
 directory (with a run id, the manifest files and the recorded-secret log) so `Stack`
 teardown still scans, and finalizes the scan at the end of the session.
 
+A run that collected no `Stack` (the scanner's own unit tests) needs no Postgres. That
+exemption is explicit: every collected test must carry the `stack_free` marker. It is
+never inferred from a file that only `Stack` writes, because a database created outside a
+`Stack` leaves no such file and must still be found by its run id.
+
 The only opt-out is `E2E_SKIP_SECRET_SCAN=1`; the end of the run then prints a warning.
 """
 
@@ -18,6 +23,16 @@ import uuid
 from pathlib import Path
 
 OWN_RUN_DIR_ENV = "LUMEWARP_E2E_SCAN_OWN_RUN_DIR"
+STACK_FREE_MARKER = "stack_free"
+
+
+def run_is_stack_free(items) -> bool:
+    """True only when the session collected tests and every one is marked stack-free.
+
+    The session decides this from what it collected; a manifest or marker file is not
+    evidence, because a database created outside a `Stack` writes neither.
+    """
+    return bool(items) and all(item.get_closest_marker(STACK_FREE_MARKER) for item in items)
 
 
 def ensure_run_context() -> None:
@@ -60,7 +75,7 @@ def ensure_run_context() -> None:
     Path(os.environ[SCAN_REPORT_ENV]).touch()
 
 
-def finish_run_context(exitstatus: int) -> int:
+def finish_run_context(exitstatus: int, *, stack_free: bool = False) -> int:
     """Scan and verify the run's databases; return the pytest exit status to use."""
     from secret_scan import finalize, scan_disabled
     from stack import PG_DSN
@@ -78,7 +93,7 @@ def finish_run_context(exitstatus: int) -> int:
         return 1
     pg_url = os.environ.get("E2E_PG_URL", PG_DSN)
     try:
-        code = finalize(run_dir, pg_url)
+        code = finalize(run_dir, pg_url, stack_free=stack_free)
     except Exception as err:  # noqa: BLE001 - any scanner failure fails the run
         print(f"secret scan failed: {type(err).__name__}: {err}", file=sys.stderr)
         code = 1

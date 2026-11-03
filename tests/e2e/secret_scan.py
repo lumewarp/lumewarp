@@ -14,7 +14,12 @@ password and any env-referenced upstream key or webhook URL). Each stack is dump
    unpadded), percent-encoded, hex, and as `pg_dump` would write it into COPY text and
    into a JSON string inside that COPY text (backslash, TAB, newline, quote, control
    characters). The OIDC `state` is stored only as a hash, but a plaintext copy anywhere
-   is still a leak, so the raw value is searched for too.
+   is still a leak, so the raw value is searched for too. A recorded credential is
+   searched at whatever length it was recorded, in its raw form and in every encoded
+   form; no needle is dropped for being short. The only length rule is
+   `MIN_CREDENTIAL_CHARS`: a credential below it is a hard failure of the run, because a
+   shorter needle cannot be told apart from ordinary dump text. Every recording entry
+   point and `load_literals` apply that one rule.
 3. **Large objects**: the product never stores one. `pg_dump` splits a large object over
    `lowrite()` chunks, which a dump-text search cannot see, so any large object in the
    dump is itself reported as a hit instead of trying to stitch the chunks.
@@ -33,10 +38,13 @@ Usage:
 `finalize` reads the run directory's `dbs` (every database the run created, written by
 `stack.Stack.setup`) and `secret-scans.jsonl` (one result per database, written by
 `Stack.teardown`), scans any database that is still present, and fails when a database
-was neither scanned nor still exists, or when any scan found a hit. It also lists the
-live databases that match this run's name pattern (`lumewarp_e2e_<run id>_`) and scans
-any that the manifest does not know about. The e2e scripts call it after pytest and before
-their reaper drops leftover databases.
+was neither scanned nor still exists, or when any scan found a hit. It always lists the
+live databases that match this run's name pattern (`lumewarp_e2e_<run id>_`), even when
+the manifest is empty, and scans any that the manifest does not know about: a database
+created outside a `Stack` never appears in the manifest. The only exemption is a run
+whose collected tests are all marked stack-free (see `finalize(stack_free=True)`); it
+created no database and needs no Postgres. The e2e scripts call it after pytest and
+before their reaper drops leftover databases.
 """
 
 from __future__ import annotations
@@ -63,16 +71,22 @@ COPY_RE = re.compile(r"^COPY (?:\S+\.)?(\S+)(?: \([^)]*\))? FROM stdin;$", re.MU
 BYTEA_RE = re.compile(r"\\\\x([0-9a-fA-F]+)")
 # pg_dump writes large objects with these calls; any of them means the database holds one.
 LARGE_OBJECT_RE = re.compile(r"\bpg_catalog\.(lo_create|lo_import|lowrite)\(")
-# Variants shorter than this are too likely to hit ordinary text; every recorded secret
-# is at least a 32-byte random token.
-MIN_VARIANT_CHARS = 12
+# The one length rule for a searchable credential, shared by recording (stack.py) and
+# scanning (this module).
+#
+# Below 8 characters a needle is too likely to appear in pg_dump's own text (version
+# strings, type names, hex bytea fragments, timestamps), so a shorter credential cannot be
+# searched reliably. It is therefore a hard failure of the run, never a silent drop: an
+# unsearched credential that the scan calls clean is the exact bug this closes. Eight is
+# the shortest value the review planted and a real e2e dump at that length produces no
+# false hit. Every recorded value passes this rule at recording time and again when a log
+# is loaded, so every needle -- raw or encoded -- derives from a credential and none is
+# discarded for length.
+MIN_CREDENTIAL_CHARS = 8
 
 DB_PREFIX = "lumewarp_e2e_"
 RUN_ID_ENV = "E2E_RUN_ID"
 RUN_ID_FILE = "run-id"
-# Written by Stack.__init__: a run that never built a stack (the scanner's own unit test)
-# has no database to discover and needs no Postgres connection to finalize.
-STACKS_FILE = "stacks"
 SECRET_LOG_ENV = "E2E_SECRET_LOG"
 SCAN_REPORT_ENV = "E2E_SCAN_REPORT"
 SKIP_ENV = "E2E_SKIP_SECRET_SCAN"
@@ -158,11 +172,13 @@ def _variants(value: str) -> dict[str, str]:
         "copy-of-json-utf8": _copy_escape(json_utf8),
     }
     # A token is already urlsafe base64; percent-encoding and base64 can collide with the
-    # plain form, and searching the same needle twice only duplicates hits.
+    # plain form, and searching the same needle twice only duplicates hits. No needle is
+    # dropped for length: each one is an exact form of a value that already passed
+    # MIN_CREDENTIAL_CHARS, so an occurrence is a leak, not noise.
     unique: dict[str, str] = {}
     seen: set[str] = set()
     for name, needle in encoded.items():
-        if len(needle) < MIN_VARIANT_CHARS or needle in seen:
+        if needle in seen:
             continue
         seen.add(needle)
         unique[name] = needle
@@ -308,6 +324,11 @@ def load_literals(path: str | None) -> list[dict]:
                 or not item["value"]
             ):
                 raise ValueError(f"{path}:{number}: corrupt recorded-secret entry")
+            if len(item["value"]) < MIN_CREDENTIAL_CHARS:
+                raise ValueError(
+                    f"{path}:{number}: a recorded credential is shorter than"
+                    f" {MIN_CREDENTIAL_CHARS} characters, the shortest the scan searches"
+                )
             items.setdefault(
                 item["value"],
                 {"kind": item.get("kind", "recorded secret"), "value": item["value"]},
@@ -345,8 +366,14 @@ def env_ref_literals(dsn: str) -> list[dict]:
     literals = []
     for name in sorted(set(names)):
         value = os.environ.get(name)
-        if value:
-            literals.append({"kind": f"env value of {name}", "value": value})
+        if not value:
+            continue
+        if len(value) < MIN_CREDENTIAL_CHARS:
+            raise RuntimeError(
+                f"{name} is referenced by the database but is shorter than"
+                f" {MIN_CREDENTIAL_CHARS} characters, the shortest the scan searches"
+            )
+        literals.append({"kind": f"env value of {name}", "value": value})
     return literals
 
 
@@ -464,16 +491,29 @@ def run_id_from(run_dir: str) -> str:
     )
 
 
-def finalize(run_dir: str, pg_url: str) -> int:
-    """Scan databases the run left behind and verify every created database was scanned."""
+def finalize(run_dir: str, pg_url: str, *, stack_free: bool = False) -> int:
+    """Scan databases the run left behind and verify every created database was scanned.
+
+    `stack_free` is set by the pytest session only when every collected test carries the
+    `stack_free` marker. Such a run never builds a `Stack`, so there is no database to
+    discover and no server to ask. Every other run -- including one with an empty
+    manifest -- always lists live databases by run id, because a database created outside
+    a `Stack` is not in the manifest and no file that `Stack` writes exists for it.
+    """
     literals_path = os.environ.get(SECRET_LOG_ENV)
     load_literals(literals_path)  # fail early: a scan without literals is not a scan
     prefix = f"{DB_PREFIX}{run_id_from(run_dir)}_"
     created = list(dict.fromkeys(_run_dir_databases(run_dir)))
     results = _scanned(run_dir)
-    if not created and not os.path.exists(os.path.join(run_dir, STACKS_FILE)):
-        # The scanner's no-stack unit test: there is nothing to dump and no server to ask.
-        print("secret scan: the run created no databases")
+    if stack_free:
+        if created:
+            print(
+                "secret scan: the run is marked stack-free but its manifest lists a"
+                f" database: {', '.join(created)}",
+                file=sys.stderr,
+            )
+            return 1
+        print("secret scan: the run is stack-free; there is no database to discover")
         return 0
     existing = _existing_databases(pg_url)
     # A database with this run's name that no Stack registered is still this run's leak

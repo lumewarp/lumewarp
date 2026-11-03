@@ -55,5 +55,11 @@ def stack(request, binaries):
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:
-    """Finalize the scan; a hit or an unchecked database fails the session."""
-    session.exitstatus = secret_scan_session.finish_run_context(exitstatus)
+    """Finalize the scan; a hit or an unchecked database fails the session.
+
+    The no-database exemption is decided here, from the collected tests: only a run whose
+    every test is marked `stack_free` may skip the Postgres lookup.
+    """
+    session.exitstatus = secret_scan_session.finish_run_context(
+        exitstatus, stack_free=secret_scan_session.run_is_stack_free(session.items)
+    )
