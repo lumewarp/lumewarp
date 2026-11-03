@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { useEffect, useState, type ReactNode } from "react";
+import { Component, useEffect, useState, type ReactNode } from "react";
 
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
@@ -62,6 +62,50 @@ export function PageLoading({ label = "Loading…" }: { label?: string }) {
       {label}
     </p>
   );
+}
+
+/** A dynamic import that failed: the module never arrived, so its error is about the download. */
+function isImportFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /dynamically imported module|error loading dynamically imported module|Importing a module script failed|module script failed/i.test(message);
+}
+
+/**
+ * A route that failed. Two different stories: a chunk that never arrived (a deploy replaced the hashed files
+ * while this tab was open, and the browser caches the rejected import, so Reload is the only way back), and a
+ * page that loaded and then threw, which is a bug and must not be blamed on a deploy.
+ */
+export function PageLoadFailed({ error }: { error?: unknown }) {
+  const missing = isImportFailure(error);
+  return (
+    <Card className="mx-auto max-w-lg items-start gap-3 p-6" data-testid="page-load-failed" data-reason={missing ? "chunk" : "render"}>
+      <h1 className="m-0">{missing ? "This page could not be loaded" : "This page could not be shown"}</h1>
+      {missing ? (
+        <p className="m-0 text-sm text-muted-foreground">
+          Its code did not arrive. That usually means a new version was deployed while this tab was open. This
+          tab will not ask for it again, so Reload is the way back.
+        </p>
+      ) : (
+        <p className="m-0 text-sm text-muted-foreground">
+          Something went wrong while showing it. The rest of the app still works: open another page, or Reload
+          to start this one again.
+        </p>
+      )}
+      <Button onClick={() => location.reload()}>Reload</Button>
+    </Card>
+  );
+}
+
+/** Catches a page that failed to load or to render, so a route never leaves a blank screen. */
+export class PageBoundary extends Component<{ children: ReactNode }, { error: unknown | null }> {
+  state: { error: unknown | null } = { error: null };
+  static getDerivedStateFromError(error: unknown) {
+    return { error: error ?? true };
+  }
+  render() {
+    // React logs the error and its component stack; nothing here silences it.
+    return this.state.error ? <PageLoadFailed error={this.state.error} /> : this.props.children;
+  }
 }
 
 /** A failed background check keeps the cached page; this notice offers the retry. */

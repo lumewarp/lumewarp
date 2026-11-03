@@ -40,6 +40,21 @@
   --sidebar-accent-foreground: #1a1d23;
   --sidebar-border: #dfe3e8;
   --sidebar-ring: #4f46e5;
+
+  /*
+   * Usage-chart series: the validated reference categorical palette, in its documented slot order (blue,
+   * orange, aqua, yellow, magenta, green, violet, red), each with its own dark value. Ordering is the
+   * colour-blind-safety mechanism, so never reorder or substitute a slot. "Other" is a neutral, not a slot.
+   */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #6250d6;
+  --series-8: #e34948;
+  --series-other: #b9c0cb;
 }
 
 .dark {
@@ -76,6 +91,16 @@
   --sidebar-accent-foreground: #e8eaee;
   --sidebar-border: #2b303b;
   --sidebar-ring: #7c83ff;
+
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  --series-other: #5d6876;
 }
 
 @theme inline {

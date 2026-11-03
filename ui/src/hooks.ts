@@ -131,10 +131,6 @@ export function useNames(rows: { id: string; name: string }[] | undefined) {
   return (id: string | null | undefined) => (id ? (map.get(id) ?? id.slice(0, 8)) : "—");
 }
 
-export function useRoutersQuery() {
-  return useQuery({ queryKey: ["routers"], queryFn: () => api.routers(), retry: false, structuralSharing: false });
-}
-
 export const useOwnKeys = () => useQuery({ queryKey: ["own-keys"], queryFn: () => api.ownKeys() });
 
 export const useModels = () => useQuery({ queryKey: ["models"], queryFn: () => api.models() });

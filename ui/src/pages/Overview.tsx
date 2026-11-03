@@ -1,9 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
+
 import { api } from "../api";
 import { PageHeader } from "../components/Bits";
+import { UsageChart } from "../components/UsageChart";
 import { Alert, AlertDescription } from "../components/ui/alert";
-import { Badge } from "../components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
+import { Card } from "../components/ui/card";
+import { dayStart, isoDay, shiftDay } from "../lib/days";
+import { useUsageMetric } from "../lib/usageMetric";
 import { useAllTeamKeys, useCan, useTeams } from "../hooks";
 
 function Counter({ label, value }: { label: string; value: string }) {
@@ -15,73 +19,6 @@ function Counter({ label, value }: { label: string; value: string }) {
   );
 }
 
-// Fixed sample numbers (tokens, thousands per hour) for the placeholder chart. Not real data.
-const SAMPLE_SERIES = [
-  { name: "Model A", fill: "fill-primary", dot: "bg-primary", values: [42, 38, 30, 26, 24, 32, 55, 78, 92, 88, 80, 74] },
-  { name: "Model B", fill: "fill-info", dot: "bg-info", values: [20, 18, 14, 12, 12, 16, 28, 36, 44, 42, 38, 34] },
-  { name: "Model C", fill: "fill-success", dot: "bg-success", values: [8, 7, 6, 5, 5, 7, 12, 16, 20, 18, 16, 14] },
-] as const;
-const SAMPLE_HOURS = ["00", "02", "04", "06", "08", "10", "12", "14", "16", "18", "20", "22"];
-const CHART_W = 480;
-const CHART_H = 160;
-const BAR_W = 24;
-const SLOT = CHART_W / SAMPLE_HOURS.length;
-const MAX = Math.max(...SAMPLE_HOURS.map((_, h) => SAMPLE_SERIES.reduce((sum, s) => sum + s.values[h], 0)));
-
-function SampleUsage() {
-  return (
-    <Card className="mt-4">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          Usage
-          <Badge variant="warn">Sample</Badge>
-        </CardTitle>
-        <CardDescription>Sample data, not real usage. Live figures are on the Usage page.</CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-3">
-        <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs" aria-label="Sample series">
-          {SAMPLE_SERIES.map((s) => (
-            <li key={s.name} className="inline-flex items-center gap-1.5">
-              <span className={`size-2.5 rounded-sm ${s.dot}`} aria-hidden="true" />
-              {s.name}
-            </li>
-          ))}
-        </ul>
-        <svg
-          role="img"
-          aria-label="Sample data, not real usage: stacked bars of tokens per two-hour slot for three example models"
-          viewBox={`0 0 ${CHART_W} ${CHART_H + 1}`}
-          className="h-auto w-full"
-        >
-          {[0.25, 0.5, 0.75, 1].map((f) => (
-            <line key={f} x1={0} x2={CHART_W} y1={CHART_H - CHART_H * f} y2={CHART_H - CHART_H * f} className="stroke-border" strokeWidth={1} />
-          ))}
-          <line x1={0} x2={CHART_W} y1={CHART_H} y2={CHART_H} className="stroke-border" strokeWidth={1} />
-          {SAMPLE_HOURS.map((hour, h) => {
-            const x = h * SLOT + (SLOT - BAR_W) / 2;
-            let y = CHART_H;
-            return (
-              <g key={hour}>
-                {SAMPLE_SERIES.map((s) => {
-                  const height = (s.values[h] / MAX) * (CHART_H - 4);
-                  y -= height;
-                  return <rect key={s.name} x={x} y={y} width={BAR_W} height={height} rx={2} className={s.fill} />;
-                })}
-              </g>
-            );
-          })}
-        </svg>
-        {/* In HTML, not the SVG, so the labels stay at text size however the chart scales. */}
-        <div className="-mt-2 grid grid-cols-12 text-center text-xs text-muted-foreground" aria-hidden="true">
-          {SAMPLE_HOURS.map((hour) => (
-            <span key={hour}>{hour}</span>
-          ))}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 export function Overview() {
   const perms = useCan();
   const teams = useTeams();
@@ -89,6 +26,18 @@ export function Overview() {
   const routers = useQuery({ queryKey: ["routers"], queryFn: () => api.routers() });
   const gateways = useQuery({ queryKey: ["gateways"], queryFn: () => api.gateways(), enabled: perms.isInstallationAdmin });
   const versions = useQuery({ queryKey: ["config-versions"], queryFn: () => api.configVersions(), enabled: perms.isInstallationAdmin });
+
+  // The last 14 UTC days, whatever this principal may read: the API already limits rows to readable teams.
+  const [metric, setMetric] = useUsageMetric();
+  const today = isoDay(new Date());
+  const from = shiftDay(today, -13);
+  const filters = { from: dayStart(from), to: dayStart(shiftDay(today, 1)), group_by: "day,model" };
+  const usage = useQuery({
+    queryKey: ["usage", filters],
+    queryFn: () => api.usage(filters),
+    // A refusal or an outage stays inside the card, with its own retry: it must not take the page down.
+    retry: false,
+  });
 
   const dash = (v: number | undefined) => (v === undefined ? "…" : String(v));
   const latest = versions.data?.reduce((m, v) => Math.max(m, v.version), 0);
@@ -109,7 +58,25 @@ export function Overview() {
           <AlertDescription>{(teams.error ?? keys.error)?.message}</AlertDescription>
         </Alert>
       )}
-      <SampleUsage />
+      <div className="mt-4">
+        <UsageChart
+          rows={usage.data}
+          from={from}
+          to={today}
+          metric={metric}
+          onMetricChange={setMetric}
+          loading={usage.isPending}
+          error={usage.error}
+          onRetry={() => void usage.refetch()}
+          empty="No usage in the last 14 days."
+          title="Usage"
+          footer={
+            <Link to="/usage" className="font-medium">
+              Open Usage
+            </Link>
+          }
+        />
+      </div>
     </>
   );
 }

@@ -104,11 +104,11 @@ test("desktop: the navigation is always there, 15rem wide, with no toggle", asyn
   expect(await page.evaluate(() => document.cookie)).not.toContain("sidebar_state");
 });
 
-test("Overview: sample usage is labelled and fits 390 px", async ({ page }) => {
-  const card = page.locator("[data-slot=card]").filter({ hasText: "Usage" });
-  await expect(card.getByText("Sample", { exact: true })).toBeVisible();
-  await expect(card.getByText(/not real usage/i).first()).toBeVisible();
-  await expect(card.getByRole("img", { name: /sample data/i })).toBeVisible();
+test("Overview: real usage over 14 UTC days, with no sample data, and it fits 390 px", async ({ page }) => {
+  const chart = page.getByTestId("usage-chart");
+  await expect(chart).toBeVisible();
+  await expect(chart.getByTestId("usage-day")).toHaveCount(14);
+  await expect(page.getByText(/sample/i)).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
 });
 

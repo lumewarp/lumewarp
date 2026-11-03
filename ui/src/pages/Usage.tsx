@@ -1,14 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { api, type UsageQuery, type UsageRow } from "../api";
-import { Badge, fmtUsd, PageHeader } from "../components/Bits";
+import { Badge, fmtNumber as n, fmtUsd, PageHeader } from "../components/Bits";
 import { SelectField, TextField } from "../components/Form";
+import { UsageChart } from "../components/UsageChart";
 import { Card } from "../components/ui/card";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { DataTable, type Column } from "../components/Table";
+import { dayStart, isoDay, shiftDay } from "../lib/days";
+import { useUsageMetric } from "../lib/usageMetric";
 import { useCatalog, useModels, useNames, useTeamDirectory, useTeams } from "../hooks";
-
-const n = (x: number) => x.toLocaleString();
 
 /** `value`, once it has stopped changing for `ms`: typed filters do not query on every keystroke. */
 function useDebounced<T>(value: T, ms: number): T {
@@ -33,7 +34,6 @@ const GROUPS = [
   { value: "team,owner,key", label: "Team × owner × key" },
 ];
 
-const isoDay = (date: Date) => date.toISOString().slice(0, 10);
 const today = new Date();
 const daysAgo = (count: number) => new Date(today.getTime() - count * 86_400_000);
 
@@ -128,8 +128,8 @@ export function Usage() {
 
   // `to` is exclusive on the server; include the chosen end day.
   const range = {
-    from: `${from}T00:00:00Z`,
-    to: `${isoDay(new Date(new Date(`${to}T00:00:00Z`).getTime() + 86_400_000))}T00:00:00Z`,
+    from: dayStart(from),
+    to: dayStart(shiftDay(to, 1)),
   };
   const filters: UsageQuery = {
     ...range,
@@ -145,6 +145,18 @@ export function Usage() {
     queryFn: () => api.usage(filters),
     enabled: !!from && !!to,
   });
+  // The chart keeps the page's range and filters but is always day × model, whatever the table groups by.
+  const chartFilters: UsageQuery = { ...filters, group_by: "day,model" };
+  const chart = useQuery({
+    queryKey: ["usage", chartFilters],
+    queryFn: () => api.usage(chartFilters),
+    enabled: !!from && !!to,
+    // A refusal or an outage is shown in the card, with its own retry: it must not stall the page.
+    retry: false,
+  });
+  const [metric, setMetric] = useUsageMetric();
+  // A half-filled range is not an error: the query stays disabled and the chart says what is missing.
+  const ranged = !!from && !!to;
 
   const total = useMemo(
     () =>
@@ -224,6 +236,20 @@ export function Usage() {
         <Stat label="Spend" value={fmtUsd(total.cost)} />
       </div>
       {total.unpriced > 0 && <p className="text-muted-foreground">{n(total.unpriced)} request(s) had no price configured and are counted at $0.</p>}
+      <div className="my-4">
+        <UsageChart
+          rows={ranged ? chart.data : []}
+          from={from}
+          to={to}
+          metric={metric}
+          onMetricChange={setMetric}
+          loading={ranged && chart.isPending}
+          error={chart.error}
+          onRetry={() => void chart.refetch()}
+          empty={ranged ? "No usage in this range." : "Choose a date range."}
+          title="Usage by day"
+        />
+      </div>
       <DataTable
         rows={query.data}
         loading={query.isPending || teams.isPending || directory.isPending}

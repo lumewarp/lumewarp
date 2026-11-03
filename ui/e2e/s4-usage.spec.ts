@@ -60,6 +60,8 @@ test("upstream model free text: arrows move through suggestions, Enter picks the
   const box = upstream(page);
   await box.click();
   const options = page.getByRole("option");
+  // The suggestions come from the models list: the page also loads its usage, so wait for them.
+  await expect(options.first()).toBeVisible();
   const count = await options.count();
   expect(count).toBeGreaterThan(1);
   await box.press("ArrowDown");
