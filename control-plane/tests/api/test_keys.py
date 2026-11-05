@@ -179,20 +179,36 @@ async def test_team_key_filters_and_own_keys_across_teams(client, committed) -> 
     await make_member(committed, other_team, owner)
     own = await make_key(committed, team, owner)
     elsewhere = await make_key(committed, other_team, owner)
-    await make_key(committed, team, other)
+    other_key = await make_key(committed, team, other)
     account = await make_service_account(committed, team)
     sa_key = await make_key(committed, team, account, lifecycle=KeyLifecycle.SUSPENDED)
+    admin, admin_token = await user_with_token(committed)
+    await make_member(committed, team, admin, role=TeamRole.ADMIN)
     await committed.commit()
     path = f"/api/v1/teams/{team.id}/keys"
+    # A plain member is forced to their own keys: filters for anything else are empty.
     for filters, expected in (
+        ({}, {str(own.id)}),
+        ({"user_id": str(owner.id)}, {str(own.id)}),
+        ({"user_id": str(other.id)}, set()),
+        ({"owner_kind": "service_account"}, set()),
+        ({"service_account_id": str(account.id)}, set()),
+        ({"lifecycle": "suspended"}, set()),
+    ):
+        listed = client.get(path, params=filters, headers=auth(token))
+        assert listed.status_code == 200, listed.text
+        assert {r["id"] for r in listed.json()["items"]} == expected, filters
+    # A team admin keeps the whole-team view, filters included.
+    for filters, expected in (
+        ({}, {str(own.id), str(other_key.id), str(sa_key.id)}),
         ({"user_id": str(owner.id)}, {str(own.id)}),
         ({"owner_kind": "service_account"}, {str(sa_key.id)}),
         ({"service_account_id": str(account.id)}, {str(sa_key.id)}),
         ({"lifecycle": "suspended"}, {str(sa_key.id)}),
     ):
-        listed = client.get(path, params=filters, headers=auth(token))
+        listed = client.get(path, params=filters, headers=auth(admin_token))
         assert listed.status_code == 200, listed.text
-        assert {r["id"] for r in listed.json()["items"]} == expected
+        assert {r["id"] for r in listed.json()["items"]} == expected, filters
     own_page = client.get("/api/v1/users/me/keys?limit=1", headers=auth(token)).json()
     next_page = client.get(
         "/api/v1/users/me/keys", params={"cursor": own_page["next_cursor"]}, headers=auth(token)
@@ -205,6 +221,31 @@ async def test_team_key_filters_and_own_keys_across_teams(client, committed) -> 
         "items": [],
         "next_cursor": None,
     }
+
+
+async def test_key_metadata_is_admin_or_owner_only(client, committed) -> None:
+    team = await make_team(committed)
+    plain, plain_token = await user_with_token(committed)
+    colleague, _ = await user_with_token(committed)
+    admin, admin_token = await user_with_token(committed)
+    await make_member(committed, team, plain)
+    await make_member(committed, team, admin, role=TeamRole.ADMIN)
+    own = await make_key(committed, team, plain)
+    other = await make_key(committed, team, colleague)
+    account = await make_service_account(committed, team)
+    sa_key = await make_key(committed, team, account)
+    await committed.commit()
+    for key, expected in ((own, 200), (other, 403), (sa_key, 403)):
+        response = client.get(f"/api/v1/keys/{key.id}", headers=auth(plain_token))
+        assert response.status_code == expected, (key.id, response.text)
+    for key in (own, other, sa_key):
+        assert client.get(f"/api/v1/keys/{key.id}", headers=auth(admin_token)).status_code == 200
+    # Outside the team the key stays invisible.
+    outsider, outsider_token = await user_with_token(committed)
+    await committed.commit()
+    for key in (own, other, sa_key):
+        assert client.get(f"/api/v1/keys/{key.id}", headers=auth(outsider_token)).status_code == 404
+    assert outsider.id != plain.id
 
 
 @pytest.mark.parametrize(

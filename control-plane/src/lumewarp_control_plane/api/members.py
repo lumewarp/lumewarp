@@ -72,21 +72,19 @@ def _out(member: TeamMember, user: User) -> MemberOut:
     )
 
 
-async def _ensure_other_admin(
-    session: AsyncSession, team_id: uuid.UUID, user_id: uuid.UUID
+async def _ensure_admin_role_change(
+    authz: Authz, team_id: uuid.UUID, before: TeamRole | None, after: TeamRole | None
 ) -> None:
-    """The team must keep an admin once `user_id` stops being one."""
-    others = await session.scalar(
-        select(func.count())
-        .select_from(TeamMember)
-        .where(
-            TeamMember.team_id == team_id,
-            TeamMember.role == TeamRole.ADMIN,
-            TeamMember.user_id != user_id,
-        )
-    )
-    if not others:
-        raise conflict("a team must keep at least one admin")
+    """Adding, promoting, demoting or removing an admin is installation-level.
+
+    One guard for every member write (`_save_member`, `update_member`, `delete_member`):
+    a team admin cannot hand out, take away or give up the team's admin role, including
+    on themselves. Plain member changes stay `TEAM_MEMBERS_MANAGE`.
+    """
+    if before is after:
+        return
+    if before is TeamRole.ADMIN or after is TeamRole.ADMIN:
+        await authz.require(Action.TEAM_ADMIN_ASSIGN, team_id)
 
 
 async def _member_or_404(
@@ -107,6 +105,7 @@ async def list_members(
     cursor: str | None = None,
 ) -> Page[MemberOut]:
     team = await get_team_or_404(session, authz, team_id)
+    await authz.require(Action.TEAM_ADMIN_READ, team.id)
     stmt = (
         select(TeamMember, User)
         .join(User, User.id == TeamMember.user_id)
@@ -208,12 +207,13 @@ async def _save_member(
         created = row is None
         if create_only and not created:
             raise conflict("user is already a member of this team")
+        await _ensure_admin_role_change(
+            authz, team.id, None if row is None else row.role, body.role
+        )
         if row is None:
             row = TeamMember(team_id=team.id, user_id=user_id, role=body.role)
             session.add(row)
         else:
-            if row.role is TeamRole.ADMIN and body.role is not TeamRole.ADMIN:
-                await _ensure_other_admin(session, team.id, user_id)
             row.role = body.role
         apply_policy(row, policy)
         await session.flush()
@@ -265,8 +265,7 @@ async def update_member(
             apply_policy(row, proposed)
             await save_grants(session, row, proposed)
         if body.role is not None and body.role is not row.role:
-            if row.role is TeamRole.ADMIN:
-                await _ensure_other_admin(session, team.id, user_id)
+            await _ensure_admin_role_change(authz, team.id, row.role, body.role)
             row.role = body.role
         await session.flush()
         await session.refresh(row)
@@ -309,8 +308,7 @@ async def delete_member(
         row = await _member_or_404(session, team.id, user_id)
         await authz.require(Action.TEAM_MEMBERS_MANAGE, team.id)
         ensure_grants_managed(request)
-        if row.role is TeamRole.ADMIN:
-            await _ensure_other_admin(session, team.id, user_id)
+        await _ensure_admin_role_change(authz, team.id, row.role, None)
         await session.delete(row)
         suspended = await suspend_user_keys(
             session,

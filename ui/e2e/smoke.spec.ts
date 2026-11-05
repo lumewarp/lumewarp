@@ -108,8 +108,24 @@ test("cookie session: CSRF on writes, inline member errors, key owner state, log
       },
     }),
   );
+  // A team admin gets the full team; a team without its policy would be the basic DTO.
   await page.route(`**/api/v1/teams/${teamId}`, (route) =>
-    route.fulfill({ json: { id: teamId, name: "Cookie Team" } }),
+    route.fulfill({
+      json: {
+        id: teamId,
+        name: "Cookie Team",
+        created_at: "2026-10-01T00:00:00Z",
+        updated_at: "2026-10-02T00:00:00Z",
+        model_access: "all",
+        allowed_models: [],
+        rpm_limit: null,
+        tpm_limit: null,
+        max_parallel: null,
+        budget_nano_usd: null,
+        max_keys_per_member: null,
+        max_member_key_lifetime_seconds: null,
+      },
+    }),
   );
   const inactiveMember = {
     team_id: teamId,
@@ -368,16 +384,17 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await expect(viewerPage.getByTestId("state-error")).toHaveCount(0);
   await viewerPage.goto(`/teams/${team.id}`);
   await expect(viewerPage.getByRole("heading", { name: "Research" })).toBeVisible();
-  await expect(viewerPage.getByRole("button", { name: "Add member" })).toBeDisabled();
-  await expect(viewerPage.getByRole("button", { name: "Edit" })).toBeDisabled();
-  await viewerPage.getByRole("tab", { name: "Service accounts" }).click();
-  await expect(viewerPage.getByRole("button", { name: "New service account" })).toBeDisabled();
+  // A plain member has no team-admin sections at all: they are not mounted and request nothing.
+  await expect(viewerPage.getByRole("tab", { name: "Members", exact: true })).toHaveCount(0);
+  await expect(viewerPage.getByRole("tab", { name: "Service accounts", exact: true })).toHaveCount(0);
   await viewerPage.getByRole("tab", { name: "Settings" }).click();
   await expect(viewerPage.getByRole("button", { name: "Edit team" })).toHaveCount(0);
   await expect(viewerPage.getByText("Team settings are read-only for members.")).toBeVisible();
 
+  // The team key list is forced to the member's own keys: the service account's key is absent.
   await viewerPage.getByRole("tab", { name: "Keys" }).click();
-  await expect(viewerPage.locator("tr", { hasText: "service-key" }).getByRole("button", { name: "Revoke" })).toBeDisabled();
+  await expect(viewerPage.locator("tr", { hasText: "service-key" })).toHaveCount(0);
+  await expect(viewerPage.getByText("No keys in this team.")).toBeVisible();
   await viewerPage.getByRole("button", { name: "New key" }).click();
   await dialog(viewerPage).getByLabel("Name").fill("personal-key");
   await dialog(viewerPage).getByRole("button", { name: "Create key" }).click();
@@ -432,7 +449,9 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   // The team view works at narrow and wide widths in both explicit themes.
   await viewerPage.setViewportSize({ width: 390, height: 844 });
   await viewerPage.goto(`/teams/${team.id}`);
-  await expect(viewerPage.getByRole("tab", { name: "Members" })).toBeVisible();
+  // A plain member's team view starts at Keys: the team-admin tabs are not offered.
+  await expect(viewerPage.getByRole("tab", { name: "Keys", exact: true })).toBeVisible();
+  await expect(viewerPage.getByRole("tab", { name: "Members", exact: true })).toHaveCount(0);
   await viewerPage.getByRole("button", { name: "Toggle navigation" }).click();
   const viewerNav = viewerPage.getByRole("navigation", { name: "Main" });
   await expect(viewerNav.getByRole("link", { name: "My keys", exact: true })).toBeVisible();

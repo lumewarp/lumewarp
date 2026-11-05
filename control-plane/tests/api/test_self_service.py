@@ -9,17 +9,19 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane.api import keys as keys_module
+from lumewarp_control_plane.auth import sessions
 from lumewarp_control_plane.authz import Authorizer, Decision, Relation
 from lumewarp_control_plane.compiler import compile_scope
 from lumewarp_control_plane.models import (
     ApiKey,
     AuditLog,
     ModelAccess,
+    PersonalAccessToken,
     ScopeType,
     TeamRole,
     member_scope_id,
 )
-from lumewarp_control_plane.security import hash_secret
+from lumewarp_control_plane.security import SecretKind, generate_secret, hash_secret
 from lumewarp_control_plane.windows import month_window
 from tests.api.helpers import (
     ADMIN_AUTH,
@@ -32,6 +34,7 @@ from tests.factories import (
     make_member,
     make_service_account,
     make_team,
+    make_user,
 )
 
 
@@ -113,7 +116,9 @@ async def test_me_reports_effective_models_limits_and_budget(client, committed) 
         "key_count": 0,
     }
     budget = narrow["budget"]
-    assert (budget["team_budget_nano_usd"], budget["team_spent_nano_usd"]) == (1000, 300)
+    # A plain member gets the member scope and the effective remaining amount, never the
+    # team's budget or the team's spend.
+    assert (budget["team_budget_nano_usd"], budget["team_spent_nano_usd"]) == (None, None)
     assert (budget["member_budget_nano_usd"], budget["member_spent_nano_usd"]) == (400, 50)
     assert budget["remaining_nano_usd"] == 350
     assert parse_ts(budget["window_start"]) == window_start
@@ -130,6 +135,65 @@ async def test_me_reports_effective_models_limits_and_budget(client, committed) 
     narrowed_all = teams[str(universal.id)]
     assert narrowed_all["models"] == [names[1]]
     assert narrowed_all["all_models"] is False
+
+
+async def _credential_headers(
+    session: AsyncSession, user_id: uuid.UUID, kind: str
+) -> dict[str, str]:
+    if kind == "session":
+        token = await sessions.create_session(session, user_id, 3600)
+        return auth("session:" + token)
+    new = generate_secret(SecretKind.PAT)
+    session.add(
+        PersonalAccessToken(
+            user_id=user_id,
+            name="me-budget",
+            token_hash=new.hash,
+            display_prefix=new.display_prefix,
+        )
+    )
+    await session.flush()
+    return auth(new.secret)
+
+
+@pytest.mark.parametrize("role", ["member", "admin"])
+@pytest.mark.parametrize("credential", ["session", "pat"])
+async def test_me_discloses_the_team_scope_to_admins_only(
+    client, committed, role, credential
+) -> None:
+    """The team budget and spend are the team-admin view, with either credential kind."""
+    team = await make_team(committed, budget_nano_usd=1000)
+    user = await make_user(committed)
+    await make_member(committed, team, user, role=TeamRole(role), budget_nano_usd=400)
+    window_start, _ = month_window(datetime.now(UTC))
+    committed.add(
+        usage_total(ScopeType.TEAM, team.id, window_start=window_start, cost_nano_usd=900)
+    )
+    committed.add(
+        usage_total(
+            ScopeType.MEMBER,
+            member_scope_id(team.id, user.id),
+            window_start=window_start,
+            cost_nano_usd=50,
+        )
+    )
+    headers = await _credential_headers(committed, user.id, credential)
+    await committed.commit()
+
+    response = client.get("/api/v1/users/me", headers=headers)
+    assert response.status_code == 200, response.text
+    [row] = response.json()["teams"]
+    budget = row["budget"]
+    # The effective minimum stays computed server-side: MIN(1000-900, 400-50).
+    assert budget["remaining_nano_usd"] == 100
+    assert (budget["member_budget_nano_usd"], budget["member_spent_nano_usd"]) == (400, 50)
+    if role == "admin":
+        assert (budget["team_budget_nano_usd"], budget["team_spent_nano_usd"]) == (1000, 900)
+    else:
+        assert (budget["team_budget_nano_usd"], budget["team_spent_nano_usd"]) == (
+            None,
+            None,
+        )
 
 
 async def test_me_matches_the_compiled_snapshot_after_team_narrowing(

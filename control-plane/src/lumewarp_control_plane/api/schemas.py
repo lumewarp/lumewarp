@@ -168,11 +168,21 @@ class TeamUpdate(PolicyFields, TeamKeyLimits):
     name: Name | None = None
 
 
-class TeamOut(PolicyOut, TeamKeyLimits):
+class TeamBasicOut(ReadModel, TeamKeyLimits):
+    """What any member of a team may read: no team policy.
+
+    A member's effective policy (team narrowed by their own) comes from `/users/me`; a
+    member must not see the team's own allowlist, limits or budget.
+    """
+
     id: uuid.UUID
     name: str
     created_at: datetime
     updated_at: datetime
+
+
+class TeamOut(PolicyOut, TeamBasicOut):
+    """The whole team, including its policy: team admins and installation admins only."""
 
 
 class MemberUpsert(PolicyFields):
@@ -791,14 +801,38 @@ class MeKeyLimitsOut(ApiModel):
 
 
 class MeBudgetOut(ApiModel):
-    """Per-scope monthly budgets and spend for the caller's key in one team."""
+    """Per-scope monthly budgets and spend for the caller's key in one team.
 
-    team_budget_nano_usd: int | None
-    team_spent_nano_usd: int
-    member_budget_nano_usd: int | None
-    member_spent_nano_usd: int
-    # MIN over the scopes that set a budget; NULL when neither does.
-    remaining_nano_usd: int | None
+    The team scope (`team_budget_nano_usd`, `team_spent_nano_usd`) is the team-admin view:
+    it is NULL for a plain member and filled for a team admin or an installation admin.
+    `remaining_nano_usd` is still the minimum across every scope that sets a budget, so a
+    member sees the effective limit without learning the team's own numbers.
+    """
+
+    team_budget_nano_usd: int | None = Field(
+        description=(
+            "The team's monthly budget; NULL when the caller is not a team admin "
+            "(or installation admin) or the team sets none."
+        ),
+    )
+    team_spent_nano_usd: int | None = Field(
+        description=(
+            "The team's spend this month; NULL when the caller is not a team admin "
+            "(or installation admin)."
+        ),
+    )
+    member_budget_nano_usd: int | None = Field(
+        description="The caller's own member budget in this team; NULL when none is set.",
+    )
+    member_spent_nano_usd: int = Field(
+        description="The caller's spend this month in this team.",
+    )
+    remaining_nano_usd: int | None = Field(
+        description=(
+            "MIN over the scopes that set a budget; NULL when none does. Computed "
+            "server-side even when a team value is not disclosed."
+        ),
+    )
     window_start: datetime
     window_end: datetime
 

@@ -344,7 +344,7 @@ def refused(self_service, foreign_team, lifecycle):
     stack, gw = self_service.stack, self_service.gateway
     team_id = self_service.team["id"]
     result = {}
-    # Another member's key: readable metadata, but no management.
+    # Another member's key: not even metadata, and no management.
     alice = cookie_api(
         self_service.admin, stack, "POST", f"/teams/{team_id}/keys", json={"name": "alice-key"}
     )
@@ -550,7 +550,8 @@ def test_01_users_me_lists_the_team_with_models_limits_and_budget(self_service):
         "key_count": 0,
     }
     budget = team["budget"]
-    assert (budget["team_budget_nano_usd"], budget["team_spent_nano_usd"]) == (TEAM_BUDGET, 0)
+    # Bob is a plain member: the team's budget and spend are the team-admin view.
+    assert (budget["team_budget_nano_usd"], budget["team_spent_nano_usd"]) == (None, None)
     if self_service.backend == "builtin":
         assert budget["member_budget_nano_usd"] == MEMBER_BUDGET
         assert budget["member_spent_nano_usd"] == 0
@@ -630,7 +631,8 @@ def test_07_suspend_resume_and_revoke_agree_with_the_gateway(self_service, lifec
 
 def test_08_refusals_stay_inside_the_team_and_its_limits(refused):
     assert refused["alice"] == {
-        "get": 200,
+        # Metadata of another member's key is a team-admin view; Bob is only a member.
+        "get": 403,
         "patch": 403,
         "rotate": 403,
         "revoke": 403,
@@ -701,14 +703,10 @@ def test_11_audit_rows_exist_and_contain_no_secret(self_service):
     actions_details = zip(rows, details, strict=True)
     rotate = next(detail for row, detail in actions_details if row["action"] == "key.rotate")
     assert {"name", "grace_seconds", "expires_at", "previous_key_expires_at"} == set(rotate)
-    # Bob, a plain member, may read his team's audit.
-    items = cookie_api(
-        self_service.member,
-        stack,
-        "GET",
-        "/audit",
+    # Bob, a plain member, has no audit view: the team's audit is the team-admin view.
+    denied = self_service.member.get(
+        stack.api_url + "/audit",
         params={"team_id": self_service.team["id"], "action": "key.rotate"},
-    )["items"]
-    assert items
-    api_details = json.dumps([item["details"] for item in items], default=str)
-    assert_no_secret(api_details, self_service.issued_secrets, "the audit API contains a full secret")
+    )
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["error"]["code"] == "forbidden"

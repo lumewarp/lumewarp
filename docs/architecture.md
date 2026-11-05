@@ -92,7 +92,13 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 - 自助 key：team 另可設 `max_keys_per_member`（每人在該 team 的非撤銷 key 上限，撤銷即釋放名額）與 `max_member_key_lifetime_seconds`（member key 最長效期）。數量上限只在建立時檢查；效期上限在建立、輪替與改到期日時強制，沒有到期日的 key 在建立或輪替時補上期限，超過上限則拒絕。service account 的 key 由 team admin 管理，不受這兩項限制；安裝層管理員與 team admin 也不能繞過 member key 的效期檢查。降低 team 上限不會自動撤銷既有 key：降低數量上限只會拒絕之後的建立（輪替不新增 key，仍可進行），降低效期上限則會拒絕之後超過上限的建立、輪替與延長。成員可以自行恢復自己暫停的 key（`owner`）與因被移出 team 而暫停的 key（`owner_removed`，恢復成員身分之後）；`admin` 暫停需要 team admin，`owner_deactivated` 需要管理員在帳號重新啟用之後處理，擁有者未啟用時任何人都不能恢復。
 - 輪替寬限：`POST /keys/{id}/rotate` 可帶 `grace_seconds`（預設 0，最多 24 小時）。寬限內舊 hash 與新 hash 都以同一個 key_id 認證，用量歸同一個 key；舊 hash 自帶到期時間，gateway 只靠快照就能在 CP 停機、從磁碟快照開機時停止接受它。快照最多帶一個舊 hash，寬限內再輪替一次會提前結束較舊的那段寬限。撤銷會同時清除新舊 hash。過期的舊 hash 沒有背景清理：gateway 依快照自帶的到期時間停止接受它，下一次 compile 不再帶上它並以 delta 移除，DB 的欄位要到下一次輪替或撤銷才改變。
 - `GET /users/me` 逐 team 回傳 member 的有效模型清單（與 compiler 的 `narrow()` 相同，team 政策與自身 member 政策取交集；若為 universal 則列出當下 catalog 並標 `all_models`）、有效限流、key 數量上限／最長效期與目前持有數，以及本月各層預算的剩餘額度；一般成員看不到他無權使用的上層清單。建立與輪替 key 以 principal 與 operation 為單位限流（各每分鐘 30 次，與目標 team／key 無關，計數在 process 內）：認證後、目標查詢與授權前檢查；安裝層管理員與緊急 session 豁免，只有 team admin 身分的 member 不豁免。成功寫入寫 audit；429 只進 metric、不寫 audit，避免灌爆稽核表。
-- 授權：安裝層管理員、team admin、team member。member 可讀 team、建立與管理自己的 key；admin 另可改 team 設定、管理成員、service account 與 team 內所有 key；安裝層管理員可建立／刪除 team、管理安裝層設定，並通過所有 team 的檢查。
+- 授權：安裝層管理員、team admin、team member，動作分得比角色細：
+  - `TEAM_READ` 只給 team 基本資料（id、名稱、時間與 `max_keys_per_member`／`max_member_key_lifetime_seconds`）；member 的有效政策一律走 `/users/me`，`TeamOut`（含 team 政策）只回給 team admin 以上。
+  - `TEAM_ADMIN_READ` 才是成員與 service account 清單、他人 key、team 用量與 audit。member 讀這些清單回 403，非成員仍是 404。
+  - `TEAM_SETTINGS_UPDATE`（team admin）只含名稱與 member key 上限；team 的模型清單、限流、並行與預算是 `TEAM_QUOTA_SET`，指派／降級／移除 team admin 是 `TEAM_ADMIN_ASSIGN`；兩者都是安裝層權限，team admin 不能設定。team 更新依實際變更判斷（`proposed != base`），team admin 重送未改動的政策值可以成功。
+  - 讀他人 key 是 team admin 或本人：`GET /keys/{id}` 對同 team 的其他 member 回 403，team 外的人仍是 404；`GET /teams/{id}/keys` 對 member 一律 AND 上「自己的 user key」，指定別人的 `user_id`／`service_account_id`／`owner_kind` 只會得到空清單。usage 由伺服器加 owner 條件，member 只看得到自己在所屬 team 的 key 的列（含任何 group by 的加總），查詢參數不能擴大；team admin 維持整個 team 的視圖。audit 只給 team admin 以上，且只含自己管理的 team；member 一律 403，已刪除 team 的 audit 仍只給安裝層管理員。
+  - `ROUTING_READ` 是安裝層（upstreams、models、aliases、routers、strategies，含 GET）；任何已認證呼叫者可以讀 `/catalog`（只有 id、name、kind），因為設定 allowlist 只需要名字。
+  - 沒有「最後一位 team admin」限制：安裝層管理員永遠在 team 之上，team 可以沒有 admin。
 - 授權後端可換：內建用 session 的 group 與 `team_members`（所以內建後端下 PAT 不會是安裝層管理員，它沒有 group）；內附 `openfga` 與 `http` 後端，也可用 `lumewarp.authz` entry point 接外部系統。後端只回答關係，單一 async 函式 `check(user_id, relation, resource) -> Decision`：`relation` 是 `admin`（team）或 `member`（team、group），`resource` 是 `group:<admin group>` 或 `team:<uuid>`。`admin` 隱含 `member` 由後端保證；admin group 涵蓋所有 team 由 Lumewarp 自己套用。`ERROR`（後端不可用或逾時）不是 deny：管理 API 回 503。
 - 用量與限流按 team 與 key owner 歸屬：member 的 scope id 是 `uuid5(team_id, user_id)`，service account 用其 id；限流 scope 為 `team:<id>`、`member:<id>`、`sa:<id>`。
 - 預算：依 token 與單價計費，達上限即拒絕。
@@ -100,7 +106,8 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 ### Admin UI
 
 - 選單依角色出現，API 仍是最後的權限來源。member 看到 My keys、Usage、Settings；team admin 多 Overview、Teams（含單一 team 的 Members／Service accounts／Keys／Usage／Settings 分頁）與 Audit log；安裝層管理員多 Users、Upstreams、Models、Aliases、Routers、Gateways 與 Config versions。既非安裝層管理員也不是 team admin 的人首頁是 `/my-keys`，其餘是 Overview；緊急 session 不擁有 key，My keys 只說明這件事。
-- 沒有獨立的 `/keys` 管理頁：整個 team 的 key 在 team 的 Keys 分頁。team admin 可管理別人的 key 與 service account 的 key；member 看得到同 team 的 key，但只能改自己的。
+- 沒有獨立的 `/keys` 管理頁：整個 team 的 key 在 team 的 Keys 分頁。team admin 看得到並管理別人的 key 與 service account 的 key；member 的 Keys 分頁只列自己的 key。Members／Service accounts 分頁只對 team admin 掛載，member 不會對這些端點發請求。
+- team admin 的 Settings 分頁把 team quota（模型、限流、預算）顯示為唯讀，只能改名稱與 member key 上限；member 只看得到名稱與 member key 上限，沒有編輯按鈕。
 - My keys 逐 team（只列自己所屬的 team）顯示可呼叫的 model（取交集後的實際清單）、限流、本月剩餘預算、key 上限與最長效期，並可建立、改名、改到期日、輪替（可選寬限）、暫停、恢復與撤銷自己的 key，下方是本月個人用量。
 - 存取變更：受保護頁面每次進入都重驗 `/users/me`。快取允許時頁面先掛上，背景重驗發現權限被收回就換成「沒有權限」；快取拒絕時先等重驗。用網址打開看不到的頁面只顯示說明，不對該 team 發請求。
 - 授權後端不可用時顯示「暫時無法確認、這不是拒絕」的狀態（`authz_unavailable`），管理 API 回 503；My keys 不會把它當成「沒有 team」。
@@ -218,7 +225,7 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 
 **權限與 SSO（control plane）**
 
-- 模型：安裝層管理員 → team → member（admin／member）與 service account → API key；沒有 org 與 project。
+- 模型：安裝層管理員 → team → member（admin／member）與 service account → API key；沒有 org 與 project。team 的 quota 與 team admin 指派是安裝層權限。
 - 授權：`Authorizer.check(user_id, relation, resource)`；內建 `builtin`、`openfga`（Check／BatchCheck／ListObjects／ReadChanges，`HIGHER_CONSISTENCY`）、`http`，或 `lumewarp.authz` entry point。每次呼叫有逾時（`LUMEWARP_AUTHZ_TIMEOUT_SECONDS`），逾時即 `ERROR` → 管理 API 503。共用情境測試 `authz/contract_tests.py`。
 - key reconciler：有 `changes()` 時每 2 秒輪詢、只重算變動的使用者，另每 5 分鐘全掃；明確 deny → `SUSPENDED`（`owner_removed`）並推新版本。恢復權限不自動復原；service account 的 key 不受影響。
 - OIDC 登入、伺服器端 session 與 CSRF 見上文 SSO 一節；admin group 成員不能以 email 自動連結。
@@ -270,7 +277,7 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 - **Metrics：** 標籤 `model` 是實際服務的 model，`requested` 是呼叫的名字，`endpoint` 是 API 路徑。改名後 label 換成新名字，舊名字的時間序列就此結束，這是 Prometheus 的正常行為。
 - **驗收：** `tests/e2e/test_catalog.py`（真實 control plane + gateway）。
 
-**尚未包含：** 註冊時的連線測試、在 Models／Routers 顯示「已生效／被 NACK」、`api_key_ref` 錯誤的處理、對成員隱藏上游資訊、dropped spans 的 metric（span 遺失目前是無聲的）。
+**尚未包含：** 註冊時的連線測試、在 Models／Routers 顯示「已生效／被 NACK」、`api_key_ref` 錯誤的處理、成員自己 usage 列上的 model／`upstream_model` provenance 是否要再收窄、dropped spans 的 metric（span 遺失目前是無聲的）。
 
 ### 已定的決定（Andy，2026-11-02）
 
@@ -291,7 +298,7 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 15. **Gateway 不寫 access log，要查單一請求就到 OTel 找。**
 16. **只有 model 改名有「Keep old name as alias」。** 預設勾選；router 和 alias 沒有。
 17. **有 gateway 沒有某個策略時，預設不能儲存。** API 回 422 並列出缺少的 gateway，帶 `force` 才能存。
-18. **Control plane 的上游資訊暫時維持現狀（Andy：先這樣處理）。** 任何已登入的人都能讀路由設定，team member 也能在 Usage 看到實際的 model 和上游模型名。回應改寫只影響 API 用戶端看到的名字，不算保密。之後要對成員隱藏再另外設計。
+18. **路由細節只給安裝層管理員。** `/catalog` 的名字與種類任何已登入者都能讀，因為 team admin 設定 allowlist 只需要名字；`/upstreams`、`/models`、`/aliases`、`/routers`、`/strategies` 的細節需要安裝層權限。Team member 仍可從自己的 usage 看到實際服務的 model 與 `upstream_model` 名稱，那是用量紀錄，不是路由設定。回應改寫只影響 API 用戶端看到的名字，不算保密。
 
 - **價格放在 model 上。** 費用永遠依實際服務的 model 計算。
 - **權限清單驗證名字存在。** Member / service account 的清單必須是 team 範圍的子集，UI 也只列 team 範圍內的名字。

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { confirmDialog } from "./helpers";
+import { confirmDialog, dialog } from "./helpers";
 import {
   Admin,
   MEMBER_EMAIL,
@@ -30,9 +30,9 @@ test.beforeEach(async ({ request }) => {
 
 test("a cached allow is revalidated and replaced when the role is taken away", async ({ page }) => {
   const team = await admin.ensureTeam("s9-allow");
-  // The outsider has no other admin role, so demoting them really takes /teams away.
+  // The outsider has no other admin role, so demoting them really takes /teams away. An
+  // installation admin does this: a team admin cannot demote another admin.
   await admin.putMember(team.id, OUTSIDER_EMAIL, "admin");
-  // A second admin so the demotion below is allowed (a team must keep at least one admin).
   await admin.putMember(team.id, MEMBER_EMAIL, "admin");
   await signIn(page, OUTSIDER, "/my-keys");
   await expect(page.getByRole("link", { name: "Teams", exact: true })).toBeVisible();
@@ -91,10 +91,93 @@ test("a 403 from a permission-dependent read revalidates /users/me", async ({ pa
 test("team detail: an own team is readable and its back link is My keys for a plain member", async ({ page }) => {
   const own = await admin.ensureTeam("s9-own");
   await admin.putMember(own.id, OUTSIDER_EMAIL);
+  const forbidden: string[] = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (/\/members$|\/service-accounts(\/|$)|\/models$|\/upstreams$|\/routers$|\/strategies$|\/audit$/.test(path)) forbidden.push(path);
+  });
   await signIn(page, OUTSIDER, `/teams/${own.id}`);
   await expect(page.getByRole("heading", { name: own.name, level: 1 })).toBeVisible();
+  // The team-admin sections are not mounted at all for a plain member.
+  await expect(page.getByRole("tab", { name: "Members", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Service accounts", exact: true })).toHaveCount(0);
+  for (const name of ["Keys", "Usage", "Settings"]) {
+    await page.getByRole("tab", { name, exact: true }).click();
+    await expect(page.getByRole("tabpanel")).toBeVisible();
+  }
+  // Settings are read-only and the team's own policy is not sent to a plain member.
+  await expect(page.getByRole("button", { name: "Edit team" })).toHaveCount(0);
+  await expect(page.getByRole("tabpanel").getByText("Policy", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("tabpanel").getByText("Keys per member", { exact: true })).toBeVisible();
   await page.getByRole("main").getByRole("link", { name: "My keys", exact: true }).click();
   await expect(page).toHaveURL(/\/my-keys$/);
+  expect(forbidden).toEqual([]);
+});
+
+test("members: a team admin cannot hand out or take away the admin role", async ({ page }) => {
+  const team = await admin.ensureTeam("s9-roles");
+  await admin.putMember(team.id, TEAM_ADMIN_EMAIL, "admin");
+  await admin.putMember(team.id, MEMBER_EMAIL, "admin");
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  await signIn(page, TEAM_ADMIN, `/teams/${team.id}`);
+  await page.getByRole("tab", { name: "Members", exact: true }).click();
+
+  // The Add member dialog offers no role at all; the server would refuse an admin anyway.
+  await page.getByRole("button", { name: "Add member" }).click();
+  await expect(dialog(page).getByRole("combobox", { name: "Role", exact: true })).toHaveCount(0);
+  await expect(dialog(page).getByText(/only an installation admin can assign a team admin/i)).toBeVisible();
+  await dialog(page).getByRole("button", { name: "Cancel" }).click();
+
+  // An admin row cannot be removed by a team admin; a plain member row can.
+  await expect(rowOf(page, MEMBER_EMAIL).getByRole("button", { name: "Delete", exact: true })).toBeDisabled();
+  await expect(rowOf(page, VIEWER_EMAIL).getByRole("button", { name: "Delete", exact: true })).toBeEnabled();
+});
+
+test("usage: an admin of one team never requests a member team's directory", async ({ page }) => {
+  const adminTeam = await admin.ensureTeam("s9-mixed-admin");
+  const memberTeam = await admin.ensureTeam("s9-mixed-member");
+  await admin.putMember(adminTeam.id, TEAM_ADMIN_EMAIL, "admin");
+  await admin.putMember(memberTeam.id, TEAM_ADMIN_EMAIL, "member");
+  const requests: string[] = [];
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (/\/members$|\/service-accounts(\/|$)/.test(path)) requests.push(path);
+  });
+  await signIn(page, TEAM_ADMIN, "/usage");
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
+  // The directory for the administered team is loaded; the member-only team is never asked.
+  await expect.poll(() => requests.includes(`/api/v1/teams/${adminTeam.id}/members`)).toBe(true);
+  expect(requests).not.toContain(`/api/v1/teams/${memberTeam.id}/members`);
+  expect(requests).not.toContain(`/api/v1/teams/${memberTeam.id}/service-accounts`);
+  await expect(page.getByTestId("state-error")).toHaveCount(0);
+});
+
+
+test("team settings: a team admin edits name and key limits but not the quota", async ({ page }) => {
+  const team = await admin.ensureTeam("s9-settings", { max_keys_per_member: 2 });
+  await admin.patch<{ id: string }>(`/teams/${team.id}`, { rpm_limit: 10, budget_nano_usd: 5000 });
+  await admin.putMember(team.id, TEAM_ADMIN_EMAIL, "admin");
+  await signIn(page, TEAM_ADMIN, `/teams/${team.id}`);
+  await page.getByRole("tab", { name: "Settings", exact: true }).click();
+  // The quota is visible read-only, with no edit control of its own.
+  await expect(page.getByRole("tabpanel")).toContainText("10 rpm");
+  await page.getByRole("button", { name: "Edit team" }).click();
+  const d = dialog(page);
+  await expect(d.getByLabel("Requests per minute")).toHaveCount(0);
+  await expect(d.getByLabel("Monthly budget (USD)")).toHaveCount(0);
+  await expect(d.getByLabel("Max keys per member")).toBeVisible();
+  const renamed = `s9-settings-${Date.now()}`;
+  await d.getByLabel("Name").fill(renamed);
+  await d.getByLabel("Max keys per member").fill("3");
+  const patched = page.waitForRequest((request) => request.method() === "PATCH" && new URL(request.url()).pathname === `/api/v1/teams/${team.id}`);
+  await d.getByRole("button", { name: "Save" }).click();
+  const body = (await patched).postDataJSON() as Record<string, unknown>;
+  expect(body).not.toHaveProperty("rpm_limit");
+  expect(body).not.toHaveProperty("model_access");
+  expect(body).not.toHaveProperty("budget_nano_usd");
+  expect(body).toMatchObject({ name: renamed, max_keys_per_member: 3 });
+  await expect(d).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: renamed, level: 1 })).toBeVisible();
 });
 
 test("team detail: a foreign team shows no-access and mounts no panels", async ({ page }) => {

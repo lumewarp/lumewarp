@@ -6,7 +6,13 @@ import type { components, paths } from "./schema";
 export { ApiError } from "./errors";
 
 export type Schemas = components["schemas"];
+/** The whole team, including its policy: team admins and installation admins only. */
 export type Team = Schemas["TeamOut"];
+/** What every team member may read: id, name, timestamps and the member key limits. */
+export type TeamBasic = Schemas["TeamBasicOut"];
+export type TeamAny = Team | TeamBasic;
+/** Whether the server sent the team policy: true for team admins and above. */
+export const hasPolicy = (team: TeamAny): team is Team => "model_access" in team;
 export type Key = Schemas["KeyOut"];
 export type Member = Schemas["MemberOut"];
 export type ServiceAccount = Schemas["ServiceAccountOut"];

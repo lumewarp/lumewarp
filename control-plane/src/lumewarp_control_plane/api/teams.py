@@ -28,7 +28,7 @@ from lumewarp_control_plane.api.policy import (
     save_grants,
     validate_owners_after_team_update,
 )
-from lumewarp_control_plane.api.schemas import Page, TeamCreate, TeamOut, TeamUpdate
+from lumewarp_control_plane.api.schemas import Page, TeamBasicOut, TeamCreate, TeamOut, TeamUpdate
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import ApiKey, ModelAccess, ServiceAccount, Team
@@ -36,23 +36,35 @@ from lumewarp_control_plane.models import ApiKey, ModelAccess, ServiceAccount, T
 router = APIRouter(tags=["teams"])
 
 
-@router.get("/teams", response_model=Page[TeamOut], operation_id="listTeams")
+@router.get(
+    "/teams",
+    response_model=Page[TeamOut | TeamBasicOut],
+    operation_id="listTeams",
+)
 async def list_teams(
     authz: Authz,
     session: SessionDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
-) -> Page[TeamOut]:
+) -> Page[TeamOut | TeamBasicOut]:
     stmt = select(Team).order_by(Team.id)
-    if not await authz.is_admin():
+    is_admin = await authz.is_admin()
+    if not is_admin:
         candidates = set(await session.scalars(select(Team.id)))
         readable = await authz.readable_teams(candidates)
         if readable is not None:
             stmt = stmt.where(Team.id.in_(readable))
     rows, next_cursor = await uuid_page(session, stmt, Team.id, limit, cursor)
-    return Page[TeamOut](
-        items=[TeamOut.model_validate(row) for row in rows], next_cursor=next_cursor
-    )
+    # The full team policy only goes to team admins; every other member gets the basic
+    # record and reads their own effective policy from /users/me.
+    admin_teams = None if is_admin else await authz.admin_teams([row.id for row in rows])
+    items = [
+        TeamOut.model_validate(row)
+        if admin_teams is None or row.id in admin_teams
+        else TeamBasicOut.model_validate(row)
+        for row in rows
+    ]
+    return Page[TeamOut | TeamBasicOut](items=items, next_cursor=next_cursor)
 
 
 @router.post(
@@ -94,10 +106,16 @@ async def create_team(
     return TeamOut.model_validate(row)
 
 
-@router.get("/teams/{team_id}", response_model=TeamOut, operation_id="getTeam")
-async def get_team(team_id: uuid.UUID, authz: Authz, session: SessionDep) -> TeamOut:
+@router.get(
+    "/teams/{team_id}",
+    response_model=TeamOut | TeamBasicOut,
+    operation_id="getTeam",
+)
+async def get_team(team_id: uuid.UUID, authz: Authz, session: SessionDep) -> TeamOut | TeamBasicOut:
     row = await get_team_or_404(session, authz, team_id)
-    return TeamOut.model_validate(row)
+    if await authz.allowed(Action.TEAM_ADMIN_READ, row.id):
+        return TeamOut.model_validate(row)
+    return TeamBasicOut.model_validate(row)
 
 
 @router.patch("/teams/{team_id}", response_model=TeamOut, operation_id="updateTeam")
@@ -112,10 +130,21 @@ async def update_team(
         await lock_scope(session, settings)
         ensure_not_null(body, "name")
         row = await get_team_or_404(session, authz, team_id)
-        await authz.require(Action.TEAM_UPDATE, row.id)
         base = policy_of(row)
         proposed = policy_from_fields(body, default_mode=ModelAccess.ALL, base=base)
         changed = proposed != base
+        key_limit_fields = ("max_keys_per_member", "max_member_key_lifetime_seconds")
+        key_limits_changed = any(
+            field in body.model_fields_set and getattr(body, field) != getattr(row, field)
+            for field in key_limit_fields
+        )
+        settings_changed = (body.name is not None and body.name != row.name) or key_limits_changed
+        # Decide from what actually changes: a form that resends the current policy must
+        # still be usable by a team admin who may not set quota.
+        if changed:
+            await authz.require(Action.TEAM_QUOTA_SET, row.id)
+        if settings_changed or not changed:
+            await authz.require(Action.TEAM_SETTINGS_UPDATE, row.id)
         if changed:
             await grant_ids(session, proposed.allowed_models)
             await validate_owners_after_team_update(session, row, proposed)
@@ -123,7 +152,7 @@ async def update_team(
             await save_grants(session, row, proposed)
         if body.name is not None:
             row.name = body.name
-        for field in ("max_keys_per_member", "max_member_key_lifetime_seconds"):
+        for field in key_limit_fields:
             if field in body.model_fields_set:
                 setattr(row, field, getattr(body, field))
         await session.flush()

@@ -88,7 +88,8 @@ the team lifetime and the member key limit are refused; the create bucket and th
 bucket are exhausted separately (rotate through a key that is refused after the limiter,
 so it costs no rows) and each answers 429 with `Retry-After`, `rate_limited`, without
 changing the key and without exhausting the other bucket; the audit rows for create and
-rotate exist and carry no secret. Every gateway assertion polls the gateway for its
+rotate exist and carry no secret, while the audit API refuses Bob (a plain member has no
+team-admin view). Every gateway assertion polls the gateway for its
 answer; nothing sleeps for a fixed time.
 
 ## No plaintext credentials in the database

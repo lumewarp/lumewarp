@@ -438,9 +438,10 @@ async def test_a_router_whose_strategy_disappeared_is_flagged(client, report):
     assert "no gateway reports" in got["config_problems"][0]
 
 
-async def test_strategies_needs_routing_read(client, committed: AsyncSession):
+async def test_strategies_need_routing_read(client, committed: AsyncSession):
     assert client.get("/api/v1/strategies").status_code == 401
     _, token = await user_with_token(committed)
     await committed.commit()
-    resp = client.get("/api/v1/strategies", headers=auth(token))
-    assert resp.status_code == 200
+    # Strategy descriptors are routing details: installation admins only.
+    assert client.get("/api/v1/strategies", headers=auth(token)).status_code == 403
+    assert client.get("/api/v1/strategies", headers=ADMIN_AUTH).status_code == 200

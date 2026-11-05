@@ -4,8 +4,10 @@ import uuid
 
 import pytest
 
+from lumewarp_control_plane.auth import sessions
 from lumewarp_control_plane.authz import Authorizer, Decision, Relation
-from lumewarp_control_plane.models import TeamRole
+from lumewarp_control_plane.models import PersonalAccessToken, TeamRole
+from lumewarp_control_plane.security import SecretKind, generate_secret
 from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
 from tests.factories import (
     make_key,
@@ -17,9 +19,13 @@ from tests.factories import (
 
 ROLES = ("group_admin", "admin", "member", "other_team", "bootstrap")
 READ = (200, 200, 200, 404, 200)
+# A team admin reads the whole-team views; a plain member has no audit view.
+ADMIN_READ = (200, 200, 403, 404, 200)
 ADMIN = (200, 200, 403, 404, 200)
 INSTALLATION = (200, 403, 403, 403, 200)
 ANY = (200, 200, 200, 200, 200)
+# A key owned by another member is admin-or-owner only; a foreign team stays a 404.
+OWN_KEY = (200, 200, 403, 404, 200)
 
 # name, method, path, body, exact response by ROLES order.
 CASES = [
@@ -27,12 +33,13 @@ CASES = [
     ("teams.create", "POST", "/teams", {"name": "new-{mark}"}, (201, 403, 403, 403, 201)),
     ("teams.read", "GET", "/teams/{team}", None, READ),
     ("teams.update", "PATCH", "/teams/{team}", {"name": "updated-{mark}"}, ADMIN),
+    ("teams.quota", "PATCH", "/teams/{team}", {"rpm_limit": 5}, (200, 403, 403, 404, 200)),
     ("teams.delete", "DELETE", "/teams/{team}", None, (204, 403, 403, 404, 204)),
-    ("members.list", "GET", "/teams/{team}/members", None, READ),
+    ("members.list", "GET", "/teams/{team}/members", None, ADMIN_READ),
     ("members.put", "PUT", "/teams/{team}/members/{target}", {"role": "member"}, ADMIN),
     ("members.patch", "PATCH", "/teams/{team}/members/{target}", {"rpm_limit": 10}, ADMIN),
     ("members.delete", "DELETE", "/teams/{team}/members/{target}", None, (204, 204, 403, 404, 204)),
-    ("sa.list", "GET", "/teams/{team}/service-accounts", None, READ),
+    ("sa.list", "GET", "/teams/{team}/service-accounts", None, ADMIN_READ),
     (
         "sa.create",
         "POST",
@@ -40,7 +47,7 @@ CASES = [
         {"name": "new"},
         (201, 201, 403, 404, 201),
     ),
-    ("sa.read", "GET", "/service-accounts/{sa}", None, READ),
+    ("sa.read", "GET", "/service-accounts/{sa}", None, ADMIN_READ),
     ("sa.patch", "PATCH", "/service-accounts/{sa}", {"description": "updated"}, ADMIN),
     ("sa.delete", "DELETE", "/service-accounts/{sa}", None, (204, 204, 403, 404, 204)),
     ("keys.list", "GET", "/teams/{team}/keys", None, READ),
@@ -51,7 +58,7 @@ CASES = [
         {"name": "sa", "service_account_id": "{sa}"},
         (201, 201, 403, 404, 201),
     ),
-    ("keys.read", "GET", "/keys/{key}", None, READ),
+    ("keys.read", "GET", "/keys/{key}", None, OWN_KEY),
     ("keys.patch", "PATCH", "/keys/{key}", {"name": "managed"}, ADMIN),
     ("keys.revoke", "POST", "/keys/{key}/revoke", None, ADMIN),
     ("keys.rotate", "POST", "/keys/{key}/rotate", None, ADMIN),
@@ -70,7 +77,7 @@ CASES = [
     ),
     ("users.me", "GET", "/users/me", None, ANY),
     ("tokens.list", "GET", "/users/me/tokens", None, ANY),
-    ("upstreams.list", "GET", "/upstreams", None, ANY),
+    ("upstreams.list", "GET", "/upstreams", None, INSTALLATION),
     (
         "upstreams.create",
         "POST",
@@ -78,8 +85,9 @@ CASES = [
         {"name": "up-{mark}", "kind": "vllm", "base_url": "http://127.0.0.1:9000/v1"},
         (201, 403, 403, 403, 201),
     ),
-    ("models.list", "GET", "/models", None, ANY),
-    ("routers.list", "GET", "/routers", None, ANY),
+    ("models.list", "GET", "/models", None, INSTALLATION),
+    ("routers.list", "GET", "/routers", None, INSTALLATION),
+    ("catalog.list", "GET", "/catalog", None, ANY),
     ("gateways.list", "GET", "/gateways", None, INSTALLATION),
     (
         "gateways.create",
@@ -90,7 +98,7 @@ CASES = [
     ),
     ("config.list", "GET", "/config/versions", None, INSTALLATION),
     ("usage.read", "GET", "/usage?team_id={team}", None, READ),
-    ("audit.read", "GET", "/audit?team_id={team}", None, READ),
+    ("audit.read", "GET", "/audit?team_id={team}", None, ADMIN_READ),
 ]
 
 
@@ -137,14 +145,27 @@ async def test_endpoint_authorization_matrix(client, committed, role, case) -> N
     )
 
 
-@pytest.mark.parametrize("resource", ["team", "member", "sa", "key", "usage", "audit"])
-async def test_unknown_and_unreadable_resources_are_both_404(client, committed, resource) -> None:
+@pytest.mark.parametrize(
+    "resource,existing",
+    [
+        ("team", 200),
+        ("member", 403),
+        ("sa", 403),
+        ("key", 403),
+        ("usage", 403),
+        ("audit", 403),
+    ],
+)
+async def test_unknown_is_404_and_unreadable_keeps_its_own_answer(
+    client, committed, resource, existing
+) -> None:
     team = await make_team(committed)
     owner = await make_user(committed)
     await make_member(committed, team, owner)
     account = await make_service_account(committed, team)
     key = await make_key(committed, team, owner)
-    _, token = await user_with_token(committed)
+    caller, token = await user_with_token(committed)
+    await make_member(committed, team, caller)
     await committed.commit()
     for missing in (False, True):
         team_id = uuid.uuid4() if missing else team.id
@@ -159,7 +180,11 @@ async def test_unknown_and_unreadable_resources_are_both_404(client, committed, 
             "audit": f"/audit?team_id={team_id}",
         }
         response = client.get("/api/v1" + paths[resource], headers=auth(token))
-        assert response.status_code == 404, response.text
+        assert response.status_code == (404 if missing else existing), (
+            resource,
+            missing,
+            response.text,
+        )
 
 
 @pytest.mark.parametrize(
@@ -257,6 +282,59 @@ async def test_missing_or_foreign_service_account_is_404_before_key_permission(
             headers=auth(token),
         )
         assert response.status_code == expected, response.text
+
+
+@pytest.mark.parametrize("role", ["member", "admin"])
+async def test_a_pat_authorizes_exactly_like_a_session(client, committed, role) -> None:
+    """Both credentials resolve to the same user id; no rule differs by credential kind."""
+    team = await make_team(committed, rpm_limit=10)
+    caller = await make_user(committed)
+    colleague = await make_user(committed)
+    await make_member(committed, team, caller, role=TeamRole(role))
+    await make_member(committed, team, colleague)
+    own_key = await make_key(committed, team, caller)
+    other_key = await make_key(committed, team, colleague)
+    session_token = await sessions.create_session(committed, caller.id, 3600)
+    secret = generate_secret(SecretKind.PAT)
+    committed.add(
+        PersonalAccessToken(
+            user_id=caller.id,
+            name="parity",
+            token_hash=secret.hash,
+            display_prefix=secret.display_prefix,
+        )
+    )
+    await committed.commit()
+    credentials = (
+        auth("session:" + session_token),
+        auth(secret.secret),
+    )
+    requests = [
+        ("GET", "/teams", None),
+        ("GET", f"/teams/{team.id}", None),
+        ("GET", f"/teams/{team.id}/members", None),
+        ("GET", f"/teams/{team.id}/service-accounts", None),
+        ("GET", f"/teams/{team.id}/keys", None),
+        ("GET", f"/keys/{own_key.id}", None),
+        ("GET", f"/keys/{other_key.id}", None),
+        ("GET", f"/usage?team_id={team.id}", None),
+        ("GET", f"/audit?team_id={team.id}", None),
+        ("PATCH", f"/teams/{team.id}", {"name": f"pat-{suffix()}"}),
+        ("PATCH", f"/teams/{team.id}", {"rpm_limit": 5}),
+        ("GET", "/upstreams", None),
+        ("GET", "/models", None),
+        ("GET", "/routers", None),
+        ("GET", "/strategies", None),
+        ("GET", "/catalog", None),
+    ]
+    for method, path, body in requests:
+        statuses = [
+            client.request(method, "/api/v1" + path, json=body, headers=headers).status_code
+            for headers in credentials
+        ]
+        assert statuses[0] == statuses[1], (method, path, statuses)
+    # Spot-check the answer itself, not only that both agree.
+    assert statuses[1] == 200  # /catalog is the last request
 
 
 @pytest.mark.parametrize("failed_relation", [Relation.MEMBER, Relation.ADMIN])

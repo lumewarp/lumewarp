@@ -6,13 +6,16 @@ import { TextField } from "../components/Form";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { DataTable } from "../components/Table";
 import { Card } from "../components/ui/card";
-import { useNames, useTeams } from "../hooks";
+import { useCan, useNames, useTeams } from "../hooks";
 
 export function Audit() {
   const [action, setAction] = useState("");
   const [teamId, setTeamId] = useState("");
+  const perms = useCan();
   const teams = useTeams();
-  const teamName = useNames(teams.data);
+  // Rows are per administered team; offering a team the caller only belongs to would be a 403.
+  const administered = (teams.data ?? []).filter((team) => perms.teamAdmin(team.id));
+  const teamName = useNames(administered);
   const q = useQuery({
     queryKey: ["audit", action, teamId],
     queryFn: () => api.audit({ action: action.trim() || undefined, team_id: teamId || undefined }),
@@ -25,7 +28,7 @@ export function Audit() {
           label="Team"
           value={teamId}
           onChange={setTeamId}
-          options={[{ value: "", label: "All teams" }, ...(teams.data ?? []).map((team) => ({ value: team.id, label: team.name }))]}
+          options={[{ value: "", label: "All teams" }, ...administered.map((team) => ({ value: team.id, label: team.name }))]}
         />
         <TextField label="Action" value={action} onChange={setAction} placeholder="e.g. key.create" />
       </Card>

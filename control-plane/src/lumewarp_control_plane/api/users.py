@@ -67,7 +67,11 @@ def _check_not_null(body: object, *fields: str) -> None:
 
 
 async def _my_teams(
-    authz: RequestAuthz, session: SessionDep, user_id: uuid.UUID
+    authz: RequestAuthz,
+    session: SessionDep,
+    user_id: uuid.UUID,
+    *,
+    installation_admin: bool,
 ) -> list[MeTeamOut]:
     rows: list[tuple[Team, TeamRole, TeamMember | None]]
     if authz.authorizer.manages_grants:
@@ -103,18 +107,25 @@ async def _my_teams(
             for team in teams
             if team.id in members or team.id in admins
         ]
-    return await _team_details(session, user_id, rows)
+    return await _team_details(session, user_id, rows, installation_admin=installation_admin)
 
 
 async def _team_details(
-    session: SessionDep, user_id: uuid.UUID, rows: list[tuple[Team, TeamRole, TeamMember | None]]
+    session: SessionDep,
+    user_id: uuid.UUID,
+    rows: list[tuple[Team, TeamRole, TeamMember | None]],
+    *,
+    installation_admin: bool,
 ) -> list[MeTeamOut]:
     """Enrich memberships with what a key of this member could do in each team.
 
     The model list is the member's *effective* set (team policy narrowed by the member
     policy), never the team's full list, so `/users/me` cannot widen what a member may
-    read. Spend is the current UTC month; a missing local member row (external IAM) means
-    only the team level applies, exactly as in the compiler.
+    read. The team budget and the team's spend are only filled for a team admin or an
+    installation admin: a plain member gets the member scope and the effective remaining
+    amount (computed here), not the team's numbers. Spend is the current UTC month; a
+    missing local member row (external IAM) means only the team level applies, exactly as
+    in the compiler.
     """
     if not rows:
         return []
@@ -155,6 +166,9 @@ async def _team_details(
     details: list[MeTeamOut] = []
     for team, role, member in rows:
         team_limits = policy_of(team)
+        # The team scope is the team-admin view. An installation admin passes every
+        # team's checks, even without a direct admin role.
+        can_read_team = installation_admin or role is TeamRole.ADMIN
         effective_limits = (
             effective(None, team_limits)
             if member is None
@@ -195,8 +209,8 @@ async def _team_details(
                     key_count=key_counts.get(team.id, 0),
                 ),
                 budget=MeBudgetOut(
-                    team_budget_nano_usd=team_limits.budget_nano_usd,
-                    team_spent_nano_usd=team_spent,
+                    team_budget_nano_usd=(team_limits.budget_nano_usd if can_read_team else None),
+                    team_spent_nano_usd=team_spent if can_read_team else None,
                     member_budget_nano_usd=(
                         member_limits.budget_nano_usd if member_limits else None
                     ),
@@ -273,7 +287,7 @@ async def get_current_user(request: Request, authz: Authz, session: SessionDep) 
     unavailable = False
     try:
         is_admin = await authz.is_admin()
-        teams = await _my_teams(authz, session, user.id)
+        teams = await _my_teams(authz, session, user.id, installation_admin=is_admin)
     except AuthzUnavailable:
         is_admin = False
         teams = []
@@ -482,20 +496,8 @@ async def delete_user(
         key = await session.scalar(select(ApiKey.id).where(ApiKey.user_id == row.id).limit(1))
         if key is not None:
             raise conflict("user owns keys (kept for usage history); deactivate the user instead")
-        other_admin_teams = select(TeamMember.team_id).where(
-            TeamMember.user_id != row.id, TeamMember.role == TeamRole.ADMIN
-        )
-        last_admin_team = await session.scalar(
-            select(TeamMember.team_id)
-            .where(
-                TeamMember.user_id == row.id,
-                TeamMember.role == TeamRole.ADMIN,
-                TeamMember.team_id.not_in(other_admin_teams),
-            )
-            .limit(1)
-        )
-        if last_admin_team is not None:
-            raise conflict("user is the last admin of a team; assign another admin first")
+        # A team without admins is valid: an installation admin is always above it, and
+        # another admin can be assigned by one.
         email = row.email
         await session.delete(row)
         audit.record(

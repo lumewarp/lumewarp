@@ -1,7 +1,7 @@
 import { Link, useParams } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api, ApiError, type Key, type Member, type Schemas, type ServiceAccount, type Team } from "../api";
+import { api, ApiError, hasPolicy, type Key, type Member, type Schemas, type ServiceAccount, type Team, type TeamAny } from "../api";
 import { Badge, fmtDate, fmtUsd, KeyBadge, PageHeader, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
@@ -33,7 +33,7 @@ export function TeamDetail() {
   const { teamId } = useParams({ strict: false }) as { teamId: string };
   const perms = useCan();
   const canListTeams = perms.isInstallationAdmin || perms.isTeamAdmin;
-  const [tab, setTab] = useState<Tab>("members");
+  const [tab, setTab] = useState<Tab | null>(null);
   const [externallyManagedTeamId, setExternallyManagedTeamId] = useState<string | null>(null);
   const team = useQuery({ queryKey: ["team", teamId], queryFn: () => api.team(teamId), enabled: !!teamId });
 
@@ -46,10 +46,19 @@ export function TeamDetail() {
     );
   }
 
+  const data = team.data;
+  // The server sends the team policy only to a team admin (or higher); members and
+  // service-account lists are the same view, so a plain member's tabs never request them.
+  const full = hasPolicy(data) ? data : null;
+  const tabs = TABS.filter((item) =>
+    item.id === "members" || item.id === "service-accounts" ? full !== null : true,
+  );
+  const selected = tab !== null && tabs.some((item) => item.id === tab) ? tab : tabs[0].id;
+
   return (
     <>
       <PageHeader
-        title={team.data.name}
+        title={data.name}
         description="Manage the people, service accounts, keys, and usage for this team."
         actions={
           <Button variant="outline" asChild>
@@ -57,32 +66,32 @@ export function TeamDetail() {
           </Button>
         }
       />
-      <Tabs value={tab} onValueChange={(value) => setTab(value as Tab)} activationMode="manual">
+      <Tabs value={selected} onValueChange={(value) => setTab(value as Tab)} activationMode="manual">
         <TabsList aria-label="Team sections" className="mb-4 max-w-full justify-start overflow-x-auto">
-          {TABS.map((item) => (
+          {tabs.map((item) => (
             <TabsTrigger key={item.id} value={item.id} className="flex-none">
               {item.label}
             </TabsTrigger>
           ))}
         </TabsList>
         <TabsContent value="members">
-          <MembersPanel
-            team={team.data}
-            managedExternally={externallyManagedTeamId === teamId}
-            onManagedExternally={() => setExternallyManagedTeamId(teamId)}
-          />
+          {full && (
+            <MembersPanel
+              team={full}
+              managedExternally={externallyManagedTeamId === teamId}
+              onManagedExternally={() => setExternallyManagedTeamId(teamId)}
+            />
+          )}
         </TabsContent>
-        <TabsContent value="service-accounts">
-          <ServiceAccountsPanel team={team.data} />
-        </TabsContent>
+        <TabsContent value="service-accounts">{full && <ServiceAccountsPanel team={full} />}</TabsContent>
         <TabsContent value="keys">
-          <KeysPanel team={team.data} />
+          <KeysPanel team={data} />
         </TabsContent>
         <TabsContent value="usage">
-          <TeamUsage team={team.data} />
+          <TeamUsage team={data} />
         </TabsContent>
         <TabsContent value="settings">
-          <TeamSettings team={team.data} />
+          <TeamSettings team={data} />
         </TabsContent>
       </Tabs>
     </>
@@ -140,14 +149,20 @@ function MembersPanel({
       user.email.toLowerCase().includes(form.values.email.trim().toLowerCase()),
   );
 
+  // Only an installation admin may hand out or change a team admin role; a team admin
+  // edits limits and leaves the existing role alone.
+  const canAssignAdmin = perms.isInstallationAdmin;
   const save = useMut(async ({ member, values }: { member: Member | null; values: MemberValues }) => {
     try {
       if (member) {
-        return await api.updateMember(team.id, member.user_id, { role: values.role, ...policyBody(values) });
+        return await api.updateMember(team.id, member.user_id, {
+          ...(canAssignAdmin ? { role: values.role } : {}),
+          ...policyBody(values),
+        });
       }
       return await api.createMember(team.id, {
         ...(values.user_id ? { user_id: values.user_id.trim() } : { email: values.email.trim() }),
-        role: values.role,
+        role: canAssignAdmin ? values.role : "member",
         ...policyBody(values),
       });
     } catch (error) {
@@ -220,7 +235,8 @@ function MembersPanel({
             cell: (member) => (
               <RowActions
                 canEdit={isAdmin && !memberWritesDisabled}
-                canDelete={isAdmin && !memberWritesDisabled}
+                // Removing an admin is installation-level; a team admin removes plain members.
+                canDelete={isAdmin && !memberWritesDisabled && (member.role === "member" || canAssignAdmin)}
                 onEdit={() => open(member)}
                 onDelete={() => setDeleting(member)}
               />
@@ -289,15 +305,21 @@ function MembersPanel({
           ) : editing ? (
             <TextField label="Email" value={(editing as Member).email} onChange={() => {}} />
           ) : null}
-          <SelectField
-            label="Role"
-            value={form.values.role}
-            onChange={(value) => form.set("role", value as Schemas["TeamRole"])}
-            options={[
-              { value: "admin", label: "Admin" },
-              { value: "member", label: "Member" },
-            ]}
-          />
+          {canAssignAdmin ? (
+            <SelectField
+              label="Role"
+              value={form.values.role}
+              onChange={(value) => form.set("role", value as Schemas["TeamRole"])}
+              options={[
+                { value: "admin", label: "Admin" },
+                { value: "member", label: "Member" },
+              ]}
+            />
+          ) : editing === "new" ? (
+            <p className="m-0 text-sm text-muted-foreground">
+              New members join as members; only an installation admin can assign a team admin.
+            </p>
+          ) : null}
           <PolicyFields values={form.values} errors={form.errors} set={form.set} team={team} />
         </fieldset>
       </FormDialog>
@@ -408,14 +430,16 @@ function ServiceAccountsPanel({ team }: { team: Team }) {
 type KeyValues = { name: string; service_account_id: string; expires: string };
 const blankKey: KeyValues = { name: "", service_account_id: "", expires: "" };
 
-function KeysPanel({ team }: { team: Team }) {
+function KeysPanel({ team }: { team: TeamAny }) {
   const me = useMe();
   const perms = useCan();
   const toast = useToast();
   const showSecret = useShowSecret();
   const isAdmin = perms.teamAdmin(team.id);
-  const members = useQuery({ queryKey: ["members", team.id], queryFn: () => api.members(team.id) });
-  const accounts = useQuery({ queryKey: ["service-accounts", team.id], queryFn: () => api.serviceAccounts(team.id) });
+  // The member and service-account lists are the team-admin view; a plain member's own
+  // keys need neither (the server forces the list to their own keys).
+  const members = useQuery({ queryKey: ["members", team.id], queryFn: () => api.members(team.id), enabled: isAdmin });
+  const accounts = useQuery({ queryKey: ["service-accounts", team.id], queryFn: () => api.serviceAccounts(team.id), enabled: isAdmin });
   const keys = useQuery({ queryKey: ["team-keys", team.id], queryFn: () => api.teamKeys(team.id) });
   const [editing, setEditing] = useState<Key | "new" | null>(null);
   const [revoking, setRevoking] = useState<Key | null>(null);
@@ -494,6 +518,7 @@ function KeysPanel({ team }: { team: Team }) {
   };
   const canResume = (key: Key) => {
     if (!perms.canResumeKey(key)) return false;
+    if (key.user_id === me.data?.user_id) return true;
     if (
       key.owner_kind === "user" &&
       (key.suspended_reason === "owner_removed" || key.suspended_reason === "owner_deactivated")
@@ -511,8 +536,8 @@ function KeysPanel({ team }: { team: Team }) {
       </div>
       <DataTable
         rows={keys.data}
-        loading={keys.isPending || members.isPending || accounts.isPending}
-        error={keys.error ?? members.error ?? accounts.error}
+        loading={keys.isPending || (isAdmin && (members.isPending || accounts.isPending))}
+        error={keys.error ?? (isAdmin ? (members.error ?? accounts.error) : null)}
         onRetry={() => void keys.refetch()}
         rowKey={(key) => key.id}
         empty="No keys in this team."
@@ -587,10 +612,13 @@ function KeysPanel({ team }: { team: Team }) {
   );
 }
 
-function TeamUsage({ team }: { team: Team }) {
+function TeamUsage({ team }: { team: TeamAny }) {
+  const perms = useCan();
+  const me = useMe();
+  const isAdmin = perms.teamAdmin(team.id);
   const [groupBy, setGroupBy] = useState("owner");
-  const members = useQuery({ queryKey: ["members", team.id], queryFn: () => api.members(team.id) });
-  const accounts = useQuery({ queryKey: ["service-accounts", team.id], queryFn: () => api.serviceAccounts(team.id) });
+  const members = useQuery({ queryKey: ["members", team.id], queryFn: () => api.members(team.id), enabled: isAdmin });
+  const accounts = useQuery({ queryKey: ["service-accounts", team.id], queryFn: () => api.serviceAccounts(team.id), enabled: isAdmin });
   const usage = useQuery({
     queryKey: ["usage", team.id, groupBy],
     queryFn: () => api.usage({ team_id: team.id, group_by: groupBy }),
@@ -598,7 +626,7 @@ function TeamUsage({ team }: { team: Team }) {
   const ownerName = (kind: string | null | undefined, id: string | null | undefined) => {
     if (!id) return "—";
     if (kind === "service_account") return accounts.data?.find((account) => account.id === id)?.name ?? id.slice(0, 8);
-    return members.data?.find((member) => member.user_id === id)?.email ?? id.slice(0, 8);
+    return members.data?.find((member) => member.user_id === id)?.email ?? (id === me.data?.user_id ? me.data?.email : undefined) ?? id.slice(0, 8);
   };
 
   return (
@@ -620,8 +648,8 @@ function TeamUsage({ team }: { team: Team }) {
       </div>
       <DataTable
         rows={usage.data}
-        loading={usage.isPending || members.isPending || accounts.isPending}
-        error={usage.error ?? members.error ?? accounts.error}
+        loading={usage.isPending || (isAdmin && (members.isPending || accounts.isPending))}
+        error={usage.error ?? (isAdmin ? (members.error ?? accounts.error) : null)}
         onRetry={() => void usage.refetch()}
         rowKey={(row) => [row.date, row.requested, row.owner_kind, row.owner_id, row.key_id].join("|")}
         empty="No usage for this team."
@@ -645,32 +673,39 @@ type TeamSettingsValues = PolicyValues & {
   max_member_key_lifetime_seconds: number | null;
 };
 
-const teamSettingsFrom = (team: Team): TeamSettingsValues => ({
+const teamSettingsFrom = (team: TeamAny, withPolicy: boolean): TeamSettingsValues => ({
   name: team.name,
-  ...policyFrom(team, true),
+  ...(withPolicy && hasPolicy(team) ? policyFrom(team, true) : blankPolicy(true)),
   max_keys_per_member: team.max_keys_per_member ?? null,
   max_member_key_lifetime_seconds: team.max_member_key_lifetime_seconds ?? null,
 });
 
-function TeamSettings({ team }: { team: Team }) {
+function TeamSettings({ team }: { team: TeamAny }) {
   const perms = useCan();
+  const canEdit = perms.canUpdateTeamSettings(team.id);
+  const canSetQuota = perms.canSetTeamQuota();
   const [editing, setEditing] = useState(false);
-  const form = useForm<TeamSettingsValues>(teamSettingsFrom(team), {
+  const form = useForm<TeamSettingsValues>(teamSettingsFrom(team, canSetQuota), {
     name: required("Name"),
   });
   const update = useMut(
-    (values: TeamSettingsValues) =>
-      api.updateTeam(team.id, {
+    (values: TeamSettingsValues) => {
+      const body: Schemas["TeamUpdate"] = {
         name: values.name,
-        ...policyBody(values),
         max_keys_per_member: values.max_keys_per_member,
         max_member_key_lifetime_seconds: values.max_member_key_lifetime_seconds,
-      }),
+      };
+      // A team admin edits the name and the member key limits; the team quota
+      // (models, rate limits, budget) is sent only by an installation admin, so a stale
+      // read can never look like a quota change.
+      if (canSetQuota) Object.assign(body, policyBody(values));
+      return api.updateTeam(team.id, body);
+    },
     "Team settings saved",
   );
 
   const edit = () => {
-    form.reset(teamSettingsFrom(team));
+    form.reset(teamSettingsFrom(team, canSetQuota));
     setEditing(true);
   };
   const submit = async () => {
@@ -682,34 +717,40 @@ function TeamSettings({ team }: { team: Team }) {
     <>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <h2 className="m-0">Settings</h2>
-        {perms.teamAdmin(team.id) && <Button variant="outline" onClick={edit}>Edit team</Button>}
+        {canEdit && <Button variant="outline" onClick={edit}>Edit team</Button>}
       </div>
-      {!perms.teamAdmin(team.id) && (
+      {!canEdit && (
         <p className="text-muted-foreground">Team settings are read-only for members.</p>
+      )}
+      {canEdit && !canSetQuota && (
+        <p className="mb-3 text-muted-foreground">
+          Model access, rate limits and the budget are set by an installation admin. You can change the name and the
+          member key limits.
+        </p>
       )}
       <Card className="mb-4 gap-3 p-4 shadow-none">
         <DescriptionList>
           <DescriptionTerm>Name</DescriptionTerm>
           <DescriptionDetails>{team.name}</DescriptionDetails>
-          <DescriptionTerm>Policy</DescriptionTerm>
-          <DescriptionDetails><PolicySummary p={team} /></DescriptionDetails>
-          <DescriptionTerm>Budget</DescriptionTerm>
-          <DescriptionDetails><Budget p={team} /></DescriptionDetails>
-          {perms.teamAdmin(team.id) && (
+          {hasPolicy(team) && (
             <>
-              <DescriptionTerm>Keys per member</DescriptionTerm>
-              <DescriptionDetails>{team.max_keys_per_member ?? "No limit"}</DescriptionDetails>
-              <DescriptionTerm>Longest member key lifetime</DescriptionTerm>
-              <DescriptionDetails>{fmtLifetime(team.max_member_key_lifetime_seconds)}</DescriptionDetails>
+              <DescriptionTerm>Policy</DescriptionTerm>
+              <DescriptionDetails><PolicySummary p={team} /></DescriptionDetails>
+              <DescriptionTerm>Budget</DescriptionTerm>
+              <DescriptionDetails><Budget p={team} /></DescriptionDetails>
             </>
           )}
+          <DescriptionTerm>Keys per member</DescriptionTerm>
+          <DescriptionDetails>{team.max_keys_per_member ?? "No limit"}</DescriptionDetails>
+          <DescriptionTerm>Longest member key lifetime</DescriptionTerm>
+          <DescriptionDetails>{fmtLifetime(team.max_member_key_lifetime_seconds)}</DescriptionDetails>
           <DescriptionTerm>Created</DescriptionTerm>
           <DescriptionDetails>{fmtDate(team.created_at)}</DescriptionDetails>
         </DescriptionList>
       </Card>
       <FormDialog open={editing} title="Edit team settings" onClose={() => setEditing(false)} onSubmit={submit}>
         <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
-        <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam />
+        {canSetQuota && <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam />}
         <NumberField
           label="Max keys per member"
           min={1}

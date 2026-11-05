@@ -532,7 +532,8 @@ async def list_catalog(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[CatalogEntryOut]:
-    await authz.require(Action.ROUTING_READ)
+    # Names and kinds only: any authenticated caller needs them to pick a team allowlist.
+    await authz.require(Action.CATALOG_READ)
     stmt = select(CatalogName).order_by(CatalogName.id)
     rows, next_cursor = await uuid_page(session, stmt, CatalogName.id, limit, cursor)
     return Page[CatalogEntryOut](

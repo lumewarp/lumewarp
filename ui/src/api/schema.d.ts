@@ -1110,17 +1110,37 @@ export interface components {
         /**
          * MeBudgetOut
          * @description Per-scope monthly budgets and spend for the caller's key in one team.
+         *
+         *     The team scope (`team_budget_nano_usd`, `team_spent_nano_usd`) is the team-admin view:
+         *     it is NULL for a plain member and filled for a team admin or an installation admin.
+         *     `remaining_nano_usd` is still the minimum across every scope that sets a budget, so a
+         *     member sees the effective limit without learning the team's own numbers.
          */
         MeBudgetOut: {
-            /** Team Budget Nano Usd */
+            /**
+             * Team Budget Nano Usd
+             * @description The team's monthly budget; NULL when the caller is not a team admin (or installation admin) or the team sets none.
+             */
             team_budget_nano_usd: number | null;
-            /** Team Spent Nano Usd */
-            team_spent_nano_usd: number;
-            /** Member Budget Nano Usd */
+            /**
+             * Team Spent Nano Usd
+             * @description The team's spend this month; NULL when the caller is not a team admin (or installation admin).
+             */
+            team_spent_nano_usd: number | null;
+            /**
+             * Member Budget Nano Usd
+             * @description The caller's own member budget in this team; NULL when none is set.
+             */
             member_budget_nano_usd: number | null;
-            /** Member Spent Nano Usd */
+            /**
+             * Member Spent Nano Usd
+             * @description The caller's spend this month in this team.
+             */
             member_spent_nano_usd: number;
-            /** Remaining Nano Usd */
+            /**
+             * Remaining Nano Usd
+             * @description MIN over the scopes that set a budget; NULL when none does. Computed server-side even when a team value is not disclosed.
+             */
             remaining_nano_usd: number | null;
             /**
              * Window Start
@@ -1448,17 +1468,17 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
-        /** Page[TeamOut] */
-        Page_TeamOut_: {
-            /** Items */
-            items: components["schemas"]["TeamOut"][];
-            /** Next Cursor */
-            next_cursor?: string | null;
-        };
         /** Page[TokenOut] */
         Page_TokenOut_: {
             /** Items */
             items: components["schemas"]["TokenOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
+        /** Page[Union[TeamOut, TeamBasicOut]] */
+        Page_Union_TeamOut__TeamBasicOut__: {
+            /** Items */
+            items: (components["schemas"]["TeamOut"] | components["schemas"]["TeamBasicOut"])[];
             /** Next Cursor */
             next_cursor?: string | null;
         };
@@ -1860,6 +1880,36 @@ export interface components {
          * @enum {string}
          */
         StreamUsageMode: "include_usage" | "passthrough";
+        /**
+         * TeamBasicOut
+         * @description What any member of a team may read: no team policy.
+         *
+         *     A member's effective policy (team narrowed by their own) comes from `/users/me`; a
+         *     member must not see the team's own allowlist, limits or budget.
+         */
+        TeamBasicOut: {
+            /** Max Keys Per Member */
+            max_keys_per_member?: number | null;
+            /** Max Member Key Lifetime Seconds */
+            max_member_key_lifetime_seconds?: number | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
         /** TeamCreate */
         TeamCreate: {
             /** Max Keys Per Member */
@@ -1880,23 +1930,15 @@ export interface components {
             /** Name */
             name: string;
         };
-        /** TeamOut */
+        /**
+         * TeamOut
+         * @description The whole team, including its policy: team admins and installation admins only.
+         */
         TeamOut: {
             /** Max Keys Per Member */
             max_keys_per_member?: number | null;
             /** Max Member Key Lifetime Seconds */
             max_member_key_lifetime_seconds?: number | null;
-            model_access: components["schemas"]["ModelAccess"];
-            /** Allowed Models */
-            allowed_models: string[];
-            /** Rpm Limit */
-            rpm_limit: number | null;
-            /** Tpm Limit */
-            tpm_limit: number | null;
-            /** Max Parallel */
-            max_parallel: number | null;
-            /** Budget Nano Usd */
-            budget_nano_usd: number | null;
             /**
              * Id
              * Format: uuid
@@ -1914,6 +1956,17 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+            model_access: components["schemas"]["ModelAccess"];
+            /** Allowed Models */
+            allowed_models: string[];
+            /** Rpm Limit */
+            rpm_limit: number | null;
+            /** Tpm Limit */
+            tpm_limit: number | null;
+            /** Max Parallel */
+            max_parallel: number | null;
+            /** Budget Nano Usd */
+            budget_nano_usd: number | null;
         };
         /**
          * TeamRole
@@ -2221,7 +2274,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Page_TeamOut_"];
+                    "application/json": components["schemas"]["Page_Union_TeamOut__TeamBasicOut__"];
                 };
             };
             /** @description Missing or invalid credentials */
@@ -2357,7 +2410,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TeamOut"];
+                    "application/json": components["schemas"]["TeamOut"] | components["schemas"]["TeamBasicOut"];
                 };
             };
             /** @description Missing or invalid credentials */

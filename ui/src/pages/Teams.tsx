@@ -1,6 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
-import { api, type Team } from "../api";
+import { api, hasPolicy, type TeamAny } from "../api";
 import { PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, required, TextField, useForm } from "../components/Form";
@@ -15,21 +15,30 @@ const blank: Values = { name: "", ...blankPolicy(true) };
 export function Teams() {
   const perms = useCan();
   const teams = useTeams();
-  const [editing, setEditing] = useState<Team | "new" | null>(null);
-  const [deleting, setDeleting] = useState<Team | null>(null);
+  const [editing, setEditing] = useState<TeamAny | "new" | null>(null);
+  const [deleting, setDeleting] = useState<TeamAny | null>(null);
   const form = useForm<Values>(blank, { name: required("Name") });
   const create = useMut((v: Values) => api.createTeam({ name: v.name, ...policyBody(v) }), "Team created");
-  const update = useMut(({ id, v }: { id: string; v: Values }) => api.updateTeam(id, { name: v.name, ...policyBody(v) }), "Team saved");
+  // A team admin may rename a team; its quota stays with the installation admin.
+  const update = useMut(
+    ({ id, v }: { id: string; v: Values }) =>
+      api.updateTeam(id, perms.isInstallationAdmin ? { name: v.name, ...policyBody(v) } : { name: v.name }),
+    "Team saved",
+  );
   const remove = useMut((id: string) => api.deleteTeam(id), "Team deleted");
 
-  const open = (team: Team | "new") => {
-    form.reset(team === "new" ? blank : { name: team.name, ...policyFrom(team, true) });
+  const open = (team: TeamAny | "new") => {
+    form.reset(
+      team === "new"
+        ? blank
+        : { name: team.name, ...(hasPolicy(team) ? policyFrom(team, true) : blankPolicy(true)) },
+    );
     setEditing(team);
   };
   const submit = async () => {
     if (!form.validate()) return false;
     return form.run(
-      () => (editing === "new" ? create.mutateAsync(form.values) : update.mutateAsync({ id: (editing as Team).id, v: form.values })),
+      () => (editing === "new" ? create.mutateAsync(form.values) : update.mutateAsync({ id: (editing as TeamAny).id, v: form.values })),
       POLICY_ALIAS,
     );
   };
@@ -55,8 +64,8 @@ export function Teams() {
             sort: (a, b) => a.name.localeCompare(b.name),
             cell: (row) => <Link to="/teams/$teamId" params={{ teamId: row.id }}><strong>{row.name}</strong></Link>,
           },
-          { key: "policy", header: "Policy", cell: (row) => <PolicySummary p={row} /> },
-          { key: "budget", header: "Budget", cell: (row) => <Budget p={row} /> },
+          { key: "policy", header: "Policy", cell: (row) => (hasPolicy(row) ? <PolicySummary p={row} /> : "—") },
+          { key: "budget", header: "Budget", cell: (row) => (hasPolicy(row) ? <Budget p={row} /> : "—") },
           {
             key: "actions",
             header: "",
@@ -79,7 +88,7 @@ export function Teams() {
         onSubmit={submit}
       >
         <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
-        <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam />
+        {perms.isInstallationAdmin && <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam />}
       </FormDialog>
       <ConfirmDialog
         open={!!deleting}

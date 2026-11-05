@@ -295,10 +295,34 @@ configured only emergency sessions are installation admins. There is no superuse
 
 | Action | Who |
 | --- | --- |
-| `TEAM_CREATE`, `TEAM_DELETE`, `USER_MANAGE`, `ROUTING_MANAGE`, `GATEWAY_TOKEN_MANAGE`, `GATEWAY_READ`, `CONFIG_READ`, `CONFIG_ROLLBACK` | Installation admin |
-| `ROUTING_READ`, `OWN_TOKENS` | Any authenticated caller |
-| `TEAM_UPDATE`, `TEAM_MEMBERS_MANAGE`, `SERVICE_ACCOUNT_MANAGE`, `KEY_MANAGE_ANY` | Team admin |
+| `TEAM_CREATE`, `TEAM_DELETE`, `TEAM_QUOTA_SET`, `TEAM_ADMIN_ASSIGN`, `USER_MANAGE`, `ROUTING_MANAGE`, `ROUTING_READ`, `GATEWAY_TOKEN_MANAGE`, `GATEWAY_READ`, `CONFIG_READ`, `CONFIG_ROLLBACK` | Installation admin |
+| `CATALOG_READ`, `OWN_TOKENS` | Any authenticated caller |
+| `TEAM_SETTINGS_UPDATE`, `TEAM_MEMBERS_MANAGE`, `TEAM_ADMIN_READ`, `SERVICE_ACCOUNT_MANAGE`, `KEY_MANAGE_ANY` | Team admin |
 | `TEAM_READ`, `KEY_CREATE_OWN`, `KEY_MANAGE_OWN` | Team member |
+
+`TEAM_QUOTA_SET` covers a team's model access, allowlist, rate limits, parallelism and budget;
+`TEAM_ADMIN_ASSIGN` covers adding an admin, promoting or demoting an existing member (including
+the caller themself) and removing an admin. Both are installation-level, so a team admin cannot
+set them. A team admin keeps `TEAM_SETTINGS_UPDATE` (the team name and the member key limits). A
+team update decides from what actually changes (`proposed != base`), so resending the current
+policy values is not a quota change.
+
+`TEAM_READ` is the team's basic record (`id`, `name`, timestamps and the member key limits); a
+member's effective policy comes from `/users/me`, never from the team. `TeamOut` (with the team
+policy) is only returned to a team admin or above; every other member gets `TeamBasicOut`.
+`TEAM_ADMIN_READ` is the whole-team view: the member and service-account lists, every key, the
+team's usage and its audit. A plain member gets `403` on those lists (a non-member still gets
+`404`), and `GET /keys/{id}` is admin-or-owner only. `GET /teams/{id}/keys` for a plain member is
+forced to their own user-owned keys, ANDed with whatever filters they sent, so asking for
+someone else returns nothing. Usage has the same server-side owner predicate: a plain member
+sees rows of their own keys in teams they belong to, including grouped totals, and cannot widen
+it with `key_id`/`user_id`/`service_account_id`. Audit rows are visible to team admins for the
+teams they administer; a caller who administers no team gets `403`, filtered or not, and a
+deleted team's rows stay installation-admin only.
+
+`ROUTING_READ` is installation-level (upstreams, models, aliases, routers and strategies,
+including their `GET`s). `CATALOG_READ` is the one routing read every authenticated caller
+needs: `GET /catalog` returns only names, ids and kinds, which is what the allowlist pickers use.
 
 `LUMEWARP_AUTHZ_BACKEND` selects the backend: `builtin` (the default), `openfga`, `http`, or
 any other value naming a `lumewarp.authz` entry point. `builtin` answers teams from `team_members`
@@ -434,7 +458,10 @@ example](../deploy/helm/lumewarp/README.md#sso-and-authorization-backend).
 
 ## Audit log
 
-Every mutation writes an `audit_log` row in the same transaction. `details` is an
+Every mutation writes an `audit_log` row in the same transaction. Reads are scoped: an
+installation admin sees everything (including rows without a team and rows of deleted teams), a
+team admin sees the rows of the teams they administer (filtered or not), and a plain member has
+no audit view (`403`). `details` is an
 allowlist per action (`DETAIL_ALLOWLIST` in `audit.py`): only fields classified for that
 action are stored, and anything else is dropped rather than redacted. Nested objects such
 as `changes`, `settings` and `traffic_split` have their own field lists, and free-form
@@ -463,8 +490,11 @@ wheel build includes the static directory as package data.
 
 Log in at `/` through SSO or the emergency login, whichever is configured. `/my-keys` is the home
 of a user who is neither an installation admin nor a team admin: their teams' effective models,
-limits and remaining budget, and the keys they own. A team's **Keys** tab lists every key in
-that team and is where a team admin manages them; there is no separate `/keys` page. The API
+limits and remaining budget, and the keys they own. A team's **Keys** tab is where a team admin
+manages every key in the team; a plain member sees only their own keys there, and the
+team-admin tabs (Members, Service accounts) are not mounted for them at all. Team settings show
+the quota read-only to a team admin (the name and key limits stay editable) and only the name
+and key limits to a plain member. There is no separate `/keys` page. The API
 types in `ui/src/api/schema.d.ts`
 are generated from this service's OpenAPI document (`pnpm gen:api`).
 
@@ -512,8 +542,9 @@ unique across all three (`catalog_names`):
 | `/api/v1/strategies` | Read-only: each strategy's descriptor, schema and the gateways that have it. |
 | `/api/v1/catalog` | Read-only: every name and its kind, for permission pickers. |
 
-Any authenticated principal may read these, writes need `ROUTING_MANAGE`. Every write is
-audited and enqueues a recompile. A name that a router, alias or fallback references cannot be
+`/catalog` is readable by any authenticated principal; the other reads (`/upstreams`, `/models`,
+`/aliases`, `/routers`, `/strategies`) need `ROUTING_READ`, which is installation-level. Writes
+need `ROUTING_MANAGE`. Every write is audited and enqueues a recompile. A name that a router, alias or fallback references cannot be
 deleted (409, listing who references it); deleting a name deletes the grants on it, with an
 audit row. See [the architecture notes](../docs/architecture.md#模型目錄已實作) for the reasoning.
 

@@ -31,16 +31,20 @@ ROLES = ("group_admin", "admin", "member", "outsider")
 EXPECTED = {
     Action.TEAM_CREATE: "Y---",
     Action.TEAM_DELETE: "Y---",
+    Action.TEAM_QUOTA_SET: "Y---",
+    Action.TEAM_ADMIN_ASSIGN: "Y---",
     Action.USER_MANAGE: "Y---",
     Action.ROUTING_MANAGE: "Y---",
+    Action.ROUTING_READ: "Y---",
     Action.GATEWAY_TOKEN_MANAGE: "Y---",
     Action.GATEWAY_READ: "Y---",
     Action.CONFIG_READ: "Y---",
     Action.CONFIG_ROLLBACK: "Y---",
-    Action.ROUTING_READ: "YYYY",
+    Action.CATALOG_READ: "YYYY",
     Action.OWN_TOKENS: "YYYY",
-    Action.TEAM_UPDATE: "YY--",
+    Action.TEAM_SETTINGS_UPDATE: "YY--",
     Action.TEAM_MEMBERS_MANAGE: "YY--",
+    Action.TEAM_ADMIN_READ: "YY--",
     Action.SERVICE_ACCOUNT_MANAGE: "YY--",
     Action.KEY_MANAGE_ANY: "YY--",
     Action.TEAM_READ: "YYY-",
@@ -110,13 +114,13 @@ async def test_request_cache_and_isolation(role) -> None:
     calls = []
     authz = request_for(role, calls)
     for _ in range(2):
-        await authz.allowed(Action.TEAM_UPDATE, TEAM)
+        await authz.allowed(Action.TEAM_SETTINGS_UPDATE, TEAM)
         await authz.allowed(Action.SERVICE_ACCOUNT_MANAGE, TEAM)
     assert len(calls) == 2  # group_admin deny and team admin allow/deny
     await authz.has(Relation.ADMIN, OTHER)
     await authz.has(Relation.MEMBER, TEAM)
     assert len(calls) == 4
-    await request_for(role, calls).allowed(Action.TEAM_UPDATE, TEAM)
+    await request_for(role, calls).allowed(Action.TEAM_SETTINGS_UPDATE, TEAM)
     assert len(calls) == 6
 
 
@@ -143,6 +147,26 @@ async def test_readable_teams(role) -> None:
     assert await request_for(role).readable_teams([TEAM, OTHER]) == (
         None if role == "group_admin" else {TEAM} if role in ("admin", "member") else set()
     )
+
+
+@pytest.mark.parametrize("role", ROLES)
+async def test_admin_teams(role) -> None:
+    assert await request_for(role).admin_teams([TEAM, OTHER]) == (
+        None if role == "group_admin" else {TEAM} if role == "admin" else set()
+    )
+
+
+async def test_admin_teams_error() -> None:
+    async def check(user, relation, resource):
+        return Decision.DENY if resource == Resource("group", "lumewarp-admins") else Decision.ERROR
+
+    authz = RequestAuthz(
+        Principal(kind=PrincipalKind.USER, user_id=uuid.uuid4()),
+        Authorizer(check),
+        "lumewarp-admins",
+    )
+    with pytest.raises(AuthzUnavailable):
+        await authz.admin_teams([TEAM])
 
 
 async def test_readable_teams_error() -> None:

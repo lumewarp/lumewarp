@@ -318,6 +318,11 @@ async def list_team_keys(
 ) -> Page[KeyOut]:
     team = await get_team_or_404(session, authz, team_id)
     stmt = select(ApiKey).where(ApiKey.team_id == team.id).order_by(ApiKey.id)
+    if not await authz.allowed(Action.TEAM_ADMIN_READ, team.id):
+        # A plain member sees only their own keys. The owner predicate is ANDed with the
+        # caller's filters, so asking for someone else (user_id, service_account_id, or
+        # owner_kind) returns nothing instead of widening what they may see.
+        stmt = stmt.where(ApiKey.owner_kind == KeyOwnerKind.USER, ApiKey.user_id == authz.user_id)
     if owner_kind is not None:
         stmt = stmt.where(ApiKey.owner_kind == owner_kind)
     if user_id is not None:

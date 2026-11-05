@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumewarp_control_plane import audit, outbox
 from lumewarp_control_plane.authz import Action, RequestAuthz
 from lumewarp_control_plane.db import get_session
-from lumewarp_control_plane.errors import ApiError, not_found
+from lumewarp_control_plane.errors import ApiError, forbidden, not_found
 from lumewarp_control_plane.metrics import DISCARD, Metrics, note_suspended
 from lumewarp_control_plane.models import ApiKey, KeyLifecycle, KeyOwnerKind, Scope, Team
 from lumewarp_control_plane.security import Principal
@@ -129,8 +129,19 @@ async def ensure_team_read(authz: RequestAuthz, team_id: uuid.UUID) -> None:
 
 
 async def ensure_key_read(authz: RequestAuthz, key: ApiKey) -> None:
+    """A key's metadata is for a team admin or its owner, never for another member.
+
+    Shared by `GET /keys/{id}`, the key-scoped write paths and the `key_id` filter of
+    usage: a team member who is neither an admin nor the owner gets 403 instead of
+    seeing another member's key. A caller outside the team still gets 404, as before.
+    """
     if not await authz.allowed(Action.TEAM_READ, key.team_id):
         raise not_found("key not found")
+    if await authz.allowed(Action.TEAM_ADMIN_READ, key.team_id):
+        return
+    if key.user_id is not None and key.user_id == authz.user_id:
+        return
+    raise forbidden(f"{Action.TEAM_ADMIN_READ.value} not allowed")
 
 
 async def get_team_or_404(session: AsyncSession, authz: RequestAuthz, team_id: uuid.UUID) -> Team:

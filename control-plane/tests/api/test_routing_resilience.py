@@ -293,7 +293,8 @@ async def test_router_writes_need_superuser(client, committed) -> None:
     router = _ok(_router(client))
     _, secret = await user_with_token(committed)
     await committed.commit()
-    assert client.get(f"/api/v1/routers/{router['id']}", headers=auth(secret)).status_code == 200
+    # Routing details are installation-level reads, not just writes.
+    assert client.get(f"/api/v1/routers/{router['id']}", headers=auth(secret)).status_code == 403
     assert (
         client.patch(
             f"/api/v1/routers/{router['id']}", json={"retry": {}}, headers=auth(secret)

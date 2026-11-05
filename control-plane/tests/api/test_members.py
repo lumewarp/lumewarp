@@ -19,6 +19,7 @@ from tests.api.helpers import ADMIN_AUTH, auth, user_with_token
 from tests.factories import (
     make_key,
     make_member,
+    make_model,
     make_service_account,
     make_team,
     make_user,
@@ -55,30 +56,105 @@ async def test_member_upsert_patch_list_and_delete(client, committed) -> None:
     assert "user_id" in unknown.json()["error"]["message"]
 
 
-@pytest.mark.parametrize("caller", ["bootstrap", "admin", "group_admin"])
-@pytest.mark.parametrize("method", ["PATCH", "PUT", "DELETE"])
-async def test_last_admin_cannot_be_demoted_or_removed(client, committed, caller, method) -> None:
+async def test_team_admin_cannot_change_an_admin_role(client, committed) -> None:
+    """Promoting, demoting or removing an admin is above a team admin, even on themself."""
     team = await make_team(committed)
-    admin, token = await user_with_token(committed)
+    team_admin, token = await user_with_token(committed)
+    other_admin, _ = await user_with_token(committed)
+    member, _ = await user_with_token(committed)
+    await make_member(committed, team, team_admin, role=TeamRole.ADMIN)
+    await make_member(committed, team, other_admin, role=TeamRole.ADMIN)
+    await make_member(committed, team, member)
+    await committed.commit()
+    headers = auth(token)
+    base = f"/api/v1/teams/{team.id}/members"
+
+    # Adding an admin by email or by id.
+    outsider = await make_user(committed)
+    await committed.commit()
+    for endpoint, body in (
+        (base, {"email": outsider.email, "role": "admin"}),
+        (f"{base}/{outsider.id}", {"role": "admin"}),
+    ):
+        response = (
+            client.put(endpoint, json=body, headers=headers)
+            if endpoint != base
+            else client.post(endpoint, json=body, headers=headers)
+        )
+        assert response.status_code == 403, (endpoint, response.text)
+        assert response.json()["error"]["code"] == "forbidden"
+    assert await committed.get(TeamMember, (team.id, outsider.id)) is None
+
+    # Promoting a plain member, demoting another admin and demoting/removing themself.
+    for method, target, body in (
+        ("PUT", member.id, {"role": "admin"}),
+        ("PATCH", member.id, {"role": "admin"}),
+        ("PUT", other_admin.id, {"role": "member"}),
+        ("PATCH", other_admin.id, {"role": "member"}),
+        ("PUT", team_admin.id, {"role": "member"}),
+        ("PATCH", team_admin.id, {"role": "member"}),
+        ("DELETE", other_admin.id, None),
+        ("DELETE", team_admin.id, None),
+    ):
+        response = client.request(method, f"{base}/{target}", json=body, headers=headers)
+        assert response.status_code == 403, (method, target, response.text)
+    for user, role in (
+        (team_admin, TeamRole.ADMIN),
+        (other_admin, TeamRole.ADMIN),
+        (member, TeamRole.MEMBER),
+    ):
+        row = await committed.get(TeamMember, (team.id, user.id))
+        await committed.refresh(row)
+        assert row.role is role
+
+    # Limits on anyone, and plain member add/remove, stay TEAM_MEMBERS_MANAGE.
+    assert (
+        client.put(
+            f"{base}/{other_admin.id}", json={"role": "admin", "rpm_limit": 7}, headers=headers
+        ).status_code
+        == 200
+    )
+    assert (
+        client.patch(f"{base}/{other_admin.id}", json={"rpm_limit": 5}, headers=headers).status_code
+        == 200
+    )
+    added = client.post(base, json={"email": outsider.email, "role": "member"}, headers=headers)
+    assert added.status_code == 201, added.text
+    assert added.json()["role"] == "member"
+    assert client.delete(f"{base}/{outsider.id}", headers=headers).status_code == 204
+    assert client.delete(f"{base}/{member.id}", headers=headers).status_code == 204
+
+
+@pytest.mark.parametrize("caller", ["bootstrap", "group_admin"])
+@pytest.mark.parametrize("method", ["PATCH", "PUT", "DELETE"])
+async def test_installation_admin_manages_admins_and_may_leave_none(
+    client, committed, caller, method
+) -> None:
+    team = await make_team(committed)
+    admin, _ = await user_with_token(committed)
     await make_member(committed, team, admin, role=TeamRole.ADMIN)
+    headers = ADMIN_AUTH
     if caller == "group_admin":
         _, token = await user_with_token(committed, group_admin=True)
+        headers = auth(token)
     await committed.commit()
-    headers = ADMIN_AUTH if caller == "bootstrap" else auth(token)
     path = f"/api/v1/teams/{team.id}/members/{admin.id}"
     response = client.request(
         method, path, json=None if method == "DELETE" else {"role": "member"}, headers=headers
     )
-    assert response.status_code == 409, response.text
-    assert "admin" in response.json()["error"]["message"]
-    assert client.patch(path, json={"role": "admin"}, headers=headers).status_code == 200
-    second = await make_user(committed)
-    await make_member(committed, team, second, role=TeamRole.ADMIN)
-    await committed.commit()
-    response = client.request(
-        method, path, json=None if method == "DELETE" else {"role": "member"}, headers=headers
-    )
     assert response.status_code == (204 if method == "DELETE" else 200), response.text
+    # No last-admin rule: the team keeps existing with no admin at all.
+    rows = client.get(f"/api/v1/teams/{team.id}/members", headers=ADMIN_AUTH).json()["items"]
+    assert [r["role"] for r in rows] == ([] if method == "DELETE" else ["member"])
+    promoted = await make_user(committed)
+    await committed.commit()
+    created = client.post(
+        f"/api/v1/teams/{team.id}/members",
+        json={"email": promoted.email, "role": "admin"},
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["role"] == "admin"
 
 
 async def test_removal_suspends_only_non_revoked_keys_in_that_team(client, committed) -> None:
@@ -271,6 +347,34 @@ async def test_inactive_user_cannot_be_added(client, committed, selector) -> Non
     response = client.request(method, path, json=payload, headers=ADMIN_AUTH)
     assert response.status_code == 409, response.text
     assert await committed.get(TeamMember, (team.id, user.id)) is None
+
+
+async def test_team_admin_picks_allowlist_names_from_the_catalog(client, committed) -> None:
+    team = await make_team(committed)
+    team_admin, token = await user_with_token(committed)
+    await make_member(committed, team, team_admin, role=TeamRole.ADMIN)
+    # A catalog name exists without the team admin being allowed to read routing details.
+    model = await make_model(committed, "s9-allowlist-model")
+    target = await make_user(committed)
+    await committed.commit()
+    headers = auth(token)
+    catalog = client.get("/api/v1/catalog?limit=500", headers=headers)
+    assert catalog.status_code == 200, catalog.text
+    assert str(model.name_id) in {item["id"] for item in catalog.json()["items"]}
+    for path in ("/api/v1/models", "/api/v1/upstreams", "/api/v1/routers", "/api/v1/strategies"):
+        assert client.get(path, headers=headers).status_code == 403, path
+    created = client.post(
+        f"/api/v1/teams/{team.id}/members",
+        json={
+            "email": target.email,
+            "role": "member",
+            "model_access": "list",
+            "allowed_models": ["s9-allowlist-model"],
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["allowed_models"] == ["s9-allowlist-model"]
 
 
 async def test_member_list_includes_inactive_account_status(client, committed) -> None:

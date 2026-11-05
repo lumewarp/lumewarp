@@ -23,7 +23,8 @@ export function Overview() {
   const perms = useCan();
   const teams = useTeams();
   const keys = useAllTeamKeys(teams.data);
-  const routers = useQuery({ queryKey: ["routers"], queryFn: () => api.routers() });
+  // Routing details are installation-level reads: a team admin must not request them.
+  const routers = useQuery({ queryKey: ["routers"], queryFn: () => api.routers(), enabled: perms.isInstallationAdmin });
   const gateways = useQuery({ queryKey: ["gateways"], queryFn: () => api.gateways(), enabled: perms.isInstallationAdmin });
   const versions = useQuery({ queryKey: ["config-versions"], queryFn: () => api.configVersions(), enabled: perms.isInstallationAdmin });
 
@@ -49,13 +50,13 @@ export function Overview() {
       <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
         <Counter label="Teams" value={dash(teams.data?.length)} />
         <Counter label="Active keys" value={dash(active)} />
-        <Counter label="Routers" value={dash(routers.data?.length)} />
+        {perms.isInstallationAdmin && <Counter label="Routers" value={dash(routers.data?.length)} />}
         {perms.isInstallationAdmin && <Counter label="Config version" value={latest ? `v${latest}` : "…"} />}
         {perms.isInstallationAdmin && <Counter label="Gateways connected" value={gateways.data ? `${gateways.data.filter((g) => g.connected).length} / ${gateways.data.length}` : "…"} />}
       </div>
-      {(teams.error || keys.error) && (
+      {(teams.error || keys.error || (perms.isInstallationAdmin && routers.error)) && (
         <Alert variant="destructive" className="mt-4" data-testid="state-error">
-          <AlertDescription>{(teams.error ?? keys.error)?.message}</AlertDescription>
+          <AlertDescription>{(teams.error ?? keys.error ?? routers.error)?.message}</AlertDescription>
         </Alert>
       )}
       <div className="mt-4">

@@ -139,8 +139,21 @@ async def test_catalog_reads_and_writes_need_their_actions(client, committed) ->
     plain = auth(secret)
     model = _model(client)
     alias = _alias(client, model["id"])
-    assert client.get(f"{API}/catalog", headers=plain).status_code == 200
-    assert client.get(f"{API}/aliases/{alias['id']}", headers=plain).status_code == 200
+    # Names are for every caller (allowlist pickers); routing details are not.
+    catalog = client.get(f"{API}/catalog", headers=plain)
+    assert catalog.status_code == 200
+    assert set(catalog.json()["items"][0]) == {"id", "name", "kind"}
+    for path in (
+        f"{API}/aliases",
+        f"{API}/aliases/{alias['id']}",
+        f"{API}/models",
+        f"{API}/routers",
+        f"{API}/upstreams",
+        f"{API}/strategies",
+    ):
+        response = client.get(path, headers=plain)
+        assert response.status_code == 403, (path, response.text)
+        assert response.json()["error"]["code"] == "forbidden"
     writes = (
         client.post(f"{API}/aliases", json={"name": _name(), "target": model["id"]}, headers=plain),
         client.patch(f"{API}/aliases/{alias['id']}", json={"name": _name()}, headers=plain),

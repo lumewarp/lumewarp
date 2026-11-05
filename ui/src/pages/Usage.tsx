@@ -9,7 +9,7 @@ import { ComboboxField } from "../components/ui/combobox-field";
 import { DataTable, type Column } from "../components/Table";
 import { dayStart, isoDay, shiftDay } from "../lib/days";
 import { useUsageMetric } from "../lib/usageMetric";
-import { useCatalog, useModels, useNames, useTeamDirectory, useTeams } from "../hooks";
+import { useCan, useCatalog, useMe, useModels, useNames, useTeamDirectory, useTeams } from "../hooks";
 
 /** `value`, once it has stopped changing for `ms`: typed filters do not query on every keystroke. */
 function useDebounced<T>(value: T, ms: number): T {
@@ -118,13 +118,30 @@ export function Usage() {
   const upstreamModel = useDebounced(upstreamText.trim(), 300);
   const [alias, setAlias] = useState(ANY);
   const [router, setRouter] = useState(ANY);
+  const perms = useCan();
+  const me = useMe();
   const teams = useTeams();
   const catalog = useCatalog();
-  const models = useModels();
-  const directory = useTeamDirectory(teams.data);
+  // Upstream suggestions come from the routing details, which only an installation admin
+  // may read; member and service-account names are the team-admin view. A plain member
+  // never requests either.
+  const models = useModels(perms.canReadRouting);
+  // Only the teams this caller administers: a mixed-role user (admin of A, member of B)
+  // must not ask B for its member or service-account lists. The hook's query key is built
+  // from the same set, so changing the role changes the cache entry too.
+  const administered = (teams.data ?? []).filter((team) => perms.teamAdmin(team.id));
+  const directoryEnabled = administered.length > 0;
+  const directory = useTeamDirectory(administered, directoryEnabled);
   const teamName = useNames(teams.data);
   const memberName = useNames(directory.data?.members.map((member) => ({ id: member.user_id, name: member.email })));
   const accountName = useNames(directory.data?.serviceAccounts);
+  // The caller's own row resolves from /users/me even in a team they only belong to.
+  const ownName = (id: string) =>
+    me.data?.user_id === id
+      ? (me.data?.email ?? id.slice(0, 8))
+      : directoryEnabled
+        ? memberName(id)
+        : id.slice(0, 8);
 
   // `to` is exclusive on the server; include the chosen end day.
   const range = {
@@ -187,7 +204,7 @@ export function Usage() {
   const dims = groupBy.split(",");
   const ownerLabel = (kind: string | null | undefined, id: string | null | undefined) => {
     if (!id) return "—";
-    return kind === "service_account" ? accountName(id) : memberName(id);
+    return kind === "service_account" ? accountName(id) : ownName(id);
   };
   const dimCols: Record<string, Column<Row>[]> = {
     day: [{ key: "day", header: "Date", sort: (a, b) => (a.date ?? "").localeCompare(b.date ?? ""), cell: (row) => row.date ?? "—" }],
@@ -252,8 +269,8 @@ export function Usage() {
       </div>
       <DataTable
         rows={query.data}
-        loading={query.isPending || teams.isPending || directory.isPending}
-        error={query.error ?? teams.error ?? directory.error}
+        loading={query.isPending || teams.isPending || (directoryEnabled && directory.isPending)}
+        error={query.error ?? teams.error ?? (directoryEnabled ? directory.error : null)}
         onRetry={() => void query.refetch()}
         rowKey={(row) => [row.date, row.requested, row.model_id ?? row.model, row.alias_id ?? row.alias, row.router_id ?? row.router, row.upstream_model, row.team_id, row.owner_kind, row.owner_id, row.key_id].join("|")}
         empty="No usage in this period."

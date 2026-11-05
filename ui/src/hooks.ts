@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Key, type Me, type Schemas, type Team } from "./api";
+import { api, type Key, type Me, type Schemas, type TeamAny } from "./api";
 import { useMemo } from "react";
 import { useToast } from "./components/Toast";
 import { runSecretMutation } from "./lib/keySecret";
@@ -24,10 +24,19 @@ export function can(me: Me | undefined) {
   return {
     isInstallationAdmin,
     isTeamAdmin,
+    // Names and kinds only; every authenticated caller may read them.
+    canReadCatalog: true,
+    // Upstreams, models, aliases, routers and strategies: installation level.
+    canReadRouting: isInstallationAdmin,
     teamRole,
     teamRead: (teamId: string) => isInstallationAdmin || teamRole(teamId) !== undefined,
     teamAdmin: (teamId: string) => isInstallationAdmin || teamRole(teamId) === "admin",
     teamMember: (teamId: string) => teamRole(teamId) !== undefined,
+    // Team quota (models, limits, budget) and admin assignment are above a team admin.
+    canSetTeamQuota: () => isInstallationAdmin,
+    canAssignTeamAdmin: () => isInstallationAdmin,
+    canUpdateTeamSettings: (teamId: string) =>
+      isInstallationAdmin || teamRole(teamId) === "admin",
     canCreateOwnKey: (teamId: string) => teamRole(teamId) !== undefined,
     canManageKey,
     canResumeKey: (key: Key) =>
@@ -98,7 +107,7 @@ export function useTeams() {
   });
 }
 
-export function useAllTeamKeys(teams: Team[] | undefined) {
+export function useAllTeamKeys(teams: TeamAny[] | undefined) {
   return useQuery({
     queryKey: ["team-keys", teams?.map((t) => t.id)],
     enabled: !!teams,
@@ -106,10 +115,12 @@ export function useAllTeamKeys(teams: Team[] | undefined) {
   });
 }
 
-export function useTeamDirectory(teams: Team[] | undefined) {
+export function useTeamDirectory(teams: TeamAny[] | undefined, enabled = true) {
   return useQuery({
     queryKey: ["team-directory", teams?.map((t) => t.id)],
-    enabled: !!teams,
+    // Members and service accounts are the team-admin view; a plain member must not
+    // request them (they answer 403).
+    enabled: !!teams && enabled,
     queryFn: async () => {
       const directory = await Promise.all(
         teams!.map(async (team) => ({
@@ -133,7 +144,8 @@ export function useNames(rows: { id: string; name: string }[] | undefined) {
 
 export const useOwnKeys = () => useQuery({ queryKey: ["own-keys"], queryFn: () => api.ownKeys() });
 
-export const useModels = () => useQuery({ queryKey: ["models"], queryFn: () => api.models() });
+export const useModels = (enabled = true) =>
+  useQuery({ queryKey: ["models"], queryFn: () => api.models(), enabled });
 export const useAliases = () => useQuery({ queryKey: ["aliases"], queryFn: () => api.aliases() });
 // Settings and schemas may hold a `__proto__` key; structural sharing would rebuild them by assignment and lose it.
 export const useRouters = () => useQuery({ queryKey: ["routers"], queryFn: () => api.routers(), structuralSharing: false });

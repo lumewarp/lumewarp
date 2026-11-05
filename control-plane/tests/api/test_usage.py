@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from lumewarp_control_plane.models import CatalogName, ScopeType
+from lumewarp_control_plane.models import CatalogName, ScopeType, TeamRole
 from lumewarp_control_plane.usage import ingest
 from tests.api.helpers import ADMIN_AUTH, auth, usage_event, usage_total, user_with_token
 from tests.factories import (
@@ -161,6 +161,67 @@ async def test_usage_visibility_and_filter_rules(client, committed) -> None:
     outsider, outsider_token = await user_with_token(committed)
     await committed.commit()
     assert query(client, auth(outsider_token)).json()["items"] == []
+
+
+async def test_a_plain_member_sees_only_their_own_rows(client, committed) -> None:
+    team = await make_team(committed)
+    member, token = await user_with_token(committed)
+    colleague, _ = await user_with_token(committed)
+    admin, admin_token = await user_with_token(committed)
+    await make_member(committed, team, member)
+    await make_member(committed, team, admin, role=TeamRole.ADMIN)
+    own = await make_key(committed, team, member)
+    other = await make_key(committed, team, colleague)
+    account = await make_service_account(committed, team)
+    sa_key = await make_key(committed, team, account)
+    for key in (own, own, other, sa_key):
+        committed.add(usage_event(key, ts=TS))
+    await committed.commit()
+    headers = auth(token)
+
+    # The owner predicate is server-side: the team's other members and the service
+    # account are not visible, and no filter or grouping widens it.
+    def requests_for(**params):
+        response = query(client, headers, **params)
+        assert response.status_code == 200, response.text
+        return sum(row["requests"] for row in response.json()["items"])
+
+    assert requests_for() == 2
+    assert requests_for(group_by="owner") == 2
+    assert requests_for(group_by="team") == 2
+    assert requests_for(group_by="team", team_id=str(team.id)) == 2
+    assert requests_for(group_by="owner", team_id=str(team.id)) == 2
+    assert requests_for(group_by="key") == 2
+    people = query(client, headers, group_by="owner").json()["items"]
+    assert {(row["owner_kind"], row["owner_id"]) for row in people} == {("user", str(member.id))}
+    # Filters for someone else return nothing instead of their rows.
+    assert requests_for(group_by="owner", team_id=str(team.id), user_id=str(colleague.id)) == 0
+    assert (
+        requests_for(group_by="owner", team_id=str(team.id), service_account_id=str(account.id))
+        == 0
+    )
+    # Another member's key cannot be selected at all.
+    forbidden = query(client, headers, group_by="key", key_id=str(other.id))
+    assert forbidden.status_code == 403, forbidden.text
+    assert forbidden.json()["error"]["code"] == "forbidden"
+    forbidden = query(client, headers, group_by="key", key_id=str(sa_key.id))
+    assert forbidden.status_code == 403, forbidden.text
+    # Own rows through the key filter still work.
+    assert requests_for(group_by="key", key_id=str(own.id)) == 2
+
+    # A team admin keeps the whole-team view.
+    def admin_requests(**params):
+        response = query(client, auth(admin_token), **params)
+        assert response.status_code == 200, response.text
+        return sum(row["requests"] for row in response.json()["items"])
+
+    assert admin_requests(group_by="team", team_id=str(team.id)) == 4
+    team_rows = query(client, auth(admin_token), group_by="owner", team_id=str(team.id)).json()
+    assert sum(row["requests"] for row in team_rows["items"]) == 4
+    assert {row["owner_kind"] for row in team_rows["items"]} == {"user", "service_account"}
+    # Installation admin unchanged: whole-team rows, no owner predicate.
+    overall = query(client, group_by="owner", team_id=str(team.id)).json()["items"]
+    assert sum(row["requests"] for row in overall) == 4
 
 
 async def test_catalog_filters_grouping_rename_and_pagination(client, committed):

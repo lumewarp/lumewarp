@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
-from sqlalchemy import String, case, cast, distinct, func, or_, select, tuple_
+from sqlalchemy import String, and_, case, cast, distinct, func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -436,12 +436,18 @@ async def get_usage(
         session, authz, team_id, user_id, service_account_id, key_id
     )
     is_admin = await authz.is_admin()
-    # A narrowing filter already proved TEAM_READ; otherwise limit to the readable teams.
-    readable = (
-        None
-        if is_admin or scoped_team is not None
-        else await authz.readable_teams(set(await session.scalars(select(Team.id))))
-    )
+    if is_admin:
+        # An installation admin reads every team; neither listing is needed.
+        readable = None
+        admin_teams = None
+    else:
+        candidates = set(await session.scalars(select(Team.id)))
+        # A narrowing filter already proved TEAM_READ; otherwise limit to the readable teams.
+        readable = None if scoped_team is not None else await authz.readable_teams(candidates)
+        # Team admins keep whole-team views; a plain member only sees rows of their own
+        # keys. This predicate is applied server-side and cannot be widened by
+        # key_id/user_id/service_account_id/team_id filters or by grouping.
+        admin_teams = await authz.admin_teams(candidates)
     use_totals = (
         is_admin
         and groups == ["team"]
@@ -509,4 +515,16 @@ async def get_usage(
         filters.append(UsageEvent.owner_id == service_account_id)
     if key_id is not None:
         filters.append(UsageEvent.key_id == key_id)
+    if admin_teams is not None:
+        # Per team: administered teams keep the whole view, every other team is narrowed
+        # to the caller's own user-owned keys.
+        filters.append(
+            or_(
+                UsageEvent.team_id.in_(admin_teams),
+                and_(
+                    UsageEvent.owner_kind == KeyOwnerKind.USER,
+                    UsageEvent.owner_id == authz.user_id,
+                ),
+            )
+        )
     return await _events_page(session, groups, readable, start, end, filters, limit, cursor)

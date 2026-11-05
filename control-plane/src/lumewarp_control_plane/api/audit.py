@@ -1,8 +1,9 @@
 """Scoped audit log reads.
 
-Audit rows carry an optional `team_id`. Admin group members read everything (including
-installation-wide rows with no team); everyone else reads the rows of the teams they are
-a member of.
+Audit rows carry an optional `team_id`. Installation admins read everything (including
+installation-wide rows with no team and rows of deleted teams); a team admin reads the
+rows of the teams they administer. A plain member reads none: the team's audit is part of
+the team-admin view, and a deployment can tell a member apart from an admin reliably.
 """
 
 from __future__ import annotations
@@ -24,8 +25,8 @@ from lumewarp_control_plane.api.common import (
     validation_error,
 )
 from lumewarp_control_plane.api.schemas import AuditOut, Page
-from lumewarp_control_plane.authz import Authz
-from lumewarp_control_plane.errors import not_found
+from lumewarp_control_plane.authz import Action, Authz
+from lumewarp_control_plane.errors import forbidden, not_found
 from lumewarp_control_plane.models import AuditLog, Team
 
 FromQuery = Annotated[datetime | None, Query(alias="from")]
@@ -54,16 +55,23 @@ async def list_audit(
     stmt = select(AuditLog).order_by(AuditLog.id.desc())
     if team_id is not None:
         if await session.get(Team, team_id) is None:
-            # A deleted team's rows stay readable to admin group members only.
+            # A deleted team's rows stay readable to installation admins only.
             if not await authz.is_admin():
                 raise not_found("team not found")
         else:
+            # Unknown and unreadable are indistinguishable (404) before the 403, as the
+            # rest of the API does.
             await ensure_team_read(authz, team_id)
+            await authz.require(Action.TEAM_ADMIN_READ, team_id)
         stmt = stmt.where(AuditLog.team_id == team_id)
     else:
-        readable = await authz.readable_teams(set(await session.scalars(select(Team.id))))
-        if readable is not None:
-            stmt = stmt.where(AuditLog.team_id.in_(readable))
+        admin_teams = await authz.admin_teams(set(await session.scalars(select(Team.id))))
+        if admin_teams is not None:
+            if not admin_teams:
+                # A caller who administers no team has no audit view at all, whether the
+                # request is filtered or not.
+                raise forbidden(f"{Action.TEAM_ADMIN_READ.value} not allowed")
+            stmt = stmt.where(AuditLog.team_id.in_(admin_teams))
     if actor_id is not None:
         stmt = stmt.where(AuditLog.actor_id == actor_id)
     if action is not None:

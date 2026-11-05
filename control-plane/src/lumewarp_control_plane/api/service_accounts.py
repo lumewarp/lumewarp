@@ -48,6 +48,7 @@ async def _account_or_404(
         raise not_found("service account not found")
     if not await authz.allowed(Action.TEAM_READ, row.team_id):
         raise not_found("service account not found")
+    await authz.require(Action.TEAM_ADMIN_READ, row.team_id)
     team = await session.get(Team, row.team_id)
     if team is None:
         raise not_found("service account not found")
@@ -67,6 +68,7 @@ async def list_service_accounts(
     cursor: str | None = None,
 ) -> Page[ServiceAccountOut]:
     team = await get_team_or_404(session, authz, team_id)
+    await authz.require(Action.TEAM_ADMIN_READ, team.id)
     stmt = (
         select(ServiceAccount).where(ServiceAccount.team_id == team.id).order_by(ServiceAccount.id)
     )

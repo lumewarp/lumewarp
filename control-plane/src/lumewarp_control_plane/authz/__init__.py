@@ -10,7 +10,13 @@ Who may do what is decided in two layers:
   the built-in membership table can be swapped without touching the API.
 
 A backend guarantees that team `admin` implies `member`. `RequestAuthz` applies the
-configured admin group to every team action, independently of the backend.
+configured admin group to every team action, independently of the backend. The matrix
+separates reading a team's basic record (`TEAM_READ`, any member) from reading what a team
+admin sees (`TEAM_ADMIN_READ`: members, service accounts, every key, usage, audit), and it
+keeps team quota (`TEAM_QUOTA_SET`) and admin assignment (`TEAM_ADMIN_ASSIGN`) at the
+installation level, so a team admin cannot set either. Catalog names are readable by every caller
+(`CATALOG_READ`) because allowlists are picked by name; routing details need
+`ROUTING_READ`, which is installation-level.
 `Decision.ERROR` (backend down or timed out) is never treated as a deny:
 the admin API answers 503 and background jobs skip
 the round. The gateway never calls a backend (it only sees compiled snapshots).
@@ -268,22 +274,29 @@ class Action(StrEnum):
     # Installation-wide (admin group member only).
     TEAM_CREATE = "team.create"
     TEAM_DELETE = "team.delete"
+    TEAM_QUOTA_SET = "team.quota.set"  # models, limits, budget; installation-level
+    TEAM_ADMIN_ASSIGN = (
+        "team.admin.assign"  # add/promote/demote/remove an admin; installation-level
+    )
     USER_MANAGE = "user.manage"
     ROUTING_MANAGE = "routing.manage"  # upstreams, models, routers, prices
+    # Upstreams, models, aliases, routers, strategies: prices and routing details.
+    ROUTING_READ = "routing.read"
     GATEWAY_TOKEN_MANAGE = "gateway_token.manage"
     GATEWAY_READ = "gateway.read"
     CONFIG_READ = "config.read"  # config versions
     CONFIG_ROLLBACK = "config.rollback"
     # Any authenticated caller.
-    ROUTING_READ = "routing.read"  # model aliases are needed to set allowlists
+    CATALOG_READ = "catalog.read"  # names and kinds, for allowlist pickers
     OWN_TOKENS = "own_tokens.manage"  # own PATs, users/me
     # Team admin.
-    TEAM_UPDATE = "team.update"  # name, budget, limits, allowlist
+    TEAM_SETTINGS_UPDATE = "team.settings.update"  # name, member key limits
     TEAM_MEMBERS_MANAGE = "team.members.manage"  # incl. members' own limits
+    TEAM_ADMIN_READ = "team.admin.read"  # members, service accounts, keys, usage, audit
     SERVICE_ACCOUNT_MANAGE = "service_account.manage"  # incl. their keys
     KEY_MANAGE_ANY = "key.manage_any"  # suspend/revoke any key of the team
     # Team member (admin included).
-    TEAM_READ = "team.read"  # team, members, service accounts, key metadata, usage, audit
+    TEAM_READ = "team.read"  # the team's basic record (id, name, timestamps, key limits)
     KEY_CREATE_OWN = "key.create_own"  # owner check is the caller's job
     KEY_MANAGE_OWN = "key.manage_own"
 
@@ -300,21 +313,26 @@ MATRIX: dict[Action, Rule] = {
         for a in (
             Action.TEAM_CREATE,
             Action.TEAM_DELETE,
+            # Installation-level: a team admin cannot set quota or assign admins.
+            Action.TEAM_QUOTA_SET,
+            Action.TEAM_ADMIN_ASSIGN,
             Action.USER_MANAGE,
             Action.ROUTING_MANAGE,
+            Action.ROUTING_READ,
             Action.GATEWAY_TOKEN_MANAGE,
             Action.GATEWAY_READ,
             Action.CONFIG_READ,
             Action.CONFIG_ROLLBACK,
         )
     },
-    Action.ROUTING_READ: Rule(Level.ANY),
+    Action.CATALOG_READ: Rule(Level.ANY),
     Action.OWN_TOKENS: Rule(Level.ANY),
     **{
         a: Rule(Level.TEAM, Relation.ADMIN)
         for a in (
-            Action.TEAM_UPDATE,
+            Action.TEAM_SETTINGS_UPDATE,
             Action.TEAM_MEMBERS_MANAGE,
+            Action.TEAM_ADMIN_READ,
             Action.SERVICE_ACCOUNT_MANAGE,
             Action.KEY_MANAGE_ANY,
         )
@@ -401,6 +419,22 @@ class RequestAuthz:
         assert self.principal.user_id is not None
         teams = await self.authorizer.list_teams(
             str(self.principal.user_id), Relation.MEMBER, candidates
+        )
+        if teams is None:
+            raise AuthzUnavailable()
+        return teams
+
+    async def admin_teams(self, candidates: Iterable[uuid.UUID]) -> set[uuid.UUID] | None:
+        """Teams among `candidates` the caller may administer; None means every team.
+
+        Handlers use it to decide whether a caller sees the whole-team view (team
+        admins) or only their own rows, and never to trust a filter they were given.
+        """
+        if await self.is_admin():
+            return None
+        assert self.principal.user_id is not None
+        teams = await self.authorizer.list_teams(
+            str(self.principal.user_id), Relation.ADMIN, candidates
         )
         if teams is None:
             raise AuthzUnavailable()

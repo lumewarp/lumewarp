@@ -74,7 +74,13 @@ async def test_current_user_and_pats(client, committed) -> None:
         assert row["all_models"] is True
         assert row["limits"] == {"rpm_limit": None, "tpm_limit": None, "max_parallel": None}
         assert row["budget"]["remaining_nano_usd"] is None
-        assert row["budget"]["team_spent_nano_usd"] == 0
+        if row["role"] == "admin":
+            assert row["budget"]["team_budget_nano_usd"] is None
+            assert row["budget"]["team_spent_nano_usd"] == 0
+        else:
+            # The team scope is the team-admin view, not the member's.
+            assert row["budget"]["team_budget_nano_usd"] is None
+            assert row["budget"]["team_spent_nano_usd"] is None
     created = client.post(
         "/api/v1/users/me/tokens",
         json={"name": "second", "expires_at": "2099-01-01T00:00:00Z"},
@@ -211,7 +217,8 @@ async def test_user_with_keys_cannot_be_deleted(client, committed, revoke) -> No
 
 
 @pytest.mark.parametrize("caller", ["bootstrap", "group_admin"])
-async def test_user_delete_cannot_remove_last_admin_of_any_team(client, committed, caller) -> None:
+async def test_user_delete_leaves_a_team_without_admins(client, committed, caller) -> None:
+    """An installation admin is always above a team, so no last-admin rule blocks a delete."""
     owner, token = await user_with_token(committed)
     first = await make_team(committed)
     last = await make_team(committed)
@@ -219,25 +226,16 @@ async def test_user_delete_cannot_remove_last_admin_of_any_team(client, committe
     await make_member(committed, first, owner, role=TeamRole.ADMIN)
     await make_member(committed, last, owner, role=TeamRole.ADMIN)
     await make_member(committed, ordinary, owner)
-    await make_member(committed, first, role=TeamRole.ADMIN)
     headers = ADMIN_AUTH
     if caller == "group_admin":
         _, admin_token = await user_with_token(committed, group_admin=True)
         headers = auth(admin_token)
     await committed.commit()
     path = f"/api/v1/users/{owner.id}"
-    denied = client.delete(path, headers=headers)
-    assert denied.status_code == 409, denied.text
-    assert "last admin" in denied.json()["error"]["message"]
-    assert client.get(path, headers=headers).status_code == 200
-    for team in (first, last, ordinary):
-        rows = client.get(f"/api/v1/teams/{team.id}/members", headers=ADMIN_AUTH).json()["items"]
-        assert str(owner.id) in {r["user_id"] for r in rows}
-    await make_member(committed, last, role=TeamRole.ADMIN)
-    await committed.commit()
     assert client.delete(path, headers=headers).status_code == 204
     assert client.get(path, headers=headers).status_code == 404
     assert client.get("/api/v1/users/me", headers=auth(token)).status_code == 401
     for team in (first, last, ordinary):
+        assert client.get(f"/api/v1/teams/{team.id}", headers=ADMIN_AUTH).status_code == 200
         rows = client.get(f"/api/v1/teams/{team.id}/members", headers=ADMIN_AUTH).json()["items"]
         assert str(owner.id) not in {r["user_id"] for r in rows}
