@@ -120,7 +120,7 @@ The gateway is not ready until it has a first config version (`/v1/*` and the ad
 plane publishes an empty version when it starts, so here the gateway is ready at once
 and answers 401 until a key exists. Open <http://127.0.0.1:8091/>, use the emergency login with the
 password `dev-break-glass` (a plaintext password needs `LUMEWARP_DEV_MODE=true`; production
-uses an argon2id hash and OIDC with an admin group, see the
+uses an argon2id hash and OIDC, see the
 [control plane README](control-plane/README.md#credentials-and-access-model)), then create:
 
 - an upstream for `http://127.0.0.1:9100/v1` (kind `openai_compatible`),
@@ -151,7 +151,7 @@ settings, SSO, authorization backends, the catalog, plugins and operations, and
 
 | Login | Where | Username | Password | Access |
 | --- | --- | --- | --- | --- |
-| SSO | <http://127.0.0.1:5173/> | `alice@example.com` | `lumewarp` | Installation admin, through the `lumewarp-admins` group |
+| SSO | <http://127.0.0.1:5173/> | `alice@example.com` | `lumewarp` | Installation admin: first login becomes `proxy_admin` through `LUMEWARP_INITIAL_ADMIN_EMAIL` |
 | SSO | <http://127.0.0.1:5173/> | `bob@example.com` | `lumewarp` | Plain user: no team and no grants until an admin adds them |
 | SSO | <http://127.0.0.1:5173/> | `carol@example.com` | `lumewarp` | Plain user: no team and no grants until an admin adds them |
 | Emergency | <http://127.0.0.1:5173/> | none | `dev-break-glass` | Emergency admin session; `LUMEWARP_BREAK_GLASS_PASSWORD` overrides the password |

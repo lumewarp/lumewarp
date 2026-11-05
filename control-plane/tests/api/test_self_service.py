@@ -478,7 +478,7 @@ async def test_rate_limits_are_per_principal_not_per_target_and_429_is_not_audit
     )
 
 
-@pytest.mark.parametrize("caller", ["break_glass", "group_admin"])
+@pytest.mark.parametrize("caller", ["break_glass", "installation_admin"])
 async def test_installation_admin_and_break_glass_bypass_the_limiter(
     client, committed, monkeypatch, caller
 ) -> None:
@@ -486,8 +486,8 @@ async def test_installation_admin_and_break_glass_bypass_the_limiter(
     monkeypatch.setattr(keys_module, "KEY_ROTATE_LIMIT", 2)
     team = await make_team(committed)
     account = await make_service_account(committed, team)
-    if caller == "group_admin":
-        _, token = await user_with_token(committed, group_admin=True)
+    if caller == "installation_admin":
+        _, token = await user_with_token(committed, installation_admin=True)
         headers = auth(token)
     else:
         headers = ADMIN_AUTH

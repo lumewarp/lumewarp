@@ -1,23 +1,21 @@
-"""Built-in authorization backend: session group claims and the `team_members` table.
+"""Built-in authorization backend: the `team_members` table.
 
 Lumewarp itself is the IAM here, so it manages grants (member endpoints are writable).
 Each call opens its own short session and reads committed state; `RequestAuthz` caches the
-answers for one API request.
+answers for one API request. Installation roles live in Postgres too, but they are not a
+team relation and are never routed through this backend.
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from contextvars import ContextVar
 
 from sqlalchemy import select
 
 from lumewarp_control_plane.authz import CheckItem, Decision, Relation, Resource
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.models import TeamMember, TeamRole, User
-
-session_groups: ContextVar[tuple[str, ...]] = ContextVar("session_groups", default=())
 
 
 def _uuid(value: str) -> uuid.UUID | None:
@@ -73,12 +71,6 @@ class BuiltinBackend:
         user = _uuid(user_id)
         if user is None or user not in active:
             return Decision.DENY
-        if resource.type == "group":
-            return (
-                Decision.ALLOW
-                if relation is Relation.MEMBER and resource.id in session_groups.get()
-                else Decision.DENY
-            )
         if resource.type != "team":
             return Decision.DENY
         team = _uuid(resource.id)

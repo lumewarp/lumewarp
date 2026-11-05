@@ -93,6 +93,7 @@ const NAV: { group: string | null; items: NavItem[] }[] = [
 
 function roleLabel(me: Me) {
   if (me.kind === "break_glass") return "break-glass";
+  if (me.installation_role === "proxy_admin") return "proxy admin";
   if (me.is_admin) return "admin";
   if (me.teams.some((team) => team.role === "admin")) return "team admin";
   return me.teams.length ? "member" : "no team access";

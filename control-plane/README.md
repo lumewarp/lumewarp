@@ -143,14 +143,14 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 | `LUMEWARP_GRPC_BIND` | `127.0.0.1:50051` | Gateway-facing gRPC bind address. |
 | `LUMEWARP_METRICS_BIND` | `127.0.0.1:9465` | Prometheus metrics listener started by `serve` (`host:port`); empty string disables it. Not the admin API port, and not 9464 (the gateway admin listener's default). A bind failure aborts startup. |
 | `LUMEWARP_GRPC_TLS_CERT_FILE` / `LUMEWARP_GRPC_TLS_KEY_FILE` | unset | PEM certificate chain and key. Both or neither; unset means plaintext gRPC. |
-| `LUMEWARP_ADMIN_GROUP` | unset | IAM group whose members are installation admins. Unset leaves emergency sessions as the only admin access. |
+| `LUMEWARP_INITIAL_ADMIN_EMAIL` | unset | Email that becomes `proxy_admin` on its first verified OIDC login while no proxy_admin exists. Unset leaves break-glass as the only way to create the first one. |
 | `LUMEWARP_BREAK_GLASS_PASSWORD_HASH` | unset | Argon2id hash of the emergency password (`lumewarp-control-plane hash-password`); an invalid hash aborts startup. See [Emergency access](#emergency-access-break-glass). |
 | `LUMEWARP_BREAK_GLASS_PASSWORD` | unset | Plaintext emergency password; refused unless `LUMEWARP_DEV_MODE=true`. The hash wins if both are set. |
 | `LUMEWARP_DEV_MODE` | `false` | Development only: allows the plaintext password above. |
 | `LUMEWARP_BREAK_GLASS_SESSION_TTL_SECONDS` | `3600` | Emergency session lifetime, 60–14400. |
 | `LUMEWARP_BREAK_GLASS_ALLOWED_CIDRS` | empty (any) | Client networks allowed to use the emergency login; others get 404. |
 | `LUMEWARP_TRUSTED_PROXIES` | empty | Proxy networks whose `X-Forwarded-For` is followed to find the client address for the two limits above. |
-| `LUMEWARP_AUTHZ_BACKEND` | `builtin` | Authorization backend: `builtin` (session groups and `team_members`), `openfga`, `http` or a `lumewarp.authz` entry-point name. See [Authorization](#authorization). |
+| `LUMEWARP_AUTHZ_BACKEND` | `builtin` | Authorization backend for team relations: `builtin` (`team_members`), `openfga`, `http` or a `lumewarp.authz` entry-point name. See [Authorization](#authorization). |
 | `LUMEWARP_SCOPE` | `default` | `Snapshot.scope` this installation publishes. Gateways must use the same value. |
 | `LUMEWARP_MAX_SNAPSHOT_BYTES` | `67108864` (64 MiB) | Compilation fails above this serialized size. |
 | `LUMEWARP_MAX_SNAPSHOT_KEYS` | `200000` | Compilation fails above this key count. |
@@ -169,15 +169,20 @@ Three token types, stored only as SHA-256 hashes, and two kinds of cookie sessio
 | Personal access token (PAT) | `lwp-` | A user over the admin API/UI; created under Settings in the UI or `POST /api/v1/users/me/tokens`. |
 | Gateway token | `lwg-` | A gateway for the config stream and usage reporting; the first one comes from `bootstrap` (which also creates the scope), later ones from the gateways API/UI. |
 | Virtual API key | `lw-` | Clients calling the gateway; owned by a team member or a service account of a team; the gateway only receives its hash in the snapshot. |
-| OIDC session | cookie | A user logged in through [SSO](#sso-login-oidc). The only credential that carries groups from the IdP. |
+| OIDC session | cookie | A user logged in through [SSO](#sso-login-oidc). |
 | Emergency session | cookie | The [break-glass](#emergency-access-break-glass) login: an installation admin that is not a user. |
 
 The bearer scheme accepts PATs only. Nothing else authenticates to the admin API. No
 credential is stored in plaintext: the OIDC nonce and PKCE verifier live only in the
 encrypted login cookie, and an upstream stores only its `api_key_ref` name.
 
-The first users and teams come from an emergency session or from an admin group member logged
-in through OIDC. An installation admin can issue a PAT for an active user with
+Installation admins live in Postgres (`installation_admins`). The first verified login whose
+email matches `LUMEWARP_INITIAL_ADMIN_EMAIL` becomes the `proxy_admin`; break-glass can create
+the first one when the setting is empty, and is the recovery path afterwards. Any installation
+admin can then assign more admins. A user must have signed in through OIDC at least once before
+receiving an installation role: otherwise the identity-link protection would leave a privileged
+account unable to log in. Assign and transfer return 409 for an account with no linked identity;
+let the person sign in once first. An installation admin can issue a PAT for an active user with
 `POST /api/v1/users/{user_id}/tokens` using `{"name":"initial access"}` (optional
 `expires_at`). The secret is returned only on creation; issuance is audited with the
 actor and target user, never the secret. Team admins cannot use this endpoint.
@@ -191,6 +196,9 @@ OIDC, and writes need the same CSRF header:
 - The session is an installation admin with no user behind it: it passes every check without
   asking the authorization backend, so it works while the backend is down. It has no PATs and
   belongs to no team.
+- Break-glass can create the first proxy_admin or assign admins, but the target must have signed
+  in through OIDC once first (409 otherwise); a newly created account has no linked identity for
+  the role.
 - It ends at its TTL, on logout, and at once when the configured credential changes.
 - Failed attempts are delayed and limited per client address (429 `rate_limited`). The endpoint
   answers 404 when no credential is configured or the address is outside
@@ -248,8 +256,8 @@ member whose own policy is narrower.
 `POST /teams/{id}/keys` (create) and `POST /keys/{id}/rotate` are rate limited per
 principal and operation: 30 attempts per minute each, independent of the target team or
 key. The check runs after authentication, before target lookup and authorization.
-Installation admins (members of the configured admin group) and break-glass sessions are
-exempt; a member who is only a team admin is not. A refusal is a 429 `rate_limited` with
+Installation admins and break-glass sessions are exempt; a member who is only a team admin is
+not. A refusal is a 429 `rate_limited` with
 `Retry-After`, counted in `lumewarp_cp_key_writes_total{result="rate_limited"}` and
 deliberately not audited: only successful writes are audited as `key.create` /
 `key.rotate`, so a client cannot flood the audit table.
@@ -288,14 +296,29 @@ Authorization has two layers. The action matrix below stays in Lumewarp; a backe
 answers relation questions. A team `admin` has every member permission (`admin` implies
 `member`).
 
-An *installation admin* is an emergency session, or a user for whom the backend answers `member`
-of `group:<LUMEWARP_ADMIN_GROUP>`. Lumewarp applies this itself: an installation admin passes
-every action, on every team, whatever the backend says about that team. With no admin group
-configured only emergency sessions are installation admins. There is no superuser role or flag.
+An *installation admin* is a break-glass session, or a user with a row in `installation_admins`
+(`proxy_admin` or `admin`). The role is read from Postgres once per request, so a revocation
+applies on the caller's next request. It is never asked of an authorization backend, and a PAT
+carries its holder's installation role. `proxy_admin` is unique: the first verified login
+matching `LUMEWARP_INITIAL_ADMIN_EMAIL` creates it while no proxy_admin exists (or break-glass
+assigns one), and it can be transferred afterwards. Every installation admin can assign and remove
+`admin` rows; nobody can remove or demote the `proxy_admin` through those endpoints. The
+`proxy_admin` account itself is protected: only that account and break-glass may deactivate,
+delete, change its email or mint a PAT for it.
+
+The endpoints are `GET /api/v1/installation-admins` (the rows with user email, display name and
+active state), `PUT /api/v1/installation-admins/{user_id}` with `{"role":"admin"}` (idempotent;
+`proxy_admin` is rejected as a normal assignment), `DELETE /api/v1/installation-admins/{user_id}`
+(removes an `admin`; the proxy_admin must be transferred) and
+`POST /api/v1/installation-admins/transfer` with `{"user_id": ...}` (the previous proxy_admin
+becomes an `admin`). Assign and transfer require the target to have linked an IdP identity
+(signed in once); an account that has never signed in gets 409 `the user must sign in once
+before receiving an installation role`. Assign, remove and transfer are audited; the first-login
+bootstrap is audited as `installation_admin.bootstrap`.
 
 | Action | Who |
 | --- | --- |
-| `TEAM_CREATE`, `TEAM_DELETE`, `TEAM_QUOTA_SET`, `TEAM_ADMIN_ASSIGN`, `USER_MANAGE`, `ROUTING_MANAGE`, `ROUTING_READ`, `GATEWAY_TOKEN_MANAGE`, `GATEWAY_READ`, `CONFIG_READ`, `CONFIG_ROLLBACK` | Installation admin |
+| `TEAM_CREATE`, `TEAM_DELETE`, `TEAM_QUOTA_SET`, `TEAM_ADMIN_ASSIGN`, `INSTALLATION_ADMIN_MANAGE`, `USER_MANAGE`, `ROUTING_MANAGE`, `ROUTING_READ`, `GATEWAY_TOKEN_MANAGE`, `GATEWAY_READ`, `CONFIG_READ`, `CONFIG_ROLLBACK` | Installation admin |
 | `CATALOG_READ`, `OWN_TOKENS` | Any authenticated caller |
 | `TEAM_SETTINGS_UPDATE`, `TEAM_MEMBERS_MANAGE`, `TEAM_ADMIN_READ`, `SERVICE_ACCOUNT_MANAGE`, `KEY_MANAGE_ANY` | Team admin |
 | `TEAM_READ`, `KEY_CREATE_OWN`, `KEY_MANAGE_OWN` | Team member |
@@ -325,12 +348,11 @@ including their `GET`s). `CATALOG_READ` is the one routing read every authentica
 needs: `GET /catalog` returns only names, ids and kinds, which is what the allowlist pickers use.
 
 `LUMEWARP_AUTHZ_BACKEND` selects the backend: `builtin` (the default), `openfga`, `http`, or
-any other value naming a `lumewarp.authz` entry point. `builtin` answers teams from `team_members`
-and the admin group from the groups of the current OIDC session, so with `builtin` **a PAT is never
-an installation admin**: it carries no groups, whoever holds it. External backends answer the group
-from the IAM, for sessions and PATs alike. The entry point may be an async `check` function, an object with an async `check`
-method, or a class/zero-argument factory returning one; it is loaded once at startup. An
-unknown name with no matching entry point aborts startup.
+any other value naming a `lumewarp.authz` entry point. Every backend answers team relations
+only; installation roles are Lumewarp's own Postgres data and are never sent to a backend.
+`builtin` answers teams from `team_members`. The entry point may be an async `check` function,
+an object with an async `check` method, or a class/zero-argument factory returning one; it is
+loaded once at startup. An unknown name with no matching entry point aborts startup.
 
 The only required method is:
 
@@ -341,10 +363,8 @@ from lumewarp_control_plane.authz import Decision, Relation, Resource
 async def check(user_id: str, relation: Relation, resource: Resource) -> Decision: ...
 ```
 
-`Relation` is `admin` (team only) or `member` (team or group). `Resource` has a `type`, `group`
-or `team`, and an `id`: the group is the value of `LUMEWARP_ADMIN_GROUP` as configured, the team
-its UUID. Answer `member` of the group for its members and `DENY` for `admin` of a group. Return `Decision.ALLOW`, `Decision.DENY` or
-`Decision.ERROR`. `ERROR` means the backend is unavailable or timed out: the admin API
+`Relation` is `admin` or `member` on a team. `Resource` has `type` `"team"` and the team UUID
+as `id`. Return `Decision.ALLOW`, `Decision.DENY` or `Decision.ERROR`. `ERROR` means the backend is unavailable or timed out: the admin API
 answers `503 authz_unavailable` and background jobs skip the round; it is never treated
 as a deny. The gateway never calls the backend; it only sees compiled snapshots.
 
@@ -376,10 +396,10 @@ Two external backends ship with the control plane:
 
 - `openfga`: `LUMEWARP_OPENFGA_URL`, `LUMEWARP_OPENFGA_STORE_ID`,
   `LUMEWARP_OPENFGA_MODEL_ID`, optional `LUMEWARP_OPENFGA_API_TOKEN`. Users are
-  `user:<lumewarp user uuid>`, resources `group:<admin group>` and `team:<uuid>`; the
-  model is `deploy/openfga/model.fga`. Implements `batch_check`, `list_teams`
-  (ListObjects) and `changes` (ReadChanges). `scripts/dev-idp.sh up` starts a local
-  OpenFGA, writes the model and prints these variables.
+  `user:<lumewarp user uuid>`, resources `team:<uuid>`; the model is
+  `deploy/openfga/model.fga`. Implements `batch_check`, `list_teams` (ListObjects) and
+  `changes` (ReadChanges). `scripts/dev-idp.sh up` starts a local OpenFGA, writes the model
+  and prints these variables.
 - `http`: `LUMEWARP_AUTHZ_HTTP_URL` (+ optional `LUMEWARP_AUTHZ_HTTP_TOKEN`).
   `check` becomes `POST {"user_id", "relation", "resource": {"type", "id"}}` answered by
   `{"decision": "allow" | "deny"}`; anything else (non-2xx, timeout, bad body) is `ERROR`.
@@ -409,16 +429,16 @@ backend already suspends keys in the same transaction that removes the member):
 
 The admin UI can sign in through any OIDC provider (Keycloak in dev). The control plane
 runs the authorization code flow with PKCE itself (Authlib) and issues a server-side
-session cookie. The IdP authenticates and, with the built-in backend, can say who is in the admin
-group; team roles never come from it, and no other claim grants anything.
+session cookie. The IdP authenticates only: installation roles live in Postgres and team roles
+never come from the IdP.
 
 | Setting | Meaning |
 | --- | --- |
 | `LUMEWARP_SECRET_KEY` | At least 32 bytes of random text; **required when SSO is enabled**. Derives the AES-256-GCM key for the login-state cookie. `serve` refuses to start with `LUMEWARP_OIDC_ISSUER` set and no key. Changing it invalidates pending logins only. |
 | `LUMEWARP_OIDC_ISSUER` | Issuer URL; unset disables SSO. |
 | `LUMEWARP_OIDC_CLIENT_ID`, `LUMEWARP_OIDC_CLIENT_SECRET` | Client credentials (secret optional for a public PKCE client). |
-| `LUMEWARP_OIDC_SCOPES` | Default `openid email profile`. Add whatever scope your IdP needs to release groups. |
-| `LUMEWARP_OIDC_GROUPS_CLAIM` | Dotted path of the groups claim, default `groups`. Read from the ID token, or from userinfo when the token does not have it. |
+| `LUMEWARP_OIDC_SCOPES` | Default `openid email profile`. |
+| `LUMEWARP_INITIAL_ADMIN_EMAIL` | The first verified login with this email becomes `proxy_admin` while no proxy_admin exists. Changing the setting afterwards never moves the role. |
 | `LUMEWARP_PUBLIC_URL` | External base URL; the redirect URI is `<public_url>/api/v1/session/oidc/callback`. |
 | `LUMEWARP_OIDC_JIT_USERS` | Create a user with no grants on first login (default true). |
 | `LUMEWARP_SESSION_TTL_SECONDS` | Absolute session lifetime (default 12 h). |
@@ -431,14 +451,11 @@ example](../deploy/helm/lumewarp/README.md#sso-and-authorization-backend).
 - Users are identified by the token's `iss` + `sub`. On a first login with a verified
   email, the identity links to an existing account with that email that
   has no identity from this issuer yet; otherwise a new user is created (JIT, only with a
-  verified email). An installation admin is never linked by email: a login is refused when the
-  claims put the person in the admin group, or the backend does not answer a plain `DENY` for
-  the existing account.
-- The groups claim is a string or a list of strings; a leading `/` (Keycloak group paths) is
-  ignored on both sides, anything else is treated as no groups. Only the admin group is kept, on
-  the session and captured at login: losing the group takes effect at the next login, so keep
-  `LUMEWARP_SESSION_TTL_SECONDS` in mind. With an external backend the IAM decides on every
-  check instead.
+  verified email). An account holding an installation role is never linked by email: a login
+  with a new IdP identity for such an account is refused.
+- No IdP claim grants any Lumewarp role: groups and roles claims are ignored. Installation
+  roles are read from Postgres on every request; team roles come from the authorization
+  backend, which only ever answers team relations.
 - Inactive users cannot log in, and their existing sessions stop working immediately.
 - The one-time login state is the encrypted cookie `lumewarp_oidc_state` (HttpOnly,
   `SameSite=Lax`, `Secure` per `LUMEWARP_SESSION_COOKIE_SECURE`, path

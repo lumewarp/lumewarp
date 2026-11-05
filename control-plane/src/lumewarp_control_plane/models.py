@@ -128,6 +128,13 @@ class TeamRole(enum.StrEnum):
     MEMBER = "member"
 
 
+class InstallationRole(enum.StrEnum):
+    """Installation-level role. `proxy_admin` is unique; `admin` may be assigned to many."""
+
+    PROXY_ADMIN = "proxy_admin"
+    ADMIN = "admin"
+
+
 class KeyOwnerKind(enum.StrEnum):
     USER = "user"
     SERVICE_ACCOUNT = "service_account"
@@ -278,6 +285,40 @@ class User(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
 
 
+class InstallationAdmin(Base):
+    """An installation-level role, read from Postgres on every request.
+
+    The authorization backend is never asked about this: it only answers team relations.
+    A partial unique index keeps at most one `proxy_admin`.
+
+    `ON DELETE CASCADE`: the role is an attribute of the account, so deleting the account
+    removes it. The API protects the proxy_admin account separately (only the account
+    itself and break-glass may change or delete it).
+    """
+
+    __tablename__ = "installation_admins"
+    __table_args__ = (
+        Index(
+            "uq_installation_admins_proxy_admin",
+            "role",
+            unique=True,
+            postgresql_where=text("role = 'proxy_admin'"),
+        ),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    role: Mapped[InstallationRole] = mapped_column(
+        _enum(InstallationRole, "installation_role"), nullable=False
+    )
+    # The user who made the assignment; NULL for break-glass and the first-login bootstrap.
+    assigned_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    assigned_at: Mapped[datetime] = _now()
+
+
 class UserIdentity(Base):
     __tablename__ = "user_identities"
     __table_args__ = (UniqueConstraint("issuer", "subject"),)
@@ -310,7 +351,6 @@ class UserSession(Base):
         ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
     )
     kind: Mapped[str] = mapped_column(String(20), nullable=False, server_default="session")
-    admin_group: Mapped[str | None] = mapped_column(Text)
     credential_fingerprint: Mapped[bytes | None] = mapped_column(LargeBinary)
     token_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
     csrf_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

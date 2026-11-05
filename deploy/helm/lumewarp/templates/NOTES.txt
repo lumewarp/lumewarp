@@ -11,8 +11,9 @@ Control plane
   Metrics:   http://{{ include "lumewarp.controlPlane.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.controlPlane.service.metricsPort }}/metrics
   {{- end }}
 
-  Log in at / with SSO. Installation settings require membership in
-  `controlPlane.adminGroup`. Emergency password login is enabled only when
+  Log in at / with SSO. The first verified login matching
+  `controlPlane.initialAdminEmail` becomes proxy_admin (then it can assign admins).
+  Emergency password login is enabled only when
   `controlPlane.breakGlass.passwordHashSecret` references an argon2id hash Secret.
   Generate that hash with `lumewarp-control-plane hash-password`.
 {{- end }}

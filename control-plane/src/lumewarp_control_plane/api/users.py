@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Request, Response, status
 from sqlalchemy import and_, func, or_, select
 
-from lumewarp_control_plane import audit
+from lumewarp_control_plane import audit, installation
 from lumewarp_control_plane.api.common import (
     LimitDep,
     MetricsDep,
@@ -38,10 +38,11 @@ from lumewarp_control_plane.api.schemas import (
     UserUpdate,
 )
 from lumewarp_control_plane.authz import Action, Authz, AuthzUnavailable, Relation, RequestAuthz
-from lumewarp_control_plane.errors import ApiError, not_found
+from lumewarp_control_plane.errors import ApiError, forbidden, not_found
 from lumewarp_control_plane.models import (
     ApiKey,
     CatalogName,
+    InstallationRole,
     KeyLifecycle,
     KeyOwnerKind,
     PersonalAccessToken,
@@ -64,6 +65,34 @@ def _check_not_null(body: object, *fields: str) -> None:
     for name in fields:
         if name in supplied and getattr(body, name) is None:
             raise validation_error(name, "cannot be null")
+
+
+async def _ensure_proxy_admin_protected(
+    authz: Authz,
+    session: SessionDep,
+    target_id: uuid.UUID,
+    action: Action | None = None,
+) -> None:
+    """Only the proxy_admin itself and break-glass may change or act as that account.
+
+    Every write that can deactivate, delete, re-address or mint a token for the account
+    calls this; the role cannot be removed through the installation-admin endpoints either.
+    The check runs under the installation lock, so a concurrent promotion (transfer or
+    first login) cannot slip in between "not the proxy_admin" and the write.
+    """
+    await installation.lock_installation(session)
+    # Authentication happened before the lock; revalidate this request's own credential
+    # after acquiring it. A PAT revoked while we waited must not act (or mint a new token).
+    await installation.recheck_principal(session, authz.principal)
+    # Re-read the caller's role too: a role removed while we waited must fail the action
+    # that the cached role authorized before the lock.
+    await installation.recheck_role(session, authz)
+    if action is not None:
+        await authz.require(action)
+    if authz.principal.is_break_glass or target_id == authz.user_id:
+        return
+    if await installation.role_of(session, target_id) is InstallationRole.PROXY_ADMIN:
+        raise forbidden("the proxy_admin account is protected")
 
 
 async def _my_teams(
@@ -278,18 +307,18 @@ async def get_current_user(request: Request, authz: Authz, session: SessionDep) 
             email=None,
             display_name="break-glass",
             is_admin=True,
+            installation_role=None,
             manages_grants=manages_grants,
             teams=[],
         )
     user = await session.get(User, principal.user_id)
     if user is None:
         raise not_found("user not found")
+    role = await authz.installation_role()
     unavailable = False
     try:
-        is_admin = await authz.is_admin()
-        teams = await _my_teams(authz, session, user.id, installation_admin=is_admin)
+        teams = await _my_teams(authz, session, user.id, installation_admin=role is not None)
     except AuthzUnavailable:
-        is_admin = False
         teams = []
         unavailable = True
     return MeOut(
@@ -297,7 +326,8 @@ async def get_current_user(request: Request, authz: Authz, session: SessionDep) 
         user_id=user.id,
         email=user.email,
         display_name=user.display_name,
-        is_admin=is_admin,
+        is_admin=role is not None,
+        installation_role=role,
         authz_unavailable=unavailable,
         manages_grants=manages_grants,
         teams=teams,
@@ -337,7 +367,7 @@ async def create_own_token(
 ) -> TokenCreated:
     if authz.user_id is None:
         raise ApiError(400, "bad_request", "break-glass sessions cannot own personal tokens")
-    return await _issue_token(body, authz.principal, session, authz.user_id)
+    return await _issue_token(body, authz.principal, session, authz.user_id, authz=authz)
 
 
 @router.post(
@@ -353,17 +383,34 @@ async def create_user_token(
     session: SessionDep,
     response: Response,
 ) -> TokenCreated:
-    """Issue a PAT on behalf of a user; requires admin group membership."""
+    """Issue a PAT on behalf of a user; requires an installation admin."""
     await authz.require(Action.USER_MANAGE)
     response.headers["Cache-Control"] = "no-store"
-    return await _issue_token(body, authz.principal, session, user_id)
+    return await _issue_token(
+        body,
+        authz.principal,
+        session,
+        user_id,
+        authz=authz,
+        action=Action.USER_MANAGE,
+    )
 
 
 async def _issue_token(
-    body: TokenCreate, principal: Principal, session: SessionDep, user_id: uuid.UUID
+    body: TokenCreate,
+    principal: Principal,
+    session: SessionDep,
+    user_id: uuid.UUID,
+    *,
+    authz: RequestAuthz | None = None,
+    action: Action | None = None,
 ) -> TokenCreated:
     new = generate_secret(SecretKind.PAT)
     async with mutation(session):
+        # Inside the same transaction: a separate read would start one and make
+        # `mutation` fail with "a transaction is already begun".
+        if authz is not None:
+            await _ensure_proxy_admin_protected(authz, session, user_id, action=action)
         user = await session.get(User, user_id)
         if user is None:
             raise not_found("user not found")
@@ -442,6 +489,7 @@ async def update_user(
         row = await session.get(User, user_id)
         if row is None:
             raise not_found("user not found")
+        await _ensure_proxy_admin_protected(authz, session, row.id, action=Action.USER_MANAGE)
         if row.id == authz.user_id and body.is_active is False:
             raise conflict("you cannot remove your own active status")
         was_active = row.is_active
@@ -491,6 +539,7 @@ async def delete_user(
         row = await session.get(User, user_id)
         if row is None:
             raise not_found("user not found")
+        await _ensure_proxy_admin_protected(authz, session, row.id, action=Action.USER_MANAGE)
         if row.id == authz.user_id:
             raise conflict("you cannot delete yourself")
         key = await session.scalar(select(ApiKey.id).where(ApiKey.user_id == row.id).limit(1))
@@ -498,6 +547,7 @@ async def delete_user(
             raise conflict("user owns keys (kept for usage history); deactivate the user instead")
         # A team without admins is valid: an installation admin is always above it, and
         # another admin can be assigned by one.
+        role = await installation.role_of(session, row.id)
         email = row.email
         await session.delete(row)
         audit.record(
@@ -508,6 +558,17 @@ async def delete_user(
             principal=authz.principal,
             details={"email": email},
         )
+        if role is not None:
+            # The role row goes with the account via ON DELETE CASCADE; record the
+            # privilege removal explicitly so audit consumers see one remove event.
+            audit.record(
+                session,
+                action="installation_admin.remove",
+                resource_type="installation_admin",
+                resource_id=row.id,
+                principal=authz.principal,
+                details={"user_id": row.id, "role": role.value},
+            )
         # Memberships cascade, which changes the compiled owners.
         await enqueue_recompile(session, settings, "api.user.delete")
     return Response(status_code=status.HTTP_204_NO_CONTENT)

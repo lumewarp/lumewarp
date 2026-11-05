@@ -32,8 +32,9 @@ controlPlane:
   databaseUrl:
     secretName: lumewarp-control-plane
     key: database-url
-  # IAM group allowed to manage installation settings. Empty = emergency access only.
-  adminGroup: ""
+  # Email that becomes proxy_admin on its first verified OIDC login while no proxy_admin
+  # exists. Empty = emergency access only (break-glass can assign the first one).
+  initialAdminEmail: ""
   # Optional existing Secret containing an argon2id password hash.
   breakGlass:
     passwordHashSecret:

@@ -75,10 +75,10 @@ async def test_member_creates_and_manages_only_own_key(client, committed) -> Non
     )
 
 
-@pytest.mark.parametrize("caller", ["bootstrap", "group_admin"])
+@pytest.mark.parametrize("caller", ["bootstrap", "installation_admin"])
 async def test_non_member_cannot_create_user_key(client, committed, caller) -> None:
     team = await make_team(committed)
-    _, token = await user_with_token(committed, group_admin=True)
+    _, token = await user_with_token(committed, installation_admin=True)
     await committed.commit()
     response = client.post(
         f"/api/v1/teams/{team.id}/keys",
@@ -89,13 +89,13 @@ async def test_non_member_cannot_create_user_key(client, committed, caller) -> N
     assert "not a member of this team" in response.json()["error"]["message"]
 
 
-@pytest.mark.parametrize("role", ["admin", "group_admin", "bootstrap"])
+@pytest.mark.parametrize("role", ["admin", "installation_admin", "bootstrap"])
 async def test_admin_creates_sa_keys_and_checks_team(client, committed, role) -> None:
     team = await make_team(committed)
     other = await make_team(committed)
     account = await make_service_account(committed, team)
     foreign = await make_service_account(committed, other)
-    user, token = await user_with_token(committed, group_admin=role == "group_admin")
+    user, token = await user_with_token(committed, installation_admin=role == "installation_admin")
     if role == "admin":
         await make_member(committed, team, user, role=TeamRole.ADMIN)
     await committed.commit()
@@ -269,7 +269,7 @@ async def test_key_create_validation(client, committed, body) -> None:
     assert response.status_code == 422, response.text
 
 
-@pytest.mark.parametrize("caller", ["admin", "group_admin", "bootstrap"])
+@pytest.mark.parametrize("caller", ["admin", "installation_admin", "bootstrap"])
 @pytest.mark.parametrize("owner_kind", ["user", "service_account"])
 async def test_admin_suspension_cannot_be_undone_by_member(
     client, committed, caller, owner_kind
@@ -277,7 +277,9 @@ async def test_admin_suspension_cannot_be_undone_by_member(
     team = await make_team(committed)
     owner, owner_token = await user_with_token(committed)
     await make_member(committed, team, owner)
-    admin, admin_token = await user_with_token(committed, group_admin=caller == "group_admin")
+    admin, admin_token = await user_with_token(
+        committed, installation_admin=caller == "installation_admin"
+    )
     if caller == "admin":
         await make_member(committed, team, admin, role=TeamRole.ADMIN)
     key_owner = owner
@@ -358,10 +360,10 @@ async def test_returned_member_can_resume_own_owner_removed_key(
     assert (restored.json()["lifecycle"], restored.json()["suspended_reason"]) == ("active", None)
 
 
-@pytest.mark.parametrize("role", ["admin", "group_admin"])
+@pytest.mark.parametrize("role", ["admin", "installation_admin"])
 async def test_privileged_owner_suspends_as_admin(client, committed, role) -> None:
     team = await make_team(committed)
-    owner, token = await user_with_token(committed, group_admin=role == "group_admin")
+    owner, token = await user_with_token(committed, installation_admin=role == "installation_admin")
     await make_member(committed, team, owner, role=TeamRole(role if role == "admin" else "member"))
     key = await make_key(committed, team, owner)
     await committed.commit()
@@ -379,7 +381,7 @@ async def test_external_membership_error_is_unavailable_not_a_denial(
     client, committed, monkeypatch, operation, decision, reason
 ) -> None:
     team = await make_team(committed)
-    owner, token = await user_with_token(committed, group_admin=True)
+    owner, token = await user_with_token(committed, installation_admin=True)
     key = await make_key(
         committed, team, owner, lifecycle=KeyLifecycle.SUSPENDED, suspended_reason=reason
     )
@@ -414,12 +416,14 @@ async def test_external_membership_error_is_unavailable_not_a_denial(
     assert [row["id"] for row in keys] == [str(key.id)]
 
 
-@pytest.mark.parametrize("caller", ["admin", "group_admin", "bootstrap"])
+@pytest.mark.parametrize("caller", ["admin", "installation_admin", "bootstrap"])
 async def test_inactive_owner_key_cannot_be_reactivated(client, committed, caller) -> None:
     team = await make_team(committed)
     owner, _ = await user_with_token(committed)
     await make_member(committed, team, owner)
-    admin, token = await user_with_token(committed, group_admin=caller == "group_admin")
+    admin, token = await user_with_token(
+        committed, installation_admin=caller == "installation_admin"
+    )
     if caller == "admin":
         await make_member(committed, team, admin, role=TeamRole.ADMIN)
     key = await make_key(committed, team, owner, name="unchanged")

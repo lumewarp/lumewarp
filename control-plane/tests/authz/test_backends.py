@@ -331,14 +331,8 @@ async def test_changes_page_limit_continues_next_poll(fga, initial):
     assert seen[-2:] == ["20", "21"]
 
 
-@pytest.mark.parametrize(
-    "tuple_change",
-    [
-        change(relation="member", obj="group:lumewarp-admins"),
-        change(relation="admin"),
-    ],
-)
-async def test_group_and_team_changes_identify_affected_user(fga, tuple_change):
+@pytest.mark.parametrize("tuple_change", [change(relation="admin")])
+async def test_team_changes_identify_affected_user(fga, tuple_change):
     await mock_client(
         fga,
         lambda request: httpx.Response(

@@ -101,7 +101,6 @@ CLASSIFIED: dict[tuple[str, str], ColumnClass] = {
     ("user_identities", "email"): ColumnClass.PERSONAL,
     ("user_identities", "issuer"): ColumnClass.PUBLIC,
     ("user_identities", "subject"): ColumnClass.PERSONAL,
-    ("user_sessions", "admin_group"): ColumnClass.PUBLIC,
     ("user_sessions", "kind"): ColumnClass.PUBLIC,
     ("users", "display_name"): ColumnClass.PERSONAL,
     ("users", "email"): ColumnClass.PERSONAL,

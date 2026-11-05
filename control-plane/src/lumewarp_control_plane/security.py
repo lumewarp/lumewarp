@@ -97,7 +97,6 @@ class Principal:
     # Emergency sessions are not users.
     user_id: uuid.UUID | None = None
     token_id: uuid.UUID | None = None
-    groups: tuple[str, ...] = ()
 
     @property
     def is_break_glass(self) -> bool:

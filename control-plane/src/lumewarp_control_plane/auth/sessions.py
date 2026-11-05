@@ -34,7 +34,6 @@ async def create_session(
     ttl: int,
     *,
     kind: PrincipalKind = PrincipalKind.SESSION,
-    admin_group: str | None = None,
     credential_fingerprint: bytes | None = None,
 ) -> str:
     token = secrets.token_urlsafe(32)
@@ -42,7 +41,6 @@ async def create_session(
         UserSession(
             user_id=user_id,
             kind=kind.value,
-            admin_group=admin_group,
             credential_fingerprint=credential_fingerprint,
             token_hash=hash_secret(token),
             csrf_hash=hash_secret(csrf_token(token)),
@@ -83,7 +81,6 @@ async def authenticate_session(
             kind=PrincipalKind(credential.kind),
             user_id=user.id if user else None,
             token_id=credential.id,
-            groups=(credential.admin_group,) if credential.admin_group else (),
         )
         # Preserve the validated actor for auditing even when the CSRF check fails.
         request.state.principal = principal

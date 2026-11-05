@@ -1,7 +1,6 @@
 """Regression evidence for the security review."""
 
 import asyncio
-import logging
 from ipaddress import ip_network
 from types import SimpleNamespace
 
@@ -14,9 +13,14 @@ from starlette.requests import Request
 
 from lumewarp_control_plane.api import session as session_api
 from lumewarp_control_plane.app import create_app
-from lumewarp_control_plane.auth import break_glass, oidc
+from lumewarp_control_plane.auth import break_glass
 from lumewarp_control_plane.authz import Authorizer, Decision
-from lumewarp_control_plane.models import AuditLog, UserIdentity
+from lumewarp_control_plane.models import (
+    AuditLog,
+    InstallationAdmin,
+    InstallationRole,
+    UserIdentity,
+)
 from lumewarp_control_plane.settings import Settings
 from tests.api.helpers import auth, user_with_token
 from tests.api.test_session import idp as idp
@@ -175,12 +179,11 @@ def test_emergency_sessions_are_bound_to_current_credential(client, change):
     assert client.get("/api/v1/session").json()["authenticated"] is False
 
 
-@pytest.mark.parametrize(
-    "decision,allowed", [(Decision.ALLOW, False), (Decision.ERROR, False), (Decision.DENY, True)]
-)
-async def test_external_admin_email_link_is_refused(
-    client, committed, idp, monkeypatch, decision, allowed
+@pytest.mark.parametrize("decision", [Decision.ALLOW, Decision.DENY, Decision.ERROR])
+async def test_existing_user_link_ignores_the_backend(
+    client, committed, idp, monkeypatch, decision
 ):
+    """A new IdP identity may link a plain account; installation roles are local."""
     user, _ = await user_with_token(committed, email=idp.claims["email"])
     await committed.commit()
     calls = []
@@ -192,56 +195,36 @@ async def test_external_admin_email_link_is_refused(
     monkeypatch.setattr(client.app.state, "authorizer", Authorizer(check, "external"))
     idp.login(client)
     response = idp.callback(client)
-    assert response.headers["location"] == ("/" if allowed else "/login?error=access_denied")
-    assert calls == [(str(user.id), "member", "group", "lumewarp-admins")]
+    assert response.headers["location"] == "/"
+    assert calls == [] or all(item[2] == "team" for item in calls)
     linked = await committed.scalar(select(UserIdentity).where(UserIdentity.user_id == user.id))
-    assert (linked is not None) is allowed
+    assert linked is not None
 
 
-@pytest.mark.parametrize(
-    "claim,value",
-    [
-        ("groups", "lumewarp-admins"),
-        ("groups", "/lumewarp-admins"),
-        ("groups", ["/lumewarp-admins", "unrelated-group"]),
-        ("realm_access.roles", ["/lumewarp-admins"]),
-    ],
-)
-def test_group_claim_shapes_and_dotted_paths(client, idp, claim, value):
-    client.app.state.settings.oidc_groups_claim = claim
-    if "." in claim:
-        idp.claims["realm_access"] = {"roles": value}
-    else:
-        idp.claims[claim] = value
+@pytest.mark.parametrize("decision", [Decision.ALLOW, Decision.DENY, Decision.ERROR])
+async def test_existing_installation_admin_cannot_be_linked_by_email(
+    client, committed, idp, monkeypatch, decision
+):
+    user, _ = await user_with_token(committed, email=idp.claims["email"])
+    committed.add(InstallationAdmin(user_id=user.id, role=InstallationRole.ADMIN))
+    await committed.commit()
+
+    async def check(uid, relation, resource):
+        return decision
+
+    monkeypatch.setattr(client.app.state, "authorizer", Authorizer(check, "external"))
+    idp.login(client)
+    response = idp.callback(client)
+    assert response.headers["location"] == "/login?error=access_denied"
+    linked = await committed.scalar(select(UserIdentity).where(UserIdentity.user_id == user.id))
+    assert linked is None
+
+
+def test_callback_does_not_fetch_userinfo(client, idp):
+    """No userinfo fallback: the id token is the only claim source."""
     idp.login(client)
     assert idp.callback(client).headers["location"] == "/"
-    assert client.get("/api/v1/users/me").json()["is_admin"]
-
-
-@pytest.mark.parametrize("value", [None, 123, {"wrong": "shape"}, ["admin", 1]])
-def test_unusable_claim_is_logged_without_contents(client, caplog, value):
-    request = Request({"type": "http", "app": client.app})
-    with caplog.at_level(logging.DEBUG, logger=oidc.__name__):
-        assert oidc.groups({"groups": value}, request) == ()
-    assert len(caplog.records) == 1
-    assert caplog.records[0].levelno == logging.DEBUG
-    assert caplog.records[0].args == ()
-
-
-@pytest.mark.parametrize("failure", ["subject", "error"])
-def test_userinfo_failure_does_not_create_session(client, idp, monkeypatch, failure):
-    idp.claims.pop("groups")
-    if failure == "subject":
-        idp.userinfo["sub"] = "other-user"
-    else:
-
-        async def unavailable(**kwargs):
-            raise RuntimeError("userinfo unavailable")
-
-        monkeypatch.setattr(client.app.state.oidc_client, "userinfo", unavailable)
-    idp.login(client)
-    assert idp.callback(client).headers["location"] == "/login?error=oidc_error"
-    assert not client.get("/api/v1/session").json()["authenticated"]
+    assert not any(request.url.path.endswith("/userinfo") for request in idp.requests)
 
 
 @pytest.mark.parametrize(
@@ -265,7 +248,7 @@ def test_plaintext_requires_development_mode_and_session_ttl_is_capped():
     assert Settings(break_glass_session_ttl_seconds=14400).break_glass_session_ttl_seconds == 14400
 
 
-async def test_identity_shell_survives_iam_outage_but_admin_actions_fail(
+async def test_identity_shell_survives_iam_outage_but_team_actions_fail(
     client, committed, monkeypatch
 ):
     _, token = await user_with_token(committed)
@@ -275,10 +258,19 @@ async def test_identity_shell_survives_iam_outage_but_admin_actions_fail(
         return Decision.ERROR
 
     monkeypatch.setattr(client.app.state, "authorizer", Authorizer(unavailable, "external"))
-    for path in ("/session", "/users/me"):
-        response = client.get("/api/v1" + path, headers=auth(token))
-        assert response.status_code == 200
-        body = response.json()
-        assert body["authz_unavailable"]
-        assert not body.get("user", body)["is_admin"]
-    assert client.get("/api/v1/users", headers=auth(token)).status_code == 503
+    # /session no longer asks the backend: the installation role is local.
+    response = client.get("/api/v1/session", headers=auth(token))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["user"]["is_admin"] is False
+    assert body["authz_unavailable"] is False
+    # /users/me still reports that team relations could not be read.
+    me = client.get("/api/v1/users/me", headers=auth(token))
+    assert me.status_code == 200
+    assert me.json()["authz_unavailable"] is True
+    assert me.json()["is_admin"] is False
+    assert me.json()["teams"] == []
+    # An installation-level action is a local 403, not a backend outage.
+    assert client.get("/api/v1/users", headers=auth(token)).status_code == 403
+    # A team-dependent read still fails closed with 503.
+    assert client.get("/api/v1/teams", headers=auth(token)).status_code == 503

@@ -19,6 +19,7 @@ from lumewarp_control_plane.api import (
     audit,
     config,
     gateways,
+    installation_admins,
     keys,
     members,
     routing,
@@ -52,6 +53,7 @@ router.include_router(keys.router)
 router.include_router(routing.router)
 router.include_router(strategies.router)
 router.include_router(users.router)
+router.include_router(installation_admins.router)
 router.include_router(usage.router)
 router.include_router(audit.router)
 router.include_router(gateways.router)

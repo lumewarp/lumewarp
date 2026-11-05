@@ -125,7 +125,7 @@ async def test_team_admin_cannot_change_an_admin_role(client, committed) -> None
     assert client.delete(f"{base}/{member.id}", headers=headers).status_code == 204
 
 
-@pytest.mark.parametrize("caller", ["bootstrap", "group_admin"])
+@pytest.mark.parametrize("caller", ["bootstrap", "installation_admin"])
 @pytest.mark.parametrize("method", ["PATCH", "PUT", "DELETE"])
 async def test_installation_admin_manages_admins_and_may_leave_none(
     client, committed, caller, method
@@ -134,8 +134,8 @@ async def test_installation_admin_manages_admins_and_may_leave_none(
     admin, _ = await user_with_token(committed)
     await make_member(committed, team, admin, role=TeamRole.ADMIN)
     headers = ADMIN_AUTH
-    if caller == "group_admin":
-        _, token = await user_with_token(committed, group_admin=True)
+    if caller == "installation_admin":
+        _, token = await user_with_token(committed, installation_admin=True)
         headers = auth(token)
     await committed.commit()
     path = f"/api/v1/teams/{team.id}/members/{admin.id}"

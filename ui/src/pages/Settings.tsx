@@ -31,7 +31,11 @@ export function Settings() {
           <DescriptionDetails>{me.data?.email ?? "—"}</DescriptionDetails>
           <DescriptionTerm>Teams and roles</DescriptionTerm>
           <DescriptionDetails>
-            {me.data?.is_admin && <Badge tone="info">admin group</Badge>}
+            {me.data?.installation_role && (
+              <Badge tone="info">
+                {me.data.installation_role === "proxy_admin" ? "proxy admin" : "installation admin"}
+              </Badge>
+            )}
             {me.data?.teams.map((team) => (
               <Badge key={team.team_id} tone="info">
                 {team.team_name} · {team.role}

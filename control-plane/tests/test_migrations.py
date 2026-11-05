@@ -1,3 +1,5 @@
+import uuid
+
 import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.runtime.migration import MigrationContext
@@ -249,6 +251,77 @@ async def test_0006_revokes_sessions_and_discards_unneeded_claims():
             assert await conn.scalar(text("SELECT groups FROM user_sessions")) == []
             assert await conn.scalar(text("SELECT revoked_at IS NOT NULL FROM user_sessions"))
         await migrate.upgrade(engine, "0006")
+    finally:
+        await engine.dispose()
+        await drop_database(url)
+
+
+async def test_0016_moves_installation_roles_to_postgres() -> None:
+    url = await create_database()
+    engine = create_async_engine(url)
+    try:
+        # Start at the previous head and create a session row that predates the column drop.
+        await migrate.upgrade(engine, "0015")
+        user_id = uuid.uuid4()
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("INSERT INTO users (id, email, is_active) VALUES (:id, :email, true)"),
+                {"id": user_id, "email": f"existing-{user_id}@example.com"},
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO user_sessions"
+                    " (id, user_id, kind, admin_group, token_hash, csrf_hash, expires_at)"
+                    " VALUES (gen_random_uuid(), :user_id, 'session', 'legacy-group',"
+                    " decode(repeat('01', 32), 'hex'), decode(repeat('02', 32), 'hex'),"
+                    " now() + interval '1 hour')"
+                ),
+                {"user_id": user_id},
+            )
+
+        async def columns(table: str) -> set[str]:
+            async with engine.connect() as conn:
+                rows = await conn.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns"
+                        " WHERE table_name = :table"
+                    ),
+                    {"table": table},
+                )
+                return {row[0] for row in rows}
+
+        def session_rows(conn):
+            return conn.scalar(
+                text("SELECT count(*) FROM user_sessions WHERE user_id = :user_id"),
+                {"user_id": user_id},
+            )
+
+        await migrate.upgrade(engine)
+        assert "installation_admins" in await _tables(engine)
+        assert await columns("installation_admins") == {
+            "user_id",
+            "role",
+            "assigned_by",
+            "assigned_at",
+        }
+        assert "admin_group" not in await columns("user_sessions")
+        async with engine.connect() as conn:
+            assert await session_rows(conn) == 1
+
+        await migrate.downgrade(engine, "0015")
+        assert "installation_admins" not in await _tables(engine)
+        assert "admin_group" in await columns("user_sessions")
+        async with engine.connect() as conn:
+            assert await session_rows(conn) == 1
+            assert (
+                await conn.scalar(
+                    text("SELECT admin_group FROM user_sessions WHERE user_id = :user_id"),
+                    {"user_id": user_id},
+                )
+                is None
+            )
+        await migrate.upgrade(engine)
+        assert "installation_admins" in await _tables(engine)
     finally:
         await engine.dispose()
         await drop_database(url)

@@ -15,8 +15,10 @@ from starlette.requests import Request
 from lumewarp_control_plane import plugins
 from lumewarp_control_plane.api import session as session_api
 from lumewarp_control_plane.auth import oidc, sessions
-from lumewarp_control_plane.authz import Authorizer, Decision, Relation, Resource
+from lumewarp_control_plane.authz import Authorizer, Decision
 from lumewarp_control_plane.models import (
+    InstallationAdmin,
+    InstallationRole,
     OIDCLoginState,
     TeamMember,
     User,
@@ -27,6 +29,7 @@ from lumewarp_control_plane.security import hash_secret
 from lumewarp_control_plane.settings import Settings
 from tests.api.helpers import ADMIN_AUTH, auth, user_with_token
 from tests.auth.idp import ISSUER, FakeIdP
+from tests.factories import make_team
 
 
 @pytest.fixture
@@ -128,7 +131,7 @@ def test_login_parameters_and_cached_discovery(client, idp):
 
 
 async def test_jit_cookie_auth_csrf_and_logout(client, idp, committed):
-    idp.claims.update({"is_admin": True, "groups": ["admin"], "roles": ["group_admin"]})
+    idp.claims.update({"is_admin": True, "roles": ["installation_admin"]})
     idp.login(client, "/teams")
     response = idp.callback(client)
     assert response.status_code == 302
@@ -220,13 +223,13 @@ async def test_unverified_jit_cannot_preclaim_email(client, idp, committed, veri
     assert await committed.scalar(select(User).where(User.email == idp.claims["email"])) is None
 
 
-@pytest.mark.parametrize("existing", ["group_admin", "same_issuer", "other_issuer"])
+@pytest.mark.parametrize("existing", ["installation_admin", "same_issuer", "other_issuer"])
 async def test_email_link_cannot_take_over_privileged_or_linked_user(
     client, idp, committed, existing
 ):
     user, _ = await user_with_token(committed, email=idp.claims["email"])
-    if existing == "group_admin":
-        idp.claims["groups"] = ["lumewarp-admins"]
+    if existing == "installation_admin":
+        committed.add(InstallationAdmin(user_id=user.id, role=InstallationRole.ADMIN))
     else:
         committed.add(
             UserIdentity(
@@ -249,7 +252,7 @@ async def test_email_link_cannot_take_over_privileged_or_linked_user(
     ).all()
     if existing == "same_issuer":
         assert [identity.subject for identity in linked] == ["existing-subject"]
-    elif existing == "group_admin":
+    elif existing == "installation_admin":
         assert linked == []
 
 
@@ -622,26 +625,29 @@ def test_invalid_bearer_takes_precedence_over_cookie(client, idp):
 
 
 @pytest.mark.parametrize("local", [True, False])
-@pytest.mark.parametrize("decision", [Decision.ALLOW, Decision.DENY, Decision.ERROR])
-async def test_session_group_admin_uses_backend_with_local_error_fallback(
-    client, committed, monkeypatch, local, decision
+async def test_session_installation_admin_is_local_and_backend_independent(
+    client, committed, monkeypatch, local
 ):
-    user, token = await user_with_token(committed, group_admin=local)
+    user, token = await user_with_token(committed, installation_admin=local)
+    await make_team(committed)
     await committed.commit()
     calls = []
 
     async def check(user_id, relation, resource):
         calls.append((user_id, relation, resource))
-        return decision
+        return Decision.ERROR
 
     monkeypatch.setattr(client.app.state, "authorizer", Authorizer(check, "external"))
     info = client.get("/api/v1/session", headers=auth(token))
-    expected = decision is Decision.ALLOW
     assert info.status_code == 200
-    assert info.json()["user"]["is_admin"] is expected
-    assert info.json()["authz_unavailable"] is (decision is Decision.ERROR)
-    assert calls == [(str(user.id), Relation.MEMBER, Resource("group", "lumewarp-admins"))]
+    body = info.json()
+    assert body["user"]["is_admin"] is local
+    assert body["user"].get("installation_role") == ("admin" if local else None)
+    assert body["authz_unavailable"] is False
+    assert calls == []
     me = client.get("/api/v1/users/me", headers=auth(token))
     assert me.status_code == 200
-    assert me.json()["is_admin"] is expected
-    assert me.json()["authz_unavailable"] is (decision is Decision.ERROR)
+    assert me.json()["is_admin"] is local
+    assert me.json()["installation_role"] == ("admin" if local else None)
+    # The team listing still asks the backend and fails closed.
+    assert me.json()["authz_unavailable"] is True

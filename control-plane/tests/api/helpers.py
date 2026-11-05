@@ -11,6 +11,8 @@ from lumewarp_control_plane.auth import sessions
 from lumewarp_control_plane.ids import uuid7
 from lumewarp_control_plane.models import (
     ApiKey,
+    InstallationAdmin,
+    InstallationRole,
     PersonalAccessToken,
     RequestOutcome,
     ScopeType,
@@ -43,7 +45,7 @@ def suffix() -> str:
 async def user_with_token(
     session: AsyncSession,
     *,
-    group_admin: bool = False,
+    installation_admin: bool = False,
     email: str | None = None,
     active: bool = True,
 ) -> tuple[User, str]:
@@ -53,8 +55,9 @@ async def user_with_token(
         display_name="test user",
         is_active=active,
     )
-    if group_admin:
-        token = await sessions.create_session(session, user.id, 3600, admin_group="lumewarp-admins")
+    if installation_admin:
+        session.add(InstallationAdmin(user_id=user.id, role=InstallationRole.ADMIN))
+        token = await sessions.create_session(session, user.id, 3600)
         await session.flush()
         return user, "session:" + token
     new = generate_secret(SecretKind.PAT)

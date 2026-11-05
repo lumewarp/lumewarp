@@ -23,7 +23,7 @@ def p2(request, binaries):
     with identity_stack(request.param) as state:
         stack = state.stack
         state.events = state.cleanup.enter_context(DatabaseEvents(stack.dsn))
-        # JIT creates no team memberships; the configured group grants admin access.
+        # JIT creates no team memberships; Alice's first login created the proxy_admin.
         for browser in (state.member, state.admin):
             assert cookie_api(browser, stack, "GET", "/teams")["items"] == []
         assert pg(stack.dsn, "SELECT count(*) AS n FROM team_members")[0]["n"] == 0

@@ -41,6 +41,7 @@ async def test_current_user_and_pats(client, committed) -> None:
         "email": None,
         "display_name": "break-glass",
         "is_admin": True,
+        "installation_role": None,
         "authz_unavailable": False,
         "manages_grants": True,
         "teams": [],
@@ -216,7 +217,7 @@ async def test_user_with_keys_cannot_be_deleted(client, committed, revoke) -> No
     assert client.delete(f"/api/v1/users/{user.id}", headers=ADMIN_AUTH).status_code == 409
 
 
-@pytest.mark.parametrize("caller", ["bootstrap", "group_admin"])
+@pytest.mark.parametrize("caller", ["bootstrap", "installation_admin"])
 async def test_user_delete_leaves_a_team_without_admins(client, committed, caller) -> None:
     """An installation admin is always above a team, so no last-admin rule blocks a delete."""
     owner, token = await user_with_token(committed)
@@ -227,8 +228,8 @@ async def test_user_delete_leaves_a_team_without_admins(client, committed, calle
     await make_member(committed, last, owner, role=TeamRole.ADMIN)
     await make_member(committed, ordinary, owner)
     headers = ADMIN_AUTH
-    if caller == "group_admin":
-        _, admin_token = await user_with_token(committed, group_admin=True)
+    if caller == "installation_admin":
+        _, admin_token = await user_with_token(committed, installation_admin=True)
         headers = auth(admin_token)
     await committed.commit()
     path = f"/api/v1/users/{owner.id}"

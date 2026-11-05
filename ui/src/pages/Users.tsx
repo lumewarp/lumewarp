@@ -40,7 +40,7 @@ export function Users() {
   if (me.isPending) return <div className="p-8 text-center text-muted-foreground" aria-busy="true">Loading user access…</div>;
   if (me.error) return <Alert variant="destructive"><AlertDescription>{me.error.message}</AlertDescription></Alert>;
   if (!me.data?.is_admin) {
-    return <Alert variant="destructive"><AlertDescription>Admin group access is required to manage users.</AlertDescription></Alert>;
+    return <Alert variant="destructive"><AlertDescription>Installation admin access is required to manage users.</AlertDescription></Alert>;
   }
 
   const submit = async () => {
@@ -54,7 +54,7 @@ export function Users() {
       ? `Deactivate ${confirmation.user.email}? This suspends the user’s API keys.`
       : confirmation.kind === "activate"
         ? `Reactivate ${confirmation.user.email}?`
-        : `Delete ${confirmation.user.email}? If the user owns keys or is the last admin of a team, the API will reject deletion and show why.`
+        : `Delete ${confirmation.user.email}? If the user owns keys, the API will reject deletion and show why.`
     : "";
   const confirmLabel =
     confirmation?.kind === "delete"
@@ -67,7 +67,7 @@ export function Users() {
     <>
       <PageHeader
         title="Users"
-        description="Manage users. Admin group membership is managed by IAM."
+        description="Manage users. Installation admin roles are managed in Postgres."
         actions={<CreateButton can onClick={() => { form.reset(); setCreating(true); }}>New user</CreateButton>}
       />
       <DataTable

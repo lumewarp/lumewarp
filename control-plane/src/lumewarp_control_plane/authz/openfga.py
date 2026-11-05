@@ -140,7 +140,7 @@ class OpenFGABackend:
                 except ValueError:
                     log.debug("ignoring OpenFGA change with invalid user subject %r", subject)
                     continue
-                if obj.startswith(("group:", "team:")) and relation in ("admin", "member"):
+                if obj.startswith("team:") and relation in ("admin", "member"):
                     users.add(user_id)
             if not changes or not next_token or next_token == token:
                 return ChangeBatch(frozenset(users), next_token or token, reset=reset)

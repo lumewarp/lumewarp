@@ -454,7 +454,7 @@ export interface paths {
         put?: never;
         /**
          * Create User Token
-         * @description Issue a PAT on behalf of a user; requires admin group membership.
+         * @description Issue a PAT on behalf of a user; requires an installation admin.
          */
         post: operations["createUserToken"];
         delete?: never;
@@ -497,6 +497,67 @@ export interface paths {
         head?: never;
         /** Update User */
         patch: operations["updateUser"];
+        trace?: never;
+    };
+    "/api/v1/installation-admins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Installation Admins */
+        get: operations["listInstallationAdmins"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/installation-admins/{user_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Installation Admin
+         * @description Give `user_id` the `admin` role. Idempotent; the proxy_admin cannot be demoted here.
+         */
+        put: operations["putInstallationAdmin"];
+        post?: never;
+        /**
+         * Delete Installation Admin
+         * @description Remove an `admin`. The proxy_admin must be transferred, never removed.
+         */
+        delete: operations["deleteInstallationAdmin"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/installation-admins/transfer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Transfer Proxy Admin
+         * @description Make another user proxy_admin; the previous proxy_admin becomes an admin.
+         */
+        post: operations["transferProxyAdmin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/usage": {
@@ -1016,6 +1077,50 @@ export interface components {
             /** Healthy Threshold */
             healthy_threshold: number | null;
         };
+        /**
+         * InstallationAdminAssign
+         * @description Only `admin` can be assigned here; proxy_admin moves through transfer.
+         */
+        InstallationAdminAssign: {
+            /** @default admin */
+            role: components["schemas"]["InstallationRole"];
+        };
+        /** InstallationAdminOut */
+        InstallationAdminOut: {
+            /**
+             * User Id
+             * Format: uuid
+             */
+            user_id: string;
+            /** Email */
+            email: string;
+            /** Display Name */
+            display_name: string;
+            /** Is Active */
+            is_active: boolean;
+            role: components["schemas"]["InstallationRole"];
+            /** Assigned By */
+            assigned_by: string | null;
+            /**
+             * Assigned At
+             * Format: date-time
+             */
+            assigned_at: string;
+        };
+        /** InstallationAdminTransfer */
+        InstallationAdminTransfer: {
+            /**
+             * User Id
+             * Format: uuid
+             */
+            user_id: string;
+        };
+        /**
+         * InstallationRole
+         * @description Installation-level role. `proxy_admin` is unique; `admin` may be assigned to many.
+         * @enum {string}
+         */
+        InstallationRole: "proxy_admin" | "admin";
         /** KeyCreate */
         KeyCreate: {
             /** Name */
@@ -1189,6 +1294,7 @@ export interface components {
             display_name: string;
             /** Is Admin */
             is_admin: boolean;
+            installation_role?: components["schemas"]["InstallationRole"] | null;
             /**
              * Authz Unavailable
              * @default false
@@ -1423,6 +1529,13 @@ export interface components {
         Page_GatewayOut_: {
             /** Items */
             items: components["schemas"]["GatewayOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
+        /** Page[InstallationAdminOut] */
+        Page_InstallationAdminOut_: {
+            /** Items */
+            items: components["schemas"]["InstallationAdminOut"][];
             /** Next Cursor */
             next_cursor?: string | null;
         };
@@ -1810,6 +1923,7 @@ export interface components {
             display_name: string;
             /** Is Admin */
             is_admin: boolean;
+            installation_role?: components["schemas"]["InstallationRole"] | null;
         };
         /**
          * StickyBy
@@ -5913,6 +6027,279 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UserOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listInstallationAdmins: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_InstallationAdminOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    putInstallationAdmin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstallationAdminAssign"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstallationAdminOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    deleteInstallationAdmin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    transferProxyAdmin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstallationAdminTransfer"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstallationAdminOut"];
                 };
             };
             /** @description Missing or invalid credentials */

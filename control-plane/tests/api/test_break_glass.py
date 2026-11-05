@@ -1,15 +1,19 @@
 """Emergency sessions, IAM claims and bearer-token authorization boundaries."""
 
-import uuid
 from datetime import UTC, datetime
 
-import pytest
 from pydantic import SecretStr
 from sqlalchemy import select
 
 from lumewarp_control_plane.auth import break_glass, sessions
 from lumewarp_control_plane.authz import Authorizer, Decision
-from lumewarp_control_plane.models import ActorType, AuditLog, PersonalAccessToken, UserSession
+from lumewarp_control_plane.models import (
+    ActorType,
+    AuditLog,
+    InstallationAdmin,
+    PersonalAccessToken,
+    UserSession,
+)
 from lumewarp_control_plane.security import SecretKind, generate_secret, hash_secret
 from tests.api.helpers import auth, suffix, user_with_token
 from tests.api.test_session import idp as idp
@@ -89,7 +93,7 @@ async def test_success_is_hashed_cookie_session_with_csrf_and_no_user(
     row = await committed.scalar(
         select(UserSession).where(UserSession.token_hash == hash_secret(secret))
     )
-    assert row.user_id is None and row.kind == "break_glass" and row.admin_group is None
+    assert row.user_id is None and row.kind == "break_glass"
     assert row.csrf_hash == hash_secret(info["csrf_token"])
     assert 3500 < (row.expires_at - datetime.now(UTC)).total_seconds() <= 3600
     assert client.post("/api/v1/teams", json={"name": "no-csrf"}).status_code == 403
@@ -142,72 +146,55 @@ def test_argon2id_hash_takes_precedence_over_plaintext(client):
     assert sign_in(client, "hashed-password").status_code == 204
 
 
-async def test_builtin_session_groups_do_not_transfer_to_pat(client, committed):
-    user, secret = await user_with_token(committed, group_admin=True)
+async def test_installation_admin_pat_and_revocation_on_the_next_request(client, committed):
+    user, session = await user_with_token(committed, installation_admin=True)
     pat = generate_secret(SecretKind.PAT)
     committed.add(
         PersonalAccessToken(
             user_id=user.id,
-            name="no-claims",
+            name="installation-admin",
             token_hash=pat.hash,
             display_prefix=pat.display_prefix,
         )
     )
     await committed.commit()
-    assert client.get("/api/v1/users", headers=auth(secret)).status_code == 200
-    assert client.get("/api/v1/users/me", headers=auth(secret)).json()["is_admin"] is True
-    assert client.get("/api/v1/users", headers=auth(pat.secret)).status_code == 403
-    client.app.state.settings.admin_group = None
-    assert client.get("/api/v1/users", headers=auth(secret)).status_code == 403
+    for headers in (auth(session), auth(pat.secret)):
+        assert client.get("/api/v1/users", headers=headers).status_code == 200
+        me = client.get("/api/v1/users/me", headers=headers).json()
+        assert (me["is_admin"], me["installation_role"]) == (True, "admin")
+    # The role is read per request; revoking it applies to the next call of either credential.
+    row = await committed.get(InstallationAdmin, user.id)
+    await committed.delete(row)
+    await committed.commit()
+    for headers in (auth(session), auth(pat.secret)):
+        assert client.get("/api/v1/users", headers=headers).status_code == 403
+        me = client.get("/api/v1/users/me", headers=headers).json()
+        assert (me["is_admin"], me["installation_role"]) == (False, None)
 
 
-@pytest.mark.parametrize(
-    "decision,expected", [(Decision.ALLOW, 200), (Decision.DENY, 403), (Decision.ERROR, 503)]
-)
-async def test_external_pat_checks_configured_group_live(
-    client, committed, monkeypatch, decision, expected
-):
-    user, pat = await user_with_token(committed)
+async def test_installation_role_never_asks_the_backend(client, committed, monkeypatch):
+    _, token = await user_with_token(committed)
+    _, admin_token = await user_with_token(committed, installation_admin=True)
     await committed.commit()
     calls = []
 
     async def check(uid, relation, resource):
         calls.append((uid, relation, resource.type, resource.id))
-        return decision
+        return Decision.ERROR
 
     monkeypatch.setattr(client.app.state, "authorizer", Authorizer(check, "external"))
-    response = client.get("/api/v1/users", headers=auth(pat))
-    assert response.status_code == expected
-    assert calls == [(str(user.id), "member", "group", "lumewarp-admins")]
+    # A backend outage can neither grant nor take away an installation role.
+    assert client.get("/api/v1/users", headers=auth(token)).status_code == 403
+    assert client.get("/api/v1/users", headers=auth(admin_token)).status_code == 200
+    assert calls == []
 
 
-async def test_oidc_admin_claim_and_userinfo_fallback(client, idp, committed):
-    idp.claims.pop("groups")
+async def test_oidc_claim_does_not_grant_an_installation_role(client, idp):
+    idp.claims["groups"] = ["lumewarp-admins"]
     idp.userinfo["groups"] = ["lumewarp-admins"]
     idp.login(client)
     assert idp.callback(client).headers["location"] == "/"
     info = client.get("/api/v1/session").json()
-    assert info["user"]["is_admin"] is True
-    assert client.get("/api/v1/users").status_code == 200
-    user_id = uuid.UUID(info["user"]["id"])
-    row = await committed.scalar(select(UserSession).where(UserSession.user_id == user_id))
-    assert row.admin_group == "lumewarp-admins"
-
-
-@pytest.mark.parametrize(
-    "claim,groups,is_admin",
-    [
-        ("groups", [], False),
-        ("roles", ["lumewarp-admins"], True),
-    ],
-)
-def test_id_token_claim_precedes_userinfo_and_supports_custom_name(
-    client, idp, claim, groups, is_admin
-):
-    client.app.state.settings.oidc_groups_claim = claim
-    idp.claims[claim] = groups
-    idp.userinfo[claim] = ["lumewarp-admins"]
-    idp.login(client)
-    assert idp.callback(client).headers["location"] == "/"
-    assert client.get("/api/v1/users/me").json()["is_admin"] is is_admin
+    assert info["user"]["is_admin"] is False
+    assert info["user"].get("installation_role") is None
     assert not any(request.url.path.endswith("/userinfo") for request in idp.requests)

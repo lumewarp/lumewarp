@@ -13,7 +13,6 @@ from lumewarp_control_plane.authz import (
     Authorizer,
     Decision,
     Relation,
-    Resource,
     team_resource,
 )
 from lumewarp_control_plane.metrics import Metrics, start_metrics_server
@@ -200,7 +199,9 @@ async def test_authorizer_check_counts_every_decision() -> None:
     authorizer = Authorizer(backend, "custom", timeout=0.01, metrics=metrics)
     assert _authz(metrics, "custom", "error") == 0
     for user in ("a", "a", "d", "e", "s", "x"):
-        await authorizer.check(user, Relation.MEMBER, Resource("group", "lumewarp-admins"))
+        await authorizer.check(
+            user, Relation.MEMBER, team_resource("00000000-0000-0000-0000-000000000001")
+        )
     assert _authz(metrics, "custom", "allow") == 2
     assert _authz(metrics, "custom", "deny") == 1
     # Exception, timeout and an invalid decision are all errors.

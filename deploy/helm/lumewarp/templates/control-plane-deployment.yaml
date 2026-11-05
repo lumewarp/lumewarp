@@ -75,8 +75,8 @@ spec:
               value: {{ .Values.controlPlane.scope | quote }}
             - name: LUMEWARP_METRICS_BIND
               value: {{ ternary (printf "0.0.0.0:%v" .Values.controlPlane.service.metricsPort) "" .Values.controlPlane.metrics.enabled | quote }}
-            - name: LUMEWARP_ADMIN_GROUP
-              value: {{ .Values.controlPlane.adminGroup | quote }}
+            - name: LUMEWARP_INITIAL_ADMIN_EMAIL
+              value: {{ .Values.controlPlane.initialAdminEmail | quote }}
             {{- if .Values.controlPlane.breakGlass.passwordHashSecret.name }}
             - name: LUMEWARP_BREAK_GLASS_PASSWORD_HASH
               valueFrom:

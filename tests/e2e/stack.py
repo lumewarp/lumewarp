@@ -377,7 +377,6 @@ class Stack:
             "LUMEWARP_DEV_MODE": "true",
             "LUMEWARP_SESSION_COOKIE_SECURE": "false",
             "LUMEWARP_SECRET_KEY": "e2e-lumewarp-secret-key-0123456789abcdef",
-            "LUMEWARP_ADMIN_GROUP": "lumewarp-admins",
             "LUMEWARP_SCOPE": SCOPE,
             "LUMEWARP_HTTP_BIND": f"127.0.0.1:{self.http_port}",
             "LUMEWARP_GRPC_BIND": f"127.0.0.1:{self.grpc_port}",

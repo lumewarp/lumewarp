@@ -1,4 +1,4 @@
-"""Admin-issued PATs are installation-group_admin-only, one-time secrets and audited."""
+"""Admin-issued PATs are installation-admin-only, one-time secrets and audited."""
 
 import json
 import uuid
@@ -12,8 +12,8 @@ from tests.api.helpers import ADMIN_AUTH, auth, user_with_token
 from tests.factories import make_member, make_team
 
 
-@pytest.mark.parametrize("issuer", ["bootstrap", "group_admin"])
-async def test_group_admin_issues_pat_for_another_user(client, committed, issuer) -> None:
+@pytest.mark.parametrize("issuer", ["bootstrap", "installation_admin"])
+async def test_installation_admin_issues_pat_for_another_user(client, committed, issuer) -> None:
     target = client.post(
         "/api/v1/users",
         headers=ADMIN_AUTH,
@@ -21,8 +21,8 @@ async def test_group_admin_issues_pat_for_another_user(client, committed, issuer
     ).json()
     actor = None
     headers = ADMIN_AUTH
-    if issuer == "group_admin":
-        actor, secret = await user_with_token(committed, group_admin=True)
+    if issuer == "installation_admin":
+        actor, secret = await user_with_token(committed, installation_admin=True)
         await committed.commit()
         headers = auth(secret)
 
@@ -72,7 +72,9 @@ async def test_group_admin_issues_pat_for_another_user(client, committed, issuer
 
 
 @pytest.mark.parametrize("role", ["admin", "member", "none"])
-async def test_non_group_admins_cannot_issue_for_self_or_others(client, committed, role) -> None:
+async def test_non_installation_admins_cannot_issue_for_self_or_others(
+    client, committed, role
+) -> None:
     team = await make_team(committed)
     user, secret = await user_with_token(committed)
     target, _ = await user_with_token(committed)

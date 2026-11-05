@@ -79,7 +79,6 @@ async def api_settings(api_database_url: str, api_scope: str, api_engine: AsyncE
         background_enabled=False,
         break_glass_password=ADMIN_PASSWORD,
         dev_mode=True,
-        admin_group="lumewarp-admins",
         session_cookie_secure=False,
         scope=api_scope,
     )

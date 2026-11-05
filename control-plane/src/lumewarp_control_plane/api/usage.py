@@ -3,7 +3,7 @@
 `from`/`to` are a half-open UTC range. `group_by` is a comma-separated subset of
 `day,requested,model,upstream_model,alias,router,team,owner,key`; the default is
 `day,requested`. `owner` groups by the key owner
-(`owner_kind`, `owner_id`: a user or a service account). A admin group member's single `team`
+(`owner_kind`, `owner_id`: a user or a service account). An installation admin's single `team`
 dimension over whole UTC months is served from the pre-aggregated `usage_totals` table;
 everything else is aggregated from `usage_events`, limited to the caller's readable teams.
 """

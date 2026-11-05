@@ -17,7 +17,7 @@ from tests.factories import (
     make_user,
 )
 
-ROLES = ("group_admin", "admin", "member", "other_team", "bootstrap")
+ROLES = ("installation_admin", "admin", "member", "other_team", "bootstrap")
 READ = (200, 200, 200, 404, 200)
 # A team admin reads the whole-team views; a plain member has no audit view.
 ADMIN_READ = (200, 200, 403, 404, 200)
@@ -107,7 +107,9 @@ CASES = [
 async def test_endpoint_authorization_matrix(client, committed, role, case) -> None:
     name, method, path, body, statuses = case
     team = await make_team(committed)
-    caller, token = await user_with_token(committed, group_admin=role == "group_admin")
+    caller, token = await user_with_token(
+        committed, installation_admin=role == "installation_admin"
+    )
     if role in ("admin", "member"):
         await make_member(committed, team, caller, role=TeamRole(role))
     elif role == "other_team":
@@ -203,6 +205,7 @@ async def test_backend_error_preserves_identity_but_rejects_admin_actions(
     client, committed, monkeypatch, path
 ) -> None:
     _, token = await user_with_token(committed)
+    await make_team(committed)
     await committed.commit()
 
     async def error(user_id, relation, resource):
@@ -214,9 +217,14 @@ async def test_backend_error_preserves_identity_but_rejects_admin_actions(
         assert response.status_code == 200, response.text
         assert response.json()["authz_unavailable"] is True
         assert response.json()["is_admin"] is False
+    elif path in ("/users", "/gateways", "/config/versions"):
+        # Installation-level actions are a local decision now: no role, no backend call.
+        assert response.status_code == 403, response.text
+        assert response.json()["error"]["code"] == "forbidden"
     else:
         assert response.status_code == 503, response.text
         assert response.json()["error"]["code"] == "authz_unavailable"
+    # Break-glass is an installation admin without the database or the backend.
     assert client.get("/api/v1" + path, headers=ADMIN_AUTH).status_code == 200
 
 
@@ -226,7 +234,7 @@ async def test_backend_error_during_team_visibility_is_503(client, committed, mo
     await committed.commit()
 
     async def check(user_id, relation, resource):
-        return Decision.DENY if resource.type == "group" else Decision.ERROR
+        return Decision.ERROR
 
     monkeypatch.setattr(client.app.state, "authorizer", Authorizer(check, "unavailable"))
     for path in ("/teams", "/usage", "/audit", f"/teams/{team.id}"):

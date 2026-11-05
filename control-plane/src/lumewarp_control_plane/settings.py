@@ -37,7 +37,9 @@ class Settings(BaseSettings):
     grpc_tls_cert_file: str | None = None
     grpc_tls_key_file: str | None = None
 
-    admin_group: str | None = None
+    # The email that becomes proxy_admin on its first verified login while no proxy_admin
+    # exists. Unset = only break-glass can create the first one.
+    initial_admin_email: str | None = None
     break_glass_password_hash: SecretStr | None = None
     break_glass_password: SecretStr | None = None
     dev_mode: bool = False
@@ -76,7 +78,6 @@ class Settings(BaseSettings):
     oidc_client_id: str | None = None
     oidc_client_secret: SecretStr | None = None
     oidc_scopes: str = "openid email profile"
-    oidc_groups_claim: str = "groups"
     # Externally visible base URL of the control plane, used to build the OIDC redirect
     # URI (<public_url>/api/v1/session/oidc/callback). Unset = derived from the request.
     public_url: str | None = None

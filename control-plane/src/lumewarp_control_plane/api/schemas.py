@@ -28,6 +28,7 @@ from lumewarp_control_plane.compiler.validate import (
 )
 from lumewarp_control_plane.models import (
     CatalogKind,
+    InstallationRole,
     KeyLifecycle,
     KeyOwnerKind,
     ModelAccess,
@@ -783,6 +784,26 @@ class UserOut(ReadModel):
     updated_at: datetime
 
 
+class InstallationAdminOut(ReadModel):
+    user_id: uuid.UUID
+    email: str
+    display_name: str
+    is_active: bool
+    role: InstallationRole
+    assigned_by: uuid.UUID | None
+    assigned_at: datetime
+
+
+class InstallationAdminAssign(ApiModel):
+    """Only `admin` can be assigned here; proxy_admin moves through transfer."""
+
+    role: InstallationRole = InstallationRole.ADMIN
+
+
+class InstallationAdminTransfer(ApiModel):
+    user_id: uuid.UUID
+
+
 class MeLimitsOut(ApiModel):
     """Effective rate limits for a key the caller could create in this team."""
 
@@ -856,7 +877,9 @@ class MeOut(ApiModel):
     user_id: uuid.UUID | None
     email: str | None
     display_name: str
+    # Compatibility flag: true for proxy_admin, admin and break-glass.
     is_admin: bool
+    installation_role: InstallationRole | None = None
     authz_unavailable: bool = False
     manages_grants: bool
     teams: list[MeTeamOut]

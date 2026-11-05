@@ -1,15 +1,11 @@
 # OpenFGA authorization model for Lumewarp.
 #
-# IAM manages group membership. The control plane applies the configured admin
-# group to installation and team-admin actions. Team admin implies member.
+# The backend answers team relations only. Installation roles (proxy_admin, admin) live in
+# Lumewarp's Postgres and are never asked of this backend. Team admin implies member.
 model
   schema 1.1
 
 type user
-
-type group
-  relations
-    define member: [user]
 
 type team
   relations

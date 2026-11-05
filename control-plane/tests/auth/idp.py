@@ -23,14 +23,18 @@ class FakeIdP:
             "email": f"{uuid.uuid4().hex}@example.com",
             "email_verified": True,
             "name": "OIDC User",
-            "groups": [],
         }
         self.overrides = {}
         self.authorization = {}
+        # Per-login state for concurrent flows. `authorization` stays the latest, so the
+        # single-flow tests keep working with the unregistered "test-code".
+        self.by_code = {}
+        self.last_state = None
+        self.last_code = None
         self.requests = []
         self.token_error = False
         self.signing_key = self.key
-        self.userinfo = {"sub": self.claims["sub"], "groups": []}
+        self.userinfo = {"sub": self.claims["sub"]}
 
     def handle(self, request):
         self.requests.append(request)
@@ -55,19 +59,21 @@ class FakeIdP:
                 return httpx.Response(400, json={"error": "invalid_grant"})
             body = parse_qs(request.content.decode())
             assert body["grant_type"] == ["authorization_code"]
-            assert body["redirect_uri"] == self.authorization["redirect_uri"]
+            code = body.get("code", ["test-code"])[0]
+            authorization = self.by_code.get(code, self.authorization)
+            assert body["redirect_uri"] == authorization["redirect_uri"]
             challenge = (
                 base64.urlsafe_b64encode(hashlib.sha256(body["code_verifier"][0].encode()).digest())
                 .rstrip(b"=")
                 .decode()
             )
-            assert challenge == self.authorization["code_challenge"][0]
+            assert challenge == authorization["code_challenge"][0]
             now = int(time.time())
             claims = {
                 **self.claims,
                 "iat": now,
                 "exp": now + 300,
-                "nonce": self.authorization["nonce"][0],
+                "nonce": authorization["nonce"][0],
                 **self.overrides,
             }
             return httpx.Response(
@@ -89,6 +95,9 @@ class FakeIdP:
         assert response.status_code == 302, response.text
         self.authorization = parse_qs(urlsplit(response.headers["location"]).query)
         assert "state" in self.authorization, response.headers["location"]
+        self.last_state = self.authorization["state"][0]
+        self.last_code = f"test-code-{uuid.uuid4().hex}"
+        self.by_code[self.last_code] = self.authorization
         return response
 
     def callback(self, client, **params):

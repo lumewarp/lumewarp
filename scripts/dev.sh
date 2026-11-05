@@ -90,7 +90,7 @@ prepare() {
   {
     echo "export LUMEWARP_DEV_MODE=true"
     printf 'export LUMEWARP_BREAK_GLASS_PASSWORD=%q\n' "$break_glass_password"
-    echo "export LUMEWARP_ADMIN_GROUP=lumewarp-admins"
+    echo "export LUMEWARP_INITIAL_ADMIN_EMAIL=alice@example.com"
     echo "export LUMEWARP_GATEWAY_TOKEN=$token"
   } >>"$env"
 
@@ -148,7 +148,7 @@ summary() { # stop hint
   wait_http "$ui_url" "UI"
   cat <<EOF
 
-  UI        $ui_url   (SSO: alice/bob/carol; alice belongs to lumewarp-admins)
+  UI        $ui_url   (SSO: alice/bob/carol; alice becomes proxy_admin on first login)
   Emergency login uses LUMEWARP_BREAK_GLASS_PASSWORD (development default configured).
   API       $cp_url/api/v1
   gateway   http://127.0.0.1:4000/v1   (names: mock-local, demo, demo-latest)

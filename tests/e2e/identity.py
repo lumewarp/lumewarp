@@ -16,7 +16,6 @@ from stack import ROOT, Stack, record_response_secrets, record_secret
 
 KEYCLOAK = "http://127.0.0.1:18080"
 OPENFGA = "http://127.0.0.1:18081"
-ADMIN_GROUP = "group:lumewarp-admins"
 
 
 def cookie_api(browser, stack, method, path, **kwargs):
@@ -133,9 +132,9 @@ def identity_stack(backend: str, *, label: str = "identity"):
     """Real Keycloak + an isolated OpenFGA store + a control plane configured for OIDC.
 
     Yields a namespace with the stack, the IdP, Bob's and Alice's cookie sessions and (for
-    openfga) the store and fault proxy. Alice is a member of the configured admin group in
-    the backend; Bob has no grants. Callers use `state.cleanup` (an ExitStack) for anything
-    they add, and create the team(s) and grants their tests need.
+    openfga) the store and fault proxy. Alice's first login creates the proxy_admin through
+    `LUMEWARP_INITIAL_ADMIN_EMAIL`; Bob has no grants. Callers use `state.cleanup` (an
+    ExitStack) for anything they add, and create the team(s) and grants their tests need.
     """
     stack = Stack()
     with ExitStack() as cleanup:
@@ -154,6 +153,7 @@ def identity_stack(backend: str, *, label: str = "identity"):
                 "LUMEWARP_PUBLIC_URL": f"http://127.0.0.1:{stack.http_port}",
                 "LUMEWARP_KEY_RECONCILE_POLL_SECONDS": "1",
                 "LUMEWARP_KEY_RECONCILE_FULL_SECONDS": "1",
+                "LUMEWARP_INITIAL_ADMIN_EMAIL": "alice@example.com",
             }
         )
         state = SimpleNamespace(stack=stack, backend=backend, idp=idp, cleanup=cleanup)
@@ -174,17 +174,6 @@ def identity_stack(backend: str, *, label: str = "identity"):
             state.admin = cleanup.enter_context(httpx.Client(timeout=15, trust_env=False))
             state.user = login(state.member, stack, "bob@example.com")
             state.admin_user = login(state.admin, stack, "alice@example.com")
-            if backend == "openfga":
-                fga_write(
-                    state,
-                    writes=[
-                        {
-                            "user": f"user:{state.admin_user['id']}",
-                            "relation": "member",
-                            "object": ADMIN_GROUP,
-                        }
-                    ],
-                )
             assert cookie_api(state.admin, stack, "GET", "/users/me")["is_admin"]
             yield state
         finally:

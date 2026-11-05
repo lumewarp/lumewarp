@@ -211,8 +211,8 @@ def test_names_and_aliases_are_clean(client) -> None:
 # ------------------------------------------------------------------------------ N3-N6
 
 
-async def test_group_admin_cannot_lock_itself_out(client, committed) -> None:
-    admin, secret = await user_with_token(committed, group_admin=True)
+async def test_installation_admin_cannot_lock_itself_out(client, committed) -> None:
+    admin, secret = await user_with_token(committed, installation_admin=True)
     await committed.commit()
     admin = {"id": str(admin.id)}
     admin_auth = auth(secret)

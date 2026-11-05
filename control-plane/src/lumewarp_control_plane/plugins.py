@@ -38,7 +38,7 @@ def discover(group: str) -> dict[str, EntryPoint]:
 @dataclass(frozen=True)
 class IdentityMapping:
     """Declarative result of an auth plugin: who the user is. Team roles and the installation
-    admin group are answered by the authz backend, not by this mapping."""
+    installation role are answered by Lumewarp's database, not by this mapping."""
 
     email: str
     display_name: str = ""

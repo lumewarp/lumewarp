@@ -142,7 +142,7 @@ async def _rate_limit(
 ) -> None:
     """Rate limit after authentication, before target lookup and authorization.
 
-    Installation admins (the configured admin group or a break-glass session) provision in
+    Installation admins (or a break-glass session) provision in
     bulk and are exempt; `RequestAuthz.is_admin()` is the same check the rest of the API
     uses. A team admin is only an admin of that team, so this returns False and they stay
     limited. The scope contains no target, so a missing or foreign UUID cannot buy quota or
@@ -269,7 +269,7 @@ async def _is_member(
     session: AsyncSession, authz: RequestAuthz, team_id: uuid.UUID, user_id: uuid.UUID
 ) -> bool:
     """Whether the user holds a membership of the team itself. `authz.has` is not enough:
-    it is true for every admin group member, who may not be a member and so cannot own keys.
+    it is true for every installation admin, who may not be a member and so cannot own keys.
     """
     if authz.authorizer.manages_grants:
         return await session.get(TeamMember, (team_id, user_id)) is not None

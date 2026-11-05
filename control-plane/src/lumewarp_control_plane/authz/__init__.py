@@ -2,15 +2,16 @@
 
 Who may do what is decided in two layers:
 
-- The action matrix (`MATRIX`) stays in Lumewarp: every admin API action needs either the
-  configured admin group, any authenticated caller, or one relation on one team.
-- A backend answers only relation questions: "is user U a `member` of group G,
-  or an `admin` or `member` of team T?". That is a single async function,
-  `check(user_id, relation, resource) -> Decision`, so OpenFGA, a home-grown AAA system or
-  the built-in membership table can be swapped without touching the API.
+- The action matrix (`MATRIX`) stays in Lumewarp: every admin API action needs either an
+  installation role, any authenticated caller, or one relation on one team.
+- A backend answers only relation questions: "is user U an `admin` or `member` of team T?".
+  That is a single async function, `check(user_id, relation, resource) -> Decision`, so
+  OpenFGA, a home-grown AAA system or the built-in membership table can be swapped without
+  touching the API. Installation roles are never asked of a backend: they live in Postgres
+  (`installation_admins`, see `installation.py`).
 
 A backend guarantees that team `admin` implies `member`. `RequestAuthz` applies the
-configured admin group to every team action, independently of the backend. The matrix
+installation roles to every team action, independently of the backend. The matrix
 separates reading a team's basic record (`TEAM_READ`, any member) from reading what a team
 admin sees (`TEAM_ADMIN_READ`: members, service accounts, every key, usage, audit), and it
 keeps team quota (`TEAM_QUOTA_SET`) and admin assignment (`TEAM_ADMIN_ASSIGN`) at the
@@ -58,6 +59,7 @@ from fastapi import Depends, Request
 
 from lumewarp_control_plane.errors import ApiError, forbidden
 from lumewarp_control_plane.metrics import DISCARD, Metrics
+from lumewarp_control_plane.models import InstallationRole
 from lumewarp_control_plane.security import CurrentPrincipal, Principal
 
 if TYPE_CHECKING:
@@ -81,7 +83,7 @@ class Relation(StrEnum):
 
 @dataclass(frozen=True)
 class Resource:
-    type: Literal["group", "team"]
+    type: Literal["team"]
     id: str
 
 
@@ -266,18 +268,19 @@ def load_authorizer(
 
 class Level(StrEnum):
     ANY = "any"  # any authenticated caller
-    INSTALLATION = "installation"  # admin group member only
+    INSTALLATION = "installation"  # a proxy_admin or admin row in installation_admins
     TEAM = "team"  # a relation on the team
 
 
 class Action(StrEnum):
-    # Installation-wide (admin group member only).
+    # Installation-wide (proxy_admin, admin, or break-glass).
     TEAM_CREATE = "team.create"
     TEAM_DELETE = "team.delete"
     TEAM_QUOTA_SET = "team.quota.set"  # models, limits, budget; installation-level
     TEAM_ADMIN_ASSIGN = (
         "team.admin.assign"  # add/promote/demote/remove an admin; installation-level
     )
+    INSTALLATION_ADMIN_MANAGE = "installation_admin.manage"  # assign/remove/transfer roles
     USER_MANAGE = "user.manage"
     ROUTING_MANAGE = "routing.manage"  # upstreams, models, routers, prices
     # Upstreams, models, aliases, routers, strategies: prices and routing details.
@@ -316,6 +319,7 @@ MATRIX: dict[Action, Rule] = {
             # Installation-level: a team admin cannot set quota or assign admins.
             Action.TEAM_QUOTA_SET,
             Action.TEAM_ADMIN_ASSIGN,
+            Action.INSTALLATION_ADMIN_MANAGE,
             Action.USER_MANAGE,
             Action.ROUTING_MANAGE,
             Action.ROUTING_READ,
@@ -344,17 +348,29 @@ MATRIX: dict[Action, Rule] = {
 }
 
 
+_UNSET = object()
+
+
 class RequestAuthz:
-    """Authorization for one admin API request. Results are cached for the request, so a
-    handler may ask the same question repeatedly without another backend round trip.
+    """Authorization for one admin API request.
+
+    Team decisions are cached for the request, so a handler may ask the same question
+    repeatedly without another backend round trip. The installation role is read from
+    Postgres once per request and cached too: a revoked role applies to the next request.
     """
 
     def __init__(
-        self, principal: Principal, authorizer: Authorizer, admin_group: str | None = None
+        self,
+        principal: Principal,
+        authorizer: Authorizer,
+        session_factory: SessionFactory | None = None,
+        *,
+        installation_role: InstallationRole | None | object = _UNSET,
     ) -> None:
         self.principal = principal
         self.authorizer = authorizer
-        self.admin_group = admin_group
+        self._session_factory = session_factory
+        self._installation_role = installation_role
         self._cache: dict[tuple[Relation, Resource], Decision] = {}
 
     @property
@@ -366,30 +382,41 @@ class RequestAuthz:
         key = (relation, resource)
         decision = self._cache.get(key)
         if decision is None:
-            from lumewarp_control_plane.authz.builtin import session_groups
-
-            token = session_groups.set(self.principal.groups)
-            try:
-                decision = await self.authorizer.check(
-                    str(self.principal.user_id), relation, resource
-                )
-            finally:
-                session_groups.reset(token)
+            decision = await self.authorizer.check(str(self.principal.user_id), relation, resource)
             if decision is not Decision.ERROR:
                 self._cache[key] = decision
         if decision is Decision.ERROR:
             raise AuthzUnavailable()
         return decision is Decision.ALLOW
 
+    async def installation_role(self) -> InstallationRole | None:
+        """The caller's installation role, read once from Postgres per request.
+
+        Break-glass has no row (it is not a user). The authorization backend is never
+        consulted for this.
+        """
+        if self._installation_role is not _UNSET:
+            return self._installation_role  # type: ignore[return-value]
+        if self.principal.user_id is None or self._session_factory is None:
+            self._installation_role = None
+            return None
+        from lumewarp_control_plane.installation import role_of
+
+        async with self._session_factory() as session:
+            self._installation_role = await role_of(session, self.principal.user_id)
+        return self._installation_role
+
+    def set_installation_role(self, role: InstallationRole | None) -> None:
+        """Replace the cached role after an in-lock re-read (see `installation.recheck_role`)."""
+        self._installation_role = role
+
     async def is_admin(self) -> bool:
         if self.principal.is_break_glass:
             return True
-        if not self.admin_group:
-            return False
-        return await self._relation(Relation.MEMBER, Resource("group", self.admin_group))
+        return await self.installation_role() is not None
 
     async def has(self, relation: Relation, team_id: uuid.UUID) -> bool:
-        """Whether the caller holds `relation` on the team (admin group members always do)."""
+        """Whether the caller holds `relation` on the team (installation admins always do)."""
         if await self.is_admin():
             return True
         return await self._relation(relation, team_resource(team_id))
@@ -446,7 +473,7 @@ def get_authorizer(request: Request) -> Authorizer:
 
 
 async def request_authz(request: Request, principal: CurrentPrincipal) -> RequestAuthz:
-    return RequestAuthz(principal, get_authorizer(request), request.app.state.settings.admin_group)
+    return RequestAuthz(principal, get_authorizer(request), request.app.state.session_factory)
 
 
 Authz = Annotated[RequestAuthz, Depends(request_authz)]
