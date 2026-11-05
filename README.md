@@ -144,6 +144,22 @@ enforced eventually. See the [control-plane README](control-plane/README.md) for
 settings, SSO, authorization backends, the catalog, plugins and operations, and
 [`docs/config-protocol.md`](docs/config-protocol.md) for the stream contract.
 
+## Dev accounts
+
+`make dev` starts the stack with these development-only accounts, defined in
+`deploy/dev/keycloak/realm.json`, `deploy/dev/compose.yaml` and `scripts/dev.sh`.
+
+| Login | Where | Username | Password | Access |
+| --- | --- | --- | --- | --- |
+| SSO | <http://127.0.0.1:5173/> | `alice@example.com` | `lumewarp` | Installation admin, through the `lumewarp-admins` group |
+| SSO | <http://127.0.0.1:5173/> | `bob@example.com` | `lumewarp` | Plain user: no team and no grants until an admin adds them |
+| SSO | <http://127.0.0.1:5173/> | `carol@example.com` | `lumewarp` | Plain user: no team and no grants until an admin adds them |
+| Emergency | <http://127.0.0.1:5173/> | none | `dev-break-glass` | Emergency admin session; `LUMEWARP_BREAK_GLASS_PASSWORD` overrides the password |
+| Keycloak console | <http://127.0.0.1:18080/> | `admin` | `lumewarp` | Administers the IdP, not Lumewarp |
+
+The seeded demo API key is in `.dev/demo-key`. Postgres is at `127.0.0.1:55432`, with
+database, user and password all `lumewarp`.
+
 ## Container images
 
 Both Dockerfiles use the repository root as build context so the gateway can read
