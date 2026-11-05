@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs every P1-A1 check locally, then the e2e gate. Mirrors .github/workflows/ci.yml.
+# Runs every check locally, then the e2e gate. Mirrors .github/workflows/ci.yml.
 # Needs the dev Postgres (scripts/dev-db.sh up) or LUMEWARP_TEST_DATABASE_URL/E2E_PG_URL.
 set -euo pipefail
 
@@ -34,7 +34,7 @@ else
   echo "buf not installed: skipping buf lint (CI runs it)"
 fi
 
-step "e2e: P1 exit gate"
-"$root/scripts/e2e-p1.sh"
+step "e2e: core gate"
+"$root/scripts/e2e-core.sh"
 
-echo; echo "all P1 checks passed"
+echo; echo "all checks passed"

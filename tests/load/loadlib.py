@@ -1,4 +1,4 @@
-"""Load-e2e helpers on top of the P1 e2e harness (tests/e2e/stack.py): a multi-team fleet of
+"""Load-e2e helpers on top of the e2e harness (tests/e2e/stack.py): a multi-team fleet of
 keys, a Locust run driven from a key-pool file, a probe client whose requests are recorded
 like Locust's, usage accounting against Postgres, and the per-scenario report.
 """

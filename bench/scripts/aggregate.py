@@ -581,7 +581,7 @@ def _rewrite(
 
 
 def _a6(nonstream: dict[int, dict[str, dict[str, Any]]]) -> dict[str, Any]:
-    """A6 exit gate at 1000 RPS; other rates are informational.
+    """A6 gate at 1000 RPS; other rates are informational.
 
     Pass requires the p99-overhead thresholds *and* that neither Lumewarp nor
     the direct baseline was saturated, and that Lumewarp's error rate is <= 1%.

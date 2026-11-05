@@ -24,7 +24,7 @@ run_dir="$(mktemp -d "${TMPDIR:-/tmp}/lumewarp-load-run.XXXXXX")"
 export E2E_RUN_DIR="$run_dir"
 touch "$run_dir/pids" "$run_dir/dbs"
 
-# Same pg_dump scan as scripts/e2e-p1.sh: each disposable database is scanned in
+# Same pg_dump scan as scripts/e2e-core.sh: each disposable database is scanned in
 # tests/e2e/stack.py::teardown before it is dropped, and the finalizer below covers
 # leftovers, databases matching this run's names that no test registered, and fails the
 # script on a hit. The run id in the database names is what makes that discovery possible.

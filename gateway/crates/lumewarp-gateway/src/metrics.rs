@@ -262,7 +262,7 @@ pub struct Metrics {
     config_info: Family<ConfigLabels, Gauge>,
     gauges: Family<ModelLabels, Gauge>,
     config_version: Gauge,
-    // Written only through the methods the config stream calls (W2);
+    // Written only through the methods the config stream calls;
     // registered here so their series exist from boot.
     config_apply_failures: Family<NackLabels, Counter>,
     config_stream_connected: Gauge,
@@ -960,7 +960,7 @@ impl Observation {
                 .filter(|_| self.headers_received.is_some() && self.status.is_success())
             {
                 // NOTE: Histogram::observe takes a shared write lock. Revisit sharding
-                // or atomic buckets in W3 if 5k/10k RPS p99 shows contention.
+                // or atomic buckets if 5k/10k RPS p99 shows contention.
                 ttft.observe(
                     ready_at
                         .saturating_duration_since(self.started)
@@ -1000,7 +1000,7 @@ impl Observation {
             .position(|&known| known == status)
             .unwrap_or(11);
         self.handles.counters[index].inc();
-        // NOTE: Histogram::observe uses shared write locks; profile contention in W3.
+        // NOTE: Histogram::observe uses shared write locks; profile if p99 shows contention.
         self.handles
             .duration
             .observe(now.saturating_duration_since(self.started).as_secs_f64());

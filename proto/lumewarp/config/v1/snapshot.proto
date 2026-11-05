@@ -267,7 +267,7 @@ message RateLimitScope {
   RateLimit limit = 2;
 }
 
-// Enforced per gateway instance in P1 (N gateways => up to N x the limit).
+// Enforced per gateway instance (N gateways => up to N x the limit).
 // Zero = unlimited for that dimension. tokens_per_minute is retrospective:
 // it rejects later requests once usage has been charged.
 message RateLimit {

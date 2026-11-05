@@ -18,7 +18,7 @@ pub struct Runtime {
     pub usage: UsageSink,
     pub health: health::Registry,
     pub retry_budget: health::RetryBudget,
-    /// Latency EWMAs, scraped vLLM load and scrape tasks (W6).
+    /// Latency EWMAs, scraped vLLM load and scrape tasks.
     pub balance: balance::Registry,
     pub client: proxy::UpstreamClient,
 }

@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 import stack as stack_module
 from stack import wait_for
-from test_p2_routing import _model, _upstream_id
+from test_routing_resilience import _model, _upstream_id
 
 STRATEGY = "cheapest_first"
 FEATURE = "strategy-cheapest-first"
@@ -47,7 +47,7 @@ def strategy_gateway() -> Path:
 
     It builds into its own target directory: the default
     gateway/target/debug/lumewarp must keep the built-ins only, because
-    test_p2_routing.py asserts its exact strategy capabilities.
+    test_routing_resilience.py asserts its exact strategy capabilities.
     """
     if binary := os.environ.get("E2E_CHEAPEST_FIRST_GATEWAY_BIN"):
         return Path(binary)

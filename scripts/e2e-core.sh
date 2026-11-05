@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# P1 end-to-end exit gate: Postgres + control plane + gateway + mock upstream as real
+# Core end-to-end gate: Postgres + control plane + gateway + mock upstream as real
 # processes (tests/e2e). Builds the gateway and the mock upstream, then runs pytest in the
 # control-plane's uv environment.
 #
-#   scripts/e2e-p1.sh [pytest args...]
+#   scripts/e2e-core.sh [pytest args...]
 #
 # Environment:
 #   E2E_PG_URL   server DSN (postgresql://user:pass@host:port/db); the tests create and drop

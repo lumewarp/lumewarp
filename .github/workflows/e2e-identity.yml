@@ -1,11 +1,11 @@
-name: P2 nightly exit gate
+name: Identity nightly e2e gate
 
 on:
   schedule:
     - cron: "47 3 * * *"
 
 jobs:
-  e2e-p2:
+  e2e-identity:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -32,7 +32,7 @@ jobs:
             bench/mock-upstream
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --locked --project control-plane
-      - name: P2 exit gate (builtin and OpenFGA)
+      - name: Identity e2e gate (builtin and OpenFGA)
         env:
           E2E_PG_URL: postgresql://lumewarp:lumewarp@127.0.0.1:55432/lumewarp
-        run: scripts/e2e-p2.sh
+        run: scripts/e2e-identity.sh

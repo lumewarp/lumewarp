@@ -880,7 +880,7 @@ async def serve(
         bound_port = server.add_insecure_port(settings.grpc_bind)
     if bound_port == 0:
         raise OSError(f"could not bind gRPC listener to {settings.grpc_bind}")
-    # P1 runs one control-plane instance per scope. Its process-local registry starts
+    # One control-plane instance runs per scope. Its process-local registry starts
     # empty, so any connected mirror belongs to a previous process (possibly crashed).
     # Commit before accepting streams; stale mirrors must not pin payloads indefinitely.
     async with session_factory() as session, session.begin():

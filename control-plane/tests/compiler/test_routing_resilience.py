@@ -1,4 +1,4 @@
-"""P2 routing fields in the compiled snapshot and their capabilities.
+"""Routing resilience fields in the compiled snapshot and their capabilities.
 
 The capability rule mirrors gateway/crates/lumewarp-gateway/src/snapshot.rs::validate: a
 capability is listed iff a field that needs it is set, and a snapshot whose fields need an
@@ -420,7 +420,7 @@ def test_validate_rejects_what_the_gateway_rejects(mutate) -> None:
         _check(snap)
 
 
-def test_validate_accepts_full_p2_snapshot() -> None:
+def test_validate_accepts_full_routing_snapshot() -> None:
     snap = _base()
     snap.upstreams[0].health_check.CopyFrom(pb.HealthCheck(interval_ms=1000, timeout_ms=999))
     snap.upstreams[0].circuit_breaker.CopyFrom(pb.CircuitBreaker())

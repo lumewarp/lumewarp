@@ -94,7 +94,7 @@ written to disk. `--gateway-id` defaults to `gateway` for local runs, but the
 control plane binds each token to one gateway id: `Hello.gateway_id` must equal
 the id the token was issued for. The Helm chart requires a non-empty
 `gateway.gatewayId` (default `gw-1`) and runs one replica; multi-replica gateways
-are deferred in P1, so deploy one release per gateway identity instead. The
+are deferred, so deploy one release per gateway identity instead. The
 chart runs the pod as UID/GID 65532 with `fsGroup: 65532` so the mounted state
 directory is writable. `--local-config` is a YAML file with only the `server:`
 block described below (listener, admin listener, timeouts); upstreams, routers,
@@ -177,7 +177,7 @@ rejected at every object level. The YAML is converted to a version-0 snapshot
 and validated exactly like a control-plane snapshot: names/ids are unique within
 each upstream, model, router, team and key list; references must resolve;
 key hashes must be unique. Environment-variable substitution inside arbitrary
-YAML strings is not implemented. P0 files load unchanged.
+YAML strings is not implemented. Older files load unchanged.
 
 | Top-level field | Default | Meaning |
 | --- | --- | --- |
@@ -730,8 +730,7 @@ gateway does not yet implement:
 - Redis-backed or global rate limits (limits are local per gateway instance);
   budgets are eventual and in-flight streams are not cut; usage events are lost
   when the bounded queue is full or the gateway crashes;
-- TPOT or MCP metrics; control-plane SSO/JWT/mTLS client
-  authentication and MCP/A2A proxying (P2);
+- TPOT or MCP metrics; JWT/mTLS client authentication and MCP/A2A proxying;
 - an idle timeout on upstream response bodies after headers (including
   non-stream bodies); `timeout_ms` stops at response headers;
 - client TLS termination (terminate it in front of the gateway).

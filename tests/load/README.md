@@ -1,6 +1,6 @@
 # Control-plane-mode e2e under load
 
-The P1 stack as real processes (Postgres database, control plane, release gateway in
+The full stack as real processes (Postgres database, control plane, release gateway in
 control-plane mode, mock upstream; harness from `tests/e2e/stack.py`) driven by headless
 Locust (`locust==2.32.4` via `uvx`, `FastHttpUser`, several processes) while the tests
 churn config and restart processes. Each scenario gets a fresh stack, so usage accounting is

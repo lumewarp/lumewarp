@@ -24,7 +24,7 @@ import httpx
 import pytest
 import secret_scan
 from no_secret import assert_no_secret
-from p2_identity import cookie_api
+from identity import cookie_api
 from secret_scan import (
     database_name,
     describe,
@@ -99,7 +99,7 @@ def test_display_prefixes_hashes_and_literal_prefixes_pass():
 
 
 def test_a_recorded_literal_is_found_plain_and_encoded():
-    secret = "p25-session-value-0123456789abcdef"
+    secret = "self_service-session-value-0123456789abcdef"
     variants = {
         "plain": secret,
         "base64": base64.b64encode(secret.encode()).decode(),
@@ -148,7 +148,7 @@ def test_a_bytea_value_is_decoded_and_its_token_is_a_hit():
 
 
 def test_a_recorded_literal_inside_bytea_is_found():
-    secret = "p25-session-value-0123456789abcdef"
+    secret = "self_service-session-value-0123456789abcdef"
     body = b"prefix" + secret.encode() + b"suffix"
     text = dump(("api_keys", f"1\t\\\\x{body.hex()}"))
     hits = scan_text(text, [{"kind": "session cookie", "value": secret}])
@@ -202,7 +202,7 @@ def test_one_position_is_reported_once_even_when_pattern_and_literal_match():
 
 def test_a_recorded_literal_is_required_to_match_completely():
     # A prefix of a recorded secret is not the secret (and is not a leak of it).
-    secret = "p25-session-value-0123456789abcdef"
+    secret = "self_service-session-value-0123456789abcdef"
     text = dump(("api_keys", "1\tp25-session-value"))
     assert scan_text(text, [{"kind": "session cookie", "value": secret}]) == []
 
@@ -291,12 +291,12 @@ def test_stack_api_and_ok_record_the_secret_they_return(tmp_path, monkeypatch):
 
 
 def test_a_planted_failure_through_real_assertion_rewriting_has_no_secret(tmp_path):
-    secret = "P25-SECRET-" + "Ab3" * 8
+    secret = "E2E-SECRET-" + "Ab3" * 8
     case = tmp_path / "test_planted.py"
     case.write_text(
         "from no_secret import assert_no_secret\n"
         "\n"
-        "PART = 'P25-SECRET-'\n"
+        "PART = 'E2E-SECRET-'\n"
         "REST = 'Ab3' * 8\n"
         "SECRET = PART + REST\n"
         "\n"

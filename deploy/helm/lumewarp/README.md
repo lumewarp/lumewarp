@@ -51,7 +51,7 @@ helm upgrade lumewarp deploy/helm/lumewarp -n lumewarp \
   --reuse-values --set gateway.enabled=true --set gateway.gatewayId=gw-1
 ```
 
-The gateway Deployment runs one replica in P1: a token identifies one gateway, so do not
+The gateway Deployment runs one replica: a token identifies one gateway, so do not
 scale it. If you need more gateway instances, deploy another release (normally in a
 separate namespace, or with `controlPlane.enabled=false`) with its own `gateway.gatewayId`
 and token.
@@ -149,13 +149,13 @@ controlPlane:
 The IdP must allow the redirect URI `<LUMEWARP_PUBLIC_URL>/api/v1/session/oidc/callback`.
 Write the OpenFGA model from `deploy/openfga/model.fga` before switching the backend.
 
-## Important P1 limits
+## Important limits
 
 - **Control plane replicas must stay at 1.** The compiler, rollover scheduler and
   notifier loop are single-process; the chart uses `Recreate`.
 - **Migration is a pre-upgrade hook.** The old control-plane pod is still running while
   the schema migrates (Rolling/Recreate), so expect a short outage window on upgrades.
-- **One gateway replica and one token per gateway id.** P1 binds each gateway token to a
+- **One gateway replica and one token per gateway id.** Each gateway token is bound to a
   single `gateway_id`. `gateway.replicaCount` must stay 1; the chart rejects higher
   values. `gateway.gatewayId` must equal the id used when the token was issued. Deploy one
   release per gateway identity if you need more gateway instances.
@@ -185,7 +185,7 @@ Common values (see [`values.yaml`](values.yaml) for the complete list):
 | Value | Default | Meaning |
 | --- | --- | --- |
 | `controlPlane.enabled` | `true` | Deploy the control plane. |
-| `controlPlane.replicaCount` | `1` | Must stay 1 in P1. |
+| `controlPlane.replicaCount` | `1` | Must stay 1. |
 | `controlPlane.image.repository` / `.tag` | `ghcr.io/lumewarp/lumewarp-control-plane` / chart appVersion | Control-plane image. |
 | `controlPlane.databaseUrl.secretName` / `.key` | `lumewarp-control-plane` / `database-url` | Existing Secret with `LUMEWARP_DATABASE_URL`. |
 | `controlPlane.adminGroup` | `""` | `LUMEWARP_ADMIN_GROUP`: the IAM group of installation admins. Empty leaves emergency access only. |
@@ -197,7 +197,7 @@ Common values (see [`values.yaml`](values.yaml) for the complete list):
 | `controlPlane.grpcTls.enabled` | `false` | Serve gateway gRPC over TLS from a Secret. |
 | `controlPlane.migrate.enabled` | `true` | Run the migration hook Job. |
 | `gateway.enabled` | `true` | Deploy the gateway. |
-| `gateway.replicaCount` | `1` | Must stay 1 in P1; one token per gateway id. |
+| `gateway.replicaCount` | `1` | Must stay 1; one token per gateway id. |
 | `gateway.image.repository` / `.tag` | `ghcr.io/lumewarp/lumewarp-gateway` / chart appVersion | Gateway image. |
 | `gateway.token.secretName` / `.key` | `lumewarp-gateway` / `token` | Existing Secret with a control-plane-created gateway token. |
 | `gateway.controlPlaneUrl` | empty | Defaults to the control-plane Service gRPC URL in this namespace. |
@@ -291,7 +291,7 @@ helm template lumewarp deploy/helm/lumewarp -n lumewarp \
   --set gateway.token.secretName=gw
 
 # Expected to fail: one token is bound to one gateway id; multi-replica gateways are
-# deferred in P1.
+# deferred.
 helm template lumewarp deploy/helm/lumewarp -n lumewarp \
   --set gateway.replicaCount=2
 ```

@@ -68,7 +68,7 @@ pub struct Model {
 }
 
 /// A compiled virtual key with its already-resolved effective policy.
-// Ids and scopes are read by usage reporting and rate limiting (W2).
+// Ids and scopes are read by usage reporting and rate limiting.
 pub struct KeyContext {
     pub key_id: Arc<str>,
     pub team_id: Arc<str>,
@@ -283,7 +283,7 @@ impl Router {
         self.pools.iter().flat_map(|pool| &pool.models)
     }
 
-    /// Creates the zero-valued series of a name on this pool, as P0 did, and
+    /// Creates the zero-valued series of a name on this pool and
     /// returns its `circuit_open` counters. Compile time only.
     fn preregister(&self, name: &str, metrics: &Metrics) -> Vec<(LabelId, Counter)> {
         for model in std::iter::once("").chain(self.models().map(|d| d.name.as_str())) {
@@ -604,7 +604,7 @@ impl RoutingTable {
             );
         }
 
-        // Pre-register zero-valued anonymous series as P0 did. This touches
+        // Pre-register zero-valued anonymous series. This touches
         // only the registry, not the handle cache, which stays sparse.
         for endpoint in 0..ENDPOINTS {
             drop(metrics.handles("unknown", "", endpoint, ""));

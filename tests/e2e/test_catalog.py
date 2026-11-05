@@ -1,6 +1,6 @@
 """The model catalog through a real control plane and gateway: names are created over the
 admin API, reach the gateway in a snapshot, and are called like a client would. Runs under
-scripts/e2e-p1.sh and e2e-p2.sh.
+scripts/e2e-core.sh and e2e-identity.sh.
 """
 
 import json

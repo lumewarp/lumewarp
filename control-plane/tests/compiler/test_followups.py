@@ -1,4 +1,4 @@
-"""Compiler regressions from the P1 end-to-end run."""
+"""Compiler regressions from the end-to-end run."""
 
 import hashlib
 from datetime import UTC, datetime, timedelta

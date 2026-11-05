@@ -256,11 +256,11 @@ gateway takes (`create` deserializes the JSON the control plane stores). Cover:
    that the control plane enforces the derived schema and that the gateway's
    `capabilities` in `Hello` carry `strategy:<name>`. From the repo root:
 
-       flock /tmp/lumewarp-e2e.lock scripts/e2e-p1.sh -k <name>
+       flock /tmp/lumewarp-e2e.lock scripts/e2e-core.sh -k <name>
 
    Build the feature gateway into its own target directory
    (`CARGO_TARGET_DIR=<repo>/gateway/target/<name>-e2e`), never the default
-   `gateway/target/debug/lumewarp`: `tests/e2e/test_p2_routing.py` asserts that
+   `gateway/target/debug/lumewarp`: `tests/e2e/test_routing_resilience.py` asserts that
    binary's exact list of `strategy:` capabilities, and a backup/restore can be
    skipped by a timeout or an interrupt.
 

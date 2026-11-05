@@ -1,7 +1,7 @@
 {{- if .Values.gateway.enabled }}
 {{- $persistence := .Values.gateway.stateDir.persistence }}
 {{- if gt (int .Values.gateway.replicaCount) 1 }}
-{{- fail "gateway.replicaCount must be 1 in P1: one gateway token is bound to one gateway id and multi-replica gateways are deferred. Deploy one release per gateway identity instead." }}
+{{- fail "gateway.replicaCount must be 1: one gateway token is bound to one gateway id and multi-replica gateways are deferred. Deploy one release per gateway identity instead." }}
 {{- end }}
 {{- $gatewayId := required "gateway.gatewayId is required: it must equal the gateway id the token was issued for" .Values.gateway.gatewayId }}
 {{- if not (hasSuffix (printf ":%v" .Values.gateway.service.port) .Values.gateway.server.listen) }}

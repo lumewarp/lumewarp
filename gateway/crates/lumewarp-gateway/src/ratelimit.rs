@@ -3,7 +3,7 @@
 //! State lives in `Runtime` for the life of the process and is keyed by scope
 //! id, so snapshot swaps keep it; limits are read from the caller's compiled
 //! policy on every request, so a new snapshot changes them in place. N
-//! gateway instances allow up to N times each limit (P1 decision).
+//! gateway instances allow up to N times each limit.
 //!
 //! Per scope:
 //! - rpm: GCRA (equivalent to a token bucket with capacity `rpm`, refilled at

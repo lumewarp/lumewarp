@@ -9,7 +9,7 @@ path: the gateway only reads the immutable snapshot it last ACKed. Design:
 One Python process serves everything: FastAPI (API + Admin UI), `grpc.aio`
 (`ConfigService`, `UsageService`, gRPC health), the compiler loop, the background
 schedulers and the Prometheus metrics listener all start and stop in the FastAPI lifespan. Running more than one process per
-installation is not supported in P1.
+installation is not supported.
 
 ## Requirements
 
@@ -608,7 +608,7 @@ revoked. It goes through the same strategy checks as a router write.
   notifications go through the notifier outbox. Budget publishing targets the protocol's
   5 s eventual-enforcement window; it is not a configurable per-flip timeout. The unused
   `LUMEWARP_BUDGET_FLIP_DEADLINE_SECONDS` setting has been removed.
-- P1 stores usage in Postgres; ClickHouse is later. While the control plane is down the
+- Usage is stored in Postgres; ClickHouse is later. While the control plane is down the
   gateway keeps serving from its snapshot, but usage batches queue in memory and are lost
   if the queue fills or the gateway restarts.
 

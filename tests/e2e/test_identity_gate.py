@@ -1,4 +1,4 @@
-"""P2 gates against real Keycloak, Postgres, OpenFGA and gateway processes."""
+"""Identity gates against real Keycloak, Postgres, OpenFGA and gateway processes."""
 
 import time
 import uuid
@@ -6,8 +6,8 @@ import uuid
 import httpx
 import pytest
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2
-from p2_events import DatabaseEvents
-from p2_identity import cookie_api, grant, identity_stack, login
+from database_events import DatabaseEvents
+from identity import cookie_api, grant, identity_stack, login
 from stack import pg
 
 
@@ -247,7 +247,7 @@ def test_05_iam_outage_revocation_and_idp_disable(traffic):
         what="removed member gateway 401",
     )
     elapsed = time.monotonic() - started
-    print(f"P2 revocation backend={state.backend} latency_seconds={elapsed:.6f}")
+    print(f"revocation backend={state.backend} latency_seconds={elapsed:.6f}")
     assert elapsed < 5
     stored = stack.ok("GET", f"/keys/{state.user_key['key']['id']}")
     assert (stored["lifecycle"], stored["suspended_reason"]) == ("suspended", "owner_removed")

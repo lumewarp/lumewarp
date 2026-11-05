@@ -255,10 +255,10 @@ jobs:
             bench/mock-upstream
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --locked --project control-plane
-      - name: P1 exit gate (Postgres + control plane + gateway + mock upstream)
+      - name: Core e2e gate (Postgres + control plane + gateway + mock upstream)
         env:
           E2E_PG_URL: postgresql://lumewarp:lumewarp@127.0.0.1:55432/lumewarp
-        run: scripts/e2e-p1.sh
+        run: scripts/e2e-core.sh
 
   load-e2e:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'

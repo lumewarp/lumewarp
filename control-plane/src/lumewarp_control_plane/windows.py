@@ -1,4 +1,4 @@
-"""Budget windows. P1 has one window kind: the UTC calendar month."""
+"""Budget windows. The only window kind is the UTC calendar month."""
 
 from datetime import UTC, datetime
 

@@ -1,9 +1,9 @@
-"""P2 routing: health checks, circuit breakers, retries, fallbacks, traffic splits.
+"""Routing resilience: health checks, circuit breakers, retries, fallbacks, traffic splits.
 
 Revision ID: 0003
 Revises: 0002 (20261028_0002_oidc_sessions)
 
-Downgrade is lossy: it drops every P2 routing setting and maps the `vllm_load` strategy
+Downgrade is lossy: it drops every routing resilience setting and maps the `vllm_load` strategy
 to `least_in_flight` (its documented fallback in the gateway).
 """
 

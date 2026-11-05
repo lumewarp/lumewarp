@@ -129,7 +129,7 @@ def login(browser, stack, username, *, enabled=True):
 
 
 @contextmanager
-def identity_stack(backend: str, *, label: str = "P2"):
+def identity_stack(backend: str, *, label: str = "identity"):
     """Real Keycloak + an isolated OpenFGA store + a control plane configured for OIDC.
 
     Yields a namespace with the stack, the IdP, Bob's and Alice's cookie sessions and (for
@@ -376,7 +376,7 @@ def fga_store():
     )
     assert process.returncode == 0, process.stderr
     with httpx.Client(base_url=OPENFGA, timeout=10, trust_env=False) as client:
-        response = client.post("/stores", json={"name": f"e2e-p2-{uuid.uuid4()}"})
+        response = client.post("/stores", json={"name": f"e2e-identity-{uuid.uuid4()}"})
         response.raise_for_status()
         store = response.json()["id"]
         try:

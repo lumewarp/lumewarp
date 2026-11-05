@@ -15,7 +15,7 @@ from lumewarp_control_plane.compiler.validate import (
 )
 from lumewarp_control_plane.models import Upstream
 from tests.compiler.helpers import OCT, SCOPE, add_router, seed_scope
-from tests.compiler.test_routing_p2 import _base
+from tests.compiler.test_routing_resilience import _base
 
 INVALID_URLS = [
     "http://exam%2fple.com/metrics",

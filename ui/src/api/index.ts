@@ -63,7 +63,7 @@ interface Page<T> {
   next_cursor?: string | null;
 }
 
-/** Follow `next_cursor` until the list is exhausted (admin lists are small in P1). */
+/** Follow `next_cursor` until the list is exhausted (admin lists are small). */
 export async function listAll<T>(fetchPage: (cursor: string | undefined) => Promise<Page<T>>): Promise<T[]> {
   const out: T[] = [];
   let cursor: string | undefined;

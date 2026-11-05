@@ -1,6 +1,6 @@
 {{- if .Values.controlPlane.enabled }}
 {{- if ne (int .Values.controlPlane.replicaCount) 1 }}
-{{- fail "controlPlane.replicaCount must be 1 in P1; the compiler and background loops are single-process" }}
+{{- fail "controlPlane.replicaCount must be 1; the compiler and background loops are single-process" }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment

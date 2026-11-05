@@ -1,6 +1,6 @@
-"""Admin REST API, mounted at /api/v1 (owner: C2).
+"""Admin REST API, mounted at /api/v1.
 
-Conventions (frozen, see .omh/runs/p1/plan.md):
+Conventions (frozen):
 - Auth: handlers take `authz.Authz` (caller in `authz.principal`) and ask it
   `require` / `allowed`; unreadable resources answer 404, readable-but-denied answer 403.
 - Lists return `{items, next_cursor}` and accept `?limit=&cursor=`.

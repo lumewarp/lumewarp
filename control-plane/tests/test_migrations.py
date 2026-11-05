@@ -113,7 +113,7 @@ async def test_enum_check_constraints_exist(engine) -> None:
 
 
 async def test_downgrade_0003_maps_vllm_load() -> None:
-    """0003 -> 0002 drops the P2 routing settings and keeps routers valid for P1."""
+    """0003 -> 0002 drops the routing resilience settings and keeps routers valid."""
     url = await create_database()
     engine = create_async_engine(url)
     try:

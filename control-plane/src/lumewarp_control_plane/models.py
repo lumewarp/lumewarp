@@ -264,7 +264,7 @@ class PolicyMixin:
 
 
 class Scope(Base):
-    """A config scope (one per installation in P1).
+    """A config scope (one per installation).
 
     `source_revision` is bumped by `outbox.enqueue_recompile` in every mutating transaction;
     the row lock it takes also serializes writers. Compiles record the revision they saw.
@@ -711,7 +711,7 @@ class Alias(TimestampMixin, Base):
 class Router(TimestampMixin, Base):
     """A callable name that distributes requests over models (`router_members`).
 
-    Retry, fallback, traffic split and strategy exist only here. Resilience (P2): an
+    Retry, fallback, traffic split and strategy exist only here. Resilience: an
     optional retry policy (scalar columns, `retry_enabled` = policy present), ordered
     fallback models (`router_fallbacks`) and an optional traffic split (`router_splits` +
     `router_split_members`, sticky by header/team/key). With a traffic split the members

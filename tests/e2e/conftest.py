@@ -9,8 +9,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 import secret_scan_session  # noqa: E402
 from stack import GATEWAY_BIN, MOCK_BIN, Stack  # noqa: E402
 
-LIVE_IDP_TESTS = ["test_p2_exit_gate.py", "test_p25_self_service.py"]
-collect_ignore = [] if os.environ.get("E2E_P2") == "1" else LIVE_IDP_TESTS
+LIVE_IDP_TESTS = ["test_identity_gate.py", "test_self_service.py"]
+collect_ignore = [] if os.environ.get("E2E_IDENTITY") == "1" else LIVE_IDP_TESTS
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
@@ -30,7 +30,7 @@ def secret_scan_run() -> None:
 def binaries() -> None:
     for binary in (GATEWAY_BIN, MOCK_BIN):
         if not binary.exists():
-            pytest.exit(f"missing {binary}; build it first (scripts/e2e-p1.sh does)", returncode=2)
+            pytest.exit(f"missing {binary}; build it first (scripts/e2e-core.sh does)", returncode=2)
 
 
 @pytest.fixture

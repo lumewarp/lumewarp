@@ -22,32 +22,34 @@ The owner, Andy, writes in Traditional Chinese — reply to him in Traditional C
 5. **Observability is a feature, not an afterthought.** Every new gateway path gets Prometheus metrics (`lumewarp_*`, see the table in `docs/architecture.md`) and OTel spans. No API-key-level labels on metrics. Never log prompts/responses by default.
 6. **Performance claims need numbers.** Any change on the gateway request path must run the `bench/` suite; don't regress p99 overhead.
 
-## Current phase: P2.5 done, P3 not started
+## Current state
 
-P0 (Rust gateway + bench vs LiteLLM), P1 (control plane, gRPC config stream, usage/budgets, Admin UI), P2, and P2.5 (model catalog, self-service keys, credential storage) are implemented; `docs/architecture.md` ("P1 已實作", "P2 已實作", "模型目錄已實作", "Admin UI（P2.5）", "憑證儲存與稽核（P2.5）") lists what exists and what is deferred. P2 delivered:
+The Rust gateway with its bench against LiteLLM, the control plane, the gRPC config stream, usage and budgets, the Admin UI, identity, routing, the model catalog, self-service keys and credential storage are implemented. `docs/architecture.md` lists what exists and what is deferred.
 
-- Tenancy: team → members (admin/member) and service accounts → API keys. No org/project. P2.5 removed the superuser and the bootstrap token: installation admins are members of the group named by `LUMEWARP_ADMIN_GROUP`, and a break-glass password opens an emergency session.
+Identity, routing and observability:
+
+- Tenancy: team → members (admin/member) and service accounts → API keys. No org/project. There is no superuser or bootstrap token: installation admins are members of the group named by `LUMEWARP_ADMIN_GROUP`, and a break-glass password opens an emergency session.
 - Admin login via OIDC (cookie sessions + CSRF); the IdP authenticates and may supply the admin group through a groups claim, team roles never come from it. Authorization is pluggable (`builtin`, `openfga`, `http`, or a `lumewarp.authz` entry point) behind `check(user_id, relation, resource)`, where a resource is a group or a team; backend errors are never denies. A key reconciler suspends keys of members removed in an external IAM.
 - Gateway routing: retries (before any response byte, budgeted), fallbacks, circuit breaker, active health checks, LOWEST_LATENCY, VLLM_LOAD, traffic split with sticky hashing — each gated by a snapshot capability the control plane emits only when used.
 - Observability: Prometheus alert rules (promtool-tested), Grafana dashboards, control-plane `/metrics` on its own listener.
 
-The model catalog (`docs/architecture.md`, "模型目錄已實作") delivered:
+The model catalog (`docs/architecture.md`, "模型目錄已實作"):
 
 - Names: a client calls a model, an alias or a router, one namespace, all renameable, referenced by id. The response `model` is the called name, without buffering.
 - Grants by id, checked against the called name. Rollback restores the catalog by id.
 - Usage records the served model plus alias, router, fallback and attempts. No access log: a request is looked up in OTel by `x-lumewarp-request-id`.
 - Strategies are Rust crates (`register!`), reported in `Hello` with their schemas, validated on write.
 
-The self-service keys and credential work of P2.5 (`docs/architecture.md`, "Admin UI（P2.5）", "憑證儲存與稽核（P2.5）") delivered:
+Self-service keys and credentials (`docs/architecture.md`, "Admin UI", "憑證儲存與稽核"):
 
 - Self-service keys: any IdP user signs in just in time with no grants and manages their own keys in the teams they belong to; a team sets `max_keys_per_member` and `max_member_key_lifetime_seconds`, and `GET /users/me` returns effective models, limits, key limits and the month's remaining budget. A member resumes their own `owner` and `owner_removed` suspensions; `admin` and `owner_deactivated` need an administrator.
 - Rotation grace: `grace_seconds` defaults to 0 and is at most 24 hours, with one previous hash; both secrets authenticate as the same key and usage stays on it, and the gateway stops accepting the old one at its own expiry from the snapshot alone. Creating and rotating are limited to 30 attempts per 60 s per principal and operation, per process, and a 429 is not audited.
 - Admin UI: `/my-keys` is a plain member's home, a team's Keys tab manages its keys, access states are not denials, and one dialog above the router shows every one-time secret.
 - Credentials at rest: only sha256 hashes and environment references, the OIDC nonce/PKCE in an AES-GCM cookie, webhook `url_ref`, `metrics_url` without a query, and an allowlist for audit details.
 
-Acceptance suites: `scripts/e2e-p1.sh`, `scripts/e2e-p2.sh` (needs `scripts/dev-idp.sh up`), `scripts/load-e2e.sh`, `ui/` Playwright (`pnpm test:e2e`), and `bench/` A6 for request-path changes. The e2e suite scans the database for plaintext credentials.
+Acceptance suites: `scripts/e2e-core.sh`, `scripts/e2e-identity.sh` (needs `scripts/dev-idp.sh up`), `scripts/load-e2e.sh`, `ui/` Playwright (`pnpm test:e2e`), and `bench/` A6 for request-path changes. The e2e suite scans the database for plaintext credentials.
 
-Next: P3 (MCP / A2A), not planned yet.
+Next: MCP / A2A, not planned yet.
 
 Decided: license Apache-2.0; MVP usage data in Postgres (ClickHouse later).
 

@@ -1,4 +1,4 @@
-"""Regression evidence for the W1 security review."""
+"""Regression evidence for the security review."""
 
 import asyncio
 import logging

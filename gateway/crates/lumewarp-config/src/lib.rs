@@ -585,7 +585,7 @@ impl Config {
         let mut shorthand = HashSet::new();
         for hex in &self.server.api_keys {
             let hash = parse_hash(hex, "server.api_keys")?;
-            // P0 accepted duplicate shorthand entries; keep that, they are one key.
+            // Duplicate shorthand entries are accepted; they are one key.
             if !shorthand.insert(hex.as_str()) {
                 continue;
             }

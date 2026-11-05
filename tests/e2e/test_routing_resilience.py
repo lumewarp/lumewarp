@@ -1,6 +1,6 @@
-"""P2 routing (W5) through the control plane: retries, fallbacks and circuit breakers
+"""Routing resilience through the control plane: retries, fallbacks and circuit breakers
 configured over the admin API, compiled into the snapshot and served by a real gateway
-against real mock upstreams. No IdP needed; runs under scripts/e2e-p1.sh.
+against real mock upstreams. No IdP needed; runs under scripts/e2e-core.sh.
 
 The "bad" mock fails every inference request with 503 (`--fail-every 1`); the stack's
 default mock is healthy. The gateway's retry budget starts with three retries, so each
@@ -10,7 +10,7 @@ test keeps its retried requests at or below that.
 import json
 
 import httpx
-from p2_events import DatabaseEvents
+from database_events import DatabaseEvents
 from stack import free_port, pg, wait_for
 
 BAD_WEIGHT = 1000  # first attempts land on the bad model ~always

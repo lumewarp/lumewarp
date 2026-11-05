@@ -1,4 +1,4 @@
-//! Load-aware selection state (W6): per-model latency EWMA for
+//! Load-aware selection state: per-model latency EWMA for
 //! `LOWEST_LATENCY`, scraped vLLM load for `VLLM_LOAD`, and the fixed-seed
 //! hash used for sticky traffic splits.
 //!

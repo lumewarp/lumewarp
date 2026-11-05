@@ -1,7 +1,7 @@
 {{- if and .Values.gateway.enabled .Values.gateway.stateDir.persistence.enabled (not .Values.gateway.stateDir.persistence.existingClaim) }}
 {{- $persistence := .Values.gateway.stateDir.persistence }}
 {{- if not (and (eq (len $persistence.accessModes) 1) (has "ReadWriteOnce" $persistence.accessModes)) }}
-{{- fail "gateway.stateDir.persistence.accessModes must be [ReadWriteOnce] in P1; shared state across gateways is not supported" }}
+{{- fail "gateway.stateDir.persistence.accessModes must be [ReadWriteOnce]; shared state across gateways is not supported" }}
 {{- end }}
 apiVersion: v1
 kind: PersistentVolumeClaim

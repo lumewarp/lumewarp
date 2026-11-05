@@ -201,7 +201,7 @@ async def compile_scope(
       split), or are weighted with zero total weight (per split when split), aliases of
       those, and any name that is empty or reserved.
       Expiry: NULL -> 0 (never); at or before the epoch -> 1 ms (expired).
-    - P2 routing: upstream health_check / circuit_breaker / metrics_url and router retry /
+    - Routing resilience: upstream health_check / circuit_breaker / metrics_url and router retry /
       fallbacks / traffic_split / sticky are emitted when set; `required_capabilities`
       lists exactly the capabilities those fields need (validate.capabilities_used, the
       gateway's rule). A retry policy with max_attempts NULL is emitted as 0, which the

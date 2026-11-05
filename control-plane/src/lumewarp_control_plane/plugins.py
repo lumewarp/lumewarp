@@ -51,13 +51,13 @@ class NotifierPlugin(Protocol):
     async def send(self, event: BudgetEvent, config: Mapping[str, Any]) -> None: ...
 
 
-# --------------------------------------------------------------------------- auth (P2)
+# -------------------------------------------------------------------------------- auth
 
 
 @dataclass(frozen=True)
 class IdentityMapping:
-    """Declarative result of an auth plugin: who the user is. Team roles and the superuser
-    flag are answered by the authz backend, not by this mapping."""
+    """Declarative result of an auth plugin: who the user is. Team roles and the installation
+    admin group are answered by the authz backend, not by this mapping."""
 
     email: str
     display_name: str = ""
@@ -65,8 +65,8 @@ class IdentityMapping:
 
 @runtime_checkable
 class AuthPlugin(Protocol):
-    """P2: maps an external identity (OIDC claims, LDAP entry, ...) to a Lumewarp user.
-    Runs in the control plane at login only. Protocol only in P1.
+    """Maps an external identity (OIDC claims, LDAP entry, ...) to a Lumewarp user.
+    Runs in the control plane at login only.
     """
 
     api_version: int

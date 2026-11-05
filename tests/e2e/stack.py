@@ -1,4 +1,4 @@
-"""Process harness for the P1 end-to-end tests: Postgres database, control plane, mock
+"""Process harness for the end-to-end tests: Postgres database, control plane, mock
 upstream and gateway, all real processes on ephemeral ports.
 """
 
@@ -218,7 +218,7 @@ class Proc:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-        if run_dir:  # lets scripts/e2e-p1.sh reap strays if pytest itself is killed
+        if run_dir:  # lets scripts/e2e-core.sh reap strays if pytest itself is killed
             with open(Path(run_dir) / "pids", "a") as pids:
                 pids.write(f"{self.popen.pid}\n")
 

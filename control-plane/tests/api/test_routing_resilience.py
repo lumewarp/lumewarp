@@ -1,4 +1,4 @@
-"""P2 routing API: health checks, circuit breakers, retries, fallbacks, traffic splits.
+"""Routing resilience API: health checks, circuit breakers, retries, fallbacks, traffic splits.
 
 Every validation rule mirrors the gateway (snapshot.rs::validate / validate_split,
 router.rs::RoutingTable::compile).
@@ -212,7 +212,7 @@ def _out(ids: list[str], weight: int = 1) -> list[dict]:
     return [{"model_id": i, "weight": weight, "params": {}} for i in ids]
 
 
-def test_router_p2_roundtrip_and_audit(client) -> None:
+def test_router_resilience_roundtrip_and_audit(client) -> None:
     upstream = _ok(_upstream(client))["id"]
     a, b, c, d = (_model(client, upstream) for _ in range(4))
     router = _ok(

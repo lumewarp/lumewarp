@@ -1,6 +1,6 @@
 # bench
 
-Compares gateway overhead of Lumewarp vs LiteLLM on the same machine (P0 exit
+Compares gateway overhead of Lumewarp vs LiteLLM on the same machine (the
 gate: Lumewarp p99 overhead clearly below LiteLLM's).
 
 - `mock-upstream/` — Rust mock upstream with fixed latency and SSE streaming,
@@ -344,23 +344,23 @@ Overhead p99 is the median with the min–max across runs.
 
 | run | auth | rate / conc | Lumewarp ovh p99 ms | LiteLLM ovh p99 ms |
 |---|---|---|---:|---:|
-| P0 quick (`1cf38c7`) | off | 1000 RPS | 0.10 [0.08–0.23] | 3882 (saturated) |
-| P0 quick | off | stream c=100, TTFT | 0.51 [0.16–0.70] | – |
-| P1 full (`2a60f24`) | key | 300 RPS | 0.20 [0.15–0.21] | 40.0 |
-| P1 full | key | 1000 RPS | 0.07 [0.00–0.12] | 4288 (saturated) |
-| P1 full | key | 5000 RPS | 0.20 [0.12–0.24] | 25128 (saturated) |
-| P1 full | key | 10000 RPS | 0.23 [0.08–0.27] | 27581 (saturated, 3% errors) |
-| P1 full | key | stream c=100, TTFT | 0.67 [-2.98–0.77] | 518 |
-| P1 full | key | stream c=1000, TTFT | 2.30 [2.05–2.40] | 4678 |
+| quick (`1cf38c7`) | off | 1000 RPS | 0.10 [0.08–0.23] | 3882 (saturated) |
+| quick (`1cf38c7`) | off | stream c=100, TTFT | 0.51 [0.16–0.70] | – |
+| full (`2a60f24`) | key | 300 RPS | 0.20 [0.15–0.21] | 40.0 |
+| full (`2a60f24`) | key | 1000 RPS | 0.07 [0.00–0.12] | 4288 (saturated) |
+| full (`2a60f24`) | key | 5000 RPS | 0.20 [0.12–0.24] | 25128 (saturated) |
+| full (`2a60f24`) | key | 10000 RPS | 0.23 [0.08–0.27] | 27581 (saturated, 3% errors) |
+| full (`2a60f24`) | key | stream c=100, TTFT | 0.67 [-2.98–0.77] | 518 |
+| full (`2a60f24`) | key | stream c=1000, TTFT | 2.30 [2.05–2.40] | 4678 |
 
-P1 streams carry the injected `include_usage` and strip the extra event, since
+Keyed runs' streams carry the injected `include_usage` and strip the extra event, since
 clients in the bench do not ask for usage. LiteLLM could not hold 1000 RPS on
 this machine. Lumewarp used 65 % CPU on average at 10k RPS.
 
 Stream TTFT overhead p99 at c=100 is noisy on this box (single quick runs have
 shown 0.5–1.8 ms for the same binary). A same-session A/B with key auth, quick
-profile, 5 repetitions: P0 binary (`1cf38c7`) 0.15 ms non-stream / 1.44
-[0.03–1.70] ms stream TTFT; P1 HEAD 0.10 ms / 0.74 [0.19–4.48] ms. No regression.
+profile, 5 repetitions: the `1cf38c7` binary 0.15 ms non-stream / 1.44
+[0.03–1.70] ms stream TTFT; the later binary 0.10 ms / 0.74 [0.19–4.48] ms. No regression.
 
 ## CI
 

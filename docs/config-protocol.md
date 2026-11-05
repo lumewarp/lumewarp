@@ -250,5 +250,5 @@ swaps; scrapers, like probes, are diffed only after a snapshot is accepted.
   | Same, members failed, fallback serves | the fallback | `latest` | `coder` | true |
 
   `upstream` and `upstream_model` are what the final attempt used, sent by the gateway so a later catalog change cannot misattribute them. `attempts` counts all upstream attempts of the request; 0 means none was made. A rejected request with a known name carries its `alias` and `router`.
-- Budget enforcement is **eventual**: once usage is ingested, an exhausted scope flips affected keys to `BUDGET_EXCEEDED` and a new version is published within 5 s. Lost events (gateway crash, full queue) are not recovered in P1, and streams in flight when a budget runs out are not cut.
+- Budget enforcement is **eventual**: once usage is ingested, an exhausted scope flips affected keys to `BUDGET_EXCEEDED` and a new version is published within 5 s. Lost events (gateway crash, full queue) are not recovered, and streams in flight when a budget runs out are not cut.
 - Month rollover is driven by a scheduler (runs at startup and at each UTC month boundary), not by incoming usage. While the control plane is down, blocked keys stay blocked.

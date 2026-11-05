@@ -786,7 +786,7 @@ def selftest() -> int:
         assert summarized["ttft_headline_ms"] == summarized["ttft_any_ms"]
         assert "ttft_ms" not in summarized and "ttft_ms" not in samples
 
-        # Trimmed Aggregated rows from w1-driver-smoke's direct history:
+        # Trimmed Aggregated rows from a driver smoke run's direct history:
         # users start at zero and worker counters update every three seconds.
         meta["config"]["step_offered"] = [20, 40]
         entry = {**manifest[0], "stages": "10:5,20:5"}
@@ -855,7 +855,7 @@ def selftest() -> int:
                                 assert bool(step["flags"]) == (share < 0.9)
                             assert bool(summarize_run(run, entry, meta)["flags"]) == (share < 0.9)
 
-        # Trimmed direct history from w1-gate-ci-shape, relative timestamps.
+        # Trimmed direct history from a CI-shaped gate run, relative timestamps.
         # 22->30 mixes worker phases; 22->28 is 602/6 = 100.3 RPS.
         meta["config"]["step_offered"] = [40, 100]
         entry["stages"] = "20:15,50:15"

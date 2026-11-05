@@ -1,23 +1,23 @@
-# P1 end-to-end exit gate
+# End-to-end gates
 
 Real processes on ephemeral ports: Postgres database (created and dropped per test), control plane
 (`python -m lumewarp_control_plane serve`), mock upstream (`bench/mock-upstream`) and the gateway in
 control-plane mode. No separate project: the tests run in the control-plane's uv environment
 (they use its `httpx`, `asyncpg` and security helpers).
 
-    scripts/e2e-p1.sh          # builds binaries, starts dev Postgres if needed, runs pytest
-    scripts/check-p1.sh        # every P1-A1 check, then the e2e gate
+    scripts/e2e-core.sh          # builds binaries, starts dev Postgres if needed, runs pytest
+    scripts/check-all.sh         # every check, then the e2e gate
 
 Environment: `E2E_PG_URL` (server DSN, default dev Postgres 127.0.0.1:55432), `E2E_PROFILE`
 (`debug`|`release` gateway), `E2E_GATEWAY_BIN`, `E2E_MOCK_BIN`, `E2E_STRATEGY_GATEWAY_BIN` (a gateway
-built with `--features strategy-priority-failover`; `scripts/e2e-p1.sh` builds and sets it, and
+built with `--features strategy-priority-failover`; `scripts/e2e-core.sh` builds and sets it, and
 `test_strategy_crate.py` skips its crate test without it). `test_strategy_cheapest_first.py` builds
 its own binary with `--features strategy-cheapest-first` into
 `gateway/target/e2e-cheapest-first`, so it runs under either script without replacing the default
 binary. Failing tests print every process log.
 
-`test_p2_routing.py` (collected by `scripts/e2e-p1.sh` and `scripts/e2e-p2.sh`; no IdP) configures
-P2 routing over the admin API against a second mock started with `--fail-every 1` (always 503)
+`test_routing_resilience.py` (collected by `scripts/e2e-core.sh` and `scripts/e2e-identity.sh`; no IdP) configures
+routing resilience over the admin API against a second mock started with `--fail-every 1` (always 503)
 and a closed port: retry to a second model with exactly one usage event for the final
 model; fallback routers (503 and connect error, streaming too) answering with the client's
 model name; a circuit breaker reaching `lumewarp_upstream_circuit_state=2` after N failures, after
@@ -33,20 +33,20 @@ model's price, filter by every dimension and stay continuous across a rename. An
 OTLP sink proves a request is found by its `x-lumewarp-request-id`, with every attempt, without
 the prompt, the response or the key, and that `traceparent` sampled=0 does not erase it.
 
-## P2: real OIDC and authorization exit gate
+## Identity: real OIDC and authorization gate
 
-    scripts/e2e-p2.sh
+    scripts/e2e-identity.sh
 
-Runs five P2 gates and the P2.5 self-service gate for each of `builtin` and `openfga`: real
+Runs five identity gates and the self-service gate for each of `builtin` and `openfga`: real
 Keycloak authorization code + S256 PKCE login and zero-grant JIT, team visibility, cookie/CSRF
 key creation by a Member and service-account creation by an Admin, streaming and
 non-streaming gateway calls, owner/team usage and cost reconciliation, removal
 to gateway 401 in less than five seconds, and Bob's self-service key journey. The runner
-prints each backend's measured revocation latency. P1's default collection excludes these
+prints each backend's measured revocation latency. The core gate's default collection excludes these
 live IdP tests.
 
 The runner starts the local dev identity stack only if discovery or OpenFGA health
-is unreachable. It reuses P1's binary builds, Postgres defaults, and process/database
+is unreachable. It reuses the core gate's binary builds, Postgres defaults, and process/database
 reaper; it never shuts down the shared dev IdP stack. Docker, curl, Rust and uv are
 required. Only loopback services and the mock upstream receive traffic.
 
@@ -66,15 +66,15 @@ continues serving both keys. Builtin has no separate remote IAM outage boundary.
 Production defaults remain a 2-second changes poll and 300-second full scan; tests
 set both to 1 second to exercise repeated error decisions promptly.
 
-`p2_events.py` installs commit-notification triggers only in the disposable database.
+`database_events.py` installs commit-notification triggers only in the disposable database.
 It subscribes before actions and checks usage/publication/ACK state on notifications,
 without fixed sleeps or timing-based retry loops. Stage fixtures explicitly express
 the dependencies between the gates; individual gates can also run via `-k`.
 Live tests are scheduled nightly, not on pull requests.
 
-## P2.5: self-service keys and no plaintext credentials
+## Self-service keys
 
-`test_p25_self_service.py` (also collected only with `E2E_P2=1`, on both backends) is Bob's
+`test_self_service.py` (also collected only with `E2E_IDENTITY=1`, on both backends) is Bob's
 journey as a plain member through the real IdP session: `/users/me` gives his team's
 effective models, limits, member-key limits and remaining budget; he creates a key with an
 expiry and the gateway serves a granted model while refusing one outside the grant; a
@@ -96,7 +96,7 @@ answer; nothing sleeps for a fixed time.
 The scan is **on by default**, including a direct `pytest` run with no script: an autouse
 session fixture creates a run directory, a run id and the `secrets.jsonl` /
 `secret-scans.jsonl` files when the scripts did not, and finalizes the scan at the end of
-the session. `scripts/e2e-p1.sh` (and therefore `scripts/e2e-p2.sh`) and
+the session. `scripts/e2e-core.sh` (and therefore `scripts/e2e-identity.sh`) and
 `scripts/load-e2e.sh` export the same context. The only opt-out is
 `E2E_SKIP_SECRET_SCAN=1`; the end of the run then prints a warning saying nothing was
 searched for. There is no per-suite or per-test switch.
@@ -104,7 +104,7 @@ searched for. There is no per-suite or per-test switch.
 The run is fail-closed. A missing or corrupt recorded-secret log, a corrupt line in the
 scan-result file, a missing `pg_dump`, or a failed env-reference query is a hard failure
 (the scan cannot claim to have looked). The harness records every secret it issues or
-receives at the API boundary: `Stack.api`/`Stack.ok` and `p2_identity.cookie_api` record
+receives at the API boundary: `Stack.api`/`Stack.ok` and `identity.cookie_api` record
 any returned `secret` or known token field before the value reaches the caller, so key
 create, key rotate, catalog keys, PATs, gateway tokens and the load rotation are covered
 without each test remembering. `stack.record_secret` additionally records the gateway

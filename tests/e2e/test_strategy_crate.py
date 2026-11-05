@@ -1,6 +1,6 @@
 """A new strategy needs only a Rust crate and a gateway rebuild.
 
-The gateway here is built with `gateway/strategies/priority-failover` (scripts/e2e-p1.sh).
+The gateway here is built with `gateway/strategies/priority-failover` (scripts/e2e-core.sh).
 The strategy reaches the control plane only through Hello: nothing in the proto, the control
 plane or the UI names it, its form comes from `GET /strategies`, and a router using it is
 created and called through the admin API.
@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import stack as stack_module
 from stack import free_port, wait_for
-from test_p2_routing import _model, _upstream_id
+from test_routing_resilience import _model, _upstream_id
 
 STRATEGY = "priority_failover"
 ROOT = Path(__file__).resolve().parents[2]
@@ -44,7 +44,7 @@ def _strategy(stack) -> dict | None:
 def test_crate_appears_through_hello_and_a_router_using_it_is_served(stack, monkeypatch):
     binary = os.environ.get("E2E_STRATEGY_GATEWAY_BIN")
     if not binary:
-        pytest.skip("only scripts/e2e-p1.sh builds the gateway with the strategy crate")
+        pytest.skip("only scripts/e2e-core.sh builds the gateway with the strategy crate")
     seeded = stack.seed()
     upstream = _upstream_id(stack, "mock")
     first, second = _model(stack, "first", upstream), _model(stack, "second", upstream)
@@ -144,7 +144,7 @@ def test_the_same_boundary_payloads_agree_in_control_plane_and_standalone(
 ):
     binary = os.environ.get("E2E_STRATEGY_GATEWAY_BIN")
     if not binary:
-        pytest.skip("only scripts/e2e-p1.sh builds the gateway with the strategy crate")
+        pytest.skip("only scripts/e2e-core.sh builds the gateway with the strategy crate")
     stack.seed()
     model = _model(stack, "boundary", _upstream_id(stack, "mock"))
     monkeypatch.setattr(stack_module, "GATEWAY_BIN", Path(binary))

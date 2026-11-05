@@ -1,7 +1,7 @@
 {
   "uid": "lumewarp-control-plane",
   "title": "Lumewarp / Control plane",
-  "description": "Control-plane metrics follow the P2 contract and remain empty until CP /metrics is deployed and scraped. No team, user or API-key dimensions.",
+  "description": "Control-plane metrics; panels stay empty until CP /metrics is scraped. No team, user or API-key dimensions.",
   "schemaVersion": 39,
   "version": 1,
   "editable": true,

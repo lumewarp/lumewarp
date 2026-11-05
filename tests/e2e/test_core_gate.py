@@ -1,4 +1,4 @@
-"""P1 exit gate: Postgres + control plane + gateway + mock upstream as real processes."""
+"""Core e2e gate: Postgres + control plane + gateway + mock upstream as real processes."""
 
 import time
 import uuid
