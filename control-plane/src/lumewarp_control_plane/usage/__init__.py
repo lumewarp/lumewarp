@@ -329,38 +329,34 @@ async def _budget_policy(
     keys: dict[uuid.UUID, ApiKey],
     aggregates: dict[tuple[ScopeType, uuid.UUID, datetime], list[int]],
 ):
-    """(hard, soft, team_id) per aggregated scope. A member removed while their events were
-    in flight has no budget left to evaluate; the team's still applies.
+    """(hard, team_id) per aggregated scope. A member removed while their events were in
+    flight has no budget left to evaluate; the team's still applies.
     """
     team_ids = {key.team_id for key in keys.values()}
-    policies: dict[tuple[ScopeType, uuid.UUID], tuple[int | None, int | None, uuid.UUID]] = {}
-    for entity_id, hard, soft in await session.execute(
-        select(Team.id, Team.budget_nano_usd, Team.soft_budget_nano_usd).where(
-            Team.id.in_(team_ids)
-        )
+    policies: dict[tuple[ScopeType, uuid.UUID], tuple[int | None, uuid.UUID]] = {}
+    for entity_id, hard in await session.execute(
+        select(Team.id, Team.budget_nano_usd).where(Team.id.in_(team_ids))
     ):
-        policies[(ScopeType.TEAM, entity_id)] = (hard, soft, entity_id)
+        policies[(ScopeType.TEAM, entity_id)] = (hard, entity_id)
     for member in await session.scalars(select(TeamMember).where(TeamMember.team_id.in_(team_ids))):
         policies[(ScopeType.MEMBER, member_scope_id(member.team_id, member.user_id))] = (
             member.budget_nano_usd,
-            member.soft_budget_nano_usd,
             member.team_id,
         )
     account_ids = {k.service_account_id for k in keys.values() if k.service_account_id}
     if account_ids:
-        for entity_id, team_id, hard, soft in await session.execute(
+        for entity_id, team_id, hard in await session.execute(
             select(
                 ServiceAccount.id,
                 ServiceAccount.team_id,
                 ServiceAccount.budget_nano_usd,
-                ServiceAccount.soft_budget_nano_usd,
             ).where(ServiceAccount.id.in_(account_ids))
         ):
-            policies[(ScopeType.SERVICE_ACCOUNT, entity_id)] = (hard, soft, team_id)
+            policies[(ScopeType.SERVICE_ACCOUNT, entity_id)] = (hard, team_id)
     for key in keys.values():
         level, scope_id = key.owner_scope
         if level is ScopeType.MEMBER:
-            policies.setdefault((level, scope_id), (None, None, key.team_id))
+            policies.setdefault((level, scope_id), (None, key.team_id))
     # Make missing rows a consistency failure rather than silently dropping an aggregate.
     for kind, scope_id, _ in aggregates:
         if (kind, scope_id) not in policies:
@@ -376,15 +372,13 @@ async def _evaluate_budgets(
     aggregate_rows: Sequence[UsageTotal],
     aggregates: dict[tuple[ScopeType, uuid.UUID, datetime], list[int]],
     previous_costs: dict[tuple[ScopeType, uuid.UUID, datetime], int],
-    policies: dict[tuple[ScopeType, uuid.UUID], tuple[int | None, int | None, uuid.UUID]],
+    policies: dict[tuple[ScopeType, uuid.UUID], tuple[int | None, uuid.UUID]],
 ) -> bool:
-    from lumewarp_control_plane.notifier import BudgetEvent, enqueue_budget_event
-
     now = datetime.now(UTC)
     current_window = month_window(now)[0]
     hard_current_month_exceeded = False
     for total in aggregate_rows:
-        hard, soft, team_id = policies[(total.scope_type, total.scope_id)]
+        hard, team_id = policies[(total.scope_type, total.scope_id)]
         window_start = total.window_start
         previous_cost = previous_costs[(total.scope_type, total.scope_id, window_start)]
         hard_crossed = (
@@ -395,60 +389,25 @@ async def _evaluate_budgets(
         hard_threshold_crossed = (
             hard is not None and previous_cost < hard <= total.cost_nano_usd
         ) or (hard == 0 and hard_crossed)
-        soft_crossed = (
-            soft is not None and total.cost_nano_usd >= soft and total.soft_notified_at is None
-        )
-        current = window_start == current_window
-        if current and hard_threshold_crossed:
+        if window_start == current_window and hard_threshold_crossed:
             hard_current_month_exceeded = True
-        if not hard_crossed and not soft_crossed:
+        if not hard_crossed:
             continue
-        if hard_crossed:
-            total.exceeded_at = now
-            audit.record(
-                session,
-                actor_type=ActorType.SYSTEM,
-                actor_id=f"usage:{gateway_id}",
-                action="budget.hard_exceeded",
-                resource_type=total.scope_type.value,
-                resource_id=total.scope_id,
-                team_id=team_id,
-                details={
-                    "window_start": window_start.isoformat(),
-                    "spent_nano_usd": total.cost_nano_usd,
-                    "budget_nano_usd": hard,
-                },
-            )
-            if current:
-                # Late events for a closed month still mark and audit it, but a
-                # "budget exceeded" notification for last month after rollover only confuses.
-                await enqueue_budget_event(
-                    session,
-                    BudgetEvent(
-                        kind="hard",
-                        scope_type=total.scope_type,
-                        scope_id=total.scope_id,
-                        team_id=team_id,
-                        window_start=window_start,
-                        spent_nano_usd=total.cost_nano_usd,
-                        budget_nano_usd=hard,
-                    ),
-                )
-        if soft_crossed:
-            total.soft_notified_at = now
-            if current:
-                await enqueue_budget_event(
-                    session,
-                    BudgetEvent(
-                        kind="soft",
-                        scope_type=total.scope_type,
-                        scope_id=total.scope_id,
-                        team_id=team_id,
-                        window_start=window_start,
-                        spent_nano_usd=total.cost_nano_usd,
-                        budget_nano_usd=soft,
-                    ),
-                )
+        total.exceeded_at = now
+        audit.record(
+            session,
+            actor_type=ActorType.SYSTEM,
+            actor_id=f"usage:{gateway_id}",
+            action="budget.hard_exceeded",
+            resource_type=total.scope_type.value,
+            resource_id=total.scope_id,
+            team_id=team_id,
+            details={
+                "window_start": window_start.isoformat(),
+                "spent_nano_usd": total.cost_nano_usd,
+                "budget_nano_usd": hard,
+            },
+        )
     return hard_current_month_exceeded
 
 

@@ -163,7 +163,7 @@ groups:
         annotations:
           summary: "Control-plane outbox is backed up"
           description: "Control plane {{ $labels.instance }} has more than 100 pending outbox entries for 10 minutes."
-          runbook: "Check compiler and notifier loops, database locks and delivery endpoints; restore draining before adding load."
+          runbook: "Check the compiler loop, database locks and gateway ACK rate; restore draining before adding load."
       # Exclude deny decisions from errors; require six checks/minute to reduce low-traffic noise.
       - alert: LumewarpCPAuthzErrorRatioHigh
         expr: "sum by (namespace, backend) (rate(lumewarp_cp_authz_checks_total{decision=\"error\"}[5m])) / sum by (namespace, backend) (rate(lumewarp_cp_authz_checks_total[5m])) > 0.05 and on (namespace, backend) sum by (namespace, backend) (rate(lumewarp_cp_authz_checks_total[5m])) >= 0.1"

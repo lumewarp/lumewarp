@@ -117,7 +117,6 @@ def stub_background(monkeypatch):
     monkeypatch.setattr(app_module.compiler, "run_compiler_loop", idle)
     monkeypatch.setattr(app_module, "run_key_reconciler", idle)
     monkeypatch.setattr(app_module.usage, "rollover_scheduler", idle)
-    monkeypatch.setattr(app_module, "_notifier_loop", idle)
 
 
 async def test_serve_starts_and_stops_metrics_listener(settings: Settings, stub_background):

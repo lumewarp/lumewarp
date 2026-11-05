@@ -11,7 +11,6 @@ export interface PolicyValues {
   tpm_limit: number | null;
   max_parallel: number | null;
   budget_usd: number | null;
-  soft_budget_usd: number | null;
 }
 
 export const blankPolicy = (isTeam = false): PolicyValues => ({
@@ -21,7 +20,6 @@ export const blankPolicy = (isTeam = false): PolicyValues => ({
   tpm_limit: null,
   max_parallel: null,
   budget_usd: null,
-  soft_budget_usd: null,
 });
 
 /** Members and service accounts have no "All": it means the same as inheriting what the team allows. */
@@ -32,7 +30,6 @@ export const policyFrom = (p: PolicyOut, isTeam = false): PolicyValues => ({
   tpm_limit: p.tpm_limit,
   max_parallel: p.max_parallel,
   budget_usd: nanoToUsd(p.budget_nano_usd),
-  soft_budget_usd: nanoToUsd(p.soft_budget_nano_usd),
 });
 
 /** Request fields for create/update; an explicit null clears a limit. */
@@ -43,11 +40,10 @@ export const policyBody = (v: PolicyValues) => ({
   tpm_limit: v.tpm_limit,
   max_parallel: v.max_parallel,
   budget_nano_usd: usdToNano(v.budget_usd),
-  soft_budget_nano_usd: usdToNano(v.soft_budget_usd),
 });
 
 /** Server field names -> form field names, for `useForm().run`. */
-export const POLICY_ALIAS = { budget_nano_usd: "budget_usd", soft_budget_nano_usd: "soft_budget_usd" } as const;
+export const POLICY_ALIAS = { budget_nano_usd: "budget_usd" } as const;
 
 interface Props {
   values: PolicyValues;
@@ -68,7 +64,6 @@ export function PolicyFields({ values, errors, set, isTeam, team }: Props) {
       <NumberField label="Tokens per minute" value={values.tpm_limit} onChange={(v) => set("tpm_limit", v)} error={errors.tpm_limit} />
       <NumberField label="Max parallel requests" value={values.max_parallel} onChange={(v) => set("max_parallel", v)} error={errors.max_parallel} />
       <NumberField label="Monthly budget (USD)" value={values.budget_usd} onChange={(v) => set("budget_usd", v)} error={errors.budget_usd} step="any" hint="Requests are blocked once spend reaches the budget." />
-      <NumberField label="Soft budget (USD)" value={values.soft_budget_usd} onChange={(v) => set("soft_budget_usd", v)} error={errors.soft_budget_usd} step="any" hint="Sends a notification only; must not exceed the budget." />
     </>
   );
 }
@@ -87,6 +82,5 @@ export function PolicySummary({ p }: { p: PolicyOut }) {
 export const Budget = ({ p }: { p: PolicyOut }) => (
   <span className="tabular-nums">
     {fmtUsd(p.budget_nano_usd, "no limit")}
-    {p.soft_budget_nano_usd !== null && <span className="text-muted-foreground"> (soft {fmtUsd(p.soft_budget_nano_usd)})</span>}
   </span>
 );

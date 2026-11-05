@@ -1,2 +1,2 @@
-[lumewarp.notifier]
-example = lumewarp_example_plugin:RecordingNotifier
+[lumewarp.auth]
+example = lumewarp_example_plugin:RecordingAuth

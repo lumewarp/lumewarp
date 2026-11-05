@@ -2,7 +2,7 @@
 #
 # The chart deploys two components:
 #   - controlPlane: FastAPI HTTP API + Admin UI, gRPC config/usage services, config
-#     compiler, budget rollover scheduler, notifier loop and a Prometheus metrics listener.
+#     compiler, budget rollover scheduler and a Prometheus metrics listener.
 #   - gateway: Rust data plane. It follows the control-plane config stream and keeps its
 #     last ACKed snapshot on a local state volume.
 #
@@ -19,8 +19,8 @@ commonLabels: {}
 
 controlPlane:
   enabled: true
-  # The gRPC server, compiler loop, rollover scheduler and notifier loop must run
-  # exactly once per installation. Scaling this Deployment is not supported.
+  # The gRPC server, compiler loop and rollover scheduler must run exactly once per
+  # installation. Scaling this Deployment is not supported.
   replicaCount: 1
   image:
     repository: ghcr.io/lumewarp/lumewarp-control-plane

@@ -21,7 +21,7 @@ export type UsageRow = Schemas["UsageRowOut"];
 export type User = Schemas["UserOut"];
 export type Me = Schemas["MeOut"];
 export type ModelAccess = Schemas["ModelAccess"];
-export type PolicyOut = Pick<Team, "model_access" | "allowed_models" | "rpm_limit" | "tpm_limit" | "max_parallel" | "budget_nano_usd" | "soft_budget_nano_usd">;
+export type PolicyOut = Pick<Team, "model_access" | "allowed_models" | "rpm_limit" | "tpm_limit" | "max_parallel" | "budget_nano_usd">;
 
 export const client = createClient<paths>({ baseUrl: "", credentials: "same-origin" });
 

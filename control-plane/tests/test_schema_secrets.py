@@ -8,10 +8,10 @@ digests and not scanned here.
 import re
 from enum import StrEnum
 
-from sqlalchemy import CheckConstraint, Enum, String, Text, text
+from sqlalchemy import Enum, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 
-from lumewarp_control_plane.models import Base, NotifierChannel
+from lumewarp_control_plane.models import Base
 
 
 class ColumnClass(StrEnum):
@@ -69,13 +69,6 @@ CLASSIFIED: dict[tuple[str, str], ColumnClass] = {
     ("gateway_tokens", "scope"): ColumnClass.PUBLIC,
     ("models", "kind"): ColumnClass.PUBLIC,
     ("models", "upstream_model"): ColumnClass.PUBLIC,
-    ("notifier_channels", "config"): ColumnClass.CONFIG,
-    ("notifier_channels", "kind"): ColumnClass.PUBLIC,
-    ("notifier_channels", "name"): ColumnClass.PUBLIC,
-    ("notifier_outbox", "dedupe_key"): ColumnClass.PUBLIC,
-    ("notifier_outbox", "event_type"): ColumnClass.PUBLIC,
-    ("notifier_outbox", "last_error"): ColumnClass.ERROR_CLASS,
-    ("notifier_outbox", "payload"): ColumnClass.PROTOCOL,
     ("oidc_login_states", "redirect_uri"): ColumnClass.PUBLIC,
     ("oidc_login_states", "return_path"): ColumnClass.PUBLIC,
     ("personal_access_tokens", "display_prefix"): ColumnClass.PUBLIC,
@@ -115,7 +108,7 @@ CLASSIFIED: dict[tuple[str, str], ColumnClass] = {
 }
 
 # A column whose name promises a credential must not be classified as free text.
-_SENSITIVE_NAME = re.compile(r"secret|password|nonce|verifier|token|webhook|credential", re.I)
+_SENSITIVE_NAME = re.compile(r"secret|password|nonce|verifier|token|credential", re.I)
 _PLAIN_TEXT_CLASSES = {
     ColumnClass.PUBLIC,
     ColumnClass.PERSONAL,
@@ -157,22 +150,12 @@ def test_sensitive_looking_columns_are_not_plain_text() -> None:
 def test_known_secret_columns_use_a_safe_class() -> None:
     assert CLASSIFIED[("upstreams", "api_key_ref")] is ColumnClass.ENV_REF
     assert CLASSIFIED[("config_outbox", "last_error")] is ColumnClass.ERROR_CLASS
-    assert CLASSIFIED[("notifier_outbox", "last_error")] is ColumnClass.ERROR_CLASS
     assert CLASSIFIED[("audit_log", "details")] is ColumnClass.AUDIT_DETAILS
 
 
 def test_login_state_table_stores_no_nonce_or_verifier() -> None:
     assert ("oidc_login_states", "nonce") not in scanned_columns()
     assert ("oidc_login_states", "code_verifier") not in scanned_columns()
-
-
-def test_webhook_channels_can_only_reference_an_env_var() -> None:
-    checks = " ".join(
-        str(constraint.sqltext)
-        for constraint in NotifierChannel.__table__.constraints
-        if isinstance(constraint, CheckConstraint)
-    )
-    assert "url_ref" in checks and "webhook" in checks
 
 
 async def test_migrated_table_has_no_login_state_secrets(engine) -> None:

@@ -25,9 +25,7 @@ def test_generated_protos_import() -> None:
     assert hasattr(usage_pb2_grpc, "UsageServiceServicer")
 
 
-@pytest.mark.parametrize(
-    "module", ["api", "compiler", "grpc", "usage", "notifier", "outbox", "audit", "authz"]
-)
+@pytest.mark.parametrize("module", ["api", "compiler", "grpc", "usage", "outbox", "audit", "authz"])
 def test_skeleton_modules_import(module: str) -> None:
     importlib.import_module(f"lumewarp_control_plane.{module}")
 

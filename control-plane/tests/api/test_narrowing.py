@@ -21,7 +21,6 @@ async def grant_names(session) -> None:
         ({"tpm_limit": 1001}, "tpm_limit"),
         ({"max_parallel": 11}, "max_parallel"),
         ({"budget_nano_usd": 1001}, "budget_nano_usd"),
-        ({"soft_budget_nano_usd": 501}, "soft_budget_nano_usd"),
     ],
 )
 async def test_owner_cannot_widen_team(client, committed, owner, policy, field) -> None:
@@ -33,7 +32,6 @@ async def test_owner_cannot_widen_team(client, committed, owner, policy, field) 
         tpm_limit=1000,
         max_parallel=10,
         budget_nano_usd=1000,
-        soft_budget_nano_usd=500,
     )
     user = await make_user(committed)
     await committed.commit()
@@ -91,7 +89,6 @@ async def test_team_narrowing_names_conflicting_owner(
     "body",
     [
         {"model_access": "inherit"},
-        {"budget_nano_usd": 100, "soft_budget_nano_usd": 101},
         {"model_access": None},
         {"allowed_models": None},
         {"allowed_models": ["a"]},

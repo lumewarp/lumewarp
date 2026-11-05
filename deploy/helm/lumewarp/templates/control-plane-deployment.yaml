@@ -10,8 +10,8 @@ metadata:
     {{- include "lumewarp.controlPlane.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.controlPlane.replicaCount }}
-  # One writer: the compiler, rollover scheduler and notifier loop must not run in
-  # two pods. Recreate avoids overlap during upgrades.
+  # One writer: the compiler and rollover scheduler must not run in two pods. Recreate
+  # avoids overlap during upgrades.
   strategy:
     type: Recreate
   selector:

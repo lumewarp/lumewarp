@@ -144,7 +144,7 @@ async def _load_version(cp: ControlPlane, version: int) -> tuple[pb.Snapshot, by
 async def test_end_to_end(cp: ControlPlane) -> None:
     r = await cp.http.get("/readyz")
     assert r.status_code == 200, r.text
-    assert set(r.json()["checks"]) >= {"grpc", "compiler", "rollover", "notifier"}
+    assert set(r.json()["checks"]) >= {"grpc", "compiler", "rollover"}
 
     # Routing, a team, a service account and two keys via REST.
     up = await cp.post("/upstreams", {"name": "vllm", "kind": "vllm", "base_url": "http://v/v1"})

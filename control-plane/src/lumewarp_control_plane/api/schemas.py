@@ -117,7 +117,6 @@ class PolicyFields(ApiModel):
     tpm_limit: int | None = Field(default=None, gt=0)
     max_parallel: int | None = Field(default=None, gt=0)
     budget_nano_usd: int | None = Field(default=None, ge=0)
-    soft_budget_nano_usd: int | None = Field(default=None, ge=0)
 
     @field_validator("allowed_models")
     @classmethod
@@ -147,7 +146,6 @@ class PolicyOut(ReadModel):
     tpm_limit: int | None
     max_parallel: int | None
     budget_nano_usd: int | None
-    soft_budget_nano_usd: int | None
 
 
 class TeamKeyLimits(ApiModel):

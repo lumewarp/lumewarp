@@ -174,8 +174,8 @@ def test_a_url_encoded_literal_is_found():
     from urllib.parse import quote, quote_plus
 
     for encoding in (quote(url, safe=""), quote_plus(url)):
-        text = dump(("notifier_channels", f"1\t{encoding}"))
-        hits = scan_text(text, [{"kind": "webhook URL", "value": url}])
+        text = dump(("upstreams", f"1\t{encoding}"))
+        hits = scan_text(text, [{"kind": "upstream API key", "value": url}])
         assert len(hits) == 1, (encoding, hits)
         assert_no_secret(describe(hits), [url], "the scan report contains the secret")
 
@@ -551,10 +551,9 @@ def test_finalize_finds_an_unregistered_database_with_a_plaintext_token(
     pg(PG_DSN, f'CREATE DATABASE "{name}"')
     dsn = f"{base}/{name}"
     try:
-        # The env-reference query needs these two tables, as a migrated control-plane
-        # database has them; create them so a failure can only be the token.
+        # The env-reference query needs this table, as a migrated control-plane database
+        # has it; create it so a failure can only be the token.
         pg(dsn, "CREATE TABLE upstreams (api_key_ref text)")
-        pg(dsn, "CREATE TABLE notifier_channels (kind text, config jsonb)")
         pg(dsn, "CREATE TABLE leaked (value text)")
         pg(dsn, "INSERT INTO leaked VALUES ($1)", full_token("lw-", "unregistered"))
         directory = run_dir(tmp_path, monkeypatch, run_id=run_id)
@@ -577,10 +576,9 @@ SHORT_VALUE = "aB9!xY2?"
 def short_credential_database():
     """A disposable database that `scan_database` can query for env references."""
     with disposable_database() as dsn:
-        # scan_database asks the database for env references; without these tables the
-        # scan fails before it looks, which would not exercise the needle.
+        # scan_database asks the database for env references; without this table the scan
+        # fails before it looks, which would not exercise the needle.
         pg(dsn, "CREATE TABLE upstreams (api_key_ref text)")
-        pg(dsn, "CREATE TABLE notifier_channels (kind text, config jsonb)")
         pg(dsn, "CREATE TABLE leaked (value text)")
         yield dsn
 

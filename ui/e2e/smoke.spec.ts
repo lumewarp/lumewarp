@@ -124,7 +124,6 @@ test("cookie session: CSRF on writes, inline member errors, key owner state, log
     tpm_limit: null,
     max_parallel: null,
     budget_nano_usd: null,
-    soft_budget_nano_usd: null,
   };
   const memberPosts: { csrf?: string; authorization?: string }[] = [];
   await page.route(new RegExp(`/api/v1/teams/${teamId}/members(?:\\?.*)?$`), async (route) => {

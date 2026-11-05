@@ -37,7 +37,6 @@ EXPECTED = {
     Action.GATEWAY_READ: "Y---",
     Action.CONFIG_READ: "Y---",
     Action.CONFIG_ROLLBACK: "Y---",
-    Action.NOTIFIER_MANAGE: "Y---",
     Action.ROUTING_READ: "YYYY",
     Action.OWN_TOKENS: "YYYY",
     Action.TEAM_UPDATE: "YY--",

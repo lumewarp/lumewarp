@@ -143,7 +143,6 @@ async def test_allowlist_modes(session: AsyncSession) -> None:
 
 
 async def test_budget_and_limit_checks(session: AsyncSession) -> None:
-    await _fails(session, Team(name="t1", budget_nano_usd=10, soft_budget_nano_usd=11))
     await _fails(session, Team(name="t2", rpm_limit=0))
     await _fails(session, Team(name="t3", budget_nano_usd=-1))
 

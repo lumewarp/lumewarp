@@ -274,7 +274,6 @@ class Action(StrEnum):
     GATEWAY_READ = "gateway.read"
     CONFIG_READ = "config.read"  # config versions
     CONFIG_ROLLBACK = "config.rollback"
-    NOTIFIER_MANAGE = "notifier.manage"
     # Any authenticated caller.
     ROUTING_READ = "routing.read"  # model aliases are needed to set allowlists
     OWN_TOKENS = "own_tokens.manage"  # own PATs, users/me
@@ -307,7 +306,6 @@ MATRIX: dict[Action, Rule] = {
             Action.GATEWAY_READ,
             Action.CONFIG_READ,
             Action.CONFIG_ROLLBACK,
-            Action.NOTIFIER_MANAGE,
         )
     },
     Action.ROUTING_READ: Rule(Level.ANY),

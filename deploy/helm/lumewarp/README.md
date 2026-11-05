@@ -70,7 +70,7 @@ pods start.
 
 | Object | Notes |
 | --- | --- |
-| Control-plane Deployment | One replica. Runs the HTTP API + UI, gRPC ConfigService/UsageService, compiler loop, monthly rollover and notifier loop. `strategy: Recreate`. |
+| Control-plane Deployment | One replica. Runs the HTTP API + UI, gRPC ConfigService/UsageService, compiler loop and monthly rollover. `strategy: Recreate`. |
 | Control-plane Service | `http` (8091), `grpc` (50051) and `metrics` (9465, Prometheus `/metrics`; only with `controlPlane.metrics.enabled`) ports. |
 | Migration Job | Helm `pre-install,pre-upgrade` hook running `python -m lumewarp_control_plane migrate` with the database Secret. |
 | Gateway Deployment | One replica. The token is bound to `gateway.gatewayId`; boots from its state volume, then follows the config stream; `/readyz` stays 503 until a snapshot is loaded. |
@@ -81,7 +81,7 @@ pods start.
 Readiness/liveness:
 
 - Control plane: `/readyz` requires a reachable database, migrations at head and live
-  gRPC/compiler/rollover/notifier tasks; `/healthz` is liveness.
+  gRPC/compiler/rollover tasks; `/healthz` is liveness.
 - Gateway: `/readyz` on the admin port requires a loaded snapshot; `/healthz` stays
   healthy during a control-plane outage so Kubernetes does not restart a gateway that is
   correctly serving its cached config.
@@ -151,8 +151,8 @@ Write the OpenFGA model from `deploy/openfga/model.fga` before switching the bac
 
 ## Important limits
 
-- **Control plane replicas must stay at 1.** The compiler, rollover scheduler and
-  notifier loop are single-process; the chart uses `Recreate`.
+- **Control plane replicas must stay at 1.** The compiler and rollover scheduler are
+  single-process; the chart uses `Recreate`.
 - **Migration is a pre-upgrade hook.** The old control-plane pod is still running while
   the schema migrates (Rolling/Recreate), so expect a short outage window on upgrades.
 - **One gateway replica and one token per gateway id.** Each gateway token is bound to a

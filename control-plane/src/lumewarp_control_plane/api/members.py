@@ -69,7 +69,6 @@ def _out(member: TeamMember, user: User) -> MemberOut:
         tpm_limit=member.tpm_limit,
         max_parallel=member.max_parallel,
         budget_nano_usd=member.budget_nano_usd,
-        soft_budget_nano_usd=member.soft_budget_nano_usd,
     )
 
 

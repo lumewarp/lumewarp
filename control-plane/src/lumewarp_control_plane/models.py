@@ -7,7 +7,7 @@ Conventions:
 - Secrets are never stored: API keys, PATs and gateway tokens are kept as sha256 digests
   (32 bytes) plus a short non-secret display prefix. See security.py for why sha256. The OIDC
   login nonce and PKCE verifier live only in the AES-GCM sealed login cookie
-  (auth/oidc.py); webhook channels store an env var name, never the URL.
+  (auth/oidc.py).
 - The installation serves one config scope (`scopes` row); source tables (teams, routing,
   users, ...) are installation-wide and compile into that scope's snapshots.
 - Hierarchy: team -> members (users) and service accounts -> keys. Every key belongs to
@@ -219,8 +219,8 @@ class PolicyMixin:
       rename keeps it); `allowed_models` is its read-only expansion to current names.
     - Rate limits: NULL = no limit at this level. Each set level becomes one shared
       `RateLimitScope` ("team:<id>", "member:<scope id>", "sa:<id>") in the snapshot.
-    - Budget: monthly (UTC calendar) hard limit and soft (notify) threshold in nano-USD,
-      NULL = none. Spend lives in `usage_totals`, never on the entity row.
+    - Budget: monthly (UTC calendar) hard limit in nano-USD, NULL = none. Spend lives in
+      `usage_totals`, never on the entity row.
     """
 
     @declared_attr
@@ -238,7 +238,6 @@ class PolicyMixin:
     tpm_limit: Mapped[int | None] = mapped_column(BigInteger)
     max_parallel: Mapped[int | None] = mapped_column(Integer)
     budget_nano_usd: Mapped[int | None] = mapped_column(BigInteger)
-    soft_budget_nano_usd: Mapped[int | None] = mapped_column(BigInteger)
 
     @staticmethod
     def policy_constraints() -> tuple[CheckConstraint, ...]:
@@ -248,14 +247,6 @@ class PolicyMixin:
             CheckConstraint("max_parallel IS NULL OR max_parallel > 0", name="parallel_positive"),
             CheckConstraint(
                 "budget_nano_usd IS NULL OR budget_nano_usd >= 0", name="budget_nonneg"
-            ),
-            CheckConstraint(
-                "soft_budget_nano_usd IS NULL OR soft_budget_nano_usd >= 0", name="soft_nonneg"
-            ),
-            CheckConstraint(
-                "soft_budget_nano_usd IS NULL OR budget_nano_usd IS NULL"
-                " OR soft_budget_nano_usd <= budget_nano_usd",
-                name="soft_le_hard",
             ),
         )
 
@@ -1227,8 +1218,8 @@ class UsageTotal(Base):
 
     Each new event adds its cost once to the team row and once to the key owner's row
     (member or service account). Blocking is
-    derived (cost_nano_usd >= the level's current budget_nano_usd); `exceeded_at` and
-    `soft_notified_at` record when that was first seen, for notifications and audit.
+    derived (cost_nano_usd >= the level's current budget_nano_usd); `exceeded_at` records
+    when that was first seen, for audit.
     """
 
     __tablename__ = "usage_totals"
@@ -1250,12 +1241,11 @@ class UsageTotal(Base):
     request_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     # Events whose cost is unknown (no price or usage not REPORTED).
     unknown_cost_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
-    soft_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     exceeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = _now()
 
 
-# --------------------------------------------------------------------------- audit, notify
+# --------------------------------------------------------------------------- audit
 
 
 class AuditLog(Base):
@@ -1282,78 +1272,3 @@ class AuditLog(Base):
     details: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
-
-
-class NotifierChannel(TimestampMixin, Base):
-    """A configured notification target. `kind` is "webhook" (built-in) or the entry-point
-    name of a `lumewarp.notifier` plugin. team_id NULL = installation-wide.
-
-    A webhook channel's config holds `url_ref`, the name of an environment variable (the
-    same pattern as upstream `api_key_ref`), and an optional numeric `timeout_seconds`;
-    never the URL. The CHECK constraint refuses a literal URL, a JSON null, other keys and
-    non-numeric or out-of-range timeouts, so a credential cannot be stored there again.
-    """
-
-    __tablename__ = "notifier_channels"
-    __table_args__ = (
-        Index(None, "team_id"),
-        CheckConstraint(
-            "kind <> 'webhook' OR coalesce("
-            " jsonb_typeof(config) = 'object'"
-            " AND config ? 'url_ref'"
-            " AND jsonb_typeof(config->'url_ref') = 'string'"
-            " AND (config->>'url_ref') ~ '^[A-Za-z_][A-Za-z0-9_]*$'"
-            " AND octet_length(config->>'url_ref') <= 200"
-            " AND (NOT (config ? 'timeout_seconds')"
-            " OR (CASE WHEN jsonb_typeof(config->'timeout_seconds') <> 'number' THEN false"
-            " ELSE (config->>'timeout_seconds')::numeric >= 0.001"
-            " AND (config->>'timeout_seconds')::numeric <= 30 END))"
-            " AND config - 'url_ref' - 'timeout_seconds' = '{}'::jsonb,"
-            " false)",
-            name="webhook_config_url_ref",
-        ),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
-    kind: Mapped[str] = mapped_column(String(100), nullable=False)
-    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"))
-    config: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
-    )
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
-
-
-class NotifierOutbox(Base):
-    """Pending notifications, delivered by a background loop with retries. `dedupe_key`
-    (e.g. "budget.soft:team:<id>:2026-10") makes enqueueing idempotent.
-    """
-
-    __tablename__ = "notifier_outbox"
-    __table_args__ = (
-        CheckConstraint("attempts >= 0", name="attempts_nonneg"),
-        Index(
-            "ix_notifier_outbox_due",
-            "next_attempt_at",
-            postgresql_where=text("status = 'pending'"),
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    dedupe_key: Mapped[str] = mapped_column(String(400), nullable=False, unique=True)
-    channel_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("notifier_channels.id", ondelete="CASCADE")
-    )
-    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    status: Mapped[OutboxStatus] = mapped_column(
-        _enum(OutboxStatus, "outbox_status"),
-        nullable=False,
-        default=OutboxStatus.PENDING,
-        server_default=OutboxStatus.PENDING.value,
-    )
-    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    next_attempt_at: Mapped[datetime] = _now()
-    last_error: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = _now()
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

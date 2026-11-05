@@ -112,9 +112,8 @@ token from `bootstrap`, the break-glass password, session and CSRF cookies, the 
 state/nonce/PKCE verifier (from the redirect and the sealed login-state cookie), the OIDC
 authorization code, and the values of `cp_env` names containing `SECRET`, `PASSWORD`,
 `TOKEN` or `API_KEY` (for example `LUMEWARP_SECRET_KEY` and the OIDC client secret).
-Upstream `api_key_ref` and notifier `url_ref` values are read from the database's
-environment references and searched for too; no run creates a notifier channel yet (there
-is no channel API), so only upstream refs appear.
+Upstream `api_key_ref` values are read from the database's environment references and
+searched for too.
 
 Each stack's disposable database exists only until its teardown, so `Stack.teardown` runs
 `secret_scan.scan_database` with `pg_dump` right before dropping it; this covers every

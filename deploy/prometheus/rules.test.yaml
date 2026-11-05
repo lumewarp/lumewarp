@@ -773,7 +773,7 @@
               "exp_annotations": {
                 "summary": "Control-plane outbox is backed up",
                 "description": "Control plane cp:8091 has more than 100 pending outbox entries for 10 minutes.",
-                "runbook": "Check compiler and notifier loops, database locks and delivery endpoints; restore draining before adding load."
+                "runbook": "Check the compiler loop, database locks and gateway ACK rate; restore draining before adding load."
               }
             }
           ]

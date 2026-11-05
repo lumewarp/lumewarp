@@ -733,7 +733,7 @@ export interface paths {
         /**
          * Readyz
          * @description Readiness: DB reachable, schema at the migration head, gRPC server, compiler
-         *     loop, rollover scheduler and notifier loop alive.
+         *     loop and rollover scheduler alive.
          */
         get: operations["readyz_readyz_get"];
         put?: never;
@@ -1210,8 +1210,6 @@ export interface components {
             max_parallel?: number | null;
             /** Budget Nano Usd */
             budget_nano_usd?: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd?: number | null;
             role: components["schemas"]["TeamRole"];
             /** User Id */
             user_id?: string | null;
@@ -1231,8 +1229,6 @@ export interface components {
             max_parallel: number | null;
             /** Budget Nano Usd */
             budget_nano_usd: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd: number | null;
             /**
              * Team Id
              * Format: uuid
@@ -1279,8 +1275,6 @@ export interface components {
             max_parallel?: number | null;
             /** Budget Nano Usd */
             budget_nano_usd?: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd?: number | null;
             role?: components["schemas"]["TeamRole"] | null;
         };
         /** MemberUpsert */
@@ -1296,8 +1290,6 @@ export interface components {
             max_parallel?: number | null;
             /** Budget Nano Usd */
             budget_nano_usd?: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd?: number | null;
             role: components["schemas"]["TeamRole"];
         };
         /**
@@ -1697,8 +1689,6 @@ export interface components {
             max_parallel?: number | null;
             /** Budget Nano Usd */
             budget_nano_usd?: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd?: number | null;
             /** Name */
             name: string;
             /**
@@ -1720,8 +1710,6 @@ export interface components {
             max_parallel: number | null;
             /** Budget Nano Usd */
             budget_nano_usd: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd: number | null;
             /**
              * Id
              * Format: uuid
@@ -1762,8 +1750,6 @@ export interface components {
             max_parallel?: number | null;
             /** Budget Nano Usd */
             budget_nano_usd?: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd?: number | null;
             /** Name */
             name?: string | null;
             /** Description */
@@ -1891,8 +1877,6 @@ export interface components {
             max_parallel?: number | null;
             /** Budget Nano Usd */
             budget_nano_usd?: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd?: number | null;
             /** Name */
             name: string;
         };
@@ -1913,8 +1897,6 @@ export interface components {
             max_parallel: number | null;
             /** Budget Nano Usd */
             budget_nano_usd: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd: number | null;
             /**
              * Id
              * Format: uuid
@@ -1955,8 +1937,6 @@ export interface components {
             max_parallel?: number | null;
             /** Budget Nano Usd */
             budget_nano_usd?: number | null;
-            /** Soft Budget Nano Usd */
-            soft_budget_nano_usd?: number | null;
             /** Name */
             name?: string | null;
         };

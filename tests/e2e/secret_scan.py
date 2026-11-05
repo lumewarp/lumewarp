@@ -2,7 +2,7 @@
 
 The e2e harness records every secret it issues or receives (API keys, PATs, gateway
 tokens, cookie sessions, CSRF tokens, the OIDC state/nonce/PKCE verifier, the break-glass
-password and any env-referenced upstream key or webhook URL). Each stack is dumped with
+password and any env-referenced upstream key). Each stack is dumped with
 `pg_dump` before its disposable database is dropped, and the dump is searched for:
 
 1. **Full token shapes**: `lw-`, `lwp-` or `lwg-` followed by exactly 43 urlsafe-base64
@@ -337,12 +337,12 @@ def load_literals(path: str | None) -> list[dict]:
 
 
 def env_ref_literals(dsn: str) -> list[dict]:
-    """Values of env vars the database references for upstream keys and webhooks.
+    """Values of env vars the database references for upstream keys.
 
     The point of an env reference is that the value is never stored, so finding the ref
-    name in the dump is fine; the value must not be. No API exists for notifier channels
-    yet, so a run may have none. The database is dumped in the same breath, so a query
-    that fails means the scan cannot see those credentials: that is an error, not [].
+    name in the dump is fine; the value must not be. The database is dumped in the same
+    breath, so a query that fails means the scan cannot see those credentials: that is an
+    error, not [].
     """
 
     async def refs() -> list[str]:
@@ -351,9 +351,6 @@ def env_ref_literals(dsn: str) -> list[dict]:
         conn = await asyncpg.connect(dsn)
         try:
             rows = await conn.fetch(
-                "SELECT config->>'url_ref' AS ref FROM notifier_channels"
-                " WHERE kind = 'webhook' AND config ? 'url_ref'"
-                " UNION "
                 "SELECT api_key_ref AS ref FROM upstreams WHERE api_key_ref IS NOT NULL"
             )
             return [row["ref"] for row in rows if row["ref"]]

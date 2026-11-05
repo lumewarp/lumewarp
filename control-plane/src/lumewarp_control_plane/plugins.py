@@ -1,7 +1,7 @@
 """Plugin discovery and protocols.
 
-Plugins run only in the control plane: auth maps identities and notifiers deliver
-budget events. They never run on the gateway hot path.
+Plugins run only in the control plane: an auth plugin maps an external identity to a
+Lumewarp user. They never run on the gateway hot path.
 
 A plugin is an entry point in one of GROUPS. The entry point may name an instance, a
 class or a zero-argument factory; classes and factories are called once at load. Every
@@ -15,17 +15,13 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.metadata import EntryPoint, entry_points
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
-
-if TYPE_CHECKING:
-    from lumewarp_control_plane.notifier import BudgetEvent
+from typing import Any, Protocol, runtime_checkable
 
 log = logging.getLogger(__name__)
 
 AUTH = "lumewarp.auth"
-NOTIFIER = "lumewarp.notifier"
 
-GROUPS = (AUTH, NOTIFIER)
+GROUPS = (AUTH,)
 
 PLUGIN_API_VERSION = 1
 
@@ -34,21 +30,6 @@ def discover(group: str) -> dict[str, EntryPoint]:
     if group not in GROUPS:
         raise ValueError(f"unknown plugin group {group!r}")
     return {ep.name: ep for ep in entry_points(group=group)}
-
-
-# --------------------------------------------------------------------------- notifier
-
-
-@runtime_checkable
-class NotifierPlugin(Protocol):
-    """Delivers budget notifications for `notifier_channels` rows whose `kind` is the
-    plugin's entry-point name. Called from the notifier outbox loop, never from ingest;
-    raising makes the outbox retry with backoff. `config` is the channel's config.
-    """
-
-    api_version: int
-
-    async def send(self, event: BudgetEvent, config: Mapping[str, Any]) -> None: ...
 
 
 # -------------------------------------------------------------------------------- auth

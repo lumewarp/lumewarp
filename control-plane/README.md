@@ -1,7 +1,7 @@
 # Lumewarp control plane
 
 Management API, config compiler, gateway-facing gRPC services (config stream and usage
-ingest), budget/notifier workers and the plugin host. It never runs on the gateway request
+ingest), the budget worker and the plugin host. It never runs on the gateway request
 path: the gateway only reads the immutable snapshot it last ACKed. Design:
 [`../docs/architecture.md`](../docs/architecture.md); stream contract:
 [`../docs/config-protocol.md`](../docs/config-protocol.md).
@@ -106,8 +106,8 @@ it off the public admin ingress.
 ### Readiness and lifecycle
 
 - `GET /readyz` returns 200 only when the database is reachable, migrations are at head,
-  and the gRPC server, compiler loop, rollover scheduler, notifier loop and (with a
-  metrics listener) the metrics gauge refresher are alive. It
+  and the gRPC server, compiler loop, rollover scheduler and (with a metrics listener) the
+  metrics gauge refresher are alive. It
   returns 503 with `{"status":"not_ready","checks":{...}}` otherwise.
 - `GET /healthz` is liveness only: the HTTP process is answering.
 - The gRPC server is the critical background service. If it stops unexpectedly the process
@@ -174,7 +174,7 @@ Three token types, stored only as SHA-256 hashes, and two kinds of cookie sessio
 
 The bearer scheme accepts PATs only. Nothing else authenticates to the admin API. No
 credential is stored in plaintext: the OIDC nonce and PKCE verifier live only in the
-encrypted login cookie, and webhook channels store an environment variable name.
+encrypted login cookie, and an upstream stores only its `api_key_ref` name.
 
 The first users and teams come from an emergency session or from an admin group member logged
 in through OIDC. An installation admin can issue a PAT for an active user with
@@ -206,8 +206,7 @@ or a prompt and prints it for `LUMEWARP_BREAK_GLASS_PASSWORD_HASH`.
 There is exactly one installation and no org or project level:
 
 - **Team**: a name plus policy (`model_access` and `allowed_models`, `rpm_limit`,
-  `tpm_limit`, `max_parallel`, `budget_nano_usd`, `soft_budget_nano_usd`) and the
-  self-service limits `max_keys_per_member` (non-revoked user keys per member; revoking
+  `tpm_limit`, `max_parallel`, `budget_nano_usd`) and the self-service limits `max_keys_per_member` (non-revoked user keys per member; revoking
   frees a slot) and `max_member_key_lifetime_seconds`.
 - **Team member**: a user in a team with role `admin` or `member` and the member's own
   narrowing policy. For regular users, membership determines team visibility
@@ -296,7 +295,7 @@ configured only emergency sessions are installation admins. There is no superuse
 
 | Action | Who |
 | --- | --- |
-| `TEAM_CREATE`, `TEAM_DELETE`, `USER_MANAGE`, `ROUTING_MANAGE`, `GATEWAY_TOKEN_MANAGE`, `GATEWAY_READ`, `CONFIG_READ`, `CONFIG_ROLLBACK`, `NOTIFIER_MANAGE` | Installation admin |
+| `TEAM_CREATE`, `TEAM_DELETE`, `USER_MANAGE`, `ROUTING_MANAGE`, `GATEWAY_TOKEN_MANAGE`, `GATEWAY_READ`, `CONFIG_READ`, `CONFIG_ROLLBACK` | Installation admin |
 | `ROUTING_READ`, `OWN_TOKENS` | Any authenticated caller |
 | `TEAM_UPDATE`, `TEAM_MEMBERS_MANAGE`, `SERVICE_ACCOUNT_MANAGE`, `KEY_MANAGE_ANY` | Team admin |
 | `TEAM_READ`, `KEY_CREATE_OWN`, `KEY_MANAGE_OWN` | Team member |
@@ -439,8 +438,8 @@ Every mutation writes an `audit_log` row in the same transaction. `details` is a
 allowlist per action (`DETAIL_ALLOWLIST` in `audit.py`): only fields classified for that
 action are stored, and anything else is dropped rather than redacted. Nested objects such
 as `changes`, `settings` and `traffic_split` have their own field lists, and free-form
-strategy params are never recorded. The failure columns (`config_outbox.last_error`,
-`notifier_outbox.last_error`) keep only the exception class name. A test scans every
+strategy params are never recorded. The failure column (`config_outbox.last_error`)
+keeps only the exception class name. A test scans every
 `audit.record(action=...)` call site, so a new action without a classification fails the
 suite, and `tests/test_schema_secrets.py` fails when a new Text/String/JSONB column is not
 classified as non-secret.
@@ -478,29 +477,21 @@ install -e ./your-plugin`) and restart `serve`:
 
 | Group | Purpose | Status |
 | --- | --- | --- |
-| `lumewarp.notifier` | Deliver budget notifications for channels whose `kind` is the entry-point name. | Called by the notifier outbox loop. |
 | `lumewarp.auth` | Map an external identity (OIDC, LDAP, ...) to a user's email and display name. | Called on a first SSO login; the first plugin (by entry-point name) wins. |
 | `lumewarp.authz` | Answer relation questions. | Named by `LUMEWARP_AUTHZ_BACKEND`, see [Authorization](#authorization), which has its own contract (no `api_version`). |
 
 Router policies are not Python plugins: a strategy is a Rust crate compiled into the
 gateway, see [router strategies](../docs/router-strategies.md).
 
-Every notifier and auth plugin declares `api_version = 1`; other versions are skipped with a warning, as are
-plugins that fail to import. Entry points may name an instance, a class or a zero-argument
+Every auth plugin declares `api_version = 1`; other versions are skipped with a warning, as
+are plugins that fail to import. Entry points may name an instance, a class or a zero-argument
 factory (classes/factories are called once at load).
 
 ```toml
 # your-plugin/pyproject.toml
-[project.entry-points."lumewarp.notifier"]
-my-channel = "my_plugin.notifier:Notifier"
+[project.entry-points."lumewarp.auth"]
+my-idp = "my_plugin.auth:Identity"
 ```
-
-Notifier plugins implement `async send(event, config)`: the channel's `config` mapping and a
-`BudgetEvent`; raising makes the outbox retry with backoff. The built-in notifier kind is
-`webhook` (JSON POST of the event). Its config is `{"url_ref": "WEBHOOK_URL_ENV",
-"timeout_seconds": 5}`: only the **name** of the environment variable is stored, and the
-outbox resolves it per delivery. A CHECK constraint rejects any other key for kind
-`webhook`, so a literal URL or token cannot be stored there again.
 
 Auth plugins implement `async map_identity(claims) -> IdentityMapping | None`, with
 `IdentityMapping(email, display_name="")`. Anything but a mapping, or an invalid email or name,
@@ -604,9 +595,8 @@ revoked. It goes through the same strategy checks as a router write.
   adds cost once to the team total and once to the key owner's (member or service account)
   total for the UTC calendar month in the same transaction, then budget evaluation flips
   exhausted scopes to `BUDGET_EXCEEDED` and publishes a new version (eventual; in-flight
-  streams are not cut). Soft-limit
-  notifications go through the notifier outbox. Budget publishing targets the protocol's
-  5 s eventual-enforcement window; it is not a configurable per-flip timeout. The unused
+  streams are not cut). Budget publishing targets the protocol's 5 s
+  eventual-enforcement window; it is not a configurable per-flip timeout. The unused
   `LUMEWARP_BUDGET_FLIP_DEADLINE_SECONDS` setting has been removed.
 - Usage is stored in Postgres; ClickHouse is later. While the control plane is down the
   gateway keeps serving from its snapshot, but usage batches queue in memory and are lost
@@ -681,5 +671,5 @@ Generated modules are checked in under `src/lumewarp_control_plane/_proto/`. Aft
 | `security.py`, `authz/`, `errors.py`, `audit.py`, `outbox.py` | auth, action matrix and authorization backends, error shape, audit, recompile outbox |
 | `api/` | REST under `/api/v1` |
 | `compiler/`, `plugins.py` | snapshots, versions, diff, rollback, plugin host |
-| `grpc/`, `usage/`, `notifier/` | ConfigService/UsageService, budgets, notifications |
+| `grpc/`, `usage/` | ConfigService/UsageService, budgets |
 | `app.py`, `__main__.py`, `static.py` | app factory, lifespan, CLI, Admin UI static serving |

@@ -1,9 +1,9 @@
 """FastAPI app factory and process lifespan.
 
 One supervised process: uvicorn (1 worker) + grpc.aio ConfigService/UsageService + the
-compiler loop + the budget rollover scheduler + the notifier delivery loop + the Prometheus
-metrics listener (`LUMEWARP_METRICS_BIND`, its own port) and its DB gauge refresher, all
-started and stopped in the FastAPI lifespan.
+compiler loop + the budget rollover scheduler + the Prometheus metrics listener
+(`LUMEWARP_METRICS_BIND`, its own port) and its DB gauge refresher, all started and stopped
+in the FastAPI lifespan.
 
 Readiness = DB reachable + migrations at head + every background service alive. A
 background service that stops on its own is logged and fails readiness; if it is the gRPC
@@ -23,7 +23,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from lumewarp_control_plane import __version__, audit, compiler, migrate, notifier, usage
+from lumewarp_control_plane import __version__, audit, compiler, migrate, usage
 from lumewarp_control_plane import grpc as grpc_services
 from lumewarp_control_plane.api import router as api_router
 from lumewarp_control_plane.auth.break_glass import LoginLimiter, enabled, validate_credentials
@@ -44,7 +44,6 @@ log = logging.getLogger(__name__)
 READY_TIMEOUT_SECONDS = 2.0
 # Deadline for draining gRPC streams and stopping loops on shutdown.
 SHUTDOWN_GRACE_SECONDS = 5.0
-NOTIFIER_INTERVAL_SECONDS = 1.0
 # Services whose unexpected exit makes the process exit, not only unready.
 FATAL_SERVICES = frozenset({"grpc"})
 
@@ -64,19 +63,6 @@ class Runtime:
     grpc_port: int | None = None
     metrics_server: MetricsServer | None = None
     failures: dict[str, str] = field(default_factory=dict)
-
-
-async def _notifier_loop(app: FastAPI, stop: asyncio.Event) -> None:
-    factory = app.state.session_factory
-    while not stop.is_set():
-        try:
-            await notifier.deliver_pending(factory)
-        except Exception:
-            log.exception("notifier delivery step failed")
-        try:
-            await asyncio.wait_for(stop.wait(), NOTIFIER_INTERVAL_SECONDS)
-        except TimeoutError:
-            pass
 
 
 def _supervise(
@@ -157,9 +143,6 @@ async def start_background(app: FastAPI) -> Runtime:
                 metrics=metrics,
             ),
         )
-    runtime.tasks["notifier"] = _supervise(
-        app, runtime, "notifier", _notifier_loop(app, runtime.stop)
-    )
     log.info("gRPC listening on port %s", runtime.grpc_port)
     if runtime.metrics_server is not None:
         runtime.tasks["metrics"] = _supervise(
@@ -277,7 +260,7 @@ def create_app(
     @app.get("/readyz", tags=["health"])
     async def readyz() -> JSONResponse:
         """Readiness: DB reachable, schema at the migration head, gRPC server, compiler
-        loop, rollover scheduler and notifier loop alive.
+        loop and rollover scheduler alive.
         """
         checks = {"database": "ok", "migrations": "ok"}
         try:

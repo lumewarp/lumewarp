@@ -44,7 +44,6 @@ class Policy:
     tpm_limit: int | None = None
     max_parallel: int | None = None
     budget_nano_usd: int | None = None
-    soft_budget_nano_usd: int | None = None
 
 
 @dataclass(frozen=True)
@@ -60,7 +59,6 @@ class Effective:
     tpm_limit: int | None = None
     max_parallel: int | None = None
     budget_nano_usd: int | None = None
-    soft_budget_nano_usd: int | None = None
 
 
 def policy_of(row: Team | TeamMember | ServiceAccount) -> Policy:
@@ -71,7 +69,6 @@ def policy_of(row: Team | TeamMember | ServiceAccount) -> Policy:
         tpm_limit=row.tpm_limit,
         max_parallel=row.max_parallel,
         budget_nano_usd=row.budget_nano_usd,
-        soft_budget_nano_usd=row.soft_budget_nano_usd,
     )
 
 
@@ -82,7 +79,6 @@ def apply_policy(row: Team | TeamMember | ServiceAccount, policy: Policy) -> Non
     row.tpm_limit = policy.tpm_limit
     row.max_parallel = policy.max_parallel
     row.budget_nano_usd = policy.budget_nano_usd
-    row.soft_budget_nano_usd = policy.soft_budget_nano_usd
 
 
 async def grant_ids(session: AsyncSession, names: tuple[str, ...]) -> dict[str, uuid.UUID]:
@@ -158,7 +154,6 @@ def effective(parent: Effective | None, policy: Policy) -> Effective:
             tpm_limit=policy.tpm_limit,
             max_parallel=policy.max_parallel,
             budget_nano_usd=policy.budget_nano_usd,
-            soft_budget_nano_usd=policy.soft_budget_nano_usd,
         )
     return Effective(
         models=models,
@@ -166,7 +161,6 @@ def effective(parent: Effective | None, policy: Policy) -> Effective:
         tpm_limit=_limit(parent.tpm_limit, policy.tpm_limit),
         max_parallel=_limit(parent.max_parallel, policy.max_parallel),
         budget_nano_usd=_limit(parent.budget_nano_usd, policy.budget_nano_usd),
-        soft_budget_nano_usd=_limit(parent.soft_budget_nano_usd, policy.soft_budget_nano_usd),
     )
 
 
@@ -187,16 +181,13 @@ def policy_from_fields(
         if fields.allowed_models and mode is not ModelAccess.LIST:
             raise violation("allowed_models", "only allowed when model_access is 'list'")
         allowed = tuple(sorted(fields.allowed_models or ())) if mode is ModelAccess.LIST else ()
-        return _validated(
-            Policy(
-                model_access=mode,
-                allowed_models=allowed,
-                rpm_limit=fields.rpm_limit,
-                tpm_limit=fields.tpm_limit,
-                max_parallel=fields.max_parallel,
-                budget_nano_usd=fields.budget_nano_usd,
-                soft_budget_nano_usd=fields.soft_budget_nano_usd,
-            )
+        return Policy(
+            model_access=mode,
+            allowed_models=allowed,
+            rpm_limit=fields.rpm_limit,
+            tpm_limit=fields.tpm_limit,
+            max_parallel=fields.max_parallel,
+            budget_nano_usd=fields.budget_nano_usd,
         )
 
     mode = fields.model_access if "model_access" in supplied else base.model_access
@@ -210,35 +201,16 @@ def policy_from_fields(
         allowed = base.allowed_models if base.model_access is ModelAccess.LIST else ()
     else:
         allowed = ()
-    return _validated(
-        Policy(
-            model_access=mode,
-            allowed_models=allowed,
-            rpm_limit=(fields.rpm_limit if "rpm_limit" in supplied else base.rpm_limit),
-            tpm_limit=(fields.tpm_limit if "tpm_limit" in supplied else base.tpm_limit),
-            max_parallel=(fields.max_parallel if "max_parallel" in supplied else base.max_parallel),
-            budget_nano_usd=(
-                fields.budget_nano_usd if "budget_nano_usd" in supplied else base.budget_nano_usd
-            ),
-            soft_budget_nano_usd=(
-                fields.soft_budget_nano_usd
-                if "soft_budget_nano_usd" in supplied
-                else base.soft_budget_nano_usd
-            ),
-        )
+    return Policy(
+        model_access=mode,
+        allowed_models=allowed,
+        rpm_limit=(fields.rpm_limit if "rpm_limit" in supplied else base.rpm_limit),
+        tpm_limit=(fields.tpm_limit if "tpm_limit" in supplied else base.tpm_limit),
+        max_parallel=(fields.max_parallel if "max_parallel" in supplied else base.max_parallel),
+        budget_nano_usd=(
+            fields.budget_nano_usd if "budget_nano_usd" in supplied else base.budget_nano_usd
+        ),
     )
-
-
-def _validated(policy: Policy) -> Policy:
-    if policy.model_access is ModelAccess.INHERIT and policy.allowed_models:
-        raise violation("allowed_models", "inherit cannot carry an allowlist")
-    if (
-        policy.budget_nano_usd is not None
-        and policy.soft_budget_nano_usd is not None
-        and policy.soft_budget_nano_usd > policy.budget_nano_usd
-    ):
-        raise violation("soft_budget_nano_usd", "must not exceed budget_nano_usd")
-    return policy
 
 
 def check_narrowing(
@@ -264,7 +236,6 @@ def check_narrowing(
         ("tpm_limit", parent.tpm_limit, policy.tpm_limit),
         ("max_parallel", parent.max_parallel, policy.max_parallel),
         ("budget_nano_usd", parent.budget_nano_usd, policy.budget_nano_usd),
-        ("soft_budget_nano_usd", parent.soft_budget_nano_usd, policy.soft_budget_nano_usd),
     ):
         if parent_value is not None and own_value is not None and own_value > parent_value:
             raise violation(

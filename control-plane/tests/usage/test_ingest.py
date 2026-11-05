@@ -16,8 +16,6 @@ from lumewarp_control_plane.models import (
     ApiKey,
     ConfigOutbox,
     KeyOwnerKind,
-    NotifierChannel,
-    NotifierOutbox,
     Scope,
     ScopeType,
     Team,
@@ -64,8 +62,6 @@ async def _seed(
     factory: SessionFactory,
     *,
     hard_budget: int | None = None,
-    soft_budget: int | None = None,
-    webhook: bool = False,
     owner_kind: KeyOwnerKind = KeyOwnerKind.USER,
 ) -> tuple[str, ApiKey]:
     scope_name = f"usage-{uuid7().hex}"
@@ -76,7 +72,6 @@ async def _seed(
             session,
             name=f"usage-team-{suffix}",
             budget_nano_usd=hard_budget,
-            soft_budget_nano_usd=soft_budget,
         )
         if owner_kind is KeyOwnerKind.USER:
             owner = await factories.make_user(session)
@@ -85,15 +80,6 @@ async def _seed(
             owner = await factories.make_service_account(session, team)
         key = await factories.make_key(session, team, owner)
         key_id = key.id
-        if webhook:
-            session.add(
-                NotifierChannel(
-                    name=f"usage-webhook-{suffix}",
-                    kind="webhook",
-                    team_id=team.id,
-                    config={"url_ref": "LUMEWARP_TEST_NOTIFY_URL"},
-                )
-            )
     async with factory() as session:
         key = await session.get(ApiKey, key_id)
         assert key is not None
@@ -192,12 +178,7 @@ async def test_conflicting_replay_skips_only_that_event(session_factory: Session
 
 @pytest.mark.asyncio
 async def test_concurrent_reports_flip_budget_once(session_factory: SessionFactory):
-    scope_name, key = await _seed(
-        session_factory,
-        hard_budget=100,
-        soft_budget=50,
-        webhook=True,
-    )
+    scope_name, key = await _seed(session_factory, hard_budget=100)
     events = [_event(key, cost=60), _event(key, cost=60)]
 
     async def report(event: usage_pb2.UsageEvent) -> int:
@@ -215,7 +196,6 @@ async def test_concurrent_reports_flip_budget_once(session_factory: SessionFacto
         assert total is not None
         assert total.cost_nano_usd == 120
         assert total.exceeded_at is not None
-        assert total.soft_notified_at is not None
         assert (
             await session.scalar(
                 select(func.count())
@@ -226,17 +206,6 @@ async def test_concurrent_reports_flip_budget_once(session_factory: SessionFacto
                 )
             )
             == 1
-        )
-        assert (
-            await session.scalar(
-                select(func.count())
-                .select_from(NotifierOutbox)
-                .where(
-                    NotifierOutbox.event_type.in_(("budget.soft", "budget.hard")),
-                    NotifierOutbox.payload["team_id"].astext == str(key.team_id),
-                )
-            )
-            == 2
         )
 
 
@@ -273,12 +242,7 @@ async def test_budget_raise_crossing_recompiles_again(session_factory: SessionFa
 
 @pytest.mark.asyncio
 async def test_late_previous_month_event_uses_its_event_window(session_factory: SessionFactory):
-    scope_name, key = await _seed(
-        session_factory,
-        hard_budget=1,
-        soft_budget=1,
-        webhook=True,
-    )
+    scope_name, key = await _seed(session_factory, hard_budget=1)
     current_start, _ = month_window(datetime.now(UTC))
     previous = current_start - timedelta(milliseconds=1)
     event = _event(key, timestamp=previous, cost=2)
@@ -316,15 +280,6 @@ async def test_late_previous_month_event_uses_its_event_window(session_factory: 
                     ConfigOutbox.scope == scope_name,
                     ConfigOutbox.reason == "usage budget exceeded",
                 )
-            )
-            == 0
-        )
-        # The old window is marked and audited, but no "exceeded" notification goes out.
-        assert (
-            await session.scalar(
-                select(func.count())
-                .select_from(NotifierOutbox)
-                .where(NotifierOutbox.payload["team_id"].astext == str(key.team_id))
             )
             == 0
         )

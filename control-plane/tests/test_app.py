@@ -83,9 +83,6 @@ async def test_background_compiler_receives_backend_membership_mode(
         compiler_started.set()
         await stop.wait()
 
-    async def notifier_loop(app, stop):
-        await stop.wait()
-
     async def reconcile_loop(
         factory, authorizer, stop, *, poll_seconds, full_seconds, settings, metrics
     ):
@@ -104,7 +101,6 @@ async def test_background_compiler_receives_backend_membership_mode(
     monkeypatch.setattr(app_module.grpc_services, "bound_port", lambda server: 0)
     monkeypatch.setattr(app_module.grpc_services, "registry_for", lambda server: None)
     monkeypatch.setattr(app_module.compiler, "run_compiler_loop", compiler_loop)
-    monkeypatch.setattr(app_module, "_notifier_loop", notifier_loop)
     monkeypatch.setattr(app_module, "run_key_reconciler", reconcile_loop)
     monkeypatch.setattr(app_module.usage, "rollover_scheduler", rollover)
     failures = []

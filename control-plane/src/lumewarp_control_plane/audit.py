@@ -5,8 +5,8 @@ field that is not listed is dropped, not redacted. Adding a detail therefore req
 classifying it here first, and a test scans the source so a new action cannot bypass the
 table. `redact` stays as a second line of defence for sensitive-looking key names.
 
-Free-text error columns elsewhere (`config_outbox.last_error`,
-`notifier_outbox.last_error`) store only the exception class name.
+Free-text error columns elsewhere (`config_outbox.last_error`) store only the exception
+class name.
 """
 
 import enum
@@ -35,7 +35,6 @@ _POLICY: dict[str, DetailSpec] = {
     "tpm_limit": None,
     "max_parallel": None,
     "budget_nano_usd": None,
-    "soft_budget_nano_usd": None,
 }
 _POLICY_CHANGES: dict[str, DetailSpec] = {
     **_POLICY,
