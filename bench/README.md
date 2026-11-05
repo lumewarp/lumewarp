@@ -367,8 +367,8 @@ profile, 5 repetitions: the `1cf38c7` binary 0.15 ms non-stream / 1.44
 - The `ci` workflow's `bench-crate` job runs `cargo fmt/clippy/test` for
   `bench/mock-upstream` and `bash -n bench/scripts/run.sh` plus the
   `aggregate.py` and `ci_check.py` self-tests on every PR. Its `control-plane`
-  job also runs the `tests/load` helper unit tests; the nightly `schedule` and
-  manual `workflow_dispatch` of that workflow run only `load-e2e`.
+  job also runs the `tests/load` helper unit tests; manual `workflow_dispatch` of
+  that workflow runs only `load-e2e`.
 - The `bench` workflow runs `bench/scripts/run.sh --quick` on PRs and pushes to
   `main` that touch `gateway/**`, `bench/**` or the workflow itself. A
   `workflow_dispatch` run can choose `profile` (`quick` or `full`) and `repeat`

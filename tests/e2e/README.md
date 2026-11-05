@@ -70,7 +70,7 @@ set both to 1 second to exercise repeated error decisions promptly.
 It subscribes before actions and checks usage/publication/ACK state on notifications,
 without fixed sleeps or timing-based retry loops. Stage fixtures explicitly express
 the dependencies between the gates; individual gates can also run via `-k`.
-Live tests are scheduled nightly, not on pull requests.
+Live tests run by manual dispatch in CI, not on pull requests.
 
 ## Self-service keys
 
