@@ -213,26 +213,51 @@ or a prompt and prints it for `LUMEWARP_BREAK_GLASS_PASSWORD_HASH`.
 
 There is exactly one installation. Below it: org -> team -> key owners -> keys.
 
-- **Org**: a name and, later, the quota level above teams. The org write API (create,
-  rename, archive, org admins) is not implemented yet: `POST /teams` puts a new team in the
-  org named `default`, which is created on first use, and `org_admins` rows are only
-  written directly (or by the built-in backend's future endpoints). An **org admin** holds
-  `admin` on `org:<id>`; `RequestAuthz` inherits that for every team of the org.
+- **Org**: the root of the quota hierarchy: `model_access` and `allowed_models`,
+  `rpm_limit`, `tpm_limit`, `max_parallel` and `budget_nano_usd`. There is no org write
+  API yet (only an installation admin can set these directly in Postgres), and archiving
+  is not implemented. `POST /teams` puts a new team in the org named `default`, which is
+  created on first use, and `org_admins` rows are only written directly or by the
+  built-in backend's endpoints. An **org admin** holds `admin` on `org:<id>`;
+  `RequestAuthz` inherits that for every team of the org.
 - **Team**: a name, its `org_id`, a policy (`model_access` and `allowed_models`,
-  `rpm_limit`, `tpm_limit`, `max_parallel`, `budget_nano_usd`) and the self-service limits
-  `max_keys_per_member` (non-revoked user keys per member; revoking frees a slot) and
-  `max_member_key_lifetime_seconds`.
-- **Team member**: a user in a team with role `admin` or `member` and the member's own
-  narrowing policy. Direct membership determines team visibility (`team_members` for the
-  built-in backend) and is the only way to own a key; team administration is also
-  inherited from an org admin; an installation admin sees every team.
+  `rpm_limit`, `tpm_limit`, `max_parallel`, `budget_nano_usd`), the member defaults
+  `member_rpm_default`, `member_tpm_default` and `member_max_parallel_default`, and the
+  self-service limits `max_keys_per_member` (non-revoked user keys per member; revoking
+  frees a slot) and `max_member_key_lifetime_seconds`.
+- **Team member**: a user in a team with role `admin` or `member`. The member's own
+  exception policy and grants live in `member_policies`, keyed by `(team_id, user_id)` and
+  deliberately independent of `team_members`: an external authorization backend has no
+  membership rows, yet per-member quotas still apply. Direct membership determines team
+  visibility (`team_members` for the built-in backend) and is the only way to own a key;
+  team administration is also inherited from an org admin; an installation admin sees
+  every team.
 - **Service account**: a non-human key owner in one team, with its own narrowing policy,
-  managed by the team's admins. It is unaffected by people joining or leaving.
+  managed by the team's admins. It takes no member defaults and is unaffected by people
+  joining or leaving.
 - **API key**: belongs to one team and is owned by a member (`owner_kind=user`) or a service
-  account (`owner_kind=service_account`). Keys carry no policy; the compiler narrows the
-  team policy by the owner policy into each key's effective policy. The snapshot carries
-  only the key id and hash, team id, status, expiry and effective policy; owner identity
-  stays in the control plane.
+  account (`owner_kind=service_account`). A key carries only its own `rpm_limit`,
+  `tpm_limit` and `max_parallel` (NULL = no key level). The compiler resolves the whole
+  chain into each key's effective policy. The snapshot carries only the key id and hash,
+  team id, status, expiry and effective policy; owner identity stays in the control plane.
+
+**Quota hierarchy.** One resolver (`quota.py`) computes org -> team -> owner for the
+compiler, `/users/me` and every write validation. Models are the intersection down the
+chain (`INHERIT`/`ALL` keep the parent, `LIST` intersects). Limits are the minimum down the
+chain; a member's effective limits are `exception ?? team member_default`, then clamped by
+the team, and a service account never takes the member defaults. Remaining budget is
+`min(org, team, owner)`, each from its own accumulated spend: the org has no
+`usage_totals` row, its spend is the sum of every one of its teams (archived included).
+
+Writes only check values they actually change: a changed value may not exceed the parent's
+current effective value (422), while an unchanged old value is not rechecked, so a parent
+decrease always succeeds and the effective value clamps. Team totals and models are
+`TEAM_QUOTA_SET` (org level and above); member defaults, member exceptions, service
+accounts and any key's limits are team-admin-and-above. A key's owner may change their own
+key's limits within their effective limits; a service-account key's limits only by team
+admin and above. Every key has at most four rate-limit scopes (org, team, owner, key); the
+control plane (`compiler/validate.py`) and the gateway (`snapshot.rs`) both reject more.
+A key without limits emits no key scope and costs nothing on the request path.
 
 A member key can be created with an optional `expires_at`. When the team sets
 `max_member_key_lifetime_seconds`, a member key created without one gets an expiry at that
@@ -254,20 +279,22 @@ kept: rotating again inside the grace ends the older grace immediately. Revoking
 both hashes. The response exposes `previous_key_expires_at` but never the old secret.
 
 `GET /users/me` returns, for every team the caller belongs to, the effective model names
-(the compiler's intersection of team and member policies; `all_models` when that
-intersection is universal), the effective rate limits, the team's member-key limits with
-the caller's current non-revoked key count (`key_limits`), and the current UTC-month
-team/member budgets with remaining amounts. It never returns the team's full allowlist to a
-member whose own policy is narrower.
+(the whole chain, org included; `all_models` when that intersection is universal), the
+effective rate limits (org, team and member defaults included), the team's member-key limits
+with the caller's current non-revoked key count (`key_limits`), and the current UTC-month
+org/team/member budgets with the remaining amount computed server-side. The org and team
+budget numbers themselves are only shown to a team admin or installation admin; a plain
+member sees the computed remainder. It never returns the team's full allowlist to a member
+whose own policy is narrower.
 
-`POST /teams/{id}/keys` (create) and `POST /keys/{id}/rotate` are rate limited per
-principal and operation: 30 attempts per minute each, independent of the target team or
-key. The check runs after authentication, before target lookup and authorization.
-Installation admins and break-glass sessions are exempt; a member who is only a team admin is
-not. A refusal is a 429 `rate_limited` with
-`Retry-After`, counted in `lumewarp_cp_key_writes_total{result="rate_limited"}` and
-deliberately not audited: only successful writes are audited as `key.create` /
-`key.rotate`, so a client cannot flood the audit table.
+`POST /teams/{id}/keys` (create), `POST /keys/{id}/rotate` and `PATCH /keys/{id}` are rate
+limited per principal and operation: 30 attempts per minute each, independent of the target
+team or key. The check runs after authentication, before target lookup and authorization.
+Installation admins and break-glass sessions are exempt; a member who is only a team admin
+is not. A refusal is a 429 `rate_limited` with `Retry-After`, counted in
+`lumewarp_cp_key_writes_total{result="rate_limited"}` and deliberately not audited: only
+successful writes are audited, so a client cannot flood the audit table. A limits-only
+`PATCH` never touches the key's lifecycle or suspension reason.
 
 Removing a member suspends that member's user-owned keys in the team
 (`suspended_reason=owner_removed`); deactivating a user suspends their user-owned keys
@@ -283,8 +310,17 @@ Usage is attributed to the key's team and owner: the event's `team_id` must matc
 key, and the owner (member or service account) is read from the key. A member's
 usage/rate-limit scope id is `member_scope_id = uuid5(team_id, user_id)`; it is derived, so
 removing and re-adding a member keeps the same total and bucket. A service account uses
-its own id. Rate-limit scopes are `team:<team_id>`, `member:<member_scope_id>` and
-`sa:<service_account_id>`.
+its own id. Rate-limit scopes are `org:<org_id>`, `team:<team_id>`,
+`member:<member_scope_id>`, `sa:<service_account_id>` and `key:<key_id>`; a level that sets
+no limit emits no scope. Rate limits are counted per gateway process: N gateway instances
+allow up to N times the configured limit, by design.
+
+Org budgets are derived: the org's monthly spend is the sum of its teams' `usage_totals`
+(archived included), and only orgs with a budget are checked after an ingest. The first
+crossing inserts `org_budget_windows` with `ON CONFLICT DO NOTHING`, so the audit row and
+the recompile happen exactly once even when several teams of one org report concurrently;
+a batch that cannot see a sibling's uncommitted total is caught by the next ingest or
+compile.
 
 ### Authorization
 

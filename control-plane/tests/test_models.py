@@ -17,6 +17,7 @@ from lumewarp_control_plane.models import (
     ConfigVersionKind,
     KeyLifecycle,
     KeyOwnerKind,
+    MemberPolicy,
     Model,
     ModelAccess,
     RequestOutcome,
@@ -133,11 +134,16 @@ async def test_team_cannot_inherit(session: AsyncSession) -> None:
 
 async def test_allowlist_modes(session: AsyncSession) -> None:
     # Explicit empty list = deny-all is representable and distinct from inherit/all.
+    member_user = await factories.make_user(session)
     t = await factories.make_team(session, model_access=ModelAccess.LIST)
     assert (t.model_access, t.allowed_models) == (ModelAccess.LIST, [])
     team = await factories.make_team(session)
     assert team.model_access is ModelAccess.ALL
-    inherit = await factories.make_member(session, team)
+    # Membership carries no policy; the member policy row is a separate, optional one.
+    await factories.make_member(session, team, member_user)
+    inherit = MemberPolicy(team_id=team.id, user_id=member_user.id)
+    session.add(inherit)
+    await session.flush()
     assert inherit.model_access is ModelAccess.INHERIT
     account = await factories.make_service_account(session, team)
     assert account.model_access is ModelAccess.INHERIT

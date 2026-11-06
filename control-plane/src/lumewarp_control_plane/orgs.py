@@ -47,6 +47,9 @@ async def default_org(session: AsyncSession) -> Org:
         row = Org(name=DEFAULT_ORG_NAME)
         session.add(row)
         await session.flush()
+        # Load the grants column property: `RowCount`-style lazy loads are not possible
+        # from async code, and the caller validates the new team against this org.
+        await session.refresh(row)
         return row
     raise ApiError(
         409,

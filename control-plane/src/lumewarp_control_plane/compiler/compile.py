@@ -26,8 +26,10 @@ from lumewarp_control_plane.models import (
     GatewaySession,
     KeyLifecycle,
     KeyOwnerKind,
+    MemberPolicy,
     Model,
     ModelAccess,
+    Org,
     PolicyGrant,
     Router,
     RouterFallback,
@@ -45,6 +47,12 @@ from lumewarp_control_plane.models import (
     UpstreamKind,
     UsageTotal,
     User,
+)
+from lumewarp_control_plane.quota import (
+    org_effective,
+    owner_effective,
+    policy_of,
+    team_effective,
 )
 from lumewarp_control_plane.settings import get_settings
 from lumewarp_control_plane.windows import month_window
@@ -103,25 +111,43 @@ def narrow(parent: ModelSet, mode: ModelAccess, allowed: Sequence[str]) -> Model
     return own if parent is None else parent & own
 
 
-# Rate-limit scope id prefix per level (the wire ids are "team:<id>", "member:<id>",
-# "sa:<id>").
-SCOPE_PREFIX = {
-    ScopeType.TEAM: "team",
-    ScopeType.MEMBER: "member",
-    ScopeType.SERVICE_ACCOUNT: "sa",
-}
-
-
-def rate_limit_scope(level: ScopeType, scope_id: uuid.UUID, entity) -> pb.RateLimitScope | None:
+def rate_limit_scope(prefix: str, scope_id: uuid.UUID | str, entity) -> pb.RateLimitScope | None:
+    """One limiter scope for an entity whose *own* limits are set; NULL limits add none."""
     if entity.rpm_limit is None and entity.tpm_limit is None and entity.max_parallel is None:
         return None
     return pb.RateLimitScope(
-        id=f"{SCOPE_PREFIX[level]}:{scope_id}",
+        id=f"{prefix}:{scope_id}",
         limit=pb.RateLimit(
             requests_per_minute=entity.rpm_limit or 0,
             tokens_per_minute=entity.tpm_limit or 0,
             max_parallel_requests=entity.max_parallel or 0,
         ),
+    )
+
+
+def _owner_scope_limits(
+    owner, member_defaults, team_eff, *, service_account: bool
+) -> tuple[int | None, int | None, int | None]:
+    """The owner level's limiter values, clamped by the team, one bucket per set value.
+
+    A member exception wins over the team's `member_*_default`; a service account has no
+    default. A dimension that is NULL at both the owner and the default stays NULL, so the
+    owner level adds no extra bucket and the team's shared scope keeps enforcing it (a
+    per-owner bucket for an inherited value would multiply the team's limit per owner).
+    """
+    if owner is not None:
+        raw = (owner.rpm_limit, owner.tpm_limit, owner.max_parallel)
+    else:
+        raw = (None, None, None)
+    if not service_account:
+        raw = tuple(
+            value if value is not None else default
+            for value, default in zip(raw, member_defaults, strict=True)
+        )
+    parents = (team_eff.rpm_limit, team_eff.tpm_limit, team_eff.max_parallel)
+    return tuple(
+        None if value is None else (value if parent is None else min(value, parent))
+        for value, parent in zip(raw, parents, strict=True)
     )
 
 
@@ -182,14 +208,17 @@ async def compile_scope(
       resulting effective set is still universal, e.g. ALL -> INHERIT (the defaults)
       allows every name. A LIST with an empty list on either level is deny-all
       (`allow_all_models=false`, `allowed_models=[]`), never "all".
-      Rate limits: one RateLimitScope per level that sets a limit ("team:<id>",
-      "member:<member_scope_id>", "sa:<id>").
+      Rate limits: one RateLimitScope per level that sets a limit (`org:<id>`,
+      `team:<id>`, `member:<member_scope_id>`, `sa:<id>`, `key:<id>`; at most four per
+      key). A member's level takes the member-policy exception, else the team's
+      `member_*_default`, even without a membership row.
       Status: SUSPENDED from lifecycle, or for a user-owned key whose owner is no longer
       a member of the key's team (builtin only) or is deactivated; external owners without
-      a local policy row inherit the team policy. Else BUDGET_EXCEEDED if the team or
-      the owner has a budget and its `usage_totals` for the UTC month of `now` is >= it;
-      else ACTIVE. Revoked keys are left out (the gateway answers 401 for them either
-      way), so revocation is a key removal in deltas. Expiry is passed through as
+      a local policy row inherit the team policy. Else BUDGET_EXCEEDED if the org (its
+      spend derived from its teams), the team or the owner has a budget and the matching
+      spend for the UTC month of `now` is >= it; else ACTIVE. Revoked keys are left out
+      (the gateway answers 401 for them either way), so revocation is a key removal in
+      deltas. Expiry is passed through as
       `expires_at_unix_ms` and enforced by the gateway.
     - The catalog is emitted as it is: `Model`, `Alias` (its target's current name) and
       `Router` (members with their weights and params, or splits with theirs). The gateway
@@ -429,27 +458,38 @@ async def compile_scope(
     snap.aliases.sort(key=lambda a: a.name)
     snap.routers.sort(key=lambda r: r.name)
 
-    # Teams, key owners and keys.
+    # Orgs, teams, key owners and keys: four levels of quotas.
+    orgs = {o.id: o for o in await session.scalars(select(Org))}
     teams = {t.id: t for t in await session.scalars(select(Team))}
-    granted: dict[tuple[uuid.UUID, uuid.UUID | None, uuid.UUID | None], list[str]] = {}
-    for team_id, user_id, account_id, name in await session.execute(
+    granted: dict[
+        tuple[uuid.UUID | None, uuid.UUID | None, uuid.UUID | None, uuid.UUID | None],
+        list[str],
+    ] = {}
+    for org_id, team_id, user_id, account_id, name in await session.execute(
         select(
+            PolicyGrant.org_id,
             PolicyGrant.team_id,
             PolicyGrant.user_id,
             PolicyGrant.service_account_id,
             CatalogName.name,
         ).join(CatalogName, CatalogName.id == PolicyGrant.name_id)
     ):
-        granted.setdefault((team_id, user_id, account_id), []).append(name)
+        # The org id is dropped for every non-org grant: org grants are keyed by /org only.
+        granted.setdefault((org_id, team_id, user_id, account_id), []).append(name)
 
-    def allowed_names(entity: Team | TeamMember | ServiceAccount) -> list[str]:
+    def allowed_names(entity: Org | Team | MemberPolicy | ServiceAccount) -> list[str]:
+        if isinstance(entity, Org):
+            return granted.get((entity.id, None, None, None), [])
         if isinstance(entity, Team):
-            return granted.get((entity.id, None, None), [])
-        if isinstance(entity, TeamMember):
-            return granted.get((entity.team_id, entity.user_id, None), [])
-        return granted.get((entity.team_id, None, entity.id), [])
+            return granted.get((None, entity.id, None, None), [])
+        if isinstance(entity, MemberPolicy):
+            return granted.get((None, entity.team_id, entity.user_id, None), [])
+        return granted.get((None, entity.team_id, None, entity.id), [])
 
     members = {(m.team_id, m.user_id): m for m in await session.scalars(select(TeamMember))}
+    member_policies = {
+        (m.team_id, m.user_id): m for m in await session.scalars(select(MemberPolicy))
+    }
     service_accounts = {a.id: a for a in await session.scalars(select(ServiceAccount))}
     active_users = set(await session.scalars(select(User.id).where(User.is_active.is_(True))))
     keys = (
@@ -469,45 +509,117 @@ async def compile_scope(
             )
         )
     }
+    # Org spend is derived: the sum of every team of the org (archived included), so the
+    # org level needs no total row and can never drift from its teams.
+    org_spent = {org_id: 0 for org_id in orgs}
+    for team in teams.values():
+        if team.org_id in org_spent:
+            org_spent[team.org_id] += spent.get((ScopeType.TEAM, team.id), 0)
 
     def over_budget(level: ScopeType, scope_id: uuid.UUID, entity) -> bool:
         budget = entity.budget_nano_usd
-        return budget is not None and spent.get((level, scope_id), 0) >= budget
+        if budget is None:
+            return False
+        used = (
+            org_spent.get(scope_id, 0)
+            if level is ScopeType.ORG
+            else spent.get((level, scope_id), 0)
+        )
+        return used >= budget
 
     for t in sorted(teams.values(), key=lambda t: str(t.id)):
         snap.teams.append(pb.Team(id=str(t.id), name=t.name))
 
+    team_effective_policies = {
+        team_id: team_effective(org_effective(orgs[team.org_id]), team)
+        for team_id, team in teams.items()
+        if team.org_id in orgs
+    }
+
     for k in sorted(keys, key=lambda k: str(k.id)):
         team = teams[k.team_id]
-        owner_level, owner_scope_id = k.owner_scope
+        org = orgs[team.org_id]
+        team_eff = team_effective_policies[team.id]
+        member_defaults = (
+            team.member_rpm_default,
+            team.member_tpm_default,
+            team.member_max_parallel_default,
+        )
         owner_gone = False
         if k.owner_kind is KeyOwnerKind.USER:
-            owner = members.get((k.team_id, k.user_id))
+            member = members.get((k.team_id, k.user_id))
+            owner_policy = member_policies.get((k.team_id, k.user_id))
             # keys/reconciler.py suspends keys whose external membership was revoked.
             owner_gone = k.user_id not in active_users or (
-                require_local_membership and owner is None
+                require_local_membership and member is None
             )
+            service_account = False
         else:
-            owner = service_accounts[k.service_account_id]
-        levels = [(ScopeType.TEAM, team.id, team)]
-        if owner is not None:
-            levels.append((owner_level, owner_scope_id, owner))
-        allowed: ModelSet = None
-        for _, _, entity in levels:
-            allowed = narrow(allowed, entity.model_access, allowed_names(entity))
-        policy = pb.EffectivePolicy(
-            allow_all_models=allowed is None,
-            allowed_models=sorted(allowed or ()),
+            owner_policy = service_accounts[k.service_account_id]
+            service_account = True
+        owner_eff = owner_effective(
+            team_eff,
+            team,
+            policy_of(owner_policy) if owner_policy is not None else None,
+            service_account=service_account,
         )
-        for level, scope_id, entity in levels:
-            if (rl := rate_limit_scope(level, scope_id, entity)) is not None:
-                policy.rate_limit_scopes.append(rl)
+        key_policy = pb.EffectivePolicy(
+            allow_all_models=owner_eff.models is None,
+            allowed_models=sorted(owner_eff.models or ()),
+        )
+        scopes: list[pb.RateLimitScope] = []
+        if (rl := rate_limit_scope("org", org.id, org)) is not None:
+            scopes.append(rl)
+        if (rl := rate_limit_scope("team", team.id, team)) is not None:
+            scopes.append(rl)
+        if k.owner_kind is KeyOwnerKind.USER:
+            # The member level's values are the exception, else the team's defaults,
+            # even without a membership row (external authz backend). Emit the clamped
+            # effective value so the scope matches /users/me.
+            limits = _owner_scope_limits(
+                owner_policy, member_defaults, team_eff, service_account=False
+            )
+            if any(value is not None for value in limits):
+                scopes.append(
+                    pb.RateLimitScope(
+                        id=f"member:{k.owner_scope[1]}",
+                        limit=pb.RateLimit(
+                            requests_per_minute=limits[0] or 0,
+                            tokens_per_minute=limits[1] or 0,
+                            max_parallel_requests=limits[2] or 0,
+                        ),
+                    )
+                )
+        else:
+            limits = _owner_scope_limits(
+                owner_policy, member_defaults, team_eff, service_account=True
+            )
+            # A service account with no limit of its own adds no scope: the team's
+            # scope already enforces the same effective value.
+            if any(value is not None for value in limits):
+                scopes.append(
+                    pb.RateLimitScope(
+                        id=f"sa:{k.owner_scope[1]}",
+                        limit=pb.RateLimit(
+                            requests_per_minute=limits[0] or 0,
+                            tokens_per_minute=limits[1] or 0,
+                            max_parallel_requests=limits[2] or 0,
+                        ),
+                    )
+                )
+        if (rl := rate_limit_scope("key", str(k.id), k)) is not None:
+            scopes.append(rl)
+        key_policy.rate_limit_scopes.extend(scopes)
 
         if k.lifecycle is KeyLifecycle.SUSPENDED or owner_gone:
             status = pb.KEY_STATUS_SUSPENDED
-        elif any(over_budget(level, scope_id, entity) for level, scope_id, entity in levels):
+        elif (
+            over_budget(ScopeType.ORG, org.id, org)
+            or over_budget(ScopeType.TEAM, team.id, team)
+            or (owner_policy is not None and over_budget(*k.owner_scope, owner_policy))
+        ):
             status = pb.KEY_STATUS_BUDGET_EXCEEDED
-            policy.budget_window_end_unix_ms = _ms(window_end)
+            key_policy.budget_window_end_unix_ms = _ms(window_end)
         else:
             status = pb.KEY_STATUS_ACTIVE
 
@@ -517,7 +629,7 @@ async def compile_scope(
             team_id=str(k.team_id),
             status=status,
             expires_at_unix_ms=expiry_ms(k.expires_at),
-            policy=policy,
+            policy=key_policy,
         )
         # The previous hash carries its own expiry so a gateway booting from its persisted
         # snapshot keeps enforcing it while the control plane is down. Once it is past,

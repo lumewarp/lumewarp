@@ -1129,6 +1129,12 @@ export interface components {
             expires_at?: string | null;
             /** Service Account Id */
             service_account_id?: string | null;
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Max Parallel */
+            max_parallel?: number | null;
         };
         /** KeyCreated */
         KeyCreated: {
@@ -1155,6 +1161,12 @@ export interface components {
              * Format: uuid
              */
             team_id: string;
+            /** Rpm Limit */
+            rpm_limit: number | null;
+            /** Tpm Limit */
+            tpm_limit: number | null;
+            /** Max Parallel */
+            max_parallel: number | null;
             owner_kind: components["schemas"]["KeyOwnerKind"];
             /** User Id */
             user_id: string | null;
@@ -1204,13 +1216,22 @@ export interface components {
              */
             grace_seconds: number;
         };
-        /** KeyUpdate */
+        /**
+         * KeyUpdate
+         * @description PATCH: omitted fields are unchanged; an explicit null clears a key limit.
+         */
         KeyUpdate: {
             /** Name */
             name?: string | null;
             /** Expires At */
             expires_at?: string | null;
             lifecycle?: components["schemas"]["KeyLifecycle"] | null;
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Max Parallel */
+            max_parallel?: number | null;
         };
         /**
          * MeBudgetOut
@@ -1222,6 +1243,16 @@ export interface components {
          *     member sees the effective limit without learning the team's own numbers.
          */
         MeBudgetOut: {
+            /**
+             * Org Budget Nano Usd
+             * @description The org's monthly budget; NULL when the caller is not a team admin (or installation admin) or the org sets none.
+             */
+            org_budget_nano_usd?: number | null;
+            /**
+             * Org Spent Nano Usd
+             * @description The org's spend this month (sum of its teams); NULL when the caller is not a team admin (or installation admin).
+             */
+            org_spent_nano_usd?: number | null;
             /**
              * Team Budget Nano Usd
              * @description The team's monthly budget; NULL when the caller is not a team admin (or installation admin) or the team sets none.
@@ -2050,6 +2081,12 @@ export interface components {
         };
         /** TeamCreate */
         TeamCreate: {
+            /** Member Rpm Default */
+            member_rpm_default?: number | null;
+            /** Member Tpm Default */
+            member_tpm_default?: number | null;
+            /** Member Max Parallel Default */
+            member_max_parallel_default?: number | null;
             /** Max Keys Per Member */
             max_keys_per_member?: number | null;
             /** Max Member Key Lifetime Seconds */
@@ -2073,6 +2110,12 @@ export interface components {
          * @description The whole team, including its policy: team admins and installation admins only.
          */
         TeamOut: {
+            /** Member Rpm Default */
+            member_rpm_default?: number | null;
+            /** Member Tpm Default */
+            member_tpm_default?: number | null;
+            /** Member Max Parallel Default */
+            member_max_parallel_default?: number | null;
             /** Max Keys Per Member */
             max_keys_per_member?: number | null;
             /** Max Member Key Lifetime Seconds */
@@ -2118,6 +2161,12 @@ export interface components {
         TeamRole: "admin" | "member";
         /** TeamUpdate */
         TeamUpdate: {
+            /** Member Rpm Default */
+            member_rpm_default?: number | null;
+            /** Member Tpm Default */
+            member_tpm_default?: number | null;
+            /** Member Max Parallel Default */
+            member_max_parallel_default?: number | null;
             /** Max Keys Per Member */
             max_keys_per_member?: number | null;
             /** Max Member Key Lifetime Seconds */

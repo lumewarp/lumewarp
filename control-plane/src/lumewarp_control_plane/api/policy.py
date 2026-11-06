@@ -1,16 +1,19 @@
-"""Policy inheritance and narrowing (O1 M1/M5).
+"""Policy inheritance and narrowing (O1 M1/M5, four-level quota hierarchy).
 
-Two levels: a team, and the owners of keys under it (team members, service accounts). The
-API is the enforcement point that keeps source state valid: an owner may only narrow its
-team. The compiler also intersects allowlists defensively, but accepting a non-subset in
-the source would make the UI misleading and could turn an explicit deny-all into an
+The resolver lives in `quota.py`; this module is the write-side enforcement. A write may
+only narrow its parent: a *changed* value may not exceed the parent's current effective
+value (422). A value the write leaves unchanged is not rechecked, so a parent decrease
+never invalidates child rows and a later unrelated child edit still succeeds. A parent
+decrease itself always succeeds; the effective value is the minimum down the chain.
+
+The compiler intersects allowlists defensively too, but accepting a non-subset in the
+source would make the UI misleading and could turn an explicit deny-all into an
 accidental grant after a later edit.
 """
 
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, select
@@ -19,66 +22,47 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumewarp_control_plane.errors import ApiError
 from lumewarp_control_plane.models import (
     CatalogName,
+    MemberPolicy,
     ModelAccess,
+    Org,
     PolicyGrant,
     ServiceAccount,
     Team,
-    TeamMember,
+)
+from lumewarp_control_plane.quota import (
+    Effective,
+    Policy,
+    apply_policy,
+    effective,
+    org_effective,
+    owner_effective,
+    policy_of,
+    team_effective,
 )
 
 if TYPE_CHECKING:
     from lumewarp_control_plane.api.schemas import PolicyFields
 
-_MODEL_UNIVERSAL = None
+__all__ = [
+    "Effective",
+    "Policy",
+    "apply_policy",
+    "effective",
+    "ensure_unique_ids",
+    "grant_ids",
+    "org_effective",
+    "owner_effective_of",
+    "policy_from_fields",
+    "policy_of",
+    "save_grants",
+    "team_effective_of",
+    "validate_owner_policy",
+    "validate_team_policy",
+]
 
 
 def violation(field: str, message: str) -> ApiError:
     return ApiError(422, "validation_error", f"{field}: {message}")
-
-
-@dataclass(frozen=True)
-class Policy:
-    model_access: ModelAccess
-    allowed_models: tuple[str, ...]
-    rpm_limit: int | None = None
-    tpm_limit: int | None = None
-    max_parallel: int | None = None
-    budget_nano_usd: int | None = None
-
-
-@dataclass(frozen=True)
-class Effective:
-    """Resolved policy from the root down to one level.
-
-    `models is None` means the universal set (every model). Otherwise it is exactly the
-    aliases still allowed at this level (possibly the empty deny-all set).
-    """
-
-    models: frozenset[str] | None
-    rpm_limit: int | None = None
-    tpm_limit: int | None = None
-    max_parallel: int | None = None
-    budget_nano_usd: int | None = None
-
-
-def policy_of(row: Team | TeamMember | ServiceAccount) -> Policy:
-    return Policy(
-        model_access=row.model_access,
-        allowed_models=tuple(row.allowed_models),
-        rpm_limit=row.rpm_limit,
-        tpm_limit=row.tpm_limit,
-        max_parallel=row.max_parallel,
-        budget_nano_usd=row.budget_nano_usd,
-    )
-
-
-def apply_policy(row: Team | TeamMember | ServiceAccount, policy: Policy) -> None:
-    """Scalar policy columns; `save_grants` writes the list once the row has its id."""
-    row.model_access = policy.model_access
-    row.rpm_limit = policy.rpm_limit
-    row.tpm_limit = policy.tpm_limit
-    row.max_parallel = policy.max_parallel
-    row.budget_nano_usd = policy.budget_nano_usd
 
 
 async def grant_ids(session: AsyncSession, names: tuple[str, ...]) -> dict[str, uuid.UUID]:
@@ -95,16 +79,28 @@ async def grant_ids(session: AsyncSession, names: tuple[str, ...]) -> dict[str, 
     return found
 
 
-def _owner(row: Team | TeamMember | ServiceAccount) -> dict[str, uuid.UUID | None]:
+def _owner(row: Org | Team | MemberPolicy | ServiceAccount) -> dict[str, uuid.UUID | None]:
+    if isinstance(row, Org):
+        return {"org_id": row.id, "team_id": None, "user_id": None, "service_account_id": None}
     if isinstance(row, Team):
-        return {"team_id": row.id, "user_id": None, "service_account_id": None}
-    if isinstance(row, TeamMember):
-        return {"team_id": row.team_id, "user_id": row.user_id, "service_account_id": None}
-    return {"team_id": row.team_id, "user_id": None, "service_account_id": row.id}
+        return {"org_id": None, "team_id": row.id, "user_id": None, "service_account_id": None}
+    if isinstance(row, MemberPolicy):
+        return {
+            "org_id": None,
+            "team_id": row.team_id,
+            "user_id": row.user_id,
+            "service_account_id": None,
+        }
+    return {
+        "org_id": None,
+        "team_id": row.team_id,
+        "user_id": None,
+        "service_account_id": row.id,
+    }
 
 
 async def save_grants(
-    session: AsyncSession, row: Team | TeamMember | ServiceAccount, policy: Policy
+    session: AsyncSession, row: Org | Team | MemberPolicy | ServiceAccount, policy: Policy
 ) -> None:
     """Replace the row's grants. The row must be flushed; refresh it to read them back."""
     ids = await grant_ids(session, policy.allowed_models)
@@ -114,6 +110,7 @@ async def save_grants(
             *(
                 column.is_(None) if value is None else column == value
                 for column, value in (
+                    (PolicyGrant.org_id, owner["org_id"]),
                     (PolicyGrant.team_id, owner["team_id"]),
                     (PolicyGrant.user_id, owner["user_id"]),
                     (PolicyGrant.service_account_id, owner["service_account_id"]),
@@ -125,59 +122,20 @@ async def save_grants(
     await session.flush()
 
 
-def _limit(parent: int | None, own: int | None) -> int | None:
-    if parent is None:
-        return own
-    if own is None:
-        return parent
-    return min(parent, own)
-
-
-def effective(parent: Effective | None, policy: Policy) -> Effective:
-    """Resolve one level, including INHERIT and ALL, against its parent's effective policy.
-
-    ALL keeps the parent's set, exactly like the compiler's `narrow()`. Only the root
-    (no parent) makes ALL universal. Source can legitimately hold a member at ALL under a
-    team that later shrank to LIST: team updates deliberately do not rewrite owner lists,
-    and the compiler's intersection still limits the key, so this function must not widen
-    that member back to the whole catalog.
-    """
-    if policy.model_access is ModelAccess.LIST:
-        own = frozenset(policy.allowed_models)
-        models = own if parent is None or parent.models is None else parent.models & own
-    else:
-        models = parent.models if parent is not None else _MODEL_UNIVERSAL
-    if parent is None:
-        return Effective(
-            models=models,
-            rpm_limit=policy.rpm_limit,
-            tpm_limit=policy.tpm_limit,
-            max_parallel=policy.max_parallel,
-            budget_nano_usd=policy.budget_nano_usd,
-        )
-    return Effective(
-        models=models,
-        rpm_limit=_limit(parent.rpm_limit, policy.rpm_limit),
-        tpm_limit=_limit(parent.tpm_limit, policy.tpm_limit),
-        max_parallel=_limit(parent.max_parallel, policy.max_parallel),
-        budget_nano_usd=_limit(parent.budget_nano_usd, policy.budget_nano_usd),
-    )
-
-
 def policy_from_fields(
     fields: PolicyFields, *, default_mode: ModelAccess, base: Policy | None = None
 ) -> Policy:
     """Build a proposed policy from a create/update payload.
 
     On create (`base is None`) omitted fields take `default_mode`/no limit. On update,
-    omitted fields keep `base`; an explicit null clears a limit or budget. Teams pass
-    `default_mode=ALL` and cannot inherit; members and service accounts pass INHERIT.
+    omitted fields keep `base`; an explicit null clears a limit or budget. Teams and orgs
+    pass `default_mode=ALL` and cannot inherit; members and service accounts pass INHERIT.
     """
     supplied = fields.model_fields_set
     if base is None:
         mode = fields.model_access if "model_access" in supplied else default_mode
         if mode is ModelAccess.INHERIT and default_mode is ModelAccess.ALL:
-            raise violation("model_access", "teams cannot inherit")
+            raise violation("model_access", "teams and orgs cannot inherit")
         if fields.allowed_models and mode is not ModelAccess.LIST:
             raise violation("allowed_models", "only allowed when model_access is 'list'")
         allowed = tuple(sorted(fields.allowed_models or ())) if mode is ModelAccess.LIST else ()
@@ -192,7 +150,7 @@ def policy_from_fields(
 
     mode = fields.model_access if "model_access" in supplied else base.model_access
     if mode is ModelAccess.INHERIT and default_mode is ModelAccess.ALL:
-        raise violation("model_access", "teams cannot inherit")
+        raise violation("model_access", "teams and orgs cannot inherit")
     if "allowed_models" in supplied:
         if mode is not ModelAccess.LIST and fields.allowed_models:
             raise violation("allowed_models", "only allowed when model_access is 'list'")
@@ -213,30 +171,51 @@ def policy_from_fields(
     )
 
 
-def check_narrowing(
-    parent: Effective, policy: Policy, prefix: str = "", *, check_models: bool = True
-) -> None:
-    """Raise 422 if `policy` widens a limit or, with `check_models`, exceeds the parent's
-    names.
-    """
-    field = (lambda name: f"{prefix}.{name}") if prefix else (lambda name: name)
+def _field(prefix: str):
+    return (lambda name: f"{prefix}.{name}") if prefix else (lambda name: name)
 
-    if check_models and policy.model_access is ModelAccess.ALL and parent.models is not None:
-        raise violation(field("model_access"), "cannot widen to all under a restricted parent")
-    if check_models and policy.model_access is ModelAccess.LIST and parent.models is not None:
-        own = set(policy.allowed_models)
-        if not own <= set(parent.models):
-            extra = sorted(own - set(parent.models))
-            raise violation(
-                field("allowed_models"),
-                f"models not allowed by parent: {', '.join(extra)}",
-            )
+
+def check_narrowing(
+    parent: Effective,
+    policy: Policy,
+    prefix: str = "",
+    *,
+    check_models: bool = True,
+    base: Policy | None = None,
+) -> None:
+    """Raise 422 if a changed value widens a limit or (with `check_models`) a model list.
+
+    `base` is the stored policy of the same level: fields it leaves unchanged are never
+    rechecked, so a parent that shrank below them is legitimate. On create (`base is
+    None`) every supplied value counts as changed.
+    """
+    field = _field(prefix)
+
+    def changed(name: str) -> bool:
+        if base is None:
+            return True
+        return getattr(base, name) != getattr(policy, name)
+
+    if check_models and changed("model_access") and policy.model_access is ModelAccess.ALL:
+        if parent.models is not None:
+            raise violation(field("model_access"), "cannot widen to all under a restricted parent")
+    if check_models and (changed("allowed_models") or changed("model_access")):
+        if policy.model_access is ModelAccess.LIST and parent.models is not None:
+            own = set(policy.allowed_models)
+            if not own <= set(parent.models):
+                extra = sorted(own - set(parent.models))
+                raise violation(
+                    field("allowed_models"),
+                    f"models not allowed by parent: {', '.join(extra)}",
+                )
     for name, parent_value, own_value in (
         ("rpm_limit", parent.rpm_limit, policy.rpm_limit),
         ("tpm_limit", parent.tpm_limit, policy.tpm_limit),
         ("max_parallel", parent.max_parallel, policy.max_parallel),
         ("budget_nano_usd", parent.budget_nano_usd, policy.budget_nano_usd),
     ):
+        if not changed(name):
+            continue
         if parent_value is not None and own_value is not None and own_value > parent_value:
             raise violation(
                 field(name),
@@ -244,53 +223,78 @@ def check_narrowing(
             )
 
 
-def team_effective(team: Team) -> Effective:
-    return effective(None, policy_of(team))
+async def _org_of(session: AsyncSession, team: Team) -> Org:
+    org = await session.get(Org, team.org_id)
+    if org is None:
+        raise violation("org_id", "team has no existing org")
+    return org
+
+
+async def team_effective_of(session: AsyncSession, team: Team) -> Effective:
+    """The team's effective policy: the org's effective set narrowed by the team."""
+    return team_effective(org_effective(await _org_of(session, team)), team)
+
+
+async def owner_effective_of(
+    session: AsyncSession,
+    team: Team,
+    policy: Policy | None,
+    *,
+    service_account: bool = False,
+) -> Effective:
+    """The owner's effective policy: exception ?? defaults, clamped by the team."""
+    return owner_effective(
+        await team_effective_of(session, team),
+        team,
+        policy,
+        service_account=service_account,
+    )
+
+
+async def validate_team_policy(
+    session: AsyncSession, team: Team, proposed: Policy, base: Policy | None
+) -> None:
+    """A changed team value may not exceed the org's current effective value."""
+    parent = org_effective(await _org_of(session, team))
+    check_narrowing(
+        parent,
+        proposed,
+        check_models=base is None
+        or (base.model_access, base.allowed_models)
+        != (proposed.model_access, proposed.allowed_models),
+        base=base,
+    )
 
 
 async def validate_owner_policy(
     session: AsyncSession, team: Team, proposed: Policy, base: Policy | None = None
 ) -> None:
-    """Names exist and stay within the team, limits narrow it. A list the write leaves
-    unchanged is not rechecked: it may legitimately exceed a team that shrank later.
-    """
+    """Names exist and changed limits/models stay within the team's effective policy."""
     models_changed = base is None or (base.model_access, base.allowed_models) != (
         proposed.model_access,
         proposed.allowed_models,
     )
     if models_changed:
         await grant_ids(session, proposed.allowed_models)
-    check_narrowing(team_effective(team), proposed, check_models=models_changed)
+    check_narrowing(
+        await team_effective_of(session, team),
+        proposed,
+        check_models=models_changed,
+        base=base,
+    )
 
 
-async def validate_owners_after_team_update(
-    session: AsyncSession, team: Team, proposed: Policy
+async def validate_key_limits(
+    owner: Effective, *, rpm_limit: int | None, tpm_limit: int | None, max_parallel: int | None
 ) -> None:
-    """Limits must still narrow the proposed team policy. Model lists are left alone when
-    the team shrinks: owners keep their settings and the effective set is the intersection
-    (`compiler.narrow`).
-    """
-    team_eff = effective(None, proposed)
-    members = (
-        await session.scalars(
-            select(TeamMember).where(TeamMember.team_id == team.id).order_by(TeamMember.user_id)
-        )
-    ).all()
-    for member in members:
-        check_narrowing(
-            team_eff, policy_of(member), f"members.{member.user_id}", check_models=False
-        )
-    accounts = (
-        await session.scalars(
-            select(ServiceAccount)
-            .where(ServiceAccount.team_id == team.id)
-            .order_by(ServiceAccount.id)
-        )
-    ).all()
-    for account in accounts:
-        check_narrowing(
-            team_eff, policy_of(account), f"service_accounts.{account.id}", check_models=False
-        )
+    """A key's limits may not exceed its owner's effective values (422)."""
+    for name, parent_value, value in (
+        ("rpm_limit", owner.rpm_limit, rpm_limit),
+        ("tpm_limit", owner.tpm_limit, tpm_limit),
+        ("max_parallel", owner.max_parallel, max_parallel),
+    ):
+        if parent_value is not None and value is not None and value > parent_value:
+            raise violation(name, f"must be <= owner value {parent_value} (got {value})")
 
 
 def ensure_unique_ids(ids: list[uuid.UUID], field: str = "model_ids") -> None:

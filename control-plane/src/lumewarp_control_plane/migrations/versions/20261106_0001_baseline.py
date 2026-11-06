@@ -6,11 +6,12 @@ Revises:
 The one and only schema migration. Lumewarp has never been deployed, so the history was
 squashed into a baseline generated from `models.py`: a fresh database runs this file and
 nothing else, and there is no upgrade path from an earlier revision. When the schema
-changes, edit `models.py` and add a new migration on top of this one.
+changes, edit `models.py` and regenerate this file (the migration test compares the two).
 
 Org data is not seeded here. The `orgs` table starts empty; `orgs.default_org` creates the
 `default` org on the first team creation, so there is no backfill and no migration-time
-data.
+data. `member_policies` rows are not required for membership either: the authz backend
+owns memberships, while per-member quotas stay here.
 
 The only object the models cannot express is the `config_versions` immutability trigger;
 it lives at the end of `upgrade()`.
@@ -163,6 +164,24 @@ def upgrade() -> None:
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("name", sa.String(length=200), nullable=False),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("rpm_limit", sa.Integer(), nullable=True),
+        sa.Column("tpm_limit", sa.BigInteger(), nullable=True),
+        sa.Column("max_parallel", sa.Integer(), nullable=True),
+        sa.Column("budget_nano_usd", sa.BigInteger(), nullable=True),
+        sa.Column(
+            "model_access",
+            sa.Enum(
+                "inherit",
+                "all",
+                "list",
+                name="model_access",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            server_default="all",
+            nullable=False,
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -175,6 +194,15 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
+        sa.CheckConstraint("model_access <> 'inherit'", name=op.f("ck_orgs_no_inherit")),
+        sa.CheckConstraint(
+            "budget_nano_usd IS NULL OR budget_nano_usd >= 0", name=op.f("ck_orgs_budget_nonneg")
+        ),
+        sa.CheckConstraint(
+            "max_parallel IS NULL OR max_parallel > 0", name=op.f("ck_orgs_parallel_positive")
+        ),
+        sa.CheckConstraint("rpm_limit IS NULL OR rpm_limit > 0", name=op.f("ck_orgs_rpm_positive")),
+        sa.CheckConstraint("tpm_limit IS NULL OR tpm_limit > 0", name=op.f("ck_orgs_tpm_positive")),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_orgs")),
         sa.UniqueConstraint("name", name=op.f("uq_orgs_name")),
     )
@@ -394,6 +422,7 @@ def upgrade() -> None:
         sa.Column(
             "scope_type",
             sa.Enum(
+                "org",
                 "team",
                 "member",
                 "service_account",
@@ -594,11 +623,6 @@ def upgrade() -> None:
         ["scope", "source_revision"],
         unique=False,
     )
-    op.execute(CONFIG_VERSIONS_IMMUTABLE)
-    op.execute(
-        "CREATE TRIGGER config_versions_immutable BEFORE UPDATE ON config_versions"
-        " FOR EACH ROW EXECUTE FUNCTION lumewarp_config_versions_immutable()"
-    )
     op.create_table(
         "gateway_tokens",
         sa.Column("id", sa.Uuid(), nullable=False),
@@ -744,6 +768,24 @@ def upgrade() -> None:
     )
     op.create_index(op.f("ix_org_admins_user_id"), "org_admins", ["user_id"], unique=False)
     op.create_table(
+        "org_budget_windows",
+        sa.Column("org_id", sa.Uuid(), nullable=False),
+        sa.Column("window_start", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "exceeded_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["org_id"],
+            ["orgs.id"],
+            name=op.f("fk_org_budget_windows_org_id_orgs"),
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("org_id", "window_start", name=op.f("pk_org_budget_windows")),
+    )
+    op.create_table(
         "personal_access_tokens",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("user_id", sa.Uuid(), nullable=False),
@@ -866,6 +908,9 @@ def upgrade() -> None:
         sa.Column("name", sa.String(length=200), nullable=False),
         sa.Column("max_keys_per_member", sa.Integer(), nullable=True),
         sa.Column("max_member_key_lifetime_seconds", sa.Integer(), nullable=True),
+        sa.Column("member_rpm_default", sa.Integer(), nullable=True),
+        sa.Column("member_tpm_default", sa.BigInteger(), nullable=True),
+        sa.Column("member_max_parallel_default", sa.Integer(), nullable=True),
         sa.Column("rpm_limit", sa.Integer(), nullable=True),
         sa.Column("tpm_limit", sa.BigInteger(), nullable=True),
         sa.Column("max_parallel", sa.Integer(), nullable=True),
@@ -910,6 +955,18 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "max_parallel IS NULL OR max_parallel > 0", name=op.f("ck_teams_parallel_positive")
+        ),
+        sa.CheckConstraint(
+            "member_max_parallel_default IS NULL OR member_max_parallel_default > 0",
+            name=op.f("ck_teams_member_max_parallel_default_positive"),
+        ),
+        sa.CheckConstraint(
+            "member_rpm_default IS NULL OR member_rpm_default > 0",
+            name=op.f("ck_teams_member_rpm_default_positive"),
+        ),
+        sa.CheckConstraint(
+            "member_tpm_default IS NULL OR member_tpm_default > 0",
+            name=op.f("ck_teams_member_tpm_default_positive"),
         ),
         sa.CheckConstraint(
             "rpm_limit IS NULL OR rpm_limit > 0", name=op.f("ck_teams_rpm_positive")
@@ -1035,6 +1092,71 @@ def upgrade() -> None:
             ondelete="SET NULL",
         ),
         sa.PrimaryKeyConstraint("scope", "gateway_id", name=op.f("pk_gateway_sessions")),
+    )
+    op.create_table(
+        "member_policies",
+        sa.Column("team_id", sa.Uuid(), nullable=False),
+        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("rpm_limit", sa.Integer(), nullable=True),
+        sa.Column("tpm_limit", sa.BigInteger(), nullable=True),
+        sa.Column("max_parallel", sa.Integer(), nullable=True),
+        sa.Column("budget_nano_usd", sa.BigInteger(), nullable=True),
+        sa.Column(
+            "model_access",
+            sa.Enum(
+                "inherit",
+                "all",
+                "list",
+                name="model_access",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            server_default="inherit",
+            nullable=False,
+        ),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "budget_nano_usd IS NULL OR budget_nano_usd >= 0",
+            name=op.f("ck_member_policies_budget_nonneg"),
+        ),
+        sa.CheckConstraint(
+            "max_parallel IS NULL OR max_parallel > 0",
+            name=op.f("ck_member_policies_parallel_positive"),
+        ),
+        sa.CheckConstraint(
+            "rpm_limit IS NULL OR rpm_limit > 0", name=op.f("ck_member_policies_rpm_positive")
+        ),
+        sa.CheckConstraint(
+            "tpm_limit IS NULL OR tpm_limit > 0", name=op.f("ck_member_policies_tpm_positive")
+        ),
+        sa.ForeignKeyConstraint(
+            ["team_id"],
+            ["teams.id"],
+            name=op.f("fk_member_policies_team_id_teams"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name=op.f("fk_member_policies_user_id_users"),
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("team_id", "user_id", name=op.f("pk_member_policies")),
+    )
+    op.create_index(
+        op.f("ix_member_policies_user_id"), "member_policies", ["user_id"], unique=False
     )
     op.create_table(
         "router_fallbacks",
@@ -1203,24 +1325,6 @@ def upgrade() -> None:
             ),
             nullable=False,
         ),
-        sa.Column("rpm_limit", sa.Integer(), nullable=True),
-        sa.Column("tpm_limit", sa.BigInteger(), nullable=True),
-        sa.Column("max_parallel", sa.Integer(), nullable=True),
-        sa.Column("budget_nano_usd", sa.BigInteger(), nullable=True),
-        sa.Column(
-            "model_access",
-            sa.Enum(
-                "inherit",
-                "all",
-                "list",
-                name="model_access",
-                native_enum=False,
-                create_constraint=True,
-                length=32,
-            ),
-            server_default="inherit",
-            nullable=False,
-        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -1232,20 +1336,6 @@ def upgrade() -> None:
             sa.DateTime(timezone=True),
             server_default=sa.text("now()"),
             nullable=False,
-        ),
-        sa.CheckConstraint(
-            "budget_nano_usd IS NULL OR budget_nano_usd >= 0",
-            name=op.f("ck_team_members_budget_nonneg"),
-        ),
-        sa.CheckConstraint(
-            "max_parallel IS NULL OR max_parallel > 0",
-            name=op.f("ck_team_members_parallel_positive"),
-        ),
-        sa.CheckConstraint(
-            "rpm_limit IS NULL OR rpm_limit > 0", name=op.f("ck_team_members_rpm_positive")
-        ),
-        sa.CheckConstraint(
-            "tpm_limit IS NULL OR tpm_limit > 0", name=op.f("ck_team_members_tpm_positive")
         ),
         sa.ForeignKeyConstraint(
             ["team_id"],
@@ -1303,6 +1393,9 @@ def upgrade() -> None:
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_by_user_id", sa.Uuid(), nullable=True),
+        sa.Column("rpm_limit", sa.Integer(), nullable=True),
+        sa.Column("tpm_limit", sa.BigInteger(), nullable=True),
+        sa.Column("max_parallel", sa.Integer(), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -1331,10 +1424,19 @@ def upgrade() -> None:
             "(previous_key_hash IS NULL) = (previous_key_expires_at IS NULL)",
             name=op.f("ck_api_keys_previous_key_pair"),
         ),
+        sa.CheckConstraint(
+            "max_parallel IS NULL OR max_parallel > 0", name=op.f("ck_api_keys_parallel_positive")
+        ),
         sa.CheckConstraint("octet_length(key_hash) = 32", name=op.f("ck_api_keys_key_hash_len")),
         sa.CheckConstraint(
             "previous_key_hash IS NULL OR octet_length(previous_key_hash) = 32",
             name=op.f("ck_api_keys_previous_key_hash_len"),
+        ),
+        sa.CheckConstraint(
+            "rpm_limit IS NULL OR rpm_limit > 0", name=op.f("ck_api_keys_rpm_positive")
+        ),
+        sa.CheckConstraint(
+            "tpm_limit IS NULL OR tpm_limit > 0", name=op.f("ck_api_keys_tpm_positive")
         ),
         sa.ForeignKeyConstraint(
             ["created_by_user_id"],
@@ -1396,17 +1498,25 @@ def upgrade() -> None:
         "policy_grants",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("name_id", sa.Uuid(), nullable=False),
-        sa.Column("team_id", sa.Uuid(), nullable=False),
+        sa.Column("org_id", sa.Uuid(), nullable=True),
+        sa.Column("team_id", sa.Uuid(), nullable=True),
         sa.Column("user_id", sa.Uuid(), nullable=True),
         sa.Column("service_account_id", sa.Uuid(), nullable=True),
         sa.CheckConstraint(
-            "user_id IS NULL OR service_account_id IS NULL", name=op.f("ck_policy_grants_one_owner")
+            "(org_id IS NOT NULL AND team_id IS NULL AND user_id IS NULL"
+            " AND service_account_id IS NULL)"
+            " OR (org_id IS NULL AND team_id IS NOT NULL"
+            " AND NOT (user_id IS NOT NULL AND service_account_id IS NOT NULL))",
+            name=op.f("ck_policy_grants_owner_shape"),
         ),
         sa.ForeignKeyConstraint(
             ["name_id"],
             ["catalog_names.id"],
             name=op.f("fk_policy_grants_name_id_catalog_names"),
             ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["org_id"], ["orgs.id"], name=op.f("fk_policy_grants_org_id_orgs"), ondelete="CASCADE"
         ),
         sa.ForeignKeyConstraint(
             ["service_account_id", "team_id"],
@@ -1416,8 +1526,8 @@ def upgrade() -> None:
         ),
         sa.ForeignKeyConstraint(
             ["team_id", "user_id"],
-            ["team_members.team_id", "team_members.user_id"],
-            name=op.f("fk_policy_grants_team_id_user_id_team_members"),
+            ["member_policies.team_id", "member_policies.user_id"],
+            name=op.f("fk_policy_grants_team_id_user_id_member_policies"),
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
@@ -1437,6 +1547,13 @@ def upgrade() -> None:
         postgresql_where=sa.text("user_id IS NOT NULL"),
     )
     op.create_index(
+        "uq_policy_grants_org",
+        "policy_grants",
+        ["org_id", "name_id"],
+        unique=True,
+        postgresql_where=sa.text("org_id IS NOT NULL"),
+    )
+    op.create_index(
         "uq_policy_grants_service_account",
         "policy_grants",
         ["service_account_id", "name_id"],
@@ -1448,7 +1565,9 @@ def upgrade() -> None:
         "policy_grants",
         ["team_id", "name_id"],
         unique=True,
-        postgresql_where=sa.text("user_id IS NULL AND service_account_id IS NULL"),
+        postgresql_where=sa.text(
+            "user_id IS NULL AND service_account_id IS NULL AND org_id IS NULL"
+        ),
     )
     op.create_table(
         "router_split_members",
@@ -1486,6 +1605,11 @@ def upgrade() -> None:
     op.create_index(
         op.f("ix_router_split_members_model_id"), "router_split_members", ["model_id"], unique=False
     )
+    op.execute(CONFIG_VERSIONS_IMMUTABLE)
+    op.execute(
+        "CREATE TRIGGER config_versions_immutable BEFORE UPDATE ON config_versions"
+        " FOR EACH ROW EXECUTE FUNCTION lumewarp_config_versions_immutable()"
+    )
 
 
 def downgrade() -> None:
@@ -1496,12 +1620,19 @@ def downgrade() -> None:
     op.drop_index(
         "uq_policy_grants_team",
         table_name="policy_grants",
-        postgresql_where=sa.text("user_id IS NULL AND service_account_id IS NULL"),
+        postgresql_where=sa.text(
+            "user_id IS NULL AND service_account_id IS NULL AND org_id IS NULL"
+        ),
     )
     op.drop_index(
         "uq_policy_grants_service_account",
         table_name="policy_grants",
         postgresql_where=sa.text("service_account_id IS NOT NULL"),
+    )
+    op.drop_index(
+        "uq_policy_grants_org",
+        table_name="policy_grants",
+        postgresql_where=sa.text("org_id IS NOT NULL"),
     )
     op.drop_index(
         "uq_policy_grants_member",
@@ -1528,6 +1659,8 @@ def downgrade() -> None:
     op.drop_table("router_members")
     op.drop_index(op.f("ix_router_fallbacks_model_id"), table_name="router_fallbacks")
     op.drop_table("router_fallbacks")
+    op.drop_index(op.f("ix_member_policies_user_id"), table_name="member_policies")
+    op.drop_table("member_policies")
     op.drop_table("gateway_sessions")
     op.drop_index(op.f("ix_user_sessions_user_id"), table_name="user_sessions")
     op.drop_table("user_sessions")
@@ -1538,6 +1671,7 @@ def downgrade() -> None:
     op.drop_table("routers")
     op.drop_index(op.f("ix_personal_access_tokens_user_id"), table_name="personal_access_tokens")
     op.drop_table("personal_access_tokens")
+    op.drop_table("org_budget_windows")
     op.drop_index(op.f("ix_org_admins_user_id"), table_name="org_admins")
     op.drop_table("org_admins")
     op.drop_index(op.f("ix_models_upstream_id"), table_name="models")

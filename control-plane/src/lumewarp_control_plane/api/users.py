@@ -22,7 +22,7 @@ from lumewarp_control_plane.api.common import (
     uuid_page,
     validation_error,
 )
-from lumewarp_control_plane.api.policy import effective, policy_of
+from lumewarp_control_plane.api.policy import policy_of
 from lumewarp_control_plane.api.schemas import (
     MeBudgetOut,
     MeKeyLimitsOut,
@@ -46,6 +46,8 @@ from lumewarp_control_plane.models import (
     InstallationRole,
     KeyLifecycle,
     KeyOwnerKind,
+    MemberPolicy,
+    Org,
     PersonalAccessToken,
     ScopeType,
     Team,
@@ -56,6 +58,13 @@ from lumewarp_control_plane.models import (
     member_scope_id,
 )
 from lumewarp_control_plane.orgs import live_orgs
+from lumewarp_control_plane.quota import (
+    BudgetLevel,
+    org_effective,
+    owner_effective,
+    remaining_nano_usd,
+    team_effective,
+)
 from lumewarp_control_plane.security import Principal, SecretKind, generate_secret
 from lumewarp_control_plane.windows import month_window
 
@@ -150,24 +159,32 @@ async def _team_details(
 ) -> list[MeTeamOut]:
     """Enrich memberships with what a key of this member could do in each team.
 
-    The model list is the member's *effective* set (team policy narrowed by the member
-    policy), never the team's full list, so `/users/me` cannot widen what a member may
-    read. The team budget and the team's spend are only filled for a team admin or an
-    installation admin: a plain member gets the member scope and the effective remaining
-    amount (computed here), not the team's numbers. Spend is the current UTC month; a
-    missing local member row (external IAM) means only the team level applies, exactly as
-    in the compiler.
+    The model list and the limits are the member's *effective* policy from the one
+    resolver (`quota`), org included; they never widen what a member may read. The org and
+    team budgets and spends are only filled for a team admin or an installation admin: a
+    plain member gets the effective remaining amount, computed server-side. Spend is the
+    current UTC month. A missing local member row (external IAM) still gets the team's
+    member defaults, exactly as in the compiler.
     """
     if not rows:
         return []
     catalog = sorted((await session.scalars(select(CatalogName.name))).all())
     window_start, window_end = month_window(datetime.now(UTC))
     team_ids = [team.id for team, _, _ in rows]
+    org_ids = {team.org_id for team, _, _ in rows}
+    orgs = {org.id: org for org in await session.scalars(select(Org).where(Org.id.in_(org_ids)))}
+    # Every team of these orgs, so the org spend is derived from its whole subtree.
+    org_team_ids = {
+        team_id: org_id
+        for team_id, org_id in await session.execute(
+            select(Team.id, Team.org_id).where(Team.org_id.in_(org_ids))
+        )
+    }
     member_ids = [
         member_scope_id(team.id, user_id) for team, _, member in rows if member is not None
     ]
     scope_filters = [
-        and_(UsageTotal.scope_type == ScopeType.TEAM, UsageTotal.scope_id.in_(team_ids))
+        and_(UsageTotal.scope_type == ScopeType.TEAM, UsageTotal.scope_id.in_(org_team_ids))
     ]
     if member_ids:
         scope_filters.append(
@@ -181,6 +198,9 @@ async def _team_details(
             )
         )
     }
+    org_spent: dict[uuid.UUID, int] = {}
+    for team_id, org_id in org_team_ids.items():
+        org_spent[org_id] = org_spent.get(org_id, 0) + spent.get((ScopeType.TEAM, team_id), 0)
     key_counts = {
         team_id: count
         for team_id, count in await session.execute(
@@ -194,32 +214,56 @@ async def _team_details(
             .group_by(ApiKey.team_id)
         )
     }
-    details: list[MeTeamOut] = []
-    for team, role, member in rows:
-        team_limits = policy_of(team)
-        # The team scope is the team-admin view. An installation admin passes every
-        # team's checks, even without a direct admin role.
-        can_read_team = installation_admin or role is TeamRole.ADMIN
-        effective_limits = (
-            effective(None, team_limits)
-            if member is None
-            else effective(effective(None, team_limits), policy_of(member))
-        )
-        member_limits = policy_of(member) if member is not None else None
-        member_spent = (
-            spent.get((ScopeType.MEMBER, member_scope_id(team.id, user_id)), 0)
-            if member is not None
-            else 0
-        )
-        team_spent = spent.get((ScopeType.TEAM, team.id), 0)
-        remaining = [
-            max(limit - used, 0)
-            for limit, used in (
-                (team_limits.budget_nano_usd, team_spent),
-                (member_limits.budget_nano_usd if member_limits else None, member_spent),
+    member_policies = {
+        (policy.team_id, policy.user_id): policy
+        for policy in await session.scalars(
+            select(MemberPolicy).where(
+                MemberPolicy.team_id.in_(team_ids), MemberPolicy.user_id == user_id
             )
-            if limit is not None
-        ]
+        )
+    }
+    details: list[MeTeamOut] = []
+    for team, role, _member in rows:
+        org = orgs[team.org_id]
+        team_limits = policy_of(team)
+        member_policy = member_policies.get((team.id, user_id))
+        member_limits = policy_of(member_policy) if member_policy is not None else None
+        team_eff = team_effective(org_effective(org), team)
+        effective_limits = owner_effective(
+            team_eff,
+            team,
+            member_limits,
+            service_account=False,
+        )
+        # The member scope exists for external-backend members too (their keys compile
+        # with the same uuid5 id), so read it even without a local membership row.
+        member_spent = spent.get((ScopeType.MEMBER, member_scope_id(team.id, user_id)), 0)
+        team_spent = spent.get((ScopeType.TEAM, team.id), 0)
+        org_spend = org_spent.get(org.id, 0)
+        budgets: list[BudgetLevel] = []
+        for level, scope_id, budget, used in (
+            (ScopeType.ORG, org.id, org.budget_nano_usd, org_spend),
+            (ScopeType.TEAM, team.id, team_limits.budget_nano_usd, team_spent),
+            (
+                ScopeType.MEMBER,
+                member_scope_id(team.id, user_id),
+                member_limits.budget_nano_usd if member_limits else None,
+                member_spent,
+            ),
+        ):
+            if budget is not None:
+                budgets.append(
+                    BudgetLevel(
+                        level=level,
+                        scope_id=scope_id,
+                        budget_nano_usd=budget,
+                        spent_nano_usd=used,
+                    )
+                )
+        # The team scope is the team-admin view. An installation admin passes every
+        # team's checks, even without a direct admin role. The org scope is visible to
+        # org admins too; `role` is only the direct team role, so it follows the team view.
+        can_read_team = installation_admin or role is TeamRole.ADMIN
         details.append(
             MeTeamOut(
                 team_id=team.id,
@@ -240,13 +284,15 @@ async def _team_details(
                     key_count=key_counts.get(team.id, 0),
                 ),
                 budget=MeBudgetOut(
+                    org_budget_nano_usd=(org.budget_nano_usd if can_read_team else None),
+                    org_spent_nano_usd=(org_spend if can_read_team else None),
                     team_budget_nano_usd=(team_limits.budget_nano_usd if can_read_team else None),
                     team_spent_nano_usd=team_spent if can_read_team else None,
                     member_budget_nano_usd=(
                         member_limits.budget_nano_usd if member_limits else None
                     ),
                     member_spent_nano_usd=member_spent,
-                    remaining_nano_usd=min(remaining) if remaining else None,
+                    remaining_nano_usd=remaining_nano_usd(budgets),
                     window_start=window_start,
                     window_end=window_end,
                 ),

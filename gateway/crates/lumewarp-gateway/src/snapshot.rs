@@ -117,6 +117,9 @@ pub fn strategy_headers(r: &pb::Router) -> Result<Vec<String>, ApplyError> {
 /// Upper bounds that keep split labels and per-request work bounded.
 pub const MAX_SPLITS: usize = 16;
 pub const MAX_SPLIT_NAME: usize = 32;
+/// org, team, owner (member/service account) and key: the four levels of the quota
+/// hierarchy. A key with more is rejected instead of costing extra limiter lookups.
+pub const MAX_RATE_LIMIT_SCOPES: usize = 4;
 pub const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_KEYS: usize = 200_000;
 pub const FILE_NAME: &str = "snapshot.pb";
@@ -381,6 +384,12 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
         if policy.allowed_models.iter().any(String::is_empty) {
             return Err(ApplyError::invalid(format!(
                 "key {id:?} allows an empty model name"
+            )));
+        }
+        if policy.rate_limit_scopes.len() > MAX_RATE_LIMIT_SCOPES {
+            return Err(ApplyError::invalid(format!(
+                "key {id:?} has {} rate limit scopes, over the limit of {MAX_RATE_LIMIT_SCOPES}",
+                policy.rate_limit_scopes.len()
             )));
         }
         let mut own = HashSet::new();
@@ -1449,6 +1458,21 @@ pub(crate) mod tests {
         s.api_keys[0].policy.as_mut().unwrap().rate_limit_scopes = vec![scope("team:t1", 1)];
         s.api_keys[1].policy.as_mut().unwrap().rate_limit_scopes = vec![scope("team:t1", 1)];
         validate(&s, SUPPORTED_CAPABILITIES).unwrap();
+        // Exactly four levels (org, team, owner, key) are accepted...
+        let four = ["org:o1", "team:t1", "member:m1", "key:k1"];
+        let mut s = base();
+        s.api_keys[0].policy.as_mut().unwrap().rate_limit_scopes =
+            four.iter().map(|id| scope(id, 100)).collect();
+        validate(&s, SUPPORTED_CAPABILITIES).unwrap();
+        // ...a fifth is rejected before any request-path work is possible.
+        let err = invalid(|s| {
+            s.api_keys[0].policy.as_mut().unwrap().rate_limit_scopes = four
+                .iter()
+                .map(|id| scope(id, 100))
+                .chain([scope("sa:s1", 100)])
+                .collect()
+        });
+        assert!(err.reason.contains("over the limit of 4"), "{err}");
     }
 
     #[test]

@@ -27,7 +27,6 @@ from lumewarp_control_plane.api.common import (
 from lumewarp_control_plane.api.policy import (
     apply_policy,
     policy_from_fields,
-    policy_of,
     save_grants,
     validate_owner_policy,
 )
@@ -41,6 +40,7 @@ from lumewarp_control_plane.api.schemas import (
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import ApiError, not_found
 from lumewarp_control_plane.models import (
+    MemberPolicy,
     ModelAccess,
     Team,
     TeamMember,
@@ -48,11 +48,13 @@ from lumewarp_control_plane.models import (
     User,
     member_scope_id,
 )
+from lumewarp_control_plane.quota import Policy, policy_of
 
 router = APIRouter(tags=["members"])
 
 
-def _out(member: TeamMember, user: User) -> MemberOut:
+def _out(member: TeamMember, user: User, policy: MemberPolicy | None) -> MemberOut:
+    """A member without a policy row reads as INHERIT with no limits or budget."""
     return MemberOut(
         team_id=member.team_id,
         user_id=member.user_id,
@@ -63,12 +65,22 @@ def _out(member: TeamMember, user: User) -> MemberOut:
         member_scope_id=member_scope_id(member.team_id, member.user_id),
         created_at=member.created_at,
         updated_at=member.updated_at,
-        model_access=member.model_access,
-        allowed_models=list(member.allowed_models),
-        rpm_limit=member.rpm_limit,
-        tpm_limit=member.tpm_limit,
-        max_parallel=member.max_parallel,
-        budget_nano_usd=member.budget_nano_usd,
+        model_access=(policy.model_access if policy is not None else ModelAccess.INHERIT),
+        allowed_models=(list(policy.allowed_models) if policy is not None else []),
+        rpm_limit=policy.rpm_limit if policy is not None else None,
+        tpm_limit=policy.tpm_limit if policy is not None else None,
+        max_parallel=policy.max_parallel if policy is not None else None,
+        budget_nano_usd=policy.budget_nano_usd if policy is not None else None,
+    )
+
+
+async def _policy_or_none(
+    session: AsyncSession, team_id: uuid.UUID, user_id: uuid.UUID, *, lock: bool = False
+) -> MemberPolicy | None:
+    return (
+        await session.get(MemberPolicy, (team_id, user_id), with_for_update=True)
+        if lock
+        else await session.get(MemberPolicy, (team_id, user_id))
     )
 
 
@@ -116,8 +128,21 @@ async def list_members(
         stmt = stmt.where(TeamMember.user_id > parse_uuid_cursor(cursor))
     rows = (await session.execute(stmt.limit(limit + 1))).all()
     next_cursor = str(rows[limit - 1][0].user_id) if len(rows) > limit else None
+    policies = {
+        (row.team_id, row.user_id): row
+        for row in await session.scalars(
+            select(MemberPolicy).where(
+                MemberPolicy.team_id == team.id,
+                MemberPolicy.user_id.in_([member.user_id for member, _ in rows[:limit]]),
+            )
+        )
+    }
     return Page[MemberOut](
-        items=[_out(member, user) for member, user in rows[:limit]], next_cursor=next_cursor
+        items=[
+            _out(member, user, policies.get((member.team_id, member.user_id)))
+            for member, user in rows[:limit]
+        ],
+        next_cursor=next_cursor,
     )
 
 
@@ -199,11 +224,15 @@ async def _save_member(
         if not user.is_active:
             raise conflict("user is not active")
         user_id = user.id
-        policy = policy_from_fields(body, default_mode=ModelAccess.INHERIT)
         row = await session.get(TeamMember, (team.id, user_id), with_for_update=True)
-        await validate_owner_policy(
-            session, team, policy, policy_of(row) if row is not None else None
-        )
+        policy_row = await _policy_or_none(session, team.id, user_id, lock=True)
+        # PUT replaces the member's policy: omitted fields take the INHERIT/no-limit
+        # defaults instead of keeping the stored row. The stored row is the validation
+        # base, so a value the PUT resends unchanged is not rechecked after a parent
+        # decrease (a real change, or a clear, is still checked).
+        base = policy_of(policy_row) if policy_row is not None else None
+        proposed = policy_from_fields(body, default_mode=ModelAccess.INHERIT)
+        await validate_owner_policy(session, team, proposed, base)
         created = row is None
         if create_only and not created:
             raise conflict("user is already a member of this team")
@@ -215,9 +244,18 @@ async def _save_member(
             session.add(row)
         else:
             row.role = body.role
-        apply_policy(row, policy)
+        if policy_row is None and proposed == Policy(ModelAccess.INHERIT, ()):
+            # No exception and no grants: leaving the row out keeps membership only.
+            pass
+        else:
+            if policy_row is None:
+                policy_row = MemberPolicy(team_id=team.id, user_id=user_id)
+                session.add(policy_row)
+            apply_policy(policy_row, proposed)
+            await session.flush()
+            await save_grants(session, policy_row, proposed)
+            await session.refresh(policy_row)
         await session.flush()
-        await save_grants(session, row, policy)
         await session.refresh(row)
         audit.record(
             session,
@@ -231,7 +269,7 @@ async def _save_member(
         await enqueue_recompile(session, settings, "api.member.put")
     if created:
         response.status_code = status.HTTP_201_CREATED
-    return _out(row, user)
+    return _out(row, user, policy_row)
 
 
 @router.patch(
@@ -257,13 +295,19 @@ async def update_member(
         ensure_grants_managed(request)
         if "role" in body.model_fields_set and body.role is None:
             raise validation_error("role", "cannot be null")
-        base = policy_of(row)
+        policy_row = await _policy_or_none(session, team.id, user_id, lock=True)
+        base = policy_of(policy_row) if policy_row is not None else Policy(ModelAccess.INHERIT, ())
         proposed = policy_from_fields(body, default_mode=ModelAccess.INHERIT, base=base)
-        await validate_owner_policy(session, team, proposed, base)
+        await validate_owner_policy(session, team, proposed, None if policy_row is None else base)
         changed = proposed != base
         if changed:
-            apply_policy(row, proposed)
-            await save_grants(session, row, proposed)
+            if policy_row is None:
+                policy_row = MemberPolicy(team_id=team.id, user_id=user_id)
+                session.add(policy_row)
+            apply_policy(policy_row, proposed)
+            await session.flush()
+            await save_grants(session, policy_row, proposed)
+            await session.refresh(policy_row)
         if body.role is not None and body.role is not row.role:
             await _ensure_admin_role_change(authz, team.id, row.role, body.role)
             row.role = body.role
@@ -284,7 +328,7 @@ async def update_member(
             },
         )
         await enqueue_recompile(session, settings, "api.member.update")
-    return _out(row, user)
+    return _out(row, user, policy_row)
 
 
 @router.delete(

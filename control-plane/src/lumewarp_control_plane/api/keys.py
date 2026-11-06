@@ -34,6 +34,11 @@ from lumewarp_control_plane.api.common import (
     parse_uuid_cursor,
     validation_error,
 )
+from lumewarp_control_plane.api.policy import (
+    owner_effective_of,
+    policy_of,
+    validate_key_limits,
+)
 from lumewarp_control_plane.api.schemas import (
     KeyCreate,
     KeyRotate,
@@ -57,6 +62,7 @@ from lumewarp_control_plane.models import (
     ApiKey,
     KeyLifecycle,
     KeyOwnerKind,
+    MemberPolicy,
     ServiceAccount,
     Team,
     TeamMember,
@@ -74,6 +80,7 @@ router = APIRouter(tags=["keys"])
 KEY_WRITE_WINDOW_SECONDS = 60
 KEY_CREATE_LIMIT = 30
 KEY_ROTATE_LIMIT = 30
+KEY_UPDATE_LIMIT = 30
 MAX_LIMITER_ENTRIES = 10_000
 
 
@@ -83,8 +90,8 @@ class KeyWriteLimiter:
 
     `entries` is the live table and `expiries` is ordered by expiry (every counter keeps its
     original deadline), so a call only pops the expired front instead of rebuilding the
-    table. At most two entries exist per principal (create and rotate), so the capacity
-    bounds principals. Normal hits and refusals are O(1). A full table refuses a new scope
+    table. At most three entries exist per principal (create, rotate and update), so the
+    capacity bounds principals. Normal hits and refusals are O(1). A full table refuses a new scope
     and never evicts a live counter: no one can free another principal's quota by creating
     targets.
     """
@@ -161,6 +168,47 @@ async def _rate_limit(
             f"too many key {operation} attempts; retry later",
             {"Retry-After": str(retry_after)},
         )
+
+
+async def _owner_effective(session: AsyncSession, team: Team, key: ApiKey):
+    """The effective policy of a key's owner (member exception/defaults or the account)."""
+    if key.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT:
+        account = await session.get(ServiceAccount, key.service_account_id)
+        if account is None:
+            raise not_found("service account not found")
+        return await owner_effective_of(session, team, policy_of(account), service_account=True)
+    policy_row = await session.get(MemberPolicy, (key.team_id, key.user_id))
+    return await owner_effective_of(
+        session, team, policy_of(policy_row) if policy_row is not None else None
+    )
+
+
+async def _check_key_limits(
+    session: AsyncSession,
+    team: Team,
+    key: ApiKey,
+    body: KeyCreate | KeyUpdate,
+    *,
+    create: bool = False,
+) -> None:
+    """A key's limits may not exceed its owner's effective values (422).
+
+    Only *changed* values are checked. On create every supplied limit is new; on update a
+    supplied value equal to the stored one is not rechecked, so after the owner's limit
+    shrank a PATCH of another limit (or of an unchanged one) still succeeds. The other
+    fields are passed as None and therefore not validated.
+    """
+    supplied = body.model_fields_set & {"rpm_limit", "tpm_limit", "max_parallel"}
+    changed = {field for field in supplied if create or getattr(body, field) != getattr(key, field)}
+    if not changed:
+        return
+    effective = await _owner_effective(session, team, key)
+    await validate_key_limits(
+        effective,
+        rpm_limit=body.rpm_limit if "rpm_limit" in changed else None,
+        tpm_limit=body.tpm_limit if "tpm_limit" in changed else None,
+        max_parallel=body.max_parallel if "max_parallel" in changed else None,
+    )
 
 
 async def _member_key_expiry(
@@ -379,9 +427,13 @@ async def create_key(
             display_prefix=new.display_prefix,
             lifecycle=KeyLifecycle.ACTIVE,
             expires_at=expires_at,
+            rpm_limit=body.rpm_limit,
+            tpm_limit=body.tpm_limit,
+            max_parallel=body.max_parallel,
             created_by_user_id=authz.user_id,
             **owner,
         )
+        await _check_key_limits(session, team, row, body, create=True)
         session.add(row)
         await session.flush()
         await session.refresh(row)
@@ -417,11 +469,13 @@ async def get_key(key_id: uuid.UUID, authz: Authz, session: SessionDep) -> KeyOu
 async def update_key(
     key_id: uuid.UUID,
     body: KeyUpdate,
+    request: Request,
     authz: Authz,
     session: SessionDep,
     settings: SettingsDep,
     metrics: MetricsDep,
 ) -> KeyOut:
+    await _rate_limit(request, authz, "update", KEY_UPDATE_LIMIT, metrics)
     async with mutation(session):
         await lock_scope(session, settings)
         ensure_not_null(body, "name")
@@ -443,6 +497,17 @@ async def update_key(
                     raise not_found("team not found")
                 _check_member_expiry(team, body.expires_at)
             row.expires_at = body.expires_at
+        limit_fields = ("rpm_limit", "tpm_limit", "max_parallel")
+        if body.model_fields_set & set(limit_fields):
+            # The owner's effective limits cap the key. A limits-only PATCH never touches
+            # `lifecycle` or `suspended_reason`; those stay with their own branches.
+            team = await session.get(Team, row.team_id)
+            if team is None:
+                raise not_found("team not found")
+            await _check_key_limits(session, team, row, body)
+            for field in limit_fields:
+                if field in body.model_fields_set:
+                    setattr(row, field, getattr(body, field))
         admin_action = (
             Action.SERVICE_ACCOUNT_MANAGE
             if row.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT

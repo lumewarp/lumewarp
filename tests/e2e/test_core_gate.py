@@ -196,6 +196,42 @@ def test_budget_exhaustion_blocks_key_within_five_seconds(stack, scope, owner_ki
     assert gw.chat(seeded.b.secret).status_code == 429, "same owner and team, same budget"
 
 
+def test_org_rate_limit_decrease_blocks_at_the_lower_value(stack):
+    """A parent decrease below the team's setting is live after one compile.
+
+    The org scope is the last line of defence: the team allows 1000 rpm but the org was
+    lowered to 2, so the gateway admits two requests and then answers 429. Team and owner
+    values are unchanged; the minimum down the chain is what the gateway enforces.
+    """
+    seeded = stack.seed()
+    stack.ok("PATCH", f"/teams/{seeded.team_id}", json={"rpm_limit": 1000})
+    (org_id,) = pg(stack.dsn, "SELECT org_id FROM teams WHERE id = $1", uuid.UUID(seeded.team_id))[
+        0
+    ].values()
+    pg(stack.dsn, "UPDATE orgs SET rpm_limit = 1000 WHERE id = $1", org_id)
+    gw = stack.start_gateway()
+    assert gw.chat(seeded.a.secret).status_code == 200
+    # Let the 1000-rpm bucket drain so the lower rate starts from an empty bucket.
+    time.sleep(0.2)
+
+    pg(stack.dsn, "UPDATE orgs SET rpm_limit = 2 WHERE id = $1", org_id)
+    version = stack.current_version()
+    # Any write that enqueues a compile picks up the direct SQL change (there is no org
+    # write API yet); a rename is the smallest one.
+    stack.ok(
+        "PATCH", f"/teams/{seeded.team_id}", json={"name": f"org-limit-{uuid.uuid4().hex[:8]}"}
+    )
+    wait_for(lambda: stack.current_version() > version, 10, "a new config version")
+    target = stack.current_version()
+    wait_for(
+        lambda: (stack.gateway_status() or {}).get("acked_version") == target,
+        10,
+        "gateway ACKed the org decrease",
+    )
+    statuses = [gw.chat(seeded.a.secret).status_code for _ in range(3)]
+    assert statuses == [200, 200, 429], statuses
+
+
 def test_authz_denials(stack):
     seeded = stack.seed()
     admin = stack.create_pat("admin@e2e.test", seeded.team_id, "admin")

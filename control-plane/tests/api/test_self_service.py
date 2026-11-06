@@ -31,6 +31,7 @@ from tests.api.helpers import (
     user_with_token,
 )
 from tests.factories import (
+    make_key,
     make_member,
     make_service_account,
     make_team,
@@ -476,6 +477,34 @@ async def test_rate_limits_are_per_principal_not_per_target_and_429_is_not_audit
         )
         == 1
     )
+
+
+async def test_update_is_rate_limited_before_the_target_lookup(client, committed) -> None:
+    """A limits/name PATCH triggers a recompile, so it gets its own per-principal limit.
+
+    The refusal happens after authentication and before the key is loaded, so a caller
+    cannot buy quota with unknown ids and a 429 is not audited.
+    """
+    team = await make_team(committed)
+    user, token = await user_with_token(committed)
+    await make_member(committed, team, user)
+    key = await make_key(committed, team, user)
+    await committed.commit()
+    headers = auth(token)
+    for i in range(keys_module.KEY_UPDATE_LIMIT):
+        response = client.patch(
+            f"/api/v1/keys/{key.id}", json={"name": f"renamed-{i}"}, headers=headers
+        )
+        assert response.status_code == 200, response.text
+    limited = client.patch(f"/api/v1/keys/{key.id}", json={"name": "too-many"}, headers=headers)
+    assert limited.status_code == 429, limited.text
+    assert limited.json()["error"]["code"] == "rate_limited"
+    assert int(limited.headers["Retry-After"]) >= 1
+    # A foreign or unknown id is refused by the limiter before the lookup, not by 404.
+    unknown = client.patch(f"/api/v1/keys/{uuid.uuid4()}", json={"name": "x"}, headers=headers)
+    assert unknown.status_code == 429, unknown.text
+    # 429s are metric-only.
+    assert await _audit_count(committed, [team.id], "key.update") == keys_module.KEY_UPDATE_LIMIT
 
 
 @pytest.mark.parametrize("caller", ["break_glass", "installation_admin"])

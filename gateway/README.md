@@ -416,10 +416,14 @@ the removed `Accept-Encoding` is forwarded as is and counted in
 | `keys[].allow_all_models` | `false` | Allow every name, present and future. |
 | `keys[].allowed_models` | `[]` | Names of any kind the key may call when `allow_all_models` is false. A grant covers exactly that name: a router's members and an alias's target need their own. **Fail-closed:** a key with neither may call nothing. |
 | `keys[].rate_limits` | Absent | Limits for this key alone (scope `key:<key_id>`). |
+| `keys[].scopes` | Absent | Explicit scopes: a list of `{id, requests_per_minute, tokens_per_minute, max_parallel_requests}`. Replaces the team/key shorthand for this key and lets a standalone config reproduce the control plane's `org:`/`member:`/`sa:` levels. At most four; the gateway rejects a snapshot with more. |
 
 `rate_limits` objects have `requests_per_minute`, `tokens_per_minute` and
 `max_parallel_requests` (each `0`/absent = unlimited). They are compiled into
-per-key `RateLimitScope`s (team scope first, then key scope); limiter state is
+per-key `RateLimitScope`s (team scope first, then key scope); the control plane can
+also emit `org:<id>` and `member:<id>`/`sa:<id>`, one per level that sets a limit.
+A key has at most four scopes; a snapshot with more is NACKed INVALID_CONFIG.
+Limiter state is
 keyed by scope id, so it survives reloads, and it is local to one gateway
 instance (N instances allow up to N times the limit). A request acquires all of
 its scopes or none: `requests_per_minute` and `max_parallel_requests` are checked

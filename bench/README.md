@@ -104,6 +104,32 @@ BENCH_AUTH=1 BENCH_REWRITE=1 BENCH_EMBED_BYTES=3145728 \
   MOCK_PORT=9100 LUMEWARP_PORT=4100 LITELLM_PORT=4101 bench/scripts/run.sh --full
 ```
 
+## Scope overhead (A6, quota hierarchy)
+
+`bench/scripts/scope_overhead.py` isolates the request-path cost of rate-limit scopes: the
+release gateway in standalone mode, one key per scenario, same mock and load generator.
+
+| scenario | scopes on the key |
+| --- | --- |
+| `scopes-0` | none (baseline) |
+| `scopes-2` | `team:` + `key:` |
+| `scopes-4` | `org:` + `team:` + `sa:` + `key:` (the maximum) |
+| `scopes-org-shared` | 8 keys, all on one `org:` bucket, 8 parallel `oha` processes |
+
+It reports each scenario's p99 and the overhead against the 0-scope key on the same
+gateway; the gate is no regression (p99 overhead <= 0.2 ms, zero errors). This is not the
+LiteLLM A6 ratio; `bench/scripts/run.sh --quick` remains that gate.
+
+```sh
+# 9000 may be MinIO and 9100 may be a dev mock upstream on this box
+MOCK_PORT=9200 GATEWAY_PORT=4100 bench/scripts/scope_overhead.py
+MOCK_PORT=9200 GATEWAY_PORT=4100 bench/scripts/scope_overhead.py --full --no-build
+```
+
+The standalone YAML expresses the scopes with `keys[].scopes` (explicit ids and limits),
+which replaces the `teams[].rate_limits` / `keys[].rate_limits` shorthand for that key;
+the control plane emits the same `RateLimitScope`s.
+
 ## Prerequisites
 
 - Rust toolchain (asdf) for release builds.

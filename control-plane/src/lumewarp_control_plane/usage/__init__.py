@@ -24,11 +24,11 @@ from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.models import (
     ActorType,
     ApiKey,
+    MemberPolicy,
     RequestOutcome,
     ScopeType,
     ServiceAccount,
     Team,
-    TeamMember,
     UsageEvent,
     UsageState,
     UsageTotal,
@@ -36,6 +36,7 @@ from lumewarp_control_plane.models import (
 )
 from lumewarp_control_plane.settings import Settings, get_settings
 from lumewarp_control_plane.usage.catalog import resolve_catalog_ids
+from lumewarp_control_plane.usage.org_budget import enforce_org_budgets
 from lumewarp_control_plane.windows import month_window
 
 log = logging.getLogger(__name__)
@@ -325,7 +326,11 @@ async def _budget_policy(
         select(Team.id, Team.budget_nano_usd).where(Team.id.in_(team_ids))
     ):
         policies[(ScopeType.TEAM, entity_id)] = (hard, entity_id)
-    for member in await session.scalars(select(TeamMember).where(TeamMember.team_id.in_(team_ids))):
+    # Member quotas live in `member_policies`, independent of the membership rows: an
+    # external backend has none, yet its members' budgets still apply.
+    for member in await session.scalars(
+        select(MemberPolicy).where(MemberPolicy.team_id.in_(team_ids))
+    ):
         policies[(ScopeType.MEMBER, member_scope_id(member.team_id, member.user_id))] = (
             member.budget_nano_usd,
             member.team_id,
@@ -450,7 +455,19 @@ async def _persist_events(
     hard_flipped = await _evaluate_budgets(
         session, gateway_id, total_rows, aggregates, previous_costs, policies
     )
-    if hard_flipped:
+    # Orgs derive their spend from their teams, so only the orgs of the teams in this
+    # batch are checked; a window that already crossed is skipped by the insert itself.
+    team_ids = {values["team_id"] for values in (by_id[rid].values for rid in inserted_ids)}
+    windows = {window for kind, _, window in aggregates if kind is ScopeType.TEAM}
+    org_flipped = False
+    for window in sorted(windows):
+        org_flipped |= await enforce_org_budgets(
+            session,
+            gateway_id,
+            team_ids,
+            window,  # type: ignore[arg-type]
+        )
+    if hard_flipped or org_flipped:
         await outbox.enqueue_recompile(
             session, scope_name or get_settings().scope, "usage budget exceeded"
         )

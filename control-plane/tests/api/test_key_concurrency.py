@@ -59,6 +59,7 @@ async def test_key_mutation_and_member_removal_do_not_deadlock(
             mutation = keys.update_key(
                 key.id,
                 KeyUpdate(name="renamed"),
+                request,
                 authz,
                 key_session,
                 api_settings,

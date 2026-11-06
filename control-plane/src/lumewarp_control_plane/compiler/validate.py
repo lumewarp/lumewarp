@@ -39,6 +39,8 @@ SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
 MAX_SPLITS = 16
 MAX_SPLIT_NAME = 32
 MAX_RETRY_ATTEMPTS = 5
+# org, team, owner (member/service account) and key: the four levels of the hierarchy.
+MAX_RATE_LIMIT_SCOPES = 4
 _SPLIT_NAME = re.compile(r"[A-Za-z0-9_.-]{1,32}")
 # hyper HeaderName::from_bytes: an RFC 9110 token.
 _HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
@@ -372,6 +374,11 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
             raise SnapshotInvalid(f"key {k.key_id!r} has no policy")
         if any(not m for m in k.policy.allowed_models):
             raise SnapshotInvalid(f"key {k.key_id!r} allows an empty model name")
+        if len(k.policy.rate_limit_scopes) > MAX_RATE_LIMIT_SCOPES:
+            raise SnapshotInvalid(
+                f"key {k.key_id!r} has {len(k.policy.rate_limit_scopes)} rate limit scopes,"
+                f" over the limit of {MAX_RATE_LIMIT_SCOPES}"
+            )
         own: set[str] = set()
         for scope in k.policy.rate_limit_scopes:
             if not scope.id or not scope.HasField("limit"):

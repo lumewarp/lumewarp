@@ -114,6 +114,7 @@ async def audit_grant_removal(
         grants = await session.execute(
             select(
                 PolicyGrant.id,
+                PolicyGrant.org_id,
                 PolicyGrant.team_id,
                 PolicyGrant.user_id,
                 PolicyGrant.service_account_id,
@@ -132,6 +133,7 @@ async def audit_grant_removal(
                 details={
                     "name": name,
                     "name_id": name_id,
+                    "org_id": grant.org_id,
                     "user_id": grant.user_id,
                     "service_account_id": grant.service_account_id,
                 },
@@ -149,15 +151,19 @@ async def copy_grants(session: AsyncSession, source: uuid.UUID, target: uuid.UUI
     """Give `target` every grant of `source`. Returns how many were copied."""
     grants = (
         await session.execute(
-            select(PolicyGrant.team_id, PolicyGrant.user_id, PolicyGrant.service_account_id).where(
-                PolicyGrant.name_id == source
-            )
+            select(
+                PolicyGrant.org_id,
+                PolicyGrant.team_id,
+                PolicyGrant.user_id,
+                PolicyGrant.service_account_id,
+            ).where(PolicyGrant.name_id == source)
         )
     ).all()
-    for team_id, user_id, service_account_id in grants:
+    for org_id, team_id, user_id, service_account_id in grants:
         session.add(
             PolicyGrant(
                 name_id=target,
+                org_id=org_id,
                 team_id=team_id,
                 user_id=user_id,
                 service_account_id=service_account_id,

@@ -143,10 +143,15 @@ class KeyOwnerKind(enum.StrEnum):
 
 
 class ScopeType(enum.StrEnum):
-    """Level a budget/total/limit belongs to: the team, or the owner of a key (a team
-    member, see `member_scope_id`, or a service account).
+    """Level a budget/total/limit belongs to: the org, the team, or the owner of a key (a
+    team member, see `member_scope_id`, or a service account).
+
+    `usage_totals` never holds an ORG row: org spend is derived by summing its teams'
+    totals (see `usage.org_budget`). The value exists for audit resource types and for
+    the rate-limit scope prefix.
     """
 
+    ORG = "org"
     TEAM = "team"
     MEMBER = "member"
     SERVICE_ACCOUNT = "service_account"
@@ -218,24 +223,27 @@ class ActorType(enum.StrEnum):
 
 
 class PolicyMixin:
-    """Policy carried by teams and by key owners (team members, service accounts).
+    """Policy carried by orgs, teams and by key owners (members, service accounts).
 
-    Two levels only; an owner may only narrow its team (enforced by the API, 422
-    otherwise): allowlist subset of the team's, limits <= the team's, budget <= the team's.
-    Keys carry no policy of their own.
+    Four levels: org -> team -> owner -> key. The resolver in `quota.py` is the single
+    place that computes the effective values: limits are the minimum down the chain,
+    models the intersection, and an owner's limits fall back to the team's member
+    defaults before being clamped. The API is the enforcement point that keeps source
+    state narrowing its parent (only changed values are rechecked).
 
     - Model access: see `ModelAccess`. The list lives in `policy_grants` (by name id, so a
       rename keeps it); `allowed_models` is its read-only expansion to current names.
     - Rate limits: NULL = no limit at this level. Each set level becomes one shared
-      `RateLimitScope` ("team:<id>", "member:<scope id>", "sa:<id>") in the snapshot.
+      `RateLimitScope` ("org:<id>", "team:<id>", "member:<scope id>", "sa:<id>",
+      "key:<id>").
     - Budget: monthly (UTC calendar) hard limit in nano-USD, NULL = none. Spend lives in
-      `usage_totals`, never on the entity row.
+      `usage_totals` (the org level derives it from its teams), never on the entity row.
     """
 
     @declared_attr
     @classmethod
     def model_access(cls) -> Mapped[ModelAccess]:
-        default = ModelAccess.ALL if cls.__name__ == "Team" else ModelAccess.INHERIT
+        default = ModelAccess.ALL if cls.__name__ in ("Org", "Team") else ModelAccess.INHERIT
         return mapped_column(
             _enum(ModelAccess, "model_access"),
             nullable=False,
@@ -407,16 +415,23 @@ def member_scope_id(team_id: uuid.UUID, user_id: uuid.UUID) -> uuid.UUID:
     return uuid.uuid5(team_id, str(user_id))
 
 
-class Org(TimestampMixin, Base):
-    """An organization: the grouping above teams.
+class Org(PolicyMixin, TimestampMixin, Base):
+    """An organization: the grouping above teams and the root of the quota hierarchy.
 
-    No policy columns yet: the quota hierarchy adds them together with their enforcement.
-    Archiving (`deleted_at`) is not implemented yet either; migration 0017 creates one
-    `default` org and attaches every existing team. A new team belongs to the `default`
-    org (see `orgs.default_org`); there is no org write API yet.
+    Policy (models, limits, budget) lives here; only an installation admin may set it,
+    and there is no org write API yet. Archiving (`deleted_at`) is not implemented yet
+    either. A new team belongs to the `default` org (see `orgs.default_org`), created on
+    the first team creation.
+
+    The org has no `usage_totals` row: its spend is the sum of its teams' rows for the
+    month, so an org total always stays consistent with the teams it contains.
     """
 
     __tablename__ = "orgs"
+    __table_args__ = (
+        *PolicyMixin.policy_constraints(),
+        CheckConstraint("model_access <> 'inherit'", name="no_inherit"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
@@ -461,6 +476,18 @@ class Team(PolicyMixin, TimestampMixin, Base):
             "max_member_key_lifetime_seconds IS NULL OR max_member_key_lifetime_seconds > 0",
             name="max_member_key_lifetime_positive",
         ),
+        CheckConstraint(
+            "member_rpm_default IS NULL OR member_rpm_default > 0",
+            name="member_rpm_default_positive",
+        ),
+        CheckConstraint(
+            "member_tpm_default IS NULL OR member_tpm_default > 0",
+            name="member_tpm_default_positive",
+        ),
+        CheckConstraint(
+            "member_max_parallel_default IS NULL OR member_max_parallel_default > 0",
+            name="member_max_parallel_default_positive",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
@@ -474,14 +501,43 @@ class Team(PolicyMixin, TimestampMixin, Base):
     # into snapshots): the API enforces them on create/rotate. Revoking a key frees a slot.
     max_keys_per_member: Mapped[int | None] = mapped_column(Integer)
     max_member_key_lifetime_seconds: Mapped[int | None] = mapped_column(Integer)
+    # The member level's default limits: a member exception overrides them, and the
+    # effective value is clamped by the team's own limit. Source-only, like the key
+    # limits above; no model or budget default (those need an explicit policy row).
+    member_rpm_default: Mapped[int | None] = mapped_column(Integer)
+    member_tpm_default: Mapped[int | None] = mapped_column(BigInteger)
+    member_max_parallel_default: Mapped[int | None] = mapped_column(Integer)
 
 
-class TeamMember(PolicyMixin, TimestampMixin, Base):
-    """A user in a team, with a role and the member's own (narrowing) policy."""
+class MemberPolicy(PolicyMixin, TimestampMixin, Base):
+    """One member's exception policy and grants, in a team.
+
+    Deliberately independent of `team_members`: with an external authorization backend
+    there are no membership rows, yet per-member quotas still live in Postgres and must
+    apply. The absence of a row means "no exception": the team's member defaults and
+    model set apply (see `quota.resolve_owner`).
+    """
+
+    __tablename__ = "member_policies"
+    __table_args__ = (
+        *PolicyMixin.policy_constraints(),
+        PrimaryKeyConstraint("team_id", "user_id"),
+        Index(None, "user_id"),
+    )
+
+    team_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+
+
+class TeamMember(TimestampMixin, Base):
+    """A user in a team, with a role. Policy lives in `member_policies`."""
 
     __tablename__ = "team_members"
     __table_args__ = (
-        *PolicyMixin.policy_constraints(),
         PrimaryKeyConstraint("team_id", "user_id"),
         Index(None, "user_id"),
     )
@@ -565,6 +621,9 @@ class ApiKey(TimestampMixin, Base):
             unique=True,
             postgresql_where=text("previous_key_hash IS NOT NULL"),
         ),
+        CheckConstraint("rpm_limit IS NULL OR rpm_limit > 0", name="rpm_positive"),
+        CheckConstraint("tpm_limit IS NULL OR tpm_limit > 0", name="tpm_positive"),
+        CheckConstraint("max_parallel IS NULL OR max_parallel > 0", name="parallel_positive"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
@@ -598,6 +657,11 @@ class ApiKey(TimestampMixin, Base):
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
+    # The key level of the hierarchy. NULL = the key adds no limiter scope, so it costs
+    # nothing at request time. A key may not exceed its owner's effective limits (API).
+    rpm_limit: Mapped[int | None] = mapped_column(Integer)
+    tpm_limit: Mapped[int | None] = mapped_column(BigInteger)
+    max_parallel: Mapped[int | None] = mapped_column(Integer)
 
     @property
     def owner_id(self) -> uuid.UUID:
@@ -948,15 +1012,16 @@ class RouterSplitMember(Base):
 
 
 class PolicyGrant(Base):
-    """A name in the `allowed_models` of a team (user and service account NULL), a member
-    (user set) or a service account. By name id, so a rename keeps it.
+    """A name in the `allowed_models` of an org (only `org_id` set), a team (only
+    `team_id` set), a member (team and user) or a service account. By name id, so a
+    rename keeps it.
     """
 
     __tablename__ = "policy_grants"
     __table_args__ = (
         ForeignKeyConstraint(
             ["team_id", "user_id"],
-            ["team_members.team_id", "team_members.user_id"],
+            ["member_policies.team_id", "member_policies.user_id"],
             ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
@@ -964,13 +1029,29 @@ class PolicyGrant(Base):
             ["service_accounts.id", "service_accounts.team_id"],
             ondelete="CASCADE",
         ),
-        CheckConstraint("user_id IS NULL OR service_account_id IS NULL", name="one_owner"),
+        # Exactly four shapes: org only, team only, team + member, team + service account.
+        CheckConstraint(
+            "(org_id IS NOT NULL AND team_id IS NULL AND user_id IS NULL"
+            " AND service_account_id IS NULL)"
+            " OR (org_id IS NULL AND team_id IS NOT NULL"
+            " AND NOT (user_id IS NOT NULL AND service_account_id IS NOT NULL))",
+            name="owner_shape",
+        ),
+        Index(
+            "uq_policy_grants_org",
+            "org_id",
+            "name_id",
+            unique=True,
+            postgresql_where=text("org_id IS NOT NULL"),
+        ),
         Index(
             "uq_policy_grants_team",
             "team_id",
             "name_id",
             unique=True,
-            postgresql_where=text("user_id IS NULL AND service_account_id IS NULL"),
+            postgresql_where=text(
+                "user_id IS NULL AND service_account_id IS NULL AND org_id IS NULL"
+            ),
         ),
         Index(
             "uq_policy_grants_member",
@@ -994,9 +1075,8 @@ class PolicyGrant(Base):
     name_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("catalog_names.id", ondelete="CASCADE"), nullable=False
     )
-    team_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
-    )
+    org_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"))
+    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"))
     user_id: Mapped[uuid.UUID | None] = mapped_column()
     service_account_id: Mapped[uuid.UUID | None] = mapped_column()
 
@@ -1041,9 +1121,10 @@ Team.allowed_models = column_property(
         PolicyGrant.service_account_id.is_(None),
     )
 )
-TeamMember.allowed_models = column_property(
+Org.allowed_models = column_property(_granted_names(PolicyGrant.org_id == Org.id))
+MemberPolicy.allowed_models = column_property(
     _granted_names(
-        PolicyGrant.team_id == TeamMember.team_id, PolicyGrant.user_id == TeamMember.user_id
+        PolicyGrant.team_id == MemberPolicy.team_id, PolicyGrant.user_id == MemberPolicy.user_id
     )
 )
 ServiceAccount.allowed_models = column_property(
@@ -1299,6 +1380,24 @@ class UsageEvent(Base):
     outcome: Mapped[RequestOutcome] = mapped_column(
         _enum(RequestOutcome, "request_outcome"), nullable=False
     )
+
+
+class OrgBudgetWindow(Base):
+    """The first time an org's derived spend reached its budget in one UTC month.
+
+    There is no org row in `usage_totals`: org spend is summed from its teams' rows. This
+    table only marks "already reported", so the budget audit row and the recompile are
+    written exactly once. `INSERT ... ON CONFLICT DO NOTHING` makes that race-free.
+    """
+
+    __tablename__ = "org_budget_windows"
+    __table_args__ = (PrimaryKeyConstraint("org_id", "window_start"),)
+
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
+    )
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    exceeded_at: Mapped[datetime] = _now()
 
 
 class UsageTotal(Base):

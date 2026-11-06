@@ -347,6 +347,21 @@ pub enum KeyStatus {
     BudgetExceeded,
 }
 
+/// One explicit limiter scope. The control plane emits these ids
+/// (`org:<id>`, `team:<id>`, `member:<id>`, `sa:<id>`, `key:<id>`); standalone configs
+/// normally use the `teams[].rate_limits` / `keys[].rate_limits` shorthand instead.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyScope {
+    pub id: String,
+    #[serde(default)]
+    pub requests_per_minute: u32,
+    #[serde(default)]
+    pub tokens_per_minute: u64,
+    #[serde(default)]
+    pub max_parallel_requests: u32,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Key {
@@ -368,6 +383,11 @@ pub struct Key {
     /// Limiter scope `key:<key_id>`.
     #[serde(default)]
     pub rate_limits: Option<RateLimits>,
+    /// Explicit scopes, e.g. to reproduce a control-plane policy with org/member levels.
+    /// When present they replace the team/key shorthand (at most four; the gateway
+    /// validates the cap). A scope with an empty id is rejected by snapshot validation.
+    #[serde(default)]
+    pub scopes: Option<Vec<KeyScope>>,
 }
 
 /// Parses `"12.345"` USD into nano-USD without going through floating point.
@@ -610,13 +630,29 @@ impl Config {
                     key.key_id, key.team_id
                 )));
             }
-            let mut scopes = Vec::new();
-            if let Some(limits) = team.and_then(|t| t.rate_limits.as_ref()) {
-                scopes.push(rate_limit_scope("team", &key.team_id, limits));
-            }
-            if let Some(limits) = &key.rate_limits {
-                scopes.push(rate_limit_scope("key", &key.key_id, limits));
-            }
+            let scopes = match &key.scopes {
+                Some(explicit) => explicit
+                    .iter()
+                    .map(|scope| pb::RateLimitScope {
+                        id: scope.id.clone(),
+                        limit: Some(pb::RateLimit {
+                            requests_per_minute: scope.requests_per_minute,
+                            tokens_per_minute: scope.tokens_per_minute,
+                            max_parallel_requests: scope.max_parallel_requests,
+                        }),
+                    })
+                    .collect(),
+                None => {
+                    let mut scopes = Vec::new();
+                    if let Some(limits) = team.and_then(|t| t.rate_limits.as_ref()) {
+                        scopes.push(rate_limit_scope("team", &key.team_id, limits));
+                    }
+                    if let Some(limits) = &key.rate_limits {
+                        scopes.push(rate_limit_scope("key", &key.key_id, limits));
+                    }
+                    scopes
+                }
+            };
             api_keys.push(pb::ApiKey {
                 key_id: key.key_id.clone(),
                 key_hash: parse_hash(&key.key_sha256, "keys[].key_sha256")?,
@@ -960,6 +996,44 @@ keys:
         let k2 = s.api_keys[2].policy.as_ref().unwrap();
         assert!(!k2.allow_all_models && k2.allowed_models.is_empty());
         assert_eq!(s.api_keys[2].status, pb::KeyStatus::Active as i32);
+    }
+
+    #[test]
+    fn explicit_key_scopes_replace_the_shorthand() {
+        let hash = "d".repeat(64);
+        let yaml = format!(
+            r#"
+teams:
+  - {{ id: t1, rate_limits: {{ requests_per_minute: 60 }} }}
+keys:
+  - key_id: k1
+    key_sha256: '{hash}'
+    team_id: t1
+    allow_all_models: true
+    rate_limits: {{ requests_per_minute: 5 }}
+    scopes:
+      - {{ id: 'org:o1', requests_per_minute: 1000 }}
+      - {{ id: 'team:t1', requests_per_minute: 100 }}
+      - {{ id: 'sa:s1', max_parallel_requests: 2 }}
+      - {{ id: 'key:k1', tokens_per_minute: 10 }}
+"#
+        );
+        let (_, s) = Config::parse(&yaml).unwrap();
+        let policy = s.api_keys[0].policy.as_ref().unwrap();
+        let ids: Vec<_> = policy
+            .rate_limit_scopes
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(ids, ["org:o1", "team:t1", "sa:s1", "key:k1"]);
+        assert_eq!(
+            policy.rate_limit_scopes[0]
+                .limit
+                .as_ref()
+                .unwrap()
+                .requests_per_minute,
+            1000
+        );
     }
 
     #[test]

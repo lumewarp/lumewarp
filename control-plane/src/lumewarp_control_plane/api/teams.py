@@ -26,15 +26,24 @@ from lumewarp_control_plane.api.policy import (
     policy_from_fields,
     policy_of,
     save_grants,
-    validate_owners_after_team_update,
+    team_effective_of,
+    validate_team_policy,
+    violation,
 )
 from lumewarp_control_plane.api.schemas import Page, TeamBasicOut, TeamCreate, TeamOut, TeamUpdate
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import ApiKey, ModelAccess, ServiceAccount, Team
 from lumewarp_control_plane.orgs import default_org
+from lumewarp_control_plane.quota import Effective
 
 router = APIRouter(tags=["teams"])
+
+MEMBER_DEFAULT_FIELDS = (
+    "member_rpm_default",
+    "member_tpm_default",
+    "member_max_parallel_default",
+)
 
 
 @router.get(
@@ -91,7 +100,14 @@ async def create_team(
             name=body.name,
             max_keys_per_member=body.max_keys_per_member,
             max_member_key_lifetime_seconds=body.max_member_key_lifetime_seconds,
+            member_rpm_default=body.member_rpm_default,
+            member_tpm_default=body.member_tpm_default,
+            member_max_parallel_default=body.member_max_parallel_default,
         )
+        # A new team is a child write too: it may not start above its org's effective
+        # policy. (Org policy has no write API yet, so in practice the default org is
+        # unrestricted unless an installation admin set it directly.)
+        await validate_team_policy(session, row, policy, None)
         apply_policy(row, policy)
         session.add(row)
         await session.flush()
@@ -138,12 +154,19 @@ async def update_team(
         base = policy_of(row)
         proposed = policy_from_fields(body, default_mode=ModelAccess.ALL, base=base)
         changed = proposed != base
-        key_limit_fields = ("max_keys_per_member", "max_member_key_lifetime_seconds")
-        key_limits_changed = any(
-            field in body.model_fields_set and getattr(body, field) != getattr(row, field)
-            for field in key_limit_fields
+        settings_fields = (
+            "max_keys_per_member",
+            "max_member_key_lifetime_seconds",
+            "member_rpm_default",
+            "member_tpm_default",
+            "member_max_parallel_default",
         )
-        settings_changed = (body.name is not None and body.name != row.name) or key_limits_changed
+        field_changes = {
+            field: getattr(body, field)
+            for field in settings_fields
+            if field in body.model_fields_set and getattr(body, field) != getattr(row, field)
+        }
+        settings_changed = (body.name is not None and body.name != row.name) or bool(field_changes)
         # Decide from what actually changes: a form that resends the current policy must
         # still be usable by a team admin who may not set quota.
         if changed:
@@ -152,14 +175,33 @@ async def update_team(
             await authz.require(Action.TEAM_SETTINGS_UPDATE, row.id)
         if changed:
             await grant_ids(session, proposed.allowed_models)
-            await validate_owners_after_team_update(session, row, proposed)
+            await validate_team_policy(session, row, proposed, base)
             apply_policy(row, proposed)
             await save_grants(session, row, proposed)
+            await session.refresh(row)
+        default_changes = {
+            field: value for field, value in field_changes.items() if field in MEMBER_DEFAULT_FIELDS
+        }
+        if default_changes:
+            # The member default is a child of the team's own effective limits: a changed
+            # default may not exceed them. Lowering the team still succeeds; per-member
+            # exceptions are not rechecked and the effective value is clamped.
+            team_eff: Effective = await team_effective_of(session, row)
+            parents = {
+                "member_rpm_default": team_eff.rpm_limit,
+                "member_tpm_default": team_eff.tpm_limit,
+                "member_max_parallel_default": team_eff.max_parallel,
+            }
+            for field, value in default_changes.items():
+                parent = parents[field]
+                if parent is not None and value is not None and value > parent:
+                    raise violation(
+                        field, f"must be <= the team's effective value {parent} (got {value})"
+                    )
         if body.name is not None:
             row.name = body.name
-        for field in key_limit_fields:
-            if field in body.model_fields_set:
-                setattr(row, field, getattr(body, field))
+        for field, value in field_changes.items():
+            setattr(row, field, value)
         await session.flush()
         await session.refresh(row)
         audit.record(

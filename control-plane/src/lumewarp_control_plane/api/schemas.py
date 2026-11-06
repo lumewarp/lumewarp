@@ -161,11 +161,24 @@ class TeamKeyLimits(ApiModel):
     max_member_key_lifetime_seconds: int | None = Field(default=None, gt=0)
 
 
-class TeamCreate(PolicyFields, TeamKeyLimits):
+class TeamMemberDefaults(ApiModel):
+    """Per-member default limits: an exception overrides them, the team clamps them.
+
+    Source-only like `TeamKeyLimits`; they compile into each member's effective policy
+    rather than into a separate level. A team admin may set them; `TEAM_QUOTA_SET` is only
+    needed for the team's own totals and model list.
+    """
+
+    member_rpm_default: int | None = Field(default=None, gt=0)
+    member_tpm_default: int | None = Field(default=None, gt=0)
+    member_max_parallel_default: int | None = Field(default=None, gt=0)
+
+
+class TeamCreate(PolicyFields, TeamKeyLimits, TeamMemberDefaults):
     name: Name
 
 
-class TeamUpdate(PolicyFields, TeamKeyLimits):
+class TeamUpdate(PolicyFields, TeamKeyLimits, TeamMemberDefaults):
     name: Name | None = None
 
 
@@ -184,7 +197,7 @@ class TeamBasicOut(ReadModel, TeamKeyLimits):
     updated_at: datetime
 
 
-class TeamOut(PolicyOut, TeamBasicOut):
+class TeamOut(PolicyOut, TeamBasicOut, TeamMemberDefaults):
     """The whole team, including its policy: team admins and installation admins only."""
 
 
@@ -246,6 +259,11 @@ class KeyCreate(ApiModel):
     expires_at: datetime | None = None
     # Omit to create a key owned by the caller.
     service_account_id: uuid.UUID | None = None
+    # The key level of the hierarchy: no value here means no extra limiter scope. The
+    # effective value is capped at the owner's (422 above it); this is enforced by keys.py.
+    rpm_limit: int | None = Field(default=None, gt=0)
+    tpm_limit: int | None = Field(default=None, gt=0)
+    max_parallel: int | None = Field(default=None, gt=0)
 
     @field_validator("expires_at")
     @classmethod
@@ -256,9 +274,14 @@ class KeyCreate(ApiModel):
 
 
 class KeyUpdate(ApiModel):
+    """PATCH: omitted fields are unchanged; an explicit null clears a key limit."""
+
     name: Name | None = None
     expires_at: datetime | None = None
     lifecycle: KeyLifecycle | None = None
+    rpm_limit: int | None = Field(default=None, gt=0)
+    tpm_limit: int | None = Field(default=None, gt=0)
+    max_parallel: int | None = Field(default=None, gt=0)
 
     @field_validator("expires_at")
     @classmethod
@@ -280,6 +303,9 @@ class KeyRotate(ApiModel):
 class KeyOut(ReadModel):
     id: uuid.UUID
     team_id: uuid.UUID
+    rpm_limit: int | None
+    tpm_limit: int | None
+    max_parallel: int | None
     owner_kind: KeyOwnerKind
     user_id: uuid.UUID | None
     service_account_id: uuid.UUID | None
@@ -832,6 +858,20 @@ class MeBudgetOut(ApiModel):
     member sees the effective limit without learning the team's own numbers.
     """
 
+    org_budget_nano_usd: int | None = Field(
+        default=None,
+        description=(
+            "The org's monthly budget; NULL when the caller is not a team admin "
+            "(or installation admin) or the org sets none."
+        ),
+    )
+    org_spent_nano_usd: int | None = Field(
+        default=None,
+        description=(
+            "The org's spend this month (sum of its teams); NULL when the caller is not a "
+            "team admin (or installation admin)."
+        ),
+    )
     team_budget_nano_usd: int | None = Field(
         description=(
             "The team's monthly budget; NULL when the caller is not a team admin "

@@ -35,17 +35,19 @@ async def test_member_creates_and_manages_only_own_key(client, committed) -> Non
     )
     assert key["created_by_user_id"] == str(user.id)
     assert key["owner_active"] is True
-    assert not {"secret", "key_hash", "allowed_models", "rpm_limit"} & key.keys()
+    assert not {"secret", "key_hash", "allowed_models"} & key.keys()
+    assert (key["rpm_limit"], key["tpm_limit"], key["max_parallel"]) == (None, None, None)
     assert (
         client.post(
             path, json={"name": "impersonate", "user_id": str(other.id)}, headers=auth(token)
         ).status_code
         == 422
     )
-    assert (
-        client.post(path, json={"name": "policy", "rpm_limit": 1}, headers=auth(token)).status_code
-        == 422
-    )
+    # A member may set their own key's limits, up to their own effective limits (none
+    # here, so any positive value is allowed).
+    limited = client.post(path, json={"name": "limited", "rpm_limit": 5}, headers=auth(token))
+    assert limited.status_code == 201, limited.text
+    assert limited.json()["key"]["rpm_limit"] == 5
     assert (
         client.post(
             path, json={"name": "sa", "service_account_id": str(account.id)}, headers=auth(token)
@@ -254,7 +256,7 @@ async def test_key_metadata_is_admin_or_owner_only(client, committed) -> None:
         {"expires_at": "2000-01-01T00:00:00Z"},
         {"expires_at": "2099-01-01T00:00:00"},
         {"name": ""},
-        {"rpm_limit": 5},
+        {"rpm_limit": 0},
     ],
 )
 async def test_key_create_validation(client, committed, body) -> None:

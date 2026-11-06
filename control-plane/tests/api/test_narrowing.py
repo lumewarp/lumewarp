@@ -3,7 +3,14 @@
 import pytest
 
 from tests.api.helpers import ADMIN_AUTH
-from tests.factories import catalog_name, make_member, make_service_account, make_team, make_user
+from tests.factories import (
+    catalog_name,
+    make_key,
+    make_member,
+    make_service_account,
+    make_team,
+    make_user,
+)
 
 
 async def grant_names(session) -> None:
@@ -59,30 +66,48 @@ async def test_owner_cannot_widen_team(client, committed, owner, policy, field) 
 
 
 @pytest.mark.parametrize("owner", ["member", "service_account"])
-@pytest.mark.parametrize(
-    "owner_policy, team_update, field",
-    [
-        ({"rpm_limit": 50}, {"rpm_limit": 40}, "rpm_limit"),
-    ],
-)
-async def test_team_narrowing_names_conflicting_owner(
-    client, committed, owner, owner_policy, team_update, field
+async def test_parent_decrease_succeeds_and_effective_values_clamp(
+    client, committed, owner, api_engine
 ) -> None:
+    """Lowering a team below its child rows is a legitimate write; the minimum applies.
+
+    Only changed values are rechecked, so the old owner row and its limits stay as they
+    are and a later unrelated edit still succeeds.
+    """
     team = await make_team(committed, rpm_limit=100)
     if owner == "member":
-        row = await make_member(committed, team, **owner_policy)
-        prefix = f"members.{row.user_id}"
+        row = await make_member(committed, team, rpm_limit=50)
+        path = f"/api/v1/teams/{team.id}/members/{row.user_id}"
+        from lumewarp_control_plane.models import User
+
+        user = await committed.get(User, row.user_id)
+        key = await make_key(committed, team, user)
     else:
-        row = await make_service_account(committed, team, **owner_policy)
-        prefix = f"service_accounts.{row.id}"
+        row = await make_service_account(committed, team, rpm_limit=50)
+        path = f"/api/v1/service-accounts/{row.id}"
+        key = await make_key(committed, team, row)
     await committed.commit()
-    path = f"/api/v1/teams/{team.id}"
-    response = client.patch(path, json=team_update, headers=ADMIN_AUTH)
-    assert response.status_code == 422, response.text
-    assert f"{prefix}.{field}" in response.json()["error"]["message"]
-    unchanged = client.get(path, headers=ADMIN_AUTH).json()
-    assert unchanged["rpm_limit"] == 100
-    assert unchanged["model_access"] == "all"
+    response = client.patch(f"/api/v1/teams/{team.id}", json={"rpm_limit": 40}, headers=ADMIN_AUTH)
+    assert response.status_code == 200, response.text
+    assert response.json()["rpm_limit"] == 40
+    # The child kept its stored setting, as the compiler's minimum expects.
+    stored = client.get(path, headers=ADMIN_AUTH) if owner == "service_account" else None
+    if stored is not None:
+        assert stored.json()["rpm_limit"] == 50
+    # An unrelated child edit still succeeds although the stored 50 exceeds the team's 40.
+    assert client.patch(path, json={"rpm_limit": 50}, headers=ADMIN_AUTH).status_code == 200
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from lumewarp_control_plane.compiler import compile_scope
+
+    async with AsyncSession(api_engine, expire_on_commit=False) as session:
+        compiled = await compile_scope(session, "api-test", require_local_membership=True)
+    wire = next(k for k in compiled.snapshot.api_keys if k.key_id == str(key.id))
+    scopes = {s.id: s.limit.requests_per_minute for s in wire.policy.rate_limit_scopes}
+    team_scope = scopes[f"team:{team.id}"]
+    owner_scope = next(v for k, v in scopes.items() if k.startswith(("member:", "sa:")))
+    assert (team_scope, owner_scope) == (40, 40)
 
 
 @pytest.mark.parametrize(
@@ -137,27 +162,26 @@ async def test_team_narrowing_keeps_owner_models_and_effective_is_intersection(
     assert "allowed_models" in widened.json()["error"]["message"]
 
 
-async def test_team_locks_scope_before_validating_owners(client, committed, monkeypatch) -> None:
+async def test_team_locks_scope_before_validation(client, committed, monkeypatch) -> None:
     from lumewarp_control_plane.api import teams
 
     team = await make_team(committed, rpm_limit=100)
-    await make_member(committed, team, rpm_limit=90)
     await committed.commit()
     original_lock = teams.lock_scope
-    original_validate = teams.validate_owners_after_team_update
+    original_validate = teams.validate_team_policy
     calls = []
 
     async def lock(session, settings):
         await original_lock(session, settings)
         calls.append("locked")
 
-    async def validate(session, row, proposed):
+    async def validate(session, row, proposed, base):
         assert calls == ["locked"]
         calls.append("validate")
-        await original_validate(session, row, proposed)
+        await original_validate(session, row, proposed, base)
 
     monkeypatch.setattr(teams, "lock_scope", lock)
-    monkeypatch.setattr(teams, "validate_owners_after_team_update", validate)
+    monkeypatch.setattr(teams, "validate_team_policy", validate)
     response = client.patch(f"/api/v1/teams/{team.id}", json={"rpm_limit": 10}, headers=ADMIN_AUTH)
-    assert response.status_code == 422
+    assert response.status_code == 200, response.text
     assert calls == ["locked", "validate"]

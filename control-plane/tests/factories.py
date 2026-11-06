@@ -15,6 +15,7 @@ from lumewarp_control_plane.models import (
     CatalogKind,
     CatalogName,
     KeyOwnerKind,
+    MemberPolicy,
     Model,
     Org,
     OrgAdmin,
@@ -79,12 +80,16 @@ async def catalog_name(
 
 
 async def grant(
-    session: AsyncSession, owner: Team | TeamMember | ServiceAccount, names: list[str]
+    session: AsyncSession,
+    owner: Org | Team | MemberPolicy | ServiceAccount,
+    names: list[str],
 ) -> None:
     """Grant names to a policy owner, creating names that do not exist yet."""
-    if isinstance(owner, Team):
+    if isinstance(owner, Org):
+        columns = {"org_id": owner.id}
+    elif isinstance(owner, Team):
         columns = {"team_id": owner.id}
-    elif isinstance(owner, TeamMember):
+    elif isinstance(owner, MemberPolicy):
         columns = {"team_id": owner.team_id, "user_id": owner.user_id}
     else:
         columns = {"team_id": owner.team_id, "service_account_id": owner.id}
@@ -206,13 +211,21 @@ async def make_member(
     session: AsyncSession, team: Team, user: User | None = None, *,
     role: TeamRole = TeamRole.MEMBER, allowed_models: list[str] = (), **policy,
 ) -> TeamMember:  # fmt: skip
-    """Add `user` (a fresh one by default) to `team`; the user is `member.user_id`."""
+    """Add `user` (a fresh one by default) to `team`; the user is `member.user_id`.
+
+    Policy kwargs create the separate `member_policies` row (an exception policy); a
+    membership alone has none, exactly like an external-backend member.
+    """
     if user is None:
         user = await make_user(session)
-    member = TeamMember(team_id=team.id, user_id=user.id, role=role, **policy)
+    member = TeamMember(team_id=team.id, user_id=user.id, role=role)
     session.add(member)
     await session.flush()
-    await grant(session, member, list(allowed_models))
+    if policy or allowed_models:
+        row = MemberPolicy(team_id=team.id, user_id=user.id, **policy)
+        session.add(row)
+        await session.flush()
+        await grant(session, row, list(allowed_models))
     return member
 
 
