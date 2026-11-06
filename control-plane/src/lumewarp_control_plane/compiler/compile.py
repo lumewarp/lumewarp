@@ -458,9 +458,12 @@ async def compile_scope(
     snap.aliases.sort(key=lambda a: a.name)
     snap.routers.sort(key=lambda r: r.name)
 
-    # Orgs, teams, key owners and keys: four levels of quotas.
+    # Orgs, teams, key owners and keys: four levels of quotas. Archived teams keep their
+    # rows for history but contribute nothing to the snapshot; they still count toward the
+    # org's derived spend.
     orgs = {o.id: o for o in await session.scalars(select(Org))}
-    teams = {t.id: t for t in await session.scalars(select(Team))}
+    all_teams = {t.id: t for t in await session.scalars(select(Team))}
+    teams = {team_id: t for team_id, t in all_teams.items() if t.deleted_at is None}
     granted: dict[
         tuple[uuid.UUID | None, uuid.UUID | None, uuid.UUID | None, uuid.UUID | None],
         list[str],
@@ -512,7 +515,7 @@ async def compile_scope(
     # Org spend is derived: the sum of every team of the org (archived included), so the
     # org level needs no total row and can never drift from its teams.
     org_spent = {org_id: 0 for org_id in orgs}
-    for team in teams.values():
+    for team in all_teams.values():
         if team.org_id in org_spent:
             org_spent[team.org_id] += spent.get((ScopeType.TEAM, team.id), 0)
 
@@ -537,7 +540,11 @@ async def compile_scope(
     }
 
     for k in sorted(keys, key=lambda k: str(k.id)):
-        team = teams[k.team_id]
+        team = teams.get(k.team_id)
+        if team is None:
+            # An archived team's keys are revoked by the archive transaction; a row left
+            # behind must never reach the gateway.
+            continue
         org = orgs[team.org_id]
         team_eff = team_effective_policies[team.id]
         member_defaults = (
@@ -556,6 +563,10 @@ async def compile_scope(
             service_account = False
         else:
             owner_policy = service_accounts[k.service_account_id]
+            if owner_policy.deactivated_at is not None:
+                # A deactivated service account's keys leave the snapshot; reactivating
+                # the account brings the non-revoked ones back on the next compile.
+                continue
             service_account = True
         owner_eff = owner_effective(
             team_eff,

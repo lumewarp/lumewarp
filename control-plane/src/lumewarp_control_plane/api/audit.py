@@ -1,9 +1,11 @@
 """Scoped audit log reads.
 
-Audit rows carry an optional `team_id`. Installation admins read everything (including
-installation-wide rows with no team and rows of deleted teams); a team admin reads the
-rows of the teams they administer. A plain member reads none: the team's audit is part of
-the team-admin view, and a deployment can tell a member apart from an admin reliably.
+Audit rows carry an optional `team_id` and `org_id`. Installation admins read everything
+(including installation-wide rows with no team and rows of archived teams); a team admin
+reads the rows of the teams they administer, never org-level events; an org admin also reads
+its org's org-level events and its archived teams. A plain member reads none: the team's
+audit is part of the team-admin view, and a deployment can tell a member apart from an admin
+reliably.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Query
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from lumewarp_control_plane.api.common import (
     LimitDep,
@@ -27,7 +29,7 @@ from lumewarp_control_plane.api.common import (
 from lumewarp_control_plane.api.schemas import AuditOut, Page
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import forbidden, not_found
-from lumewarp_control_plane.models import AuditLog, Team
+from lumewarp_control_plane.models import AuditLog, Org, Team
 
 FromQuery = Annotated[datetime | None, Query(alias="from")]
 ToQuery = Annotated[datetime | None, Query(alias="to")]
@@ -55,7 +57,7 @@ async def list_audit(
     stmt = select(AuditLog).order_by(AuditLog.id.desc())
     if team_id is not None:
         if await session.get(Team, team_id) is None:
-            # A deleted team's rows stay readable to installation admins only.
+            # A team row that no longer exists is installation-admin history only.
             if not await authz.is_admin():
                 raise not_found("team not found")
         else:
@@ -65,13 +67,22 @@ async def list_audit(
             await authz.require(Action.TEAM_ADMIN_READ, team_id)
         stmt = stmt.where(AuditLog.team_id == team_id)
     else:
+        # Archived teams stay in the candidate set: their history remains attributable and
+        # an org admin reads it. `org_id` adds the org-level events (org policy, org admins,
+        # org budget), which a team admin never sees.
         admin_teams = await authz.admin_teams(set(await session.scalars(select(Team.id))))
-        if admin_teams is not None:
-            if not admin_teams:
-                # A caller who administers no team has no audit view at all, whether the
+        admin_orgs = await authz.admin_orgs(set(await session.scalars(select(Org.id))))
+        if admin_teams is not None or admin_orgs is not None:
+            filters = []
+            if admin_teams:
+                filters.append(AuditLog.team_id.in_(admin_teams))
+            if admin_orgs:
+                filters.append(AuditLog.org_id.in_(admin_orgs))
+            if not filters:
+                # A caller who administers nothing has no audit view at all, whether the
                 # request is filtered or not.
                 raise forbidden(f"{Action.TEAM_ADMIN_READ.value} not allowed")
-            stmt = stmt.where(AuditLog.team_id.in_(admin_teams))
+            stmt = stmt.where(or_(*filters))
     if actor_id is not None:
         stmt = stmt.where(AuditLog.actor_id == actor_id)
     if action is not None:

@@ -3,7 +3,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { confirmDialog, dialog, optionNames, pick } from "./helpers";
+import { confirmDialog, dialog, ensureOrg, optionNames, pick } from "./helpers";
 
 /*
  * The model catalog UI through the real control plane (e2e/serve.py): Models, Aliases, Routers with
@@ -550,7 +550,7 @@ test("My keys shows what a new key can call; a member cannot open admin pages", 
   const up = await upstream(request, "mine-up");
   await model(request, "mine/a", up.id);
   await model(request, "mine/b", up.id);
-  const team = await post<any>(request, "/teams", { name: "Mine team", model_access: "list", allowed_models: ["mine/a", "mine/b"] });
+  const team = await post<any>(request, "/teams", { name: "Mine team", org_id: await ensureOrg(request, admin), model_access: "list", allowed_models: ["mine/a", "mine/b"] });
   const viewer = (await items<any>(request, "/users")).find((u) => u.email === "viewer@e2e.test");
   const put = await request.put(`/api/v1/teams/${team.id}/members/${viewer.id}`, { headers: admin, data: { role: "member", model_access: "list", allowed_models: ["mine/b"] } });
   expect(put.ok(), await put.text()).toBe(true);

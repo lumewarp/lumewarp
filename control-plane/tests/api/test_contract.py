@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from lumewarp_control_plane.app import create_app
 from lumewarp_control_plane.models import AuditLog, ConfigOutbox
 from lumewarp_control_plane.settings import Settings
-from tests.api.helpers import ADMIN_AUTH, suffix
+from tests.api.helpers import ADMIN_AUTH, create_org, suffix
 
 EXPECTED_OPERATION_IDS = {
     "createAlias",
@@ -19,6 +19,7 @@ EXPECTED_OPERATION_IDS = {
     "completeOidcLogin",
     "createModel",
     "createGatewayToken",
+    "createOrg",
     "createKey",
     "createMember",
     "createOwnToken",
@@ -30,6 +31,8 @@ EXPECTED_OPERATION_IDS = {
     "createUserToken",
     "deleteModel",
     "deleteMember",
+    "deleteOrg",
+    "deleteOrgAdmin",
     "deleteRouter",
     "deleteServiceAccount",
     "deleteTeam",
@@ -39,6 +42,8 @@ EXPECTED_OPERATION_IDS = {
     "getCurrentUser",
     "getModel",
     "getKey",
+    "getOrg",
+    "getOrgUsage",
     "getRouter",
     "getServiceAccount",
     "getSession",
@@ -50,6 +55,8 @@ EXPECTED_OPERATION_IDS = {
     "listConfigVersions",
     "listModels",
     "listGateways",
+    "listOrgs",
+    "listOrgAdmins",
     "listInstallationAdmins",
     "listMembers",
     "listOwnKeys",
@@ -65,6 +72,7 @@ EXPECTED_OPERATION_IDS = {
     "loginBreakGlass",
     "putInstallationAdmin",
     "putMember",
+    "putOrgAdmin",
     "revokeGatewayToken",
     "revokeKey",
     "revokeOwnToken",
@@ -74,6 +82,7 @@ EXPECTED_OPERATION_IDS = {
     "transferProxyAdmin",
     "updateModel",
     "updateKey",
+    "updateOrg",
     "updateMember",
     "updateRouter",
     "updateServiceAccount",
@@ -103,6 +112,7 @@ def test_openapi_operation_ids_are_stable_and_unique() -> None:
 async def test_mutation_writes_audit_and_outbox_in_one_transaction(
     client, committed, api_scope
 ) -> None:
+    org = create_org(client)
     async with type(committed)(committed.bind) as session:
         audit_before = await session.scalar(
             select(func.count())
@@ -112,7 +122,9 @@ async def test_mutation_writes_audit_and_outbox_in_one_transaction(
         outbox_before = await session.scalar(select(func.count()).select_from(ConfigOutbox))
 
     name = f"txn-{suffix()}"
-    resp = client.post("/api/v1/teams", json={"name": name}, headers=ADMIN_AUTH)
+    resp = client.post(
+        "/api/v1/teams", json={"name": name, "org_id": org["id"]}, headers=ADMIN_AUTH
+    )
     assert resp.status_code == 201, resp.text
     team_id = resp.json()["id"]
 
@@ -134,7 +146,9 @@ async def test_mutation_writes_audit_and_outbox_in_one_transaction(
     assert outbox_after == outbox_before + 1
 
     # A rejected mutation rolls back the row, audit and outbox together.
-    duplicate = client.post("/api/v1/teams", json={"name": name}, headers=ADMIN_AUTH)
+    duplicate = client.post(
+        "/api/v1/teams", json={"name": name, "org_id": org["id"]}, headers=ADMIN_AUTH
+    )
     assert duplicate.status_code == 409
     async with type(committed)(committed.bind) as session:
         assert (

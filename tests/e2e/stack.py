@@ -403,6 +403,8 @@ class Stack:
         )
         self.admin = httpx.Client(timeout=15)
         self.gateway_token = ""
+        # Every stack has one org for the tests' teams (there is no implicit default).
+        self.org_id = ""
 
     # lifecycle ---------------------------------------------------------------------
 
@@ -433,6 +435,7 @@ class Stack:
             "mock upstream",
         )
         self.start_cp()
+        self.org_id = self.ok("POST", "/orgs", json={"name": "e2e"})["id"]
 
     def _run_cli(self, *args: str) -> str:
         res = subprocess.run(
@@ -602,6 +605,7 @@ class Stack:
         body = {"name": "ml", "model_access": "all"}
         if team_budget is not None:
             body["budget_nano_usd"] = team_budget
+        body["org_id"] = self.org_id
         team = self.ok("POST", "/teams", json=body)
         body = {}
         if owner_budget is not None:

@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { join } from "node:path";
 
-import { deleteTeams, pick } from "./helpers";
+import { deleteTeams, ensureOrg, pick } from "./helpers";
 
 /* Audit, Gateways, Settings, Users and Config after the move to shadcn components. */
 
@@ -32,8 +32,9 @@ async function signIn(page: Page, path: string) {
 }
 
 test("audit: the Team filter is a combobox that sends team_id, and the log narrows to that team", async ({ page, request }) => {
-  const team = await (await request.post("/api/v1/teams", { headers: admin, data: { name: "s2-audit-team" } })).json();
-  await request.post("/api/v1/teams", { headers: admin, data: { name: "s2-audit-other" } });
+  const orgId = await ensureOrg(request, admin);
+  const team = await (await request.post("/api/v1/teams", { headers: admin, data: { name: "s2-audit-team", org_id: orgId } })).json();
+  await request.post("/api/v1/teams", { headers: admin, data: { name: "s2-audit-other", org_id: orgId } });
   const cell = (name: string) => page.getByRole("cell", { name, exact: true }).first();
   await signIn(page, "/audit");
   await expect(page.getByRole("heading", { name: "Audit log" })).toBeVisible();
@@ -72,7 +73,7 @@ test("settings and users: description list, buttons and pager render and work", 
 
 test("screenshots: s2 pages, desktop and phone, light and dark", async ({ page, request }) => {
   test.skip(!SHOTS, "screenshots only with E2E_SHOTS");
-  await request.post("/api/v1/teams", { headers: admin, data: { name: "s2-shot-team" } });
+  await request.post("/api/v1/teams", { headers: admin, data: { name: "s2-shot-team", org_id: await ensureOrg(request, admin) } });
   await signIn(page, "/");
   const modes: [string, number, number, string][] = [
     ["desktop-light", 1280, 900, "light"],

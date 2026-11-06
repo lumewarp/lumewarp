@@ -118,12 +118,14 @@ async def _my_teams(
         result = await session.execute(
             select(Team, TeamMember)
             .join(TeamMember, TeamMember.team_id == Team.id)
-            .where(TeamMember.user_id == user_id)
+            .where(TeamMember.user_id == user_id, Team.deleted_at.is_(None))
             .order_by(Team.name)
         )
         rows = [(team, member.role, member) for team, member in result]
     else:
-        teams = (await session.scalars(select(Team).order_by(Team.name))).all()
+        teams = (
+            await session.scalars(select(Team).where(Team.deleted_at.is_(None)).order_by(Team.name))
+        ).all()
         local = {
             member.team_id: member
             for member in await session.scalars(

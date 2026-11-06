@@ -14,7 +14,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,25 @@ from lumewarp_control_plane.models import (
     UsageTotal,
 )
 from lumewarp_control_plane.windows import month_window
+
+
+async def reset_org_budget_window(
+    session: AsyncSession, org_id: uuid.UUID, window_start: datetime
+) -> None:
+    """Forget that an org already reported a crossing in this month.
+
+    Called when a policy change can clear the exceeded state (a raised or removed budget):
+    the next crossing must audit and recompile again, exactly as a team budget crossing
+    does after the team budget is raised. Delete-only: a still-exceeded org reports once
+    more on the next ingest, which is correct because the policy that produced the old
+    report no longer applies.
+    """
+    await session.execute(
+        delete(OrgBudgetWindow).where(
+            OrgBudgetWindow.org_id == org_id,
+            OrgBudgetWindow.window_start == window_start,
+        )
+    )
 
 
 async def enforce_org_budgets(

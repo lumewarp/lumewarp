@@ -125,7 +125,7 @@ test("members: a team admin cannot hand out or take away the admin role", async 
   // The Add member dialog offers no role at all; the server would refuse an admin anyway.
   await page.getByRole("button", { name: "Add member" }).click();
   await expect(dialog(page).getByRole("combobox", { name: "Role", exact: true })).toHaveCount(0);
-  await expect(dialog(page).getByText(/only an installation admin can assign a team admin/i)).toBeVisible();
+  await expect(dialog(page).getByText(/only an org admin can assign a team admin/i)).toBeVisible();
   await dialog(page).getByRole("button", { name: "Cancel" }).click();
 
   // An admin row cannot be removed by a team admin; a plain member row can.

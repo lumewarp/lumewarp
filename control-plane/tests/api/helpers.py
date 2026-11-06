@@ -42,6 +42,17 @@ def suffix() -> str:
     return uuid7().hex[-10:]
 
 
+def create_org(client, name: str | None = None, **policy) -> dict:
+    """An org through the API (installation admin)."""
+    response = client.post(
+        "/api/v1/orgs",
+        json={"name": name or f"org-{suffix()}", **policy},
+        headers=ADMIN_AUTH,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
 async def user_with_token(
     session: AsyncSession,
     *,

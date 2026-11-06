@@ -116,6 +116,7 @@ def self_service(request, binaries):
                 "/teams",
                 json={
                     "name": TEAM_NAME,
+                    "org_id": stack.org_id,
                     "model_access": "list",
                     "allowed_models": ["mock"],
                     "rpm_limit": RPM_LIMIT,
@@ -151,7 +152,9 @@ def self_service(request, binaries):
 
 @pytest.fixture(scope="module")
 def foreign_team(self_service):
-    return self_service.stack.ok("POST", "/teams", json={"name": "not-bobs"})["id"]
+    return self_service.stack.ok(
+        "POST", "/teams", json={"name": "not-bobs", "org_id": self_service.stack.org_id}
+    )["id"]
 
 
 @pytest.fixture(scope="module")

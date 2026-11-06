@@ -151,7 +151,7 @@ function MembersPanel({
 
   // Only an installation admin may hand out or change a team admin role; a team admin
   // edits limits and leaves the existing role alone.
-  const canAssignAdmin = perms.isInstallationAdmin;
+  const canAssignAdmin = perms.canAssignTeamAdmin(team.id);
   const save = useMut(async ({ member, values }: { member: Member | null; values: MemberValues }) => {
     try {
       if (member) {
@@ -317,7 +317,7 @@ function MembersPanel({
             />
           ) : editing === "new" ? (
             <p className="m-0 text-sm text-muted-foreground">
-              New members join as members; only an installation admin can assign a team admin.
+              New members join as members; only an org admin can assign a team admin.
             </p>
           ) : null}
           <PolicyFields values={form.values} errors={form.errors} set={form.set} team={team} />

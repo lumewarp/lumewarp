@@ -19,6 +19,7 @@ type UserRow = { id: string; email: string };
 
 /** The control plane as break-glass, for fixtures the UI specs need. */
 export class Admin {
+  private orgIdPromise?: Promise<string>;
   headers: Record<string, string> = {};
 
   private constructor(private request: APIRequestContext) {}
@@ -57,6 +58,17 @@ export class Admin {
     return user!;
   }
 
+  /** The org this session's teams belong to (created on first use). */
+  async orgId(): Promise<string> {
+    this.orgIdPromise ??= (async () => {
+      const orgs = await this.get<{ items: { id: string; name: string }[] }>("/orgs?limit=200");
+      const found = orgs.items.find((org) => org.name === "e2e") ?? orgs.items[0];
+      if (found) return found.id;
+      return (await this.post<{ id: string }>("/orgs", { name: "e2e" })).id;
+    })();
+    return this.orgIdPromise;
+  }
+
   /** Idempotent: a test may run alone or after the one that first made the team. */
   async ensureTeam(
     name: string,
@@ -65,7 +77,7 @@ export class Admin {
     const teams = await this.get<{ items: TeamRow[] }>("/teams?limit=200");
     const found = teams.items.find((team) => team.name === name);
     if (found) return found;
-    return this.post<TeamRow>("/teams", { name, ...limits });
+    return this.post<TeamRow>("/teams", { name, org_id: await this.orgId(), ...limits });
   }
 
   async putMember(teamId: string, email: string, role: "admin" | "member" = "member") {

@@ -174,8 +174,63 @@ class TeamMemberDefaults(ApiModel):
     member_max_parallel_default: int | None = Field(default=None, gt=0)
 
 
+class OrgCreate(PolicyFields):
+    name: Name
+
+
+class OrgUpdate(PolicyFields):
+    name: Name | None = None
+
+
+class OrgOut(PolicyOut):
+    id: uuid.UUID
+    name: str
+    created_at: datetime
+    updated_at: datetime
+    # Present for an installation admin reading an archived org; the list endpoint only
+    # returns live orgs.
+    deleted_at: datetime | None = None
+
+
+class OrgAdminOut(ReadModel):
+    org_id: uuid.UUID
+    user_id: uuid.UUID
+    email: str
+    display_name: str
+    is_active: bool
+    assigned_by: uuid.UUID | None
+    assigned_at: datetime
+
+
+class OrgTeamUsageOut(ApiModel):
+    """One team's usage inside an org, aggregated from `usage_events` at query time."""
+
+    team_id: uuid.UUID
+    team_name: str
+    archived: bool
+    requests: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cost_nano_usd: int
+    unknown_cost_count: int
+
+
+class OrgUsageOut(ApiModel):
+    org_id: uuid.UUID
+    org_name: str
+    teams: list[OrgTeamUsageOut]
+    requests: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    cost_nano_usd: int
+    unknown_cost_count: int
+
+
 class TeamCreate(PolicyFields, TeamKeyLimits, TeamMemberDefaults):
     name: Name
+    org_id: uuid.UUID
 
 
 class TeamUpdate(PolicyFields, TeamKeyLimits, TeamMemberDefaults):
@@ -242,6 +297,8 @@ class ServiceAccountCreate(PolicyFields):
 class ServiceAccountUpdate(PolicyFields):
     name: Name | None = None
     description: str | None = Field(default=None, max_length=2000)
+    # False deactivates the account (its keys leave the snapshot); True reactivates it.
+    is_active: bool | None = None
 
 
 class ServiceAccountOut(PolicyOut):
@@ -249,6 +306,7 @@ class ServiceAccountOut(PolicyOut):
     team_id: uuid.UUID
     name: str
     description: str
+    is_active: bool
     created_by_user_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime

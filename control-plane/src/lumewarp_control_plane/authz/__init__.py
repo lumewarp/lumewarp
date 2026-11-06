@@ -34,9 +34,10 @@ A backend guarantees that team `admin` implies `member`. The new contract is tha
 inherit it, because `_is_member`, `/users/me` and the reconciler would then be wrong.
 The matrix separates reading a team's basic record (`TEAM_READ`, any member or above) from
 reading what a team admin sees (`TEAM_ADMIN_READ`: members, service accounts, every key,
-usage, audit). Team quota (`TEAM_QUOTA_SET`) and admin assignment (`TEAM_ADMIN_ASSIGN`)
-are `ORG` level: an org admin may do both for a team of its own org, a team admin for
-none. Catalog names are readable by every caller (`CATALOG_READ`) and routing details need
+usage, audit). Team creation and archiving (`TEAM_CREATE`, `TEAM_DELETE`), team quota
+(`TEAM_QUOTA_SET`) and admin assignment (`TEAM_ADMIN_ASSIGN`) are `ORG` level: an org admin
+may do them for a team of its own org (or create one in it), a team admin for none.
+Catalog names are readable by every caller (`CATALOG_READ`) and routing details need
 `ROUTING_READ`, which is installation-level.
 `Decision.ERROR` (backend down or timed out) is never treated as a deny:
 the admin API answers 503 and background jobs skip
@@ -343,14 +344,13 @@ def load_authorizer(
 class Level(StrEnum):
     ANY = "any"  # any authenticated caller
     INSTALLATION = "installation"  # a proxy_admin or admin row in installation_admins
-    ORG = "org"  # `relation` on the org the target team belongs to
+    ORG = "org"  # `relation` on the org the target team belongs to (or `org_id`)
     TEAM = "team"  # an (inherited) capability on the team itself
 
 
 class Action(StrEnum):
     # Installation-wide (proxy_admin, admin, or break-glass).
-    TEAM_CREATE = "team.create"
-    TEAM_DELETE = "team.delete"
+    ORG_MANAGE = "org.manage"  # create, rename, set policy, archive, assign org admins
     INSTALLATION_ADMIN_MANAGE = "installation_admin.manage"  # assign/remove/transfer roles
     USER_MANAGE = "user.manage"
     ROUTING_MANAGE = "routing.manage"  # upstreams, models, routers, prices
@@ -360,7 +360,10 @@ class Action(StrEnum):
     GATEWAY_READ = "gateway.read"
     CONFIG_READ = "config.read"  # config versions
     CONFIG_ROLLBACK = "config.rollback"
-    # Org admin (and installation admin): a team of the caller's own org only.
+    # Org admin (and installation admin): a team of the caller's own org only. TEAM_CREATE
+    # takes the org directly (no team exists yet); TEAM_DELETE archives.
+    TEAM_CREATE = "team.create"
+    TEAM_DELETE = "team.delete"  # DELETE /teams/{id} archives the team
     TEAM_QUOTA_SET = "team.quota.set"  # models, limits, budget
     TEAM_ADMIN_ASSIGN = "team.admin.assign"  # add/promote/demote/remove an admin
     # Any authenticated caller.
@@ -388,8 +391,7 @@ MATRIX: dict[Action, Rule] = {
     **{
         a: Rule(Level.INSTALLATION)
         for a in (
-            Action.TEAM_CREATE,
-            Action.TEAM_DELETE,
+            Action.ORG_MANAGE,
             Action.INSTALLATION_ADMIN_MANAGE,
             Action.USER_MANAGE,
             Action.ROUTING_MANAGE,
@@ -401,7 +403,10 @@ MATRIX: dict[Action, Rule] = {
         )
     },
     # Org level: the relation is checked on the target team's own org, resolved from
-    # Postgres. A team admin never gets these, and an org admin never another org's team.
+    # Postgres, or on the org id given for TEAM_CREATE. A team admin never gets these,
+    # and an org admin never another org's team.
+    Action.TEAM_CREATE: Rule(Level.ORG, Relation.ADMIN),
+    Action.TEAM_DELETE: Rule(Level.ORG, Relation.ADMIN),
     Action.TEAM_QUOTA_SET: Rule(Level.ORG, Relation.ADMIN),
     Action.TEAM_ADMIN_ASSIGN: Rule(Level.ORG, Relation.ADMIN),
     Action.CATALOG_READ: Rule(Level.ANY),
@@ -548,27 +553,43 @@ class RequestAuthz:
             return await self._team_admin_capability(team_id)
         return await self._team_read_capability(team_id)
 
-    async def allowed(self, action: Action, team_id: uuid.UUID | None = None) -> bool:
+    async def allowed(
+        self,
+        action: Action,
+        team_id: uuid.UUID | None = None,
+        *,
+        org_id: uuid.UUID | None = None,
+    ) -> bool:
         rule = MATRIX[action]
         if rule.level is Level.ANY:
             return True
         if rule.level is Level.INSTALLATION:
             return await self.is_admin()
-        if team_id is None:
-            raise ValueError(f"{action} needs a team")
         if await self.is_admin():
             return True
         if rule.level is Level.ORG:
-            org_id = await self.team_org(team_id)
-            return org_id is not None and await self.is_org_admin(org_id)
+            target = org_id
+            if target is None:
+                if team_id is None:
+                    raise ValueError(f"{action} needs a team or an org")
+                target = await self.team_org(team_id)
+            return target is not None and await self.is_org_admin(target)
+        if team_id is None:
+            raise ValueError(f"{action} needs a team")
         assert rule.relation is not None
         return await self.has(rule.relation, team_id)
 
-    async def require(self, action: Action, team_id: uuid.UUID | None = None) -> None:
+    async def require(
+        self,
+        action: Action,
+        team_id: uuid.UUID | None = None,
+        *,
+        org_id: uuid.UUID | None = None,
+    ) -> None:
         """403 unless allowed. To avoid leaking existence, callers check TEAM_READ first
         (`ensure_team_read`) and answer 404 when that fails.
         """
-        if not await self.allowed(action, team_id):
+        if not await self.allowed(action, team_id, org_id=org_id):
             raise forbidden(f"{action.value} not allowed")
 
     async def _direct_objects(

@@ -73,34 +73,35 @@ export async function optionNames(scope: Page | Locator, label: string): Promise
 type Items<T> = { items: T[] };
 
 /**
- * Delete the teams a spec made for itself (every team whose name starts with `prefix`), through the API.
+ * The org a spec's teams belong to. There is no implicit default org any more, so a team needs an
+ * explicit one; every spec that creates teams goes through here.
+ */
+export async function ensureOrg(request: APIRequestContext, headers: Record<string, string>, name = "e2e") {
+  const listed = await request.get("/api/v1/orgs?limit=200", { headers });
+  expect(listed.status(), await listed.text()).toBe(200);
+  const items = ((await listed.json()) as Items<{ id: string; name: string }>).items;
+  const found = items.find((org) => org.name === name) ?? items[0];
+  if (found) return found.id;
+  const created = await request.post("/api/v1/orgs", { headers, data: { name } });
+  expect(created.status(), await created.text()).toBe(201);
+  return ((await created.json()) as { id: string }).id;
+}
+
+/**
+ * Archive the teams a spec made for itself (every team whose name starts with `prefix`), through the API.
  *
- * The API refuses to delete a team that still has a service account, and refuses both the account and the
- * team while a key exists — keys are kept for usage history and there is no delete-key endpoint, only revoke.
- * So a team that has a key cannot be deleted at all: it is left untouched and its name is returned. Members
- * cascade with their team and need no separate call.
+ * Archiving revokes keys, deactivates service accounts and frees the name, so a spec no longer has to
+ * work around a team it cannot delete. The team row itself stays for usage history but leaves the list.
  */
 export async function deleteTeams(request: APIRequestContext, headers: Record<string, string>, prefix: string): Promise<string[]> {
-  const list = async <T>(path: string): Promise<T[]> => {
-    const response = await request.get(`/api/v1${path}`, { headers });
-    expect(response.status(), await response.text()).toBe(200);
-    return ((await response.json()) as Items<T>).items;
-  };
-  const remove = async (path: string, what: string) => {
-    const response = await request.delete(`/api/v1${path}`, { headers });
-    expect(response.status(), `delete ${what}: ${await response.text()}`).toBe(204);
-  };
-  const own = (await list<{ id: string; name: string }>("/teams?limit=200")).filter((team) => team.name.startsWith(prefix));
-  const kept: string[] = [];
+  const listed = await request.get("/api/v1/teams?limit=200", { headers });
+  expect(listed.status(), await listed.text()).toBe(200);
+  const own = ((await listed.json()) as Items<{ id: string; name: string }>).items.filter((team) =>
+    team.name.startsWith(prefix),
+  );
   for (const team of own) {
-    if ((await list(`/teams/${team.id}/keys?limit=1`)).length) {
-      kept.push(team.name);
-      continue;
-    }
-    for (const account of await list<{ id: string; name: string }>(`/teams/${team.id}/service-accounts?limit=200`)) {
-      await remove(`/service-accounts/${account.id}`, `service account ${account.name}`);
-    }
-    await remove(`/teams/${team.id}`, `team ${team.name}`);
+    const response = await request.delete(`/api/v1/teams/${team.id}`, { headers });
+    expect(response.status(), `archive team ${team.name}: ${await response.text()}`).toBe(204);
   }
-  return kept;
+  return [];
 }

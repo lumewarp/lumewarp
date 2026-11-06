@@ -26,6 +26,7 @@ export type CatalogKind = Schemas["CatalogKind"];
 export type UsageRow = Schemas["UsageRowOut"];
 export type User = Schemas["UserOut"];
 export type Me = Schemas["MeOut"];
+export type Org = Schemas["OrgOut"];
 export type ModelAccess = Schemas["ModelAccess"];
 export type PolicyOut = Pick<Team, "model_access" | "allowed_models" | "rpm_limit" | "tpm_limit" | "max_parallel" | "budget_nano_usd">;
 
@@ -94,6 +95,9 @@ export const api = {
   logoutSession: () => unwrap(client.POST("/api/v1/session/logout")),
 
   me: () => unwrap(client.GET("/api/v1/users/me")),
+
+  orgs: () => listAll((c) => unwrap(client.GET("/api/v1/orgs", { params: { query: q(c) } }))),
+  org: (id: string) => unwrap(client.GET("/api/v1/orgs/{org_id}", { params: { path: { org_id: id } } })),
 
   teams: () => listAll((c) => unwrap(client.GET("/api/v1/teams", { params: { query: q(c) } }))),
   team: (id: string) => unwrap(client.GET("/api/v1/teams/{team_id}", { params: { path: { team_id: id } } })),

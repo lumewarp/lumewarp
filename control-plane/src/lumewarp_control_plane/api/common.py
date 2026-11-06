@@ -18,7 +18,14 @@ from lumewarp_control_plane.authz import Action, RequestAuthz
 from lumewarp_control_plane.db import get_session
 from lumewarp_control_plane.errors import ApiError, forbidden, not_found
 from lumewarp_control_plane.metrics import DISCARD, Metrics, note_suspended
-from lumewarp_control_plane.models import ApiKey, KeyLifecycle, KeyOwnerKind, Scope, Team
+from lumewarp_control_plane.models import (
+    ApiKey,
+    KeyLifecycle,
+    KeyOwnerKind,
+    Scope,
+    Team,
+    UserIdentity,
+)
 from lumewarp_control_plane.security import Principal
 from lumewarp_control_plane.settings import Settings
 
@@ -144,9 +151,26 @@ async def ensure_key_read(authz: RequestAuthz, key: ApiKey) -> None:
     raise forbidden(f"{Action.TEAM_ADMIN_READ.value} not allowed")
 
 
+async def require_signed_in(session: AsyncSession, user_id: uuid.UUID) -> None:
+    """A user must have linked an IdP identity before receiving a role.
+
+    Installation roles and org admins are protected from email linking (`resolve_user`),
+    so assigning one to an account that has never signed in would make it impossible to
+    log into. Shared by installation roles and org admins.
+    """
+    identity = await session.scalar(
+        select(UserIdentity.id).where(UserIdentity.user_id == user_id).limit(1)
+    )
+    if identity is None:
+        raise conflict("the user must sign in once before receiving a role")
+
+
 async def get_team_or_404(session: AsyncSession, authz: RequestAuthz, team_id: uuid.UUID) -> Team:
+    """A live team the caller may read. An archived team is gone from the API: its
+    history stays readable through usage and audit, but it is not a target for writes.
+    """
     team = await session.get(Team, team_id)
-    if team is None:
+    if team is None or team.deleted_at is not None:
         raise not_found("team not found")
     await ensure_team_read(authz, team.id)
     return team

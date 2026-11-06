@@ -327,11 +327,23 @@ async def _is_member(
     return decision is Decision.ALLOW
 
 
+async def _live_team_or_404(session: AsyncSession, team_id: uuid.UUID) -> Team:
+    """The key's team, 404 when the team was archived (writes go through here too)."""
+    team = await session.get(Team, team_id)
+    if team is None or team.deleted_at is not None:
+        raise not_found("key not found")
+    return team
+
+
 async def _get_key(session: AsyncSession, authz: RequestAuthz, key_id: uuid.UUID) -> ApiKey:
     row = await session.get(ApiKey, key_id, with_for_update=True)
     if row is None:
         raise not_found("key not found")
     await ensure_key_read(authz, row)
+    # Every write to a key of an archived team is refused, even though its row is kept for
+    # usage history. All archive paths revoke their keys in the same transaction, but the
+    # guard must not depend on that ordering.
+    await _live_team_or_404(session, row.team_id)
     return row
 
 
@@ -412,6 +424,8 @@ async def create_key(
             account = await session.get(ServiceAccount, body.service_account_id)
             if account is None or account.team_id != team.id:
                 raise not_found("service account not found")
+            if account.deactivated_at is not None:
+                raise conflict("the service account is deactivated")
             await authz.require(Action.SERVICE_ACCOUNT_MANAGE, team.id)
             owner = {
                 "owner_kind": KeyOwnerKind.SERVICE_ACCOUNT,
@@ -462,6 +476,7 @@ async def get_key(key_id: uuid.UUID, authz: Authz, session: SessionDep) -> KeyOu
     if row is None:
         raise not_found("key not found")
     await ensure_key_read(authz, row)
+    await _live_team_or_404(session, row.team_id)
     return await _out(session, row)
 
 
@@ -492,18 +507,14 @@ async def update_key(
             row.name = body.name
         if "expires_at" in body.model_fields_set:
             if row.owner_kind is KeyOwnerKind.USER:
-                team = await session.get(Team, row.team_id)
-                if team is None:
-                    raise not_found("team not found")
+                team = await _live_team_or_404(session, row.team_id)
                 _check_member_expiry(team, body.expires_at)
             row.expires_at = body.expires_at
         limit_fields = ("rpm_limit", "tpm_limit", "max_parallel")
         if body.model_fields_set & set(limit_fields):
             # The owner's effective limits cap the key. A limits-only PATCH never touches
             # `lifecycle` or `suspended_reason`; those stay with their own branches.
-            team = await session.get(Team, row.team_id)
-            if team is None:
-                raise not_found("team not found")
+            team = await _live_team_or_404(session, row.team_id)
             await _check_key_limits(session, team, row, body)
             for field in limit_fields:
                 if field in body.model_fields_set:
@@ -520,6 +531,10 @@ async def update_key(
                     raise conflict("the key's owner is not active")
                 if not await _is_member(session, authz, row.team_id, row.user_id):
                     raise conflict("the key's owner is no longer a member of the team")
+            if row.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT:
+                account = await session.get(ServiceAccount, row.service_account_id)
+                if account is None or account.deactivated_at is not None:
+                    raise conflict("the service account is deactivated")
             owner_resume = (
                 row.suspended_reason == "owner_removed"
                 and row.owner_kind is KeyOwnerKind.USER
@@ -613,9 +628,7 @@ async def rotate_key(
         if row.lifecycle is KeyLifecycle.REVOKED:
             raise conflict("revoked keys cannot be rotated")
         if row.owner_kind is KeyOwnerKind.USER:
-            team = await session.get(Team, row.team_id)
-            if team is None:
-                raise not_found("team not found")
+            team = await _live_team_or_404(session, row.team_id)
             _enforce_rotation_lifetime(team, row)
         new = generate_secret(SecretKind.API_KEY)
         old_hash = row.key_hash

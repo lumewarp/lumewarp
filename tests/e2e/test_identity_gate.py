@@ -28,7 +28,7 @@ def p2(request, binaries):
             assert cookie_api(browser, stack, "GET", "/teams")["items"] == []
         assert pg(stack.dsn, "SELECT count(*) AS n FROM team_members")[0]["n"] == 0
         state.team = cookie_api(
-            state.admin, stack, "POST", "/teams", json={"name": "p2", "model_access": "all"}
+            state.admin, stack, "POST", "/teams", json={"name": "p2", "org_id": stack.org_id, "model_access": "all"}
         )["id"]
         yield state
 
@@ -288,7 +288,7 @@ def test_06_openfga_renamed_store_via_mapping():
     ) as state:
         stack = state.stack
         team = cookie_api(
-            state.admin, stack, "POST", "/teams", json={"name": "renamed", "model_access": "all"}
+            state.admin, stack, "POST", "/teams", json={"name": "renamed", "org_id": stack.org_id, "model_access": "all"}
         )
         state.team = team
         grant(state, state.user, "member")

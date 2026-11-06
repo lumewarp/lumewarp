@@ -8,10 +8,10 @@ squashed into a baseline generated from `models.py`: a fresh database runs this 
 nothing else, and there is no upgrade path from an earlier revision. When the schema
 changes, edit `models.py` and regenerate this file (the migration test compares the two).
 
-Org data is not seeded here. The `orgs` table starts empty; `orgs.default_org` creates the
-`default` org on the first team creation, so there is no backfill and no migration-time
-data. `member_policies` rows are not required for membership either: the authz backend
-owns memberships, while per-member quotas stay here.
+Org data is not seeded here. The `orgs` table starts empty and there is no implicit
+default: `POST /teams` takes an explicit `org_id`, so there is no backfill and no
+migration-time data. `member_policies` rows are not required for membership either: the
+authz backend owns memberships, while per-member quotas stay here.
 
 The only object the models cannot express is the `config_versions` immutability trigger;
 it lives at the end of `upgrade()`.
@@ -906,6 +906,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("org_id", sa.Uuid(), nullable=False),
         sa.Column("name", sa.String(length=200), nullable=False),
+        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("max_keys_per_member", sa.Integer(), nullable=True),
         sa.Column("max_member_key_lifetime_seconds", sa.Integer(), nullable=True),
         sa.Column("member_rpm_default", sa.Integer(), nullable=True),
@@ -978,9 +979,15 @@ def upgrade() -> None:
             ["org_id"], ["orgs.id"], name=op.f("fk_teams_org_id_orgs"), ondelete="RESTRICT"
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_teams")),
-        sa.UniqueConstraint("name", name=op.f("uq_teams_name")),
     )
     op.create_index(op.f("ix_teams_org_id"), "teams", ["org_id"], unique=False)
+    op.create_index(
+        "uq_teams_name",
+        "teams",
+        ["name"],
+        unique=True,
+        postgresql_where=sa.text("deleted_at IS NULL"),
+    )
     op.create_table(
         "user_identities",
         sa.Column("id", sa.Uuid(), nullable=False),
@@ -1248,6 +1255,7 @@ def upgrade() -> None:
         sa.Column("team_id", sa.Uuid(), nullable=False),
         sa.Column("name", sa.String(length=200), nullable=False),
         sa.Column("description", sa.Text(), server_default="", nullable=False),
+        sa.Column("deactivated_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_by_user_id", sa.Uuid(), nullable=True),
         sa.Column("rpm_limit", sa.Integer(), nullable=True),
         sa.Column("tpm_limit", sa.BigInteger(), nullable=True),
@@ -1666,6 +1674,11 @@ def downgrade() -> None:
     op.drop_table("user_sessions")
     op.drop_index(op.f("ix_user_identities_user_id"), table_name="user_identities")
     op.drop_table("user_identities")
+    op.drop_index(
+        "uq_teams_name",
+        table_name="teams",
+        postgresql_where=sa.text("deleted_at IS NULL"),
+    )
     op.drop_index(op.f("ix_teams_org_id"), table_name="teams")
     op.drop_table("teams")
     op.drop_table("routers")

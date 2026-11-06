@@ -107,7 +107,7 @@ class Fleet:
         budgets = budgets or {}
         team_budgets = team_budgets or {}
         for t in range(teams):
-            body = {"name": f"team-{t}"}
+            body = {"name": f"team-{t}", "org_id": stack.org_id}
             if t in team_budgets:
                 body["budget_nano_usd"] = team_budgets[t]
             team = stack.ok("POST", "/teams", json=body)

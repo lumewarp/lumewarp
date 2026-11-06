@@ -30,7 +30,13 @@ OWN_KEY = (200, 200, 403, 404, 200)
 # name, method, path, body, exact response by ROLES order.
 CASES = [
     ("teams.list", "GET", "/teams", None, ANY),
-    ("teams.create", "POST", "/teams", {"name": "new-{mark}"}, (201, 403, 403, 403, 201)),
+    (
+        "teams.create",
+        "POST",
+        "/teams",
+        {"name": "new-{mark}", "org_id": "{org}"},
+        (201, 404, 404, 404, 201),
+    ),
     ("teams.read", "GET", "/teams/{team}", None, READ),
     ("teams.update", "PATCH", "/teams/{team}", {"name": "updated-{mark}"}, ADMIN),
     ("teams.quota", "PATCH", "/teams/{team}", {"rpm_limit": 5}, (200, 403, 403, 404, 200)),
@@ -125,6 +131,7 @@ async def test_endpoint_authorization_matrix(client, committed, role, case) -> N
         "target": str(target.id),
         "unused_user": str(unused.id),
         "mark": suffix(),
+        "org": str(team.org_id),
     }
     if name != "teams.delete":
         account = await make_service_account(committed, team)

@@ -42,6 +42,7 @@ _POLICY_CHANGES: dict[str, DetailSpec] = {
     "name": None,
     "description": None,
     "role": None,
+    "is_active": None,
 }
 _HEALTH_CHECK: dict[str, DetailSpec] = {
     "path": None,
@@ -129,6 +130,11 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
             "keep_old_name_as_alias": None,
         },
     },
+    "org.admin.assign": {"org_id": None, "user_id": None},
+    "org.admin.remove": {"org_id": None, "user_id": None},
+    "org.archive": {"name": None},
+    "org.create": {"name": None},
+    "org.update": {"name": None, "policy_changed": None, "changes": _POLICY_CHANGES},
     "pat.create": {"name": None, "user_id": None},
     "pat.revoke": {"name": None},
     "router.create": {"name": None, "members": None, "settings": _ROUTER_SETTINGS},
@@ -149,7 +155,11 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
     "session.break_glass.login": {"result": None, "window_seconds": None},
     "session.break_glass.request": {"method": None, "path": None, "status": None},
     "team.create": {"name": None},
-    "team.delete": {"name": None},
+    "team.archive": {
+        "name": None,
+        "revoked_keys": None,
+        "deactivated_service_accounts": None,
+    },
     "team.update": {
         "name": None,
         "policy_changed": None,

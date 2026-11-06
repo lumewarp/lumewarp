@@ -2,7 +2,7 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-import { confirmDialog, control, deleteTeams, dialog, pick, SHOTS, shot } from "./helpers";
+import { confirmDialog, control, deleteTeams, dialog, ensureOrg, pick, SHOTS, shot } from "./helpers";
 
 /*
  * The screenshot matrix, in one place: every page, every team tab, the two catalog forms, the permission picker,
@@ -74,7 +74,7 @@ test("screenshots: the whole matrix, desktop and 390 px, light and dark", async 
   info.setTimeout(900_000);
   // Start from a clean s7-* set: a stale file from an earlier run would hide a missing shot from this one.
   if (existsSync(SHOTS!)) for (const name of readdirSync(SHOTS!)) if (name.startsWith("s7-") && name.endsWith(".png")) rmSync(join(SHOTS!, name));
-  const team = await post(request, "/teams", { name: "s7-shots" });
+  const team = await post(request, "/teams", { name: "s7-shots", org_id: await ensureOrg(request, admin) });
   await post(request, `/teams/${team.id}/members`, { email: "viewer@e2e.test", role: "member" });
   const account = await post(request, `/teams/${team.id}/service-accounts`, { name: "s7-agent", description: "Screenshots" });
   await post(request, `/teams/${team.id}/keys`, { name: "s7-key", service_account_id: account.id });

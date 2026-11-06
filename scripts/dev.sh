@@ -132,12 +132,14 @@ seed() {
   admin_csrf="$(curl -fsS -b "$state/admin-cookie" "$cp_url/api/v1/session" | jq -r .csrf_token)"
   [[ $(api GET /upstreams | jq '.items | length') == 0 ]] || return 0
   log "seeding demo upstream, model, router, alias, team and key"
-  local up model router team sa
+  local org up model router team sa
+  org="$(api GET /orgs | jq -r '.items | map(select(.name == "default")) | first | .id // empty')"
+  [[ -n "$org" ]] || org="$(api POST /orgs '{"name":"default"}' | jq -r .id)"
   up="$(api POST /upstreams '{"name":"mock","kind":"openai_compatible","base_url":"http://127.0.0.1:9100/v1"}' | jq -r .id)"
   model="$(api POST /models "{\"name\":\"mock-local\",\"upstream_id\":\"$up\",\"upstream_model\":\"mock\"}" | jq -r .id)"
   router="$(api POST /routers "{\"name\":\"demo\",\"members\":[{\"model_id\":\"$model\"}]}" | jq -r .id)"
   api POST /aliases "{\"name\":\"demo-latest\",\"target\":\"$router\"}" >/dev/null
-  team="$(api POST /teams '{"name":"demo","model_access":"all"}' | jq -r .id)"
+  team="$(api POST /teams "{\"name\":\"demo\",\"org_id\":\"$org\",\"model_access\":\"all\"}" | jq -r .id)"
   sa="$(api POST "/teams/$team/service-accounts" '{"name":"chat"}' | jq -r .id)"
   api POST "/teams/$team/keys" "{\"name\":\"demo\",\"service_account_id\":\"$sa\"}" \
     | jq -r .secret >"$state/demo-key"

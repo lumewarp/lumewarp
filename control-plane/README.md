@@ -214,17 +214,27 @@ or a prompt and prints it for `LUMEWARP_BREAK_GLASS_PASSWORD_HASH`.
 There is exactly one installation. Below it: org -> team -> key owners -> keys.
 
 - **Org**: the root of the quota hierarchy: `model_access` and `allowed_models`,
-  `rpm_limit`, `tpm_limit`, `max_parallel` and `budget_nano_usd`. There is no org write
-  API yet (only an installation admin can set these directly in Postgres), and archiving
-  is not implemented. `POST /teams` puts a new team in the org named `default`, which is
-  created on first use, and `org_admins` rows are only written directly or by the
-  built-in backend's endpoints. An **org admin** holds `admin` on `org:<id>`;
-  `RequestAuthz` inherits that for every team of the org.
+  `rpm_limit`, `tpm_limit`, `max_parallel` and `budget_nano_usd`. Only an installation
+  admin may create one (`POST /orgs`), rename or set its policy (`PATCH /orgs/{id}`),
+  archive it (`DELETE /orgs/{id}`) or assign/remove its admins
+  (`PUT|DELETE /orgs/{id}/admins/{user_id}`); an org admin reads its own orgs
+  (`GET /orgs`, `GET /orgs/{id}`) and their per-team spend (`GET /orgs/{id}/usage`, summed
+  from `usage_events` at query time). Admin assignment needs the built-in backend
+  (`manages_grants`; an external backend answers 409) and a target that has signed in
+  once. An **org admin** holds `admin` on `org:<id>`; `RequestAuthz` inherits that for
+  every team of the org. `POST /teams` takes an explicit `org_id`: there is no default
+  org. Archiving an org is irreversible and only allowed once it has no live team; after
+  that no team can be created in it.
 - **Team**: a name, its `org_id`, a policy (`model_access` and `allowed_models`,
   `rpm_limit`, `tpm_limit`, `max_parallel`, `budget_nano_usd`), the member defaults
   `member_rpm_default`, `member_tpm_default` and `member_max_parallel_default`, and the
   self-service limits `max_keys_per_member` (non-revoked user keys per member; revoking
-  frees a slot) and `max_member_key_lifetime_seconds`.
+  frees a slot) and `max_member_key_lifetime_seconds`. `DELETE /teams/{id}` archives:
+  in one transaction it locks the config scope, sets `deleted_at`, revokes every key of
+  the team (including the rotation-grace hash), deactivates its service accounts and
+  frees the name, which is unique only among live teams. Archived teams stay in the
+  database for usage and audit (`GET /usage?team_id=`, `GET /audit?team_id=`, the org
+  usage summary) but every write path and every team-scoped read answers 404.
 - **Team member**: a user in a team with role `admin` or `member`. The member's own
   exception policy and grants live in `member_policies`, keyed by `(team_id, user_id)` and
   deliberately independent of `team_members`: an external authorization backend has no
@@ -234,7 +244,10 @@ There is exactly one installation. Below it: org -> team -> key owners -> keys.
   every team.
 - **Service account**: a non-human key owner in one team, with its own narrowing policy,
   managed by the team's admins. It takes no member defaults and is unaffected by people
-  joining or leaving.
+  joining or leaving. `PATCH /service-accounts/{id}` with `{"is_active": false}`
+  deactivates it: the compiler leaves its keys out of the snapshot (and includes the
+  non-revoked ones again after reactivation). Archiving a team deactivates all of its
+  accounts.
 - **API key**: belongs to one team and is owned by a member (`owner_kind=user`) or a service
   account (`owner_kind=service_account`). A key carries only its own `rpm_limit`,
   `tpm_limit` and `max_parallel` (NULL = no key level). The compiler resolves the whole
@@ -298,8 +311,8 @@ successful writes are audited, so a client cannot flood the audit table. A limit
 
 Removing a member suspends that member's user-owned keys in the team
 (`suspended_reason=owner_removed`); deactivating a user suspends their user-owned keys
-(`owner_deactivated`). Revoked keys are kept for usage history. A key or a service
-account prevents team deletion.
+(`owner_deactivated`). Revoked keys are kept for usage history; a key or a service
+account no longer prevents archiving a team.
 
 An active owner may resume a key they suspended themselves (`owner`) and, once they
 are a member again, one suspended by their removal (`owner_removed`). An `admin`
@@ -320,7 +333,8 @@ Org budgets are derived: the org's monthly spend is the sum of its teams' `usage
 crossing inserts `org_budget_windows` with `ON CONFLICT DO NOTHING`, so the audit row and
 the recompile happen exactly once even when several teams of one org report concurrently;
 a batch that cannot see a sibling's uncommitted total is caught by the next ingest or
-compile.
+compile. Raising a budget (or removing it) deletes the month's window row, so a later
+crossing audits and recompiles again instead of staying silent.
 
 ### Authorization
 
@@ -375,20 +389,21 @@ reconciler only looks at direct memberships).
 
 | Action | Installation admin | Org admin | Team admin | Member |
 | --- | --- | --- | --- | --- |
-| `TEAM_CREATE`, `TEAM_DELETE`, `INSTALLATION_ADMIN_MANAGE`, `USER_MANAGE`, `ROUTING_MANAGE`, `ROUTING_READ`, `GATEWAY_TOKEN_MANAGE`, `GATEWAY_READ`, `CONFIG_READ`, `CONFIG_ROLLBACK` | yes | | | |
-| `TEAM_QUOTA_SET`, `TEAM_ADMIN_ASSIGN` | yes | its org's teams | | |
+| `ORG_MANAGE`, `INSTALLATION_ADMIN_MANAGE`, `USER_MANAGE`, `ROUTING_MANAGE`, `ROUTING_READ`, `GATEWAY_TOKEN_MANAGE`, `GATEWAY_READ`, `CONFIG_READ`, `CONFIG_ROLLBACK` | yes | | | |
+| `TEAM_CREATE`, `TEAM_DELETE`, `TEAM_QUOTA_SET`, `TEAM_ADMIN_ASSIGN` | yes | its org's teams | | |
 | `TEAM_SETTINGS_UPDATE`, `TEAM_MEMBERS_MANAGE`, `TEAM_ADMIN_READ`, `SERVICE_ACCOUNT_MANAGE`, `KEY_MANAGE_ANY` | yes | inherited | yes | |
 | `TEAM_READ`, `KEY_CREATE_OWN`, `KEY_MANAGE_OWN` | yes | inherited | yes | yes |
 | `CATALOG_READ`, `OWN_TOKENS` | yes | yes | yes | yes |
 
 `TEAM_QUOTA_SET` covers a team's model access, allowlist, rate limits, parallelism and budget;
 `TEAM_ADMIN_ASSIGN` covers adding an admin, promoting or demoting an existing member (including
-the caller themself) and removing an admin. Both are org-level, checked on the org of the team
-named in the URL, so an org admin may use them in its own org and a team admin cannot use them at
-all. A team admin keeps `TEAM_SETTINGS_UPDATE` (the team name and the member key limits). A team
-update decides from what actually changes (`proposed != base`), so resending the current policy
-values is not a quota change. Team creation and deletion stay installation-level until team
-archiving and `POST /teams` with an `org_id` exist.
+the caller themself) and removing an admin. `TEAM_CREATE` takes the `org_id` from the body and
+`TEAM_DELETE` archives the team named in the URL; both are org-level, checked on the org of the
+target, so an org admin may use them in its own org and a team admin cannot use them at all. A
+team admin keeps `TEAM_SETTINGS_UPDATE` (the team name and the member key limits). A team update
+decides from what actually changes (`proposed != base`), so resending the current policy values
+is not a quota change. `ORG_MANAGE` is installation-level: create, rename, policy, archive and
+org admin assignment.
 
 `KEY_CREATE_OWN` passes for an org admin (it has the team's read capability) but creating a
 user-owned key also requires a direct membership, so an org admin that is not a member of the
@@ -408,8 +423,9 @@ with whatever filters they sent, so asking for someone else returns nothing. Usa
 server-side owner predicate: a plain member sees rows of their own keys in teams they belong to,
 including grouped totals, and cannot widen it with `key_id`/`user_id`/`service_account_id`.
 Team-admin views and audit cover direct team admins and every inherited org team; a caller who
-administers no team gets `403`, filtered or not, and a deleted team's rows stay installation-admin
-only.
+administers no team gets `403`, filtered or not. Audit also matches `org_id`, so an org admin
+reads its org's org-level events (org policy, org admins, org budget) and the rows of its
+archived teams; a team admin reads only rows attached to its teams.
 
 `ROUTING_READ` is installation-level (upstreams, models, aliases, routers and strategies,
 including their `GET`s). `CATALOG_READ` is the one routing read every authenticated caller
@@ -569,9 +585,10 @@ example](../deploy/helm/lumewarp/README.md#sso-and-authorization-backend).
 ## Audit log
 
 Every mutation writes an `audit_log` row in the same transaction. Reads are scoped: an
-installation admin sees everything (including rows without a team and rows of deleted teams), a
-team admin sees the rows of the teams they administer (filtered or not), and a plain member has
-no audit view (`403`). `details` is an
+installation admin sees everything (including rows without a team and rows of archived teams), a
+team admin sees the rows of the teams they administer (filtered or not), an org admin additionally
+sees its org-level events (`org_id` set, `team_id` NULL: org policy, org admins, org budget) and
+the rows of its archived teams, and a plain member has no audit view (`403`). `details` is an
 allowlist per action (`DETAIL_ALLOWLIST` in `audit.py`): only fields classified for that
 action are stored, and anything else is dropped rather than redacted. Nested objects such
 as `changes`, `settings` and `traffic_split` have their own field lists, and free-form
@@ -790,8 +807,8 @@ end.
 
 The history is one baseline, `20261106_0001_baseline.py`, generated from `models.py`:
 Lumewarp has never been deployed, so there is no upgrade path from an earlier revision and
-no data-preserving migration code. A fresh database runs that one file. `orgs` start empty;
-`POST /teams` creates the `default` org on first use.
+no data-preserving migration code. A fresh database runs that one file. `orgs` start empty
+and `POST /teams` takes an explicit `org_id`; nothing is seeded.
 
 Edit `models.py`, then with the dev DB at head:
 

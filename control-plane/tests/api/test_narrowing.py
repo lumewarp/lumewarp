@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.api.helpers import ADMIN_AUTH
+from tests.api.helpers import ADMIN_AUTH, create_org, suffix
 from tests.factories import (
     catalog_name,
     make_key,
@@ -120,10 +120,11 @@ async def test_parent_decrease_succeeds_and_effective_values_clamp(
     ],
 )
 def test_team_policy_validation(client, body) -> None:
-    from tests.api.helpers import suffix
-
+    org = create_org(client)
     response = client.post(
-        "/api/v1/teams", json={"name": f"policy-{suffix()}", **body}, headers=ADMIN_AUTH
+        "/api/v1/teams",
+        json={"name": f"policy-{suffix()}", "org_id": org["id"], **body},
+        headers=ADMIN_AUTH,
     )
     assert response.status_code == 422, response.text
 

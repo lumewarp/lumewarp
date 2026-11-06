@@ -32,7 +32,6 @@ from lumewarp_control_plane.models import (
     UpstreamKind,
     User,
 )
-from lumewarp_control_plane.orgs import DEFAULT_ORG_NAME
 from lumewarp_control_plane.security import SecretKind, generate_secret
 
 _seq = itertools.count(1)
@@ -171,8 +170,13 @@ async def make_alias(session: AsyncSession, name: str, target: Model | Router) -
 
 
 async def make_org(session: AsyncSession, name: str | None = None, **kw) -> Org:
-    """An org. Tests share the one `default` org the migration created unless they name one."""
-    name = name or DEFAULT_ORG_NAME
+    """An org. A named org is reused so a test can put several teams in one; an unnamed one
+    is fresh (there is no implicit default org any more)."""
+    if name is None:
+        row = Org(name=_unique("org"), **kw)
+        session.add(row)
+        await session.flush()
+        return row
     row = await session.scalar(select(Org).where(Org.name == name))
     if row is None:
         row = Org(name=name, **kw)

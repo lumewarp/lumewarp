@@ -1,6 +1,7 @@
 """Org administration: inheritance, its boundaries and the direct-membership rule.
 
-The org write API does not exist yet, so orgs and `org_admins` rows are created directly.
+Orgs and `org_admins` rows are created directly so this file tests inheritance itself,
+not the org write path (see `test_orgs.py`).
 Every check here is what `RequestAuthz` adds on top of the backend's direct relations.
 """
 

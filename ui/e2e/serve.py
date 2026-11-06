@@ -69,6 +69,11 @@ async def seed_users(url: str) -> None:
     engine = create_async_engine(url)
     try:
         async with AsyncSession(engine) as session, session.begin():
+            # One org for the specs' teams: the Admin UI has no Orgs page yet, and a team
+            # needs an explicit org.
+            from lumewarp_control_plane.models import Org
+
+            session.add(Org(name="e2e"))
             for email, display_name, token in (
                 (VIEWER_EMAIL, "E2E Viewer", VIEWER_TOKEN),
                 (MEMBER_EMAIL, "E2E Member", MEMBER_TOKEN),

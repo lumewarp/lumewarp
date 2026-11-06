@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Response, status
 from sqlalchemy import select
@@ -33,8 +34,14 @@ from lumewarp_control_plane.api.policy import (
 from lumewarp_control_plane.api.schemas import Page, TeamBasicOut, TeamCreate, TeamOut, TeamUpdate
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import not_found
-from lumewarp_control_plane.models import ApiKey, ModelAccess, ServiceAccount, Team
-from lumewarp_control_plane.orgs import default_org
+from lumewarp_control_plane.models import (
+    ApiKey,
+    KeyLifecycle,
+    ModelAccess,
+    Org,
+    ServiceAccount,
+    Team,
+)
 from lumewarp_control_plane.quota import Effective
 
 router = APIRouter(tags=["teams"])
@@ -57,10 +64,10 @@ async def list_teams(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[TeamOut | TeamBasicOut]:
-    stmt = select(Team).order_by(Team.id)
+    stmt = select(Team).where(Team.deleted_at.is_(None)).order_by(Team.id)
     is_admin = await authz.is_admin()
     if not is_admin:
-        candidates = set(await session.scalars(select(Team.id)))
+        candidates = set(await session.scalars(select(Team.id).where(Team.deleted_at.is_(None))))
         readable = await authz.readable_teams(candidates)
         if readable is not None:
             stmt = stmt.where(Team.id.in_(readable))
@@ -89,12 +96,15 @@ async def create_team(
     session: SessionDep,
     settings: SettingsDep,
 ) -> TeamOut:
-    await authz.require(Action.TEAM_CREATE)
     async with mutation(session):
         await lock_scope(session, settings)
+        org = await session.get(Org, body.org_id)
+        # A caller who does not administer the org sees the same 404 as an unknown org.
+        if org is None or not await authz.is_org_admin(org.id):
+            raise not_found("org not found")
+        if org.deleted_at is not None:
+            raise conflict("the org is archived")
         policy = policy_from_fields(body, default_mode=ModelAccess.ALL)
-        # The request shape is unchanged: a new team joins the default org (orgs.py).
-        org = await default_org(session)
         row = Team(
             org_id=org.id,
             name=body.name,
@@ -105,8 +115,7 @@ async def create_team(
             member_max_parallel_default=body.member_max_parallel_default,
         )
         # A new team is a child write too: it may not start above its org's effective
-        # policy. (Org policy has no write API yet, so in practice the default org is
-        # unrestricted unless an installation admin set it directly.)
+        # policy.
         await validate_team_policy(session, row, policy, None)
         apply_policy(row, policy)
         session.add(row)
@@ -234,35 +243,59 @@ async def delete_team(
     session: SessionDep,
     settings: SettingsDep,
 ) -> Response:
+    """Archive a team. Irreversible: keys are revoked, service accounts deactivated and the
+    name becomes free for a new live team. History (usage, audit) keeps resolving.
+    """
     async with mutation(session):
         await lock_scope(session, settings)
-        row = await session.get(Team, team_id)
-        if row is None:
+        # Read without the live-team guard: an already archived team answers 409 to a
+        # reader, while anyone who cannot read it gets 404.
+        row = await session.get(Team, team_id, with_for_update=True)
+        if row is None or not await authz.allowed(Action.TEAM_READ, row.id):
             raise not_found("team not found")
-        if not await authz.allowed(Action.TEAM_READ, row.id):
-            raise not_found("team not found")
+        if row.deleted_at is not None:
+            raise conflict("the team is already archived")
         await authz.require(Action.TEAM_DELETE, row.id)
-        key = await session.scalar(select(ApiKey.id).where(ApiKey.team_id == row.id).limit(1))
-        if key is not None:
-            raise conflict("team still has keys (kept for usage history); revoke is not enough")
-        account = await session.scalar(
-            select(ServiceAccount.id).where(ServiceAccount.team_id == row.id).limit(1)
-        )
-        if account is not None:
-            raise conflict("team still has service accounts; delete them first")
-        # The team row is gone in this transaction; keep its org on the audit row.
-        org_id = row.org_id
-        name = row.name
-        await session.delete(row)
+        now = datetime.now(UTC)
+        keys = (
+            await session.scalars(
+                select(ApiKey).where(
+                    ApiKey.team_id == row.id, ApiKey.lifecycle != KeyLifecycle.REVOKED
+                )
+            )
+        ).all()
+        for key in keys:
+            key.lifecycle = KeyLifecycle.REVOKED
+            key.suspended_reason = None
+            key.revoked_at = now
+            # Revoking kills both credentials; never leave a grace hash behind.
+            key.previous_key_hash = None
+            key.previous_key_expires_at = None
+        accounts = (
+            await session.scalars(
+                select(ServiceAccount).where(
+                    ServiceAccount.team_id == row.id,
+                    ServiceAccount.deactivated_at.is_(None),
+                )
+            )
+        ).all()
+        for account in accounts:
+            account.deactivated_at = now
+        row.deleted_at = now
+        await session.flush()
         audit.record(
             session,
-            action="team.delete",
+            action="team.archive",
             resource_type="team",
             resource_id=row.id,
             principal=authz.principal,
             team_id=row.id,
-            org_id=org_id,
-            details={"name": name},
+            org_id=row.org_id,
+            details={
+                "name": row.name,
+                "revoked_keys": len(keys),
+                "deactivated_service_accounts": len(accounts),
+            },
         )
-        await enqueue_recompile(session, settings, "api.team.delete")
+        await enqueue_recompile(session, settings, "api.team.archive")
     return Response(status_code=status.HTTP_204_NO_CONTENT)

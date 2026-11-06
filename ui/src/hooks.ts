@@ -34,6 +34,9 @@ export function can(me: Me | undefined, teams: TeamAny[] | undefined) {
   return {
     isInstallationAdmin,
     isOrgAdmin,
+    // Team creation is org level: an org admin may create in its own org, a team admin not.
+    canCreateTeam: isInstallationAdmin || isOrgAdmin,
+    canDeleteTeam: (teamId: string) => isInstallationAdmin || isOrgTeamAdmin(teamId),
     isTeamAdmin,
     // Names and kinds only; every authenticated caller may read them.
     canReadCatalog: true,
@@ -57,6 +60,10 @@ export function can(me: Me | undefined, teams: TeamAny[] | undefined) {
       canManageKey(key) &&
       (teamAdmin(key.team_id) || ownerResumableReason(key)),
   };
+}
+
+export function useOrgs(enabled = true) {
+  return useQuery({ queryKey: ["orgs"], queryFn: () => api.orgs(), enabled, staleTime: 60_000 });
 }
 
 export function useCan() {

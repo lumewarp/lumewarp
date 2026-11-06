@@ -30,13 +30,15 @@ from tests import factories
 ORG_A, ORG_B = uuid.uuid4(), uuid.uuid4()
 TEAM, OTHER = uuid.uuid4(), uuid.uuid4()
 ROLES = ("installation_admin", "org_admin", "admin", "member", "outsider")
-# team.create / team.delete stay installation-level in this change.
+# team.create / team.delete are org level since archiving: an org admin may create a team
+# in its own org and archive one of its teams.
 EXPECTED = {
-    Action.TEAM_CREATE: "Y----",
-    Action.TEAM_DELETE: "Y----",
+    Action.TEAM_CREATE: "YY---",
+    Action.TEAM_DELETE: "YY---",
     # Org level: the org admin may do this for a team of its own org, a team admin never.
     Action.TEAM_QUOTA_SET: "YY---",
     Action.TEAM_ADMIN_ASSIGN: "YY---",
+    Action.ORG_MANAGE: "Y----",
     Action.INSTALLATION_ADMIN_MANAGE: "Y----",
     Action.USER_MANAGE: "Y----",
     Action.ROUTING_MANAGE: "Y----",
@@ -108,8 +110,7 @@ def request_for(role, session_factory=None, calls=None):
 def test_matrix_complete() -> None:
     assert set(EXPECTED) == set(Action) == set(MATRIX)
     installation = {
-        Action.TEAM_CREATE,
-        Action.TEAM_DELETE,
+        Action.ORG_MANAGE,
         Action.INSTALLATION_ADMIN_MANAGE,
         Action.USER_MANAGE,
         Action.ROUTING_MANAGE,
@@ -121,6 +122,8 @@ def test_matrix_complete() -> None:
     }
     assert {a for a, rule in MATRIX.items() if rule.level is Level.INSTALLATION} == installation
     assert {a for a, rule in MATRIX.items() if rule.level is Level.ORG} == {
+        Action.TEAM_CREATE,
+        Action.TEAM_DELETE,
         Action.TEAM_QUOTA_SET,
         Action.TEAM_ADMIN_ASSIGN,
     }
@@ -161,9 +164,21 @@ async def test_bootstrap_is_admin() -> None:
 @pytest.mark.parametrize(
     "action", [a for a in Action if MATRIX[a].level in (Level.ORG, Level.TEAM)]
 )
-async def test_team_actions_need_team(action) -> None:
+async def test_team_actions_need_a_target(action) -> None:
     with pytest.raises(ValueError, match="needs a team"):
         await request_for("member").allowed(action)
+
+
+async def test_team_create_is_checked_on_the_given_org(hierarchy) -> None:
+    org_admin = request_for("org_admin", hierarchy)
+    assert await org_admin.allowed(Action.TEAM_CREATE, org_id=ORG_A)
+    assert not await org_admin.allowed(Action.TEAM_CREATE, org_id=ORG_B)
+    assert await request_for("installation_admin", hierarchy).allowed(
+        Action.TEAM_CREATE, org_id=ORG_B
+    )
+    with pytest.raises(ApiError) as exc:
+        await org_admin.require(Action.TEAM_CREATE, org_id=ORG_B)
+    assert exc.value.status == 403
 
 
 async def test_request_cache_and_isolation(hierarchy) -> None:
@@ -249,9 +264,20 @@ async def test_org_admin_inherits_admin_and_read(hierarchy) -> None:
     for relation in (Relation.ADMIN, Relation.MEMBER):
         assert await authz.has(relation, TEAM)
         assert not await authz.has(relation, OTHER)
-    for action in (Action.TEAM_QUOTA_SET, Action.TEAM_ADMIN_ASSIGN, Action.TEAM_READ):
-        assert await authz.allowed(action, TEAM)
-        assert not await authz.allowed(action, OTHER)
+    for action in (
+        Action.TEAM_CREATE,
+        Action.TEAM_DELETE,
+        Action.TEAM_QUOTA_SET,
+        Action.TEAM_ADMIN_ASSIGN,
+        Action.TEAM_READ,
+    ):
+        assert await authz.allowed(
+            action, TEAM if MATRIX[action].level is not Level.ORG else None, org_id=ORG_A
+        )
+        if MATRIX[action].level is Level.ORG:
+            assert not await authz.allowed(action, org_id=ORG_B)
+        else:
+            assert not await authz.allowed(action, OTHER)
 
 
 async def test_team_admin_does_not_get_org_actions(hierarchy) -> None:

@@ -3,38 +3,48 @@ import { useState } from "react";
 import { api, hasPolicy, type TeamAny } from "../api";
 import { PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
-import { FormDialog, required, TextField, useForm } from "../components/Form";
+import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
 import { blankPolicy, Budget, PolicyFields, policyBody, policyFrom, PolicySummary, POLICY_ALIAS, type PolicyValues } from "../components/Policy";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
-import { useCan, useMut, useTeams } from "../hooks";
+import { useCan, useMut, useOrgs, useTeams } from "../hooks";
 
-type Values = PolicyValues & { name: string };
-const blank: Values = { name: "", ...blankPolicy(true) };
+type Values = PolicyValues & { name: string; org_id: string };
+const blank: Values = { name: "", org_id: "", ...blankPolicy(true) };
 
 export function Teams() {
   const perms = useCan();
   const teams = useTeams();
+  // Team creation is org level. With exactly one org the dialog picks it; several orgs
+  // need an explicit choice. There is no full Orgs page yet.
+  const orgs = useOrgs(perms.canCreateTeam);
   const [editing, setEditing] = useState<TeamAny | "new" | null>(null);
   const [deleting, setDeleting] = useState<TeamAny | null>(null);
   const form = useForm<Values>(blank, { name: required("Name") });
-  const create = useMut((v: Values) => api.createTeam({ name: v.name, ...policyBody(v) }), "Team created");
-  // A team admin may rename a team; its quota stays with the installation admin.
+  const create = useMut(
+    (v: Values) =>
+      api.createTeam({ org_id: v.org_id || orgs.data?.[0]?.id || "", name: v.name, ...policyBody(v) }),
+    "Team created",
+  );
+  // A team admin may rename a team; its quota stays with the team's org admins.
   const update = useMut(
     ({ id, v }: { id: string; v: Values }) =>
-      api.updateTeam(id, perms.isInstallationAdmin ? { name: v.name, ...policyBody(v) } : { name: v.name }),
+      api.updateTeam(id, perms.canSetTeamQuota(id) ? { name: v.name, ...policyBody(v) } : { name: v.name }),
     "Team saved",
   );
-  const remove = useMut((id: string) => api.deleteTeam(id), "Team deleted");
+  const remove = useMut((id: string) => api.deleteTeam(id), "Team archived");
 
   const open = (team: TeamAny | "new") => {
     form.reset(
       team === "new"
-        ? blank
-        : { name: team.name, ...(hasPolicy(team) ? policyFrom(team, true) : blankPolicy(true)) },
+        ? { ...blank, org_id: orgs.data?.[0]?.id ?? "" }
+        : { name: team.name, org_id: team.org_id, ...(hasPolicy(team) ? policyFrom(team, true) : blankPolicy(true)) },
     );
     setEditing(team);
   };
+  // With no org yet there is nothing to create a team in; with one it is picked for the
+  // caller. Keep Create disabled until the org list answers so the body never carries "".
+  const orgReady = editing !== "new" || !!form.values.org_id || !!orgs.data?.[0];
   const submit = async () => {
     if (!form.validate()) return false;
     return form.run(
@@ -48,7 +58,7 @@ export function Teams() {
       <PageHeader
         title="Teams"
         description="Teams group members, service accounts, keys, and usage."
-        actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => open("new")}>New team</CreateButton>}
+        actions={<CreateButton can={perms.canCreateTeam} onClick={() => open("new")}>New team</CreateButton>}
       />
       <DataTable
         rows={teams.data}
@@ -72,7 +82,7 @@ export function Teams() {
             cell: (row) => (
               <RowActions
                 canEdit={perms.teamAdmin(row.id)}
-                canDelete={perms.isInstallationAdmin}
+                canDelete={perms.canDeleteTeam(row.id)}
                 onEdit={() => open(row)}
                 onDelete={() => setDeleting(row)}
               />
@@ -84,16 +94,36 @@ export function Teams() {
         open={!!editing}
         title={editing === "new" ? "New team" : "Edit team"}
         submitLabel={editing === "new" ? "Create" : "Save"}
+        submitDisabled={!orgReady}
         onClose={() => setEditing(null)}
         onSubmit={submit}
       >
         <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
-        {perms.isInstallationAdmin && <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam />}
+        {editing === "new" && (orgs.data?.length ?? 0) > 1 && (
+          <SelectField
+            label="Org"
+            value={form.values.org_id}
+            onChange={(value) => form.set("org_id", value)}
+            options={(orgs.data ?? []).map((org) => ({ value: org.id, label: org.name }))}
+          />
+        )}
+        {editing === "new" && orgs.data?.length === 1 && (
+          <p className="m-0 text-sm text-muted-foreground">Created in {orgs.data[0].name}.</p>
+        )}
+        {editing === "new" && orgs.data?.length === 0 && (
+          <p className="m-0 text-sm text-muted-foreground">
+            There is no org yet. An installation admin can create one, then a team belongs to it.
+          </p>
+        )}
+        {(editing === "new" ? perms.canCreateTeam : editing ? perms.canSetTeamQuota(editing.id) : false) && (
+          <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam />
+        )}
       </FormDialog>
       <ConfirmDialog
         open={!!deleting}
-        title="Delete team"
-        message={`Delete “${deleting?.name}”? It must have no keys or service accounts.`}
+        title="Archive team"
+        confirmLabel="Archive"
+        message={`Archive “${deleting?.name}”? This cannot be undone. Its keys are revoked, its service accounts deactivated, and the name becomes free again.`}
         onConfirm={() => remove.mutateAsync(deleting!.id)}
         onClose={() => setDeleting(null)}
       />

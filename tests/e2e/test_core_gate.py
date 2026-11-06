@@ -104,6 +104,46 @@ def test_revoke_key_takes_effect_within_two_seconds(stack):
     assert error_code(gw.chat(seeded.a.secret)) == "invalid_api_key"
 
 
+def test_archive_team_revokes_both_secrets_and_frees_the_name(stack):
+    seeded = stack.seed()
+    gw = stack.start_gateway()
+    assert gw.chat(seeded.a.secret).status_code == 200
+
+    # Rotate with grace: the gateway accepts both the current and the previous secret.
+    rotated = stack.ok("POST", f"/keys/{seeded.a.id}/rotate", json={"grace_seconds": 3600})
+    new_secret = rotated["secret"]
+    # Wait for the compile that carries the new hash; the previous one keeps working until
+    # its own grace expiry.
+    wait_for(lambda: gw.chat(new_secret).status_code == 200, 5, "rotated secret accepted")
+    assert gw.chat(seeded.a.secret).status_code == 200
+
+    assert stack.api("DELETE", f"/teams/{seeded.team_id}").status_code == 204
+    wait_for(
+        lambda: gw.chat(seeded.a.secret).status_code == 401,
+        5.0,
+        "both archived secrets rejected",
+        interval=0.05,
+    )
+    # The rotation-grace hash was cleared too, and the team's other key is gone with it.
+    for secret in (seeded.a.secret, new_secret, seeded.b.secret):
+        response = gw.chat(secret)
+        assert response.status_code == 401, response.text
+        assert error_code(response) == "invalid_api_key"
+
+    # The API no longer serves the team or its (deactivated) service account, but the row
+    # and its name stay reusable for a new live team.
+    assert stack.api("GET", f"/teams/{seeded.team_id}").status_code == 404
+    assert stack.api("GET", f"/service-accounts/{seeded.owner_id}").status_code == 404
+    reused = stack.ok("POST", "/teams", json={"name": "ml", "org_id": stack.org_id})
+    assert reused["id"] != seeded.team_id
+    archived = pg(
+        stack.dsn,
+        "SELECT deleted_at, name FROM teams WHERE id = $1",
+        uuid.UUID(seeded.team_id),
+    )
+    assert archived[0]["deleted_at"] is not None and archived[0]["name"] == "ml"
+
+
 def test_control_plane_outage_and_recovery(stack):
     seeded = stack.seed()
     gw = stack.start_gateway()
@@ -208,19 +248,14 @@ def test_org_rate_limit_decrease_blocks_at_the_lower_value(stack):
     (org_id,) = pg(stack.dsn, "SELECT org_id FROM teams WHERE id = $1", uuid.UUID(seeded.team_id))[
         0
     ].values()
-    pg(stack.dsn, "UPDATE orgs SET rpm_limit = 1000 WHERE id = $1", org_id)
+    stack.ok("PATCH", f"/orgs/{org_id}", json={"rpm_limit": 1000})
     gw = stack.start_gateway()
     assert gw.chat(seeded.a.secret).status_code == 200
     # Let the 1000-rpm bucket drain so the lower rate starts from an empty bucket.
     time.sleep(0.2)
 
-    pg(stack.dsn, "UPDATE orgs SET rpm_limit = 2 WHERE id = $1", org_id)
+    stack.ok("PATCH", f"/orgs/{org_id}", json={"rpm_limit": 2})
     version = stack.current_version()
-    # Any write that enqueues a compile picks up the direct SQL change (there is no org
-    # write API yet); a rename is the smallest one.
-    stack.ok(
-        "PATCH", f"/teams/{seeded.team_id}", json={"name": f"org-limit-{uuid.uuid4().hex[:8]}"}
-    )
     wait_for(lambda: stack.current_version() > version, 10, "a new config version")
     target = stack.current_version()
     wait_for(
@@ -246,7 +281,8 @@ def test_authz_denials(stack):
         assert stack.api("POST", "/gateways", pat, json={"gateway_id": "evil"}).status_code == 403
         r = stack.api("POST", f"/gateways/{GATEWAY_ID}/tokens/{fake}/revoke", pat)
         assert r.status_code == 403, (r.status_code, r.text)
-        assert stack.api("POST", "/teams", pat, json={"name": "evil"}).status_code == 403
+        denied = stack.api("POST", "/teams", pat, json={"name": "evil", "org_id": stack.org_id})
+        assert denied.status_code == 404, (denied.status_code, denied.text)
     assert (
         stack.api("POST", f"/teams/{seeded.team_id}/keys", member, json={"name": "ok"}).status_code
         == 201

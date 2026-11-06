@@ -1,50 +1,40 @@
-"""The default org: created on first use, never seeded by a migration."""
+"""Orgs: live listing and the name rules that archiving changes."""
+
+from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
-from lumewarp_control_plane.errors import ApiError
-from lumewarp_control_plane.models import Org, Team
-from lumewarp_control_plane.orgs import DEFAULT_ORG_NAME, default_org, live_orgs
+from lumewarp_control_plane.models import Org
+from lumewarp_control_plane.orgs import live_orgs
 from tests import factories
 
 
-@pytest.fixture
-async def empty_hierarchy(session):
-    """No orgs at all, in a transaction the test rolls back."""
-    await session.execute(delete(Team))
-    await session.execute(delete(Org))
+async def test_live_orgs_excludes_archived_orgs(session) -> None:
+    live = await factories.make_org(session)
+    archived = await factories.make_org(session)
+    archived.deleted_at = datetime.now(UTC)
     await session.flush()
-    yield session
-    await session.rollback()
+    listed = {row.id for row in await live_orgs(session)}
+    assert live.id in listed and archived.id not in listed
+    assert (await session.get(Org, archived.id)) is not None
 
 
-async def test_first_team_creation_creates_the_default_org(empty_hierarchy) -> None:
-    session = empty_hierarchy
-    assert await live_orgs(session) == []
-    org = await default_org(session)
-    assert (org.name, org.deleted_at) == (DEFAULT_ORG_NAME, None)
-    # Idempotent within the same request: the next team uses the same org.
-    assert (await default_org(session)).id == org.id
-    team = await factories.make_team(session)
-    assert team.org_id == org.id
-    assert len(await live_orgs(session)) == 1
+async def test_team_name_is_unique_among_live_teams(session) -> None:
+    org = await factories.make_org(session)
+    name = "same-name"
+    await factories.make_team(session, name, org=org)
+    with pytest.raises(IntegrityError):
+        await factories.make_team(session, name, org=org)
 
 
-async def test_default_org_prefers_its_name_over_the_only_live_org(empty_hierarchy) -> None:
-    session = empty_hierarchy
-    renamed = await factories.make_org(session, "only-org")
-    assert (await default_org(session)).id == renamed.id
-    preferred = await factories.make_org(session, DEFAULT_ORG_NAME)
-    assert (await default_org(session)).id == preferred.id
-
-
-async def test_several_orgs_without_a_default_are_ambiguous(empty_hierarchy) -> None:
-    session = empty_hierarchy
-    await factories.make_org(session, "org-a")
-    await factories.make_org(session, "org-b")
-    with pytest.raises(ApiError) as exc:
-        await default_org(session)
-    assert exc.value.status == 409
-    # Nothing was created behind the refusal.
-    assert await session.scalar(select(Org).where(Org.name == DEFAULT_ORG_NAME)) is None
+async def test_archiving_frees_the_name_for_a_new_team(session) -> None:
+    org = await factories.make_org(session)
+    name = "reusable"
+    old = await factories.make_team(session, name, org=org)
+    old.deleted_at = datetime.now(UTC)
+    await session.flush()
+    # A second live team with the same name is accepted: the unique index covers live rows
+    # only, so history keeps its old row while the name is reusable.
+    new = await factories.make_team(session, name, org=org)
+    assert new.id != old.id

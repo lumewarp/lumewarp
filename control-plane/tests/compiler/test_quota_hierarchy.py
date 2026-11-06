@@ -240,6 +240,31 @@ async def test_org_budget_sums_its_teams_and_blocks_every_key(factory) -> None:
     assert key_of(await compile_(factory), k_foreign).status == pb.KEY_STATUS_ACTIVE
 
 
+async def test_archived_team_spend_counts_for_the_org_and_its_keys_are_left_out(
+    factory,
+) -> None:
+    await seed_scope(factory)
+    async with factory() as s, s.begin():
+        org = await factories.make_org(s, budget_nano_usd=100)
+        live = await factories.make_team(s, org=org)
+        archived = await factories.make_team(s, org=org)
+        archived.deleted_at = datetime(OCT.year, OCT.month, 1, tzinfo=UTC)
+        user = await factories.make_user(s)
+        await factories.make_member(s, live, user)
+        await factories.make_member(s, archived, user)
+        live_key = await add_key(s, live, user, name="live")
+        archived_key = await add_key(s, archived, user, name="archived")
+        archived_team_id = archived.id
+    # Archived teams still contribute to the org's derived monthly spend, so the live
+    # team's key is blocked by the org budget alone.
+    await _spend(factory, ScopeType.TEAM, archived_team_id, 150)
+    compiled = await compile_(factory)
+    assert key_of(compiled, live_key).status == pb.KEY_STATUS_BUDGET_EXCEEDED
+    # The archived team and its keys are not in the snapshot.
+    assert str(archived_team_id) not in {team.id for team in compiled.snapshot.teams}
+    assert str(archived_key.id) not in {k.key_id for k in compiled.snapshot.api_keys}
+
+
 async def test_org_budget_under_its_teams_does_not_block(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():

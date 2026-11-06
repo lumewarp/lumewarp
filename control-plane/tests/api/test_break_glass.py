@@ -106,7 +106,13 @@ async def test_success_is_hashed_cookie_session_with_csrf_and_no_user(
     assert denied_audit.actor_type is ActorType.BREAK_GLASS
     assert denied_audit.details == {"method": "POST", "path": "/api/v1/teams", "status": 403}
     headers = {"X-Lumewarp-CSRF": info["csrf_token"]}
-    created = client.post("/api/v1/teams", json={"name": "emergency-" + suffix()}, headers=headers)
+    org = client.post("/api/v1/orgs", json={"name": "emergency-org-" + suffix()}, headers=headers)
+    assert org.status_code == 201, org.text
+    created = client.post(
+        "/api/v1/teams",
+        json={"name": "emergency-" + suffix(), "org_id": org.json()["id"]},
+        headers=headers,
+    )
     assert created.status_code == 201, created.text
     assert (
         client.post(

@@ -14,7 +14,7 @@ from lumewarp_control_plane.models import (
     CatalogNameHistory,
     PolicyGrant,
 )
-from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, create_org, suffix, user_with_token
 
 H = ADMIN_AUTH
 API = "/api/v1"
@@ -67,7 +67,13 @@ def _alias(client, target: str, name: str | None = None) -> dict:
 
 
 def _team(client, *names: str, access: str = "list") -> dict:
-    body = {"name": _name("team"), "model_access": access, "allowed_models": list(names)}
+    org = create_org(client)
+    body = {
+        "name": _name("team"),
+        "org_id": org["id"],
+        "model_access": access,
+        "allowed_models": list(names),
+    }
     if access != "list":
         del body["allowed_models"]
     return _ok(client.post(f"{API}/teams", json=body, headers=H))
@@ -416,7 +422,12 @@ async def test_alias_crud_is_audited(client, committed) -> None:
 
 def test_allowed_names_must_exist_and_stay_in_team_scope(client) -> None:
     inside, outside = _model(client), _model(client)
-    body = {"name": _name(), "model_access": "list", "allowed_models": ["no-such-name"]}
+    body = {
+        "name": _name(),
+        "org_id": create_org(client)["id"],
+        "model_access": "list",
+        "allowed_models": ["no-such-name"],
+    }
     _422(client.post(f"{API}/teams", json=body, headers=H), "unknown names")
 
     team = _team(client, inside["name"])

@@ -90,7 +90,7 @@ async def test_a_plain_member_has_no_audit_view(client, committed) -> None:
         assert response.json()["error"]["code"] == "forbidden"
     # A team they cannot read is still a 404, not a hint that it exists.
     assert client.get(f"/api/v1/audit?team_id={other.id}", headers=headers).status_code == 404
-    # Unknown still looks unknown, and a deleted team stays installation-admin only.
+    # Unknown still looks unknown, and an archived team stays closed to a plain member.
     assert client.get(f"/api/v1/audit?team_id={uuid.uuid4()}", headers=headers).status_code == 404
     assert client.delete(f"/api/v1/teams/{other.id}", headers=ADMIN_AUTH).status_code == 204
     assert client.get(f"/api/v1/audit?team_id={other.id}", headers=headers).status_code == 404

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Response, status
 from sqlalchemy import select
@@ -50,7 +51,9 @@ async def _account_or_404(
         raise not_found("service account not found")
     await authz.require(Action.TEAM_ADMIN_READ, row.team_id)
     team = await session.get(Team, row.team_id)
-    if team is None:
+    if team is None or team.deleted_at is not None:
+        # An archived team is invisible: its service accounts are deactivated with it and
+        # no write may target them any more.
         raise not_found("service account not found")
     return row, team
 
@@ -161,6 +164,11 @@ async def update_service_account(
             row.name = body.name
         if body.description is not None:
             row.description = body.description
+        if body.is_active is not None:
+            if body.is_active:
+                row.deactivated_at = None
+            elif row.deactivated_at is None:
+                row.deactivated_at = datetime.now(UTC)
         await session.flush()
         await session.refresh(row)
         audit.record(

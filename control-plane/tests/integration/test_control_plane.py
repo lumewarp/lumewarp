@@ -159,7 +159,8 @@ async def test_end_to_end(cp: ControlPlane) -> None:
         },
     )
     await cp.post("/routers", {"name": "llama", "members": [{"model_id": dep["id"]}]})
-    team = await cp.post("/teams", {"name": "ml"})
+    org = await cp.post("/orgs", {"name": "ml"})
+    team = await cp.post("/teams", {"name": "ml", "org_id": org["id"]})
     account = await cp.post(
         f"/teams/{team['id']}/service-accounts", {"name": "chat", "budget_nano_usd": 1_000}
     )

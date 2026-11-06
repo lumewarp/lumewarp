@@ -33,12 +33,132 @@ export interface paths {
         get: operations["getTeam"];
         put?: never;
         post?: never;
-        /** Delete Team */
+        /**
+         * Delete Team
+         * @description Archive a team. Irreversible: keys are revoked, service accounts deactivated and the
+         *     name becomes free for a new live team. History (usage, audit) keeps resolving.
+         */
         delete: operations["deleteTeam"];
         options?: never;
         head?: never;
         /** Update Team */
         patch: operations["updateTeam"];
+        trace?: never;
+    };
+    "/api/v1/orgs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Orgs
+         * @description Live orgs: every one for an installation admin, the caller's own for an org admin.
+         */
+        get: operations["listOrgs"];
+        put?: never;
+        /** Create Org */
+        post: operations["createOrg"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Org */
+        get: operations["getOrg"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Org
+         * @description Archive an org. Irreversible; refused while it has a live team.
+         */
+        delete: operations["deleteOrg"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Org
+         * @description Rename or set the org policy; installation admins only.
+         */
+        patch: operations["updateOrg"];
+        trace?: never;
+    };
+    "/api/v1/orgs/{org_id}/admins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Org Admins
+         * @description The org's local admin grants; installation admins only.
+         *
+         *     Under an external authorization backend these rows are not the source of truth (the
+         *     backend answers the relation), so the list is informational and the writes answer 409.
+         */
+        get: operations["listOrgAdmins"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org_id}/admins/{user_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Org Admin
+         * @description Give `user_id` the org admin relation. Idempotent; installation admins only.
+         */
+        put: operations["putOrgAdmin"];
+        post?: never;
+        /**
+         * Delete Org Admin
+         * @description Remove an org admin relation. Installation admins only.
+         */
+        delete: operations["deleteOrgAdmin"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org_id}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Org Usage
+         * @description Spend per team, summed from `usage_events` at query time.
+         *
+         *     Archived teams are included (their history stays attributable), and every team of the
+         *     org appears even without events. The default range is the current UTC month.
+         */
+        get: operations["getOrgUsage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/teams/{team_id}/members": {
@@ -1546,6 +1666,148 @@ export interface components {
              */
             keep_old_name_as_alias: boolean;
         };
+        /** OrgAdminOut */
+        OrgAdminOut: {
+            /**
+             * Org Id
+             * Format: uuid
+             */
+            org_id: string;
+            /**
+             * User Id
+             * Format: uuid
+             */
+            user_id: string;
+            /** Email */
+            email: string;
+            /** Display Name */
+            display_name: string;
+            /** Is Active */
+            is_active: boolean;
+            /** Assigned By */
+            assigned_by: string | null;
+            /**
+             * Assigned At
+             * Format: date-time
+             */
+            assigned_at: string;
+        };
+        /** OrgCreate */
+        OrgCreate: {
+            model_access?: components["schemas"]["ModelAccess"] | null;
+            /** Allowed Models */
+            allowed_models?: string[] | null;
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Max Parallel */
+            max_parallel?: number | null;
+            /** Budget Nano Usd */
+            budget_nano_usd?: number | null;
+            /** Name */
+            name: string;
+        };
+        /** OrgOut */
+        OrgOut: {
+            model_access: components["schemas"]["ModelAccess"];
+            /** Allowed Models */
+            allowed_models: string[];
+            /** Rpm Limit */
+            rpm_limit: number | null;
+            /** Tpm Limit */
+            tpm_limit: number | null;
+            /** Max Parallel */
+            max_parallel: number | null;
+            /** Budget Nano Usd */
+            budget_nano_usd: number | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Deleted At */
+            deleted_at?: string | null;
+        };
+        /**
+         * OrgTeamUsageOut
+         * @description One team's usage inside an org, aggregated from `usage_events` at query time.
+         */
+        OrgTeamUsageOut: {
+            /**
+             * Team Id
+             * Format: uuid
+             */
+            team_id: string;
+            /** Team Name */
+            team_name: string;
+            /** Archived */
+            archived: boolean;
+            /** Requests */
+            requests: number;
+            /** Prompt Tokens */
+            prompt_tokens: number;
+            /** Completion Tokens */
+            completion_tokens: number;
+            /** Total Tokens */
+            total_tokens: number;
+            /** Cost Nano Usd */
+            cost_nano_usd: number;
+            /** Unknown Cost Count */
+            unknown_cost_count: number;
+        };
+        /** OrgUpdate */
+        OrgUpdate: {
+            model_access?: components["schemas"]["ModelAccess"] | null;
+            /** Allowed Models */
+            allowed_models?: string[] | null;
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Max Parallel */
+            max_parallel?: number | null;
+            /** Budget Nano Usd */
+            budget_nano_usd?: number | null;
+            /** Name */
+            name?: string | null;
+        };
+        /** OrgUsageOut */
+        OrgUsageOut: {
+            /**
+             * Org Id
+             * Format: uuid
+             */
+            org_id: string;
+            /** Org Name */
+            org_name: string;
+            /** Teams */
+            teams: components["schemas"]["OrgTeamUsageOut"][];
+            /** Requests */
+            requests: number;
+            /** Prompt Tokens */
+            prompt_tokens: number;
+            /** Completion Tokens */
+            completion_tokens: number;
+            /** Total Tokens */
+            total_tokens: number;
+            /** Cost Nano Usd */
+            cost_nano_usd: number;
+            /** Unknown Cost Count */
+            unknown_cost_count: number;
+        };
         /** Page[AliasOut] */
         Page_AliasOut_: {
             /** Items */
@@ -1606,6 +1868,20 @@ export interface components {
         Page_ModelOut_: {
             /** Items */
             items: components["schemas"]["ModelOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
+        /** Page[OrgAdminOut] */
+        Page_OrgAdminOut_: {
+            /** Items */
+            items: components["schemas"]["OrgAdminOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
+        /** Page[OrgOut] */
+        Page_OrgOut_: {
+            /** Items */
+            items: components["schemas"]["OrgOut"][];
             /** Next Cursor */
             next_cursor?: string | null;
         };
@@ -1906,6 +2182,8 @@ export interface components {
             name: string;
             /** Description */
             description: string;
+            /** Is Active */
+            is_active: boolean;
             /** Created By User Id */
             created_by_user_id: string | null;
             /**
@@ -1936,6 +2214,8 @@ export interface components {
             name?: string | null;
             /** Description */
             description?: string | null;
+            /** Is Active */
+            is_active?: boolean | null;
         };
         /** SessionInfo */
         SessionInfo: {
@@ -2104,6 +2384,11 @@ export interface components {
             budget_nano_usd?: number | null;
             /** Name */
             name: string;
+            /**
+             * Org Id
+             * Format: uuid
+             */
+            org_id: string;
         };
         /**
          * TeamOut
@@ -2739,6 +3024,620 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TeamOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listOrgs: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_OrgOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    createOrg: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OrgCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getOrg: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    deleteOrg: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    updateOrg: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OrgUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listOrgAdmins: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path: {
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_OrgAdminOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    putOrgAdmin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org_id: string;
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgAdminOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    deleteOrgAdmin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                org_id: string;
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getOrgUsage: {
+        parameters: {
+            query?: {
+                from?: string | null;
+                to?: string | null;
+            };
+            header?: never;
+            path: {
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgUsageOut"];
                 };
             };
             /** @description Missing or invalid credentials */

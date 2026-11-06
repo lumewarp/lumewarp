@@ -32,6 +32,12 @@ def _members(*ids, weight=1):
     return [{"model_id": i, "weight": weight} for i in ids]
 
 
+def _team(client, **body):
+    """A team needs an explicit org; there is no implicit default."""
+    org = _post(client, "/orgs", name=f"org-{suffix()}").json()
+    return _post(client, "/teams", org_id=org["id"], **body)
+
+
 def _model(client, *, upstream_id=None):
     if upstream_id is None:
         upstream_id = _post(
@@ -193,8 +199,8 @@ def test_names_and_aliases_are_clean(client) -> None:
     assert resp.status_code == 201
     assert resp.json()["name"] == padded
 
-    assert _post(client, "/teams", name="   ").status_code == 422
-    team = _post(client, "/teams", name=f"team-{suffix()}").json()
+    assert _team(client, name="   ").status_code == 422
+    team = _team(client, name=f"team-{suffix()}").json()
     assert _patch(client, f"/teams/{team['id']}", name=" \t").status_code == 422
     assert (
         _patch(
@@ -230,7 +236,7 @@ def _pat_for(client, user_id: str) -> str:
 
 
 def test_query_ranges_are_capped(client) -> None:
-    team = _post(client, "/teams", name=f"team-{suffix()}").json()
+    team = _team(client, name=f"team-{suffix()}").json()
     wide = {"from": "2024-01-01T00:00:00+00:00", "to": "2026-01-01T00:00:00+00:00"}
     for path in ("/audit", "/usage"):
         resp = client.get(

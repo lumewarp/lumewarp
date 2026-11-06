@@ -22,6 +22,7 @@ from lumewarp_control_plane.api import (
     installation_admins,
     keys,
     members,
+    orgs,
     routing,
     service_accounts,
     session,
@@ -47,6 +48,7 @@ _ERROR_RESPONSES: dict[int | str, dict] = {
 
 router = APIRouter(prefix="/api/v1", responses=_ERROR_RESPONSES)
 router.include_router(teams.router)
+router.include_router(orgs.router)
 router.include_router(members.router)
 router.include_router(service_accounts.router)
 router.include_router(keys.router)

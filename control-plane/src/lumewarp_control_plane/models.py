@@ -418,13 +418,13 @@ def member_scope_id(team_id: uuid.UUID, user_id: uuid.UUID) -> uuid.UUID:
 class Org(PolicyMixin, TimestampMixin, Base):
     """An organization: the grouping above teams and the root of the quota hierarchy.
 
-    Policy (models, limits, budget) lives here; only an installation admin may set it,
-    and there is no org write API yet. Archiving (`deleted_at`) is not implemented yet
-    either. A new team belongs to the `default` org (see `orgs.default_org`), created on
-    the first team creation.
+    Policy (models, limits, budget) lives here and only an installation admin may set it
+    (see `api/orgs.py`). An org can only be archived (`deleted_at`) when it has no live
+    team; archiving is irreversible and no team may be created in it afterwards.
 
     The org has no `usage_totals` row: its spend is the sum of its teams' rows for the
-    month, so an org total always stays consistent with the teams it contains.
+    month (archived teams included), so an org total always stays consistent with the
+    teams it contains.
     """
 
     __tablename__ = "orgs"
@@ -488,15 +488,26 @@ class Team(PolicyMixin, TimestampMixin, Base):
             "member_max_parallel_default IS NULL OR member_max_parallel_default > 0",
             name="member_max_parallel_default_positive",
         ),
+        # A name is freed by archiving: unique only among live teams (moving a team
+        # between orgs is still not supported).
+        Index(
+            "uq_teams_name",
+            "name",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    # Archiving and moving a team between orgs are not implemented: RESTRICT keeps the
-    # owning org from disappearing under its teams.
+    # RESTRICT keeps the owning org from disappearing under its teams. Archiving a team
+    # revokes its keys, deactivates its service accounts and leaves the row for history.
     org_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("orgs.id", ondelete="RESTRICT"), nullable=False, index=True
     )
-    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # Set once; an archived team is invisible to the API and to the compiler, and its
+    # name is free for a new live team.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Per-member self-service limits. NULL = unlimited. They are source-only (not compiled
     # into snapshots): the API enforces them on create/rotate. Revoking a key frees a slot.
     max_keys_per_member: Mapped[int | None] = mapped_column(Integer)
@@ -570,9 +581,16 @@ class ServiceAccount(PolicyMixin, TimestampMixin, Base):
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    # A deactivated account keeps its rows (usage history) but the compiler leaves its
+    # keys out of the snapshot. Reversible through PATCH.
+    deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
+
+    @property
+    def is_active(self) -> bool:
+        return self.deactivated_at is None
 
 
 class ApiKey(TimestampMixin, Base):

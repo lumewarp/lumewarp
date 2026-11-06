@@ -20,6 +20,7 @@ from lumewarp_control_plane.api.common import (
     conflict,
     mutation,
     parse_uuid_cursor,
+    require_signed_in,
     validation_error,
 )
 from lumewarp_control_plane.api.schemas import (
@@ -34,23 +35,9 @@ from lumewarp_control_plane.models import (
     InstallationAdmin,
     InstallationRole,
     User,
-    UserIdentity,
 )
 
 router = APIRouter(tags=["installation-admins"])
-
-
-async def _require_signed_in(session: SessionDep, user_id: uuid.UUID) -> None:
-    """An account must have linked an IdP identity before it receives an installation role.
-
-    The role is protected from email linking (`resolve_user`), so assigning it to a user
-    who has never signed in would make that account impossible to log into.
-    """
-    identity = await session.scalar(
-        select(UserIdentity.id).where(UserIdentity.user_id == user_id).limit(1)
-    )
-    if identity is None:
-        raise conflict("the user must sign in once before receiving an installation role")
 
 
 def _out(row: InstallationAdmin, user: User) -> InstallationAdminOut:
@@ -120,7 +107,7 @@ async def put_installation_admin(
         if row is None:
             if not user.is_active:
                 raise conflict("the user is not active")
-            await _require_signed_in(session, user.id)
+            await require_signed_in(session, user.id)
             row = InstallationAdmin(
                 user_id=user.id,
                 role=InstallationRole.ADMIN,
@@ -208,7 +195,7 @@ async def transfer_proxy_admin(
             raise conflict("the user is not active")
         if current is not None and current.user_id == target.id:
             raise conflict("this user is already the proxy_admin")
-        await _require_signed_in(session, target.id)
+        await require_signed_in(session, target.id)
         target_row = await session.get(InstallationAdmin, target.id, with_for_update=True)
         now = datetime.now(UTC)
         previous = None

@@ -1,7 +1,7 @@
 import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
 import { join } from "node:path";
 
-import { deleteTeams, dialog, optionNames, pick } from "./helpers";
+import { deleteTeams, dialog, ensureOrg, optionNames, pick } from "./helpers";
 
 /*
  * TeamDetail after the move to shadcn components: the section tabs (ui/tabs) are one tab stop with
@@ -50,7 +50,7 @@ const panelId = async (tab: Locator) => {
 
 for (const [where, width] of [["desktop", 1280], ["390 px", 390]] as const) {
   test(`section tabs (${where}): arrows move focus only, Enter or Space activates, an inactive panel is not mounted`, async ({ page, request }) => {
-    const team = await post<{ id: string; name: string }>(request, "/teams", { name: `s6-tabs-${where}` });
+    const team = await post<{ id: string; name: string }>(request, "/teams", { name: `s6-tabs-${where}`, org_id: await ensureOrg(request, admin) });
     await page.setViewportSize({ width, height: 844 });
     await signIn(page);
     await page.goto(`/teams/${team.id}`);
@@ -155,7 +155,7 @@ for (const [where, width] of [["desktop", 1280], ["390 px", 390]] as const) {
 }
 
 test("adding a member: the User Combobox sends the picked user id", async ({ page, request }) => {
-  const team = await post<{ id: string; name: string }>(request, "/teams", { name: "s6-members" });
+  const team = await post<{ id: string; name: string }>(request, "/teams", { name: "s6-members", org_id: await ensureOrg(request, admin) });
   const picked = await post<{ id: string; email: string }>(request, "/users", { email: "s6-picked@e2e.test", display_name: "S6 Picked" });
   const other = await post<{ id: string; email: string }>(request, "/users", { email: "s6-other@e2e.test", display_name: "S6 Other" });
 
@@ -193,7 +193,7 @@ test("adding a member: the User Combobox sends the picked user id", async ({ pag
 });
 
 test("key actions at 390 px: the table scrolls inside its card and the last action can be reached, without the page scrolling sideways", async ({ page, request }) => {
-  const team = await post<{ id: string; name: string }>(request, "/teams", { name: "s6-phone-keys" });
+  const team = await post<{ id: string; name: string }>(request, "/teams", { name: "s6-phone-keys", org_id: await ensureOrg(request, admin) });
   const account = await post<{ id: string }>(request, `/teams/${team.id}/service-accounts`, { name: "s6-phone-agent", description: "Phone" });
   await post(request, `/teams/${team.id}/keys`, { name: "s6-phone-key", service_account_id: account.id });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -215,7 +215,7 @@ test("key actions at 390 px: the table scrolls inside its card and the last acti
 
 test("screenshots: TeamDetail tabs, desktop and phone, light and dark", async ({ page, request }) => {
   test.skip(!SHOTS, "screenshots only with E2E_SHOTS");
-  const team = await post<{ id: string; name: string }>(request, "/teams", { name: "s6-shots" });
+  const team = await post<{ id: string; name: string }>(request, "/teams", { name: "s6-shots", org_id: await ensureOrg(request, admin) });
   await post(request, `/teams/${team.id}/members`, { email: "viewer@e2e.test", role: "member" });
   const account = await post<{ id: string; name: string }>(request, `/teams/${team.id}/service-accounts`, {
     name: "s6-agent",
