@@ -128,7 +128,14 @@ def login(browser, stack, username, *, enabled=True):
 
 
 @contextmanager
-def identity_stack(backend: str, *, label: str = "identity"):
+def identity_stack(
+    backend: str,
+    *,
+    label: str = "identity",
+    model_path=None,
+    extra_env: dict | None = None,
+    object_type: str = "team",
+):
     """Real Keycloak + an isolated OpenFGA store + a control plane configured for OIDC.
 
     Yields a namespace with the stack, the IdP, Bob's and Alice's cookie sessions and (for
@@ -156,9 +163,15 @@ def identity_stack(backend: str, *, label: str = "identity"):
                 "LUMEWARP_INITIAL_ADMIN_EMAIL": "alice@example.com",
             }
         )
-        state = SimpleNamespace(stack=stack, backend=backend, idp=idp, cleanup=cleanup)
+        state = SimpleNamespace(
+            stack=stack,
+            backend=backend,
+            idp=idp,
+            cleanup=cleanup,
+            object_type=object_type,
+        )
         if backend == "openfga":
-            state.store, model = cleanup.enter_context(fga_store())
+            state.store, model = cleanup.enter_context(fga_store(model_path))
             state.proxy = FGAProxy()
             cleanup.callback(state.proxy.close)
             stack.cp_env.update(
@@ -166,6 +179,7 @@ def identity_stack(backend: str, *, label: str = "identity"):
                     "LUMEWARP_OPENFGA_URL": state.proxy.url,
                     "LUMEWARP_OPENFGA_STORE_ID": state.store,
                     "LUMEWARP_OPENFGA_MODEL_ID": model,
+                    **(extra_env or {}),
                 }
             )
         try:
@@ -204,7 +218,11 @@ def grant(state, user, role, *, delete=False):
         response = state.stack.api(method, f"/teams/{team_id}/members/{user['id']}", **kwargs)
         assert response.status_code in (200, 201, 204), response.text
     else:
-        key = {"user": f"user:{user['id']}", "relation": role, "object": f"team:{team_id}"}
+        key = {
+            "user": f"user:{user['id']}",
+            "relation": role,
+            "object": f"{state.object_type}:{team_id}",
+        }
         fga_write(state, deletes=[key] if delete else [], writes=[] if delete else [key])
 
 
@@ -343,14 +361,15 @@ class FGAProxy:
 
 
 @contextmanager
-def fga_store():
+def fga_store(model_path=None):
+    model_path = model_path or ROOT / "deploy/openfga/model.fga"
     process = subprocess.run(
         [
             "docker",
             "run",
             "--rm",
             "-v",
-            f"{ROOT / 'deploy/openfga/model.fga'}:/model.fga:ro",
+            f"{model_path}:/model.fga:ro",
             "openfga/cli:v0.8.2",
             "model",
             "transform",

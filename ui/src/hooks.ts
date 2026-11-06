@@ -13,43 +13,57 @@ export function useMe() {
  * What the signed-in principal may do, mirroring the server's authorization matrix so the UI can hide or
  * disable actions. Purely cosmetic: the server enforces every request.
  */
-export function can(me: Me | undefined) {
+export function can(me: Me | undefined, teams: TeamAny[] | undefined) {
   const isInstallationAdmin = !!me?.is_admin || me?.kind === "break_glass";
-  const isTeamAdmin = !!me?.teams.some((team) => team.role === "admin");
+  // The server inherits team administration from an org: an org admin administers every team of its
+  // orgs without being a member. `org_id` on the team DTO is what maps a team to that check.
+  const adminOrgIds = new Set((me?.admin_orgs ?? []).map((org) => org.id));
+  const isOrgAdmin = adminOrgIds.size > 0;
+  const teamOrgId = (teamId: string) => teams?.find((team) => team.id === teamId)?.org_id;
+  const isOrgTeamAdmin = (teamId: string) => {
+    const orgId = teamOrgId(teamId);
+    return orgId !== undefined && adminOrgIds.has(orgId);
+  };
+  const isTeamAdmin = isOrgAdmin || !!me?.teams.some((team) => team.role === "admin");
   const teamRole = (teamId: string) => me?.teams.find((t) => t.team_id === teamId)?.role;
+  const teamAdmin = (teamId: string) =>
+    isInstallationAdmin || teamRole(teamId) === "admin" || isOrgTeamAdmin(teamId);
   const canManageKey = (key: Key) =>
-    isInstallationAdmin ||
-    teamRole(key.team_id) === "admin" ||
+    teamAdmin(key.team_id) ||
     (teamRole(key.team_id) !== undefined && key.owner_kind === "user" && key.user_id === me?.user_id);
   return {
     isInstallationAdmin,
+    isOrgAdmin,
     isTeamAdmin,
     // Names and kinds only; every authenticated caller may read them.
     canReadCatalog: true,
     // Upstreams, models, aliases, routers and strategies: installation level.
     canReadRouting: isInstallationAdmin,
     teamRole,
-    teamRead: (teamId: string) => isInstallationAdmin || teamRole(teamId) !== undefined,
-    teamAdmin: (teamId: string) => isInstallationAdmin || teamRole(teamId) === "admin",
+    teamRead: (teamId: string) => teamAdmin(teamId) || teamRole(teamId) !== undefined,
+    teamAdmin,
     teamMember: (teamId: string) => teamRole(teamId) !== undefined,
-    // Team quota (models, limits, budget) and admin assignment are above a team admin.
-    canSetTeamQuota: () => isInstallationAdmin,
-    canAssignTeamAdmin: () => isInstallationAdmin,
-    canUpdateTeamSettings: (teamId: string) =>
-      isInstallationAdmin || teamRole(teamId) === "admin",
+    // Team quota (models, limits, budget) and admin assignment are org-level: an org admin may set
+    // them for its own org's teams, a team admin never.
+    canSetTeamQuota: (teamId: string) => isInstallationAdmin || isOrgTeamAdmin(teamId),
+    canAssignTeamAdmin: (teamId: string) => isInstallationAdmin || isOrgTeamAdmin(teamId),
+    canUpdateTeamSettings: teamAdmin,
+    // A key belongs to its owner, and only a direct membership can own one.
     canCreateOwnKey: (teamId: string) => teamRole(teamId) !== undefined,
     canManageKey,
     canResumeKey: (key: Key) =>
       // The API refuses to activate a key whose owner is inactive, even for a team admin.
       key.owner_active !== false &&
       canManageKey(key) &&
-      (isInstallationAdmin || teamRole(key.team_id) === "admin" || ownerResumableReason(key)),
+      (teamAdmin(key.team_id) || ownerResumableReason(key)),
   };
 }
 
 export function useCan() {
-  const { data } = useMe();
-  return can(data);
+  const { data: me } = useMe();
+  // The team list supplies each team's org, needed to apply org inheritance locally.
+  const { data: teams } = useTeams();
+  return can(me, teams);
 }
 
 /** What a route or navigation entry requires; purely cosmetic, the API enforces every request. */

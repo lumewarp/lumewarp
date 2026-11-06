@@ -1,11 +1,21 @@
 # OpenFGA authorization model for Lumewarp.
 #
-# The backend answers team relations only. Installation roles (proxy_admin, admin) live in
-# Lumewarp's Postgres and are never asked of this backend. Team admin implies member.
+# The backend answers direct relations only. Installation roles (proxy_admin, admin) live
+# in Lumewarp's Postgres and are never asked of this backend. Org administration is
+# inherited by Lumewarp from `team.org_id`; the model has no org -> team relation.
+# Team admin implies member.
+#
+# An existing store may use other names; map them with LUMEWARP_OPENFGA_OBJECT_TYPES and
+# LUMEWARP_OPENFGA_RELATIONS (authz/openfga.py, control-plane/README.md). model-renamed.fga
+# is this model under `llm_org` / `llm_team`.
 model
   schema 1.1
 
 type user
+
+type org
+  relations
+    define admin: [user]
 
 type team
   relations

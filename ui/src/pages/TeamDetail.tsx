@@ -683,7 +683,7 @@ const teamSettingsFrom = (team: TeamAny, withPolicy: boolean): TeamSettingsValue
 function TeamSettings({ team }: { team: TeamAny }) {
   const perms = useCan();
   const canEdit = perms.canUpdateTeamSettings(team.id);
-  const canSetQuota = perms.canSetTeamQuota();
+  const canSetQuota = perms.canSetTeamQuota(team.id);
   const [editing, setEditing] = useState(false);
   const form = useForm<TeamSettingsValues>(teamSettingsFrom(team, canSetQuota), {
     name: required("Name"),

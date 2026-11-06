@@ -150,7 +150,7 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 | `LUMEWARP_BREAK_GLASS_SESSION_TTL_SECONDS` | `3600` | Emergency session lifetime, 60–14400. |
 | `LUMEWARP_BREAK_GLASS_ALLOWED_CIDRS` | empty (any) | Client networks allowed to use the emergency login; others get 404. |
 | `LUMEWARP_TRUSTED_PROXIES` | empty | Proxy networks whose `X-Forwarded-For` is followed to find the client address for the two limits above. |
-| `LUMEWARP_AUTHZ_BACKEND` | `builtin` | Authorization backend for team relations: `builtin` (`team_members`), `openfga`, `http` or a `lumewarp.authz` entry-point name. See [Authorization](#authorization). |
+| `LUMEWARP_AUTHZ_BACKEND` | `builtin` | Authorization backend for direct org/team relations: `builtin` (`org_admins` + `team_members`), `openfga`, `http` or a `lumewarp.authz` entry-point name. See [Authorization](#authorization). |
 | `LUMEWARP_SCOPE` | `default` | `Snapshot.scope` this installation publishes. Gateways must use the same value. |
 | `LUMEWARP_MAX_SNAPSHOT_BYTES` | `67108864` (64 MiB) | Compilation fails above this serialized size. |
 | `LUMEWARP_MAX_SNAPSHOT_KEYS` | `200000` | Compilation fails above this key count. |
@@ -211,14 +211,21 @@ or a prompt and prints it for `LUMEWARP_BREAK_GLASS_PASSWORD_HASH`.
 
 ### Tenancy model
 
-There is exactly one installation and no org or project level:
+There is exactly one installation. Below it: org -> team -> key owners -> keys.
 
-- **Team**: a name plus policy (`model_access` and `allowed_models`, `rpm_limit`,
-  `tpm_limit`, `max_parallel`, `budget_nano_usd`) and the self-service limits `max_keys_per_member` (non-revoked user keys per member; revoking
-  frees a slot) and `max_member_key_lifetime_seconds`.
+- **Org**: a name and, later, the quota level above teams. The org write API (create,
+  rename, archive, org admins) is not implemented yet: `POST /teams` puts a new team in the
+  org named `default`, which is created on first use, and `org_admins` rows are only
+  written directly (or by the built-in backend's future endpoints). An **org admin** holds
+  `admin` on `org:<id>`; `RequestAuthz` inherits that for every team of the org.
+- **Team**: a name, its `org_id`, a policy (`model_access` and `allowed_models`,
+  `rpm_limit`, `tpm_limit`, `max_parallel`, `budget_nano_usd`) and the self-service limits
+  `max_keys_per_member` (non-revoked user keys per member; revoking frees a slot) and
+  `max_member_key_lifetime_seconds`.
 - **Team member**: a user in a team with role `admin` or `member` and the member's own
-  narrowing policy. For regular users, membership determines team visibility
-  (`team_members` for the built-in backend); an installation admin sees every team.
+  narrowing policy. Direct membership determines team visibility (`team_members` for the
+  built-in backend) and is the only way to own a key; team administration is also
+  inherited from an org admin; an installation admin sees every team.
 - **Service account**: a non-human key owner in one team, with its own narrowing policy,
   managed by the team's admins. It is unaffected by people joining or leaving.
 - **API key**: belongs to one team and is owned by a member (`owner_kind=user`) or a service
@@ -293,8 +300,15 @@ membership writes remain disabled. Session discovery and `/users/me` resolve
 `authz_unavailable: true` for display, and privileged API operations fail closed with HTTP 503.
 
 Authorization has two layers. The action matrix below stays in Lumewarp; a backend only
-answers relation questions. A team `admin` has every member permission (`admin` implies
-`member`).
+answers direct relation questions. Inheritance is applied by `RequestAuthz`, never by a
+backend, and a team's org always comes from Postgres (never from a request payload):
+
+```
+is_installation_admin        = break-glass or a row in installation_admins
+is_org_admin(org)            = is_installation_admin or admin of org:<id>
+team_admin_capability(team)  = is_org_admin(team.org_id) or admin of team:<id>
+team_read_capability(team)   = team_admin_capability(team) or member of team:<id>
+```
 
 An *installation admin* is a break-glass session, or a user with a row in `installation_admins`
 (`proxy_admin` or `admin`). The role is read from Postgres once per request, so a revocation
@@ -316,43 +330,66 @@ becomes an `admin`). Assign and transfer require the target to have linked an Id
 before receiving an installation role`. Assign, remove and transfer are audited; the first-login
 bootstrap is audited as `installation_admin.bootstrap`.
 
-| Action | Who |
-| --- | --- |
-| `TEAM_CREATE`, `TEAM_DELETE`, `TEAM_QUOTA_SET`, `TEAM_ADMIN_ASSIGN`, `INSTALLATION_ADMIN_MANAGE`, `USER_MANAGE`, `ROUTING_MANAGE`, `ROUTING_READ`, `GATEWAY_TOKEN_MANAGE`, `GATEWAY_READ`, `CONFIG_READ`, `CONFIG_ROLLBACK` | Installation admin |
-| `CATALOG_READ`, `OWN_TOKENS` | Any authenticated caller |
-| `TEAM_SETTINGS_UPDATE`, `TEAM_MEMBERS_MANAGE`, `TEAM_ADMIN_READ`, `SERVICE_ACCOUNT_MANAGE`, `KEY_MANAGE_ANY` | Team admin |
-| `TEAM_READ`, `KEY_CREATE_OWN`, `KEY_MANAGE_OWN` | Team member |
+An *org admin* holds `admin` on one org (`org_admins` rows for the built-in backend). Its teams
+are administered by inheritance: it reads every team of the org (with the whole-team policy
+view), reads their members, service accounts, keys, usage and audit, changes their settings,
+sets their quota and assigns their team admins. It never reaches another org, and it does not
+become a team *member*: a direct membership is still required to own a key (and the key
+reconciler only looks at direct memberships).
+
+| Action | Installation admin | Org admin | Team admin | Member |
+| --- | --- | --- | --- | --- |
+| `TEAM_CREATE`, `TEAM_DELETE`, `INSTALLATION_ADMIN_MANAGE`, `USER_MANAGE`, `ROUTING_MANAGE`, `ROUTING_READ`, `GATEWAY_TOKEN_MANAGE`, `GATEWAY_READ`, `CONFIG_READ`, `CONFIG_ROLLBACK` | yes | | | |
+| `TEAM_QUOTA_SET`, `TEAM_ADMIN_ASSIGN` | yes | its org's teams | | |
+| `TEAM_SETTINGS_UPDATE`, `TEAM_MEMBERS_MANAGE`, `TEAM_ADMIN_READ`, `SERVICE_ACCOUNT_MANAGE`, `KEY_MANAGE_ANY` | yes | inherited | yes | |
+| `TEAM_READ`, `KEY_CREATE_OWN`, `KEY_MANAGE_OWN` | yes | inherited | yes | yes |
+| `CATALOG_READ`, `OWN_TOKENS` | yes | yes | yes | yes |
 
 `TEAM_QUOTA_SET` covers a team's model access, allowlist, rate limits, parallelism and budget;
 `TEAM_ADMIN_ASSIGN` covers adding an admin, promoting or demoting an existing member (including
-the caller themself) and removing an admin. Both are installation-level, so a team admin cannot
-set them. A team admin keeps `TEAM_SETTINGS_UPDATE` (the team name and the member key limits). A
-team update decides from what actually changes (`proposed != base`), so resending the current
-policy values is not a quota change.
+the caller themself) and removing an admin. Both are org-level, checked on the org of the team
+named in the URL, so an org admin may use them in its own org and a team admin cannot use them at
+all. A team admin keeps `TEAM_SETTINGS_UPDATE` (the team name and the member key limits). A team
+update decides from what actually changes (`proposed != base`), so resending the current policy
+values is not a quota change. Team creation and deletion stay installation-level until team
+archiving and `POST /teams` with an `org_id` exist.
 
-`TEAM_READ` is the team's basic record (`id`, `name`, timestamps and the member key limits); a
-member's effective policy comes from `/users/me`, never from the team. `TeamOut` (with the team
-policy) is only returned to a team admin or above; every other member gets `TeamBasicOut`.
-`TEAM_ADMIN_READ` is the whole-team view: the member and service-account lists, every key, the
-team's usage and its audit. A plain member gets `403` on those lists (a non-member still gets
-`404`), and `GET /keys/{id}` is admin-or-owner only. `GET /teams/{id}/keys` for a plain member is
-forced to their own user-owned keys, ANDed with whatever filters they sent, so asking for
-someone else returns nothing. Usage has the same server-side owner predicate: a plain member
-sees rows of their own keys in teams they belong to, including grouped totals, and cannot widen
-it with `key_id`/`user_id`/`service_account_id`. Audit rows are visible to team admins for the
-teams they administer; a caller who administers no team gets `403`, filtered or not, and a
-deleted team's rows stay installation-admin only.
+`KEY_CREATE_OWN` passes for an org admin (it has the team's read capability) but creating a
+user-owned key also requires a direct membership, so an org admin that is not a member of the
+team gets `422 not a member of this team`. The same rule keeps `/users/me` honest: `teams` lists
+direct memberships only, and `admin_orgs` (id and name) lists the orgs the caller administers;
+an installation admin administers every org and gets an empty `admin_orgs`, and break-glass has
+no user.
+
+`TEAM_READ` is the team's basic record (`id`, `org_id`, `name`, timestamps and the member key
+limits); a member's effective policy comes from `/users/me`, never from the team. `TeamOut` (with
+the team policy) is only returned to a team admin or above; every other member gets
+`TeamBasicOut`. `TEAM_ADMIN_READ` is the whole-team view: the member and service-account lists,
+every key, the team's usage and its audit. A plain member gets `403` on those lists (a non-member
+still gets `404`, and another org's team is a non-member), and `GET /keys/{id}` is admin-or-owner
+only. `GET /teams/{id}/keys` for a plain member is forced to their own user-owned keys, ANDed
+with whatever filters they sent, so asking for someone else returns nothing. Usage has the same
+server-side owner predicate: a plain member sees rows of their own keys in teams they belong to,
+including grouped totals, and cannot widen it with `key_id`/`user_id`/`service_account_id`.
+Team-admin views and audit cover direct team admins and every inherited org team; a caller who
+administers no team gets `403`, filtered or not, and a deleted team's rows stay installation-admin
+only.
 
 `ROUTING_READ` is installation-level (upstreams, models, aliases, routers and strategies,
 including their `GET`s). `CATALOG_READ` is the one routing read every authenticated caller
 needs: `GET /catalog` returns only names, ids and kinds, which is what the allowlist pickers use.
 
 `LUMEWARP_AUTHZ_BACKEND` selects the backend: `builtin` (the default), `openfga`, `http`, or
-any other value naming a `lumewarp.authz` entry point. Every backend answers team relations
-only; installation roles are Lumewarp's own Postgres data and are never sent to a backend.
-`builtin` answers teams from `team_members`. The entry point may be an async `check` function,
-an object with an async `check` method, or a class/zero-argument factory returning one; it is
-loaded once at startup. An unknown name with no matching entry point aborts startup.
+any other value naming a `lumewarp.authz` entry point. Every backend, the three built-ins
+included, loads through that one entry point (they are registered in this project's
+`pyproject.toml`), so there is no special case in `load_authorizer`. Every backend answers
+direct relations only; installation roles are Lumewarp's own Postgres data and are never sent
+to a backend. `builtin` answers `admin` on orgs from `org_admins` and `admin`/`member` on teams
+from `team_members`.
+
+A factory entry point may take one argument, `AuthzContext(settings, session_factory, metrics)`,
+or none. It may also name an async `check` function or an object with an async `check` method
+directly. An unknown name with no matching entry point aborts startup.
 
 The only required method is:
 
@@ -363,22 +400,26 @@ from lumewarp_control_plane.authz import Decision, Relation, Resource
 async def check(user_id: str, relation: Relation, resource: Resource) -> Decision: ...
 ```
 
-`Relation` is `admin` or `member` on a team. `Resource` has `type` `"team"` and the team UUID
-as `id`. Return `Decision.ALLOW`, `Decision.DENY` or `Decision.ERROR`. `ERROR` means the backend is unavailable or timed out: the admin API
-answers `503 authz_unavailable` and background jobs skip the round; it is never treated
-as a deny. The gateway never calls the backend; it only sees compiled snapshots.
+`Relation` is `admin` (on an org or a team) or `member` (on a team). `Resource.type` is `"org"`
+or `"team"` and `id` is the UUID. `member` **must mean a direct team membership**: an org admin
+does not inherit it, or `_is_member`, `/users/me` and the key reconciler would be wrong. A team
+`admin` must imply `member` (team admins hold keys). Return `Decision.ALLOW`, `Decision.DENY` or
+`Decision.ERROR`. `ERROR` means the backend is unavailable or timed out: the admin API answers
+`503 authz_unavailable` and background jobs skip the round; it is never treated as a deny, and an
+error while resolving an inherited capability is a 503 too, never an empty list. The gateway
+never calls the backend; it only sees compiled snapshots.
 
 Optional members are filled in from `check` when absent:
 
 - `async batch_check(items)` returns one `Decision` per `(user_id, relation, resource)` in
   the same order; the default runs `check` with bounded concurrency.
-- `async list_teams(user_id, relation)` returns the team ids where the user holds the
-  relation; Lumewarp intersects the result with the candidate teams. Without it, the
-  candidates are filtered with `batch_check`. A raised exception or an `ERROR` decision
-  makes the admin API answer 503.
-- `manages_grants: bool` defaults to `False`: memberships live in the external system and
-  the member write endpoints answer `409 managed_externally`. The built-in backend sets it
-  to `True`.
+- `async list_objects(user_id, relation, resource_type)` returns the object ids where the user
+  holds the direct relation (`"org"` or `"team"`); Lumewarp intersects the result with the
+  candidates. The older team-only `async list_teams(user_id, relation)` is still accepted.
+  Without either, candidates are filtered with `batch_check`. A raised exception or an `ERROR`
+  decision makes the admin API answer 503.
+- `manages_grants: bool` defaults to `False`: memberships live in the external system and the
+  member write endpoints answer `409 managed_externally`. The built-in backend sets it to `True`.
 
 ```toml
 # pyproject.toml
@@ -389,20 +430,35 @@ my-authz = "my_plugin.authz:check"
 The backend conformance suite is importable from
 `lumewarp_control_plane.authz.contract_tests`
 (`src/lumewarp_control_plane/authz/contract_tests.py`). Run it against a backend before
-setting `LUMEWARP_AUTHZ_BACKEND`; it covers the implied relations, inactive and unknown
-users, batch ordering, `list_teams` consistency and `ERROR` handling.
+setting `LUMEWARP_AUTHZ_BACKEND`; it covers the implied relations, org admin as a direct
+relation only, inactive and unknown users, batch ordering, `list_objects` consistency and
+`ERROR` handling. `tests/authz` runs it for the built-in backend, the HTTP backend and a live
+OpenFGA when `LUMEWARP_TEST_OPENFGA_URL` is set (the dev instance from `scripts/dev-idp.sh up`
+is `http://127.0.0.1:18081`).
 
 Two external backends ship with the control plane:
 
 - `openfga`: `LUMEWARP_OPENFGA_URL`, `LUMEWARP_OPENFGA_STORE_ID`,
   `LUMEWARP_OPENFGA_MODEL_ID`, optional `LUMEWARP_OPENFGA_API_TOKEN`. Users are
-  `user:<lumewarp user uuid>`, resources `team:<uuid>`; the model is
-  `deploy/openfga/model.fga`. Implements `batch_check`, `list_teams` (ListObjects) and
-  `changes` (ReadChanges). `scripts/dev-idp.sh up` starts a local OpenFGA, writes the model
-  and prints these variables.
+  `user:<lumewarp user uuid>`; the standalone model is `deploy/openfga/model.fga` (`org` with
+  `admin`, `team` with `admin`/`member`, `admin` implies `member`, no org -> team relation).
+  Implements `batch_check`, `list_objects` (ListObjects) and `changes` (ReadChanges), all
+  through the same name mapping:
+  - `LUMEWARP_OPENFGA_OBJECT_TYPES='{"team": "llm_team", "org": "llm_org"}'` renames types;
+  - `LUMEWARP_OPENFGA_RELATIONS='{"team.admin": "owner"}'` renames relations.
+
+  Defaults are today's names. `deploy/openfga/model-renamed.fga` is the same model under
+  `llm_org`/`llm_team` with `owner` as the team admin relation. `changes()` maps every changed
+  tuple back to Lumewarp users; a change it cannot map to users (a userset or wildcard subject)
+  asks the reconciler for a full rescan instead of being dropped. In a store shared with other
+  applications, a change to any other object type (or to a relation Lumewarp does not map) makes
+  the reconciler check that user, or rescan everything when no user can be named: expect extra
+  checks in a busy store. `scripts/dev-idp.sh up`
+  starts a local OpenFGA, writes the model and prints these variables.
 - `http`: `LUMEWARP_AUTHZ_HTTP_URL` (+ optional `LUMEWARP_AUTHZ_HTTP_TOKEN`).
   `check` becomes `POST {"user_id", "relation", "resource": {"type", "id"}}` answered by
-  `{"decision": "allow" | "deny"}`; anything else (non-2xx, timeout, bad body) is `ERROR`.
+  `{"decision": "allow" | "deny"}`, with `type` `"org"` or `"team"`; anything else (non-2xx,
+  timeout, bad body) is `ERROR`.
 
 Every backend call is bounded by `LUMEWARP_AUTHZ_TIMEOUT_SECONDS` (default 2 s); a
 timeout is `ERROR`.
@@ -454,8 +510,9 @@ example](../deploy/helm/lumewarp/README.md#sso-and-authorization-backend).
   verified email). An account holding an installation role is never linked by email: a login
   with a new IdP identity for such an account is refused.
 - No IdP claim grants any Lumewarp role: groups and roles claims are ignored. Installation
-  roles are read from Postgres on every request; team roles come from the authorization
-  backend, which only ever answers team relations.
+  roles are read from Postgres on every request; org and team relations come from the
+  authorization backend, which only ever answers direct relations (`RequestAuthz` applies
+  the org -> team inheritance).
 - Inactive users cannot log in, and their existing sessions stop working immediately.
 - The one-time login state is the encrypted cookie `lumewarp_oidc_state` (HttpOnly,
   `SameSite=Lax`, `Secure` per `LUMEWARP_SESSION_COOKIE_SECURE`, path
@@ -595,7 +652,7 @@ Settings that compile 1:1 into the snapshot (`proto/lumewarp/config/v1/snapshot.
 
 Validation mirrors the gateway's snapshot checks so an accepted write never makes a gateway
 NACK (422 otherwise): health interval >= 1000 ms and 0 < timeout < interval, path absolute
-without query/fragment; `metrics_url` plain http(s) without userinfo or query (migration 0013 stops while a stored one has a query, naming the upstream); `max_attempts` 1..5,
+without query/fragment; `metrics_url` plain http(s) without userinfo or query; `max_attempts` 1..5,
 statuses 400..599 and unique; members and fallbacks exist, are models and are unique; at most
 16 splits, names 1..32 of `[A-Za-z0-9_.-]` and unique, each split non-empty, weights >= 0
 summing to more than 0; `sticky_header` (an HTTP header name, stored lower-case) required iff
@@ -695,6 +752,11 @@ end.
 
 ## Schema changes
 
+The history is one baseline, `20261106_0001_baseline.py`, generated from `models.py`:
+Lumewarp has never been deployed, so there is no upgrade path from an earlier revision and
+no data-preserving migration code. A fresh database runs that one file. `orgs` start empty;
+`POST /teams` creates the `default` org on first use.
+
 Edit `models.py`, then with the dev DB at head:
 
 ```sh
@@ -702,7 +764,8 @@ uv run alembic revision --autogenerate -m "what changed"
 ```
 
 Review the generated file (autogenerate duplicates enum CHECK constraints; keep the ones on
-the `sa.Enum` columns). `tests/test_migrations.py` fails if models and migrations drift.
+the `sa.Enum` columns). `tests/test_migrations.py::test_models_match_migrations` fails if
+models and migrations drift.
 
 ## Protobuf
 

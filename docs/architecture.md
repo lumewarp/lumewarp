@@ -80,13 +80,13 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 ### 憑證儲存與稽核
 
 - DB 只存不可逆或不可用的形式。API key、PAT、gateway token、session／CSRF token 與 OIDC state 只存 sha256：它們是 256-bit 隨機值，快速 hash 就足以防離線猜測。OIDC 的 nonce 與 PKCE code verifier 只放在 AES-256-GCM 封存的登入 cookie（金鑰由 `LUMEWARP_SECRET_KEY` 派生），`oidc_login_states` 只有 state hash、return path、redirect URI 與到期時間，用過即刪；SSO 開啟但沒設金鑰時服務拒絕啟動。Helm 以 `controlPlane.extraEnv` 的 `secretKeyRef` 傳入，範例見 [chart README](../deploy/helm/lumewarp/README.md#sso-and-authorization-backend)。
-- `upstreams.metrics_url` 不帶 query string（`?token=...` 會把憑證放進 API 會回傳、也會進稽核的欄位）；migration 0013 遇到已存的 query 會停止，並只列出 upstream 名稱、不印 URL。
+- `upstreams.metrics_url` 不帶 query string（`?token=...` 會把憑證放進 API 會回傳、也會進稽核的欄位）；API 與 compiler 都拒絕帶 query 或 userinfo 的值。
 - 稽核 `details` 是每個 action 的 allowlist：沒分類的欄位不記錄；`last_error` 類欄位只存 exception class。守門測試掃每個 Text／String／JSONB 欄位與原始碼中每個 `audit.record(action=...)`，新增而未分類就失敗。
 - e2e suite 會掃描資料庫，確認沒有明文憑證。
 
 ### Team / Member / Service Account
 
-- 階層：team → member（admin／member）與 service account → API key；沒有 org／project 層級。安裝層管理員是 Postgres 的 `installation_admins` 一列（`proxy_admin` 或 `admin`），緊急 session 也算安裝層管理員。第一個 `proxy_admin` 由「還沒有 proxy_admin 時，第一個通過驗證且 email 等於 `LUMEWARP_INITIAL_ADMIN_EMAIL` 的登入」建立（`LUMEWARP_OIDC_JIT_USERS=false` 時只有這個 email 可以即時建立）；變數之後失效，改值不會換人。緊急 session 可以建立或轉移 `proxy_admin`，`proxy_admin` 也可以轉移給別人，轉移後自己變成 `admin`。
+- 階層：org → team → member（admin／member）與 service account → API key。org 目前只有名稱與 `deleted_at`（配額欄位與 org 寫入 API 是後續工作）；建立 team 時放進名為 `default` 的 org，該 org 在第一次建立 team 時才建立，沒有種子資料。org admin 是 `org_admins` 一列，代表 `admin` on `org:<id>`；team 管理權由 `RequestAuthz` 從 `team.org_id` 繼承，後端只回答直接關係，`member` 永遠只代表直接成員，所以 org admin 沒有直接成員身分時不能建立自己的 key，`/users/me` 的 team 清單也只列直接成員（另外回傳 `admin_orgs`）。安裝層管理員是 Postgres 的 `installation_admins` 一列（`proxy_admin` 或 `admin`），緊急 session 也算安裝層管理員。第一個 `proxy_admin` 由「還沒有 proxy_admin 時，第一個通過驗證且 email 等於 `LUMEWARP_INITIAL_ADMIN_EMAIL` 的登入」建立（`LUMEWARP_OIDC_JIT_USERS=false` 時只有這個 email 可以即時建立）；變數之後失效，改值不會換人。緊急 session 可以建立或轉移 `proxy_admin`，`proxy_admin` 也可以轉移給別人，轉移後自己變成 `admin`。
 - API key 屬於一個 team，owner 是該 team 的成員或 service account；key 本身不帶 policy，owner 身分也不進快照，compiler 只把展開後的有效策略寫進 key。
 - team 與 key owner（member、service account）各自可設模型清單、限流、預算；owner 只能收窄 team，compiler 預先展開成每個 key 的有效策略。
 - 自助 key：team 另可設 `max_keys_per_member`（每人在該 team 的非撤銷 key 上限，撤銷即釋放名額）與 `max_member_key_lifetime_seconds`（member key 最長效期）。數量上限只在建立時檢查；效期上限在建立、輪替與改到期日時強制，沒有到期日的 key 在建立或輪替時補上期限，超過上限則拒絕。service account 的 key 由 team admin 管理，不受這兩項限制；安裝層管理員與 team admin 也不能繞過 member key 的效期檢查。降低 team 上限不會自動撤銷既有 key：降低數量上限只會拒絕之後的建立（輪替不新增 key，仍可進行），降低效期上限則會拒絕之後超過上限的建立、輪替與延長。成員可以自行恢復自己暫停的 key（`owner`）與因被移出 team 而暫停的 key（`owner_removed`，恢復成員身分之後）；`admin` 暫停需要 team admin，`owner_deactivated` 需要管理員在帳號重新啟用之後處理，擁有者未啟用時任何人都不能恢復。
@@ -95,12 +95,12 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 - 授權：安裝層管理員、team admin、team member，動作分得比角色細：
   - `TEAM_READ` 只給 team 基本資料（id、名稱、時間與 `max_keys_per_member`／`max_member_key_lifetime_seconds`）；member 的有效政策一律走 `/users/me`，`TeamOut`（含 team 政策）只回給 team admin 以上。
   - `TEAM_ADMIN_READ` 才是成員與 service account 清單、他人 key、team 用量與 audit。member 讀這些清單回 403，非成員仍是 404。
-  - `TEAM_SETTINGS_UPDATE`（team admin）只含名稱與 member key 上限；team 的模型清單、限流、並行與預算是 `TEAM_QUOTA_SET`，指派／降級／移除 team admin 是 `TEAM_ADMIN_ASSIGN`；兩者都是安裝層權限，team admin 不能設定。team 更新依實際變更判斷（`proposed != base`），team admin 重送未改動的政策值可以成功。
-  - 讀他人 key 是 team admin 或本人：`GET /keys/{id}` 對同 team 的其他 member 回 403，team 外的人仍是 404；`GET /teams/{id}/keys` 對 member 一律 AND 上「自己的 user key」，指定別人的 `user_id`／`service_account_id`／`owner_kind` 只會得到空清單。usage 由伺服器加 owner 條件，member 只看得到自己在所屬 team 的 key 的列（含任何 group by 的加總），查詢參數不能擴大；team admin 維持整個 team 的視圖。audit 只給 team admin 以上，且只含自己管理的 team；member 一律 403，已刪除 team 的 audit 仍只給安裝層管理員。
+  - `TEAM_SETTINGS_UPDATE`（team admin，org admin 繼承）只含名稱與 member key 上限；team 的模型清單、限流、並行與預算是 `TEAM_QUOTA_SET`，指派／降級／移除 team admin 是 `TEAM_ADMIN_ASSIGN`；兩者都是 org 層權限，在「URL 那支 team 所屬的 org」上檢查，所以 org admin 只能管自己 org 的 team，team admin 完全不能設定。team 更新依實際變更判斷（`proposed != base`），team admin 重送未改動的政策值可以成功。
+  - 讀他人 key 是 team admin（含 org admin 繼承）或本人：`GET /keys/{id}` 對同 team 的其他 member 回 403，team 外的人仍是 404；`GET /teams/{id}/keys` 對 member 一律 AND 上「自己的 user key」，指定別人的 `user_id`／`service_account_id`／`owner_kind` 只會得到空清單。usage 由伺服器加 owner 條件，member 只看得到自己在所屬 team 的 key 的列（含任何 group by 的加總），查詢參數不能擴大；team admin 與 org admin 維持自己管理的 team 的完整視圖。audit 只給 team admin 以上，且只含自己管理的 team（org admin 含旗下所有 team）；member 一律 403，已刪除 team 的 audit 仍只給安裝層管理員。
   - `ROUTING_READ` 是安裝層（upstreams、models、aliases、routers、strategies，含 GET）；任何已認證呼叫者可以讀 `/catalog`（只有 id、name、kind），因為設定 allowlist 只需要名字。
   - 沒有「最後一位 team admin」限制：安裝層管理員永遠在 team 之上，team 可以沒有 admin。
 - 安裝層角色管理：`GET /installation-admins` 列出角色，`PUT /installation-admins/{user_id}` 指派 `admin`，`DELETE /installation-admins/{user_id}` 移除 `admin`，`POST /installation-admins/transfer` 轉移 `proxy_admin`。任何安裝層管理員都能指派／移除 `admin`（含自己）；`proxy_admin` 不能透過指派或移除被降級或拔除，只能轉移；轉移只允許目前的 `proxy_admin` 或緊急 session。`proxy_admin` 帳號本身受保護：只有該帳號自己或緊急 session 能停用、刪除、改 email 或代發 PAT，其他安裝層管理員一律 403。指派與轉移要求目標至少已有一個 IdP identity（先登入過一次），否則回 409；這是因為新的 IdP identity 不能連結到已有安裝層角色的帳號，先給角色會讓該帳號永遠無法登入。每次角色變更寫 audit（`installation_admin.assign`／`remove`／`transfer`／`bootstrap`）。
-- 授權後端可換：內建用 `team_members`；內附 `openfga` 與 `http` 後端，也可用 `lumewarp.authz` entry point 接外部系統。後端只回答 team 關係，單一 async 函式 `check(user_id, relation, resource) -> Decision`：`relation` 是 `admin` 或 `member`，`resource` 只有 `team:<uuid>`；安裝層角色永遠不問後端。`admin` 隱含 `member` 由後端保證；安裝層管理員涵蓋所有 team 由 Lumewarp 自己套用。`ERROR`（後端不可用或逾時）不是 deny：管理 API 回 503。
+- 授權後端可換：內建用 `org_admins` 與 `team_members`；內附 `openfga` 與 `http` 後端，也可用 `lumewarp.authz` entry point 接外部系統。全部後端（含三個內建）都經同一個 entry point 載入，factory 可收 `AuthzContext`（settings、session factory、metrics）或零參數。後端只回答直接關係，單一 async 函式 `check(user_id, relation, resource) -> Decision`：`relation` 是 `admin`（org 或 team）或 `member`（只限 team），`resource` 是 `org:<uuid>` 或 `team:<uuid>`；安裝層角色永遠不問後端。`admin` 隱含 `member` 由後端保證；`member` 只代表直接成員，org 繼承只由 `RequestAuthz` 套用，team→org 一律讀 Postgres、不信任 payload。`ERROR`（後端不可用或逾時）不是 deny：管理 API 回 503，解析繼承權限時也一樣，不會變成空清單。`openfga` 可用 `LUMEWARP_OPENFGA_OBJECT_TYPES`／`LUMEWARP_OPENFGA_RELATIONS` 接既有 store 的不同 type／relation 名稱，Check、BatchCheck、ListObjects、ReadChanges 共用同一份對應；`changes()` 遇到無法對應到使用者的變更（userset、wildcard）改成要求全掃，不丟棄。
 - 用量與限流按 team 與 key owner 歸屬：member 的 scope id 是 `uuid5(team_id, user_id)`，service account 用其 id；限流 scope 為 `team:<id>`、`member:<id>`、`sa:<id>`。
 - 預算：依 token 與單價計費，達上限即拒絕。
 
@@ -226,8 +226,8 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 
 **權限與 SSO（control plane）**
 
-- 模型：安裝層管理員 → team → member（admin／member）與 service account → API key；沒有 org 與 project。安裝層角色（`proxy_admin`／`admin`）存在 Postgres，team 的 quota 與 team admin 指派是安裝層權限。
-- 授權：`Authorizer.check(user_id, relation, resource)`（只回答 team）；內建 `builtin`、`openfga`（Check／BatchCheck／ListObjects／ReadChanges，`HIGHER_CONSISTENCY`）、`http`，或 `lumewarp.authz` entry point。每次呼叫有逾時（`LUMEWARP_AUTHZ_TIMEOUT_SECONDS`），逾時即 `ERROR` → 管理 API 503。安裝層角色不經後端；共用情境測試 `authz/contract_tests.py`。
+- 模型：安裝層管理員 → org → team → member（admin／member）與 service account → API key。安裝層角色（`proxy_admin`／`admin`）存在 Postgres；org admin 來自 `org_admins`，team 管理權由 `RequestAuthz` 依 `team.org_id` 繼承；team 的 quota 與 team admin 指派是 org 權限（安裝層管理員也可以）。
+- 授權：`Authorizer.check(user_id, relation, resource)`（只回答直接的 org／team 關係；繼承在 `RequestAuthz`）；內建 `builtin`、`openfga`（Check／BatchCheck／ListObjects／ReadChanges，`HIGHER_CONSISTENCY`，可改名對應）、`http`，全部經 `lumewarp.authz` entry point 載入。每次呼叫有逾時（`LUMEWARP_AUTHZ_TIMEOUT_SECONDS`），逾時即 `ERROR` → 管理 API 503。安裝層角色不經後端；共用情境測試 `authz/contract_tests.py`（builtin、http、live OpenFGA）。
 - key reconciler：有 `changes()` 時每 2 秒輪詢、只重算變動的使用者，另每 5 分鐘全掃；明確 deny → `SUSPENDED`（`owner_removed`）並推新版本。恢復權限不自動復原；service account 的 key 不受影響。
 - OIDC 登入、伺服器端 session 與 CSRF 見上文 SSO 一節；已有安裝層角色的帳號不能由新的 IdP 身分以 email 自動連結。
 - 成員可用 email 加入；成員與 key 顯示擁有者是否仍啟用。
@@ -311,7 +311,6 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 - **讀 body 前被拒絕的請求，`requested` 是空的。** 403、404、429（限流）在讀完 body 之後才決定，有值；已撤銷、停用、過期和超過預算的 key 在讀 body 之前就被拒絕，那時還不知道名字。要補就得為了被拒絕的請求讀 body，所以維持空值。
 - **快速路徑可能回傳上游更具體的名字。** 呼叫的名字等於 `upstream_model` 時不走掃描器，例如呼叫 `gpt-4o`，OpenAI 可能回 `gpt-4o-2024-08-06`。這是第 10 點「一律改寫」之外的例外，另外兩個例外是錯誤回應和上游仍然壓縮的回應。
 - **Binary 叫 `lumewarp`，** 指令是 `lumewarp strategies --json`。
-- **Usage 的 migration（`0011`）是離線的。** 回填和建索引都在同一個交易內，全程持有 `ACCESS EXCLUSIVE`，要在維護時段執行。Downgrade 會遺失 provenance 欄位，文件有寫。
 - **解析 usage 名字有寬限時間。** 依請求開始時間（`started_at`，舊 gateway 用完成時間），查不到精確的區間時，寬限時間內只有一個同種類的擁有者才補 id。預設 300 秒，`LUMEWARP_USAGE_CATALOG_GRACE_SECONDS`，0 是關閉。這容忍時鐘偏差和傳播延遲，不是身分證明：同種類舊名字在寬限時間內被重複使用時，落後的 gateway 仍可能算到新擁有者。
 - **非串流回應超過 4 MiB 時，usage 是 `INVALID`。** 回應本身正常轉發和改寫，只是 usage 的 capture 上限 `MAX_JSON_CAPTURE` 讀不到 token。這個上限原本就有，但以前這種回應需要改寫時會中斷，現在會送達，所以比較容易遇到。
 - **沒有 gateway 回報的策略也算 `config_invalid`。** 遷移過來的自訂 router 在 gateway 回報該策略之前都會顯示 `Config invalid`，資料不會被修改。

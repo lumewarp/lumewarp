@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from lumewarp_control_plane.authz import Decision, Relation, team_resource
+from lumewarp_control_plane.authz import Decision, Relation, org_resource, team_resource
 from lumewarp_control_plane.authz.contract_tests import AuthzSeed
 from lumewarp_control_plane.authz.openfga import OpenFGABackend
 from lumewarp_control_plane.settings import Settings
@@ -21,6 +21,8 @@ def authz_seed():
     return AuthzSeed(
         *(str(uuid.uuid4()) for _ in range(5)),
         teams=(uuid.uuid4(), uuid.uuid4()),
+        org=uuid.uuid4(),
+        org_admin=str(uuid.uuid4()),
     )
 
 
@@ -30,6 +32,7 @@ def grant_check(authz_seed):
     grants = {
         (seed.admin, "admin", "team", str(seed.teams[0])),
         (seed.member, "member", "team", str(seed.teams[0])),
+        (seed.org_admin, "admin", "org", str(seed.org)),
     }
 
     async def check(user, relation, resource):
@@ -91,6 +94,7 @@ async def live_backend(openfga_settings, authz_seed):
     tuples = [
         backend._tuple(seed.admin, Relation.ADMIN, team_resource(seed.teams[0])),
         backend._tuple(seed.member, Relation.MEMBER, team_resource(seed.teams[0])),
+        backend._tuple(seed.org_admin, Relation.ADMIN, org_resource(seed.org)),
     ]
     try:
         await backend._post("write", {"writes": {"tuple_keys": tuples}})

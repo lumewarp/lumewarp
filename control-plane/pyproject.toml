@@ -26,6 +26,14 @@ dependencies = [
 [project.scripts]
 lumewarp-control-plane = "lumewarp_control_plane.__main__:main"
 
+# Every authorization backend, including the built-ins, is a plugin behind this one entry
+# point (authz/__init__.py::load_authorizer). A deployment attaches its own by registering
+# another `lumewarp.authz` entry point in its own distribution.
+[project.entry-points."lumewarp.authz"]
+builtin = "lumewarp_control_plane.authz.builtin:create"
+openfga = "lumewarp_control_plane.authz.openfga:create"
+http = "lumewarp_control_plane.authz.http:create"
+
 [dependency-groups]
 dev = [
     "grpcio-tools==1.84.0",

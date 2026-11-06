@@ -148,10 +148,18 @@ controlPlane:
       value: 01H...
     - name: LUMEWARP_OPENFGA_MODEL_ID
       value: 01H...
+    # Optional: when the store names its objects/relations differently.
+    - name: LUMEWARP_OPENFGA_OBJECT_TYPES
+      value: '{"team": "llm_team", "org": "llm_org"}'
+    - name: LUMEWARP_OPENFGA_RELATIONS
+      value: '{"team.admin": "owner"}'
 ```
 
 The IdP must allow the redirect URI `<LUMEWARP_PUBLIC_URL>/api/v1/session/oidc/callback`.
-Write the OpenFGA model from `deploy/openfga/model.fga` before switching the backend.
+Write the OpenFGA model from `deploy/openfga/model.fga` before switching the backend;
+`deploy/openfga/model-renamed.fga` is the same model under the names of the mapping example
+above. Lumewarp answers direct `admin` (org/team) and `member` (team) relations only; org
+administration is inherited from `team.org_id` by the control plane.
 
 ## Important limits
 

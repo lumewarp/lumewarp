@@ -1,6 +1,8 @@
 import asyncio
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
+from importlib.metadata import entry_points
 
 import httpx
 import pytest
@@ -242,10 +244,10 @@ async def test_list_objects_mapping_and_validation(fga):
         return httpx.Response(200, json={"objects": ["team:one", "team:two"]})
 
     await mock_client(fga, respond)
-    assert await fga.list_teams("alice", Relation.MEMBER) == ["one", "two"]
+    assert await fga.list_objects("alice", Relation.MEMBER, "team") == ["one", "two"]
     await mock_client(fga, lambda request: httpx.Response(200, json={"objects": ["user:alice"]}))
     with pytest.raises(ValueError):
-        await fga.list_teams("alice", Relation.MEMBER)
+        await fga.list_objects("alice", Relation.MEMBER, "team")
 
 
 def change(
@@ -357,7 +359,8 @@ async def test_team_changes_identify_affected_user(fga, tuple_change):
         None,
     ],
 )
-async def test_changes_ignore_invalid_user_subjects(fga, subject, caplog):
+async def test_changes_with_unmappable_subject_force_a_full_rescan(fga, subject, caplog):
+    """Dropping such a change would leave a revoked key serving for five minutes."""
     await mock_client(
         fga,
         lambda request: httpx.Response(
@@ -366,8 +369,65 @@ async def test_changes_ignore_invalid_user_subjects(fga, subject, caplog):
     )
     with caplog.at_level("DEBUG", logger="lumewarp_control_plane.authz.openfga"):
         batch = await fga.changes("same")
-    assert batch == ChangeBatch(frozenset({ALICE}), "same")
+    assert batch.reset
+    assert batch.cursor == "same"
+    assert ALICE in batch.user_ids
     assert len(caplog.records) == 1
+
+
+@pytest.mark.parametrize(
+    "tuple_change",
+    [
+        # A group whose membership derives team membership: not a Lumewarp type.
+        change(obj="group:eng"),
+        # A team relation Lumewarp never asks about (e.g. a parent or viewer relation).
+        change(relation="viewer"),
+    ],
+)
+async def test_changes_on_unmapped_objects_check_the_named_user(fga, tuple_change):
+    """Such a change cannot be mapped; a plain user subject is one cheap extra check."""
+    await mock_client(
+        fga,
+        lambda request: httpx.Response(
+            200, json={"changes": [tuple_change], "continuation_token": "same"}
+        ),
+    )
+    batch = await fga.changes("same")
+    assert not batch.reset
+    assert batch.user_ids == frozenset({ALICE})
+
+
+@pytest.mark.parametrize(
+    "tuple_change",
+    [
+        change(user="group:eng#member", obj="group:eng"),
+        change(user="team:other#member", relation="viewer"),
+    ],
+)
+async def test_changes_on_unmapped_objects_without_a_user_reset(fga, tuple_change):
+    """A userset on another type may change users Lumewarp cannot name: full rescan."""
+    await mock_client(
+        fga,
+        lambda request: httpx.Response(
+            200, json={"changes": [tuple_change], "continuation_token": "same"}
+        ),
+    )
+    assert await fga.changes("same") == ChangeBatch(frozenset(), "same", reset=True)
+
+
+async def test_changes_ignore_lumewarp_org_relations(fga):
+    """Org relations do not decide key ownership; inheritance is Lumewarp's."""
+    await mock_client(
+        fga,
+        lambda request: httpx.Response(
+            200,
+            json={
+                "changes": [change(obj="org:one", relation="admin")],
+                "continuation_token": "same",
+            },
+        ),
+    )
+    assert await fga.changes("same") == ChangeBatch(frozenset(), "same")
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 500])
@@ -399,7 +459,7 @@ async def test_authorizer_timeout_cancels_hung_backend(method):
     calls = {
         "check": lambda: authz.check(*ITEM),
         "batch_check": lambda: authz.batch_check([ITEM]),
-        "list_teams": lambda: authz.list_teams("alice", Relation.MEMBER, []),
+        "list_teams": lambda: authz.list_teams("alice", Relation.MEMBER, [uuid.uuid4()]),
         "changes": lambda: authz.changes(None),
     }
     async with asyncio.timeout(1):
@@ -443,3 +503,191 @@ async def test_live_changes_tracks_member_delete(live_backend, authz_seed):
         )
     finally:
         await live_backend._post("write", {"writes": {"tuple_keys": [key]}})
+
+
+@pytest.fixture
+async def mapped_fga():
+    backend = OpenFGABackend(
+        Settings(
+            openfga_url="https://fga.test",
+            openfga_store_id="store",
+            openfga_model_id="model",
+            openfga_object_types={"team": "llm_team", "org": "llm_org"},
+            openfga_relations={"team.admin": "owner"},
+        )
+    )
+    yield backend
+    await backend.aclose()
+
+
+async def test_mapping_applies_to_check_batch_and_list(mapped_fga):
+    def respond(request):
+        body = json.loads(request.content)
+        path = request.url.path
+
+        def expected(object_type, relation, object_id):
+            return {
+                "user": f"user:{ALICE}",
+                "relation": relation,
+                "object": f"{object_type}:{object_id}",
+            }
+
+        if path.endswith("/check"):
+            assert body["tuple_key"] in (
+                expected("llm_team", "owner", "one"),
+                expected("llm_org", "admin", "two"),
+            )
+            return httpx.Response(200, json={"allowed": True})
+        assert path.endswith("/batch-check")
+        assert body["checks"][0]["tuple_key"] == expected("llm_team", "member", "one")
+        return httpx.Response(200, json={"result": {"0": {"allowed": True}}})
+
+    await mock_client(mapped_fga, respond)
+    team = Resource("team", "one")
+    org = Resource("org", "two")
+    assert await mapped_fga.check(ALICE, Relation.ADMIN, team) is Decision.ALLOW
+    assert await mapped_fga.check(ALICE, Relation.ADMIN, org) is Decision.ALLOW
+    assert await mapped_fga.batch_check([(ALICE, Relation.MEMBER, team)]) == [Decision.ALLOW]
+
+    def respond_list(request):
+        assert json.loads(request.content) == {
+            "authorization_model_id": "model",
+            "user": f"user:{ALICE}",
+            "relation": "owner",
+            "type": "llm_team",
+        }
+        return httpx.Response(200, json={"objects": ["llm_team:one"]})
+
+    await mock_client(mapped_fga, respond_list)
+    assert await mapped_fga.list_objects(ALICE, Relation.ADMIN, "team") == ["one"]
+
+
+async def test_mapping_applies_to_changes(mapped_fga):
+    def respond(request):
+        return httpx.Response(
+            200,
+            json={
+                "changes": [
+                    change(relation="owner", obj="llm_team:one"),
+                    change(relation="member", obj="llm_team:one"),
+                    change(relation="owner", obj="team:one"),  # unmapped store type
+                ],
+                "continuation_token": "end",
+            },
+        )
+
+    await mock_client(mapped_fga, respond)
+    assert await mapped_fga.changes("start") == ChangeBatch(frozenset({ALICE}), "end")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"openfga_object_types": {"group": "llm_team"}},
+        {"openfga_object_types": {"team": "not a type"}},
+        {"openfga_object_types": {"team": "llm", "org": "llm"}},
+        {"openfga_relations": {"team.reader": "owner"}},
+        {"openfga_relations": {"group.admin": "owner"}},
+        {"openfga_relations": {"team.admin": "not a relation"}},
+    ],
+)
+def test_invalid_mapping_rejected(kwargs):
+    with pytest.raises(ValueError):
+        OpenFGABackend(
+            Settings(
+                openfga_url="https://fga.test",
+                openfga_store_id="store",
+                openfga_model_id="model",
+                **kwargs,
+            )
+        )
+
+
+# ------------------------------------------------------------------- entry point loading
+
+
+async def plugin_check(user_id, relation, resource):
+    return Decision.ALLOW
+
+
+class PluginObject:
+    async def check(self, user_id, relation, resource):
+        return Decision.ALLOW
+
+
+class PluginZeroArg:
+    async def check(self, user_id, relation, resource):
+        return Decision.ALLOW
+
+
+class PluginWithContext:
+    def __init__(self, context):
+        self.context = context
+
+    async def check(self, user_id, relation, resource):
+        return Decision.ALLOW
+
+
+def plugin_zero_factory():
+    return PluginZeroArg()
+
+
+def plugin_context_factory(context):
+    return PluginWithContext(context)
+
+
+def _entry_point(name, value):
+    from importlib.metadata import EntryPoint
+
+    return EntryPoint(name=name, value=value, group="lumewarp.authz")
+
+
+def _fake_entry_points(monkeypatch, *points):
+    monkeypatch.setattr("lumewarp_control_plane.authz.entry_points", lambda group: list(points))
+
+
+def test_builtins_are_registered_entry_points() -> None:
+    names = {ep.name for ep in entry_points(group="lumewarp.authz")}
+    assert {"builtin", "openfga", "http"} <= names
+    settings = Settings(
+        database_url="postgresql+asyncpg://u:p@127.0.0.1:1/none",
+        openfga_url="https://fga.test",
+        openfga_store_id="store",
+        openfga_model_id="model",
+        authz_http_url="https://authz.test/check",
+    )
+
+    def session_factory():  # never used: no check is issued here
+        raise AssertionError("no database access expected")
+
+    assert type(load_authorizer(settings, session_factory).backend).__name__ == "BuiltinBackend"
+    for name, cls in (("openfga", "OpenFGABackend"), ("http", "HttpBackend")):
+        backend = load_authorizer(
+            Settings(**(settings.model_dump() | {"authz_backend": name})), None
+        )
+        assert type(backend.backend).__name__ == cls
+
+
+def test_unknown_backend_is_fatal() -> None:
+    with pytest.raises(RuntimeError, match="no lumewarp.authz entry point"):
+        load_authorizer(Settings(authz_backend="nope"), None)
+
+
+@pytest.mark.parametrize(
+    ("value", "loaded"),
+    [
+        ("tests.authz.test_backends:plugin_check", "_FunctionBackend"),
+        ("tests.authz.test_backends:PluginObject", "PluginObject"),
+        ("tests.authz.test_backends:plugin_zero_factory", "PluginZeroArg"),
+        ("tests.authz.test_backends:plugin_context_factory", "PluginWithContext"),
+    ],
+)
+async def test_plugin_loading_contract(monkeypatch, value, loaded) -> None:
+    """A plain check function, an object, a zero-argument factory and a context factory."""
+    _fake_entry_points(monkeypatch, _entry_point("custom", value))
+    backend = load_authorizer(Settings(authz_backend="custom"), None)
+    assert type(backend.backend).__name__ == loaded
+    assert await backend.check(ALICE, Relation.MEMBER, team_resource("one")) is Decision.ALLOW
+    if loaded == "PluginWithContext":
+        assert backend.backend.context.settings.authz_backend == "custom"
+        assert backend.backend.context.session_factory is None

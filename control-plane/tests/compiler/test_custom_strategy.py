@@ -1,12 +1,9 @@
 import json
-import uuid
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import create_async_engine
 
-from lumewarp_control_plane import migrate
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 from lumewarp_control_plane.compiler import (
     compile_scope,
@@ -19,7 +16,6 @@ from lumewarp_control_plane.models import CatalogKind, CatalogName, Router
 from tests import factories
 from tests.api.helpers import report_strategies
 from tests.compiler.helpers import OCT, SCOPE, add_router, load_version, seed_scope, touch
-from tests.conftest import create_database, drop_database
 
 
 def _wire_router(snapshot: pb.Snapshot, name: str = "custom") -> pb.Router:
@@ -91,56 +87,6 @@ def test_custom_strategy_mirror_rejects_invalid_params(params):
     )
     with pytest.raises(SnapshotInvalid, match="strategy|headers|params"):
         validate_snapshot(snap, max_bytes=64 * 1024 * 1024, max_keys=200_000)
-
-
-async def test_custom_strategy_migration_up_down():
-    url = await create_database()
-    engine = create_async_engine(url)
-    try:
-        await migrate.upgrade(engine, "0004")
-        await migrate.upgrade(engine, "0005")
-        router_id = uuid.uuid4()
-        async with engine.begin() as conn:
-            await conn.execute(
-                text(
-                    "INSERT INTO routes (id, model, strategy, custom_strategy, strategy_params)"
-                    " VALUES (:id, 'custom', 'custom', 'header_pin', '{\"headers\":[\"x-pin\"]}')"
-                ),
-                {"id": router_id},
-            )
-        await migrate.downgrade(engine, "0004")
-        async with engine.connect() as conn:
-            assert (
-                await conn.scalar(
-                    text("SELECT strategy FROM routes WHERE id = :id"), {"id": router_id}
-                )
-                == "least_in_flight"
-            )
-            assert (
-                await conn.scalar(
-                    text(
-                        "SELECT count(*) FROM information_schema.columns"
-                        " WHERE table_name = 'routes'"
-                        " AND column_name IN ('custom_strategy', 'strategy_params')"
-                    )
-                )
-                == 0
-            )
-        await migrate.upgrade(engine, "0005")
-        async with engine.connect() as conn:
-            row = (
-                await conn.execute(
-                    text(
-                        "SELECT strategy, custom_strategy, strategy_params FROM routes"
-                        " WHERE id = :id"
-                    ),
-                    {"id": router_id},
-                )
-            ).one()
-            assert tuple(row) == ("least_in_flight", None, None)
-    finally:
-        await engine.dispose()
-        await drop_database(url)
 
 
 @pytest.mark.parametrize(

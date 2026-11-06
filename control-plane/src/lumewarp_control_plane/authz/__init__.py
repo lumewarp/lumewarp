@@ -3,34 +3,55 @@
 Who may do what is decided in two layers:
 
 - The action matrix (`MATRIX`) stays in Lumewarp: every admin API action needs either an
-  installation role, any authenticated caller, or one relation on one team.
-- A backend answers only relation questions: "is user U an `admin` or `member` of team T?".
-  That is a single async function, `check(user_id, relation, resource) -> Decision`, so
-  OpenFGA, a home-grown AAA system or the built-in membership table can be swapped without
-  touching the API. Installation roles are never asked of a backend: they live in Postgres
-  (`installation_admins`, see `installation.py`).
+  installation role, any authenticated caller, or one relation on one org or team.
+- A backend answers only *direct* relation questions: "is user U an `admin` of org O?",
+  "is U an `admin` or `member` of team T?". That is a single async function,
+  `check(user_id, relation, resource) -> Decision`, so OpenFGA, a home-grown AAA system or
+  the built-in tables can be swapped without touching the API. Installation roles are never
+  asked of a backend: they live in Postgres (`installation_admins`, see `installation.py`).
 
-A backend guarantees that team `admin` implies `member`. `RequestAuthz` applies the
-installation roles to every team action, independently of the backend. The matrix
-separates reading a team's basic record (`TEAM_READ`, any member) from reading what a team
-admin sees (`TEAM_ADMIN_READ`: members, service accounts, every key, usage, audit), and it
-keeps team quota (`TEAM_QUOTA_SET`) and admin assignment (`TEAM_ADMIN_ASSIGN`) at the
-installation level, so a team admin cannot set either. Catalog names are readable by every caller
-(`CATALOG_READ`) because allowlists are picked by name; routing details need
+Inheritance lives in `RequestAuthz` only, and the backend never needs to know which team
+belongs to which org:
+
+    is_installation_admin        = a row in installation_admins, or break-glass
+    is_org_admin(org)            = is_installation_admin or admin of org:<id>
+    team_admin_capability(team)  = is_org_admin(team.org_id) or admin of team:<id>
+    team_read_capability(team)   = team_admin_capability(team) or member of team:<id>
+
+The team -> org mapping is always read from Postgres by `RequestAuthz`, never from a
+request payload. A caller that needs a direct relation must ask for one explicitly and
+must not use the inherited capabilities:
+
+- `_is_member` (key creation) requires a direct membership, so an org admin who is not a
+  member cannot own a key;
+- the key reconciler and `Authorizer.list_objects(..., "team", ...)` see direct relations;
+- `/users/me` lists direct memberships and the caller's `admin_orgs` separately;
+- `is_admin()` is installation-level only (proxy_admin, admin, break-glass), never "any
+  admin".
+
+A backend guarantees that team `admin` implies `member`. The new contract is that
+`member of team` is a **direct** membership only: a backend must not make an org admin
+inherit it, because `_is_member`, `/users/me` and the reconciler would then be wrong.
+The matrix separates reading a team's basic record (`TEAM_READ`, any member or above) from
+reading what a team admin sees (`TEAM_ADMIN_READ`: members, service accounts, every key,
+usage, audit). Team quota (`TEAM_QUOTA_SET`) and admin assignment (`TEAM_ADMIN_ASSIGN`)
+are `ORG` level: an org admin may do both for a team of its own org, a team admin for
+none. Catalog names are readable by every caller (`CATALOG_READ`) and routing details need
 `ROUTING_READ`, which is installation-level.
 `Decision.ERROR` (backend down or timed out) is never treated as a deny:
 the admin API answers 503 and background jobs skip
 the round. The gateway never calls a backend (it only sees compiled snapshots).
 
-Backends are selected by `LUMEWARP_AUTHZ_BACKEND`: "builtin" (default, `builtin.py`),
-"openfga" (`openfga.py`), "http" (`http.py`) or the name of a `lumewarp.authz` entry point.
-The entry point may be the async `check` function itself, an object with a `check` method,
-or a class / zero-argument factory returning one.
+Every backend, including the three built-ins, loads through one `lumewarp.authz` entry
+point. `load_authorizer` passes an `AuthzContext` to a factory that can be called with one
+argument; a plain async `check` function, an object with `check`, or a zero-argument
+factory keeps working unchanged. The entry point may name any of those directly.
 Everything besides `check` is optional and filled in by `Authorizer`:
 
 - `batch_check(items)`: default runs `check` concurrently (bounded).
-- `list_teams(user_id, relation, candidates)`: default filters `candidates` with
-  `batch_check`.
+- `list_objects(user_id, relation, resource_type)`: the objects of one type where the user
+  holds the direct relation. `list_teams(user_id, relation)` is the older name for the
+  team case and is still accepted.
 - `changes(cursor)`: a stream of users whose relations may have changed (`ChangeBatch`),
   used by the key reconciler to react within seconds. Without it the reconciler only
   rescans periodically.
@@ -56,10 +77,11 @@ from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 
 from fastapi import Depends, Request
+from sqlalchemy import select
 
 from lumewarp_control_plane.errors import ApiError, forbidden
 from lumewarp_control_plane.metrics import DISCARD, Metrics
-from lumewarp_control_plane.models import InstallationRole
+from lumewarp_control_plane.models import InstallationRole, Team
 from lumewarp_control_plane.security import CurrentPrincipal, Principal
 
 if TYPE_CHECKING:
@@ -76,19 +98,38 @@ HTTP = "http"
 BATCH_CONCURRENCY = 16
 
 
+@dataclass(frozen=True)
+class AuthzContext:
+    """What an authorization backend factory receives.
+
+    A factory registered in `lumewarp.authz` may take one argument (this context) or none;
+    the context carries what the built-ins need without making every plugin depend on the
+    settings class. A backend named by `LUMEWARP_AUTHZ_BACKEND` that is a plain `check`
+    function or an object with `check` is used as is.
+    """
+
+    settings: Settings | None = None
+    session_factory: SessionFactory | None = None
+    metrics: Metrics = DISCARD
+
+
 class Relation(StrEnum):
-    ADMIN = "admin"  # on a team
-    MEMBER = "member"  # on a team
+    ADMIN = "admin"  # on an org or a team
+    MEMBER = "member"  # on a team (direct membership only)
 
 
 @dataclass(frozen=True)
 class Resource:
-    type: Literal["team"]
+    type: Literal["org", "team"]
     id: str
 
 
 def team_resource(team_id: uuid.UUID | str) -> Resource:
     return Resource("team", str(team_id))
+
+
+def org_resource(org_id: uuid.UUID | str) -> Resource:
+    return Resource("org", str(org_id))
 
 
 class Decision(StrEnum):
@@ -196,26 +237,47 @@ class Authorizer:
 
         return list(await asyncio.gather(*(one(item) for item in items)))
 
-    async def list_teams(
-        self, user_id: str, relation: Relation, candidates: Iterable[uuid.UUID]
+    async def list_objects(
+        self,
+        user_id: str,
+        relation: Relation,
+        resource_type: Literal["org", "team"],
+        candidates: Iterable[uuid.UUID],
     ) -> set[uuid.UUID] | None:
-        """Teams among `candidates` where `user_id` holds `relation`; None on ERROR."""
-        native = getattr(self.backend, "list_teams", None)
+        """Objects among `candidates` where `user_id` holds the direct relation.
+
+        None on ERROR. Never inherited: an org admin is not returned for a team. A
+        backend may implement `list_objects(user_id, relation, resource_type)`; the older
+        team-only `list_teams(user_id, relation)` still works.
+        """
         candidates = list(candidates)
+        if not candidates:
+            return set()
+        native = getattr(self.backend, "list_objects", None)
+        args: tuple[Any, ...] = (user_id, relation, resource_type)
+        if native is None and resource_type == "team":
+            native = getattr(self.backend, "list_teams", None)
+            args = (user_id, relation)
         if native is not None:
             try:
                 async with asyncio.timeout(self.timeout):
-                    teams = await native(user_id, relation)
-                return {uuid.UUID(str(t)) for t in teams} & set(candidates)
+                    found = await native(*args)
+                return {uuid.UUID(str(t)) for t in found} & set(candidates)
             except Exception:
-                log.exception("authz backend %s: list_teams failed", self.name)
+                log.exception("authz backend %s: list_objects failed", self.name)
                 return None
         decisions = await self.batch_check(
-            [(user_id, relation, team_resource(t)) for t in candidates]
+            [(user_id, relation, Resource(resource_type, str(t))) for t in candidates]
         )
         if Decision.ERROR in decisions:
             return None
         return {t for t, d in zip(candidates, decisions, strict=True) if d is Decision.ALLOW}
+
+    async def list_teams(
+        self, user_id: str, relation: Relation, candidates: Iterable[uuid.UUID]
+    ) -> set[uuid.UUID] | None:
+        """Teams among `candidates` where `user_id` holds the direct relation; None on ERROR."""
+        return await self.list_objects(user_id, relation, "team", candidates)
 
     async def changes(self, cursor: str | None) -> ChangeBatch | None:
         """The backend's change stream since `cursor`; None on error or when the backend
@@ -235,32 +297,44 @@ class Authorizer:
             return None
 
 
+def _instantiate(factory: Any, context: AuthzContext) -> Any:
+    """Call a factory, passing the context only when it takes an argument.
+
+    Compatibility: a zero-argument factory (or class) keeps working as before. A factory
+    with a required (or named `context`) parameter receives `AuthzContext`.
+    """
+    if not inspect.isclass(factory) and (
+        inspect.iscoroutinefunction(factory) or hasattr(factory, "check")
+    ):
+        return factory
+    try:
+        signature = inspect.signature(factory)
+    except (TypeError, ValueError):
+        return factory()
+    try:
+        signature.bind()
+    except TypeError:
+        return factory(context)
+    for name in signature.parameters:
+        if name in ("context", "ctx"):
+            return factory(context)
+    return factory()
+
+
 def load_authorizer(
-    settings: Settings, session_factory: SessionFactory, metrics: Metrics = DISCARD
+    settings: Settings, session_factory: SessionFactory | None, metrics: Metrics = DISCARD
 ) -> Authorizer:
+    """Load `LUMEWARP_AUTHZ_BACKEND` from the `lumewarp.authz` entry points.
+
+    The built-ins register themselves in `pyproject.toml`; there is no special case here.
+    """
     name = settings.authz_backend
     timeout = settings.authz_timeout_seconds
-    if name == BUILTIN:
-        from lumewarp_control_plane.authz.builtin import BuiltinBackend
-
-        return Authorizer(BuiltinBackend(session_factory), BUILTIN, timeout, metrics)
-    if name == OPENFGA:
-        from lumewarp_control_plane.authz.openfga import OpenFGABackend
-
-        return Authorizer(OpenFGABackend(settings), OPENFGA, timeout, metrics)
-    if name == HTTP:
-        from lumewarp_control_plane.authz.http import HttpBackend
-
-        return Authorizer(HttpBackend(settings), HTTP, timeout, metrics)
     matches = [ep for ep in entry_points(group=ENTRY_POINT_GROUP) if ep.name == name]
     if not matches:
         raise RuntimeError(f"unknown authz backend {name!r} (no {ENTRY_POINT_GROUP} entry point)")
-    obj = matches[0].load()
-    if inspect.isclass(obj) or (
-        callable(obj) and not inspect.iscoroutinefunction(obj) and not hasattr(obj, "check")
-    ):
-        obj = obj()
-    return Authorizer(obj, name, timeout, metrics)
+    context = AuthzContext(settings=settings, session_factory=session_factory, metrics=metrics)
+    return Authorizer(_instantiate(matches[0].load(), context), name, timeout, metrics)
 
 
 # --------------------------------------------------------------------------- actions
@@ -269,17 +343,14 @@ def load_authorizer(
 class Level(StrEnum):
     ANY = "any"  # any authenticated caller
     INSTALLATION = "installation"  # a proxy_admin or admin row in installation_admins
-    TEAM = "team"  # a relation on the team
+    ORG = "org"  # `relation` on the org the target team belongs to
+    TEAM = "team"  # an (inherited) capability on the team itself
 
 
 class Action(StrEnum):
     # Installation-wide (proxy_admin, admin, or break-glass).
     TEAM_CREATE = "team.create"
     TEAM_DELETE = "team.delete"
-    TEAM_QUOTA_SET = "team.quota.set"  # models, limits, budget; installation-level
-    TEAM_ADMIN_ASSIGN = (
-        "team.admin.assign"  # add/promote/demote/remove an admin; installation-level
-    )
     INSTALLATION_ADMIN_MANAGE = "installation_admin.manage"  # assign/remove/transfer roles
     USER_MANAGE = "user.manage"
     ROUTING_MANAGE = "routing.manage"  # upstreams, models, routers, prices
@@ -289,18 +360,21 @@ class Action(StrEnum):
     GATEWAY_READ = "gateway.read"
     CONFIG_READ = "config.read"  # config versions
     CONFIG_ROLLBACK = "config.rollback"
+    # Org admin (and installation admin): a team of the caller's own org only.
+    TEAM_QUOTA_SET = "team.quota.set"  # models, limits, budget
+    TEAM_ADMIN_ASSIGN = "team.admin.assign"  # add/promote/demote/remove an admin
     # Any authenticated caller.
     CATALOG_READ = "catalog.read"  # names and kinds, for allowlist pickers
     OWN_TOKENS = "own_tokens.manage"  # own PATs, users/me
-    # Team admin.
+    # Team admin (org admins inherit this for their org's teams).
     TEAM_SETTINGS_UPDATE = "team.settings.update"  # name, member key limits
     TEAM_MEMBERS_MANAGE = "team.members.manage"  # incl. members' own limits
     TEAM_ADMIN_READ = "team.admin.read"  # members, service accounts, keys, usage, audit
     SERVICE_ACCOUNT_MANAGE = "service_account.manage"  # incl. their keys
     KEY_MANAGE_ANY = "key.manage_any"  # suspend/revoke any key of the team
-    # Team member (admin included).
+    # Team member (admin included; org admins inherit this too).
     TEAM_READ = "team.read"  # the team's basic record (id, name, timestamps, key limits)
-    KEY_CREATE_OWN = "key.create_own"  # owner check is the caller's job
+    KEY_CREATE_OWN = "key.create_own"  # a direct membership is checked by the caller
     KEY_MANAGE_OWN = "key.manage_own"
 
 
@@ -316,9 +390,6 @@ MATRIX: dict[Action, Rule] = {
         for a in (
             Action.TEAM_CREATE,
             Action.TEAM_DELETE,
-            # Installation-level: a team admin cannot set quota or assign admins.
-            Action.TEAM_QUOTA_SET,
-            Action.TEAM_ADMIN_ASSIGN,
             Action.INSTALLATION_ADMIN_MANAGE,
             Action.USER_MANAGE,
             Action.ROUTING_MANAGE,
@@ -329,6 +400,10 @@ MATRIX: dict[Action, Rule] = {
             Action.CONFIG_ROLLBACK,
         )
     },
+    # Org level: the relation is checked on the target team's own org, resolved from
+    # Postgres. A team admin never gets these, and an org admin never another org's team.
+    Action.TEAM_QUOTA_SET: Rule(Level.ORG, Relation.ADMIN),
+    Action.TEAM_ADMIN_ASSIGN: Rule(Level.ORG, Relation.ADMIN),
     Action.CATALOG_READ: Rule(Level.ANY),
     Action.OWN_TOKENS: Rule(Level.ANY),
     **{
@@ -354,9 +429,11 @@ _UNSET = object()
 class RequestAuthz:
     """Authorization for one admin API request.
 
-    Team decisions are cached for the request, so a handler may ask the same question
-    repeatedly without another backend round trip. The installation role is read from
-    Postgres once per request and cached too: a revoked role applies to the next request.
+    This is the only place where org -> team inheritance is applied; the backend answers
+    direct relations only. Backend decisions are cached for the request, so a handler may
+    ask the same question repeatedly without another round trip. The installation role and
+    each team's org are read from Postgres once per request and cached too: a revoked role
+    applies to the next request, and no caller can supply an org from a payload.
     """
 
     def __init__(
@@ -372,6 +449,7 @@ class RequestAuthz:
         self._session_factory = session_factory
         self._installation_role = installation_role
         self._cache: dict[tuple[Relation, Resource], Decision] = {}
+        self._team_orgs: dict[uuid.UUID, uuid.UUID | None] = {}
 
     @property
     def user_id(self) -> uuid.UUID | None:
@@ -411,15 +489,64 @@ class RequestAuthz:
         self._installation_role = role
 
     async def is_admin(self) -> bool:
+        """Installation level only: proxy_admin, admin or break-glass. Never "any admin"."""
         if self.principal.is_break_glass:
             return True
         return await self.installation_role() is not None
 
-    async def has(self, relation: Relation, team_id: uuid.UUID) -> bool:
-        """Whether the caller holds `relation` on the team (installation admins always do)."""
+    async def _resolve_orgs(self, team_ids: Iterable[uuid.UUID]) -> None:
+        """Read team -> org from Postgres for the ids not cached yet.
+
+        Never from a payload: callers only pass a team id. A team that does not exist maps
+        to None (the API checks existence first and answers 404).
+        """
+        missing = [t for t in dict.fromkeys(team_ids) if t not in self._team_orgs]
+        if not missing:
+            return
+        if self._session_factory is None:
+            raise RuntimeError("RequestAuthz needs a session factory to resolve team -> org")
+        async with self._session_factory() as session:
+            rows = await session.execute(select(Team.id, Team.org_id).where(Team.id.in_(missing)))
+            found = {team_id: org_id for team_id, org_id in rows}
+        for team_id in missing:
+            self._team_orgs[team_id] = found.get(team_id)
+
+    async def team_org(self, team_id: uuid.UUID) -> uuid.UUID | None:
+        """The team's org, from Postgres (cached per request); None if it does not exist."""
+        await self._resolve_orgs([team_id])
+        return self._team_orgs[team_id]
+
+    async def is_org_admin(self, org_id: uuid.UUID) -> bool:
+        """Installation admin, or a direct `admin` relation on this org."""
         if await self.is_admin():
             return True
-        return await self._relation(relation, team_resource(team_id))
+        return await self._relation(Relation.ADMIN, org_resource(org_id))
+
+    async def _team_admin_capability(self, team_id: uuid.UUID) -> bool:
+        """Org admin of the team's org, or a direct team `admin`."""
+        org_id = await self.team_org(team_id)
+        if org_id is not None and await self.is_org_admin(org_id):
+            return True
+        return await self._relation(Relation.ADMIN, team_resource(team_id))
+
+    async def _team_read_capability(self, team_id: uuid.UUID) -> bool:
+        """Team admin capability, or a direct `member` relation on the team."""
+        if await self._team_admin_capability(team_id):
+            return True
+        return await self._relation(Relation.MEMBER, team_resource(team_id))
+
+    async def has(self, relation: Relation, team_id: uuid.UUID) -> bool:
+        """The caller's inherited capability for `relation` on the team.
+
+        Installation admins always have it; org admins have both relations on their org's
+        teams by inheritance. This is a capability, not a direct relation: never use it to
+        decide membership (keys, the reconciler, `/users/me`).
+        """
+        if await self.is_admin():
+            return True
+        if relation is Relation.ADMIN:
+            return await self._team_admin_capability(team_id)
+        return await self._team_read_capability(team_id)
 
     async def allowed(self, action: Action, team_id: uuid.UUID | None = None) -> bool:
         rule = MATRIX[action]
@@ -429,6 +556,11 @@ class RequestAuthz:
             return await self.is_admin()
         if team_id is None:
             raise ValueError(f"{action} needs a team")
+        if await self.is_admin():
+            return True
+        if rule.level is Level.ORG:
+            org_id = await self.team_org(team_id)
+            return org_id is not None and await self.is_org_admin(org_id)
         assert rule.relation is not None
         return await self.has(rule.relation, team_id)
 
@@ -439,33 +571,56 @@ class RequestAuthz:
         if not await self.allowed(action, team_id):
             raise forbidden(f"{action.value} not allowed")
 
-    async def readable_teams(self, candidates: Iterable[uuid.UUID]) -> set[uuid.UUID] | None:
-        """Teams among `candidates` the caller may read; None means every team."""
+    async def _direct_objects(
+        self,
+        relation: Relation,
+        resource_type: Literal["org", "team"],
+        candidates: Iterable[uuid.UUID],
+    ) -> set[uuid.UUID]:
+        assert self.principal.user_id is not None
+        found = await self.authorizer.list_objects(
+            str(self.principal.user_id), relation, resource_type, candidates
+        )
+        if found is None:
+            raise AuthzUnavailable()
+        return found
+
+    async def admin_orgs(self, candidates: Iterable[uuid.UUID]) -> set[uuid.UUID] | None:
+        """Orgs among `candidates` the caller administers (direct relation); None = all."""
         if await self.is_admin():
             return None
-        assert self.principal.user_id is not None
-        teams = await self.authorizer.list_teams(
-            str(self.principal.user_id), Relation.MEMBER, candidates
-        )
-        if teams is None:
-            raise AuthzUnavailable()
-        return teams
+        return await self._direct_objects(Relation.ADMIN, "org", candidates)
 
     async def admin_teams(self, candidates: Iterable[uuid.UUID]) -> set[uuid.UUID] | None:
         """Teams among `candidates` the caller may administer; None means every team.
 
-        Handlers use it to decide whether a caller sees the whole-team view (team
-        admins) or only their own rows, and never to trust a filter they were given.
+        A direct team admin, plus every team of an org the caller administers. Handlers use
+        it to decide whether a caller sees the whole-team view (team and org admins) or
+        only their own rows, and never to trust a filter they were given.
         """
         if await self.is_admin():
             return None
-        assert self.principal.user_id is not None
-        teams = await self.authorizer.list_teams(
-            str(self.principal.user_id), Relation.ADMIN, candidates
-        )
-        if teams is None:
-            raise AuthzUnavailable()
-        return teams
+        candidates = list(dict.fromkeys(candidates))
+        direct = await self._direct_objects(Relation.ADMIN, "team", candidates)
+        await self._resolve_orgs(candidates)
+        orgs = {t: o for t in candidates if (o := self._team_orgs.get(t)) is not None}
+        if not orgs:
+            return direct
+        admin_orgs = await self._direct_objects(Relation.ADMIN, "org", set(orgs.values()))
+        return direct | {team for team, org in orgs.items() if org in admin_orgs}
+
+    async def readable_teams(self, candidates: Iterable[uuid.UUID]) -> set[uuid.UUID] | None:
+        """Teams among `candidates` the caller may read; None means every team.
+
+        A direct member (team admins imply member by contract) or anything the caller
+        administers, inherited org included.
+        """
+        if await self.is_admin():
+            return None
+        candidates = list(dict.fromkeys(candidates))
+        members = await self._direct_objects(Relation.MEMBER, "team", candidates)
+        admins = await self.admin_teams(candidates)
+        return members | (admins or set())
 
 
 def get_authorizer(request: Request) -> Authorizer:

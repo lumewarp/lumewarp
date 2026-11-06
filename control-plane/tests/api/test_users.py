@@ -45,6 +45,7 @@ async def test_current_user_and_pats(client, committed) -> None:
         "authz_unavailable": False,
         "manages_grants": True,
         "teams": [],
+        "admin_orgs": [],
     }
     assert client.get("/api/v1/users/me/tokens", headers=ADMIN_AUTH).json()["items"] == []
     assert (

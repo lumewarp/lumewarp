@@ -1282,6 +1282,22 @@ export interface components {
             /** Max Parallel */
             max_parallel: number | null;
         };
+        /**
+         * MeOrgOut
+         * @description An org the caller administers directly (`admin_orgs`).
+         *
+         *     Its teams are administered by inheritance and are not mixed into `MeOut.teams`,
+         *     which lists direct memberships only.
+         */
+        MeOrgOut: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+        };
         /** MeOut */
         MeOut: {
             /** Kind */
@@ -1304,6 +1320,8 @@ export interface components {
             manages_grants: boolean;
             /** Teams */
             teams: components["schemas"]["MeTeamOut"][];
+            /** Admin Orgs */
+            admin_orgs?: components["schemas"]["MeOrgOut"][];
         };
         /** MeTeamOut */
         MeTeamOut: {
@@ -1999,7 +2017,8 @@ export interface components {
          * @description What any member of a team may read: no team policy.
          *
          *     A member's effective policy (team narrowed by their own) comes from `/users/me`; a
-         *     member must not see the team's own allowlist, limits or budget.
+         *     member must not see the team's own allowlist, limits or budget. `org_id` is here so a
+         *     client can tell whether the team belongs to an org the caller administers.
          */
         TeamBasicOut: {
             /** Max Keys Per Member */
@@ -2011,6 +2030,11 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /**
+             * Org Id
+             * Format: uuid
+             */
+            org_id: string;
             /** Name */
             name: string;
             /**
@@ -2058,6 +2082,11 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /**
+             * Org Id
+             * Format: uuid
+             */
+            org_id: string;
             /** Name */
             name: string;
             /**

@@ -37,8 +37,8 @@ test("audit: the Team filter is a combobox that sends team_id, and the log narro
   const cell = (name: string) => page.getByRole("cell", { name, exact: true }).first();
   await signIn(page, "/audit");
   await expect(page.getByRole("heading", { name: "Audit log" })).toBeVisible();
-  await expect(cell("s2-audit-team")).toBeVisible();
-  await expect(cell("s2-audit-other")).toBeVisible();
+  // The table is paged 10 rows; the rows of older teams can be on the next page. The filter is
+  // what this test is about, so select each team and assert its own (few) rows.
   const filtered = page.waitForRequest((r) => new URL(r.url()).pathname === "/api/v1/audit" && new URL(r.url()).searchParams.get("team_id") === team.id);
   await pick(page, "Team", "s2-audit-team");
   await filtered;
@@ -47,9 +47,14 @@ test("audit: the Team filter is a combobox that sends team_id, and the log narro
   await expect(cell("s2-audit-team")).toBeVisible();
   // The unfiltered query is cached, so clearing may not hit the network: assert the control, not a request.
   await pick(page, "Team", "All teams");
-  await expect(page.getByRole("combobox", { name: "Team" })).toContainText("All teams");
+  const all = page.getByRole("combobox", { name: "Team" });
+  await expect(all).toContainText("All teams");
   await expect(cell("s2-audit-other")).toBeVisible();
-  await expect(cell("s2-audit-team")).toBeVisible();
+  // Both teams stay selectable after clearing.
+  await pick(page, "Team", "s2-audit-team");
+  await expect(all).toContainText("s2-audit-team");
+  await pick(page, "Team", "s2-audit-other");
+  await expect(all).toContainText("s2-audit-other");
 });
 
 test("settings and users: description list, buttons and pager render and work", async ({ page }) => {

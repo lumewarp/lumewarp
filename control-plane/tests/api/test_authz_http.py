@@ -345,7 +345,6 @@ async def test_a_pat_authorizes_exactly_like_a_session(client, committed, role) 
     assert statuses[1] == 200  # /catalog is the last request
 
 
-@pytest.mark.parametrize("failed_relation", [Relation.MEMBER, Relation.ADMIN])
 @pytest.mark.parametrize(
     "method,path,body",
     [
@@ -356,7 +355,7 @@ async def test_a_pat_authorizes_exactly_like_a_session(client, committed, role) 
     ],
 )
 async def test_mutation_backend_error_is_503_and_preserves_state(
-    client, committed, monkeypatch, failed_relation, method, path, body
+    client, committed, monkeypatch, method, path, body
 ) -> None:
     team = await make_team(committed)
     caller, token = await user_with_token(committed)
@@ -366,10 +365,9 @@ async def test_mutation_backend_error_is_503_and_preserves_state(
     await committed.commit()
 
     async def check(user_id, relation, resource):
-        if resource.type == "group":
-            return Decision.DENY
         if resource.id == str(team.id):
-            return Decision.ERROR if relation is failed_relation else Decision.ALLOW
+            # The caller is a team admin: every mutation needs this relation.
+            return Decision.ERROR if relation is Relation.ADMIN else Decision.ALLOW
         return Decision.DENY
 
     monkeypatch.setattr(client.app.state, "authorizer", Authorizer(check, "external"))
@@ -389,3 +387,35 @@ async def test_mutation_backend_error_is_503_and_preserves_state(
         client.get(f"/api/v1/teams/{team.id}/service-accounts", headers=ADMIN_AUTH).json()["items"]
         == []
     )
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("GET", "/keys/{key}"),
+        ("POST", "/teams/{team}/keys"),
+    ],
+)
+async def test_member_relation_error_is_503(client, committed, monkeypatch, method, path) -> None:
+    """A plain member's own read/create needs `member`; ERROR there is 503, never 403."""
+    team = await make_team(committed)
+    caller, token = await user_with_token(committed)
+    await make_member(committed, team, caller)
+    key = await make_key(committed, team, caller)
+    await committed.commit()
+
+    async def check(user_id, relation, resource):
+        if resource.id == str(team.id) and relation is Relation.MEMBER:
+            return Decision.ERROR
+        return Decision.DENY
+
+    monkeypatch.setattr(client.app.state, "authorizer", Authorizer(check, "external"))
+    body = {"name": "unavailable"} if method == "POST" else None
+    response = client.request(
+        method,
+        "/api/v1" + path.format(team=team.id, key=key.id),
+        json=body,
+        headers=auth(token),
+    )
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["code"] == "authz_unavailable"

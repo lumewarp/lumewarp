@@ -210,21 +210,8 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
 
 
 def _same_event(existing: UsageEvent, values: dict[str, object]) -> bool:
-    # 0011 backfills router on legacy rows. A lost pre-upgrade ACK can cause an
-    # identical old gateway event (no provenance at all) to be replayed afterwards.
-    # Ignore only that synthesized router, not conflicts in real wire provenance.
-    legacy = all(
-        not values[field]
-        for field in ("alias", "router", "upstream", "upstream_model", "fallback", "attempts")
-    ) and all(
-        not getattr(existing, field)
-        for field in ("alias", "upstream", "upstream_model", "fallback", "attempts")
-    )
-    return all(
-        getattr(existing, field) == values[field]
-        for field in _USAGE_FIELDS
-        if not (legacy and field == "router")
-    )
+    """Whether a replay of one request id carries the same values as the stored row."""
+    return all(getattr(existing, field) == values[field] for field in _USAGE_FIELDS)
 
 
 def _add_totals(

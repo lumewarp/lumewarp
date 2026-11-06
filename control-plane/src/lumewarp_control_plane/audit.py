@@ -15,9 +15,10 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumewarp_control_plane.models import ActorType, AuditLog
+from lumewarp_control_plane.models import ActorType, AuditLog, Team
 from lumewarp_control_plane.security import Principal
 
 log = logging.getLogger(__name__)
@@ -281,17 +282,22 @@ def record(
     actor_type: ActorType | None = None,
     actor_id: str | None = None,
     team_id: uuid.UUID | None = None,
+    org_id: uuid.UUID | None = None,
     details: Mapping[str, Any] | None = None,
 ) -> AuditLog:
     """Add an audit row to the caller's transaction (commit together with the change).
 
     Pass `principal` for API callers, or `actor_type`/`actor_id` for gateways and system
-    jobs (e.g. ActorType.SYSTEM, "budget").
+    jobs (e.g. ActorType.SYSTEM, "budget"). A team-scoped row gets the team's current org,
+    read in the same INSERT so no call site can forget it; a caller that deletes the team
+    in the same transaction passes `org_id` explicitly.
     """
     if principal is not None:
         actor_type, actor_id = actor_of(principal)
     if actor_type is None:
         raise ValueError("audit.record needs a principal or an actor_type")
+    if team_id is not None and org_id is None:
+        org_id = select(Team.org_id).where(Team.id == team_id).scalar_subquery()
     row = AuditLog(
         actor_type=actor_type,
         actor_id=actor_id,
@@ -299,6 +305,7 @@ def record(
         resource_type=resource_type,
         resource_id=str(resource_id) if resource_id is not None else None,
         team_id=team_id,
+        org_id=org_id,
         details=details_of(action, details),
     )
     session.add(row)

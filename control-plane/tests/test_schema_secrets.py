@@ -80,6 +80,7 @@ CLASSIFIED: dict[tuple[str, str], ColumnClass] = {
     ("routers", "params"): ColumnClass.CONFIG,
     ("routers", "sticky_header"): ColumnClass.PUBLIC,
     ("routers", "strategy"): ColumnClass.PUBLIC,
+    ("orgs", "name"): ColumnClass.PUBLIC,
     ("scopes", "name"): ColumnClass.PUBLIC,
     ("service_accounts", "description"): ColumnClass.PUBLIC,
     ("service_accounts", "name"): ColumnClass.PUBLIC,

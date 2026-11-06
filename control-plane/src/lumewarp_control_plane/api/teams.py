@@ -32,6 +32,7 @@ from lumewarp_control_plane.api.schemas import Page, TeamBasicOut, TeamCreate, T
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import ApiKey, ModelAccess, ServiceAccount, Team
+from lumewarp_control_plane.orgs import default_org
 
 router = APIRouter(tags=["teams"])
 
@@ -83,7 +84,10 @@ async def create_team(
     async with mutation(session):
         await lock_scope(session, settings)
         policy = policy_from_fields(body, default_mode=ModelAccess.ALL)
+        # The request shape is unchanged: a new team joins the default org (orgs.py).
+        org = await default_org(session)
         row = Team(
+            org_id=org.id,
             name=body.name,
             max_keys_per_member=body.max_keys_per_member,
             max_member_key_lifetime_seconds=body.max_member_key_lifetime_seconds,
@@ -100,6 +104,7 @@ async def create_team(
             resource_id=row.id,
             principal=authz.principal,
             team_id=row.id,
+            org_id=row.org_id,
             details={"name": row.name},
         )
         await enqueue_recompile(session, settings, "api.team.create")
@@ -164,6 +169,7 @@ async def update_team(
             resource_id=row.id,
             principal=authz.principal,
             team_id=row.id,
+            org_id=row.org_id,
             details={
                 "name": row.name,
                 "policy_changed": changed,
@@ -202,6 +208,9 @@ async def delete_team(
         )
         if account is not None:
             raise conflict("team still has service accounts; delete them first")
+        # The team row is gone in this transaction; keep its org on the audit row.
+        org_id = row.org_id
+        name = row.name
         await session.delete(row)
         audit.record(
             session,
@@ -210,7 +219,8 @@ async def delete_team(
             resource_id=row.id,
             principal=authz.principal,
             team_id=row.id,
-            details={"name": row.name},
+            org_id=org_id,
+            details={"name": name},
         )
         await enqueue_recompile(session, settings, "api.team.delete")
     return Response(status_code=status.HTTP_204_NO_CONTENT)

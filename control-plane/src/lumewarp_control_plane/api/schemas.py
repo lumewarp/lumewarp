@@ -173,10 +173,12 @@ class TeamBasicOut(ReadModel, TeamKeyLimits):
     """What any member of a team may read: no team policy.
 
     A member's effective policy (team narrowed by their own) comes from `/users/me`; a
-    member must not see the team's own allowlist, limits or budget.
+    member must not see the team's own allowlist, limits or budget. `org_id` is here so a
+    client can tell whether the team belongs to an org the caller administers.
     """
 
     id: uuid.UUID
+    org_id: uuid.UUID
     name: str
     created_at: datetime
     updated_at: datetime
@@ -872,6 +874,17 @@ class MeTeamOut(ApiModel):
     budget: MeBudgetOut
 
 
+class MeOrgOut(ApiModel):
+    """An org the caller administers directly (`admin_orgs`).
+
+    Its teams are administered by inheritance and are not mixed into `MeOut.teams`,
+    which lists direct memberships only.
+    """
+
+    id: uuid.UUID
+    name: str
+
+
 class MeOut(ApiModel):
     kind: str
     user_id: uuid.UUID | None
@@ -882,7 +895,11 @@ class MeOut(ApiModel):
     installation_role: InstallationRole | None = None
     authz_unavailable: bool = False
     manages_grants: bool
+    # Direct memberships only; an org admin's other teams come through `admin_orgs`.
     teams: list[MeTeamOut]
+    # Orgs the caller administers. An installation admin administers every org and does
+    # not need this list; break-glass has no user and gets an empty one.
+    admin_orgs: list[MeOrgOut] = Field(default_factory=list)
 
 
 class TokenCreate(ApiModel):

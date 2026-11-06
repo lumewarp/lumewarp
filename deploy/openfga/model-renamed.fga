@@ -1,0 +1,24 @@
+# The same model as model.fga with store names that differ from Lumewarp's.
+#
+# Example of attaching an existing store: the object types are renamed and the team admin
+# relation is called `owner`. Configure the control plane with
+#
+#   LUMEWARP_OPENFGA_OBJECT_TYPES='{"team": "llm_team", "org": "llm_org"}'
+#   LUMEWARP_OPENFGA_RELATIONS='{"team.admin": "owner"}'
+#
+# Every request path (Check, BatchCheck, ListObjects, ReadChanges) uses the same mapping.
+# Inheritance is Lumewarp's: this model has no org -> team relation, and `member` means a
+# direct team membership only.
+model
+  schema 1.1
+
+type user
+
+type llm_org
+  relations
+    define admin: [user]
+
+type llm_team
+  relations
+    define owner: [user]
+    define member: [user] or owner

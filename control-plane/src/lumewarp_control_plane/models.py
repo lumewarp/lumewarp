@@ -10,8 +10,10 @@ Conventions:
   (auth/oidc.py).
 - The installation serves one config scope (`scopes` row); source tables (teams, routing,
   users, ...) are installation-wide and compile into that scope's snapshots.
-- Hierarchy: team -> members (users) and service accounts -> keys. Every key belongs to
-  one team and is owned by a member of it or by one of its service accounts.
+- Hierarchy: org -> teams -> members (users) and service accounts -> keys. Every key
+  belongs to one team and is owned by a member of it or by one of its service accounts.
+  Org administration is inherited by the org's teams in `authz.RequestAuthz`; the backend
+  only ever answers direct relations.
 """
 
 import enum
@@ -405,6 +407,47 @@ def member_scope_id(team_id: uuid.UUID, user_id: uuid.UUID) -> uuid.UUID:
     return uuid.uuid5(team_id, str(user_id))
 
 
+class Org(TimestampMixin, Base):
+    """An organization: the grouping above teams.
+
+    No policy columns yet: the quota hierarchy adds them together with their enforcement.
+    Archiving (`deleted_at`) is not implemented yet either; migration 0017 creates one
+    `default` org and attaches every existing team. A new team belongs to the `default`
+    org (see `orgs.default_org`); there is no org write API yet.
+    """
+
+    __tablename__ = "orgs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OrgAdmin(Base):
+    """A user who administers one org.
+
+    This is a direct relation (`admin` on `org:<id>`); its teams inherit the capability in
+    `RequestAuthz`, never in the authorization backend. Under an external backend the rows
+    are read-only like team memberships. `ON DELETE CASCADE` on both sides: the grant is an
+    attribute of the org and of the account; `assigned_by` is kept as NULL if the assigner
+    is deleted.
+    """
+
+    __tablename__ = "org_admins"
+    __table_args__ = (PrimaryKeyConstraint("org_id", "user_id"), Index(None, "user_id"))
+
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    assigned_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    assigned_at: Mapped[datetime] = _now()
+
+
 class Team(PolicyMixin, TimestampMixin, Base):
     __tablename__ = "teams"
     __table_args__ = (
@@ -421,6 +464,11 @@ class Team(PolicyMixin, TimestampMixin, Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    # Archiving and moving a team between orgs are not implemented: RESTRICT keeps the
+    # owning org from disappearing under its teams.
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("orgs.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
     # Per-member self-service limits. NULL = unlimited. They are source-only (not compiled
     # into snapshots): the API enforces them on create/rotate. Revoking a key frees a slot.
@@ -1297,6 +1345,7 @@ class AuditLog(Base):
     __table_args__ = (
         Index(None, "ts"),
         Index("ix_audit_log_team_ts", "team_id", "ts"),
+        Index("ix_audit_log_org_ts", "org_id", "ts"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
@@ -1309,6 +1358,9 @@ class AuditLog(Base):
     resource_id: Mapped[str | None] = mapped_column(String(200))
     # Team the resource belongs to, for scoped reads (NULL = installation-wide).
     team_id: Mapped[uuid.UUID | None] = mapped_column()
+    # The team's org at write time, so an org admin reads its teams' rows and the row
+    # survives the team. No FK: audit outlives the entities it mentions.
+    org_id: Mapped[uuid.UUID | None] = mapped_column()
     details: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )

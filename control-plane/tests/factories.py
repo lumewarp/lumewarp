@@ -16,6 +16,8 @@ from lumewarp_control_plane.models import (
     CatalogName,
     KeyOwnerKind,
     Model,
+    Org,
+    OrgAdmin,
     PolicyGrant,
     Router,
     RouterFallback,
@@ -29,6 +31,7 @@ from lumewarp_control_plane.models import (
     UpstreamKind,
     User,
 )
+from lumewarp_control_plane.orgs import DEFAULT_ORG_NAME
 from lumewarp_control_plane.security import SecretKind, generate_secret
 
 _seq = itertools.count(1)
@@ -162,10 +165,37 @@ async def make_alias(session: AsyncSession, name: str, target: Model | Router) -
     return alias
 
 
+async def make_org(session: AsyncSession, name: str | None = None, **kw) -> Org:
+    """An org. Tests share the one `default` org the migration created unless they name one."""
+    name = name or DEFAULT_ORG_NAME
+    row = await session.scalar(select(Org).where(Org.name == name))
+    if row is None:
+        row = Org(name=name, **kw)
+        session.add(row)
+        await session.flush()
+    return row
+
+
+async def make_org_admin(session: AsyncSession, org: Org, user: User | None = None) -> OrgAdmin:
+    """Make `user` (a fresh one by default) an org admin; returns the grant row."""
+    if user is None:
+        user = await make_user(session)
+    row = OrgAdmin(org_id=org.id, user_id=user.id)
+    session.add(row)
+    await session.flush()
+    return row
+
+
 async def make_team(
-    session: AsyncSession, name: str | None = None, *, allowed_models: list[str] = (), **policy
+    session: AsyncSession,
+    name: str | None = None,
+    *,
+    org: Org | None = None,
+    allowed_models: list[str] = (),
+    **policy,
 ) -> Team:
-    team = Team(name=name or _unique("team"), **policy)
+    org = org or await make_org(session)
+    team = Team(name=name or _unique("team"), org_id=org.id, **policy)
     session.add(team)
     await session.flush()
     await grant(session, team, list(allowed_models))

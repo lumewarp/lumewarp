@@ -127,7 +127,8 @@ async def test_usage_totals_primary_key_and_upsert(session: AsyncSession) -> Non
 
 
 async def test_team_cannot_inherit(session: AsyncSession) -> None:
-    await _fails(session, Team(name="t-inherit", model_access=ModelAccess.INHERIT))
+    org = await factories.make_org(session)
+    await _fails(session, Team(name="t-inherit", org_id=org.id, model_access=ModelAccess.INHERIT))
 
 
 async def test_allowlist_modes(session: AsyncSession) -> None:
@@ -143,8 +144,9 @@ async def test_allowlist_modes(session: AsyncSession) -> None:
 
 
 async def test_budget_and_limit_checks(session: AsyncSession) -> None:
-    await _fails(session, Team(name="t2", rpm_limit=0))
-    await _fails(session, Team(name="t3", budget_nano_usd=-1))
+    org = await factories.make_org(session)
+    await _fails(session, Team(name="t2", org_id=org.id, rpm_limit=0))
+    await _fails(session, Team(name="t3", org_id=org.id, budget_nano_usd=-1))
 
 
 async def test_service_account_key_must_match_team(session: AsyncSession) -> None:

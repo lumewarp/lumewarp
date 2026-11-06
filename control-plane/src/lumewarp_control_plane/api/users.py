@@ -27,6 +27,7 @@ from lumewarp_control_plane.api.schemas import (
     MeBudgetOut,
     MeKeyLimitsOut,
     MeLimitsOut,
+    MeOrgOut,
     MeOut,
     MeTeamOut,
     Page,
@@ -54,6 +55,7 @@ from lumewarp_control_plane.models import (
     User,
     member_scope_id,
 )
+from lumewarp_control_plane.orgs import live_orgs
 from lumewarp_control_plane.security import Principal, SecretKind, generate_secret
 from lumewarp_control_plane.windows import month_window
 
@@ -321,6 +323,19 @@ async def get_current_user(request: Request, authz: Authz, session: SessionDep) 
     except AuthzUnavailable:
         teams = []
         unavailable = True
+    admin_orgs: list[MeOrgOut] = []
+    try:
+        # Direct org-admin grants only. `RequestAuthz` applies the team inheritance from
+        # them; `/users/me` never mixes those teams into the direct-membership list.
+        orgs = await live_orgs(session)
+        administered = (
+            {org.id for org in orgs}
+            if role is not None
+            else (await authz.admin_orgs([org.id for org in orgs])) or set()
+        )
+        admin_orgs = [MeOrgOut(id=org.id, name=org.name) for org in orgs if org.id in administered]
+    except AuthzUnavailable:
+        unavailable = True
     return MeOut(
         kind=principal.kind.value,
         user_id=user.id,
@@ -331,6 +346,7 @@ async def get_current_user(request: Request, authz: Authz, session: SessionDep) 
         authz_unavailable=unavailable,
         manages_grants=manages_grants,
         teams=teams,
+        admin_orgs=admin_orgs,
     )
 
 

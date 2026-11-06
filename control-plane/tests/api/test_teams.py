@@ -21,7 +21,7 @@ def test_team_crud_and_unique_name(client) -> None:
     team = created.json()
     assert team["model_access"] == "all"
     assert team["budget_nano_usd"] == 1000
-    assert "org_id" not in team
+    assert team["org_id"]
     assert client.post("/api/v1/teams", json={"name": name}, headers=ADMIN_AUTH).status_code == 409
     path = f"/api/v1/teams/{team['id']}"
     assert client.get(path, headers=ADMIN_AUTH).json() == team
@@ -142,6 +142,7 @@ async def test_team_read_is_basic_for_a_plain_member(client, committed) -> None:
     await committed.commit()
     basic_keys = {
         "id",
+        "org_id",
         "name",
         "created_at",
         "updated_at",

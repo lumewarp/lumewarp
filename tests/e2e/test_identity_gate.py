@@ -263,3 +263,51 @@ def test_05_iam_outage_revocation_and_idp_disable(traffic):
         # A fresh browser avoids mistaking an existing RP/IdP session for a new login.
         with httpx.Client(timeout=15, trust_env=False) as browser:
             login(browser, stack, username, enabled=False)
+
+
+def test_06_openfga_renamed_store_via_mapping():
+    """An existing store with other type names: sign in, create a key, revoke the tuple.
+
+    The full scan is pushed far away, so the suspension has to come from `ReadChanges`
+    mapped back to the Lumewarp user; `Check` and `ListObjects` run through the same
+    mapping when the key is created and the team list is read.
+    """
+    from stack import ROOT
+
+    model = ROOT / "deploy/openfga/model-renamed.fga"
+    with identity_stack(
+        "openfga",
+        label="renamed",
+        model_path=model,
+        object_type="llm_team",
+        extra_env={
+            "LUMEWARP_OPENFGA_OBJECT_TYPES": '{"team": "llm_team", "org": "llm_org"}',
+            "LUMEWARP_OPENFGA_RELATIONS": '{"team.admin": "owner"}',
+            "LUMEWARP_KEY_RECONCILE_FULL_SECONDS": "3600",
+        },
+    ) as state:
+        stack = state.stack
+        team = cookie_api(
+            state.admin, stack, "POST", "/teams", json={"name": "renamed", "model_access": "all"}
+        )
+        state.team = team
+        grant(state, state.user, "member")
+        listed = cookie_api(state.member, stack, "GET", "/teams")["items"]
+        assert [row["id"] for row in listed] == [team["id"]]
+        key = cookie_api(
+            state.member, stack, "POST", f"/teams/{team['id']}/keys", json={"name": "mapped"}
+        )
+        assert key["key"]["user_id"] == state.user["id"]
+
+        grant(state, state.user, "member", delete=True)
+
+        deadline = time.monotonic() + 15
+        stored = stack.ok("GET", f"/keys/{key['key']['id']}")
+        while time.monotonic() < deadline and stored["lifecycle"] != "suspended":
+            time.sleep(0.25)
+            stored = stack.ok("GET", f"/keys/{key['key']['id']}")
+        assert stored["lifecycle"] == "suspended", (
+            "the removed tuple did not suspend the key through ReadChanges"
+        )
+        assert stored["suspended_reason"] == "owner_removed"
+        assert cookie_api(state.member, stack, "GET", "/teams")["items"] == []

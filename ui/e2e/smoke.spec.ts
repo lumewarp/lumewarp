@@ -105,6 +105,7 @@ test("cookie session: CSRF on writes, inline member errors, key owner state, log
         is_admin: false,
         manages_grants: true,
         teams: [{ team_id: teamId, team_name: "Cookie Team", role: "admin" }],
+        admin_orgs: [],
       },
     }),
   );
@@ -113,6 +114,7 @@ test("cookie session: CSRF on writes, inline member errors, key owner state, log
     route.fulfill({
       json: {
         id: teamId,
+        org_id: "00000000-0000-4000-8000-000000000004",
         name: "Cookie Team",
         created_at: "2026-10-01T00:00:00Z",
         updated_at: "2026-10-02T00:00:00Z",
@@ -124,6 +126,25 @@ test("cookie session: CSRF on writes, inline member errors, key owner state, log
         budget_nano_usd: null,
         max_keys_per_member: null,
         max_member_key_lifetime_seconds: null,
+      },
+    }),
+  );
+  // `useCan` reads each team's org to apply org inheritance, so the list has to answer too.
+  await page.route(/\/api\/v1\/teams(?:\?.*)?$/, (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          {
+            id: teamId,
+            org_id: "00000000-0000-4000-8000-000000000004",
+            name: "Cookie Team",
+            created_at: "2026-10-01T00:00:00Z",
+            updated_at: "2026-10-02T00:00:00Z",
+            max_keys_per_member: null,
+            max_member_key_lifetime_seconds: null,
+          },
+        ],
+        next_cursor: null,
       },
     }),
   );

@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     openfga_store_id: str | None = None
     openfga_model_id: str | None = None
     openfga_api_token: SecretStr | None = None
+    # Attach an existing store whose names differ from Lumewarp's. Both maps are shared by
+    # Check, BatchCheck, ListObjects and ReadChanges; unset = today's names.
+    #   LUMEWARP_OPENFGA_OBJECT_TYPES='{"team": "llm_team", "org": "llm_org"}'
+    #   LUMEWARP_OPENFGA_RELATIONS='{"team.admin": "owner"}'
+    openfga_object_types: dict[str, str] = Field(default_factory=dict)
+    openfga_relations: dict[str, str] = Field(default_factory=dict)
     # `http` backend (authz/http.py): POST {user_id, relation, resource} -> {decision}.
     authz_http_url: str | None = None
     authz_http_token: SecretStr | None = None
