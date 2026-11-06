@@ -63,6 +63,10 @@ export function PolicyFields({ values, errors, set, isTeam, team }: Props) {
       <NumberField label="Requests per minute" value={values.rpm_limit} onChange={(v) => set("rpm_limit", v)} error={errors.rpm_limit} />
       <NumberField label="Tokens per minute" value={values.tpm_limit} onChange={(v) => set("tpm_limit", v)} error={errors.tpm_limit} />
       <NumberField label="Max parallel requests" value={values.max_parallel} onChange={(v) => set("max_parallel", v)} error={errors.max_parallel} />
+      <p className="m-0 text-[13px] text-muted-foreground">
+        Rate limits are counted per gateway instance: with N instances the effective limit can reach N times the
+        configured value.
+      </p>
       <NumberField label="Monthly budget (USD)" value={values.budget_usd} onChange={(v) => set("budget_usd", v)} error={errors.budget_usd} step="any" hint="Requests are blocked once spend reaches the budget." />
     </>
   );

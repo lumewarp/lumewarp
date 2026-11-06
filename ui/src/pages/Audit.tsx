@@ -6,24 +6,37 @@ import { TextField } from "../components/Form";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { DataTable } from "../components/Table";
 import { Card } from "../components/ui/card";
-import { useCan, useNames, useTeams } from "../hooks";
+import { useCan, useNames, useOrgLayer, useTeams } from "../hooks";
 
 export function Audit() {
   const [action, setAction] = useState("");
   const [teamId, setTeamId] = useState("");
+  const [orgId, setOrgId] = useState("");
   const perms = useCan();
   const teams = useTeams();
+  // The org layer (the filter and the Org column) is hidden for a single-org installation.
+  const { orgs, show: showOrg } = useOrgLayer();
+  const orgName = useNames(orgs.data);
   // Rows are per administered team; offering a team the caller only belongs to would be a 403.
   const administered = (teams.data ?? []).filter((team) => perms.teamAdmin(team.id));
   const teamName = useNames(administered);
   const q = useQuery({
-    queryKey: ["audit", action, teamId],
-    queryFn: () => api.audit({ action: action.trim() || undefined, team_id: teamId || undefined }),
+    queryKey: ["audit", action, teamId, orgId],
+    queryFn: () =>
+      api.audit({ action: action.trim() || undefined, team_id: teamId || undefined, org_id: orgId || undefined }),
   });
   return (
     <>
       <PageHeader title="Audit log" description="Every change made through the API. Secrets and hashes are never recorded." />
       <Card className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3 p-4 shadow-none">
+        {showOrg && (
+          <ComboboxField
+            label="Org"
+            value={orgId}
+            onChange={setOrgId}
+            options={[{ value: "", label: "All orgs" }, ...(orgs.data ?? []).map((org) => ({ value: org.id, label: org.name }))]}
+          />
+        )}
         <ComboboxField
           label="Team"
           value={teamId}
@@ -42,6 +55,7 @@ export function Audit() {
         columns={[
           { key: "ts", header: "When", sort: (a, b) => a.ts.localeCompare(b.ts), cell: (r) => fmtDateTime(r.ts) },
           { key: "team", header: "Team", cell: (r) => teamName(r.team_id) },
+          ...(showOrg ? [{ key: "org", header: "Org", cell: (r: { org_id: string | null }) => orgName(r.org_id) }] : []),
           { key: "actor", header: "Actor", cell: (r) => (<><span>{r.actor_type}</span> <code className="text-muted-foreground">{r.actor_id?.slice(0, 8)}</code></>) },
           { key: "action", header: "Action", sort: (a, b) => a.action.localeCompare(b.action), cell: (r) => <code>{r.action}</code> },
           { key: "resource", header: "Resource", cell: (r) => (<>{r.resource_type} <code className="text-muted-foreground">{r.resource_id?.slice(0, 8)}</code></>) },

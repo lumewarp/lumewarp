@@ -7,7 +7,7 @@ import { FormDialog, required, SelectField, TextField, useForm } from "../compon
 import { blankPolicy, Budget, PolicyFields, policyBody, policyFrom, PolicySummary, POLICY_ALIAS, type PolicyValues } from "../components/Policy";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
-import { useCan, useMut, useOrgs, useTeams } from "../hooks";
+import { useCan, useMut, useNames, useOrgs, useTeams } from "../hooks";
 
 type Values = PolicyValues & { name: string; org_id: string };
 const blank: Values = { name: "", org_id: "", ...blankPolicy(true) };
@@ -16,8 +16,11 @@ export function Teams() {
   const perms = useCan();
   const teams = useTeams();
   // Team creation is org level. With exactly one org the dialog picks it; several orgs
-  // need an explicit choice. There is no full Orgs page yet.
+  // need an explicit choice. The org layer (the column) is hidden for a single-org
+  // installation, except on the Orgs page itself.
   const orgs = useOrgs(perms.canCreateTeam);
+  const showOrg = perms.isOrgAdmin && (orgs.data?.length ?? 0) > 1;
+  const orgName = useNames(orgs.data);
   const [editing, setEditing] = useState<TeamAny | "new" | null>(null);
   const [deleting, setDeleting] = useState<TeamAny | null>(null);
   const form = useForm<Values>(blank, { name: required("Name") });
@@ -74,6 +77,7 @@ export function Teams() {
             sort: (a, b) => a.name.localeCompare(b.name),
             cell: (row) => <Link to="/teams/$teamId" params={{ teamId: row.id }}><strong>{row.name}</strong></Link>,
           },
+          ...(showOrg ? [{ key: "org", header: "Org", cell: (row: TeamAny) => orgName(row.org_id) }] : []),
           { key: "policy", header: "Policy", cell: (row) => (hasPolicy(row) ? <PolicySummary p={row} /> : "—") },
           { key: "budget", header: "Budget", cell: (row) => (hasPolicy(row) ? <Budget p={row} /> : "—") },
           {
@@ -83,6 +87,8 @@ export function Teams() {
               <RowActions
                 canEdit={perms.teamAdmin(row.id)}
                 canDelete={perms.canDeleteTeam(row.id)}
+                deleteLabel="Archive"
+                deleteReason="Only an org admin or an installation admin can archive a team"
                 onEdit={() => open(row)}
                 onDelete={() => setDeleting(row)}
               />

@@ -18,7 +18,11 @@ export function can(me: Me | undefined, teams: TeamAny[] | undefined) {
   // The server inherits team administration from an org: an org admin administers every team of its
   // orgs without being a member. `org_id` on the team DTO is what maps a team to that check.
   const adminOrgIds = new Set((me?.admin_orgs ?? []).map((org) => org.id));
-  const isOrgAdmin = adminOrgIds.size > 0;
+  // An installation admin administers every org (and a break-glass session has no
+  // `admin_orgs` rows), so the org layer is available to it as well.
+  const isOrgAdmin = isInstallationAdmin || adminOrgIds.size > 0;
+  const orgAdminOf = (orgId: string | undefined) =>
+    !!orgId && (isInstallationAdmin || adminOrgIds.has(orgId));
   const teamOrgId = (teamId: string) => teams?.find((team) => team.id === teamId)?.org_id;
   const isOrgTeamAdmin = (teamId: string) => {
     const orgId = teamOrgId(teamId);
@@ -34,8 +38,13 @@ export function can(me: Me | undefined, teams: TeamAny[] | undefined) {
   return {
     isInstallationAdmin,
     isOrgAdmin,
+    orgAdminOf,
+    canReadOrg: orgAdminOf,
+    // Installation level only: create, rename/policy, archive and admin assignment.
+    canManageOrg: isInstallationAdmin,
     // Team creation is org level: an org admin may create in its own org, a team admin not.
-    canCreateTeam: isInstallationAdmin || isOrgAdmin,
+    canCreateTeam: isOrgAdmin,
+    canCreateTeamInOrg: orgAdminOf,
     canDeleteTeam: (teamId: string) => isInstallationAdmin || isOrgTeamAdmin(teamId),
     isTeamAdmin,
     // Names and kinds only; every authenticated caller may read them.
@@ -66,6 +75,16 @@ export function useOrgs(enabled = true) {
   return useQuery({ queryKey: ["orgs"], queryFn: () => api.orgs(), enabled, staleTime: 60_000 });
 }
 
+/**
+ * Whether the UI shows the org layer (org columns, filters and selectors). A single-org
+ * installation does not: the Orgs page itself always shows its org, as the plan says.
+ */
+export function useOrgLayer() {
+  const perms = useCan();
+  const orgs = useOrgs(perms.isInstallationAdmin || perms.isOrgAdmin);
+  return { orgs, show: (orgs.data?.length ?? 0) > 1 };
+}
+
 export function useCan() {
   const { data: me } = useMe();
   // The team list supplies each team's org, needed to apply org inheritance locally.
@@ -74,14 +93,15 @@ export function useCan() {
 }
 
 /** What a route or navigation entry requires; purely cosmetic, the API enforces every request. */
-export type Access = "installationAdmin" | "teamAdmin" | "member";
+export type Access = "installationAdmin" | "orgAdmin" | "teamAdmin" | "member";
 
 export function hasAccess(
-  perms: Pick<ReturnType<typeof can>, "isInstallationAdmin" | "isTeamAdmin">,
+  perms: Pick<ReturnType<typeof can>, "isInstallationAdmin" | "isOrgAdmin" | "isTeamAdmin">,
   need: Access,
 ) {
   if (need === "member") return true;
   if (need === "installationAdmin") return perms.isInstallationAdmin;
+  if (need === "orgAdmin") return perms.isInstallationAdmin || perms.isOrgAdmin;
   return perms.isInstallationAdmin || perms.isTeamAdmin;
 }
 

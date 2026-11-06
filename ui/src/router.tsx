@@ -6,7 +6,7 @@ import { getCsrfToken } from "./auth";
 import { Layout } from "./components/Layout";
 import { Alert, AlertDescription } from "./components/ui/alert";
 import { useCan, useMe, type Access } from "./hooks";
-import { AuthzTemporary, CheckFailed, PageBoundary, PageLoading, RequireAccess, RequireTeamRead } from "./pages/Access";
+import { AuthzTemporary, CheckFailed, PageBoundary, PageLoading, RequireAccess, RequireOrgRead, RequireTeamRead } from "./pages/Access";
 import { Login } from "./pages/Login";
 import { MyKeys } from "./pages/MyKeys";
 import { Overview } from "./pages/Overview";
@@ -26,6 +26,8 @@ const ConfigPage = lazy(() => import("./pages/Config").then((module) => ({ defau
 const UsersPage = lazy(() => import("./pages/Users").then((module) => ({ default: module.Users })));
 const AuditPage = lazy(() => import("./pages/Audit").then((module) => ({ default: module.Audit })));
 const TeamsPage = lazy(() => import("./pages/Teams").then((module) => ({ default: module.Teams })));
+const OrgsPage = lazy(() => import("./pages/Orgs").then((module) => ({ default: module.Orgs })));
+const OrgDetailPage = lazy(() => import("./pages/Orgs").then((module) => ({ default: module.OrgDetail })));
 const SettingsPage = lazy(() => import("./pages/Settings").then((module) => ({ default: module.Settings })));
 const TeamDetailPage = lazy(() => import("./pages/TeamDetail").then((module) => ({ default: module.TeamDetail })));
 
@@ -131,11 +133,30 @@ const teamDetailRoute = createRoute({
   component: TeamDetailRoute,
 });
 
+const SuspendedOrgDetail = suspended(() => <OrgDetailPage />);
+
+function OrgDetailRoute() {
+  const { orgId } = useParams({ strict: false }) as { orgId: string };
+  return (
+    <RequireOrgRead key={orgId} orgId={orgId}>
+      <SuspendedOrgDetail />
+    </RequireOrgRead>
+  );
+}
+
+const orgDetailRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/orgs/$orgId",
+  component: OrgDetailRoute,
+});
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   appRoute.addChildren([
     page("/", Home),
     page("/my-keys", MyKeys),
+    page("/orgs", () => <OrgsPage />, "orgAdmin"),
+    orgDetailRoute,
     page("/teams", () => <TeamsPage />, "teamAdmin"),
     teamDetailRoute,
     page("/users", () => <UsersPage />, "installationAdmin"),

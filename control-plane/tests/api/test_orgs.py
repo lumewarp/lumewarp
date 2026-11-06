@@ -426,3 +426,27 @@ async def test_org_admins_read_org_events_and_archived_team_audit(client, world:
         headers=world.admin,
     )
     assert filtered.status_code == 200, filtered.text
+
+    # The org filter returns the org's own rows (team_id NULL included) and nothing from
+    # another org; a team admin cannot use it.
+    by_org = client.get(
+        "/api/v1/audit",
+        params={"org_id": str(world.org_a.id), "limit": 500},
+        headers=world.admin,
+    )
+    assert by_org.status_code == 200, by_org.text
+    rows = by_org.json()["items"]
+    assert rows and all(row["org_id"] == str(world.org_a.id) for row in rows)
+    assert any(row["action"] == "org.update" and row["team_id"] is None for row in rows)
+    assert (
+        client.get(
+            "/api/v1/audit", params={"org_id": str(world.org_b.id)}, headers=world.admin
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get(
+            "/api/v1/audit", params={"org_id": str(world.org_a.id)}, headers=world.team_admin
+        ).status_code
+        == 404
+    )

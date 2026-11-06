@@ -1114,6 +1114,7 @@ class AuditOut(ReadModel):
     resource_type: str
     resource_id: str | None
     team_id: uuid.UUID | None
+    org_id: uuid.UUID | None
     details: dict[str, Any]
 
 

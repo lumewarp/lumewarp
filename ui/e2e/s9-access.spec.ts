@@ -163,7 +163,7 @@ test("team settings: a team admin edits name and key limits but not the quota", 
   await expect(page.getByRole("tabpanel")).toContainText("10 rpm");
   await page.getByRole("button", { name: "Edit team" }).click();
   const d = dialog(page);
-  await expect(d.getByLabel("Requests per minute")).toHaveCount(0);
+  await expect(d.getByLabel("Requests per minute", { exact: true })).toHaveCount(0);
   await expect(d.getByLabel("Monthly budget (USD)")).toHaveCount(0);
   await expect(d.getByLabel("Max keys per member")).toBeVisible();
   const renamed = `s9-settings-${Date.now()}`;

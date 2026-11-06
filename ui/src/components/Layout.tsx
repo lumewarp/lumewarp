@@ -3,6 +3,7 @@ import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import {
   BarChart3,
   Boxes,
+  Building2,
   CornerDownRight,
   History,
   KeyRound,
@@ -61,6 +62,7 @@ const NAV: { group: string | null; items: NavItem[] }[] = [
   {
     group: "Access",
     items: [
+      { to: "/orgs", label: "Orgs", icon: Building2, access: "orgAdmin" },
       { to: "/teams", label: "Teams", icon: Users, access: "teamAdmin" },
       { to: "/users", label: "Users", icon: ShieldCheck, access: "installationAdmin" },
     ],
@@ -95,6 +97,7 @@ function roleLabel(me: Me) {
   if (me.kind === "break_glass") return "break-glass";
   if (me.installation_role === "proxy_admin") return "proxy admin";
   if (me.is_admin) return "admin";
+  if (me.admin_orgs?.length) return "org admin";
   if (me.teams.some((team) => team.role === "admin")) return "team admin";
   return me.teams.length ? "member" : "no team access";
 }
@@ -111,9 +114,9 @@ function NavToggle() {
   );
 }
 
-function NavSidebar({ installationAdmin, teamAdmin }: { installationAdmin: boolean; teamAdmin: boolean }) {
+function NavSidebar({ installationAdmin, orgAdmin, teamAdmin }: { installationAdmin: boolean; orgAdmin: boolean; teamAdmin: boolean }) {
   const { setOpenMobile } = useSidebar();
-  const perms = { isInstallationAdmin: installationAdmin, isTeamAdmin: teamAdmin };
+  const perms = { isInstallationAdmin: installationAdmin, isOrgAdmin: orgAdmin, isTeamAdmin: teamAdmin };
   return (
     <Sidebar>
       <SidebarHeader className="px-5 pt-4 pb-1">
@@ -190,7 +193,7 @@ export function Layout() {
       >
         Skip to content
       </a>
-      <NavSidebar installationAdmin={perms.isInstallationAdmin} teamAdmin={perms.isTeamAdmin} />
+      <NavSidebar installationAdmin={perms.isInstallationAdmin} orgAdmin={perms.isOrgAdmin} teamAdmin={perms.isTeamAdmin} />
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-40 flex items-center gap-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur md:px-6">
           <NavToggle />

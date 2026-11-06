@@ -996,6 +996,8 @@ export interface components {
             resource_id: string | null;
             /** Team Id */
             team_id: string | null;
+            /** Org Id */
+            org_id: string | null;
             /** Details */
             details: {
                 [key: string]: unknown;
@@ -7417,6 +7419,7 @@ export interface operations {
         parameters: {
             query?: {
                 team_id?: string | null;
+                org_id?: string | null;
                 actor_id?: string | null;
                 action?: string | null;
                 resource_type?: string | null;

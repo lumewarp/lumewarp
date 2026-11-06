@@ -5,6 +5,7 @@ import { api, type Key, type Me, type Schemas } from "../api";
 import { Badge, fmtDate, fmtUsd, KeyBadge, PageHeader, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
+import { blankKeyLimits, KeyLimitFields, keyLimitsBody, keyLimitsFrom, type KeyLimitValues } from "../components/KeyLimits";
 import { DataTable } from "../components/Table";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge as UiBadge } from "../components/ui/badge";
@@ -184,7 +185,9 @@ function TeamSection({
         <Fact label="Callable models">
           <CallableModels team={team} />
         </Fact>
-        <Fact label="Rate limits">{rateLimits(team)}</Fact>
+        <Fact label="Rate limits" hint="Counted per gateway instance.">
+          {rateLimits(team)}
+        </Fact>
         <Fact label="Remaining budget" hint="This month, for the team and your own budget">
           {remainingBudget(team)}
         </Fact>
@@ -317,8 +320,8 @@ function TeamSection({
   );
 }
 
-type CreateValues = { name: string; expires: string };
-const blankCreate: CreateValues = { name: "", expires: "" };
+type CreateValues = KeyLimitValues & { name: string; expires: string };
+const blankCreate: CreateValues = { name: "", expires: "", ...blankKeyLimits() };
 
 function CreateKeyDialog({
   team,
@@ -334,7 +337,11 @@ function CreateKeyDialog({
   const form = useForm<CreateValues>(blankCreate, { name: required("Name") });
   const create = useSecretMut(
     (values: CreateValues) =>
-      api.createKey(team.team_id, { name: values.name.trim(), expires_at: expiryFromDay(values.expires) }),
+      api.createKey(team.team_id, {
+        name: values.name.trim(),
+        expires_at: expiryFromDay(values.expires),
+        ...keyLimitsBody(values),
+      }),
     (secret) => onCreated(secret),
   );
   const lifetime = team.key_limits.max_member_key_lifetime_seconds;
@@ -380,6 +387,7 @@ function CreateKeyDialog({
             : `Optional. This team limits member keys to ${fmtLifetime(lifetime)}; empty uses that limit. The latest day is ${max}.`
         }
       />
+      <KeyLimitFields values={form.values} errors={form.errors} set={form.set} cap={team.limits} />
       <div className="flex flex-col gap-1.5">
         <span className="text-sm font-semibold">This key can call</span>
         <CallableModels team={team} />
@@ -388,14 +396,14 @@ function CreateKeyDialog({
   );
 }
 
-type EditValues = { name: string; expires: string };
+type EditValues = KeyLimitValues & { name: string; expires: string };
 
 function EditKeyDialog({ team, target, onClose }: { team: Team; target: Key; onClose: () => void }) {
   const initialExpiry = localDayOf(target.expires_at);
-  const initial: EditValues = { name: target.name, expires: initialExpiry };
+  const initial: EditValues = { name: target.name, expires: initialExpiry, ...keyLimitsFrom(target) };
   const form = useForm<EditValues>(initial, { name: required("Name") });
   const update = useMut((values: EditValues) => {
-    const body: Schemas["KeyUpdate"] = { name: values.name.trim() };
+    const body: Schemas["KeyUpdate"] = { name: values.name.trim(), ...keyLimitsBody(values) };
     if (values.expires !== initialExpiry) {
       body.expires_at = expiryFromDay(values.expires);
     }
@@ -439,6 +447,7 @@ function EditKeyDialog({ team, target, onClose }: { team: Team; target: Key; onC
             : `This team limits member keys to ${fmtLifetime(lifetime)}; the latest day is ${max}.`
         }
       />
+      <KeyLimitFields values={form.values} errors={form.errors} set={form.set} cap={team.limits} />
     </FormDialog>
   );
 }

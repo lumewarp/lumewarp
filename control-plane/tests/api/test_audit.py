@@ -53,7 +53,7 @@ async def test_audit_visibility_filters_pagination_and_redaction(client, committ
     filtered = client.get("/api/v1/audit", params=filters, headers=auth(token))
     assert filtered.status_code == 200
     assert len(filtered.json()["items"]) == 1
-    assert "org_id" not in filtered.json()["items"][0]
+    assert filtered.json()["items"][0]["org_id"] == str(team.org_id)
     assert secret not in json.dumps(filtered.json()["items"][0]["details"])
     first = client.get(
         "/api/v1/audit", params={"team_id": str(team.id), "limit": 1}, headers=auth(token)

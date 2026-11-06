@@ -208,6 +208,44 @@ export function RequireAccess({ need, children }: { need: Access; children: Reac
   );
 }
 
+/** The org-specific guard: a foreign org mounts no panel and makes no org request. */
+export function RequireOrgRead({ orgId, children }: { orgId: string; children: ReactNode }) {
+  const perms = useCan();
+  const allowed = perms.canReadOrg(orgId);
+  const { me, checking } = useRevalidated(allowed, orgId);
+  if (me.isPending) return <PageLoading />;
+  if (me.error && !me.data) {
+    return (
+      <Alert variant="destructive" data-testid="state-error">
+        <AlertDescription>{me.error.message}</AlertDescription>
+      </Alert>
+    );
+  }
+  const notice = me.error && me.data ? <CheckFailed onRetry={() => void me.refetch()} /> : null;
+  if (me.data?.authz_unavailable) {
+    return (
+      <>
+        {notice}
+        <AuthzBlocked onRetry={() => void me.refetch()} />
+      </>
+    );
+  }
+  if (!allowed && checking) {
+    return (
+      <>
+        {notice}
+        <PageLoading label="Checking access…" />
+      </>
+    );
+  }
+  return (
+    <>
+      {notice}
+      {allowed ? <>{children}</> : <NoAccess />}
+    </>
+  );
+}
+
 /** The team-specific guard: an unreadable team mounts no panels and makes no team request. */
 export function RequireTeamRead({ teamId, children }: { teamId: string; children: ReactNode }) {
   const perms = useCan();

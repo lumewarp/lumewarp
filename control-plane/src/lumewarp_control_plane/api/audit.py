@@ -42,6 +42,7 @@ async def list_audit(
     authz: Authz,
     session: SessionDep,
     team_id: uuid.UUID | None = None,
+    org_id: uuid.UUID | None = None,
     actor_id: str | None = None,
     action: str | None = None,
     resource_type: str | None = None,
@@ -83,6 +84,13 @@ async def list_audit(
                 # request is filtered or not.
                 raise forbidden(f"{Action.TEAM_ADMIN_READ.value} not allowed")
             stmt = stmt.where(or_(*filters))
+    if org_id is not None:
+        # The org filter is the org admin's view: its own org's rows, including the
+        # org-level events whose team_id is NULL. Unknown and unreadable are the same
+        # 404, as for a team filter.
+        if await session.get(Org, org_id) is None or not await authz.is_org_admin(org_id):
+            raise not_found("org not found")
+        stmt = stmt.where(AuditLog.org_id == org_id)
     if actor_id is not None:
         stmt = stmt.where(AuditLog.actor_id == actor_id)
     if action is not None:

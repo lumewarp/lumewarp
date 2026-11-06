@@ -27,6 +27,8 @@ export type UsageRow = Schemas["UsageRowOut"];
 export type User = Schemas["UserOut"];
 export type Me = Schemas["MeOut"];
 export type Org = Schemas["OrgOut"];
+export type OrgAdmin = Schemas["OrgAdminOut"];
+export type OrgUsage = Schemas["OrgUsageOut"];
 export type ModelAccess = Schemas["ModelAccess"];
 export type PolicyOut = Pick<Team, "model_access" | "allowed_models" | "rpm_limit" | "tpm_limit" | "max_parallel" | "budget_nano_usd">;
 
@@ -98,6 +100,18 @@ export const api = {
 
   orgs: () => listAll((c) => unwrap(client.GET("/api/v1/orgs", { params: { query: q(c) } }))),
   org: (id: string) => unwrap(client.GET("/api/v1/orgs/{org_id}", { params: { path: { org_id: id } } })),
+  createOrg: (body: Schemas["OrgCreate"]) => unwrap(client.POST("/api/v1/orgs", { body })),
+  updateOrg: (id: string, body: Schemas["OrgUpdate"]) =>
+    unwrap(client.PATCH("/api/v1/orgs/{org_id}", { params: { path: { org_id: id } }, body })),
+  deleteOrg: (id: string) => unwrap(client.DELETE("/api/v1/orgs/{org_id}", { params: { path: { org_id: id } } })),
+  orgAdmins: (orgId: string) =>
+    listAll((c) => unwrap(client.GET("/api/v1/orgs/{org_id}/admins", { params: { path: { org_id: orgId }, query: q(c) } }))),
+  putOrgAdmin: (orgId: string, userId: string) =>
+    unwrap(client.PUT("/api/v1/orgs/{org_id}/admins/{user_id}", { params: { path: { org_id: orgId, user_id: userId } } })),
+  deleteOrgAdmin: (orgId: string, userId: string) =>
+    unwrap(client.DELETE("/api/v1/orgs/{org_id}/admins/{user_id}", { params: { path: { org_id: orgId, user_id: userId } } })),
+  orgUsage: (orgId: string) =>
+    unwrap(client.GET("/api/v1/orgs/{org_id}/usage", { params: { path: { org_id: orgId } } })),
 
   teams: () => listAll((c) => unwrap(client.GET("/api/v1/teams", { params: { query: q(c) } }))),
   team: (id: string) => unwrap(client.GET("/api/v1/teams/{team_id}", { params: { path: { team_id: id } } })),
@@ -168,7 +182,7 @@ export const api = {
 
   usage: (query: UsageQuery) =>
     listAll((c) => unwrap(client.GET("/api/v1/usage", { params: { query: { ...query, ...q(c) } } }))),
-  audit: (query: { team_id?: string; actor_id?: string; action?: string; resource_type?: string; resource_id?: string; from?: string; to?: string } = {}) =>
+  audit: (query: { team_id?: string; org_id?: string; actor_id?: string; action?: string; resource_type?: string; resource_id?: string; from?: string; to?: string } = {}) =>
     listAll((c) => unwrap(client.GET("/api/v1/audit", { params: { query: { ...query, ...q(c) } } }))),
 
   gateways: () => listAll((c) => unwrap(client.GET("/api/v1/gateways", { params: { query: q(c) } }))),

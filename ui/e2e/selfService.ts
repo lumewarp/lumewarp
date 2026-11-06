@@ -5,11 +5,13 @@ export const BREAK_GLASS = "e2e-break-glass-password";
 export const VIEWER = "e2e-viewer-session-0123456789abcdef";
 export const MEMBER = "e2e-member-session-0123456789abcdef";
 export const TEAM_ADMIN = "e2e-teamadmin-session-0123456789abcdef";
+export const ORG_ADMIN = "e2e-orgadmin-session-0123456789abcdef";
 export const OUTSIDER = "e2e-outsider-session-0123456789abcdef";
 export const SHOTS_TOKEN = "e2e-shots-session-0123456789abcdef";
 export const VIEWER_EMAIL = "viewer@e2e.test";
 export const MEMBER_EMAIL = "member@e2e.test";
 export const TEAM_ADMIN_EMAIL = "teamadmin@e2e.test";
+export const ORG_ADMIN_EMAIL = "orgadmin@e2e.test";
 export const OUTSIDER_EMAIL = "outsider@e2e.test";
 export const SHOTS_EMAIL = "shots@e2e.test";
 export const WEEK = 604_800;
@@ -73,11 +75,18 @@ export class Admin {
   async ensureTeam(
     name: string,
     limits: { max_keys_per_member?: number; max_member_key_lifetime_seconds?: number } = {},
+    orgId?: string,
   ): Promise<TeamRow> {
     const teams = await this.get<{ items: TeamRow[] }>("/teams?limit=200");
     const found = teams.items.find((team) => team.name === name);
     if (found) return found;
-    return this.post<TeamRow>("/teams", { name, org_id: await this.orgId(), ...limits });
+    return this.post<TeamRow>("/teams", { name, org_id: orgId ?? (await this.orgId()), ...limits });
+  }
+
+  async putOrgAdmin(orgId: string, email: string): Promise<void> {
+    const user = await this.user(email);
+    const response = await this.request.put(`/api/v1/orgs/${orgId}/admins/${user.id}`, { headers: this.headers });
+    expect(response.ok(), await response.text()).toBe(true);
   }
 
   async putMember(teamId: string, email: string, role: "admin" | "member" = "member") {

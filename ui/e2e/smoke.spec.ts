@@ -389,7 +389,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await page.getByRole("tab", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Edit team" }).click();
   await expect(dialog(page)).toBeVisible();
-  await dialog(page).getByLabel("Requests per minute").fill("100");
+  await dialog(page).getByLabel("Requests per minute", { exact: true }).fill("100");
   await dialog(page).getByRole("button", { name: "Save" }).click();
   await expect(dialog(page)).toHaveCount(0);
 
