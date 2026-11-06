@@ -7,7 +7,7 @@
 Lumewarp 是比 LiteLLM 更快、更好管理的 LLM gateway，拆成兩個獨立部署的元件：
 
 - **Data plane（gateway）**：Rust。只處理請求，熱路徑不碰資料庫、不跑 Python。
-- **Control plane（管理端）**：Python（FastAPI）+ React Admin UI。管理 Team／Member／Service Account、SSO、路由、plugin，產生設定快照。
+- **Control plane（管理端）**：Python（FastAPI）+ React Admin UI。管理 Org／Team／Member／Service Account、SSO、路由、plugin，產生設定快照。
 
 兩者之間只透過一條版本化的 gRPC 設定串流溝通。control plane 掛掉時 gateway 照常服務。
 
@@ -25,7 +25,7 @@ Lumewarp 是比 LiteLLM 更快、更好管理的 LLM gateway，拆成兩個獨�
 flowchart TB
   IdP["Keycloak / OIDC IdP"] -->|OIDC 登入| API
   subgraph CP["Control plane (Python)"]
-    API["管理 API + plugin<br/>Team／Member／Service Account、授權、路由設定"] --> PG[("Postgres<br/>唯一事實來源、稽核")]
+    API["管理 API + plugin<br/>Org／Team／Member／Service Account、授權、路由設定"] --> PG[("Postgres<br/>唯一事實來源、稽核")]
     PG --> COMP["Config compiler<br/>展開繼承 → 版本化快照"]
     UI["React Admin UI (static SPA)"] --> API
   end
@@ -56,7 +56,7 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 ## 設定下發
 
 1. 管理者在 UI/API 改設定，寫入 Postgres 並留稽核紀錄。
-2. Config compiler 把 team 與 key owner 的繼承、路由、權限展開成已解析的 protobuf 快照，給遞增版本號，發布前驗證。
+2. Config compiler 把 org、team 與 key owner 的繼承、路由、權限展開成已解析的 protobuf 快照，給遞增版本號，發布前驗證。
 3. gateway 開機訂閱 gRPC 串流，先收全量，之後收 delta（例如新增/撤銷 API key）。
 4. gateway 背景建好新索引，ArcSwap 原子替換；成功回 ACK，失敗回 NACK 並保留舊版。
 5. 最後一份成功快照寫到本地磁碟，control plane 掛掉仍可重啟服務。
@@ -71,8 +71,8 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 ### SSO（Keycloak / OIDC）
 
 - control plane 是標準 OIDC RP；Keycloak 是預設但非必要。SAML 交給 Keycloak brokering。
-- 管理端登入：Authorization Code + PKCE 由 control plane 後端完成（Authlib），之後發伺服器端 session（httpOnly、`SameSite=Lax` cookie，寫入需 `X-Lumewarp-CSRF`）；以 `iss`+`sub` 認人；任何通過 IdP 驗證的使用者都能登入，首次登入 JIT 建立零權限使用者（只接受已驗證 email；`LUMEWARP_OIDC_JIT_USERS=false` 時只能登入已存在的帳號）。程式呼叫管理 API 用 PAT（bearer 只接受 PAT）。登入過程的 nonce 與 PKCE code verifier 不進 DB，放在用 `LUMEWARP_SECRET_KEY` 做 AES-256-GCM 封存的登入 cookie；沒設金鑰時服務拒絕啟動。
-- IdP 只負責認證，不授予任何 Lumewarp 角色：groups／roles claim 一律忽略。安裝層角色存在 Postgres 的 `installation_admins`（`proxy_admin` 唯一，`admin` 可多人），每次請求讀取，撤銷在下一個請求生效；team 權限只來自授權後端。IdP 與 IAM 的人員狀態同步由部署方負責。
+- 管理端登入：Authorization Code + PKCE 由 control plane 後端完成（Authlib），之後發伺服器端 session（httpOnly、`SameSite=Lax` cookie，寫入需 `X-Lumewarp-CSRF`）；以 `iss`+`sub` 認人；任何通過 IdP 驗證的使用者都能登入，首次登入 JIT 建立零權限使用者（只接受已驗證 email；`LUMEWARP_OIDC_JIT_USERS=false` 時只能登入已存在的帳號，唯一例外是還沒有 `proxy_admin` 時符合 `LUMEWARP_INITIAL_ADMIN_EMAIL` 的首次登入）。程式呼叫管理 API 用 PAT（bearer 只接受 PAT）。登入過程的 nonce 與 PKCE code verifier 不進 DB，放在用 `LUMEWARP_SECRET_KEY` 做 AES-256-GCM 封存的登入 cookie；沒設金鑰時服務拒絕啟動。
+- IdP 只負責認證，不授予任何 Lumewarp 角色：groups／roles claim 一律忽略。安裝層角色存在 Postgres 的 `installation_admins`（`proxy_admin` 唯一，`admin` 可多人），每次請求讀取，撤銷在下一個請求生效；org 與 team 的 admin／member 關係只來自授權後端（安裝層角色永遠讀 Postgres）。IdP 與 IAM 的人員狀態同步由部署方負責。
 - 緊急登入（break-glass）：`POST /api/v1/session/break-glass` 用密碼換 session cookie，IdP 或 IAM 故障時仍可管理。生產用 argon2id hash（`LUMEWARP_BREAK_GLASS_PASSWORD_HASH`），明文密碼要 `LUMEWARP_DEV_MODE=true`。這個 session 不是使用者，不問授權後端；有 TTL（預設 1 小時，上限 4 小時）、失敗延遲與次數限制、可限制來源網段，嘗試都寫稽核，換密碼立刻失效。
 - gateway 憑證只有虛擬 API key（只存 hash）；JWT／mTLS 呼叫 gateway 延後。
 - 停權時推撤銷 delta，所有 gateway 秒級內拒絕：內建後端在移除成員的同一交易停用 key；外部 IAM 由 key reconciler 讀變更串流，約 5 秒內停用；IAM 錯誤或逾時絕不停用 key。
@@ -84,7 +84,19 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 - 稽核 `details` 是每個 action 的 allowlist：沒分類的欄位不記錄；`last_error` 類欄位只存 exception class。守門測試掃每個 Text／String／JSONB 欄位與原始碼中每個 `audit.record(action=...)`，新增而未分類就失敗。
 - e2e suite 會掃描資料庫，確認沒有明文憑證。
 
-### Team / Member / Service Account
+### Org / Team / Member / Service Account
+
+五個角色，上層繼承下層的管理權：
+
+| 角色 | 來源 | 能做什麼 |
+| --- | --- | --- |
+| `proxy_admin` | `installation_admins`，全庫唯一一列 | 安裝層全部：上游、路由、gateway、config、使用者、org 與安裝層角色。只有本人或緊急 session 能轉移這個角色、停用／刪除帳號、改 email 或代發 PAT |
+| `admin` | `installation_admins`，可多人 | 與 `proxy_admin` 相同，除了不能降級／拔除 `proxy_admin` 或動其帳號；任何 `admin` 都能指派與移除其他 `admin` |
+| org admin | `org_admins` 一列，即 `admin` on `org:<id>` | 旗下 team 的建立與封存、team 的模型／限流／並行／預算、指派 team admin、成員、service account 與任何 key、org 用量與旗下 audit；org 政策本身唯讀 |
+| team admin | `team_members.role=admin`，即 `admin` on `team:<id>` | team 名稱、member key 上限、member 預設與例外配額、service account、team 內任何 key、成員、team 用量與 audit；不能改 team 的模型與總額 |
+| member | `team_members.role=member`，即 `member` on `team:<id>` | 讀 team 基本資料與模型目錄名字、在自己的有效限額內建立與管理自己的 key、看自己的用量 |
+
+安裝層管理員（`proxy_admin` 或 `admin`）在 team 之上；org admin 繼承旗下 team 的 team admin 能力，team admin 是該 team 的直接成員（可以持有 key）。繼承只由 `RequestAuthz` 套用，授權後端只回答直接關係。
 
 - 階層：org → team → member（admin／member）與 service account → API key。org 是配額階層的根（模型、限流、並行與預算）。只有安裝層管理員能建立 org（`POST /orgs`）、改名或改政策（`PATCH /orgs/{id}`）、封存（`DELETE /orgs/{id}`）與指派／移除 org admin（`PUT|DELETE /orgs/{id}/admins/{user_id}`）；org admin 可以讀自己的 org（`GET /orgs`、`GET /orgs/{id}`）與旗下 team 的用量彙總（`GET /orgs/{id}/usage`，查詢時由 `usage_events` 依 team 分組）。org admin 的指派需要 builtin 後端（外部後端回 409），且對象必須先登入過一次。`POST /teams` 帶明確的 `org_id`，沒有預設 org；org 封存不可逆，旗下沒有未封存 team 才能封存，封存後不能再建 team。org admin 是 `org_admins` 一列，代表 `admin` on `org:<id>`；team 管理權由 `RequestAuthz` 從 `team.org_id` 繼承，後端只回答直接關係，`member` 永遠只代表直接成員，所以 org admin 沒有直接成員身分時不能建立自己的 key，`/users/me` 的 team 清單也只列直接成員（另外回傳 `admin_orgs`）。安裝層管理員是 Postgres 的 `installation_admins` 一列（`proxy_admin` 或 `admin`），緊急 session 也算安裝層管理員。第一個 `proxy_admin` 由「還沒有 proxy_admin 時，第一個通過驗證且 email 等於 `LUMEWARP_INITIAL_ADMIN_EMAIL` 的登入」建立（`LUMEWARP_OIDC_JIT_USERS=false` 時只有這個 email 可以即時建立）；變數之後失效，改值不會換人。緊急 session 可以建立或轉移 `proxy_admin`，`proxy_admin` 也可以轉移給別人，轉移後自己變成 `admin`。
 - team 封存（`DELETE /teams/{id}`）在同一交易鎖住 config scope、寫 `deleted_at`、撤銷所有 key（含 rotation grace 的舊 hash）、停用 service account 並釋放名稱；名稱只在未封存的 team 之間唯一。compiler 略過封存的 team，所有寫入路徑（含不經 team loader 的 key 與 service account 路徑）都拒絕它；歷史讀取不過濾封存，晚到的 usage 仍找得到 team 與 owner，audit 與 org 月額也含已封存 team。service account 另有停用狀態（`PATCH /service-accounts/{id}` 的 `is_active=false`），compiler 會把停用帳號的 key 排除，重新啟用後未撤銷的 key 會再進快照。
@@ -94,7 +106,7 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 - 自助 key：team 另可設 `max_keys_per_member`（每人在該 team 的非撤銷 key 上限，撤銷即釋放名額）與 `max_member_key_lifetime_seconds`（member key 最長效期）。數量上限只在建立時檢查；效期上限在建立、輪替與改到期日時強制，沒有到期日的 key 在建立或輪替時補上期限，超過上限則拒絕。service account 的 key 由 team admin 管理，不受這兩項限制；安裝層管理員與 team admin 也不能繞過 member key 的效期檢查。降低 team 上限不會自動撤銷既有 key：降低數量上限只會拒絕之後的建立（輪替不新增 key，仍可進行），降低效期上限則會拒絕之後超過上限的建立、輪替與延長。成員可以自行恢復自己暫停的 key（`owner`）與因被移出 team 而暫停的 key（`owner_removed`，恢復成員身分之後）；`admin` 暫停需要 team admin，`owner_deactivated` 需要管理員在帳號重新啟用之後處理，擁有者未啟用時任何人都不能恢復。
 - 輪替寬限：`POST /keys/{id}/rotate` 可帶 `grace_seconds`（預設 0，最多 24 小時）。寬限內舊 hash 與新 hash 都以同一個 key_id 認證，用量歸同一個 key；舊 hash 自帶到期時間，gateway 只靠快照就能在 CP 停機、從磁碟快照開機時停止接受它。快照最多帶一個舊 hash，寬限內再輪替一次會提前結束較舊的那段寬限。撤銷會同時清除新舊 hash。過期的舊 hash 沒有背景清理：gateway 依快照自帶的到期時間停止接受它，下一次 compile 不再帶上它並以 delta 移除，DB 的欄位要到下一次輪替或撤銷才改變。
 - `GET /users/me` 逐 team 回傳 member 的全鏈有效模型清單（org ∩ team ∩ 自身 member 政策；若為 universal 則列出當下 catalog 並標 `all_models`）、有效限流（含 org 與 team 預設）、key 數量上限／最長效期與目前持有數，以及本月各層預算的剩餘額度（org 的推導花費也算在內）；org 與 team 的預算數字只給 team admin 以上，一般成員只看到算好的剩餘額。建立、輪替與改 key（包含限額）都以 principal 與 operation 為單位限流（各每分鐘 30 次，與目標 team／key 無關，計數在 process 內）：認證後、目標查詢與授權前檢查；安裝層管理員與緊急 session 豁免，只有 team admin 身分的 member 不豁免。成功寫入寫 audit；429 只進 metric、不寫 audit，避免灌爆稽核表。
-- 授權：安裝層管理員、team admin、team member，動作分得比角色細：
+- 授權：安裝層管理員、org admin、team admin、member，動作分得比角色細：
   - `TEAM_READ` 只給 team 基本資料（id、名稱、時間與 `max_keys_per_member`／`max_member_key_lifetime_seconds`；member 預設限流與 team 政策只在 `TeamOut`）；member 的有效政策一律走 `/users/me`，`TeamOut`（含 team 政策）只回給 team admin 以上。
   - `TEAM_ADMIN_READ` 才是成員與 service account 清單、他人 key、team 用量與 audit。member 讀這些清單回 403，非成員仍是 404。
   - `TEAM_SETTINGS_UPDATE`（team admin，org admin 繼承）只含名稱、member key 上限與 member 預設限流；team 的模型清單、限流、並行與預算是 `TEAM_QUOTA_SET`，指派／降級／移除 team admin 是 `TEAM_ADMIN_ASSIGN`；建立 team 在 body 的 `org_id` 上檢查、封存 team 在 URL 那支 team 所屬的 org 上檢查，所以 org admin 只能管自己 org 的 team，team admin 完全不能建立、封存或設定。team 更新依實際變更判斷（`proposed != base`），team admin 重送未改動的政策值可以成功。
@@ -329,7 +341,7 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 - `api_key_ref` 錯誤造成 gateway 收不到新設定的問題。這項尚未實測，應該獨立設計。
 - Token 月配額。
 
-## 效能目標（尚未實測）
+## 效能目標
 
 | 指標 | 目標 |
 | --- | --- |
@@ -339,7 +351,7 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 | 同時串流連線 | ≥ 50,000，記憶體 < 2 GB |
 | 設定生效時間 | < 2 s |
 
-驗證：固定延遲、可模擬 SSE 的 mock 上游；同機對 LiteLLM 與 Lumewarp 跑 1k / 5k / 10k RPS（oha 或 k6），比較額外延遲、TTFT、CPU、記憶體，結果進 CI 追蹤退化。
+驗證：固定延遲、可模擬 SSE 的 mock 上游；同機對 LiteLLM 與 Lumewarp 跑 1k / 5k / 10k RPS（oha 或 k6），比較額外延遲、TTFT、CPU、記憶體，結果進 CI 追蹤退化。`bench/` 已量到 gateway 額外延遲 p99 與 10,000 RPS（見上文「路由」與 `bench/README.md`）；p50、50,000 條同時串流與設定生效時間尚未量測。
 
 ## Roadmap
 
@@ -347,7 +359,7 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 
 其他尚未實作的項目：
 
-- JWT／mTLS 呼叫 gateway、SCIM、IdP→IAM 人員同步、讀 IdP claims 做 team 授權、更細的角色、key 層級限制。
+- JWT／mTLS 呼叫 gateway、SCIM、IdP→IAM 人員同步、讀 IdP claims 做 team 授權、比這五個更細的角色。
 - 跨 gateway 共享限流（Redis 對帳）、ClickHouse、設定版本 canary、cache 親和、依 header／token 數條件分流、逐請求外部 hook、LoRA 自動探索。
 - control plane 的 OTLP metrics／traces（Prometheus `lumewarp_cp_*` 已有）；gateway 只有選用的 OTLP traces，沒有 metrics exporter。
 - `gateway/Dockerfile`、`control-plane/Dockerfile` 可建置映像，但尚未有發佈映像的 CI；Helm chart 需自行指定 repository/tag。

@@ -433,6 +433,34 @@ async def test_key_supplies_owner_and_exactly_two_totals(session_factory, owner_
 
 
 @pytest.mark.asyncio
+async def test_late_usage_for_an_archived_team_still_attributes_owner_and_totals(
+    session_factory: SessionFactory,
+):
+    """A report that lands after the team was archived still finds the team and its owner."""
+    scope_name, key = await _seed(session_factory)
+    async with session_factory() as session, session.begin():
+        team = await session.get(Team, key.team_id)
+        assert team is not None
+        team.deleted_at = datetime.now(UTC)
+    event = _event(key, cost=23)
+    async with session_factory() as session, session.begin():
+        assert await ingest(session, "gateway-archive", [event], scope_name=scope_name) == 1
+    async with session_factory() as session:
+        stored = await session.scalar(
+            select(UsageEventRow).where(UsageEventRow.request_id == uuid.UUID(event.request_id))
+        )
+        assert stored is not None
+        assert (stored.team_id, stored.owner_id) == (key.team_id, key.owner_id)
+        total = await session.scalar(
+            select(UsageTotal).where(
+                UsageTotal.scope_type == ScopeType.TEAM,
+                UsageTotal.scope_id == key.team_id,
+            )
+        )
+        assert total is not None and total.cost_nano_usd == 23
+
+
+@pytest.mark.asyncio
 async def test_batch_at_configured_maximum_is_ingested(session_factory: SessionFactory):
     from lumewarp_control_plane.settings import Settings
 

@@ -289,7 +289,7 @@ async def test_router_writes_audit_and_recompile(client, committed) -> None:
     assert create.details["settings"]["retry"]["max_attempts"] == 2
 
 
-async def test_router_writes_need_superuser(client, committed) -> None:
+async def test_router_writes_need_an_installation_admin(client, committed) -> None:
     router = _ok(_router(client))
     _, secret = await user_with_token(committed)
     await committed.commit()

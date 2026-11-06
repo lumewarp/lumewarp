@@ -7,8 +7,9 @@ immutable in-memory config snapshot; it never touches Postgres or Python. Config
 updates and usage events are asynchronous.
 
 Implemented: the control plane with Postgres, the versioned gRPC config
-stream with on-disk snapshot boot, teams with members and service accounts owning
-virtual keys, budgets and rate limits, usage accounting, plugins and the Admin UI;
+stream with on-disk snapshot boot, orgs, teams with members and service accounts owning
+virtual keys, the org -> team -> owner -> key quota hierarchy (budgets and rate limits,
+with optional key limits), archived teams and orgs, usage accounting, plugins and the Admin UI;
 OIDC login for the Admin UI, pluggable authorization (built-in, OpenFGA
 or HTTP) with automatic key suspension, retries/fallbacks/circuit breaking/health
 checks, latency- and vLLM-load-aware routing, traffic splits, alert rules and
@@ -159,6 +160,35 @@ settings, SSO, authorization backends, the catalog, plugins and operations, and
 
 The seeded demo API key is in `.dev/demo-key`. Postgres is at `127.0.0.1:55432`, with
 database, user and password all `lumewarp`.
+
+## Roles and authorization
+
+Five roles; each level inherits the administration of the level below it.
+
+| Role | Scope | Can |
+| --- | --- | --- |
+| `proxy_admin` | `installation_admins`, one row | Everything (upstreams, routing, gateways, config, users, orgs, installation roles). Only this account or break-glass can transfer the role, or deactivate, delete, change the email of or mint a PAT for it. |
+| `admin` | `installation_admins`, any number | The same installation-level management, except demoting or removing the `proxy_admin` or touching that account; assigns and removes other admins. |
+| org admin | `admin` on `org:<id>` (`org_admins`) | Creates and archives the org's teams, sets their models, limits, parallelism and budget, assigns team admins, manages members, service accounts and any key in them, reads the org's usage and audit. The org policy itself is read-only. |
+| team admin | `admin` on `team:<id>` (`team_members.role=admin`) | Team name, member key limits, member defaults and per-member exceptions, service accounts, any key in the team, members, team usage and audit. Cannot change the team's models, limits or budget. |
+| member | `member` on `team:<id>` (`team_members.role=member`) | Reads the team's basic record and catalog names, creates and manages their own keys within their effective limits, sees their own usage. |
+
+Inheritance is applied by the control plane (`RequestAuthz`), never by an authorization
+backend: installation admin -> org admin -> team admin -> member. A backend only answers
+direct relations with `check(user_id, relation, resource)`, where `relation` is `admin` (on
+an org or a team) or `member` (on a team) and `resource` is `org:<uuid>` or `team:<uuid>`.
+`member` always means a **direct** team membership: an org admin does not inherit it,
+because key ownership, `/users/me` and the key reconciler depend on it. Installation roles
+are Postgres rows and are never asked of the backend. Quotas follow the same chain, org ->
+team -> owner -> key, with an optional rate limit on the key.
+
+`builtin` (the default), `openfga`, `http` and any other `lumewarp.authz` entry point load
+the same way. An OpenFGA store can keep its own names:
+`LUMEWARP_OPENFGA_OBJECT_TYPES='{"team":"llm_team","org":"llm_org"}'` and
+`LUMEWARP_OPENFGA_RELATIONS='{"team.admin":"owner"}'` map type and relation names for
+Check, BatchCheck, ListObjects and ReadChanges alike. The
+[control-plane README](control-plane/README.md#authorization) has the full action matrix,
+the factory contract and the standalone model (`deploy/openfga/model.fga`).
 
 ## Container images
 
