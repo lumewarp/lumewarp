@@ -20,7 +20,15 @@ use serde_json::{value::RawValue, Map, Value};
 
 /// Keys the gateway owns; a default body or a fragment may not set them.
 pub const RESERVED_KEYS: [&str; 3] = ["model", "stream", "stream_options"];
-pub const REASONING_LEVELS: [&str; 6] = ["none", "minimal", "low", "medium", "high", "xhigh"];
+const MAX_REASONING_LEVELS: usize = 16;
+
+fn valid_reasoning_level(level: &str) -> bool {
+    (1..=32).contains(&level.len())
+        && level.as_bytes()[0].is_ascii_alphanumeric()
+        && level
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
 const MAX_JSON_BYTES: usize = 16 * 1024;
 /// Object/array nesting allowed in a default body or fragment (the control plane checks
 /// the same bound, well inside serde_json's recursion limit).
@@ -109,8 +117,8 @@ impl Transform {
             Some(r) => {
                 let level = (!r.default_level.is_empty()).then(|| r.default_level.clone());
                 if let Some(level) = &level {
-                    if !REASONING_LEVELS.contains(&level.as_str()) {
-                        return Err(format!("unknown reasoning default_level {level:?}"));
+                    if !valid_reasoning_level(level) {
+                        return Err(format!("invalid reasoning default_level {level:?}"));
                     }
                 }
                 let mode = pb::ReasoningEffortMode::try_from(r.mode)
@@ -132,10 +140,13 @@ impl Transform {
                         if r.fragments_json.is_empty() {
                             return Err("reasoning mode MAPPED needs fragments".into());
                         }
+                        if r.fragments_json.len() > MAX_REASONING_LEVELS {
+                            return Err("reasoning mode MAPPED supports at most 16 levels".into());
+                        }
                         let mut fragments = HashMap::new();
                         for (key, text) in &r.fragments_json {
-                            if !REASONING_LEVELS.contains(&key.as_str()) {
-                                return Err(format!("unknown reasoning level {key:?}"));
+                            if !valid_reasoning_level(key) {
+                                return Err(format!("invalid reasoning level {key:?}"));
                             }
                             fragments.insert(
                                 key.clone(),
@@ -196,8 +207,8 @@ impl Transform {
                 }
                 Reasoning::Strip => entries.remove(REASONING_FIELD),
                 Reasoning::Mapped(fragments) => {
-                    let level = entries.reasoning_level()?.or(self.default_level.as_deref());
-                    entries.remove(REASONING_FIELD);
+                    let client_level = entries.reasoning_level()?;
+                    let level = client_level.as_deref().or(self.default_level.as_deref());
                     if let Some(level) = level {
                         let Some(fragment) = fragments.get(level) else {
                             return Err(Rejected {
@@ -209,6 +220,7 @@ impl Transform {
                         };
                         merge_values(&mut defaults, fragment);
                     }
+                    entries.remove(REASONING_FIELD);
                 }
             }
             entries.merge_defaults(&defaults)?;
@@ -295,25 +307,24 @@ impl<'a> Entries<'a> {
         self.0.retain(|(k, _)| k != key);
     }
 
-    fn reasoning_level(&self) -> Result<Option<&'static str>, Rejected> {
+    fn reasoning_level(&self) -> Result<Option<Cow<'_, str>>, Rejected> {
         let Some(raw) = self.get(REASONING_FIELD) else {
             return Ok(None);
         };
-        match serde_json::from_str::<Option<String>>(raw) {
-            Ok(None) => Ok(None),
-            Ok(Some(level)) => REASONING_LEVELS
-                .iter()
-                .find(|l| **l == level)
-                .map(|l| Some(*l))
-                .ok_or_else(|| Rejected {
-                    reason: "reasoning_effort",
-                    message: format!("unknown reasoning_effort {level:?}"),
-                }),
-            Err(_) => Err(Rejected {
+        let raw = raw.trim();
+        if raw == "null" {
+            return Ok(None);
+        }
+        // RawValue has already validated the JSON; unescaped strings can be borrowed.
+        if raw.starts_with('"') && !raw.contains('\\') {
+            return Ok(Some(Cow::Borrowed(&raw[1..raw.len() - 1])));
+        }
+        serde_json::from_str::<String>(raw)
+            .map(|level| Some(Cow::Owned(level)))
+            .map_err(|_| Rejected {
                 reason: "reasoning_effort",
                 message: "reasoning_effort must be a string".into(),
-            }),
-        }
+            })
     }
 
     /// Adds every default the client did not send; objects on both sides merge.
@@ -407,6 +418,56 @@ mod tests {
         assert_eq!(out["reasoning_effort"], "low");
         let out = json(&run(&m, r#"{"model":"x","reasoning_effort":"odd"}"#).unwrap());
         assert_eq!(out["reasoning_effort"], "odd");
+    }
+
+    #[test]
+    fn custom_reasoning_levels() {
+        let mut m = model();
+        m.reasoning_effort = Some(mapped(&[("think", r#"{"thinking":true}"#)], "think"));
+        for body in [
+            r#"{"reasoning_effort":"think"}"#,
+            r#"{"reasoning_effort":"th\u0069nk"}"#,
+            r#"{"reasoning_effort" : "think" }"#,
+            r#"{"reasoning_effort" : null }"#,
+            r#"{}"#,
+        ] {
+            assert_eq!(json(&run(&m, body).unwrap())["thinking"], true);
+        }
+        m.reasoning_effort = Some(pb::ReasoningEffort {
+            mode: pb::ReasoningEffortMode::Passthrough as i32,
+            default_level: "max".into(),
+            ..Default::default()
+        });
+        for body in ["{}", r#"{"reasoning_effort":null}"#] {
+            assert_eq!(json(&run(&m, body).unwrap())["reasoning_effort"], "max");
+        }
+    }
+
+    #[test]
+    fn reasoning_level_names_and_count_are_bounded() {
+        let mut m = model();
+        for bad in ["", "-think", "a b", "é", "a\n", &"a".repeat(33)] {
+            m.reasoning_effort = Some(mapped(&[(bad, "{}")], ""));
+            assert!(Transform::compile(&m).is_err(), "{bad:?}");
+            if !bad.is_empty() {
+                m.reasoning_effort = Some(pb::ReasoningEffort {
+                    default_level: bad.into(),
+                    ..Default::default()
+                });
+                assert!(Transform::compile(&m).is_err(), "{bad:?}");
+            }
+        }
+        let mut r = mapped(&[], "");
+        for i in 0..17 {
+            r.fragments_json.insert(format!("level-{i}"), "{}".into());
+        }
+        m.reasoning_effort = Some(r.clone());
+        assert!(Transform::compile(&m).unwrap_err().contains("16 levels"));
+        r.fragments_json.remove("level-16");
+        r.fragments_json.remove("level-0");
+        r.fragments_json.insert("A0_.-".repeat(6), "{}".into());
+        m.reasoning_effort = Some(r);
+        assert!(Transform::compile(&m).is_ok());
     }
 
     #[test]
@@ -505,7 +566,10 @@ mod tests {
         let err = run(&m, r#"{"model":"x","reasoning_effort":"low"}"#).unwrap_err();
         assert_eq!(err.reason, "reasoning_effort");
         let err = run(&m, r#"{"model":"x","reasoning_effort":"huge"}"#).unwrap_err();
-        assert!(err.message.contains("unknown"));
+        assert_eq!(
+            err.message,
+            "reasoning_effort \"huge\" is not supported by this model"
+        );
         assert!(run(&m, r#"{"model":"x","reasoning_effort":3}"#).is_err());
     }
 
@@ -572,7 +636,7 @@ mod tests {
         m.default_body_json.clear();
         for r in [
             mapped(&[], ""),
-            mapped(&[("ultra", "{}")], ""),
+            mapped(&[("bad name", "{}")], ""),
             mapped(&[("low", "{}")], "high"),
             mapped(&[("low", r#"{"stream_options":{}}"#)], ""),
             pb::ReasoningEffort {

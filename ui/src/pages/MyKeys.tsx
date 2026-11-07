@@ -11,6 +11,7 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge as UiBadge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
+import { HelpTip } from "../components/ui/help-tip";
 import { useAction, useCan, useMe, useMut, useOwnKeys, useSecretMut } from "../hooks";
 import { useShowSecret } from "../components/SecretProvider";
 import { AuthzTemporary, BreakGlassNoKeys, CheckFailed, PageLoading } from "./Access";
@@ -44,7 +45,7 @@ export function MyKeys() {
     <>
       <PageHeader
         title="My keys"
-        description="Your teams, the models you can call, and the API keys you own. A secret is shown once, when a key is created or rotated."
+        hint="A secret is shown only once, when a key is created or rotated."
       />
       {me.error && me.data && <CheckFailed onRetry={() => void me.refetch()} />}
       {me.data?.authz_unavailable ? (
@@ -84,12 +85,15 @@ function NoTeams() {
   );
 }
 
-function Fact({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+function Fact({ label, hint, note, children }: { label: string; hint?: string; note?: string; children: ReactNode }) {
   return (
     <div className="flex min-w-0 flex-col gap-1">
-      <span className="text-xs font-medium tracking-[0.04em] text-muted-foreground uppercase">{label}</span>
+      <div className="flex items-center gap-1">
+        <span className="text-xs font-medium tracking-[0.04em] text-muted-foreground uppercase">{label}</span>
+        {hint && <HelpTip label={label} text={hint} />}
+      </div>
       <div className="min-w-0 text-sm">{children}</div>
-      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
+      {note && <span className="text-xs text-muted-foreground">{note}</span>}
     </div>
   );
 }
@@ -99,7 +103,7 @@ function CallableModels({ team }: { team: Team }) {
   if (team.all_models) {
     return (
       <span data-testid="all-models">
-        All models <span className="text-muted-foreground">(including names added later)</span>
+        All models <HelpTip label="All models" text="Includes names added later." />
       </span>
     );
   }
@@ -188,12 +192,13 @@ function TeamSection({
         <Fact label="Rate limits" hint="Counted per gateway instance.">
           {rateLimits(team)}
         </Fact>
-        <Fact label="Remaining budget" hint="This month, for the team and your own budget">
+        <Fact label="Remaining budget" hint="The remaining amount is capped by org, team and personal budgets for the current month.">
           {remainingBudget(team)}
         </Fact>
         <Fact
           label="Key limit"
-          hint={`Non-revoked keys only: revoked keys stay in the list but do not count. Longest lifetime: ${fmtLifetime(lifetime)}`}
+          hint="Revoked keys stay in the list but do not count toward the cap."
+          note={`Longest lifetime: ${fmtLifetime(lifetime)}`}
         >
           {limits.max_keys_per_member === null
             ? `${limits.key_count} non-revoked ${limits.key_count === 1 ? "key" : "keys"}, no cap`
@@ -381,7 +386,7 @@ function CreateKeyDialog({
         max={max}
         onChange={(value) => form.set("expires", value)}
         error={form.errors.expires}
-        hint={
+        note={
           lifetime === null
             ? "Empty means the key never expires."
             : `Optional. This team limits member keys to ${fmtLifetime(lifetime)}; empty uses that limit. The latest day is ${max}.`
@@ -441,7 +446,7 @@ function EditKeyDialog({ team, target, onClose }: { team: Team; target: Key; onC
         max={max}
         onChange={(value) => form.set("expires", value)}
         error={form.errors.expires}
-        hint={
+        note={
           lifetime === null
             ? "Empty means the key never expires."
             : `This team limits member keys to ${fmtLifetime(lifetime)}; the latest day is ${max}.`

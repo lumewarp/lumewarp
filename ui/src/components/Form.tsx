@@ -7,9 +7,11 @@ import { Alert, AlertDescription } from "./ui/alert";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
 import { Field as UiField, FieldDescription, FieldError, FieldLabel } from "./ui/field";
+import { HelpTip } from "./ui/help-tip";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import { Switch } from "./ui/switch";
 
 type Validators<V> = { [K in keyof V]?: (value: V[K], all: V) => string | undefined };
 
@@ -65,19 +67,25 @@ export function useForm<V extends object>(initial: V, validators: Validators<V> 
 export const required = (label: string) => (v: string) => (v.trim() ? undefined : `${label} is required`);
 
 /**
- * Label, control and message. Layout is utilities only: the old `field` class sized the router form's split
- * children and went with the legacy stylesheet.
+ * Label, control and message. `hint` is static help: a "?" tooltip next to the label (and the control's
+ * accessible description). `note` is live text derived from the value (a formatted size, a loading state):
+ * it stays visible under the control. Layout is utilities only.
  */
-export function Field({ label, error, hint, children }: { label: string; error?: string; hint?: string; children: (p: ControlProps) => ReactNode }) {
+export function Field({ label, error, hint, note, children }: { label: string; error?: string; hint?: string; note?: ReactNode; children: (p: ControlProps) => ReactNode }) {
   const id = useId();
-  const descId = error || hint ? `${id}-d` : undefined;
+  const msgId = error || note ? `${id}-m` : undefined;
+  const hintId = hint ? `${id}-h` : undefined;
+  const describedBy = [msgId, hintId].filter(Boolean).join(" ") || undefined;
   return (
     <UiField className="min-w-0 gap-1.5" data-invalid={error ? true : undefined}>
-      <FieldLabel htmlFor={id} className="font-semibold">
-        {label}
-      </FieldLabel>
-      {children({ id, "aria-invalid": !!error, "aria-describedby": descId })}
-      {error ? <FieldError id={descId}>{error}</FieldError> : hint && <FieldDescription id={descId}>{hint}</FieldDescription>}
+      <div className="flex items-center gap-1">
+        <FieldLabel htmlFor={id} className="font-semibold">
+          {label}
+        </FieldLabel>
+        {hint && <HelpTip text={hint} id={hintId} label={label} />}
+      </div>
+      {children({ id, "aria-invalid": !!error, "aria-describedby": describedBy })}
+      {error ? <FieldError id={msgId}>{error}</FieldError> : note && <FieldDescription id={msgId}>{note}</FieldDescription>}
     </UiField>
   );
 }
@@ -94,6 +102,7 @@ interface TextProps {
   onChange: (v: string) => void;
   error?: string;
   hint?: string;
+  note?: ReactNode;
   type?: "text" | "password" | "url" | "date";
   placeholder?: string;
   autoFocus?: boolean;
@@ -101,18 +110,18 @@ interface TextProps {
   min?: string;
   max?: string;
 }
-export function TextField({ label, value, onChange, error, hint, type = "text", placeholder, autoFocus, min, max }: TextProps) {
+export function TextField({ label, value, onChange, error, hint, note, type = "text", placeholder, autoFocus, min, max }: TextProps) {
   return (
-    <Field label={label} error={error} hint={hint}>
+    <Field label={label} error={error} hint={hint} note={note}>
       {(p) => <Input {...p} type={type} value={value} min={min} max={max} placeholder={placeholder} autoFocus={autoFocus} onChange={(e) => onChange(e.target.value)} />}
     </Field>
   );
 }
 
 /** Number input where an empty string means "no limit" (null). */
-export function NumberField({ label, value, onChange, error, hint, min = 0, step, placeholder = "unlimited" }: { label: string; value: number | null; onChange: (v: number | null) => void; error?: string; hint?: string; min?: number; step?: number | "any"; placeholder?: string }) {
+export function NumberField({ label, value, onChange, error, hint, note, min = 0, step, placeholder = "unlimited" }: { label: string; value: number | null; onChange: (v: number | null) => void; error?: string; hint?: string; note?: ReactNode; min?: number; step?: number | "any"; placeholder?: string }) {
   return (
-    <Field label={label} error={error} hint={hint}>
+    <Field label={label} error={error} hint={hint} note={note}>
       {(p) => (
         <Input {...p} type="number" min={min} step={step} value={value ?? ""} placeholder={placeholder} onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))} />
       )}
@@ -145,25 +154,36 @@ export function SelectControl<T>({ value, onChange, options, unset, placeholder 
   );
 }
 
-export function SelectField<T = string>({ label, error, hint, ...choice }: ChoiceProps<T> & { label: string; error?: string; hint?: string }) {
-  return <Field label={label} error={error} hint={hint}>{(p) => <SelectControl {...choice} {...p} />}</Field>;
+export function SelectField<T = string>({ label, error, hint, note, ...choice }: ChoiceProps<T> & { label: string; error?: string; hint?: string; note?: ReactNode }) {
+  return <Field label={label} error={error} hint={hint} note={note}>{(p) => <SelectControl {...choice} {...p} />}</Field>;
 }
 
-/** A labelled checkbox (switches an optional settings group on or off). */
+/** A labelled checkbox: a one-off choice (confirm, keep an alias). To turn a settings group on or off, use SwitchField. */
 export function CheckField({ label, checked, onChange, hint }: { label: string; checked: boolean; onChange: (v: boolean) => void; hint?: string }) {
   const id = useId();
-  const descId = hint ? `${id}-d` : undefined;
+  const hintId = hint ? `${id}-h` : undefined;
   return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex items-center gap-2">
-        <Checkbox id={id} checked={checked} aria-describedby={descId} onCheckedChange={(value) => onChange(value === true)} />
-        <Label htmlFor={id} className="cursor-pointer font-normal">
-          {label}
-        </Label>
-      </div>
-      {hint && (
-        <FieldDescription id={descId}>{hint}</FieldDescription>
-      )}
+    <div className="flex items-center gap-2">
+      <Checkbox id={id} checked={checked} aria-describedby={hintId} onCheckedChange={(value) => onChange(value === true)} />
+      <Label htmlFor={id} className="cursor-pointer font-normal">
+        {label}
+      </Label>
+      {hint && <HelpTip text={hint} id={hintId} label={label} />}
+    </div>
+  );
+}
+
+/** A labelled switch that turns an optional settings group on or off; the group's fields show only while on. */
+export function SwitchField({ label, checked, onChange, hint }: { label: string; checked: boolean; onChange: (v: boolean) => void; hint?: string }) {
+  const id = useId();
+  const hintId = hint ? `${id}-h` : undefined;
+  return (
+    <div className="flex items-center gap-2">
+      <Switch id={id} checked={checked} aria-describedby={hintId} onCheckedChange={onChange} />
+      <Label htmlFor={id} className="cursor-pointer font-normal">
+        {label}
+      </Label>
+      {hint && <HelpTip text={hint} id={hintId} label={label} />}
     </div>
   );
 }

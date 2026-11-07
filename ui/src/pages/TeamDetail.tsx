@@ -14,6 +14,7 @@ import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { DescriptionDetails, DescriptionList, DescriptionTerm } from "../components/ui/description-list";
+import { HelpTip } from "../components/ui/help-tip";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { useAction, useCan, useMe, useMut, useOrgLayer, useSecretMut } from "../hooks";
 import { useShowSecret } from "../components/SecretProvider";
@@ -60,7 +61,6 @@ export function TeamDetail() {
     <>
       <PageHeader
         title={data.name}
-        description="Manage the people, service accounts, keys, and usage for this team."
         actions={
           <Button variant="outline" asChild>
             {canListTeams ? <Link to="/teams">All teams</Link> : <Link to="/my-keys">My keys</Link>}
@@ -269,11 +269,7 @@ function MembersPanel({
                   form.set("user_id", "");
                 }}
                 error={form.errors.email}
-                hint={
-                  perms.isInstallationAdmin
-                    ? "Enter an existing user's email address, or pick a matching user below."
-                    : "Enter the email address of an existing user."
-                }
+                hint="The email must belong to an existing user."
                 autoFocus
               />
               {perms.isInstallationAdmin && (
@@ -321,10 +317,11 @@ function MembersPanel({
               New members join as members; only an org admin can assign a team admin.
             </p>
           ) : null}
+          <div className="flex items-center gap-1 text-sm font-medium">
+            Member policy
+            <HelpTip label="Member policy" text="This exception overrides member defaults but remains capped by the team's effective limits." />
+          </div>
           <PolicyFields values={form.values} errors={form.errors} set={form.set} team={team} />
-          <p className="m-0 text-[13px] text-muted-foreground">
-            This exception overrides the team's member defaults; the team's effective limits still cap it.
-          </p>
         </fieldset>
       </FormDialog>
       <ConfirmDialog
@@ -436,11 +433,11 @@ function ServiceAccountsPanel({ team }: { team: Team }) {
       >
         <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
         <TextField label="Description" value={form.values.description} onChange={(value) => form.set("description", value)} />
+        <div className="flex items-center gap-1 text-sm font-medium">
+          Account policy
+          <HelpTip label="Account policy" text="These limits cap the account's keys, which stop working while the account is deactivated." />
+        </div>
         <PolicyFields values={form.values} errors={form.errors} set={form.set} team={team} />
-        <p className="m-0 text-[13px] text-muted-foreground">
-          The owner's effective limits cap each of this account's keys. A deactivated account's keys are not served
-          by the gateway until it is reactivated.
-        </p>
       </FormDialog>
       <ConfirmDialog
         open={!!deleting}
@@ -695,7 +692,7 @@ function KeysPanel({ team }: { team: TeamAny }) {
           />
         )}
         <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
-        <TextField label="Expires" type="date" value={form.values.expires} max={expiryMax} onChange={(value) => form.set("expires", value)} hint={expiryHint} />
+        <TextField label="Expires" type="date" value={form.values.expires} max={expiryMax} onChange={(value) => form.set("expires", value)} note={expiryHint} />
         <KeyLimitFields
           values={form.values}
           errors={form.errors}
@@ -872,11 +869,6 @@ function TeamSettings({ team }: { team: TeamAny }) {
           the member key limits and the member defaults.
         </p>
       )}
-      {canEdit && canSetQuota && (
-        <p className="mb-3 text-muted-foreground">
-          Team totals and models are set here; a team admin keeps the member defaults and the member key limits.
-        </p>
-      )}
       <Card className="mb-4 gap-3 p-4 shadow-none">
         <DescriptionList>
           <DescriptionTerm>Name</DescriptionTerm>
@@ -920,7 +912,7 @@ function TeamSettings({ team }: { team: TeamAny }) {
           value={form.values.member_rpm_default}
           onChange={(value) => form.set("member_rpm_default", value)}
           error={form.errors.member_rpm_default}
-          hint="Applies to a member without an exception; an exception overrides it, and the team's own limits still cap it."
+          hint="Member exceptions override this default, which remains capped by the team and is counted per gateway instance."
         />
         <NumberField
           label="Member default tokens per minute"
@@ -928,7 +920,7 @@ function TeamSettings({ team }: { team: TeamAny }) {
           value={form.values.member_tpm_default}
           onChange={(value) => form.set("member_tpm_default", value)}
           error={form.errors.member_tpm_default}
-          hint="A changed value may not exceed the team's effective value."
+          hint="A changed value may not exceed the team's effective value and is counted per gateway instance."
         />
         <NumberField
           label="Member default max parallel requests"
@@ -936,19 +928,15 @@ function TeamSettings({ team }: { team: TeamAny }) {
           value={form.values.member_max_parallel_default}
           onChange={(value) => form.set("member_max_parallel_default", value)}
           error={form.errors.member_max_parallel_default}
-          hint="Blank means no member-level default; the team's own limit still applies."
+          hint="Blank removes the member default; the team's limit still applies per gateway instance."
         />
-        <p className="m-0 text-[13px] text-muted-foreground">
-          Rate limits are counted per gateway instance: with N instances the effective limit can reach N times the
-          configured value.
-        </p>
         <NumberField
           label="Max keys per member"
           min={1}
           value={form.values.max_keys_per_member}
           onChange={(value) => form.set("max_keys_per_member", value)}
           error={form.errors.max_keys_per_member}
-          hint="Blank means no limit. Revoking a key frees a slot; the cap is checked when a key is created."
+          hint="Blank means no limit; revoking a key frees a slot and the cap is checked only on creation."
         />
         <NumberField
           label="Longest member key lifetime (seconds)"
@@ -956,11 +944,8 @@ function TeamSettings({ team }: { team: TeamAny }) {
           value={form.values.max_member_key_lifetime_seconds}
           onChange={(value) => form.set("max_member_key_lifetime_seconds", value)}
           error={form.errors.max_member_key_lifetime_seconds}
-          hint={
-            form.values.max_member_key_lifetime_seconds
-              ? `${fmtLifetime(form.values.max_member_key_lifetime_seconds)}. Blank means no limit.`
-              : "Blank means no limit. Member keys must expire within this many seconds."
-          }
+          hint="Blank means no limit; member keys must expire within this many seconds."
+          note={form.values.max_member_key_lifetime_seconds ? fmtLifetime(form.values.max_member_key_lifetime_seconds) : undefined}
         />
       </FormDialog>
       <ConfirmDialog

@@ -4,6 +4,7 @@ import { useEffect, useId, useState } from "react";
 import { getOwn, HEADER_LIST_WIDGET, hasOwn, withKey, withoutKey, type Field as SchemaField, type Values } from "../lib/schema";
 import { Field, SelectField } from "./Form";
 import { Button } from "./ui/button";
+import { HelpTip } from "./ui/help-tip";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Textarea } from "./ui/textarea";
@@ -64,8 +65,8 @@ export function SchemaFields({ fields, values, onChange, errors = {}, path = "",
                     Add {f.title}
                   </Button>
                   <span className="text-xs text-muted-foreground">{f.required ? "Required" : "Not set"}</span>
+                  {hint && <HelpTip text={hint} label={f.title} />}
                 </div>
-                {hint && <p className="mt-1 text-[13px] text-muted-foreground">{hint}</p>}
                 {error && (
                   <p className="mt-1 text-[13px] text-destructive" role="alert">
                     {error}
@@ -76,8 +77,12 @@ export function SchemaFields({ fields, values, onChange, errors = {}, path = "",
           }
           return (
             <fieldset key={f.key} className="m-0 flex min-w-0 flex-col gap-3 rounded-xl border p-3" data-testid={`schema-${full}`}>
-              <legend className="px-1 font-semibold">{f.title}</legend>
-              {hint && <p className="mt-1 text-[13px] text-muted-foreground">{hint}</p>}
+              <legend className="px-1 font-semibold">
+                <span className="flex items-center gap-1">
+                  {f.title}
+                  {hint && <HelpTip text={hint} label={f.title} />}
+                </span>
+              </legend>
               {error && (
                 <p className="mt-1 text-[13px] text-destructive" role="alert">
                   {error}
@@ -260,16 +265,17 @@ export function JsonEditor({ label, value, onChange, onProblem, error, hint }: {
   const shown = problem ?? error;
   return (
     <div className="flex min-w-0 flex-col gap-1.5">
-      <Label htmlFor={id} className="font-semibold">
-        {label}
-      </Label>
-      <Textarea id={id} className="min-h-24 font-mono text-[13px]" spellCheck={false} value={text} aria-invalid={!!shown} onChange={(e) => update(e.target.value)} />
-      {shown ? (
-        <p className="mt-1 text-[13px] text-destructive" role="alert">
+      <div className="flex items-center gap-1">
+        <Label htmlFor={id} className="font-semibold">
+          {label}
+        </Label>
+        {hint && <HelpTip text={hint} id={`${id}-h`} label={label} />}
+      </div>
+      <Textarea id={id} className="min-h-24 font-mono text-[13px]" spellCheck={false} value={text} aria-invalid={!!shown} aria-describedby={[shown && `${id}-m`, hint && `${id}-h`].filter(Boolean).join(" ") || undefined} onChange={(e) => update(e.target.value)} />
+      {shown && (
+        <p id={`${id}-m`} className="mt-1 text-[13px] text-destructive" role="alert">
           {shown}
         </p>
-      ) : (
-        hint && <p className="mt-1 text-[13px] text-muted-foreground">{hint}</p>
       )}
     </div>
   );

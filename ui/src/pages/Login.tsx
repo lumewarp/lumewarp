@@ -65,15 +65,15 @@ export function Login() {
             Lumewarp
           </div>
           <h1 className="text-xl font-semibold">Sign in</h1>
-          <p className="text-sm text-muted-foreground">
-            {session.isPending
-              ? "Checking sign-in options…"
-              : session.data?.oidc_enabled
-                ? "Sign in with your identity provider."
+          {!session.data?.oidc_enabled && (
+            <p className="text-sm text-muted-foreground">
+              {session.isPending
+                ? "Checking sign-in options…"
                 : session.data
                   ? "Single sign-on is not configured."
                   : "Sign-in options are unavailable."}
-          </p>
+            </p>
+          )}
           {ssoError && (
             <Alert variant="destructive">
               <AlertDescription>{ssoError}</AlertDescription>
@@ -91,7 +91,6 @@ export function Login() {
           )}
           {session.data?.break_glass_enabled && (
             <>
-              <p className="text-sm text-muted-foreground">Emergency sign-in · break-glass</p>
               <TextField label="Break-glass password" type="password" value={password} onChange={setPassword} error={error} autoFocus />
               <Button type="submit" variant={session.data?.oidc_enabled ? "outline" : "default"} disabled={busy}>
                 {busy ? "Signing in…" : "Sign in"}

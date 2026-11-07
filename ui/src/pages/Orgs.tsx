@@ -14,6 +14,7 @@ import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { DescriptionDetails, DescriptionList, DescriptionTerm } from "../components/ui/description-list";
+import { HelpTip } from "../components/ui/help-tip";
 import { useCan, useMe, useMut, useOrgs, useTeams } from "../hooks";
 
 type OrgValues = PolicyValues & { name: string };
@@ -51,9 +52,7 @@ function OrgEditor({ org, onClose }: { org: Org | "new"; onClose: () => void }) 
         autoFocus
       />
       <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam />
-      <p className="m-0 text-[13px] text-muted-foreground">
-        An org is the root of the quota hierarchy: its models and limits cap every team below it.
-      </p>
+
     </FormDialog>
   );
 }
@@ -120,7 +119,7 @@ function AssignAdminDialog({ org, onClose }: { org: Org; onClose: () => void }) 
           onChange={(value) => form.set("user_id", value)}
           error={form.errors.user_id}
           options={[{ value: "", label: "Select a user" }, ...options]}
-          hint="Only active users who are not org admins yet are shown. A user must have signed in once."
+          hint="A user must be active and have signed in once before being assigned as an org admin."
         />
       ) : (
         <p className="m-0 text-sm text-muted-foreground">
@@ -144,7 +143,6 @@ export function Orgs() {
     <>
       <PageHeader
         title="Orgs"
-        description="The root of the tenancy and quota hierarchy. An org owns teams, caps their models, limits and budget, and has its own admins."
         actions={
           <CreateButton can={perms.canManageOrg} onClick={() => setEditing("new")}>
             New org
@@ -271,7 +269,7 @@ export function OrgDetail() {
     <>
       <PageHeader
         title={data.name}
-        description="Org policy caps every team below it. Org admins create and archive teams here; an installation admin sets the org policy and its admins."
+        hint="Org policy caps every team below it and can only be changed by an installation admin."
         actions={
           <>
             <Button variant="outline" asChild>
@@ -296,12 +294,7 @@ export function OrgDetail() {
           <DescriptionTerm>Created</DescriptionTerm>
           <DescriptionDetails>{fmtDate(data.created_at)}</DescriptionDetails>
         </DescriptionList>
-        {!perms.canManageOrg && (
-          <p className="m-0 text-[13px] text-muted-foreground">
-            The org policy is read-only for an org admin. An installation admin can change its models, limits and
-            budget.
-          </p>
-        )}
+        {!perms.canManageOrg && <p className="m-0 text-[13px] text-muted-foreground">The org policy is read-only for an org admin; an installation admin changes it.</p>}
       </Card>
 
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -393,10 +386,10 @@ export function OrgDetail() {
       )}
 
       <div className="mt-6 mb-3">
-        <h2 className="m-0">Usage this month</h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          The current UTC month, by team. Archived teams are included so their history stays attributable.
-        </p>
+        <h2 className="m-0 flex items-center gap-1">
+          Usage this month
+          <HelpTip label="Usage this month" text="Usage follows the UTC month and includes archived teams." />
+        </h2>
       </div>
       <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
         <Metric label="Requests" value={(usage.data?.requests ?? 0).toLocaleString()} />

@@ -3,7 +3,7 @@ import { useCallback, useMemo, useState } from "react";
 import { api, type Model, type Router, type Strategy } from "../api";
 import { Badge, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
-import { CheckField, Field, FormDialog, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
+import { CheckField, Field, FormDialog, NumberField, required, SelectField, SwitchField, TextField, useForm } from "../components/Form";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { JsonEditor, NumberInput, SchemaFields } from "../components/SchemaForm";
 import { SearchBox } from "../components/Search";
@@ -11,6 +11,7 @@ import { DataTable } from "../components/Table";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Checkbox } from "../components/ui/checkbox";
+import { HelpTip } from "../components/ui/help-tip";
 import { Combobox, ComboboxField } from "../components/ui/combobox-field";
 import { Label } from "../components/ui/label";
 import { useAliases, useCan, useModels, useMut, useNames, useRouters, useStrategies } from "../hooks";
@@ -335,7 +336,7 @@ export function Routers() {
     splits: (v) => splitsError(v),
     retry_statuses: (v, all) => (all.retry_enabled && parseStatuses(v) === undefined ? "Comma-separated HTTP statuses in 400–599" : undefined),
     retry_max_attempts: (v, all) => (all.retry_enabled && v !== null && (v < 1 || v > 5) ? "Between 1 and 5" : undefined),
-    sticky_header: (v, all) => (all.splits.length && all.sticky === "header" && !HEADER_NAME.test(v.trim()) ? "A header name such as x-session-id" : undefined),
+    sticky_header: (v, all) => (all.splits.length && all.sticky === "header" && !HEADER_NAME.test(v.trim()) ? "Enter a header name" : undefined),
     force: (v, all) => ((strategyByName.get(all.strategy)?.missing_gateways.length ?? 0) > 0 && !v ? "Tick “Save anyway” to save while those gateways lack this strategy" : undefined),
   });
   const v = form.values;
@@ -412,7 +413,7 @@ export function Routers() {
 
   return (
     <>
-      <PageHeader title="Routers" description="A public name that spreads requests over several models, with a strategy, optional retries, fallbacks and traffic splits." actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => open("new")}>New router</CreateButton>} />
+      <PageHeader title="Routers" actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => open("new")}>New router</CreateButton>} />
       <SearchBox value={search} onChange={setSearch} label="Search routers" placeholder="Name or upstream model" />
       <DataTable
         rows={rows}
@@ -505,7 +506,7 @@ export function Routers() {
       <StrategiesTable strategies={strategies.data} loading={strategies.isPending} error={strategies.error} onRetry={() => void strategies.refetch()} />
 
       <FormDialog variant="wide-drawer" open={!!editing} title={editing === "new" ? "New router" : "Edit router"} submitLabel={editing === "new" ? "Create" : "Save"} onClose={() => setEditing(null)} onSubmit={submit}>
-        <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus hint="The `model` value clients send. Must be unique across models, aliases and routers." />
+        <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus hint="Must be unique across models, aliases and routers." />
         <ComboboxField label="Strategy" value={v.strategy} onChange={changeStrategy} options={strategyOptions} error={form.errors.strategy} hint={shape.desc ? strategyDescription(shape.desc) || undefined : undefined} />
 
         {missing.length > 0 && (
@@ -540,7 +541,7 @@ export function Routers() {
 
         <fieldset className="m-0 flex min-w-0 flex-col gap-3 rounded-xl border p-3">
           <legend className="px-1 font-semibold">Retries</legend>
-          <CheckField label="Retry failed attempts" checked={v.retry_enabled} onChange={(x) => form.set("retry_enabled", x)} hint="Only before any response byte reached the client: connect errors, timeouts and the statuses below. Streams are not retried once the upstream answered." />
+          <SwitchField label="Retry failed attempts" checked={v.retry_enabled} onChange={(x) => form.set("retry_enabled", x)} hint="Only before any response byte reached the client; streams are not retried once the upstream answered." />
           {v.retry_enabled && (
             <>
               <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
@@ -552,7 +553,7 @@ export function Routers() {
           )}
         </fieldset>
 
-        <Field label="Fallback model (optional)" error={form.errors.fallback_model_ids} hint="Tried in order once this router's models failed, within this router's attempt budget (enable retries with at least 2 attempts). Clients still see this router's name.">
+        <Field label="Fallback model (optional)" error={form.errors.fallback_model_ids} hint="Tried in order once this router's models failed, within its attempt budget (needs retries with at least 2 attempts).">
           {(p) => (
             <div className="flex flex-col gap-1.5">
               {v.fallback_model_ids.map((id, i) => (
@@ -586,8 +587,12 @@ export function Routers() {
         </Field>
 
         <fieldset className="m-0 flex min-w-0 flex-col gap-3 rounded-xl border p-3">
-          <legend className="px-1 font-semibold">Traffic split</legend>
-          <p className="mt-1 text-[13px] text-muted-foreground">Send a share of requests to each group of models (canary). With a split on, models are chosen under each split. A retry stays in the chosen split first, then tries the others.</p>
+          <legend className="px-1 font-semibold">
+            <span className="flex items-center gap-1">
+              Traffic split
+              <HelpTip label="Traffic split" text="With a split, models are chosen under each split; a retry stays in the chosen split first, then tries the others." />
+            </span>
+          </legend>
           {form.errors.splits && (
             <p className="mt-1 text-[13px] text-destructive" role="alert">
               {form.errors.splits}
@@ -638,8 +643,13 @@ function StrategySettings({ shape, strategy, params, onChange, errors, error, on
     if (!shape.params.fields.length && !extra.length) return error ? <p className="mt-1 text-[13px] text-destructive" role="alert">{error}</p> : null;
     return (
       <fieldset className="m-0 flex min-w-0 flex-col gap-3 rounded-xl border p-3" data-testid="strategy-settings">
-        <legend className="px-1 font-semibold">{shape.params.title || "Strategy settings"}</legend>
-        {shape.params.description && <p className="mt-1 text-[13px] text-muted-foreground">{shape.params.description}</p>}
+        <legend className="px-1 font-semibold">
+          <span className="flex items-center gap-1">
+            {shape.params.title || "Strategy settings"}
+            {shape.params.description && <HelpTip label={shape.params.title || "Strategy settings"} text={shape.params.description} />}
+          </span>
+        </legend>
+
         {error && (
           <p className="mt-1 text-[13px] text-destructive" role="alert">
             {error}

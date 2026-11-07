@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { api, type Upstream, type UpstreamTest } from "../api";
 import { Badge } from "../components/Bits";
 import { EditPage, Section } from "../components/EditPage";
-import { CheckField, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
+import { NumberField, required, SelectField, SwitchField, TextField, useForm } from "../components/Form";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { DescriptionDetails, DescriptionList, DescriptionTerm } from "../components/ui/description-list";
@@ -14,7 +14,7 @@ import { PageLoading } from "./Access";
 import { HealthBadge, KINDS } from "./Upstreams";
 
 const USAGE_MODES = [
-  { value: "include_usage", label: "Request usage in the stream (stream_options.include_usage)" },
+  { value: "include_usage", label: "Request usage in the stream" },
   { value: "passthrough", label: "Pass through unchanged" },
 ];
 
@@ -178,7 +178,6 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
   return (
     <EditPage
       title={existing ? existing.name : "New upstream"}
-      description="An OpenAI-compatible endpoint: vLLM, OpenAI or anything that speaks the API."
       back="/upstreams"
       backLabel="Upstreams"
       dirty={dirty}
@@ -201,7 +200,7 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
         </div>
       </Section>
 
-      <Section title="Credential" description="Sent to the upstream as a bearer token.">
+      <Section title="Credential" hint="Sent to the upstream as a bearer token.">
         <SelectField label="Source" value={v.key_source} onChange={(x) => form.set("key_source", x as KeySource)} options={KEY_SOURCES} />
         {v.key_source === "stored" && (
           <TextField
@@ -219,11 +218,11 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
         )}
       </Section>
 
-      <Section title="Health check" description="Unhealthy upstreams get no traffic while another candidate is available.">
-        <CheckField label="Probe periodically" checked={v.health_enabled} onChange={(x) => form.set("health_enabled", x)} />
+      <Section title="Health check">
+        <SwitchField label="Probe periodically" checked={v.health_enabled} onChange={(x) => form.set("health_enabled", x)} hint="While it fails, the upstream gets no traffic if another candidate is available." />
         {v.health_enabled && (
           <>
-            <TextField label="Health URL" type="url" value={v.health_url} onChange={(x) => form.set("health_url", x)} error={form.errors.health_url} placeholder={defaultHealthUrl(v.base_url)} hint="Empty uses the default shown. 2xx means healthy." />
+            <TextField label="Health URL" type="url" value={v.health_url} onChange={(x) => form.set("health_url", x)} error={form.errors.health_url} placeholder={defaultHealthUrl(v.base_url)} hint="Empty uses the default shown; a 2xx answer counts as healthy." />
             <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
               <NumberField label="Interval (ms)" value={v.health_interval_ms} onChange={(x) => form.set("health_interval_ms", x)} error={form.errors.health_interval_ms} min={1000} placeholder="10000" />
               <NumberField label="Timeout (ms)" value={v.health_timeout_ms} onChange={(x) => form.set("health_timeout_ms", x)} error={form.errors.health_timeout_ms} min={1} placeholder="2000" />
@@ -235,8 +234,8 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
         <TestNow upstream={existing} values={v} />
       </Section>
 
-      <Section title="Circuit breaker" description="Stops sending to a model after repeated failures, then lets one request through to retry.">
-        <CheckField label="Enabled" checked={v.breaker_enabled} onChange={(x) => form.set("breaker_enabled", x)} />
+      <Section title="Circuit breaker">
+        <SwitchField label="Enabled" checked={v.breaker_enabled} onChange={(x) => form.set("breaker_enabled", x)} hint="Stops sending to a model after repeated failures, then lets one request through to retry." />
         {v.breaker_enabled && (
           <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
             <NumberField label="Consecutive failures" value={v.breaker_failures} onChange={(x) => form.set("breaker_failures", x)} error={form.errors.breaker_failures} min={1} placeholder="5" />
@@ -275,8 +274,8 @@ function TestNow({ upstream, values }: { upstream?: Upstream; values: Values }) 
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-dashed p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-sm text-muted-foreground">{urlProblem ?? "Check these settings now, from the control plane. Nothing is saved."}</span>
-        <Button type="button" variant="outline" size="sm" disabled={!!urlProblem || run.isPending} onClick={() => run.mutate()}>
+        {urlProblem && <span className="text-sm text-muted-foreground">{urlProblem}</span>}
+        <Button type="button" variant="outline" size="sm" className="ml-auto" disabled={!!urlProblem || run.isPending} onClick={() => run.mutate()}>
           {run.isPending ? "Testing…" : "Test now"}
         </Button>
       </div>

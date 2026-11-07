@@ -31,7 +31,6 @@ export function Gateways() {
     <>
       <PageHeader
         title="Gateways"
-        description="Connected data-plane instances and the tokens they authenticate with."
         actions={
           <CreateButton
             onClick={() => {
@@ -85,7 +84,7 @@ export function Gateways() {
         ]}
       />
       <FormDialog open={creating} title="New gateway token" submitLabel="Create token" onClose={() => setCreating(false)} onSubmit={() => (form.validate() ? form.run(() => create.mutateAsync(form.values)) : false)}>
-        <TextField label="Gateway id" value={form.values.gateway_id} onChange={(v) => form.set("gateway_id", v)} error={form.errors.gateway_id} autoFocus hint="Identifier the gateway reports, e.g. gw-eu-1." />
+        <TextField label="Gateway id" value={form.values.gateway_id} onChange={(v) => form.set("gateway_id", v)} error={form.errors.gateway_id} autoFocus hint="The identifier the gateway reports." />
         <TextField label="Label" value={form.values.name} onChange={(v) => form.set("name", v)} />
       </FormDialog>
       <ConfirmDialog open={!!revoking} title="Revoke gateway token" confirmLabel="Revoke" message="The gateway using this token can no longer connect. It keeps serving its last good config." onConfirm={() => revoke.mutateAsync({ g: revoking!.gateway, t: revoking!.token.id })} onClose={() => setRevoking(null)} />

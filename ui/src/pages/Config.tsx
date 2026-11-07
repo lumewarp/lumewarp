@@ -78,7 +78,7 @@ export function Config() {
   const current = list.data?.reduce((m, v) => Math.max(m, v.version), 0);
   return (
     <>
-      <PageHeader title="Config versions" description="Immutable snapshots pushed to gateways. Rolling back restores routing only; keys, budgets and policies stay current." />
+      <PageHeader title="Config versions" hint="Rolling back restores routing only; keys, budgets and policies stay current." />
       <DataTable
         rows={list.data}
         loading={list.isPending}

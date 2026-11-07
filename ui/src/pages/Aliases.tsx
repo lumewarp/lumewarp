@@ -51,7 +51,7 @@ export function Aliases() {
 
   return (
     <>
-      <PageHeader title="Aliases" description="Another name for a model or a router. Access is granted to the alias itself, not to its target." actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => open("new")}>New alias</CreateButton>} />
+      <PageHeader title="Aliases" hint="Access is granted to the alias itself, not to its target." actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => open("new")}>New alias</CreateButton>} />
       <SearchBox value={search} onChange={setSearch} label="Search aliases" placeholder="Name, target or upstream model" />
       <DataTable
         rows={rows}
@@ -96,7 +96,7 @@ export function Aliases() {
         ]}
       />
       <FormDialog open={!!editing} title={editing === "new" ? "New alias" : "Edit alias"} submitLabel={editing === "new" ? "Create" : "Save"} onClose={() => setEditing(null)} onSubmit={submit}>
-        <TextField label="Name" value={form.values.name} onChange={(v) => form.set("name", v)} error={form.errors.name} autoFocus hint="The `model` value clients send. Must be unique across models, aliases and routers." />
+        <TextField label="Name" value={form.values.name} onChange={(v) => form.set("name", v)} error={form.errors.name} autoFocus hint="Must be unique across models, aliases and routers." />
         <ComboboxField label="Points to" value={form.values.target} onChange={(v) => form.set("target", v)} error={form.errors.target} options={targets} placeholder="Select a model or router…" emptyText="No model or router matches" hint="An alias cannot point at another alias." />
       </FormDialog>
       <ConfirmDialog open={!!deleting} title="Delete alias" message={`Delete alias “${deleting?.name}”? Clients calling this name will get an error, and access granted to it is removed.`} onConfirm={() => remove.mutateAsync(deleting!.id)} onClose={() => setDeleting(null)} />

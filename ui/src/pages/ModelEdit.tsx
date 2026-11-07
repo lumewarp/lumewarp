@@ -1,15 +1,17 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
+import { PlusIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 
 import { api, type Model, type ModelTest } from "../api";
 import { Badge, fmtTokens, nanoToUsd, usdToNano } from "../components/Bits";
 import { EditPage, Section } from "../components/EditPage";
-import { CheckField, Field, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
+import { CheckField, Field, NumberField, required, SelectField, SwitchField, TextField, useForm } from "../components/Form";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { DescriptionDetails, DescriptionList, DescriptionTerm } from "../components/ui/description-list";
+import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { useAliases, useModels, useMut, useNames, useRouters, useUpstreams } from "../hooks";
 import { usedBy } from "../lib/catalog";
@@ -17,24 +19,34 @@ import { PageLoading } from "./Access";
 import { ProbeRow } from "./UpstreamEdit";
 import { HealthBadge } from "./Upstreams";
 
-const LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh"] as const;
-type Level = (typeof LEVELS)[number];
 type Mode = Model["reasoning"]["mode"];
 /** Keys the gateway owns; the API refuses them in a default body or a reasoning fragment. */
 const RESERVED = ["model", "stream", "stream_options"];
+/** Level names the API accepts. */
+const LEVEL_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/;
 
 const MODES: { value: Mode; label: string }[] = [
-  { value: "passthrough", label: "Pass through" },
-  { value: "mapped", label: "Map each level to request fields" },
-  { value: "strip", label: "Remove (model has no reasoning control)" },
+  { value: "mapped", label: "Map levels to request fields" },
+  { value: "strip", label: "Remove reasoning_effort" },
+  { value: "passthrough", label: "Pass through with a default level" },
 ];
 
+/** One mapped level; `key` only identifies the row in the list. */
+interface LevelRow {
+  key: number;
+  name: string;
+  json: string;
+}
+let rowSeq = 1000;
+const newRow = (name = "", json = ""): LevelRow => ({ key: rowSeq++, name, json });
+
 const thinking = (key: string, on: boolean) => JSON.stringify({ chat_template_kwargs: { [key]: on } });
-const PRESETS: { label: string; mode: Mode; fragments?: Partial<Record<Level, string>>; level?: Level | "" }[] = [
-  { label: "Qwen3 (enable_thinking)", mode: "mapped", fragments: { none: thinking("enable_thinking", false), low: thinking("enable_thinking", true), medium: thinking("enable_thinking", true), high: thinking("enable_thinking", true) } },
-  { label: "DeepSeek (thinking)", mode: "mapped", fragments: { none: thinking("thinking", false), low: thinking("thinking", true), medium: thinking("thinking", true), high: thinking("thinking", true) } },
-  { label: "Native (gpt-oss, OpenAI)", mode: "passthrough" },
-  { label: "None (strip)", mode: "strip" },
+const rowsOf = (entries: [string, string][]): LevelRow[] => entries.map(([name, json], i) => ({ key: i, name, json }));
+const PRESETS: { label: string; mode: Mode; rows?: [string, string][]; level?: string }[] = [
+  { label: "Qwen3 (enable_thinking)", mode: "mapped", rows: [["none", thinking("enable_thinking", false)], ["low", thinking("enable_thinking", true)], ["medium", thinking("enable_thinking", true)], ["high", thinking("enable_thinking", true)]] },
+  { label: "DeepSeek (thinking)", mode: "mapped", rows: [["none", thinking("thinking", false)], ["low", thinking("thinking", true)], ["medium", thinking("thinking", true)], ["high", thinking("thinking", true)]] },
+  { label: "OpenAI standard levels", mode: "passthrough", level: "medium" },
+  { label: "Remove (no reasoning control)", mode: "strip" },
 ];
 
 interface Values {
@@ -47,17 +59,16 @@ interface Values {
   price_in: number | null;
   price_out: number | null;
   default_body: string;
+  reasoning_on: boolean;
   reasoning_mode: Mode;
-  fragments: Record<Level, string>;
-  reasoning_default: Level | "";
+  levels: LevelRow[];
+  reasoning_default: string;
   check_enabled: boolean;
   check_interval_ms: number | null;
   check_timeout_ms: number | null;
   check_unhealthy: number | null;
   check_healthy: number | null;
 }
-
-const noFragments = () => Object.fromEntries(LEVELS.map((l) => [l, ""])) as Record<Level, string>;
 
 const blank: Values = {
   name: "",
@@ -69,8 +80,9 @@ const blank: Values = {
   price_in: null,
   price_out: null,
   default_body: "",
-  reasoning_mode: "passthrough",
-  fragments: noFragments(),
+  reasoning_on: false,
+  reasoning_mode: "mapped",
+  levels: [],
   reasoning_default: "",
   check_enabled: false,
   check_interval_ms: 60000,
@@ -89,9 +101,11 @@ const fromModel = (m: Model): Values => ({
   price_in: nanoToUsd(m.price_input_nano_usd_per_mtok),
   price_out: nanoToUsd(m.price_output_nano_usd_per_mtok),
   default_body: m.default_body ? JSON.stringify(m.default_body, null, 2) : "",
-  reasoning_mode: m.reasoning.mode,
-  fragments: { ...noFragments(), ...Object.fromEntries(Object.entries(m.reasoning.fragments ?? {}).map(([k, v]) => [k, JSON.stringify(v)])) },
-  reasoning_default: (m.reasoning.default_level as Level | null) ?? "",
+  // Pass through without a default level changes nothing, which is the same as no handling.
+  reasoning_on: !(m.reasoning.mode === "passthrough" && !m.reasoning.default_level),
+  reasoning_mode: m.reasoning.mode === "passthrough" && !m.reasoning.default_level ? blank.reasoning_mode : m.reasoning.mode,
+  levels: rowsOf(Object.entries(m.reasoning.fragments ?? {}).map(([k, v]) => [k, JSON.stringify(v)])),
+  reasoning_default: m.reasoning.default_level ?? "",
   check_enabled: !!m.chat_check,
   check_interval_ms: m.chat_check?.interval_ms ?? blank.check_interval_ms,
   check_timeout_ms: m.chat_check?.timeout_ms ?? blank.check_timeout_ms,
@@ -114,12 +128,28 @@ function jsonObjectProblem(text: string, reserved: string[] = RESERVED): string 
 }
 
 const parseObject = (text: string) => (text.trim() ? (JSON.parse(text) as Record<string, unknown>) : null);
-const mappedLevels = (v: Values) => LEVELS.filter((l) => v.fragments[l].trim());
 
+/** A level row's own problem, or undefined. `others` are the other rows' names. */
+function rowProblem(r: LevelRow, rows: LevelRow[]): { name?: string; json?: string } {
+  const name = r.name.trim();
+  const out: { name?: string; json?: string } = {};
+  if (!LEVEL_NAME.test(name)) out.name = "Letters, digits, . _ - (max 32)";
+  else if (rows.some((o) => o !== r && o.name.trim() === name)) out.name = "Already used";
+  out.json = r.json.trim() ? jsonObjectProblem(r.json) : "Fields required";
+  return out;
+}
+const levelsProblem = (rows: LevelRow[]) => {
+  if (!rows.length) return "Add at least one level";
+  if (rows.length > 16) return "At most 16 levels";
+  const bad = rows.map((r) => rowProblem(r, rows)).find((p) => p.name || p.json);
+  return bad ? (bad.name ?? bad.json) : undefined;
+};
+
+/** The API value; Off sends null so the client's reasoning_effort passes through untouched. */
 function reasoning(v: Values) {
-  if (v.reasoning_mode === "passthrough" && !v.reasoning_default) return null;
-  const fragments = v.reasoning_mode === "mapped" ? Object.fromEntries(mappedLevels(v).map((l) => [l, parseObject(v.fragments[l])!])) : null;
-  return { mode: v.reasoning_mode, fragments, default_level: v.reasoning_mode === "strip" ? null : v.reasoning_default || null };
+  if (!v.reasoning_on) return null;
+  const fragments = v.reasoning_mode === "mapped" ? Object.fromEntries(v.levels.map((r) => [r.name.trim(), parseObject(r.json)!])) : null;
+  return { mode: v.reasoning_mode, fragments, default_level: v.reasoning_mode === "strip" ? null : v.reasoning_default.trim() || null };
 }
 
 /** Prices are entered as USD per 1M tokens and stored as integer nano-USD per 1M tokens. */
@@ -132,6 +162,7 @@ const body = (v: Values) => ({
   max_input_tokens: v.max_input_tokens,
   max_output_tokens: v.max_output_tokens,
   default_body: parseObject(v.default_body),
+  // Level names are free strings; schema.d.ts may still list the old literals.
   reasoning: reasoning(v),
   chat_check: v.check_enabled
     ? { interval_ms: v.check_interval_ms ?? 0, timeout_ms: v.check_timeout_ms ?? 0, unhealthy_threshold: v.check_unhealthy, healthy_threshold: v.check_healthy }
@@ -144,7 +175,7 @@ const ALIAS = {
   price_output_nano_usd_per_mtok: "price_out",
   reasoning: "reasoning_mode",
   mode: "reasoning_mode",
-  fragments: "reasoning_mode",
+  fragments: "levels",
   default_level: "reasoning_default",
   interval_ms: "check_interval_ms",
   timeout_ms: "check_timeout_ms",
@@ -178,9 +209,12 @@ function ModelForm({ existing }: { existing?: Model }) {
     upstream_model: required("Upstream model"),
     // reasoning_effort has its own default below.
     default_body: (x) => jsonObjectProblem(x, [...RESERVED, "reasoning_effort"]),
-    fragments: (x, all) => (all.reasoning_mode === "mapped" ? LEVELS.map((l) => jsonObjectProblem(x[l])).find(Boolean) : undefined),
-    reasoning_mode: (x, all) => (x === "mapped" && !mappedLevels(all).length ? "Map at least one level" : undefined),
-    reasoning_default: (x, all) => (x && all.reasoning_mode === "mapped" && !all.fragments[x].trim() ? "This level has no mapping" : undefined),
+    levels: (x, all) => (all.reasoning_on && all.reasoning_mode === "mapped" ? levelsProblem(x) : undefined),
+    reasoning_default: (x, all) => {
+      if (!all.reasoning_on || all.reasoning_mode === "strip") return undefined;
+      if (all.reasoning_mode === "mapped") return x && !all.levels.some((r) => r.name.trim() === x) ? "This level is not in the list" : undefined;
+      return LEVEL_NAME.test(x.trim()) ? undefined : "Letters, digits, . _ - (max 32)";
+    },
     check_interval_ms: (x, all) => (all.check_enabled && (x ?? 0) < 1000 ? "At least 1000 ms" : undefined),
     check_timeout_ms: (x, all) => (all.check_enabled && ((x ?? 0) < 1 || (x ?? 0) >= (all.check_interval_ms ?? 0)) ? "Must be above 0 and below the interval" : undefined),
   });
@@ -206,22 +240,23 @@ function ModelForm({ existing }: { existing?: Model }) {
     ...(typed && !listed.some((m) => m.id === typed) ? [{ value: typed, label: `Use “${typed}” (custom)` }] : []),
     ...listed.map((m) => ({ value: m.id, label: m.id })),
   ];
-  const modelHint = offered.error
+  const modelNote = offered.error
     ? `Could not list the upstream's models (${offered.error.message}); type the name.`
     : offered.isFetching
       ? "Loading the upstream's models…"
-      : "Pick from the upstream's list, or type any name it accepts.";
+      : undefined;
   const applyPreset = (p: (typeof PRESETS)[number]) => {
     form.set("reasoning_mode", p.mode);
-    form.set("fragments", { ...noFragments(), ...p.fragments });
+    form.set("levels", (p.rows ?? []).map(([name, json]) => newRow(name, json)));
     form.set("reasoning_default", p.level ?? "");
   };
-  const defaultLevels = v.reasoning_mode === "mapped" ? mappedLevels(v) : LEVELS;
+  const setRow = (key: number, patch: Partial<LevelRow>) => form.set("levels", v.levels.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+  const levelNames = v.levels.map((r) => r.name.trim()).filter((n, i, all) => LEVEL_NAME.test(n) && all.indexOf(n) === i);
 
   return (
     <EditPage
       title={existing ? existing.name : "New model"}
-      description={v.upstream_id && v.upstream_model.trim() ? `${upstreamName(v.upstream_id)}/${v.upstream_model.trim()}` : "A public name for one model on one upstream."}
+      description={v.upstream_id && v.upstream_model.trim() ? `${upstreamName(v.upstream_id)}/${v.upstream_model.trim()}` : undefined}
       back="/models"
       backLabel="Models"
       dirty={dirty}
@@ -235,7 +270,7 @@ function ModelForm({ existing }: { existing?: Model }) {
       }}
     >
       <Section title="Model">
-        <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus={!existing} hint="What clients send as `model`." />
+        <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus={!existing} hint="What clients send as model." />
         {renamed && <CheckField label="Keep old name as alias" checked={v.keep_old_name_as_alias} onChange={(c) => form.set("keep_old_name_as_alias", c)} />}
         <ComboboxField label="Upstream" value={v.upstream_id} onChange={(x) => form.set("upstream_id", x)} error={form.errors.upstream_id} options={(upstreams.data ?? []).map((u) => ({ value: u.id, label: u.name }))} />
         <ComboboxField
@@ -246,77 +281,104 @@ function ModelForm({ existing }: { existing?: Model }) {
           error={form.errors.upstream_model}
           placeholder="meta-llama/Llama-3.1-8B-Instruct"
           options={modelOptions}
-          hint={modelHint}
+          note={modelNote}
         />
       </Section>
 
       <Section title="Limits and pricing">
-        <div className="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-3">
-          <NumberField label="Input length (tokens)" value={v.max_input_tokens} onChange={(x) => form.set("max_input_tokens", x)} error={form.errors.max_input_tokens} min={1} placeholder="unknown" hint={v.max_input_tokens ? `${fmtTokens(v.max_input_tokens)} tokens.` : undefined} />
-          <NumberField label="Max output (tokens)" value={v.max_output_tokens} onChange={(x) => form.set("max_output_tokens", x)} error={form.errors.max_output_tokens} min={1} hint={`${v.max_output_tokens ? `${fmtTokens(v.max_output_tokens)} tokens. ` : ""}Larger max_tokens gets a 400.`} />
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <NumberField label="Input length (tokens)" value={v.max_input_tokens} onChange={(x) => form.set("max_input_tokens", x)} error={form.errors.max_input_tokens} min={1} placeholder="unknown" note={v.max_input_tokens ? `${fmtTokens(v.max_input_tokens)} tokens.` : undefined} />
+          <NumberField label="Max output (tokens)" value={v.max_output_tokens} onChange={(x) => form.set("max_output_tokens", x)} error={form.errors.max_output_tokens} min={1} hint="A larger max_tokens gets a 400." note={v.max_output_tokens ? `${fmtTokens(v.max_output_tokens)} tokens.` : undefined} />
           <NumberField label="Input price (USD / 1M tokens)" value={v.price_in} onChange={(x) => form.set("price_in", x)} error={form.errors.price_in} step="any" placeholder="unpriced" />
           <NumberField label="Output price (USD / 1M tokens)" value={v.price_out} onChange={(x) => form.set("price_out", x)} error={form.errors.price_out} step="any" placeholder="unpriced" />
         </div>
       </Section>
 
-      <Section title="Default request body" description="Merged into every request; fields the client sends win.">
+      <Section title="Default request body" hint="Merged into every request; fields the client sends win.">
         <JsonField label="JSON object" value={v.default_body} onChange={(x) => form.set("default_body", x)} error={form.errors.default_body} placeholder={'{\n  "temperature": 0.6,\n  "top_k": 20\n}'} rows={5} />
       </Section>
 
-      <Section title="Reasoning effort" description="How the client's reasoning_effort reaches the upstream.">
-        <div className="flex flex-wrap gap-2">
-          {PRESETS.map((p) => (
-            <Button key={p.label} type="button" variant="outline" size="sm" onClick={() => applyPreset(p)}>
-              {p.label}
-            </Button>
-          ))}
-        </div>
-        <SelectField label="Mode" value={v.reasoning_mode} onChange={(x) => form.set("reasoning_mode", x as Mode)} options={MODES} error={form.errors.reasoning_mode} />
-        {v.reasoning_mode === "mapped" && (
-          <div className="flex flex-col gap-2" data-testid="reasoning-levels">
-            {form.errors.fragments && <p className="text-sm text-destructive">{form.errors.fragments}</p>}
-            {LEVELS.map((level) => (
-              <div key={level} className="grid grid-cols-[6rem_1fr] items-start gap-3">
-                <Badge tone={v.fragments[level].trim() ? "info" : "muted"}>{level}</Badge>
-                <JsonField
-                  label={`Fields for ${level}`}
-                  hideLabel
-                  value={v.fragments[level]}
-                  onChange={(x) => form.set("fragments", { ...v.fragments, [level]: x })}
-                  error={v.fragments[level].trim() ? jsonObjectProblem(v.fragments[level]) : undefined}
-                  placeholder="not accepted"
-                  rows={1}
-                />
+      <Section title="Reasoning effort">
+        <SwitchField
+          label="Handle reasoning effort"
+          checked={v.reasoning_on}
+          onChange={(x) => form.set("reasoning_on", x)}
+          hint="Off forwards the client's reasoning_effort untouched."
+        />
+        {v.reasoning_on && (
+          <>
+            <div className="flex flex-wrap gap-2">
+              {PRESETS.map((p) => (
+                <Button key={p.label} type="button" variant="outline" size="sm" onClick={() => applyPreset(p)}>
+                  {p.label}
+                </Button>
+              ))}
+            </div>
+            <SelectField label="Mode" value={v.reasoning_mode} onChange={(x) => form.set("reasoning_mode", x as Mode)} options={MODES} error={form.errors.reasoning_mode} />
+            {v.reasoning_mode === "mapped" && (
+              <div className="flex flex-col gap-2" data-testid="reasoning-levels">
+                {form.errors.levels && <p className="text-sm text-destructive">{form.errors.levels}</p>}
+                {v.levels.map((r, i) => {
+                  const problem = rowProblem(r, v.levels);
+                  return (
+                    <div key={r.key} className="grid grid-cols-[1fr_auto] items-start gap-2 sm:grid-cols-[10rem_1fr_auto]">
+                      <div className="flex min-w-0 flex-col gap-1">
+                        <Input aria-label={`Level ${i + 1} name`} aria-invalid={!!r.name.trim() && !!problem.name} value={r.name} onChange={(e) => setRow(r.key, { name: e.target.value })} placeholder="level name" spellCheck={false} />
+                        {r.name.trim() && problem.name && <p className="text-sm text-destructive">{problem.name}</p>}
+                      </div>
+                      <Button type="button" variant="ghost" size="icon" aria-label={`Remove level ${i + 1}`} className="sm:order-3" onClick={() => form.set("levels", v.levels.filter((o) => o.key !== r.key))}>
+                        <Trash2Icon aria-hidden="true" />
+                      </Button>
+                      <div className="col-span-2 sm:order-2 sm:col-span-1">
+                        <JsonField
+                          label={`Level ${i + 1} fields`}
+                          hideLabel
+                          value={r.json}
+                          onChange={(x) => setRow(r.key, { json: x })}
+                          error={r.json.trim() ? problem.json : undefined}
+                          placeholder='{"chat_template_kwargs": {"enable_thinking": true}}'
+                          rows={1}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+                <div>
+                  <Button type="button" variant="outline" size="sm" onClick={() => form.set("levels", [...v.levels, newRow()])} disabled={v.levels.length >= 16}>
+                    <PlusIcon aria-hidden="true" />
+                    Add level
+                  </Button>
+                </div>
               </div>
-            ))}
-          </div>
-        )}
-        {v.reasoning_mode !== "strip" && (
-          <SelectField
-            label="Default level"
-            value={v.reasoning_default || undefined}
-            onChange={(x) => form.set("reasoning_default", x as Level)}
-            unset={{ label: "Not set", onSelect: () => form.set("reasoning_default", "") }}
-            options={defaultLevels.map((l) => ({ value: l, label: l }))}
-            error={form.errors.reasoning_default}
-            hint="Used when the client sends no reasoning_effort."
-          />
+            )}
+            {v.reasoning_mode === "mapped" && (
+              <SelectField
+                label="Default level"
+                value={v.reasoning_default || undefined}
+                onChange={(x) => form.set("reasoning_default", x)}
+                unset={{ label: "Not set", onSelect: () => form.set("reasoning_default", "") }}
+                options={levelNames.map((l) => ({ value: l, label: l }))}
+                error={form.errors.reasoning_default}
+                hint="Used when the client sends no reasoning_effort."
+              />
+            )}
+            {v.reasoning_mode === "passthrough" && (
+              <TextField label="Default level" value={v.reasoning_default} onChange={(x) => form.set("reasoning_default", x)} error={form.errors.reasoning_default} placeholder="medium" hint="Used when the client sends no reasoning_effort." />
+            )}
+          </>
         )}
       </Section>
 
-      <Section title="Health check" description="A one-line chat completion (“1 + 1 = ?”) to this model, with its default body.">
+      <Section title="Health check">
         <ChatTestNow values={v} />
-        <CheckField label="Check periodically" checked={v.check_enabled} onChange={(x) => form.set("check_enabled", x)} />
+        <SwitchField label="Check periodically" checked={v.check_enabled} onChange={(x) => form.set("check_enabled", x)} hint="Each gateway sends a short chat completion on this schedule (it uses tokens), and while it fails the model gets no traffic if another candidate is available." />
         {v.check_enabled && (
-          <>
-            <p className="text-sm text-muted-foreground">Each gateway sends it on this schedule. While it fails, the model gets no traffic as long as another candidate (router member or fallback) is available.</p>
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
-              <NumberField label="Interval (ms)" value={v.check_interval_ms} onChange={(x) => form.set("check_interval_ms", x)} error={form.errors.check_interval_ms} min={1000} placeholder="60000" />
-              <NumberField label="Timeout (ms)" value={v.check_timeout_ms} onChange={(x) => form.set("check_timeout_ms", x)} error={form.errors.check_timeout_ms} min={1} placeholder="10000" />
-              <NumberField label="Failures to mark down" value={v.check_unhealthy} onChange={(x) => form.set("check_unhealthy", x)} error={form.errors.check_unhealthy} min={1} placeholder="3" />
-              <NumberField label="Successes to mark up" value={v.check_healthy} onChange={(x) => form.set("check_healthy", x)} error={form.errors.check_healthy} min={1} placeholder="1" />
-            </div>
-          </>
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
+            <NumberField label="Interval (ms)" value={v.check_interval_ms} onChange={(x) => form.set("check_interval_ms", x)} error={form.errors.check_interval_ms} min={1000} placeholder="60000" />
+            <NumberField label="Timeout (ms)" value={v.check_timeout_ms} onChange={(x) => form.set("check_timeout_ms", x)} error={form.errors.check_timeout_ms} min={1} placeholder="10000" />
+            <NumberField label="Failures to mark down" value={v.check_unhealthy} onChange={(x) => form.set("check_unhealthy", x)} error={form.errors.check_unhealthy} min={1} placeholder="3" />
+            <NumberField label="Successes to mark up" value={v.check_healthy} onChange={(x) => form.set("check_healthy", x)} error={form.errors.check_healthy} min={1} placeholder="1" />
+          </div>
         )}
       </Section>
 
@@ -351,8 +413,8 @@ function ChatTestNow({ values }: { values: Values }) {
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-dashed p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-sm text-muted-foreground">{missing ?? "Ask the model now, from the control plane. Nothing is saved."}</span>
-        <Button type="button" variant="outline" size="sm" disabled={!!missing || run.isPending} onClick={() => run.mutate()}>
+        {missing && <span className="text-sm text-muted-foreground">{missing}</span>}
+        <Button type="button" variant="outline" size="sm" className="ml-auto" disabled={!!missing || run.isPending} onClick={() => run.mutate()}>
           {run.isPending ? "Testing…" : "Test now"}
         </Button>
       </div>

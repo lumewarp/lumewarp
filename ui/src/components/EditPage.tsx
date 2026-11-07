@@ -5,7 +5,8 @@ import { useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";
 import { Alert, AlertDescription } from "./ui/alert";
 import { Button } from "./ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
+import { HelpTip } from "./ui/help-tip";
 
 /**
  * A create/edit form on its own page: back link, sections, and a Save bar. Leaving with unsaved changes asks
@@ -15,6 +16,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/
 export function EditPage({
   title,
   description,
+  hint,
   back,
   backLabel,
   dirty,
@@ -24,7 +26,9 @@ export function EditPage({
   children,
 }: {
   title: string;
+  /** Live subtitle (e.g. what the form currently points at); static help goes in `hint`. */
   description?: string;
+  hint?: string;
   back: string;
   backLabel: string;
   dirty: boolean;
@@ -67,7 +71,10 @@ export function EditPage({
       </div>
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
-          <h1>{title}</h1>
+          <div className="flex items-center gap-2">
+            <h1>{title}</h1>
+            {hint && <HelpTip text={hint} label={title} />}
+          </div>
           {description && <p className="mt-1 text-sm text-muted-foreground">{description}</p>}
         </div>
         {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
@@ -106,13 +113,13 @@ export function EditPage({
   );
 }
 
-/** One titled block of fields on an EditPage. */
-export function Section({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
+/** One titled block of fields on an EditPage; `hint` is static help behind a "?" next to the title. */
+export function Section({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
   return (
     <Card className="gap-4">
-      <CardHeader>
+      <CardHeader className="flex items-center gap-1">
         <CardTitle>{title}</CardTitle>
-        {description && <CardDescription>{description}</CardDescription>}
+        {hint && <HelpTip text={hint} label={title} />}
       </CardHeader>
       <CardContent className="flex flex-col gap-3.5">{children}</CardContent>
     </Card>

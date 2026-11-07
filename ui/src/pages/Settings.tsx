@@ -21,7 +21,7 @@ export function Settings() {
   const { theme, cycle } = useTheme();
   return (
     <>
-      <PageHeader title="Settings" description="Your session, access tokens and UI preferences." />
+      <PageHeader title="Settings" />
       <Card className={CARD}>
         <h2>Session</h2>
         <DescriptionList>

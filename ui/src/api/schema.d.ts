@@ -2167,7 +2167,7 @@ export interface components {
             mode: "passthrough" | "strip" | "mapped";
             /**
              * Fragments
-             * @description mapped only: level -> object merged into the request.
+             * @description mapped only: 1–16 levels mapped to request objects. Level names match ^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$.
              */
             fragments?: {
                 [key: string]: {
@@ -2178,7 +2178,7 @@ export interface components {
              * Default Level
              * @description Used when the client sends no reasoning_effort.
              */
-            default_level?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh") | null;
+            default_level?: string | null;
         };
         /** ReasoningOut */
         ReasoningOut: {

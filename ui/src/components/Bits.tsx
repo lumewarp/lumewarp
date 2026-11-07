@@ -3,6 +3,7 @@ import { useState, type ReactNode } from "react";
 import type { Key } from "../api";
 import { Badge as ShadcnBadge } from "./ui/badge";
 import { Button } from "./ui/button";
+import { HelpTip } from "./ui/help-tip";
 
 type Tone = "ok" | "warn" | "danger" | "muted" | "info";
 
@@ -85,12 +86,15 @@ export function SecretOnce({ secret }: { secret: string }) {
   );
 }
 
-export function PageHeader({ title, description, actions }: { title: string; description?: string; actions?: ReactNode }) {
+/** `hint` is static help behind a "?" next to the title. */
+export function PageHeader({ title, hint, actions }: { title: string; hint?: string; actions?: ReactNode }) {
   return (
     <header className="mb-5 flex flex-wrap items-start justify-between gap-4">
       <div className="min-w-0">
-        <h1>{title}</h1>
-        {description && <p className="mt-1 text-sm text-muted-foreground">{description}</p>}
+        <div className="flex items-center gap-2">
+          <h1>{title}</h1>
+          {hint && <HelpTip text={hint} label={title} />}
+        </div>
       </div>
       {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
     </header>

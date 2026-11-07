@@ -60,7 +60,6 @@ export function Teams() {
     <>
       <PageHeader
         title="Teams"
-        description="Teams group members, service accounts, keys, and usage."
         actions={<CreateButton can={perms.canCreateTeam} onClick={() => open("new")}>New team</CreateButton>}
       />
       <DataTable

@@ -45,7 +45,7 @@ export function Upstreams() {
 
   return (
     <>
-      <PageHeader title="Upstreams" description="OpenAI-compatible endpoints (vLLM, OpenAI, …)." actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => void navigate({ to: "/upstreams/new" })}>New upstream</CreateButton>} />
+      <PageHeader title="Upstreams" actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => void navigate({ to: "/upstreams/new" })}>New upstream</CreateButton>} />
       <DataTable
         rows={list.data}
         loading={list.isPending}

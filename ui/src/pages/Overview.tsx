@@ -46,7 +46,7 @@ export function Overview() {
 
   return (
     <>
-      <PageHeader title="Overview" description="Control-plane state at a glance." />
+      <PageHeader title="Overview" />
       <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
         <Counter label="Teams" value={dash(teams.data?.length)} />
         <Counter label="Active keys" value={dash(active)} />

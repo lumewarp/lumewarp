@@ -235,7 +235,7 @@ export function Usage() {
 
   return (
     <>
-      <PageHeader title="Usage" description="Requests, tokens and spend. Spend is for the model that served each request; alias and router show how it was reached." />
+      <PageHeader title="Usage" hint="Spend is for the model that served each request." />
       <Card className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3 p-4">
         <TextField label="From" type="date" value={from} onChange={setFrom} />
         <TextField label="To (inclusive)" type="date" value={to} onChange={setTo} />

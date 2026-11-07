@@ -887,7 +887,7 @@ class Model(TimestampMixin, Base):
         String(16), nullable=False, default="passthrough", server_default="passthrough"
     )
     reasoning_fragments: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
-    reasoning_default_level: Mapped[str | None] = mapped_column(String(16))
+    reasoning_default_level: Mapped[str | None] = mapped_column(String(32))
     # Periodic "1 + 1 = ?" chat completion by the gateway; interval NULL = not probed.
     chat_check_interval_ms: Mapped[int | None] = mapped_column(Integer)
     chat_check_timeout_ms: Mapped[int | None] = mapped_column(Integer)

@@ -1,5 +1,5 @@
 import { CheckIcon, ChevronsUpDownIcon } from "lucide-react";
-import { useId, useState } from "react";
+import { useId, useState, type ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
 import { applyChoice, MISSING_LABEL, optionKey, selection, UNSET_KEY, type ChoiceOption, type ChoiceProps } from "../choice";
@@ -173,11 +173,11 @@ function FreeCombobox({ value, onChange, options, placeholder, disabled, ...aria
   );
 }
 
-type FieldProps<T> = ChoiceProps<T> & { label: string; error?: string; hint?: string; searchLabel?: string; emptyText?: string; free?: boolean };
+type FieldProps<T> = ChoiceProps<T> & { label: string; error?: string; hint?: string; note?: ReactNode; searchLabel?: string; emptyText?: string; free?: boolean };
 
-export function ComboboxField<T = string>({ label, error, hint, free, ...choice }: FieldProps<T>) {
+export function ComboboxField<T = string>({ label, error, hint, note, free, ...choice }: FieldProps<T>) {
   return (
-    <Field label={label} error={error} hint={hint}>
+    <Field label={label} error={error} hint={hint} note={note}>
       {(p) =>
         free ? (
           <FreeCombobox value={String(choice.value ?? "")} onChange={choice.onChange as (v: string) => void} options={choice.options as unknown as ChoiceOption<string>[]} placeholder={choice.placeholder} disabled={choice.disabled} {...p} />

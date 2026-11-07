@@ -27,7 +27,7 @@ export function Audit() {
   });
   return (
     <>
-      <PageHeader title="Audit log" description="Every change made through the API. Secrets and hashes are never recorded." />
+      <PageHeader title="Audit log" />
       <Card className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3 p-4 shadow-none">
         {showOrg && (
           <ComboboxField

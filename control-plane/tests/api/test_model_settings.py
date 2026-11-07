@@ -134,7 +134,11 @@ async def test_strip_and_passthrough_default_level(client, committed, api_settin
             "nests deeper than 32 levels",
         ),
         ({"reasoning": {"mode": "mapped"}}, "needs at least one level"),
-        ({"reasoning": {"mode": "mapped", "fragments": {"ultra": {}}}}, "ultra"),
+        ({"reasoning": {"mode": "mapped", "fragments": {"bad name": {}}}}, "invalid reasoning"),
+        (
+            {"reasoning": {"mode": "mapped", "fragments": {f"level-{i}": {} for i in range(17)}}},
+            "at most 16 levels",
+        ),
         (
             {"reasoning": {"mode": "mapped", "fragments": {"low": {"stream_options": {}}}}},
             "must not set 'stream_options'",
@@ -180,6 +184,36 @@ async def test_audit_records_flags_not_values(client, committed) -> None:
     assert changes["reasoning_changed"] is True
     assert "secret-looking-value" not in json.dumps(entry.details)
     assert "enable_thinking" not in json.dumps(entry.details)
+
+
+@pytest.mark.parametrize("bad", ["", "-think", "a b", "é", "a\n", "a" * 33])
+def test_reasoning_invalid_names_are_422(client, bad) -> None:
+    for reasoning in [
+        {"mode": "mapped", "fragments": {bad: {}}},
+        {"mode": "passthrough", "default_level": bad},
+    ]:
+        response = _create(client, reasoning=reasoning)
+        assert response.status_code == 422, response.text
+        assert "invalid reasoning level" in response.text
+
+
+async def test_reasoning_custom_levels_round_trip(client, committed, api_settings) -> None:
+    fragments = {name: {"effort": name} for name in ["max", "think", "fast", "A0_.-" * 6]}
+    fragments.update({f"level-{i}": {} for i in range(12)})
+    reasoning = {"mode": "mapped", "fragments": fragments, "default_level": "think"}
+    response = _create(client, reasoning=reasoning)
+    assert response.status_code == 201, response.text
+    assert response.json()["reasoning"] == reasoning
+    _, model = await _wire(committed, api_settings, response.json()["name"])
+    assert model.reasoning_effort.default_level == "think"
+    assert set(model.reasoning_effort.fragments_json) == set(fragments)
+    for default_level in ["max", "A" * 32]:
+        response = _create(
+            client, reasoning={"mode": "passthrough", "default_level": default_level}
+        )
+        assert response.status_code == 201, response.text
+        _, model = await _wire(committed, api_settings, response.json()["name"])
+        assert model.reasoning_effort.default_level == default_level
 
 
 def test_thirty_two_levels_are_accepted(client) -> None:

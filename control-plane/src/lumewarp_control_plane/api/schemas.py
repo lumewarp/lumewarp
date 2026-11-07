@@ -644,9 +644,6 @@ class UpstreamOut(ReadModel):
         }
 
 
-ReasoningLevel = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
-
-
 def _body_object(value: dict[str, Any] | None, what: str) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -665,10 +662,14 @@ class ReasoningIn(ApiModel):
             " JSON object mapped to its level (e.g. chat_template_kwargs for vLLM)."
         ),
     )
-    fragments: dict[ReasoningLevel, dict[str, Any]] | None = Field(
-        default=None, description="mapped only: level -> object merged into the request."
+    fragments: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "mapped only: 1–16 levels mapped to request objects. Level names match"
+            " ^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$."
+        ),
     )
-    default_level: ReasoningLevel | None = Field(
+    default_level: str | None = Field(
         default=None, description="Used when the client sends no reasoning_effort."
     )
 

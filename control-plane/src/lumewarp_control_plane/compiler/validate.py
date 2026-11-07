@@ -445,7 +445,8 @@ RESERVED_BODY_KEYS = ("model", "stream", "stream_options")
 DEFAULT_BODY_RESERVED_KEYS = (*RESERVED_BODY_KEYS, "reasoning_effort")
 # Object/array nesting of a default body or fragment; the gateway checks the same bound.
 MAX_BODY_DEPTH = 32
-REASONING_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh")
+REASONING_LEVEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}")
+MAX_REASONING_LEVELS = 16
 MAX_BODY_JSON_BYTES = 16 * 1024
 
 
@@ -484,14 +485,16 @@ def body_object_problem(
 
 
 def reasoning_problem(mode: str, fragments: dict | None, default_level: str | None) -> str | None:
-    if default_level is not None and default_level not in REASONING_LEVELS:
-        return f"unknown reasoning level {default_level!r}"
+    if default_level is not None and not REASONING_LEVEL_NAME.fullmatch(default_level):
+        return f"invalid reasoning level {default_level!r}"
     if mode == "mapped":
         if not fragments:
             return "mapped reasoning needs at least one level"
+        if len(fragments) > MAX_REASONING_LEVELS:
+            return "mapped reasoning supports at most 16 levels"
         for level, fragment in fragments.items():
-            if level not in REASONING_LEVELS:
-                return f"unknown reasoning level {level!r}"
+            if not isinstance(level, str) or not REASONING_LEVEL_NAME.fullmatch(level):
+                return f"invalid reasoning level {level!r}"
             if problem := body_object_problem(fragment, f"reasoning fragment {level!r}"):
                 return problem
         if default_level is not None and default_level not in fragments:

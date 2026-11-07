@@ -29,7 +29,7 @@ export const keyLimitsBody = (v: KeyLimitValues): KeyLimitValues => ({
  */
 export type KeyLimitCap = KeyLimitValues | undefined;
 
-const limitHint = (cap: KeyLimitCap, value: number | null | undefined, capNote: string) => {
+const limitNote = (cap: KeyLimitCap, value: number | null | undefined, capNote: string) => {
   if (!cap) return undefined;
   if (value == null) return "The owner has no limit at this level.";
   return `At most ${value.toLocaleString()} (${capNote}).`;
@@ -60,26 +60,25 @@ export function KeyLimitFields({
         value={values.rpm_limit}
         onChange={(v) => set("rpm_limit", v)}
         error={errors.rpm_limit}
-        hint={limitHint(cap, cap?.rpm_limit, capNote)}
+        hint="Rate limits are counted per gateway instance."
+        note={limitNote(cap, cap?.rpm_limit, capNote)}
       />
       <NumberField
         label="Tokens per minute"
         value={values.tpm_limit}
         onChange={(v) => set("tpm_limit", v)}
         error={errors.tpm_limit}
-        hint={limitHint(cap, cap?.tpm_limit, capNote)}
+        hint="Rate limits are counted per gateway instance."
+        note={limitNote(cap, cap?.tpm_limit, capNote)}
       />
       <NumberField
         label="Max parallel requests"
         value={values.max_parallel}
         onChange={(v) => set("max_parallel", v)}
         error={errors.max_parallel}
-        hint={limitHint(cap, cap?.max_parallel, capNote)}
+        hint="Limits are counted per gateway instance."
+        note={limitNote(cap, cap?.max_parallel, capNote)}
       />
-      <p className="m-0 text-[13px] text-muted-foreground">
-        Rate limits are counted per gateway instance: with N instances the effective limit can reach N times the
-        configured value.
-      </p>
     </>
   );
 }

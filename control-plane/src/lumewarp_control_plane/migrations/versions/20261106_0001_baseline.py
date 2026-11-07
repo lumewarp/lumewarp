@@ -717,7 +717,7 @@ def upgrade() -> None:
             "reasoning_mode", sa.String(length=16), server_default="passthrough", nullable=False
         ),
         sa.Column("reasoning_fragments", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.Column("reasoning_default_level", sa.String(length=16), nullable=True),
+        sa.Column("reasoning_default_level", sa.String(length=32), nullable=True),
         sa.Column("chat_check_interval_ms", sa.Integer(), nullable=True),
         sa.Column("chat_check_timeout_ms", sa.Integer(), nullable=True),
         sa.Column("chat_check_unhealthy_threshold", sa.Integer(), nullable=True),

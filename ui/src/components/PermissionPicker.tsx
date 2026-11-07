@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import type { CatalogEntry, CatalogKind, ModelAccess } from "../api";
 import { useCatalog } from "../hooks";
 import { Checkbox } from "./ui/checkbox";
+import { HelpTip } from "./ui/help-tip";
 import { Label } from "./ui/label";
 import { RadioGroup, RadioGroupItem } from "./ui/radio-group";
 import { Skeleton } from "./ui/skeleton";
@@ -40,7 +41,12 @@ export function PermissionPicker({ isTeam, access, onAccess, selected, onSelecte
   const toggle = (name: string, on: boolean) => onSelected(on ? [...selected, name] : selected.filter((n) => n !== name));
   return (
     <fieldset className="flex min-w-0 flex-col gap-2" data-testid="permission-picker">
-      <legend className="mb-1 text-sm font-semibold">Model access</legend>
+      <legend className="mb-1 text-sm font-semibold">
+        <span className="flex items-center gap-1">
+          Model access
+          <HelpTip label="Model access" text={access === "list" ? isTeam ? "Only the names ticked below." : "Only the names ticked below, within what the team allows; none ticked denies everything." : first.hint} />
+        </span>
+      </legend>
       <RadioGroup value={access === "list" ? "list" : first.value} onValueChange={(v) => onAccess(v as ModelAccess)} aria-label="Model access" className="flex flex-wrap gap-x-5 gap-y-2" aria-invalid={!!error}>
         {[first, { value: "list", label: "Selected", hint: "" } as const].map((o) => (
           <div key={o.value} className="flex items-center gap-2">
@@ -51,7 +57,6 @@ export function PermissionPicker({ isTeam, access, onAccess, selected, onSelecte
           </div>
         ))}
       </RadioGroup>
-      <p className="text-[13px] text-muted-foreground">{access === "list" ? "Only the names ticked below" + (isTeam ? "." : ", and only within what the team allows. None ticked denies everything.") : first.hint}</p>
       {access === "list" && (
         <div className="flex max-h-72 flex-col gap-3 overflow-y-auto rounded-md border p-3" data-testid="permission-options">
           {catalog.isPending && <Skeleton className="h-4 w-full" />}

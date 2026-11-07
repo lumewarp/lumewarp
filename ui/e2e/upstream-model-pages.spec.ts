@@ -113,7 +113,7 @@ test("model Test now asks the model, and the periodic check is saved", async ({ 
   await expect(main.getByTestId("model-test-result")).toContainText("2");
   expect(sent).toEqual([{ upstream_id: up.id, upstream_model: "qwen", default_body: { top_k: 20 } }]);
 
-  await main.getByLabel("Check periodically").check();
+  await main.getByLabel("Check periodically").click();
   await main.getByLabel("Interval (ms)").fill("30000");
   await main.getByLabel("Timeout (ms)").fill("5000");
   await main.getByRole("button", { name: "Create" }).click();
@@ -123,4 +123,36 @@ test("model Test now asks the model, and the periodic check is saved", async ({ 
   await expect(row).toContainText("128k / —");
   const stored = ((await (await request.get("/api/v1/models?limit=200", { headers: admin })).json()).items as any[]).find((m) => m.name === "pg-checked");
   expect(stored.chat_check).toEqual({ interval_ms: 30000, timeout_ms: 5000, unhealthy_threshold: null, healthy_threshold: null });
+});
+
+test("reasoning effort: switch on, add custom levels, set the default, and store them", async ({ page, request }) => {
+  const up = await (await request.post("/api/v1/upstreams", { headers: admin, data: { name: "pg-up3", kind: "vllm", base_url: "http://127.0.0.1:9/v1" } })).json();
+  await page.route(`**/api/v1/upstreams/${up.id}/models`, (route) => route.fulfill({ json: { models: [] } }));
+  await signIn(page, request, "/models/new");
+  const main = page.locator("#main");
+  await main.getByLabel("Name", { exact: true }).fill("pg-reasoning");
+  await main.getByRole("combobox", { name: "Upstream", exact: true }).click();
+  await page.getByRole("option", { name: "pg-up3" }).click();
+  await main.getByRole("combobox", { name: "Upstream model", exact: true }).fill("qwen");
+  await page.getByRole("option", { name: "Use “qwen” (custom)" }).click();
+
+  // Off by default: nothing to configure.
+  await expect(main.getByTestId("reasoning-levels")).toHaveCount(0);
+  await main.getByLabel("Handle reasoning effort").click();
+  await main.getByRole("button", { name: "Add level" }).click();
+  await main.getByLabel("Level 1 name").fill("off");
+  await main.getByLabel("Level 1 fields").fill('{"chat_template_kwargs": {"enable_thinking": false}}');
+  await main.getByRole("button", { name: "Add level" }).click();
+  await main.getByLabel("Level 2 name").fill("deep.think");
+  await main.getByLabel("Level 2 fields").fill('{"chat_template_kwargs": {"enable_thinking": true}}');
+  await main.getByRole("combobox", { name: "Default level" }).click();
+  await page.getByRole("option", { name: "deep.think" }).click();
+  await main.getByRole("button", { name: "Create" }).click();
+  await expect(page).toHaveURL(/\/models$/);
+  const stored = ((await (await request.get("/api/v1/models?limit=200", { headers: admin })).json()).items as any[]).find((m) => m.name === "pg-reasoning");
+  expect(stored.reasoning).toEqual({
+    mode: "mapped",
+    fragments: { off: { chat_template_kwargs: { enable_thinking: false } }, "deep.think": { chat_template_kwargs: { enable_thinking: true } } },
+    default_level: "deep.think",
+  });
 });
