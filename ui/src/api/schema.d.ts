@@ -365,6 +365,48 @@ export interface paths {
         patch: operations["updateUpstream"];
         trace?: never;
     };
+    "/api/v1/upstreams/{upstream_id}/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Upstream Models
+         * @description The upstream's own `GET /models`, called now with its credential. 502 when it
+         *     cannot be reached or does not answer with an OpenAI model list.
+         */
+        get: operations["listUpstreamModels"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/upstreams/{upstream_id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Upstream
+         * @description Probe the upstream once now from the control plane: its health URL (configured or
+         *     default) and `/models`. Reflects the control plane's network, not each gateway's.
+         */
+        post: operations["testUpstream"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/catalog": {
         parameters: {
             query?: never;
@@ -1160,14 +1202,14 @@ export interface components {
         };
         /**
          * HealthCheckIn
-         * @description Active probe: GET <base_url><path> every interval; 2xx within timeout = success.
+         * @description Active probe: GET <url> every interval; 2xx within timeout = success.
          */
         HealthCheckIn: {
             /**
-             * Path
-             * @description Relative to base_url; null = /models.
+             * Url
+             * @description Absolute http(s) URL; null = vLLM: base_url without /v1 + /health, others: base_url + /models.
              */
-            path?: string | null;
+            url?: string | null;
             /** Interval Ms */
             interval_ms: number;
             /**
@@ -1188,8 +1230,8 @@ export interface components {
         };
         /** HealthCheckOut */
         HealthCheckOut: {
-            /** Path */
-            path: string | null;
+            /** Url */
+            url: string | null;
             /** Interval Ms */
             interval_ms: number;
             /** Timeout Ms */
@@ -1604,6 +1646,25 @@ export interface components {
         ModelAccess: "inherit" | "all" | "list";
         /** ModelCreate */
         ModelCreate: {
+            /**
+             * Max Input Tokens
+             * @description Context window; informational.
+             */
+            max_input_tokens?: number | null;
+            /**
+             * Max Output Tokens
+             * @description Requests asking for more max_tokens / max_completion_tokens get a 400.
+             */
+            max_output_tokens?: number | null;
+            /**
+             * Default Body
+             * @description Merged under each request body: the client's fields win, objects on both sides merge. Must not set model, stream or stream_options.
+             */
+            default_body?: {
+                [key: string]: unknown;
+            } | null;
+            /** @description null = passthrough. */
+            reasoning?: components["schemas"]["ReasoningIn"] | null;
             /** Name */
             name: string;
             /**
@@ -1638,6 +1699,15 @@ export interface components {
             price_input_nano_usd_per_mtok: number | null;
             /** Price Output Nano Usd Per Mtok */
             price_output_nano_usd_per_mtok: number | null;
+            /** Max Input Tokens */
+            max_input_tokens: number | null;
+            /** Max Output Tokens */
+            max_output_tokens: number | null;
+            /** Default Body */
+            default_body: {
+                [key: string]: unknown;
+            } | null;
+            reasoning: components["schemas"]["ReasoningOut"];
             /**
              * Created At
              * Format: date-time
@@ -1649,8 +1719,31 @@ export interface components {
              */
             updated_at: string;
         };
-        /** ModelUpdate */
+        /**
+         * ModelUpdate
+         * @description PATCH: omitted fields are unchanged; the limits, default_body and reasoning accept
+         *     null to remove the setting.
+         */
         ModelUpdate: {
+            /**
+             * Max Input Tokens
+             * @description Context window; informational.
+             */
+            max_input_tokens?: number | null;
+            /**
+             * Max Output Tokens
+             * @description Requests asking for more max_tokens / max_completion_tokens get a 400.
+             */
+            max_output_tokens?: number | null;
+            /**
+             * Default Body
+             * @description Merged under each request body: the client's fields win, objects on both sides merge. Must not set model, stream or stream_options.
+             */
+            default_body?: {
+                [key: string]: unknown;
+            } | null;
+            /** @description null = passthrough. */
+            reasoning?: components["schemas"]["ReasoningIn"] | null;
             /** Name */
             name?: string | null;
             /** Upstream Id */
@@ -1942,6 +2035,71 @@ export interface components {
             items: components["schemas"]["UserOut"][];
             /** Next Cursor */
             next_cursor?: string | null;
+        };
+        /** ProbeOut */
+        ProbeOut: {
+            /** Url */
+            url: string;
+            /**
+             * Ok
+             * @description 2xx within the timeout.
+             */
+            ok: boolean;
+            /**
+             * Status
+             * @description HTTP status; null when no response arrived.
+             */
+            status: number | null;
+            /** Latency Ms */
+            latency_ms: number;
+            /**
+             * Error
+             * @description Why no response arrived (never the response body).
+             */
+            error: string | null;
+        };
+        /**
+         * ReasoningIn
+         * @description How the OpenAI `reasoning_effort` field is handled for this model.
+         */
+        ReasoningIn: {
+            /**
+             * Mode
+             * @description passthrough: forward it; strip: remove it; mapped: replace it with the JSON object mapped to its level (e.g. chat_template_kwargs for vLLM).
+             * @default passthrough
+             * @enum {string}
+             */
+            mode: "passthrough" | "strip" | "mapped";
+            /**
+             * Fragments
+             * @description mapped only: level -> object merged into the request.
+             */
+            fragments?: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            } | null;
+            /**
+             * Default Level
+             * @description Used when the client sends no reasoning_effort.
+             */
+            default_level?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh") | null;
+        };
+        /** ReasoningOut */
+        ReasoningOut: {
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "passthrough" | "strip" | "mapped";
+            /** Fragments */
+            fragments: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            } | null;
+            /** Default Level */
+            default_level: string | null;
         };
         /**
          * RetryPolicyIn
@@ -2542,6 +2700,11 @@ export interface components {
             /** Api Key Ref */
             api_key_ref?: string | null;
             /**
+             * Api Key
+             * @description Bearer token, stored sealed with LUMEWARP_ENCRYPTION_KEY and never returned. Mutually exclusive with api_key_ref.
+             */
+            api_key?: string | null;
+            /**
              * Timeout Ms
              * @default 0
              */
@@ -2558,6 +2721,21 @@ export interface components {
          * @enum {string}
          */
         UpstreamKind: "openai" | "vllm" | "openai_compatible";
+        /** UpstreamModelInfoOut */
+        UpstreamModelInfoOut: {
+            /** Id */
+            id: string;
+            /**
+             * Max Model Len
+             * @description Context window reported by vLLM; null when the upstream reports none.
+             */
+            max_model_len: number | null;
+        };
+        /** UpstreamModelsOut */
+        UpstreamModelsOut: {
+            /** Models */
+            models: components["schemas"]["UpstreamModelInfoOut"][];
+        };
         /** UpstreamOut */
         UpstreamOut: {
             /**
@@ -2572,6 +2750,11 @@ export interface components {
             base_url: string;
             /** Api Key Ref */
             api_key_ref: string | null;
+            /**
+             * Api Key Set
+             * @description A sealed api_key is stored (its value is never returned).
+             */
+            api_key_set: boolean;
             /** Timeout Ms */
             timeout_ms: number;
             stream_usage_mode: components["schemas"]["StreamUsageMode"];
@@ -2579,6 +2762,13 @@ export interface components {
             circuit_breaker: components["schemas"]["CircuitBreakerOut"] | null;
             /** Metrics Url */
             metrics_url: string | null;
+            /**
+             * Health
+             * @description Active health check as connected gateways report it: unhealthy if any says so, unknown when no connected gateway has reported it yet.
+             * @default not_probed
+             * @enum {string}
+             */
+            health: "healthy" | "unhealthy" | "unknown" | "not_probed";
             /**
              * Created At
              * Format: date-time
@@ -2590,10 +2780,16 @@ export interface components {
              */
             updated_at: string;
         };
+        /** UpstreamTestOut */
+        UpstreamTestOut: {
+            health: components["schemas"]["ProbeOut"];
+            models: components["schemas"]["ProbeOut"];
+        };
         /**
          * UpstreamUpdate
          * @description PATCH: omitted fields are unchanged; `health_check`, `circuit_breaker` and
-         *     `metrics_url` accept null to remove the setting.
+         *     `metrics_url` accept null to remove the setting. `api_key` replaces the stored key
+         *     (and clears `api_key_ref`); null removes it. Setting `api_key_ref` removes a stored key.
          */
         UpstreamUpdate: {
             /** Name */
@@ -2603,6 +2799,11 @@ export interface components {
             base_url?: string | null;
             /** Api Key Ref */
             api_key_ref?: string | null;
+            /**
+             * Api Key
+             * @description Bearer token, stored sealed with LUMEWARP_ENCRYPTION_KEY and never returned. Mutually exclusive with api_key_ref.
+             */
+            api_key?: string | null;
             /** Timeout Ms */
             timeout_ms?: number | null;
             stream_usage_mode?: components["schemas"]["StreamUsageMode"] | null;
@@ -5173,6 +5374,140 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UpstreamOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listUpstreamModels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                upstream_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpstreamModelsOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    testUpstream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                upstream_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpstreamTestOut"];
                 };
             };
             /** @description Missing or invalid credentials */

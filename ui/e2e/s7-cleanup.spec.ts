@@ -166,17 +166,13 @@ test("screenshots: the whole matrix, desktop and 390 px, light and dark", async 
     await page.keyboard.press("Escape");
     await expect(dialog(page)).toHaveCount(0);
 
-    // The upstream form (a drawer) and the Select it opens.
-    await page.goto("/upstreams");
-    await page.getByRole("button", { name: "New upstream" }).click();
-    await formTop();
+    // The upstream form (a page) and the Select it opens.
+    await page.goto("/upstreams/new");
     await shot(page, `s7-${label}-upstream-form`, { settle: 450, fullPage: false });
-    await (await control(dialog(page), "Kind")).click();
+    await (await control(page.locator("#main"), "Kind")).click();
     await shot(page, `s7-${label}-select-open`, { settle: 450, fullPage: false });
     await page.keyboard.press("Escape");
     await expect(page.getByRole("listbox")).toHaveCount(0);
-    await page.keyboard.press("Escape");
-    await expect(dialog(page)).toHaveCount(0);
 
     // The permission picker: the team form with "Selected" chosen and its options loaded.
     await page.goto("/teams");
@@ -190,14 +186,11 @@ test("screenshots: the whole matrix, desktop and 390 px, light and dark", async 
     await expect(dialog(page)).toHaveCount(0);
 
     // The Combobox: the model form's Upstream.
-    await page.goto("/models");
-    await page.getByRole("button", { name: "New model" }).click();
-    await (await control(dialog(page), "Upstream")).click();
+    await page.goto("/models/new");
+    await (await control(page.locator("#main"), "Upstream")).click();
     await shot(page, `s7-${label}-combobox-open`, { settle: 450, fullPage: false });
     await page.keyboard.press("Escape");
     await expect(page.getByRole("option")).toHaveCount(0);
-    await page.keyboard.press("Escape");
-    await expect(dialog(page)).toHaveCount(0);
 
     // The delete confirmation (an alias nothing refers to), and the 409 (a model an alias still points at).
     await page.goto("/aliases");

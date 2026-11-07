@@ -89,12 +89,12 @@ test("models, aliases and routers: create through the forms, search by upstream 
   await expect(page.getByRole("heading", { name: "Models" })).toBeVisible();
   for (const [name, upstreamModel] of [["cat/alpha", "Org/Alpha-8B"], ["cat/beta", "Org/Beta-8B"]]) {
     await page.getByRole("button", { name: "New model" }).click();
-    const d = dialog(page);
-    await d.getByLabel("Name").fill(name);
+    const d = page.locator("#main");
+    await d.getByLabel("Name", { exact: true }).fill(name);
     await pick(d, "Upstream", "cat-up");
-    await d.getByLabel("Upstream model").fill(upstreamModel);
+    await d.getByLabel("Upstream model", { exact: true }).fill(upstreamModel);
     await d.getByRole("button", { name: "Create" }).click();
-    await expect(d).toBeHidden();
+    await expect(page).toHaveURL(/\/models$/);
   }
   const alpha = row(page, "cat/alpha");
   await expect(alpha).toContainText("cat-up");
@@ -151,10 +151,14 @@ test("models, aliases and routers: create through the forms, search by upstream 
   await expect(routerRow).toBeVisible();
   await page.getByLabel("Search routers").fill("");
 
-  // The Models page now says who uses each model.
+  // The model's page says who uses it.
   await nav.getByRole("link", { name: "Models" }).click();
-  await expect(row(page, "cat/alpha")).toContainText("cat-router");
-  await expect(row(page, "cat/alpha")).toContainText("cat-alias");
+  await row(page, "cat/alpha").getByRole("link", { name: "cat/alpha" }).click();
+  const usedBy = page.locator("[data-slot=card]", { hasText: "Used by" });
+  await expect(usedBy).toContainText("cat-router");
+  await expect(usedBy).toContainText("cat-alias");
+  await page.getByRole("link", { name: "Models", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/models$/);
 
   // --- Delete is blocked while referenced: the 409 lists who refers to it.
   await row(page, "cat/alpha").getByRole("button", { name: "Delete" }).click();
@@ -167,23 +171,24 @@ test("models, aliases and routers: create through the forms, search by upstream 
 
   // --- Rename with "Keep old name as alias" (checked by default) ...
   await row(page, "cat/beta").getByRole("button", { name: "Edit" }).click();
-  d = dialog(page);
-  await expect(d.getByLabel("Keep old name as alias")).toHaveCount(0); // only once the name changes
-  await d.getByLabel("Name").fill("cat/beta2");
-  await expect(d.getByLabel("Keep old name as alias")).toBeChecked();
-  await d.getByRole("button", { name: "Save" }).click();
-  await expect(d).toBeHidden();
+  const edit = page.locator("#main");
+  await expect(edit.getByRole("heading", { name: "cat/beta" })).toBeVisible();
+  await expect(edit.getByLabel("Keep old name as alias")).toHaveCount(0); // only once the name changes
+  await edit.getByLabel("Name", { exact: true }).fill("cat/beta2");
+  await expect(edit.getByLabel("Keep old name as alias")).toBeChecked();
+  await edit.getByRole("button", { name: "Save" }).click();
+  await expect(page).toHaveURL(/\/models$/);
   const aliases = await items<{ name: string; target: string; target_name: string }>(request, "/aliases");
   const kept = aliases.find((a) => a.name === "cat/beta");
   expect(kept?.target_name).toBe("cat/beta2");
 
   // ... and without it.
   await row(page, "cat/alpha").getByRole("button", { name: "Edit" }).click();
-  d = dialog(page);
-  await d.getByLabel("Name").fill("cat/alpha2");
-  await d.getByLabel("Keep old name as alias").uncheck();
-  await d.getByRole("button", { name: "Save" }).click();
-  await expect(d).toBeHidden();
+  await expect(edit.getByRole("heading", { name: "cat/alpha" })).toBeVisible();
+  await edit.getByLabel("Name", { exact: true }).fill("cat/alpha2");
+  await edit.getByLabel("Keep old name as alias").uncheck();
+  await edit.getByRole("button", { name: "Save" }).click();
+  await expect(page).toHaveURL(/\/models$/);
   const names = (await items<{ name: string }>(request, "/catalog")).map((e) => e.name);
   expect(names).toContain("cat/alpha2");
   expect(names).not.toContain("cat/alpha");

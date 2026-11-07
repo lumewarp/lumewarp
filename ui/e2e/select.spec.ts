@@ -163,7 +163,7 @@ test("select contract: options that arrive late are chosen from by value", async
   const posted = recordWrites(page, "POST", "models");
   await page.reload();
   await page.getByRole("button", { name: "New model" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   // Not loaded yet: nothing to choose from and nothing pre-selected.
   await expect(await control(d, "Upstream")).toHaveText("Select…");
   release();
@@ -172,7 +172,7 @@ test("select contract: options that arrive late are chosen from by value", async
   await d.getByLabel("Name", { exact: true }).fill("sel-late");
   await d.getByLabel("Upstream model", { exact: true }).fill("m");
   await d.getByRole("button", { name: "Create" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/models$/);
   expect(posted[0].upstream_id).toBe(up2.id);
   expect(posted[0].upstream_id).not.toBe(up1.id);
 });
@@ -195,7 +195,7 @@ test("select contract: when the options are reordered after a choice, the chosen
   const posted = recordWrites(page, "POST", "models");
   await page.reload();
   await page.getByRole("button", { name: "New model" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   await expect.poll(async () => (await optionNames(d, "Upstream")).length).toBeGreaterThanOrEqual(3);
   const before = await optionNames(d, "Upstream");
   await pick(d, "Upstream", "sel-b-up");
@@ -214,7 +214,7 @@ test("select contract: when the options are reordered after a choice, the chosen
   await d.getByLabel("Name", { exact: true }).fill("sel-reordered");
   await d.getByLabel("Upstream model", { exact: true }).fill("m");
   await d.getByRole("button", { name: "Create" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/models$/);
   expect(posted[0].upstream_id).toBe(up2.id);
   expect(posted[0].upstream_id).not.toBe(up1.id);
 });
@@ -224,10 +224,10 @@ test("select contract: no options is an empty list, not a crash", async ({ page,
   await page.route("**/api/v1/upstreams?**", (route) => route.fulfill({ json: { items: [], next_cursor: null } }));
   await page.reload();
   await page.getByRole("button", { name: "New model" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   await expect(await control(d, "Upstream")).toHaveText("Select…");
   expect(await optionNames(d, "Upstream")).toEqual([]);
-  await expect(d).toBeVisible();
+  await expect(d.getByRole("heading", { name: "New model" })).toBeVisible();
 });
 
 /** Open without choosing; like `pick`'s first half. */
@@ -335,63 +335,60 @@ async function expectPageUnlocked(page: Page) {
 }
 
 test("select inside a dialog and a drawer: Esc, focus return and scrolling at the end of the page", async ({ page, request }) => {
-  await upstream(request, "sel-dlg-up");
-  await signIn(page, request, "/models");
-  await page.getByRole("button", { name: "New model" }).click();
+  const up0 = await upstream(request, "sel-dlg-up");
+  await model(request, "sel-dlg/m", up0.id);
+  await signIn(page, request, "/aliases");
+  await page.getByRole("button", { name: "New alias" }).click();
   const d = dialog(page);
-  const up = await control(d, "Upstream");
+  const up = await control(d, "Points to");
   await up.click();
   await page.keyboard.press("Escape");
   await expect(d).toBeVisible();
   await expect(up).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(d).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "New model" })).toBeFocused();
+  await expect(page.getByRole("button", { name: "New alias" })).toBeFocused();
   await expect.poll(() => page.evaluate(() => document.body.hasAttribute("data-scroll-locked"))).toBe(false);
-  // A drawer (Upstreams, md wide) holds Selects too.
-  await page.goto("/upstreams");
-  await page.getByRole("button", { name: "New upstream" }).click();
-  await pick(dialog(page), "Kind", "OpenAI-compatible");
+  // A drawer (the router sheet) holds Selects too.
+  await page.goto("/routers");
+  await page.getByRole("button", { name: "New router" }).click();
+  await pick(dialog(page), "Strategy", "E2E tuned");
   await page.keyboard.press("Escape");
   await expect(dialog(page)).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => document.body.hasAttribute("data-scroll-locked"))).toBe(false);
 });
 
-test("long lists at 390 px: a 65 entry Combobox in a dialog, a 64 entry Select and a 65 entry Combobox in a sheet reach their first and last entries", async ({ page, request }) => {
+test("long lists at 390 px: a 65 entry Combobox on a page, a 64 entry Select and a 65 entry Combobox in a sheet reach their first and last entries", async ({ page, request }) => {
   await page.setViewportSize({ width: 390, height: 700 });
-  // A 65 entry Combobox inside a Dialog: the model form's upstream list.
+  // A 65 entry Combobox on the model page: the upstream list.
   const ups = [] as { id: string; name: string }[];
   for (let i = 0; i < 65; i++) ups.push(await upstream(request, `lng-${String(i).padStart(2, "0")}-up`));
   await signIn(page, request, "/models");
   await page.getByRole("button", { name: "New model" }).click();
-  let d = dialog(page);
-  const names = await optionNames(d, "Upstream");
+  const main = page.locator("#main");
+  const names = await optionNames(main, "Upstream");
   const lngs = names.filter((n) => n.startsWith("lng-"));
   expect(lngs).toHaveLength(65);
-  await pick(d, "Upstream", lngs[0]);
-  await expect(await control(d, "Upstream")).toHaveText(lngs[0]);
-  await pick(d, "Upstream", lngs[lngs.length - 1]);
-  await expect(await control(d, "Upstream")).toHaveText(lngs[lngs.length - 1]);
-  // The list scrolls with the wheel too, inside the dialog's scroll lock.
-  const { trigger, popup } = await openPopup(page, d, "Upstream");
+  await pick(main, "Upstream", lngs[0]);
+  await expect(await control(main, "Upstream")).toHaveText(lngs[0]);
+  await pick(main, "Upstream", lngs[lngs.length - 1]);
+  await expect(await control(main, "Upstream")).toHaveText(lngs[lngs.length - 1]);
+  // The list scrolls with the wheel too.
+  const { trigger, popup } = await openPopup(page, main, "Upstream");
   const scroller = popup.locator("[cmdk-list]");
   await scroller.hover();
   await page.mouse.wheel(0, 400);
   await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
   await page.keyboard.press("Escape");
-  // The first Esc closes only the popover; the dialog stays until the second.
   await expect(popup).toHaveCount(0);
-  await expect(d).toHaveCount(1);
   await expect(trigger).toBeFocused();
-  await page.keyboard.press("Escape");
-  await expect(d).toHaveCount(0);
 
   // A 64 entry Select and a 65 entry Combobox inside the router sheet.
   const up = ups[0];
   for (let i = 0; i < 65; i++) await model(request, `fb/${String(i).padStart(2, "0")}`, up.id);
   await page.goto("/routers");
   await page.getByRole("button", { name: "New router" }).click();
-  d = dialog(page);
+  const d = dialog(page);
   await pick(d, "Strategy", "E2E tuned");
   await pick(d, "Big list", "opt-00");
   await expect(await control(d, "Big list")).toHaveText("opt-00");
@@ -462,25 +459,19 @@ test("combobox contract: the search matches labels and never the keys, an unmatc
   expect(posted[0].members.map((x: any) => x.model_id)).toEqual([m.id]);
 });
 
-test("sheet: full width on a phone, md and xl from sm up, and a long form keeps its header and footer reachable", async ({ page, request }) => {
+test("sheet: full width on a phone, xl from sm up, and a long form keeps its header and footer reachable", async ({ page, request }) => {
   await upstream(request, "sheet-up");
-  await signIn(page, request, "/upstreams");
+  await signIn(page, request, "/routers");
   const widthOf = async () => (await dialog(page).boundingBox())!.width;
   // 390 px: the whole screen (the library default would be 75%).
   await page.setViewportSize({ width: 390, height: 700 });
-  await page.getByRole("button", { name: "New upstream" }).click();
+  await page.getByRole("button", { name: "New router" }).click();
   await expect(dialog(page)).toBeVisible();
   await expect.poll(widthOf).toBe(390);
   await page.keyboard.press("Escape");
   await expect(dialog(page)).toHaveCount(0);
-  // 1280 px: md (28rem = 448) for a drawer.
+  // 1280 px: the router form is a wide drawer, xl (36rem = 576).
   await page.setViewportSize({ width: 1280, height: 900 });
-  await page.getByRole("button", { name: "New upstream" }).click();
-  await expect.poll(widthOf).toBe(448);
-  await page.keyboard.press("Escape");
-  await expect(dialog(page)).toHaveCount(0);
-  // The router form is a wide drawer: xl (36rem = 576).
-  await page.goto("/routers");
   await page.getByRole("button", { name: "New router" }).click();
   await expect.poll(widthOf).toBe(576);
   await page.setViewportSize({ width: 390, height: 700 });
@@ -613,16 +604,13 @@ test("screenshots of forms, open dropdowns and confirmations", async ({ page, re
     await page.evaluate((t) => localStorage.setItem("lumewarp.theme", t), theme);
     await page.goto("/models");
     await page.getByRole("button", { name: "New model" }).click();
-    await shot(`${label}-model-dialog`);
-    await (await control(dialog(page), "Upstream")).click();
-    await shot(`${label}-model-dialog-select-open`);
+    await shot(`${label}-model-page`);
+    await (await control(page.locator("#main"), "Upstream")).click();
+    await shot(`${label}-model-page-select-open`);
     await page.keyboard.press("Escape");
-    await page.keyboard.press("Escape");
-    await page.goto("/upstreams");
-    await page.getByRole("button", { name: "New upstream" }).click();
-    await (await control(dialog(page), "Kind")).click();
-    await shot(`${label}-upstream-drawer-select-open`);
-    await page.keyboard.press("Escape");
+    await page.goto("/upstreams/new");
+    await (await control(page.locator("#main"), "Kind")).click();
+    await shot(`${label}-upstream-page-select-open`);
     await page.keyboard.press("Escape");
     await page.goto("/routers");
     await page.getByRole("button", { name: "New router" }).click();

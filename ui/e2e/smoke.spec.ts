@@ -600,22 +600,24 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
     .filter({ has: page.getByRole("cell", { name: "smoke-up", exact: true }) })
     .getByRole("button", { name: "Edit" })
     .click();
-  const u = dialog(page);
-  await u.getByLabel("Probe this upstream").check();
-  await u.getByLabel("Probe path").fill("/health");
-  await u.getByLabel("Probe interval (ms)").fill("5000");
-  await u.getByLabel("Probe timeout (ms)").fill("5000");
+  const u = page.locator("#main");
+  const health = u.locator("[data-slot=card]", { hasText: "Health check" });
+  await u.getByLabel("Probe periodically").check();
+  await u.getByLabel("Health URL").fill("http://127.0.0.1:9/health");
+  await health.getByLabel("Interval (ms)").fill("5000");
+  await health.getByLabel("Timeout (ms)").fill("5000");
   await u.getByRole("button", { name: "Save" }).click();
   await expect(u.getByText("Must be above 0 and below the interval")).toBeVisible();
-  await u.getByLabel("Probe timeout (ms)").fill("1000");
-  await u.getByLabel("Open the circuit after repeated failures").check();
-  await u.getByLabel("Consecutive failures").fill("3");
+  await health.getByLabel("Timeout (ms)").fill("1000");
+  const breaker = u.locator("[data-slot=card]", { hasText: "Circuit breaker" });
+  await breaker.getByLabel("Enabled").check();
+  await breaker.getByLabel("Consecutive failures").fill("3");
   await u.getByRole("button", { name: "Save" }).click();
-  await expect(u).toBeHidden();
+  await expect(page).toHaveURL(/\/upstreams$/);
   const up = await (await request.get(`/api/v1/upstreams/${upstream.id}`, { headers: admin })).json();
-  expect(up.health_check).toEqual({ path: "/health", interval_ms: 5000, timeout_ms: 1000, unhealthy_threshold: null, healthy_threshold: null });
+  expect(up.health_check).toEqual({ url: "http://127.0.0.1:9/health", interval_ms: 5000, timeout_ms: 1000, unhealthy_threshold: null, healthy_threshold: null });
   expect(up.circuit_breaker).toEqual({ failure_threshold: 3, open_ms: null });
-  await expect(page.getByRole("row").filter({ hasText: "smoke-up" })).toContainText("breaker 3×");
+  await expect(page.getByRole("row").filter({ hasText: "smoke-up" })).toContainText("Unknown");
 });
 
 test("an expired session lands on a usable login page even when 401s arrive late", async ({ page }) => {

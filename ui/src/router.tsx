@@ -20,6 +20,8 @@ import { Usage } from "./pages/Usage";
 const RoutersPage = lazy(() => import("./pages/Routers").then((module) => ({ default: module.Routers })));
 const UpstreamsPage = lazy(() => import("./pages/Upstreams").then((module) => ({ default: module.Upstreams })));
 const ModelsPage = lazy(() => import("./pages/Models").then((module) => ({ default: module.Models })));
+const ModelEditPage = lazy(() => import("./pages/ModelEdit").then((module) => ({ default: module.ModelEdit })));
+const UpstreamEditPage = lazy(() => import("./pages/UpstreamEdit").then((module) => ({ default: module.UpstreamEdit })));
 const AliasesPage = lazy(() => import("./pages/Aliases").then((module) => ({ default: module.Aliases })));
 const GatewaysPage = lazy(() => import("./pages/Gateways").then((module) => ({ default: module.Gateways })));
 const ConfigPage = lazy(() => import("./pages/Config").then((module) => ({ default: module.Config })));
@@ -162,8 +164,12 @@ const routeTree = rootRoute.addChildren([
     page("/users", () => <UsersPage />, "installationAdmin"),
     page("/routers", () => <RoutersPage />, "installationAdmin"),
     page("/models", () => <ModelsPage />, "installationAdmin"),
+    page("/models/new", () => <ModelEditPage />, "installationAdmin"),
+    page("/models/$modelId", () => <ModelEditPage />, "installationAdmin"),
     page("/aliases", () => <AliasesPage />, "installationAdmin"),
     page("/upstreams", () => <UpstreamsPage />, "installationAdmin"),
+    page("/upstreams/new", () => <UpstreamEditPage />, "installationAdmin"),
+    page("/upstreams/$upstreamId", () => <UpstreamEditPage />, "installationAdmin"),
     page("/usage", Usage),
     page("/audit", () => <AuditPage />, "teamAdmin"),
     page("/gateways", () => <GatewaysPage />, "installationAdmin"),
