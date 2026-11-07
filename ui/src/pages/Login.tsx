@@ -66,9 +66,13 @@ export function Login() {
           </div>
           <h1 className="text-xl font-semibold">Sign in</h1>
           <p className="text-sm text-muted-foreground">
-            {session.data?.oidc_enabled
-              ? "Sign in with your identity provider."
-              : "Single sign-on is not configured."}
+            {session.isPending
+              ? "Checking sign-in options…"
+              : session.data?.oidc_enabled
+                ? "Sign in with your identity provider."
+                : session.data
+                  ? "Single sign-on is not configured."
+                  : "Sign-in options are unavailable."}
           </p>
           {ssoError && (
             <Alert variant="destructive">

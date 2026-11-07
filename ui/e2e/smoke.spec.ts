@@ -617,3 +617,33 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
   expect(up.circuit_breaker).toEqual({ failure_threshold: 3, open_ms: null });
   await expect(page.getByRole("row").filter({ hasText: "smoke-up" })).toContainText("breaker 3×");
 });
+
+test("an expired session lands on a usable login page even when 401s arrive late", async ({ page }) => {
+  await login(page, VIEWER);
+  await expect(page.getByRole("link", { name: /My keys/i }).first()).toBeVisible();
+
+  // The session expires; one request answers 401 at once, another one second later, while the login
+  // page is still discovering its sign-in options.
+  let first = true;
+  await page.route(/\/api\/v1\/(?!session)/, async (route) => {
+    const late = !first;
+    first = false;
+    if (late) await new Promise((resolve) => setTimeout(resolve, 1000));
+    await route.fulfill({ status: 401, json: { error: { code: "unauthorized", message: "unauthorized" } } });
+  });
+  await page.route("**/api/v1/session", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await route.fulfill({ json: { oidc_enabled: true, break_glass_enabled: true, authenticated: false } });
+  });
+  // A client-side navigation to a page that has not loaded yet sends fresh requests.
+  const here = "/usage";
+  await page.evaluate((path) => {
+    history.pushState({}, "", path);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, here);
+
+  await page.waitForURL(/\/login/);
+  await expect(page.getByRole("button", { name: "Sign in with SSO" })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText("Single sign-on is not configured.")).toHaveCount(0);
+  expect(new URL(page.url()).searchParams.get("next")).toContain(here);
+});

@@ -33,9 +33,13 @@ const queryClient = new QueryClient({
   },
 });
 
+// Every request still in flight when a session expires answers 401. Only the first one may clear the
+// cache: a later clear would also drop the login page's own session query mid-flight and leave it pending.
 setUnauthorizedHandler(() => {
+  const { pathname, href } = router.state.location;
+  if (pathname === "/login") return;
   queryClient.clear();
-  void router.navigate({ to: "/login" });
+  void router.navigate({ to: "/login", search: { next: href } });
 });
 
 createRoot(document.getElementById("root")!).render(
