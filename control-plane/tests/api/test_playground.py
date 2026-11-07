@@ -17,10 +17,23 @@ from sqlalchemy import select
 from lumewarp_control_plane.api import playground
 from lumewarp_control_plane.app import create_app
 from lumewarp_control_plane.auth import sessions
-from lumewarp_control_plane.models import AuditLog, KeyLifecycle, MemberPolicy, ModelAccess
+from lumewarp_control_plane.models import (
+    AuditLog,
+    CatalogName,
+    KeyLifecycle,
+    MemberPolicy,
+    ModelAccess,
+)
 from tests.api.conftest import TEST_ENCRYPTION_KEY
 from tests.api.helpers import auth, user_with_token
-from tests.factories import make_key, make_member, make_model, make_service_account, make_team
+from tests.factories import (
+    make_alias,
+    make_key,
+    make_member,
+    make_model,
+    make_service_account,
+    make_team,
+)
 
 
 def mock_gateway(client, monkeypatch, handler):
@@ -294,3 +307,30 @@ async def test_body_limit_and_unreachable(client, committed, monkeypatch):
     )
     assert row.details == {"key_id": str(own.id), "model": None}
     assert not client.app.state.playground_client.is_closed
+
+
+async def test_reasoning_levels_for_mapped_models_and_their_aliases(client, committed):
+    own, _excluded, headers, _pat = await setup_keys(committed)
+    fragments = {"low": {"reasoning_effort": "low"}, "xhigh": {"reasoning_effort": "xhigh"}}
+    mapped = await make_model(
+        committed,
+        f"mapped-{uuid.uuid4().hex[:6]}",
+        reasoning_mode="mapped",
+        reasoning_fragments=fragments,
+        reasoning_default_level="xhigh",
+    )
+    plain = await make_model(committed, f"plain-{uuid.uuid4().hex[:6]}")
+    alias = await make_alias(committed, f"alias-{uuid.uuid4().hex[:6]}", mapped)
+    await committed.commit()
+    body = client.get("/api/v1/playground", headers=headers).json()
+    names = set(body["keys"][0]["models"])
+    reasoning = body["reasoning"]
+    expected = {"levels": ["low", "xhigh"], "default_level": "xhigh"}
+    name = lambda row: committed.get(CatalogName, row.name_id)  # noqa: E731
+    mapped_name, alias_name, plain_name = [(await name(r)).name for r in (mapped, alias, plain)]
+    assert {mapped_name, alias_name, plain_name} <= names
+    assert sorted(reasoning[mapped_name]["levels"]) == expected["levels"]
+    assert reasoning[mapped_name]["default_level"] == "xhigh"
+    assert reasoning[alias_name] == reasoning[mapped_name]
+    assert plain_name not in reasoning
+    assert set(reasoning) <= names

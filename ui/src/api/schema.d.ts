@@ -2185,6 +2185,23 @@ export interface components {
             enabled: boolean;
             /** Keys */
             keys: components["schemas"]["PlaygroundKey"][];
+            /**
+             * Reasoning
+             * @default {}
+             */
+            reasoning: {
+                [key: string]: components["schemas"]["PlaygroundReasoning"];
+            };
+        };
+        /**
+         * PlaygroundReasoning
+         * @description The reasoning_effort levels a name maps, and the one used when a request names none.
+         */
+        PlaygroundReasoning: {
+            /** Levels */
+            levels: string[];
+            /** Default Level */
+            default_level: string | null;
         };
         /** ProbeOut */
         ProbeOut: {

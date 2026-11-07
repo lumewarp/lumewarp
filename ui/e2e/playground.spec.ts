@@ -34,8 +34,8 @@ async function mockInfo(page: Page, body: object) {
 }
 
 test("sends the act-as and CSRF headers, streams text and shows the request id and usage", async ({ page }) => {
-  await mockInfo(page, { enabled: true, keys: [KEY] });
-  let seen: { headers: Record<string, string>; body: { model: string; messages: { role: string; content: string }[]; temperature?: number; stream?: boolean; chat_template_kwargs?: unknown } } | undefined;
+  await mockInfo(page, { enabled: true, keys: [KEY], reasoning: { "gpt-a": { levels: ["low", "xhigh"], default_level: "xhigh" } } });
+  let seen: { headers: Record<string, string>; body: { model: string; messages: { role: string; content: string }[]; temperature?: number; reasoning_effort?: string; stream?: boolean; chat_template_kwargs?: unknown } } | undefined;
   await page.route("**/api/v1/playground/v1/chat/completions", async (route) => {
     seen = { headers: route.request().headers(), body: route.request().postDataJSON() };
     await route.fulfill({
@@ -63,6 +63,10 @@ test("sends the act-as and CSRF headers, streams text and shows the request id a
   await expect(page.getByRole("link", { name: "Playground" })).toBeVisible();
 
   await page.getByLabel("Request body (JSON)").fill('{"temperature": 0.2, "model": "ignored", "chat_template_kwargs": {"enable_thinking": false}}');
+  // The model maps reasoning levels: the default is named, and a chosen level is sent.
+  await expect(page.getByLabel("Reasoning effort")).toContainText("Model default (xhigh)");
+  await page.getByLabel("Reasoning effort").click();
+  await page.getByRole("option", { name: "low", exact: true }).click();
   // An example prompt fills the message box without sending it.
   await page.getByTestId("example-prompts").getByRole("button").first().click();
   await expect(page.getByLabel("Message")).toHaveValue(/sky is blue/);
@@ -86,6 +90,7 @@ test("sends the act-as and CSRF headers, streams text and shows the request id a
   expect(seen?.body.model).toBe("gpt-a");
   expect(seen?.body.messages).toEqual([{ role: "user", content: "Hi there" }]);
   expect(seen?.body.temperature).toBe(0.2);
+  expect(seen?.body.reasoning_effort).toBe("low");
   expect(seen?.body.chat_template_kwargs).toEqual({ enable_thinking: false });
   expect(seen?.body.stream).toBe(true);
 

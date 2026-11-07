@@ -6,7 +6,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { api } from "../api";
+import { api, type Schemas } from "../api";
 import { playgroundProvider, type PlaygroundKey, type ResponseInfo } from "../api/playground";
 import { PageHeader } from "../components/Bits";
 import { SelectField } from "../components/Form";
@@ -100,17 +100,21 @@ export function Playground() {
           </EmptyHeader>
         </Empty>
       ) : (
-        <Chat keys={info.data.keys} />
+        <Chat keys={info.data.keys} reasoning={info.data.reasoning ?? {}} />
       )}
     </div>
   );
 }
 
-function Chat({ keys }: { keys: PlaygroundKey[] }) {
+function Chat({ keys, reasoning }: { keys: PlaygroundKey[]; reasoning: Record<string, Schemas["PlaygroundReasoning"]> }) {
   const saved = useMemo(loadChoice, []);
   const [keyId, setKeyId] = useState(() => (keys.some((k) => k.id === saved.key) ? saved.key! : keys[0]!.id));
   const key = keys.find((k) => k.id === keyId) ?? keys[0]!;
   const [model, setModel] = useState(() => (key.models.includes(saved.model ?? "") ? saved.model! : (key.models[0] ?? "")));
+  const [effort, setEffort] = useState<string | undefined>(undefined);
+  const levels = reasoning[model];
+  // A level the newly chosen model does not map falls back to its default.
+  const chosenEffort = effort !== undefined && levels?.levels.includes(effort) ? effort : undefined;
   const [extra, setExtra] = useState<Values>({});
   const [extraProblem, setExtraProblem] = useState<string | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -183,7 +187,7 @@ function Chat({ keys }: { keys: PlaygroundKey[] }) {
     };
     try {
       const result = streamText({
-        model: playgroundProvider(key.id, seen, extra).chatModel(model),
+        model: playgroundProvider(key.id, seen, chosenEffort === undefined ? extra : { reasoning_effort: chosenEffort, ...extra }).chatModel(model),
         messages: history,
         abortSignal: controller.signal,
         maxRetries: 0,
@@ -246,6 +250,15 @@ function Chat({ keys }: { keys: PlaygroundKey[] }) {
           placeholder={key.models.length ? "Select a model…" : "No models"}
           disabled={key.models.length === 0}
         />
+        {levels && (
+          <SelectField
+            label="Reasoning effort"
+            value={chosenEffort}
+            onChange={setEffort}
+            unset={{ label: levels.default_level ? `Model default (${levels.default_level})` : "Model default", onSelect: () => setEffort(undefined) }}
+            options={levels.levels.map((l) => ({ value: l, label: l }))}
+          />
+        )}
         <JsonEditor
           label="Request body (JSON)"
           hint="Merged into every request; model, messages and stream are set by the playground."

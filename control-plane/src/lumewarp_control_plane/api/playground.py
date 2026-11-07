@@ -22,7 +22,15 @@ from lumewarp_control_plane.api.common import SessionDep, SettingsDep
 from lumewarp_control_plane.api.keys import _live_team_or_404, _owner_effective
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import ApiError
-from lumewarp_control_plane.models import ApiKey, CatalogName, KeyLifecycle, KeyOwnerKind, Team
+from lumewarp_control_plane.models import (
+    Alias,
+    ApiKey,
+    CatalogName,
+    KeyLifecycle,
+    KeyOwnerKind,
+    Model,
+    Team,
+)
 from lumewarp_control_plane.security import PrincipalKind
 
 log = logging.getLogger(__name__)
@@ -48,9 +56,49 @@ class PlaygroundKey(BaseModel):
     models: list[str]
 
 
+class PlaygroundReasoning(BaseModel):
+    """The reasoning_effort levels a name maps, and the one used when a request names none."""
+
+    levels: list[str]
+    default_level: str | None
+
+
 class PlaygroundOut(BaseModel):
     enabled: bool
     keys: list[PlaygroundKey]
+    # By callable name: models with mapped reasoning levels and aliases that point at one.
+    # Routers are left out: their members may map different levels.
+    reasoning: dict[str, PlaygroundReasoning] = {}
+
+
+async def _reasoning(session) -> dict[str, PlaygroundReasoning]:
+    rows = (
+        await session.execute(
+            select(
+                Model.name_id,
+                CatalogName.name,
+                Model.reasoning_fragments,
+                Model.reasoning_default_level,
+            )
+            .join(CatalogName, CatalogName.id == Model.name_id)
+            .where(Model.reasoning_mode == "mapped")
+        )
+    ).all()
+    by_id = {
+        row.name_id: PlaygroundReasoning(
+            levels=list(row.reasoning_fragments or {}), default_level=row.reasoning_default_level
+        )
+        for row in rows
+    }
+    out = {row.name: by_id[row.name_id] for row in rows}
+    aliases = await session.execute(
+        select(CatalogName.name, Alias.target_name_id)
+        .join(CatalogName, CatalogName.id == Alias.name_id)
+        .where(Alias.target_name_id.in_(by_id))
+    )
+    for name, target in aliases.all():
+        out[name] = by_id[target]
+    return out
 
 
 def _session_only(authz: Authz) -> None:
@@ -98,8 +146,16 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
                 models=models,
             )
         )
+    callable_names = {name for key in keys for name in key.models}
+    reasoning = {
+        name: levels
+        for name, levels in (await _reasoning(session)).items()
+        if name in callable_names
+    }
     return PlaygroundOut(
-        enabled=bool(settings.playground_gateway_url and settings.encryption_key), keys=keys
+        enabled=bool(settings.playground_gateway_url and settings.encryption_key),
+        keys=keys,
+        reasoning=reasoning,
     )
 
 
