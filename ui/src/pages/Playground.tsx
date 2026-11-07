@@ -45,6 +45,13 @@ interface Turn {
 
 const STORE = "lumewarp.playground";
 
+const EXAMPLES = [
+  "Explain why the sky is blue in two sentences.",
+  "Write a Python function that checks whether a string is a palindrome.",
+  "Summarize the pros and cons of microservices as a table.",
+  "Translate \"Good morning, how are you?\" into Japanese and French.",
+];
+
 function loadChoice(): { key?: string; model?: string } {
   try {
     return JSON.parse(localStorage.getItem(STORE) ?? "{}") as { key?: string; model?: string };
@@ -112,6 +119,7 @@ function Chat({ keys }: { keys: PlaygroundKey[] }) {
   const abort = useRef<AbortController | null>(null);
   const nextId = useRef(1);
   const end = useRef<HTMLDivElement>(null);
+  const input = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     saveChoice(keyId, model);
@@ -248,38 +256,64 @@ function Chat({ keys }: { keys: PlaygroundKey[] }) {
       </Card>
 
       <Card className="h-[70dvh] min-w-0 gap-0 p-0 lg:h-auto" data-testid="playground-chat">
+        <div className="flex items-center justify-between gap-2 border-b px-4 py-2">
+          <span className="truncate text-sm text-muted-foreground">{model || "No model"}</span>
+          <Button type="button" variant="ghost" size="sm" onClick={() => setTurns([])} disabled={busy || turns.length === 0}>
+            <Trash2Icon aria-hidden="true" /> Clear
+          </Button>
+        </div>
         <div className="relative flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4" role="log" aria-label="Transcript" aria-live="polite">
-          {turns.length === 0 && <p className="m-auto text-sm text-muted-foreground">Send a message to start.</p>}
+          {turns.length === 0 && (
+            <div className="m-auto flex max-w-xl flex-col items-center gap-3" data-testid="example-prompts">
+              <p className="m-0 text-sm text-muted-foreground">Send a message, or start from one of these.</p>
+              <div className="flex flex-wrap justify-center gap-2">
+                {EXAMPLES.map((example) => (
+                  <Button
+                    key={example}
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-auto py-1.5 font-normal whitespace-normal"
+                    onClick={() => {
+                      setDraft(example);
+                      input.current?.focus();
+                    }}
+                  >
+                    {example}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          )}
           {turns.map((t) => (
             <Message key={t.id} turn={t} />
           ))}
           <div ref={end} />
         </div>
-        <div className="flex flex-col gap-2 border-t p-4">
-          <Textarea
-            aria-label="Message"
-            rows={2}
-            placeholder="Message"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                void send();
-              }
-            }}
-          />
-          <div className="flex flex-wrap justify-end gap-2">
-            <Button type="button" variant="outline" onClick={() => setTurns([])} disabled={busy || turns.length === 0}>
-              <Trash2Icon aria-hidden="true" /> Clear
-            </Button>
+        <div className="border-t p-4">
+          <div className="relative">
+            <Textarea
+              ref={input}
+              aria-label="Message"
+              rows={2}
+              placeholder="Message"
+              className="max-h-48 pr-12"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  void send();
+                }
+              }}
+            />
             {busy ? (
-              <Button type="button" variant="outline" onClick={() => abort.current?.abort()}>
-                <SquareIcon aria-hidden="true" /> Stop
+              <Button type="button" size="icon" variant="outline" aria-label="Stop" className="absolute right-2 bottom-2 size-8" onClick={() => abort.current?.abort()}>
+                <SquareIcon aria-hidden="true" />
               </Button>
             ) : (
-              <Button type="button" onClick={() => void send()} disabled={!draft.trim() || !model || !!extraProblem}>
-                <SendIcon aria-hidden="true" /> Send
+              <Button type="button" size="icon" aria-label="Send" className="absolute right-2 bottom-2 size-8" onClick={() => void send()} disabled={!draft.trim() || !model || !!extraProblem}>
+                <SendIcon aria-hidden="true" />
               </Button>
             )}
           </div>

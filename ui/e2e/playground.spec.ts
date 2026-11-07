@@ -63,6 +63,10 @@ test("sends the act-as and CSRF headers, streams text and shows the request id a
   await expect(page.getByRole("link", { name: "Playground" })).toBeVisible();
 
   await page.getByLabel("Request body (JSON)").fill('{"temperature": 0.2, "model": "ignored", "chat_template_kwargs": {"enable_thinking": false}}');
+  // An example prompt fills the message box without sending it.
+  await page.getByTestId("example-prompts").getByRole("button").first().click();
+  await expect(page.getByLabel("Message")).toHaveValue(/sky is blue/);
+  await expect(page.getByLabel("Message")).toBeFocused();
   await page.getByLabel("Message").fill("Hi there");
   await page.getByLabel("Message").press("Enter");
 
