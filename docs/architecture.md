@@ -166,8 +166,8 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 - 自動探索：定期讀 `/v1/models`，註冊模型與 LoRA adapter（延後）。
 - 負載感知路由：讀 vLLM `/metrics` 的等待中請求數與 KV cache 使用率。
 - prefix cache 親和（延後）。
-- 健康檢查：`health_check.url` 是完整 URL；留空時 vLLM 用去掉 `/v1` 的 base URL 加 `/health`，其他用 `<base>/models`。bearer token 只送往與 base URL 同 origin（scheme、host、port）的 URL。gateway 在 `Hello` 後、每次 ACK 後與探測狀態改變時（每秒最多一次）送 `UpstreamHealthReport`，control plane 存進 `gateway_sessions.upstream_health`；Upstreams 頁的狀態是已連線 gateway 的彙總，任一台回報異常即異常。編輯頁的「Test now」由 control plane 立即探測一次健康 URL 與 `/models`（`POST /upstreams/{id}/test`）。
-- 模型清單：`GET /upstreams/{id}/models` 由 control plane 讀上游的 `/models`（OpenAI 格式，vLLM 另帶 `max_model_len`），給 model 編輯頁當選單；不在請求路徑上。
+- 健康檢查：`health_check.url` 是完整 URL；留空時 vLLM 用去掉 `/v1` 的 base URL 加 `/health`，其他用 `<base>/models`。bearer token 只送往與 base URL 同 origin（scheme、host、port）的 URL。gateway 在 `Hello` 後、每次 ACK 後與探測狀態改變時（每秒最多一次）送 `UpstreamHealthReport`，control plane 存進 `gateway_sessions.upstream_health`；Upstreams 頁的狀態是已連線 gateway 的彙總，任一台回報異常即異常。編輯頁的「Test now」由 control plane 依表單目前的內容（不必先儲存）立即探測一次健康 URL 與 `/models`（`POST /upstreams/test`）：表單裡輸入的 key 只用這一次、不儲存；沒輸入時用已存的 key，或 control plane 自己環境裡的變數，回應會說用了哪一種。
+- 模型清單：`GET /upstreams/{id}/models` 由 control plane 讀上游的 `/models`（OpenAI 格式），給 model 編輯頁當選單，也可以輸入清單外的名稱。上游有回報長度時一併帶入：輸入長度取 `max_model_len`（vLLM）、`context_length`、`context_window` 或 `max_input_tokens`，輸出長度取 `max_output_tokens`、`max_completion_tokens`，沒有時用 context window。不在請求路徑上。
 - token 計量：用上游 usage（串流自動加 `stream_options.include_usage`）；自架 vLLM 可依 GPU 小時成本換算。
 
 ## Metrics 與 Alert

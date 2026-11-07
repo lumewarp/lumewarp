@@ -165,11 +165,24 @@ function ModelForm({ existing }: { existing?: Model }) {
   );
   // The upstream's own list feeds the picker; any name can still be typed.
   const offered = useQuery({ queryKey: ["upstream-models", v.upstream_id], queryFn: () => api.upstreamModels(v.upstream_id), enabled: !!v.upstream_id, retry: false, staleTime: 60_000 });
+  const listed = offered.data?.models ?? [];
+  // Choosing a listed model brings its lengths along; a custom name leaves them as they are.
   const pickModel = (name: string) => {
     form.set("upstream_model", name);
-    const length = offered.data?.models.find((m) => m.id === name)?.max_model_len;
-    if (length) form.set("max_input_tokens", length);
+    const info = listed.find((m) => m.id === name);
+    if (info?.max_input_tokens) form.set("max_input_tokens", info.max_input_tokens);
+    if (info?.max_output_tokens) form.set("max_output_tokens", info.max_output_tokens);
   };
+  const typed = v.upstream_model.trim();
+  const modelOptions = [
+    ...(typed && !listed.some((m) => m.id === typed) ? [{ value: typed, label: `Use “${typed}” (custom)` }] : []),
+    ...listed.map((m) => ({ value: m.id, label: m.id })),
+  ];
+  const modelHint = offered.error
+    ? `Could not list the upstream's models (${offered.error.message}); type the name.`
+    : offered.isFetching
+      ? "Loading the upstream's models…"
+      : "Pick from the upstream's list, or type any name it accepts.";
   const applyPreset = (p: (typeof PRESETS)[number]) => {
     form.set("reasoning_mode", p.mode);
     form.set("fragments", { ...noFragments(), ...p.fragments });
@@ -203,8 +216,8 @@ function ModelForm({ existing }: { existing?: Model }) {
           onChange={(x) => pickModel(String(x))}
           error={form.errors.upstream_model}
           placeholder="meta-llama/Llama-3.1-8B-Instruct"
-          options={(offered.data?.models ?? []).map((m) => ({ value: m.id, label: m.id }))}
-          hint={offered.error ? `Could not list the upstream's models: ${offered.error.message}` : offered.isFetching ? "Loading the upstream's models…" : undefined}
+          options={modelOptions}
+          hint={modelHint}
         />
       </Section>
 

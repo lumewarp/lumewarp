@@ -386,7 +386,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/upstreams/{upstream_id}/test": {
+    "/api/v1/upstreams/test": {
         parameters: {
             query?: never;
             header?: never;
@@ -397,8 +397,10 @@ export interface paths {
         put?: never;
         /**
          * Test Upstream
-         * @description Probe the upstream once now from the control plane: its health URL (configured or
-         *     default) and `/models`. Reflects the control plane's network, not each gateway's.
+         * @description Probe an upstream once now from the control plane, as the form stands (saved or
+         *     not): its health URL (configured or default) and `/models`. Reflects the control
+         *     plane's network, not each gateway's. A key typed in the form is used once and never
+         *     stored.
          */
         post: operations["testUpstream"];
         delete?: never;
@@ -2726,10 +2728,15 @@ export interface components {
             /** Id */
             id: string;
             /**
-             * Max Model Len
-             * @description Context window reported by vLLM; null when the upstream reports none.
+             * Max Input Tokens
+             * @description Context window the upstream reports (vLLM max_model_len, or context_length / context_window / max_input_tokens); null when it reports none.
              */
-            max_model_len: number | null;
+            max_input_tokens: number | null;
+            /**
+             * Max Output Tokens
+             * @description Output limit the upstream reports (max_output_tokens / max_completion_tokens); otherwise the context window, which no completion can exceed; null when neither is reported.
+             */
+            max_output_tokens: number | null;
         };
         /** UpstreamModelsOut */
         UpstreamModelsOut: {
@@ -2780,8 +2787,37 @@ export interface components {
              */
             updated_at: string;
         };
+        /**
+         * UpstreamTestIn
+         * @description The upstream form as it stands, saved or not.
+         */
+        UpstreamTestIn: {
+            kind: components["schemas"]["UpstreamKind"];
+            /** Base Url */
+            base_url: string;
+            /**
+             * Api Key
+             * @description A key typed in the form; used once, never stored.
+             */
+            api_key?: string | null;
+            /** Api Key Ref */
+            api_key_ref?: string | null;
+            /**
+             * Upstream Id
+             * @description A saved upstream whose stored key is used when api_key is not given.
+             */
+            upstream_id?: string | null;
+            /** Health Check Url */
+            health_check_url?: string | null;
+        };
         /** UpstreamTestOut */
         UpstreamTestOut: {
+            /**
+             * Credential
+             * @description The bearer token used: typed in the form, the saved upstream's stored key, the control plane's own env var, that env var missing here, or none.
+             * @enum {string}
+             */
+            credential: "entered" | "stored" | "env" | "env_unset" | "none";
             health: components["schemas"]["ProbeOut"];
             models: components["schemas"]["ProbeOut"];
         };
@@ -5494,12 +5530,14 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path: {
-                upstream_id: string;
-            };
+            path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpstreamTestIn"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

@@ -36,8 +36,38 @@ class UpstreamCallFailed(Exception):
 @dataclass(frozen=True)
 class UpstreamModelInfo:
     id: str
-    # vLLM's context window (`max_model_len`); OpenAI does not report one.
-    max_model_len: int | None
+    max_input_tokens: int | None
+    max_output_tokens: int | None
+
+
+# Where OpenAI-compatible servers report limits (OpenAI itself reports none): vLLM
+# `max_model_len`; OpenRouter, Together, Groq, LiteLLM and others use the rest.
+_INPUT_FIELDS = ("max_model_len", "context_length", "context_window", "max_input_tokens")
+_OUTPUT_FIELDS = ("max_output_tokens", "max_completion_tokens", "max_tokens")
+
+
+def _positive(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 < value < 2**31:
+        return value
+    return None
+
+
+def _first(item: dict, fields: tuple[str, ...]) -> int | None:
+    for field in fields:
+        if (value := _positive(item.get(field))) is not None:
+            return value
+    return None
+
+
+def model_limits(item: dict) -> tuple[int | None, int | None]:
+    """(input, output) from one `/models` entry. Without a reported output limit the
+    context window is used: no completion can be longer.
+    """
+    top = item.get("top_provider")
+    nested = top if isinstance(top, dict) else {}
+    window = _first(item, _INPUT_FIELDS) or _first(nested, ("context_length",))
+    output = _first(item, _OUTPUT_FIELDS) or _first(nested, ("max_completion_tokens",))
+    return window, output or window
 
 
 @dataclass(frozen=True)
@@ -112,9 +142,7 @@ async def list_models(settings: Settings, row: Upstream) -> list[UpstreamModelIn
     for item in data[:MAX_MODELS]:
         if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
             continue
-        length = item.get("max_model_len")
-        valid = isinstance(length, int) and not isinstance(length, bool) and length > 0
-        out.setdefault(item["id"], UpstreamModelInfo(item["id"], length if valid else None))
+        out.setdefault(item["id"], UpstreamModelInfo(item["id"], *model_limits(item)))
     return sorted(out.values(), key=lambda m: m.id)
 
 
@@ -136,10 +164,14 @@ def _elapsed(started: float) -> int:
 
 def health_url(row: Upstream) -> str:
     """The URL the gateway probes (router.rs): explicit, or the default per kind."""
-    if row.health_check_url:
-        return row.health_check_url
-    base = row.base_url.rstrip("/")
-    if row.kind == UpstreamKind.VLLM:
+    return default_health_url(row.kind, row.base_url, row.health_check_url)
+
+
+def default_health_url(kind: UpstreamKind, base_url: str, explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    base = base_url.rstrip("/")
+    if kind == UpstreamKind.VLLM:
         return f"{base.removesuffix('/v1')}/health"
     return f"{base}/models"
 
@@ -154,12 +186,13 @@ def _same_origin(a: str, b: str) -> bool:
     )
 
 
-async def test_upstream(settings: Settings, row: Upstream) -> tuple[ProbeResult, ProbeResult]:
+async def test_upstream(
+    kind: UpstreamKind, base_url: str, health_check_url: str | None, token: str | None
+) -> tuple[ProbeResult, ProbeResult]:
     """Probe the health URL and `/models` once each, as the gateway would."""
-    token = bearer(settings, row)
-    health = health_url(row)
-    models = f"{row.base_url.rstrip('/')}/models"
+    health = default_health_url(kind, base_url, health_check_url)
+    models = f"{base_url.rstrip('/')}/models"
     return (
-        await probe(health, token if _same_origin(health, row.base_url) else None),
+        await probe(health, token if _same_origin(health, base_url) else None),
         await probe(models, token),
     )

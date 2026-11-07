@@ -7,6 +7,7 @@ Every catalog write holds the scope lock, so the name and reference checks are e
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -55,6 +56,7 @@ from lumewarp_control_plane.api.schemas import (
     UpstreamModelInfoOut,
     UpstreamModelsOut,
     UpstreamOut,
+    UpstreamTestIn,
     UpstreamTestOut,
     UpstreamUpdate,
 )
@@ -543,29 +545,42 @@ async def list_upstream_models(
         models = await upstream_client.list_models(settings, row)
     except upstream_client.UpstreamCallFailed as exc:
         raise ApiError(502, "upstream_unavailable", str(exc)) from None
-    return UpstreamModelsOut(
-        models=[UpstreamModelInfoOut(id=m.id, max_model_len=m.max_model_len) for m in models]
-    )
+    return UpstreamModelsOut(models=[UpstreamModelInfoOut(**vars(m)) for m in models])
 
 
-@router.post(
-    "/upstreams/{upstream_id}/test", response_model=UpstreamTestOut, operation_id="testUpstream"
-)
+@router.post("/upstreams/test", response_model=UpstreamTestOut, operation_id="testUpstream")
 async def test_upstream(
-    upstream_id: uuid.UUID, authz: Authz, session: SessionDep, settings: SettingsDep
+    body: UpstreamTestIn, authz: Authz, session: SessionDep, settings: SettingsDep
 ) -> UpstreamTestOut:
-    """Probe the upstream once now from the control plane: its health URL (configured or
-    default) and `/models`. Reflects the control plane's network, not each gateway's.
+    """Probe an upstream once now from the control plane, as the form stands (saved or
+    not): its health URL (configured or default) and `/models`. Reflects the control
+    plane's network, not each gateway's. A key typed in the form is used once and never
+    stored.
     """
     await authz.require(Action.ROUTING_MANAGE)
-    row = await session.get(Upstream, upstream_id)
-    if row is None:
-        raise not_found("upstream not found")
-    try:
-        health, models = await upstream_client.test_upstream(settings, row)
-    except upstream_client.UpstreamCallFailed as exc:
-        raise ApiError(502, "upstream_unavailable", str(exc)) from None
-    return UpstreamTestOut(health=ProbeOut(**vars(health)), models=ProbeOut(**vars(models)))
+    token: str | None = None
+    credential = "none"
+    if body.api_key is not None:
+        token, credential = body.api_key.get_secret_value(), "entered"
+    elif body.api_key_ref is not None:
+        token = os.environ.get(body.api_key_ref) or None
+        credential = "env" if token else "env_unset"
+    elif body.upstream_id is not None:
+        row = await session.get(Upstream, body.upstream_id)
+        if row is None:
+            raise not_found("upstream not found")
+        if row.api_key_ciphertext is not None:
+            try:
+                token = upstream_client.bearer(settings, row)
+            except upstream_client.UpstreamCallFailed as exc:
+                raise ApiError(502, "upstream_unavailable", str(exc)) from None
+            credential = "stored"
+    health, models = await upstream_client.test_upstream(
+        body.kind, body.base_url, body.health_check_url, token
+    )
+    return UpstreamTestOut(
+        credential=credential, health=ProbeOut(**vars(health)), models=ProbeOut(**vars(models))
+    )
 
 
 @router.patch("/upstreams/{upstream_id}", response_model=UpstreamOut, operation_id="updateUpstream")

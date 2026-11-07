@@ -17,6 +17,18 @@ HEALTH = {"interval_ms": 5000, "timeout_ms": 1000}
 KEY = "sk-health-test-secret-4411"
 
 
+def _test(client, up: dict, **extra):
+    """Test a saved upstream as its form stands (no key typed)."""
+    body = {
+        "kind": up["kind"],
+        "base_url": up["base_url"],
+        "upstream_id": up["id"],
+        "health_check_url": (up["health_check"] or {}).get("url"),
+        **extra,
+    }
+    return client.post("/api/v1/upstreams/test", json=body, headers=ADMIN_AUTH)
+
+
 def _upstream(client, **body) -> dict:
     body = {"name": f"up-{suffix()}", "kind": "vllm", "base_url": "http://vllm.test/v1", **body}
     response = client.post("/api/v1/upstreams", json=body, headers=ADMIN_AUTH)
@@ -94,7 +106,7 @@ def test_on_demand_test_probes_health_and_models(client, replies) -> None:
     table["http://vllm.test/health"] = httpx.Response(200)
     table["http://vllm.test/v1/models"] = httpx.Response(401, text=KEY)
     up = _upstream(client, api_key=KEY)
-    response = client.post(f"/api/v1/upstreams/{up['id']}/test", headers=ADMIN_AUTH)
+    response = _test(client, up)
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["health"]["url"] == "http://vllm.test/health"
@@ -113,7 +125,7 @@ def test_explicit_health_url_on_another_host_gets_no_token(client, replies) -> N
         api_key=KEY,
         health_check={**HEALTH, "url": "http://probe.test/ready"},
     )
-    body = client.post(f"/api/v1/upstreams/{up['id']}/test", headers=ADMIN_AUTH).json()
+    body = _test(client, up).json()
     assert body["health"] == {
         "url": "http://probe.test/ready",
         "ok": True,
@@ -132,6 +144,41 @@ def test_default_health_url_for_non_vllm_is_models(client, replies) -> None:
     _, table = replies
     table["http://vllm.test/v1/models"] = httpx.Response(200, json={"data": []})
     up = _upstream(client, kind="openai_compatible")
-    body = client.post(f"/api/v1/upstreams/{up['id']}/test", headers=ADMIN_AUTH).json()
+    body = _test(client, up).json()
     assert body["health"]["url"] == "http://vllm.test/v1/models"
     assert body["health"]["ok"] is True
+
+
+def test_unsaved_form_is_tested_with_the_typed_key(client, replies) -> None:
+    calls, table = replies
+    table["http://new.test/v1/models"] = httpx.Response(200, json={"data": []})
+    body = {"kind": "openai", "base_url": "http://new.test/v1", "api_key": KEY}
+    response = client.post("/api/v1/upstreams/test", json=body, headers=ADMIN_AUTH)
+    assert response.status_code == 200, response.text
+    assert response.json()["credential"] == "entered"
+    assert response.json()["models"]["ok"] is True
+    assert KEY not in response.text
+    assert all(c.headers["authorization"] == f"Bearer {KEY}" for c in calls)
+
+
+def test_credential_sources(client, replies, monkeypatch) -> None:
+    calls, table = replies
+    table["http://vllm.test/v1/models"] = httpx.Response(200, json={"data": []})
+    up = _upstream(client, kind="openai", api_key=KEY)
+    assert _test(client, up).json()["credential"] == "stored"
+    assert calls[-1].headers["authorization"] == f"Bearer {KEY}"
+    # A key typed over a stored one wins, without replacing it.
+    assert _test(client, up, api_key="sk-typed").json()["credential"] == "entered"
+    assert calls[-1].headers["authorization"] == "Bearer sk-typed"
+    monkeypatch.delenv("LW_TEST_UNSET_KEY", raising=False)
+    body = _test(client, up, api_key_ref="LW_TEST_UNSET_KEY").json()
+    assert body["credential"] == "env_unset"
+    assert "authorization" not in calls[-1].headers
+    monkeypatch.setenv("LW_TEST_SET_KEY", "env-123")
+    assert _test(client, up, api_key_ref="LW_TEST_SET_KEY").json()["credential"] == "env"
+    assert calls[-1].headers["authorization"] == "Bearer env-123"
+    plain = _upstream(client, kind="openai")
+    assert _test(client, plain).json()["credential"] == "none"
+    assert _test(client, {**up, "id": str(uuid.uuid4())}).status_code == 404
+    bad = {"kind": "openai", "base_url": "ftp://x"}
+    assert client.post("/api/v1/upstreams/test", json=bad, headers=ADMIN_AUTH).status_code == 422

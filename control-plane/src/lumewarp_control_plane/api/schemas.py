@@ -1352,8 +1352,18 @@ class RollbackOut(ApiModel):
 
 class UpstreamModelInfoOut(ReadModel):
     id: str
-    max_model_len: int | None = Field(
-        description="Context window reported by vLLM; null when the upstream reports none."
+    max_input_tokens: int | None = Field(
+        description=(
+            "Context window the upstream reports (vLLM max_model_len, or context_length /"
+            " context_window / max_input_tokens); null when it reports none."
+        )
+    )
+    max_output_tokens: int | None = Field(
+        description=(
+            "Output limit the upstream reports (max_output_tokens / max_completion_tokens);"
+            " otherwise the context window, which no completion can exceed; null when"
+            " neither is reported."
+        )
     )
 
 
@@ -1369,6 +1379,62 @@ class ProbeOut(ReadModel):
     error: str | None = Field(description="Why no response arrived (never the response body).")
 
 
+class UpstreamTestIn(ApiModel):
+    """The upstream form as it stands, saved or not."""
+
+    kind: UpstreamKind
+    base_url: str = Field(min_length=1)
+    api_key: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4096,
+        description="A key typed in the form; used once, never stored.",
+    )
+    api_key_ref: str | None = Field(default=None, max_length=200)
+    upstream_id: uuid.UUID | None = Field(
+        default=None,
+        description="A saved upstream whose stored key is used when api_key is not given.",
+    )
+    health_check_url: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("base_url")
+    @classmethod
+    def _http_url(cls, value: str) -> str:
+        return _base_url(value)  # type: ignore[return-value]
+
+    @field_validator("api_key_ref")
+    @classmethod
+    def _check_api_key_ref(cls, value: str | None) -> str | None:
+        return _env_name(value)
+
+    @field_validator("api_key")
+    @classmethod
+    def _check_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        return _api_key(value)
+
+    @field_validator("health_check_url")
+    @classmethod
+    def _check_health_url(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        value = value.strip()
+        if problem := health_url_problem(value):
+            raise ValueError(f"health_check_url {problem}")
+        return value
+
+    @model_validator(mode="after")
+    def _one_key_source(self) -> UpstreamTestIn:
+        if self.api_key is not None and self.api_key_ref is not None:
+            raise ValueError("set api_key or api_key_ref, not both")
+        return self
+
+
 class UpstreamTestOut(ReadModel):
+    credential: Literal["entered", "stored", "env", "env_unset", "none"] = Field(
+        description=(
+            "The bearer token used: typed in the form, the saved upstream's stored key, the"
+            " control plane's own env var, that env var missing here, or none."
+        )
+    )
     health: ProbeOut
     models: ProbeOut

@@ -152,7 +152,7 @@ export const api = {
   updateUpstream: (id: string, body: Schemas["UpstreamUpdate"]) => unwrap(client.PATCH("/api/v1/upstreams/{upstream_id}", { params: { path: { upstream_id: id } }, body })),
   deleteUpstream: (id: string) => unwrap(client.DELETE("/api/v1/upstreams/{upstream_id}", { params: { path: { upstream_id: id } } })),
   upstreamModels: (id: string) => unwrap(client.GET("/api/v1/upstreams/{upstream_id}/models", { params: { path: { upstream_id: id } } })),
-  testUpstream: (id: string) => unwrap(client.POST("/api/v1/upstreams/{upstream_id}/test", { params: { path: { upstream_id: id } } })),
+  testUpstream: (body: Schemas["UpstreamTestIn"]) => unwrap(client.POST("/api/v1/upstreams/test", { body })),
 
   models: () => listAll((c) => unwrap(client.GET("/api/v1/models", { params: { query: q(c) } }))),
   createModel: (body: Schemas["ModelCreate"]) => unwrap(client.POST("/api/v1/models", { body })),

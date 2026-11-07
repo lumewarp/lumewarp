@@ -233,7 +233,7 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
             </div>
           </>
         )}
-        <TestNow upstream={existing} />
+        <TestNow upstream={existing} values={v} />
       </Section>
 
       <Section title="Circuit breaker" description="Stops sending to a model after repeated failures, then lets one request through to retry.">
@@ -253,20 +253,36 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
   );
 }
 
-/** One probe now, from the control plane, of the saved settings. */
-function TestNow({ upstream }: { upstream?: Upstream }) {
+/** The form as it stands, saved or not: a typed key wins, else the stored one, else the env variable. */
+function testBody(v: Values, upstream: Upstream | undefined) {
+  const key = v.key_source === "stored" && v.api_key.trim() ? { api_key: v.api_key.trim() } : v.key_source === "stored" && upstream?.api_key_set ? { upstream_id: upstream.id } : v.key_source === "env" && v.api_key_ref.trim() ? { api_key_ref: v.api_key_ref.trim() } : {};
+  return { kind: v.kind, base_url: v.base_url.trim(), health_check_url: v.health_enabled ? v.health_url.trim() || null : null, ...key };
+}
+
+const CREDENTIAL: Record<UpstreamTest["credential"], string> = {
+  entered: "Tested with the key typed above.",
+  stored: "Tested with the stored key.",
+  env: "Tested with the variable from the control plane's environment.",
+  env_unset: "The variable is not set on the control plane, so this test sent no key; gateways use their own environment.",
+  none: "Tested without a key.",
+};
+
+/** One probe now, from the control plane, of the form as it stands. */
+function TestNow({ upstream, values }: { upstream?: Upstream; values: Values }) {
   const [result, setResult] = useState<UpstreamTest | null>(null);
-  const run = useMutation({ mutationFn: () => api.testUpstream(upstream!.id), onSuccess: setResult });
+  const run = useMutation({ mutationFn: () => api.testUpstream(testBody(values, upstream)), onSuccess: setResult });
   useEffect(() => setResult(null), [upstream?.id]);
+  const urlProblem = values.base_url.trim() ? validUrl(values.base_url.trim()) : "Enter the base URL first.";
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-dashed p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-sm text-muted-foreground">{upstream ? "Check the saved settings now, from the control plane." : "Save first to test the connection."}</span>
-        <Button type="button" variant="outline" size="sm" disabled={!upstream || run.isPending} onClick={() => run.mutate()}>
+        <span className="text-sm text-muted-foreground">{urlProblem ?? "Check these settings now, from the control plane. Nothing is saved."}</span>
+        <Button type="button" variant="outline" size="sm" disabled={!!urlProblem || run.isPending} onClick={() => run.mutate()}>
           {run.isPending ? "Testing…" : "Test now"}
         </Button>
       </div>
       {run.error && <p className="text-sm text-destructive">{run.error.message}</p>}
+      {result && <p className={result.credential === "env_unset" ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>{CREDENTIAL[result.credential]}</p>}
       {result && (
         <DescriptionList data-testid="upstream-test-result">
           {(["health", "models"] as const).map((k) => (

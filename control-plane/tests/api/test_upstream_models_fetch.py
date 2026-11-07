@@ -43,6 +43,12 @@ def test_lists_models_with_the_stored_key(client, upstream_calls) -> None:
                 {"id": "qwen3", "max_model_len": 1},
                 {"id": "", "max_model_len": 5},
                 {"id": "bool", "max_model_len": True},
+                {
+                    "id": "router/llama",
+                    "context_length": 131072,
+                    "top_provider": {"max_completion_tokens": 8192},
+                },
+                {"id": "groq", "context_window": 8192, "max_completion_tokens": 4096},
                 "garbage",
             ],
         },
@@ -52,9 +58,12 @@ def test_lists_models_with_the_stored_key(client, upstream_calls) -> None:
     assert response.status_code == 200, response.text
     assert response.json() == {
         "models": [
-            {"id": "bool", "max_model_len": None},
-            {"id": "gpt-4o", "max_model_len": None},
-            {"id": "qwen3", "max_model_len": 32768},
+            {"id": "bool", "max_input_tokens": None, "max_output_tokens": None},
+            {"id": "gpt-4o", "max_input_tokens": None, "max_output_tokens": None},
+            {"id": "groq", "max_input_tokens": 8192, "max_output_tokens": 4096},
+            # vLLM reports no output limit: the context window bounds it.
+            {"id": "qwen3", "max_input_tokens": 32768, "max_output_tokens": 32768},
+            {"id": "router/llama", "max_input_tokens": 131072, "max_output_tokens": 8192},
         ]
     }
     assert calls[-1].headers["authorization"] == f"Bearer {KEY}"
