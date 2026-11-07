@@ -89,6 +89,8 @@ prepare() {
     --gateway-id "$gateway_id" 2>/dev/null)"
   {
     echo "export LUMEWARP_DEV_MODE=true"
+    # Seals upstream API keys entered in the UI; the gateway opens them with the same key.
+    echo "export LUMEWARP_ENCRYPTION_KEY=dev-only-lumewarp-encryption-key-0123456789"
     printf 'export LUMEWARP_BREAK_GLASS_PASSWORD=%q\n' "$break_glass_password"
     echo "export LUMEWARP_INITIAL_ADMIN_EMAIL=alice@example.com"
     echo "export LUMEWARP_GATEWAY_TOKEN=$token"
