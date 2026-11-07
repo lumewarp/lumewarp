@@ -11,7 +11,9 @@ use std::{
     task::{Context, Poll},
 };
 
-use lumewarp_proto::config::v1::{ConfigUpdate, GatewayMessage};
+use lumewarp_proto::config::v1::{
+    gateway_message::Msg, ConfigUpdate, GatewayMessage, UpstreamHealthReport,
+};
 use tokio::{
     net::TcpListener,
     sync::{mpsc, oneshot},
@@ -30,6 +32,8 @@ pub struct Conn {
     pub inbound: mpsc::UnboundedReceiver<GatewayMessage>,
     /// Dropping it ends the stream from the server side.
     pub outbound: mpsc::UnboundedSender<Result<ConfigUpdate, Status>>,
+    /// Health reports `recv` skipped, oldest first.
+    pub health: Vec<UpstreamHealthReport>,
 }
 
 impl Conn {
@@ -39,10 +43,32 @@ impl Conn {
             .expect("gateway stream closed");
     }
 
+    /// The next Hello, ACK or NACK; health reports are kept in `health`.
     pub async fn recv(&mut self) -> GatewayMessage {
-        super::bounded(self.inbound.recv())
-            .await
-            .expect("gateway closed the stream")
+        loop {
+            let message = super::bounded(self.inbound.recv())
+                .await
+                .expect("gateway closed the stream");
+            match message.msg {
+                Some(Msg::UpstreamHealth(report)) => self.health.push(report),
+                _ => return message,
+            }
+        }
+    }
+
+    /// The next health report, including one `recv` already skipped.
+    pub async fn recv_health(&mut self) -> UpstreamHealthReport {
+        loop {
+            if !self.health.is_empty() {
+                return self.health.remove(0);
+            }
+            let message = super::bounded(self.inbound.recv())
+                .await
+                .expect("gateway closed the stream");
+            if let Some(Msg::UpstreamHealth(report)) = message.msg {
+                return report;
+            }
+        }
     }
 }
 
@@ -91,6 +117,7 @@ impl tonic::server::StreamingService<GatewayMessage> for StreamImpl {
                 authorization,
                 inbound: in_rx,
                 outbound: out_tx,
+                health: Vec::new(),
             });
             Ok(Response::new(Updates(out_rx)))
         })

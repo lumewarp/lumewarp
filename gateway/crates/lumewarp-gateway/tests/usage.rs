@@ -278,6 +278,7 @@ fn snapshot(upstream: SocketAddr) -> Snapshot {
         upstream: upstream.into(),
         upstream_model: "actual".into(),
         price,
+        ..Default::default()
     };
     let router = |name: &str, model: &str| Router {
         name: name.into(),

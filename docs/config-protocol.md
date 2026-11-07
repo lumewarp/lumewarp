@@ -60,7 +60,7 @@ receive → apply to a private copy → validate (capabilities, references, hash
 - One background apply task; blocking file I/O never runs on the request path.
 - Persist failure → NACK `PERSIST_FAILED`, keep serving the previous version in memory.
 - ACK means "active and durable": a gateway restarted right after ACK boots into that version.
-- Validation failure (including an unresolvable `api_key_ref`) → NACK `INVALID_CONFIG`, keep the previous version.
+- Validation failure (including an unresolvable `api_key_ref`, or an `api_key_ciphertext` that does not open with the gateway's `LUMEWARP_ENCRYPTION_KEY`) → NACK `INVALID_CONFIG`, keep the previous version.
 - State survives swaps: per-model in-flight counters and circuit breakers,
   upstream health, the gateway retry budget, rate-limit buckets (by
   `RateLimitScope.id`) and the metrics registry are process-lifetime. Active

@@ -106,6 +106,13 @@ spec:
             - name: OTEL_TRACES_SAMPLER_ARG
               value: {{ $samplingRatio | quote }}
             {{- end }}
+            {{- if .Values.encryptionKey.secretName }}
+            - name: LUMEWARP_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.encryptionKey.secretName }}
+                  key: {{ .Values.encryptionKey.key }}
+            {{- end }}
             {{- with .Values.gateway.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

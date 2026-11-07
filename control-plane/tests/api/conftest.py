@@ -25,6 +25,7 @@ from tests.conftest import migrated_database
 
 API_SCOPE = "api-test"
 ADMIN_PASSWORD = "test-break-glass-password"
+TEST_ENCRYPTION_KEY = "test-encryption-key-0123456789abcdef"
 
 
 @pytest.fixture(scope="session")
@@ -81,6 +82,7 @@ async def api_settings(api_database_url: str, api_scope: str, api_engine: AsyncE
         dev_mode=True,
         session_cookie_secure=False,
         scope=api_scope,
+        encryption_key=TEST_ENCRYPTION_KEY,
     )
 
 

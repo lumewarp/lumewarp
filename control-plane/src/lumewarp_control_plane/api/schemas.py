@@ -10,20 +10,24 @@ import re
 import uuid
 from datetime import UTC, datetime
 from datetime import date as date_type
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     field_validator,
     model_validator,
 )
 
 from lumewarp_control_plane.compiler.validate import (
-    health_path_problem,
+    DEFAULT_BODY_RESERVED_KEYS,
+    body_object_problem,
+    health_url_problem,
     metrics_url_problem,
+    reasoning_problem,
     upstream_url_problem,
 )
 from lumewarp_control_plane.models import (
@@ -419,10 +423,15 @@ def _metrics_url(value: str | None) -> str | None:
 
 
 class HealthCheckIn(ApiModel):
-    """Active probe: GET <base_url><path> every interval; 2xx within timeout = success."""
+    """Active probe: GET <url> every interval; 2xx within timeout = success."""
 
-    path: str | None = Field(
-        default=None, max_length=400, description="Relative to base_url; null = /models."
+    url: str | None = Field(
+        default=None,
+        max_length=2000,
+        description=(
+            "Absolute http(s) URL; null = vLLM: base_url without /v1 + /health,"
+            " others: base_url + /models."
+        ),
     )
     interval_ms: int = Field(ge=1000, le=INT32_MAX)
     timeout_ms: int = Field(ge=1, le=INT32_MAX, description="Must be below interval_ms.")
@@ -433,13 +442,14 @@ class HealthCheckIn(ApiModel):
         default=None, ge=1, le=1000, description="Consecutive successes; null = 1."
     )
 
-    @field_validator("path")
+    @field_validator("url")
     @classmethod
-    def _path(cls, value: str | None) -> str | None:
-        if value is None or value == "":
+    def _url(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
             return None
-        if problem := health_path_problem(value):
-            raise ValueError(problem)
+        value = value.strip()
+        if problem := health_url_problem(value):
+            raise ValueError(f"url {problem}")
         return value
 
     @model_validator(mode="after")
@@ -450,7 +460,7 @@ class HealthCheckIn(ApiModel):
 
 
 class HealthCheckOut(ReadModel):
-    path: str | None
+    url: str | None
     interval_ms: int
     timeout_ms: int
     unhealthy_threshold: int | None
@@ -471,11 +481,30 @@ class CircuitBreakerOut(ReadModel):
     open_ms: int | None
 
 
+_API_KEY_DOC = (
+    "Bearer token, stored sealed with LUMEWARP_ENCRYPTION_KEY and never returned. "
+    "Mutually exclusive with api_key_ref."
+)
+
+
+def _api_key(value: SecretStr | None) -> SecretStr | None:
+    if value is None:
+        return None
+    raw = value.get_secret_value()
+    # It becomes an HTTP header value on every gateway: visible ASCII only.
+    if not all("!" <= c <= "~" for c in raw):
+        raise ValueError("api_key must be printable ASCII without spaces")
+    return value
+
+
 class UpstreamCreate(ApiModel):
     name: Name
     kind: UpstreamKind
     base_url: str = Field(min_length=1)
     api_key_ref: str | None = Field(default=None, max_length=200)
+    api_key: SecretStr | None = Field(
+        default=None, min_length=1, max_length=4096, description=_API_KEY_DOC
+    )
     timeout_ms: int = Field(default=0, ge=0)
     stream_usage_mode: StreamUsageMode = StreamUsageMode.INCLUDE_USAGE
     health_check: HealthCheckIn | None = None
@@ -492,21 +521,36 @@ class UpstreamCreate(ApiModel):
     def _check_api_key_ref(cls, value: str | None) -> str | None:
         return _env_name(value)
 
+    @field_validator("api_key")
+    @classmethod
+    def _check_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        return _api_key(value)
+
     @field_validator("metrics_url")
     @classmethod
     def _check_metrics_url(cls, value: str | None) -> str | None:
         return _metrics_url(value)
 
+    @model_validator(mode="after")
+    def _one_key_source(self) -> UpstreamCreate:
+        if self.api_key is not None and self.api_key_ref is not None:
+            raise ValueError("set api_key or api_key_ref, not both")
+        return self
+
 
 class UpstreamUpdate(ApiModel):
     """PATCH: omitted fields are unchanged; `health_check`, `circuit_breaker` and
-    `metrics_url` accept null to remove the setting.
+    `metrics_url` accept null to remove the setting. `api_key` replaces the stored key
+    (and clears `api_key_ref`); null removes it. Setting `api_key_ref` removes a stored key.
     """
 
     name: Name | None = None
     kind: UpstreamKind | None = None
     base_url: str | None = Field(default=None, min_length=1)
     api_key_ref: str | None = Field(default=None, max_length=200)
+    api_key: SecretStr | None = Field(
+        default=None, min_length=1, max_length=4096, description=_API_KEY_DOC
+    )
     timeout_ms: int | None = Field(default=None, ge=0)
     stream_usage_mode: StreamUsageMode | None = None
     health_check: HealthCheckIn | None = None
@@ -523,10 +567,21 @@ class UpstreamUpdate(ApiModel):
     def _check_api_key_ref(cls, value: str | None) -> str | None:
         return _env_name(value)
 
+    @field_validator("api_key")
+    @classmethod
+    def _check_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        return _api_key(value)
+
     @field_validator("metrics_url")
     @classmethod
     def _check_metrics_url(cls, value: str | None) -> str | None:
         return _metrics_url(value)
+
+    @model_validator(mode="after")
+    def _one_key_source(self) -> UpstreamUpdate:
+        if self.api_key is not None and self.api_key_ref is not None:
+            raise ValueError("set api_key or api_key_ref, not both")
+        return self
 
 
 class UpstreamOut(ReadModel):
@@ -535,11 +590,21 @@ class UpstreamOut(ReadModel):
     kind: UpstreamKind
     base_url: str
     api_key_ref: str | None
+    api_key_set: bool = Field(
+        description="A sealed api_key is stored (its value is never returned)."
+    )
     timeout_ms: int
     stream_usage_mode: StreamUsageMode
     health_check: HealthCheckOut | None
     circuit_breaker: CircuitBreakerOut | None
     metrics_url: str | None
+    health: Literal["healthy", "unhealthy", "unknown", "not_probed"] = Field(
+        default="not_probed",
+        description=(
+            "Active health check as connected gateways report it: unhealthy if any says so,"
+            " unknown when no connected gateway has reported it yet."
+        ),
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -551,7 +616,7 @@ class UpstreamOut(ReadModel):
         health = None
         if data.health_check_interval_ms is not None:
             health = HealthCheckOut(
-                path=data.health_check_path,
+                url=data.health_check_url,
                 interval_ms=data.health_check_interval_ms,
                 timeout_ms=data.health_check_timeout_ms,
                 unhealthy_threshold=data.health_check_unhealthy_threshold,
@@ -568,6 +633,7 @@ class UpstreamOut(ReadModel):
             "kind": data.kind,
             "base_url": data.base_url,
             "api_key_ref": data.api_key_ref,
+            "api_key_set": data.api_key_ciphertext is not None,
             "timeout_ms": data.timeout_ms,
             "stream_usage_mode": data.stream_usage_mode,
             "health_check": health,
@@ -578,7 +644,79 @@ class UpstreamOut(ReadModel):
         }
 
 
-class ModelCreate(ApiModel):
+ReasoningLevel = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+
+
+def _body_object(value: dict[str, Any] | None, what: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if problem := body_object_problem(value, what, DEFAULT_BODY_RESERVED_KEYS):
+        raise ValueError(problem)
+    return value
+
+
+class ReasoningIn(ApiModel):
+    """How the OpenAI `reasoning_effort` field is handled for this model."""
+
+    mode: Literal["passthrough", "strip", "mapped"] = Field(
+        default="passthrough",
+        description=(
+            "passthrough: forward it; strip: remove it; mapped: replace it with the"
+            " JSON object mapped to its level (e.g. chat_template_kwargs for vLLM)."
+        ),
+    )
+    fragments: dict[ReasoningLevel, dict[str, Any]] | None = Field(
+        default=None, description="mapped only: level -> object merged into the request."
+    )
+    default_level: ReasoningLevel | None = Field(
+        default=None, description="Used when the client sends no reasoning_effort."
+    )
+
+    @model_validator(mode="after")
+    def _shape(self) -> ReasoningIn:
+        fragments = self.fragments or None
+        if fragments is not None:
+            for level, fragment in fragments.items():
+                if problem := body_object_problem(fragment, f"fragment {level!r}"):
+                    raise ValueError(problem)
+        if problem := reasoning_problem(self.mode, fragments, self.default_level):
+            raise ValueError(problem)
+        self.fragments = fragments if self.mode == "mapped" else None
+        return self
+
+
+class ReasoningOut(ReadModel):
+    mode: Literal["passthrough", "strip", "mapped"]
+    fragments: dict[str, dict[str, Any]] | None
+    default_level: str | None
+
+
+class _ModelSettings(ApiModel):
+    max_input_tokens: int | None = Field(
+        default=None, ge=1, le=INT32_MAX, description="Context window; informational."
+    )
+    max_output_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        le=INT32_MAX,
+        description="Requests asking for more max_tokens / max_completion_tokens get a 400.",
+    )
+    default_body: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Merged under each request body: the client's fields win, objects on both"
+            " sides merge. Must not set model, stream or stream_options."
+        ),
+    )
+    reasoning: ReasoningIn | None = Field(default=None, description="null = passthrough.")
+
+    @field_validator("default_body")
+    @classmethod
+    def _check_default_body(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return _body_object(value, "default_body") or None
+
+
+class ModelCreate(_ModelSettings):
     name: ModelName
     upstream_id: uuid.UUID
     upstream_model: str = Field(min_length=1, max_length=400)
@@ -594,7 +732,11 @@ class ModelCreate(ApiModel):
         return self
 
 
-class ModelUpdate(ApiModel):
+class ModelUpdate(_ModelSettings):
+    """PATCH: omitted fields are unchanged; the limits, default_body and reasoning accept
+    null to remove the setting.
+    """
+
     name: ModelName | None = None
     upstream_id: uuid.UUID | None = None
     upstream_model: str | None = Field(default=None, min_length=1, max_length=400)
@@ -613,8 +755,36 @@ class ModelOut(ReadModel):
     upstream_model: str
     price_input_nano_usd_per_mtok: int | None
     price_output_nano_usd_per_mtok: int | None
+    max_input_tokens: int | None
+    max_output_tokens: int | None
+    default_body: dict[str, Any] | None
+    reasoning: ReasoningOut
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_row(cls, data: Any) -> Any:
+        if isinstance(data, dict) or not hasattr(data, "reasoning_mode"):
+            return data
+        return {
+            "id": data.id,
+            "name": data.name,
+            "upstream_id": data.upstream_id,
+            "upstream_model": data.upstream_model,
+            "price_input_nano_usd_per_mtok": data.price_input_nano_usd_per_mtok,
+            "price_output_nano_usd_per_mtok": data.price_output_nano_usd_per_mtok,
+            "max_input_tokens": data.max_input_tokens,
+            "max_output_tokens": data.max_output_tokens,
+            "default_body": data.default_body,
+            "reasoning": ReasoningOut(
+                mode=data.reasoning_mode,
+                fragments=data.reasoning_fragments,
+                default_level=data.reasoning_default_level,
+            ),
+            "created_at": data.created_at,
+            "updated_at": data.updated_at,
+        }
 
 
 class AliasCreate(ApiModel):
@@ -1178,3 +1348,27 @@ class RollbackCreate(ApiModel):
 
 class RollbackOut(ApiModel):
     version: int
+
+
+class UpstreamModelInfoOut(ReadModel):
+    id: str
+    max_model_len: int | None = Field(
+        description="Context window reported by vLLM; null when the upstream reports none."
+    )
+
+
+class UpstreamModelsOut(ReadModel):
+    models: list[UpstreamModelInfoOut]
+
+
+class ProbeOut(ReadModel):
+    url: str
+    ok: bool = Field(description="2xx within the timeout.")
+    status: int | None = Field(description="HTTP status; null when no response arrived.")
+    latency_ms: int
+    error: str | None = Field(description="Why no response arrived (never the response body).")
+
+
+class UpstreamTestOut(ReadModel):
+    health: ProbeOut
+    models: ProbeOut

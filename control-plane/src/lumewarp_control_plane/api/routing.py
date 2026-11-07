@@ -8,14 +8,16 @@ Every catalog write holds the scope lock, so the name and reference checks are e
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import APIRouter, Response, status
+from pydantic import SecretStr
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumewarp_control_plane import audit, catalog
+from lumewarp_control_plane import audit, catalog, sealing, upstream_client
 from lumewarp_control_plane.api.common import (
     LimitDep,
     SessionDep,
@@ -39,6 +41,7 @@ from lumewarp_control_plane.api.schemas import (
     ModelOut,
     ModelUpdate,
     Page,
+    ProbeOut,
     RetryPolicyIn,
     RetryPolicyOut,
     RouterCreate,
@@ -49,7 +52,10 @@ from lumewarp_control_plane.api.schemas import (
     TrafficSplitIn,
     TrafficSplitOut,
     UpstreamCreate,
+    UpstreamModelInfoOut,
+    UpstreamModelsOut,
     UpstreamOut,
+    UpstreamTestOut,
     UpstreamUpdate,
 )
 from lumewarp_control_plane.authz import Action, Authz
@@ -63,11 +69,12 @@ from lumewarp_control_plane.compiler.strategy import (
     params_problem,
     strategy_problem,
 )
-from lumewarp_control_plane.errors import not_found
+from lumewarp_control_plane.errors import ApiError, not_found
 from lumewarp_control_plane.models import (
     Alias,
     CatalogKind,
     CatalogName,
+    GatewaySession,
     Model,
     Router,
     RouterFallback,
@@ -77,6 +84,7 @@ from lumewarp_control_plane.models import (
     StickyBy,
     Upstream,
 )
+from lumewarp_control_plane.settings import Settings
 
 router = APIRouter(tags=["routing"])
 
@@ -126,11 +134,68 @@ async def _existing_models(session: AsyncSession, ids: list[uuid.UUID], field_na
 
 
 def _apply_health(row: Upstream, health: HealthCheckIn | None) -> None:
-    row.health_check_path = health.path if health else None
+    row.health_check_url = health.url if health else None
     row.health_check_interval_ms = health.interval_ms if health else None
     row.health_check_timeout_ms = health.timeout_ms if health else None
     row.health_check_unhealthy_threshold = health.unhealthy_threshold if health else None
     row.health_check_healthy_threshold = health.healthy_threshold if health else None
+
+
+def _sealed_api_key(settings: Settings, api_key: SecretStr) -> bytes:
+    try:
+        return sealing.seal(settings, api_key.get_secret_value())
+    except sealing.SealingUnavailable as exc:
+        raise validation_error(
+            "api_key", "LUMEWARP_ENCRYPTION_KEY is not configured on the control plane"
+        ) from exc
+
+
+async def _upstreams_out(
+    session: AsyncSession, settings: Settings, rows: Sequence[Upstream]
+) -> list[UpstreamOut]:
+    """UpstreamOut with `health` from the connected gateways' latest reports."""
+    reports = (
+        await session.scalars(
+            select(GatewaySession.upstream_health).where(
+                GatewaySession.scope == settings.scope, GatewaySession.connected.is_(True)
+            )
+        )
+    ).all()
+    out = []
+    for row in rows:
+        item = UpstreamOut.model_validate(row)
+        if row.health_check_interval_ms is not None:
+            seen = [r[row.name] for r in reports if isinstance(r.get(row.name), bool)]
+            item.health = "unhealthy" if False in seen else "healthy" if seen else "unknown"
+        out.append(item)
+    return out
+
+
+_MODEL_SETTINGS = ("max_input_tokens", "max_output_tokens", "default_body", "reasoning")
+
+
+def _apply_model_settings(row: Model, body: ModelCreate | ModelUpdate, *, create: bool) -> None:
+    """Limits, default body and reasoning; on PATCH only the fields sent."""
+    sent = body.model_fields_set
+    for name in ("max_input_tokens", "max_output_tokens", "default_body"):
+        if create or name in sent:
+            setattr(row, name, getattr(body, name))
+    if create or "reasoning" in sent:
+        r = body.reasoning
+        row.reasoning_mode = r.mode if r else "passthrough"
+        row.reasoning_fragments = r.fragments if r else None
+        row.reasoning_default_level = r.default_level if r else None
+
+
+def _model_changes(body: ModelUpdate) -> dict[str, Any]:
+    """Audit: scalars as sent; the body settings only as "changed" (free-form JSON)."""
+    changes = body.model_dump(
+        exclude_unset=True, exclude={"default_body", "reasoning"}, mode="json"
+    )
+    for name in ("default_body", "reasoning"):
+        if name in body.model_fields_set:
+            changes[f"{name}_changed"] = True
+    return changes
 
 
 def _apply_breaker(row: Upstream, breaker: CircuitBreakerIn | None) -> None:
@@ -387,6 +452,7 @@ async def _router_out(session: AsyncSession, scope: str, row: Router) -> RouterO
 async def list_upstreams(
     authz: Authz,
     session: SessionDep,
+    settings: SettingsDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[UpstreamOut]:
@@ -394,7 +460,7 @@ async def list_upstreams(
     stmt = select(Upstream).order_by(Upstream.id)
     rows, next_cursor = await uuid_page(session, stmt, Upstream.id, limit, cursor)
     return Page[UpstreamOut](
-        items=[UpstreamOut.model_validate(row) for row in rows], next_cursor=next_cursor
+        items=await _upstreams_out(session, settings, rows), next_cursor=next_cursor
     )
 
 
@@ -418,6 +484,9 @@ async def create_upstream(
             kind=body.kind,
             base_url=body.base_url,
             api_key_ref=body.api_key_ref,
+            api_key_ciphertext=(
+                _sealed_api_key(settings, body.api_key) if body.api_key is not None else None
+            ),
             timeout_ms=body.timeout_ms,
             stream_usage_mode=body.stream_usage_mode,
             metrics_url=body.metrics_url,
@@ -433,19 +502,70 @@ async def create_upstream(
             resource_type="upstream",
             resource_id=row.id,
             principal=authz.principal,
-            details={"name": row.name, "base_url": row.base_url},
+            details={
+                "name": row.name,
+                "base_url": row.base_url,
+                "credential_stored": row.api_key_ciphertext is not None,
+            },
         )
         await enqueue_recompile(session, settings, "api.upstream.create")
-    return UpstreamOut.model_validate(row)
+    return (await _upstreams_out(session, settings, [row]))[0]
 
 
 @router.get("/upstreams/{upstream_id}", response_model=UpstreamOut, operation_id="getUpstream")
-async def get_upstream(upstream_id: uuid.UUID, authz: Authz, session: SessionDep) -> UpstreamOut:
+async def get_upstream(
+    upstream_id: uuid.UUID, authz: Authz, session: SessionDep, settings: SettingsDep
+) -> UpstreamOut:
     await authz.require(Action.ROUTING_READ)
     row = await session.get(Upstream, upstream_id)
     if row is None:
         raise not_found("upstream not found")
-    return UpstreamOut.model_validate(row)
+    return (await _upstreams_out(session, settings, [row]))[0]
+
+
+@router.get(
+    "/upstreams/{upstream_id}/models",
+    response_model=UpstreamModelsOut,
+    operation_id="listUpstreamModels",
+)
+async def list_upstream_models(
+    upstream_id: uuid.UUID, authz: Authz, session: SessionDep, settings: SettingsDep
+) -> UpstreamModelsOut:
+    """The upstream's own `GET /models`, called now with its credential. 502 when it
+    cannot be reached or does not answer with an OpenAI model list.
+    """
+    # Uses the upstream's credential, so it needs the right to change the upstream.
+    await authz.require(Action.ROUTING_MANAGE)
+    row = await session.get(Upstream, upstream_id)
+    if row is None:
+        raise not_found("upstream not found")
+    try:
+        models = await upstream_client.list_models(settings, row)
+    except upstream_client.UpstreamCallFailed as exc:
+        raise ApiError(502, "upstream_unavailable", str(exc)) from None
+    return UpstreamModelsOut(
+        models=[UpstreamModelInfoOut(id=m.id, max_model_len=m.max_model_len) for m in models]
+    )
+
+
+@router.post(
+    "/upstreams/{upstream_id}/test", response_model=UpstreamTestOut, operation_id="testUpstream"
+)
+async def test_upstream(
+    upstream_id: uuid.UUID, authz: Authz, session: SessionDep, settings: SettingsDep
+) -> UpstreamTestOut:
+    """Probe the upstream once now from the control plane: its health URL (configured or
+    default) and `/models`. Reflects the control plane's network, not each gateway's.
+    """
+    await authz.require(Action.ROUTING_MANAGE)
+    row = await session.get(Upstream, upstream_id)
+    if row is None:
+        raise not_found("upstream not found")
+    try:
+        health, models = await upstream_client.test_upstream(settings, row)
+    except upstream_client.UpstreamCallFailed as exc:
+        raise ApiError(502, "upstream_unavailable", str(exc)) from None
+    return UpstreamTestOut(health=ProbeOut(**vars(health)), models=ProbeOut(**vars(models)))
 
 
 @router.patch("/upstreams/{upstream_id}", response_model=UpstreamOut, operation_id="updateUpstream")
@@ -468,6 +588,14 @@ async def update_upstream(
                 setattr(row, name, getattr(body, name))
         if "api_key_ref" in body.model_fields_set:
             row.api_key_ref = body.api_key_ref
+            if body.api_key_ref is not None:
+                row.api_key_ciphertext = None
+        if "api_key" in body.model_fields_set:
+            row.api_key_ciphertext = (
+                _sealed_api_key(settings, body.api_key) if body.api_key is not None else None
+            )
+            if body.api_key is not None:
+                row.api_key_ref = None
         if "metrics_url" in body.model_fields_set:
             row.metrics_url = body.metrics_url
         if "health_check" in body.model_fields_set:
@@ -482,10 +610,14 @@ async def update_upstream(
             resource_type="upstream",
             resource_id=row.id,
             principal=authz.principal,
-            details={"name": row.name, "changes": body.model_dump(exclude_unset=True, mode="json")},
+            details={
+                "name": row.name,
+                "changes": body.model_dump(exclude_unset=True, exclude={"api_key"}, mode="json"),
+                "credential_changed": "api_key" in body.model_fields_set,
+            },
         )
         await enqueue_recompile(session, settings, "api.upstream.update")
-    return UpstreamOut.model_validate(row)
+    return (await _upstreams_out(session, settings, [row]))[0]
 
 
 @router.delete(
@@ -586,6 +718,7 @@ async def create_model(
             price_input_nano_usd_per_mtok=body.price_input_nano_usd_per_mtok,
             price_output_nano_usd_per_mtok=body.price_output_nano_usd_per_mtok,
         )
+        _apply_model_settings(row, body, create=True)
         session.add(row)
         await session.flush()
         await session.refresh(row)
@@ -660,6 +793,7 @@ async def update_model(
             )
         row.price_input_nano_usd_per_mtok = price_in
         row.price_output_nano_usd_per_mtok = price_out
+        _apply_model_settings(row, body, create=False)
         if renaming:
             old_name = await _rename(session, row.id, body.name)
             row.updated_at = func.now()
@@ -703,7 +837,7 @@ async def update_model(
             resource_type="model",
             resource_id=row.id,
             principal=authz.principal,
-            details={"name": row.name, "changes": body.model_dump(exclude_unset=True, mode="json")},
+            details={"name": row.name, "changes": _model_changes(body)},
         )
         await enqueue_recompile(session, settings, "api.model.update")
     return ModelOut.model_validate(row)

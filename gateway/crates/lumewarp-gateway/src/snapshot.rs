@@ -25,6 +25,10 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     "traffic_split",
     "vllm_load",
     "rotation_grace",
+    "encrypted_api_key",
+    "model_limits",
+    "default_body",
+    "reasoning_effort",
     "strategy:weighted",
     "strategy:least_in_flight",
     "strategy:lowest_latency",
@@ -231,15 +235,22 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
         require(u.health_check.is_some(), "health_check")?;
         require(u.circuit_breaker.is_some(), "circuit_breaker")?;
         require(!u.metrics_url.is_empty(), "vllm_load")?;
+        require(!u.api_key_ciphertext.is_empty(), "encrypted_api_key")?;
+        if !u.api_key_ref.is_empty() && !u.api_key_ciphertext.is_empty() {
+            return Err(ApplyError::invalid(format!(
+                "upstream {:?} sets both api_key_ref and api_key_ciphertext",
+                u.name
+            )));
+        }
         if let Some(h) = &u.health_check {
             if h.interval_ms < 1000 || h.timeout_ms == 0 || h.timeout_ms >= h.interval_ms {
                 return Err(ApplyError::invalid(
                     "health interval must be >= 1000 ms and 0 < timeout < interval",
                 ));
             }
-            if !h.path.is_empty() && (!h.path.starts_with('/') || h.path.contains(['?', '#'])) {
+            if !h.url.is_empty() && crate::router::plain_http_uri(&h.url).is_none() {
                 return Err(ApplyError::invalid(
-                    "health path must be an absolute path without query or fragment",
+                    "health url must be an absolute http(s) URL without userinfo",
                 ));
             }
         }
@@ -253,6 +264,9 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
     }
     let models = unique(snapshot.models.iter().map(|d| d.name.as_str()), "model")?;
     for d in &snapshot.models {
+        require(d.max_output_tokens > 0, "model_limits")?;
+        require(!d.default_body_json.is_empty(), "default_body")?;
+        require(d.reasoning_effort.is_some(), "reasoning_effort")?;
         if !upstreams.contains(d.upstream.as_str()) {
             return Err(ApplyError::invalid(format!(
                 "model {:?} references unknown upstream {:?}",
@@ -829,6 +843,7 @@ pub(crate) mod tests {
             upstream: upstream.into(),
             upstream_model: "actual".into(),
             price: None,
+            ..Default::default()
         }
     }
 
@@ -950,6 +965,12 @@ pub(crate) mod tests {
                 }
                 "traffic_split" => r.traffic_split = vec![split("stable", &["a"], 1)],
                 "vllm_load" => s.upstreams[0].metrics_url = "http://h/metrics".into(),
+                "encrypted_api_key" => s.upstreams[0].api_key_ciphertext = vec![1; 40],
+                "model_limits" => s.models[0].max_output_tokens = 10,
+                "default_body" => s.models[0].default_body_json = r#"{"a":1}"#.into(),
+                "reasoning_effort" => {
+                    s.models[0].reasoning_effort = Some(pb::ReasoningEffort::default())
+                }
                 "strategy:least_in_flight" | "rotation_grace" => continue,
                 strategy => {
                     r.strategy = strategy.strip_prefix("strategy:").unwrap().into();

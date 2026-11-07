@@ -237,6 +237,7 @@ def upgrade() -> None:
         ),
         sa.Column("base_url", sa.Text(), nullable=False),
         sa.Column("api_key_ref", sa.String(length=200), nullable=True),
+        sa.Column("api_key_ciphertext", sa.LargeBinary(), nullable=True),
         sa.Column("timeout_ms", sa.Integer(), server_default="0", nullable=False),
         sa.Column(
             "stream_usage_mode",
@@ -251,7 +252,7 @@ def upgrade() -> None:
             server_default="include_usage",
             nullable=False,
         ),
-        sa.Column("health_check_path", sa.String(length=400), nullable=True),
+        sa.Column("health_check_url", sa.Text(), nullable=True),
         sa.Column("health_check_interval_ms", sa.Integer(), nullable=True),
         sa.Column("health_check_timeout_ms", sa.Integer(), nullable=True),
         sa.Column("health_check_unhealthy_threshold", sa.Integer(), nullable=True),
@@ -279,11 +280,15 @@ def upgrade() -> None:
             name=op.f("ck_upstreams_api_key_ref_env_name"),
         ),
         sa.CheckConstraint(
+            "api_key_ref IS NULL OR api_key_ciphertext IS NULL",
+            name=op.f("ck_upstreams_one_api_key_source"),
+        ),
+        sa.CheckConstraint(
             "(circuit_failure_threshold IS NULL OR circuit_failure_threshold > 0) AND (circuit_open_ms IS NULL OR circuit_open_ms > 0)",
             name=op.f("ck_upstreams_circuit_breaker_positive"),
         ),
         sa.CheckConstraint(
-            "(health_check_interval_ms IS NULL) = (health_check_timeout_ms IS NULL) AND (health_check_interval_ms IS NOT NULL OR (health_check_path IS NULL AND health_check_unhealthy_threshold IS NULL AND health_check_healthy_threshold IS NULL))",
+            "(health_check_interval_ms IS NULL) = (health_check_timeout_ms IS NULL) AND (health_check_interval_ms IS NOT NULL OR (health_check_url IS NULL AND health_check_unhealthy_threshold IS NULL AND health_check_healthy_threshold IS NULL))",
             name=op.f("ck_upstreams_health_check_shape"),
         ),
         sa.CheckConstraint(
@@ -705,6 +710,14 @@ def upgrade() -> None:
         sa.Column("upstream_model", sa.String(length=400), nullable=False),
         sa.Column("price_input_nano_usd_per_mtok", sa.BigInteger(), nullable=True),
         sa.Column("price_output_nano_usd_per_mtok", sa.BigInteger(), nullable=True),
+        sa.Column("max_input_tokens", sa.Integer(), nullable=True),
+        sa.Column("max_output_tokens", sa.Integer(), nullable=True),
+        sa.Column("default_body", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column(
+            "reasoning_mode", sa.String(length=16), server_default="passthrough", nullable=False
+        ),
+        sa.Column("reasoning_fragments", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column("reasoning_default_level", sa.String(length=16), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -725,6 +738,18 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "price_input_nano_usd_per_mtok IS NULL OR (price_input_nano_usd_per_mtok >= 0 AND price_output_nano_usd_per_mtok >= 0)",
             name=op.f("ck_models_price_nonneg"),
+        ),
+        sa.CheckConstraint(
+            "(max_input_tokens IS NULL OR max_input_tokens > 0) AND (max_output_tokens IS NULL OR max_output_tokens > 0)",
+            name=op.f("ck_models_token_limits_positive"),
+        ),
+        sa.CheckConstraint(
+            "reasoning_mode IN ('passthrough', 'strip', 'mapped')",
+            name=op.f("ck_models_reasoning_mode"),
+        ),
+        sa.CheckConstraint(
+            "(reasoning_mode = 'mapped') = (reasoning_fragments IS NOT NULL) AND (reasoning_mode <> 'strip' OR reasoning_default_level IS NULL)",
+            name=op.f("ck_models_reasoning_shape"),
         ),
         sa.ForeignKeyConstraint(
             ["name_id", "kind"],
@@ -1086,6 +1111,12 @@ def upgrade() -> None:
         sa.Column("connected_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("disconnected_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column(
+            "upstream_health",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default=sa.text("'{}'::jsonb"),
+            nullable=False,
+        ),
         sa.ForeignKeyConstraint(
             ["scope"],
             ["scopes.name"],

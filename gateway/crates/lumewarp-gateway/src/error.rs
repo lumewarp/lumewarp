@@ -3,7 +3,7 @@ use hyper::{header, Response, StatusCode};
 
 use crate::proxy::{full_body, ProxyBody};
 
-pub fn json(status: StatusCode, code: &'static str, message: &'static str) -> Response<ProxyBody> {
+pub fn json(status: StatusCode, code: &'static str, message: &str) -> Response<ProxyBody> {
     let kind = match (status, code) {
         (StatusCode::UNAUTHORIZED, _) => "authentication_error",
         (StatusCode::FORBIDDEN, _) => "permission_error",

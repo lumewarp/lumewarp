@@ -1328,3 +1328,63 @@ async def test_session_ids_always_move_forward(session_factory: SessionFactory, 
     finally:
         await channel.close()
         await server.stop(0)
+
+
+async def _status(factory: SessionFactory, scope: str, gateway_id: str) -> GatewaySession:
+    async with factory() as session:
+        return await session.get(GatewaySession, (scope, gateway_id))
+
+
+@pytest.mark.asyncio
+async def test_upstream_health_report_is_mirrored_any_time(session_factory: SessionFactory):
+    scope, tokens = await _seed(session_factory, versions=(1,))
+    server, channel, stub = await _start(session_factory, scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    try:
+        # Before the ACK of the pending full: not a reply, never an ACK/NACK mismatch.
+        await call.read()
+        report = cpb.UpstreamHealthReport(
+            upstreams=[
+                cpb.UpstreamHealth(name="vllm", healthy=False),
+                cpb.UpstreamHealth(name="openai", healthy=True),
+            ]
+        )
+        await call.write(cpb.GatewayMessage(upstream_health=report))
+        await call.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
+        for _ in range(100):
+            status = await _status(session_factory, scope, "gateway-a")
+            if status.acked_version == 1 and status.upstream_health:
+                break
+            await asyncio.sleep(0.02)
+        assert status.upstream_health == {"vllm": False, "openai": True}
+        assert status.acked_version == 1
+        # A later report replaces the previous one.
+        await call.write(cpb.GatewayMessage(upstream_health=cpb.UpstreamHealthReport()))
+        for _ in range(100):
+            status = await _status(session_factory, scope, "gateway-a")
+            if not status.upstream_health:
+                break
+            await asyncio.sleep(0.02)
+        assert status.upstream_health == {}
+    finally:
+        call.cancel()
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.asyncio
+async def test_oversized_health_report_closes_the_stream(session_factory: SessionFactory):
+    scope, tokens = await _seed(session_factory, versions=(1,))
+    server, channel, stub = await _start(session_factory, scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    try:
+        await call.read()
+        bad = cpb.UpstreamHealthReport(upstreams=[cpb.UpstreamHealth(name="x" * 201)])
+        await call.write(cpb.GatewayMessage(upstream_health=bad))
+        with pytest.raises(grpc.aio.AioRpcError) as err:
+            await asyncio.wait_for(call.read(), 2)
+        assert err.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    finally:
+        call.cancel()
+        await channel.close()
+        await server.stop(0)

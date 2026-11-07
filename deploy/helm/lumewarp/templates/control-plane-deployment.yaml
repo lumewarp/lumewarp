@@ -90,6 +90,13 @@ spec:
             - name: LUMEWARP_GRPC_TLS_KEY_FILE
               value: /etc/lumewarp/tls/{{ .Values.controlPlane.grpcTls.keyKey }}
             {{- end }}
+            {{- if .Values.encryptionKey.secretName }}
+            - name: LUMEWARP_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.encryptionKey.secretName }}
+                  key: {{ .Values.encryptionKey.key }}
+            {{- end }}
             {{- with .Values.controlPlane.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -707,12 +707,15 @@ class Upstream(TimestampMixin, Base):
             "api_key_ref IS NULL OR api_key_ref ~ '^[A-Za-z_][A-Za-z0-9_]*$'",
             name="api_key_ref_env_name",
         ),
+        CheckConstraint(
+            "api_key_ref IS NULL OR api_key_ciphertext IS NULL", name="one_api_key_source"
+        ),
         CheckConstraint("timeout_ms >= 0", name="timeout_nonneg"),
         # Health check: interval/timeout NULL = no active probing; the other settings
         # only exist together with them.
         CheckConstraint(
             "(health_check_interval_ms IS NULL) = (health_check_timeout_ms IS NULL)"
-            " AND (health_check_interval_ms IS NOT NULL OR (health_check_path IS NULL"
+            " AND (health_check_interval_ms IS NOT NULL OR (health_check_url IS NULL"
             " AND health_check_unhealthy_threshold IS NULL"
             " AND health_check_healthy_threshold IS NULL))",
             name="health_check_shape",
@@ -746,6 +749,9 @@ class Upstream(TimestampMixin, Base):
     base_url: Mapped[str] = mapped_column(Text, nullable=False)
     # Name of the env var on the gateway holding the bearer token; never the value.
     api_key_ref: Mapped[str | None] = mapped_column(String(200))
+    # The bearer token itself, sealed with LUMEWARP_ENCRYPTION_KEY (sealing.py); never
+    # returned by the API. At most one of this and api_key_ref.
+    api_key_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
     # 0 = gateway default.
     timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     stream_usage_mode: Mapped[StreamUsageMode] = mapped_column(
@@ -754,9 +760,10 @@ class Upstream(TimestampMixin, Base):
         default=StreamUsageMode.INCLUDE_USAGE,
         server_default=StreamUsageMode.INCLUDE_USAGE.value,
     )
-    # Active health probe (proto HealthCheck). NULL interval = not probed. Path NULL =
-    # gateway default "/models"; thresholds NULL = gateway defaults (3 / 1).
-    health_check_path: Mapped[str | None] = mapped_column(String(400))
+    # Active health probe (proto HealthCheck). NULL interval = not probed. URL NULL =
+    # gateway default (vLLM: <base without /v1>/health, else <base>/models); thresholds
+    # NULL = gateway defaults (3 / 1).
+    health_check_url: Mapped[str | None] = mapped_column(Text)
     health_check_interval_ms: Mapped[int | None] = mapped_column(Integer)
     health_check_timeout_ms: Mapped[int | None] = mapped_column(Integer)
     health_check_unhealthy_threshold: Mapped[int | None] = mapped_column(Integer)
@@ -827,6 +834,19 @@ class Model(TimestampMixin, Base):
             " AND price_output_nano_usd_per_mtok >= 0)",
             name="price_nonneg",
         ),
+        CheckConstraint(
+            "(max_input_tokens IS NULL OR max_input_tokens > 0)"
+            " AND (max_output_tokens IS NULL OR max_output_tokens > 0)",
+            name="token_limits_positive",
+        ),
+        CheckConstraint(
+            "reasoning_mode IN ('passthrough', 'strip', 'mapped')", name="reasoning_mode"
+        ),
+        CheckConstraint(
+            "(reasoning_mode = 'mapped') = (reasoning_fragments IS NOT NULL)"
+            " AND (reasoning_mode <> 'strip' OR reasoning_default_level IS NULL)",
+            name="reasoning_shape",
+        ),
     )
 
     name_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
@@ -839,6 +859,18 @@ class Model(TimestampMixin, Base):
     upstream_model: Mapped[str] = mapped_column(String(400), nullable=False)
     price_input_nano_usd_per_mtok: Mapped[int | None] = mapped_column(BigInteger)
     price_output_nano_usd_per_mtok: Mapped[int | None] = mapped_column(BigInteger)
+    # Context window, informational (the gateway does not tokenize). NULL = unknown.
+    max_input_tokens: Mapped[int | None] = mapped_column(Integer)
+    # Enforced by the gateway on max_tokens / max_completion_tokens. NULL = none.
+    max_output_tokens: Mapped[int | None] = mapped_column(Integer)
+    # Merged under every request body (the client's fields win). NULL = none.
+    default_body: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    # reasoning_effort handling: passthrough | strip | mapped (level -> fragment object).
+    reasoning_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="passthrough", server_default="passthrough"
+    )
+    reasoning_fragments: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    reasoning_default_level: Mapped[str | None] = mapped_column(String(16))
 
     id = synonym("name_id")
 
@@ -1285,6 +1317,10 @@ class GatewaySession(Base):
     connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Latest UpstreamHealthReport: upstream name -> healthy, probed upstreams only.
+    upstream_health: Mapped[dict[str, bool]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
 
 
 class GatewayStrategy(Base):

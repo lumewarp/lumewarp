@@ -138,13 +138,17 @@ def test_upstream_health_breaker_metrics_roundtrip(client) -> None:
     up = _ok(
         _upstream(
             client,
-            health_check={"path": "/health", "interval_ms": 5000, "timeout_ms": 1000},
+            health_check={
+                "url": "http://127.0.0.1:9/health",
+                "interval_ms": 5000,
+                "timeout_ms": 1000,
+            },
             circuit_breaker={"failure_threshold": 3},
             metrics_url="http://127.0.0.1:9/metrics",
         )
     )
     assert up["health_check"] == {
-        "path": "/health",
+        "url": "http://127.0.0.1:9/health",
         "interval_ms": 5000,
         "timeout_ms": 1000,
         "unhealthy_threshold": None,
@@ -181,12 +185,12 @@ def test_upstream_health_breaker_metrics_roundtrip(client) -> None:
         ({"health_check": {"interval_ms": 1000, "timeout_ms": 1000}}, "below interval_ms"),
         ({"health_check": {"interval_ms": 2000, "timeout_ms": 0}}, "timeout_ms"),
         (
-            {"health_check": {"interval_ms": 2000, "timeout_ms": 10, "path": "health"}},
-            "absolute path",
+            {"health_check": {"interval_ms": 2000, "timeout_ms": 10, "url": "health"}},
+            "http(s)",
         ),
         (
-            {"health_check": {"interval_ms": 2000, "timeout_ms": 10, "path": "/h?x=1"}},
-            "without query",
+            {"health_check": {"interval_ms": 2000, "timeout_ms": 10, "url": "http://h/h?x=1"}},
+            "query",
         ),
         (
             {"health_check": {"interval_ms": 2000, "timeout_ms": 10, "unhealthy_threshold": 0}},

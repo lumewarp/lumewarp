@@ -75,6 +75,10 @@ def test_supported_capabilities_match_gateway() -> None:
         "traffic_split",
         "vllm_load",
         "rotation_grace",
+        "encrypted_api_key",
+        "model_limits",
+        "default_body",
+        "reasoning_effort",
         "strategy:weighted",
         "strategy:least_in_flight",
         "strategy:lowest_latency",
@@ -100,18 +104,24 @@ async def test_health_check(factory) -> None:
     async with factory() as s, s.begin():
         await add_router(s, "llama", [("a", None)])
         await add_router(s, "other", [("b", None)], upstream="openai")
-        for name, path, unhealthy in (("vllm", "/health", 2), ("openai", None, None)):
+        for name, url, unhealthy in (
+            ("vllm", "http://vllm.internal:8000/health", 2),
+            ("openai", None, None),
+        ):
             up = await s.scalar(select(Upstream).where(Upstream.name == name))
-            up.health_check_path = path
+            up.health_check_url = url
             up.health_check_interval_ms = 5000
             up.health_check_timeout_ms = 1000
             up.health_check_unhealthy_threshold = unhealthy
     snap = (await compile_(factory)).snapshot
     ups = {u.name: u for u in snap.upstreams}
     assert ups["vllm"].health_check == pb.HealthCheck(
-        path="/health", interval_ms=5000, timeout_ms=1000, unhealthy_threshold=2
+        url="http://vllm.internal:8000/health",
+        interval_ms=5000,
+        timeout_ms=1000,
+        unhealthy_threshold=2,
     )
-    # NULL path / thresholds are the gateway defaults (0 / "").
+    # NULL url / thresholds are the gateway defaults (0 / "").
     assert ups["openai"].health_check == pb.HealthCheck(interval_ms=5000, timeout_ms=1000)
     assert list(snap.required_capabilities) == ["health_check", "strategy:weighted"]
 
@@ -292,6 +302,11 @@ async def test_all_capabilities_together(factory) -> None:
         up.health_check_timeout_ms = 500
         up.circuit_breaker_enabled = True
         up.metrics_url = "http://vllm:8000/metrics"
+        up.api_key_ciphertext = b"\x01" + b"0" * 40
+        a = await _dep(s, "a")
+        a.max_output_tokens = 100
+        a.default_body = {"top_k": 20}
+        a.reasoning_mode = "strip"
     snap = (await compile_(factory)).snapshot
     assert list(snap.required_capabilities) == sorted(
         SUPPORTED_CAPABILITIES - {"strategy:weighted", "strategy:least_in_flight", "rotation_grace"}
@@ -339,7 +354,7 @@ INVALID = {
         pb.HealthCheck(interval_ms=1000)
     ),
     "health path": lambda s: s.upstreams[0].health_check.CopyFrom(
-        pb.HealthCheck(path="/x?y", interval_ms=1000, timeout_ms=10)
+        pb.HealthCheck(url="http://u/x?y", interval_ms=1000, timeout_ms=10)
     ),
     "metrics url": lambda s: setattr(s.upstreams[0], "metrics_url", "ftp://u/metrics"),
     "retry attempts": lambda s: s.routers[0].retry.CopyFrom(pb.RetryPolicy(max_attempts=6)),
@@ -434,6 +449,16 @@ def test_validate_accepts_full_routing_snapshot() -> None:
     r.retry.CopyFrom(pb.RetryPolicy(max_attempts=5, retry_on_status=[400, 599]))
     r.fallbacks.append("b")
     snap.routers[1].strategy = "vllm_load"
+    snap.upstreams[0].api_key_ciphertext = b"\x01" + b"0" * 40
+    snap.models[0].max_output_tokens = 100
+    snap.models[0].default_body_json = '{"top_k":20}'
+    snap.models[0].reasoning_effort.CopyFrom(
+        pb.ReasoningEffort(
+            mode=pb.REASONING_EFFORT_MODE_MAPPED,
+            fragments_json={"none": '{"chat_template_kwargs":{"enable_thinking":false}}'},
+            default_level="none",
+        )
+    )
     _check(snap)
     assert list(snap.required_capabilities) == sorted(
         SUPPORTED_CAPABILITIES

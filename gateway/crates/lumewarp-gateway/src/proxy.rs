@@ -512,6 +512,25 @@ pub async fn forward(
             &model.upstream_model_json,
             inject.then_some(&include_usage),
         );
+        // Per attempt: the model serving it decides its own body rules.
+        let rewritten = match &model.transform {
+            None => rewritten,
+            Some(transform) => match transform.apply(rewritten) {
+                Ok(body) => body,
+                Err(rejected) => {
+                    pending.discard();
+                    routing_table
+                        .runtime
+                        .metrics
+                        .request_rejected(&model.name, rejected.reason);
+                    return error::json(
+                        StatusCode::BAD_REQUEST,
+                        rejected.reason,
+                        &rejected.message,
+                    );
+                }
+            },
+        };
         let mut parts = next_parts
             .take()
             .unwrap_or_else(|| replay.as_ref().expect("retry template").clone());

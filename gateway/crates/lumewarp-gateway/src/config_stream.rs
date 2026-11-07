@@ -13,6 +13,7 @@ use lumewarp_config::AuthMode;
 use lumewarp_proto::config::v1::{
     config_service_client::ConfigServiceClient, config_update::Update, gateway_message::Msg, Ack,
     ConfigUpdate, GatewayMessage, Hello, Nack, NackCode, Snapshot, StrategyDescriptor,
+    UpstreamHealth, UpstreamHealthReport,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::ReceiverStream;
@@ -32,6 +33,8 @@ use crate::{
 const MAX_MESSAGE_BYTES: usize = snapshot::MAX_SNAPSHOT_BYTES;
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// Probe state changes are coalesced into at most one report per interval.
+const HEALTH_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct StreamConfig {
     pub url: String,
@@ -187,14 +190,53 @@ impl Client {
         tracing::info!(have_version = have, "config stream connected");
 
         let mut received = false;
-        while let Some(update) = inbound.message().await? {
-            received = true;
-            let reply = self.handle(update).await;
-            if tx.send(reply).await.is_err() {
-                break;
+        // Report once right away: the state may come from the on-disk snapshot.
+        let mut report_at = Some(tokio::time::Instant::now());
+        loop {
+            let report_due = async {
+                match report_at {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                update = inbound.message() => {
+                    let Some(update) = update? else { break };
+                    received = true;
+                    let reply = self.handle(update).await;
+                    let acked = matches!(reply.msg, Some(Msg::Ack(_)));
+                    if tx.send(reply).await.is_err() {
+                        break;
+                    }
+                    if acked {
+                        report_at.get_or_insert_with(tokio::time::Instant::now);
+                    }
+                }
+                () = self.runtime.health.changed(), if report_at.is_none() => {
+                    report_at = Some(tokio::time::Instant::now() + HEALTH_REPORT_INTERVAL);
+                }
+                () = report_due => {
+                    report_at = None;
+                    if tx.send(self.health_report()).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
         Ok(received)
+    }
+
+    fn health_report(&self) -> GatewayMessage {
+        let upstreams = self
+            .runtime
+            .health
+            .probed()
+            .into_iter()
+            .map(|(name, healthy)| UpstreamHealth { name, healthy })
+            .collect();
+        GatewayMessage {
+            msg: Some(Msg::UpstreamHealth(UpstreamHealthReport { upstreams })),
+        }
     }
 
     /// Applies one update and returns the ACK or NACK to send.

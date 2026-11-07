@@ -117,6 +117,28 @@ What the lookup depends on:
 
 Usage events do not depend on any of this, but they have no per-attempt detail.
 
+## Upstream API keys
+
+An upstream's API key can be entered in the Admin UI instead of naming a gateway
+environment variable. It is stored sealed with `LUMEWARP_ENCRYPTION_KEY`, which both the
+control plane and every gateway need. Create a Secret with at least 32 random characters
+and point the chart at it:
+
+```sh
+kubectl create secret generic lumewarp-encryption \
+  --from-literal=encryption-key="$(openssl rand -base64 48)"
+```
+
+```yaml
+encryptionKey:
+  secretName: lumewarp-encryption
+  key: encryption-key
+```
+
+It is separate from `LUMEWARP_SECRET_KEY` (OIDC login cookie, control plane only).
+Changing it makes the stored keys unreadable: gateways NACK the next snapshot until every
+stored key is entered again.
+
 ## SSO and authorization backend
 
 The control plane reads every setting from `LUMEWARP_*` environment variables (see the

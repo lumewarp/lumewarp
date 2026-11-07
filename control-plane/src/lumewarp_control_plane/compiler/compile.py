@@ -12,10 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 from lumewarp_control_plane.compiler.strategy import BUILTIN_STRATEGIES, params_json
 from lumewarp_control_plane.compiler.validate import (
+    DEFAULT_BODY_RESERVED_KEYS,
     RESERVED_ALIASES,
     SnapshotInvalid,
+    body_object_problem,
     capabilities_used,
     metrics_url_problem,
+    reasoning_problem,
     upstream_url_problem,
     validate_snapshot,
 )
@@ -169,6 +172,41 @@ EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 ONE_MS = timedelta(milliseconds=1)
 
 
+_REASONING_MODES = {
+    "passthrough": pb.REASONING_EFFORT_MODE_PASSTHROUGH,
+    "strip": pb.REASONING_EFFORT_MODE_STRIP,
+    "mapped": pb.REASONING_EFFORT_MODE_MAPPED,
+}
+
+
+def _model_body_rules(out: pb.Model, d: Model, warnings: list[str]) -> None:
+    """Output bound, default body and reasoning. A stored setting the gateway would
+    reject (the API refuses it) is left out with a warning instead of failing the compile.
+    """
+    if d.max_output_tokens:
+        out.max_output_tokens = d.max_output_tokens
+    if d.default_body:
+        if problem := body_object_problem(
+            d.default_body, "default_body", DEFAULT_BODY_RESERVED_KEYS
+        ):
+            warnings.append(f"model {d.name!r}: {problem}, left out")
+        else:
+            out.default_body_json = params_json(d.default_body)
+    fragments = d.reasoning_fragments if d.reasoning_mode == "mapped" else None
+    if d.reasoning_mode == "passthrough" and not d.reasoning_default_level:
+        return
+    if problem := reasoning_problem(d.reasoning_mode, fragments, d.reasoning_default_level):
+        warnings.append(f"model {d.name!r}: reasoning {problem}, left out")
+        return
+    out.reasoning_effort.CopyFrom(
+        pb.ReasoningEffort(
+            mode=_REASONING_MODES[d.reasoning_mode],
+            fragments_json={k: params_json(v) for k, v in (fragments or {}).items()},
+            default_level=d.reasoning_default_level or "",
+        )
+    )
+
+
 def _ms(ts: datetime) -> int:
     """Exact Unix milliseconds (floored), without float rounding."""
     return (ts - EPOCH) // ONE_MS
@@ -312,13 +350,14 @@ async def compile_scope(
             kind=UPSTREAM_KIND[u.kind],
             base_url=u.base_url,
             api_key_ref=u.api_key_ref or "",
+            api_key_ciphertext=u.api_key_ciphertext or b"",
             timeout_ms=u.timeout_ms,
             stream_usage_mode=STREAM_USAGE_MODE[u.stream_usage_mode],
         )
         if u.health_check_interval_ms is not None:
             up.health_check.CopyFrom(
                 pb.HealthCheck(
-                    path=u.health_check_path or "",
+                    url=u.health_check_url or "",
                     interval_ms=u.health_check_interval_ms,
                     timeout_ms=u.health_check_timeout_ms or 0,
                     unhealthy_threshold=u.health_check_unhealthy_threshold or 0,
@@ -358,6 +397,7 @@ async def compile_scope(
                         output_nano_usd_per_mtok=d.price_output_nano_usd_per_mtok or 0,
                     )
                 )
+            _model_body_rules(out, d, warnings)
             snap.models.append(out)
     valid_model_ids = {d.id for d in valid_models}
     model_name = {d.id: d.name for d in valid_models}

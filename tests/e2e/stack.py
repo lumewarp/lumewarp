@@ -31,6 +31,7 @@ from secret_scan import (
 
 ROOT = Path(__file__).resolve().parents[2]
 BREAK_GLASS_PASSWORD = "e2e-break-glass-password"
+ENCRYPTION_KEY = "e2e-lumewarp-encryption-key-0123456789abcdef"
 SCOPE = "e2e"
 GATEWAY_ID = "gw-e2e"
 FORBIDDEN_PORTS = {9000, 5432, 8080, 8081}
@@ -269,7 +270,12 @@ class Gateway:
             f"server:\n  listen: '127.0.0.1:{self.port}'\n"
             f"  admin_listen: '127.0.0.1:{self.admin_port}'\n  shutdown_grace_ms: 1000\n"
         )
-        env = {**stack.base_env, "E2E_GATEWAY_TOKEN": token, "RUST_LOG": "info"}
+        env = {
+            **stack.base_env,
+            "E2E_GATEWAY_TOKEN": token,
+            "LUMEWARP_ENCRYPTION_KEY": ENCRYPTION_KEY,
+            "RUST_LOG": "info",
+        }
         env.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
         env.update(extra_env or {})
         self.proc = Proc(
@@ -377,6 +383,7 @@ class Stack:
             "LUMEWARP_DEV_MODE": "true",
             "LUMEWARP_SESSION_COOKIE_SECURE": "false",
             "LUMEWARP_SECRET_KEY": "e2e-lumewarp-secret-key-0123456789abcdef",
+            "LUMEWARP_ENCRYPTION_KEY": ENCRYPTION_KEY,
             "LUMEWARP_SCOPE": SCOPE,
             "LUMEWARP_HTTP_BIND": f"127.0.0.1:{self.http_port}",
             "LUMEWARP_GRPC_BIND": f"127.0.0.1:{self.grpc_port}",
@@ -426,6 +433,7 @@ class Stack:
         assert self.gateway_token.startswith("lwg-"), out
         record_secret(self.gateway_token, "gateway token")
         record_secret(BREAK_GLASS_PASSWORD, "break-glass password")
+        record_secret(ENCRYPTION_KEY, "LUMEWARP_ENCRYPTION_KEY")
         self.mock.start()
         wait_for(
             lambda: (

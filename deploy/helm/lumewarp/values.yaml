@@ -17,6 +17,14 @@ fullnameOverride: ""
 imagePullSecrets: []
 commonLabels: {}
 
+# Existing Secret holding LUMEWARP_ENCRYPTION_KEY (at least 32 characters). It seals the
+# upstream API keys stored in the database; the control plane and the gateway both get it.
+# Required once an upstream stores an API key. Changing it makes stored keys unreadable
+# until they are entered again.
+encryptionKey:
+  secretName: ""
+  key: encryption-key
+
 controlPlane:
   enabled: true
   # The gRPC server, compiler loop and rollover scheduler must run exactly once per

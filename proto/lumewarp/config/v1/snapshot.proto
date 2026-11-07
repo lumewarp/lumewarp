@@ -46,12 +46,20 @@ message Upstream {
   // Prometheus endpoint scraped for load by the "vllm_load" strategy.
   // Empty = base_url with a trailing "/v1" removed, plus "/metrics".
   string metrics_url = 9;
+  // Bearer token sealed by the control plane: 0x01 || 12-byte nonce || AES-256-GCM
+  // ciphertext and tag, key = HKDF-SHA256(LUMEWARP_ENCRYPTION_KEY, no salt, info
+  // "lumewarp/upstream-api-key/v1"), no AAD. The gateway opens it when applying the
+  // snapshot, never per request. At most one of this and api_key_ref is set.
+  // Capability "encrypted_api_key".
+  bytes api_key_ciphertext = 10;
 }
 
-// GET <base_url><path> every interval; 2xx within timeout = success.
+// GET <url> every interval; 2xx within timeout = success.
 message HealthCheck {
-  // Relative to base_url; empty = "/models".
-  string path = 1;
+  // Absolute http(s) URL without userinfo. Empty = for VLLM upstreams base_url
+  // with a trailing "/v1" removed plus "/health", otherwise base_url + "/models".
+  // The upstream's bearer token is sent only to base_url's host and port.
+  string url = 1;
   uint32 interval_ms = 2;
   uint32 timeout_ms = 3;
   // Consecutive failures before the upstream is marked unhealthy (0 = 3).
@@ -102,6 +110,43 @@ message Model {
   // Price used to compute spend from upstream-reported usage. Absent = price
   // unknown: usage is still metered but cost is reported as unknown, never 0.
   Price price = 5;
+  // Upper bound for the request's max_tokens and max_completion_tokens (after
+  // default_body and reasoning are applied); above it the attempt is answered
+  // 400 without reaching the upstream. 0 = no bound. Capability "model_limits".
+  uint32 max_output_tokens = 6;
+  // A JSON object merged under the request body: a key the client sends wins,
+  // objects present on both sides are merged recursively, anything else is
+  // the client's. Never contains model, stream or stream_options. Empty = none.
+  // Capability "default_body".
+  string default_body_json = 7;
+  // How the OpenAI `reasoning_effort` field is handled. Absent = passed
+  // through untouched. Capability "reasoning_effort".
+  ReasoningEffort reasoning_effort = 8;
+}
+
+// Request bodies are only re-encoded for a model with default_body_json or
+// reasoning_effort; top-level values the gateway does not change keep their
+// exact bytes.
+message ReasoningEffort {
+  ReasoningEffortMode mode = 1;
+  // MAPPED: level -> JSON object merged into the request in place of
+  // reasoning_effort, above default_body and below the client's own fields.
+  // A level without an entry is answered 400.
+  map<string, string> fragments_json = 2;
+  // The level used when the client sends no reasoning_effort (or null).
+  // Empty = none.
+  string default_level = 3;
+}
+
+enum ReasoningEffortMode {
+  // Treated as PASSTHROUGH.
+  REASONING_EFFORT_MODE_UNSPECIFIED = 0;
+  // Forward reasoning_effort as sent (default_level is added when absent).
+  REASONING_EFFORT_MODE_PASSTHROUGH = 1;
+  // Remove reasoning_effort: the model has no reasoning control.
+  REASONING_EFFORT_MODE_STRIP = 2;
+  // Replace reasoning_effort with fragments_json[level].
+  REASONING_EFFORT_MODE_MAPPED = 3;
 }
 
 // Fixed-point: nano-USD (1e-9 USD) per one million tokens. An explicit

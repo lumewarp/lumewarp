@@ -66,6 +66,8 @@ EXPECTED_OPERATION_IDS = {
     "listTeamKeys",
     "listTeams",
     "listUpstreams",
+    "listUpstreamModels",
+    "testUpstream",
     "listStrategies",
     "listUsers",
     "logoutSession",

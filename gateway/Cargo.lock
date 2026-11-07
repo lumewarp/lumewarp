@@ -1086,6 +1086,7 @@ dependencies = [
  "papaya",
  "prometheus-client",
  "prost",
+ "ring",
  "schemars",
  "serde",
  "serde_json",

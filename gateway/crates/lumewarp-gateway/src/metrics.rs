@@ -142,6 +142,11 @@ struct ModelLabels {
     model: String,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct RejectionLabels {
+    model: String,
+    reason: &'static str,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct TtftLabels {
     requested: String,
     model: String,
@@ -287,6 +292,7 @@ pub struct Metrics {
     vllm_scrape_failures: Family<UpstreamLabels, Counter>,
     latency_ewma: Family<ModelLabels, Gauge<f64, AtomicU64>>,
     rewrite_compressed: Family<ModelLabels, Counter>,
+    rejected: Family<RejectionLabels, Counter>,
 }
 
 impl Metrics {
@@ -326,6 +332,12 @@ impl Metrics {
         let vllm_scrape_failures = Family::default();
         let latency_ewma = Family::default();
         let rewrite_compressed = Family::default();
+        let rejected = Family::default();
+        registry.register(
+            "lumewarp_requests_rejected",
+            "Requests answered 400 by a model's body rules before reaching the upstream (reason: max_output_tokens, reasoning_effort, invalid_body)",
+            rejected.clone(),
+        );
         registry.register(
             "lumewarp_response_model_rewrite_compressed",
             "Successful responses that kept the upstream's model name because the upstream compressed them",
@@ -510,7 +522,17 @@ impl Metrics {
             vllm_scrape_failures,
             latency_ewma,
             rewrite_compressed,
+            rejected,
         }
+    }
+
+    pub fn request_rejected(&self, model: &str, reason: &'static str) {
+        self.rejected
+            .get_or_create(&RejectionLabels {
+                model: model.into(),
+                reason,
+            })
+            .inc();
     }
 
     /// Only for the rare upstream that compresses despite no `Accept-Encoding`.

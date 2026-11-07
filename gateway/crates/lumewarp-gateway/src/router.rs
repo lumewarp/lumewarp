@@ -30,7 +30,9 @@ use crate::{
     metrics::{HandleKey, LabelId, Metrics, RequestMetrics, API_ENDPOINTS},
     ratelimit::clock,
     runtime::Runtime,
+    sealed,
     snapshot::{self, ApplyError},
+    transform::Transform,
 };
 
 /// Proxied endpoints: chat_completions, completions, embeddings.
@@ -65,6 +67,9 @@ pub struct Model {
     /// Feed `latency` only when a `lowest_latency` router uses this model.
     pub track_latency: bool,
     pub load: Arc<VllmLoad>,
+    /// Default body, reasoning effort and output bound; `None` for a model
+    /// that changes nothing (the request takes the plain splice only).
+    pub transform: Option<Arc<Transform>>,
 }
 
 /// A compiled virtual key with its already-resolved effective policy.
@@ -438,6 +443,12 @@ impl RoutingTable {
         for router in &snapshot.routers {
             strategies.insert(router.name.as_str(), CompiledStrategy::configure(router)?);
         }
+        let encryption_secret = snapshot
+            .upstreams
+            .iter()
+            .any(|u| !u.api_key_ciphertext.is_empty())
+            .then(sealed::env_secret)
+            .flatten();
         let mut upstreams = HashMap::new();
         let mut probes = Vec::new();
         let mut unprobed = Vec::new();
@@ -475,20 +486,29 @@ impl RoutingTable {
                     "upstream {name:?} requires an http(s) base URL without userinfo or query"
                 )));
             }
-            let authorization = (!upstream.api_key_ref.is_empty())
-                .then(|| {
-                    let env = &upstream.api_key_ref;
-                    // Do not retain VarError::NotUnicode: its Display contains the secret.
-                    let key = std::env::var(env)
-                        .map_err(|_| invalid(format!("missing or invalid api_key_env {env:?}")))?;
-                    let mut value =
-                        HeaderValue::from_str(&format!("Bearer {key}")).map_err(|_| {
-                            invalid(format!("api_key_env {env:?} is not a valid header value"))
-                        })?;
-                    value.set_sensitive(true);
-                    Ok(value)
-                })
-                .transpose()?;
+            let authorization = if !upstream.api_key_ciphertext.is_empty() {
+                let key = sealed::open(encryption_secret.as_deref(), &upstream.api_key_ciphertext)
+                    .map_err(|e| invalid(format!("upstream {name:?} api key: {e}")))?;
+                let mut value = HeaderValue::from_str(&format!("Bearer {key}")).map_err(|_| {
+                    invalid(format!(
+                        "upstream {name:?} api key is not a valid header value"
+                    ))
+                })?;
+                value.set_sensitive(true);
+                Some(value)
+            } else if !upstream.api_key_ref.is_empty() {
+                let env = &upstream.api_key_ref;
+                // Do not retain VarError::NotUnicode: its Display contains the secret.
+                let key = std::env::var(env)
+                    .map_err(|_| invalid(format!("missing or invalid api_key_env {env:?}")))?;
+                let mut value = HeaderValue::from_str(&format!("Bearer {key}")).map_err(|_| {
+                    invalid(format!("api_key_env {env:?} is not a valid header value"))
+                })?;
+                value.set_sensitive(true);
+                Some(value)
+            } else {
+                None
+            };
             let host =
                 HeaderValue::from_str(base.authority().expect("validated authority").as_str())
                     .map_err(|_| invalid(format!("upstream {name:?} has an invalid host")))?;
@@ -512,23 +532,31 @@ impl RoutingTable {
                     "upstream {name:?} requires an http(s) metrics_url without userinfo"
                 ))
             })?;
-            // The upstream's bearer token goes only to its own host.
+            // The upstream's bearer token goes only to its own origin.
             let metrics_authorization = authorization
                 .clone()
-                .filter(|_| metrics_uri.authority() == base.authority());
+                .filter(|_| same_origin(&metrics_uri, &base));
             metrics_uris.insert(name.as_str(), (metrics_uri, metrics_authorization));
             let upstream_name: Arc<str> = name.as_str().into();
             let healthy = runtime.health.upstream(name);
             let gauge = runtime.metrics.health_gauge(name);
             if let Some(config) = &upstream.health_check {
+                let uri = if !config.url.is_empty() {
+                    plain_http_uri(&config.url).ok_or_else(|| {
+                        invalid(format!("upstream {name:?} has an invalid health url"))
+                    })?
+                } else if upstream.kind == lumewarp_proto::config::v1::UpstreamKind::Vllm as i32 {
+                    root_uri(&base, "/health")
+                        .ok_or_else(|| invalid(format!("upstream {name:?} has an invalid URL")))?
+                } else {
+                    endpoint("/models")?
+                };
+                // The upstream's bearer token goes only to its own origin.
+                let authorization = authorization.clone().filter(|_| same_origin(&uri, &base));
                 probes.push(Probe {
                     name: name.clone(),
-                    uri: endpoint(if config.path.is_empty() {
-                        "/models"
-                    } else {
-                        &config.path
-                    })?,
-                    authorization: authorization.clone(),
+                    uri,
+                    authorization,
                     config: config.clone(),
                     healthy: healthy.clone(),
                     gauge,
@@ -600,6 +628,9 @@ impl RoutingTable {
                     latency: runtime.balance.latency(&d.name),
                     track_latency: latency_tracked.contains(d.name.as_str()),
                     load: runtime.balance.load(&d.name, metrics),
+                    transform: Transform::compile(d)
+                        .map_err(|e| invalid(format!("model {:?}: {e}", d.name)))?
+                        .map(Arc::new),
                 }),
             );
         }
@@ -1145,20 +1176,46 @@ fn router_members(
     Ok((infos, params))
 }
 
+/// An absolute http(s) URI without userinfo.
+pub fn plain_http_uri(text: &str) -> Option<Uri> {
+    let uri: Uri = text.parse().ok()?;
+    let plain = matches!(uri.scheme_str(), Some("http" | "https"))
+        && uri.authority().is_some_and(|a| !a.as_str().contains('@'));
+    plain.then_some(uri)
+}
+
+/// Same scheme, host and effective port: the only URLs the upstream's bearer token may go
+/// to (an `https` base never sends it to `http` on the same host and port).
+fn same_origin(a: &Uri, b: &Uri) -> bool {
+    let port = |u: &Uri| {
+        u.port_u16().or(match u.scheme_str() {
+            Some("http") => Some(80),
+            Some("https") => Some(443),
+            _ => None,
+        })
+    };
+    a.scheme() == b.scheme()
+        && a.host().map(str::to_ascii_lowercase) == b.host().map(str::to_ascii_lowercase)
+        && port(a) == port(b)
+}
+
+/// `base_url` minus a trailing `/v1`, plus `suffix` (vLLM serves `/metrics` and
+/// `/health` beside, not under, its OpenAI API).
+fn root_uri(base: &Uri, suffix: &str) -> Option<Uri> {
+    let path = base.path().trim_end_matches('/');
+    let path = path.strip_suffix("/v1").unwrap_or(path);
+    let mut parts = base.clone().into_parts();
+    parts.path_and_query = Some(format!("{path}{suffix}").parse().ok()?);
+    Uri::from_parts(parts).ok()
+}
+
 /// Explicit `metrics_url`, or `base_url` minus a trailing `/v1` plus
 /// `/metrics`. `None` when an explicit URL is not plain http(s).
 fn metrics_uri(base: &Uri, explicit: &str) -> Option<Uri> {
     if !explicit.is_empty() {
-        let uri: Uri = explicit.parse().ok()?;
-        let plain = matches!(uri.scheme_str(), Some("http" | "https"))
-            && uri.authority().is_some_and(|a| !a.as_str().contains('@'));
-        return plain.then_some(uri);
+        return plain_http_uri(explicit);
     }
-    let path = base.path().trim_end_matches('/');
-    let path = path.strip_suffix("/v1").unwrap_or(path);
-    let mut parts = base.clone().into_parts();
-    parts.path_and_query = Some(format!("{path}/metrics").parse().ok()?);
-    Uri::from_parts(parts).ok()
+    root_uri(base, "/metrics")
 }
 
 fn models_json<'a>(models: impl Iterator<Item = &'a Box<str>>) -> Bytes {
@@ -2192,6 +2249,63 @@ mod tests {
         }
         s.upstreams[0].metrics_url = "ftp://h/m".into();
         assert!(RoutingTable::compile(&s, AuthMode::Open, &Runtime::new()).is_err());
+    }
+
+    #[test]
+    fn health_probe_urls_and_credentials() {
+        let probe_of = |kind: pb::UpstreamKind, url: &str| {
+            let mut s = snapshot("weighted");
+            s.required_capabilities.push("health_check".into());
+            s.upstreams[0].kind = kind as i32;
+            s.upstreams[0].base_url = "http://h:8000/v1".into();
+            s.upstreams[0].api_key_ref = "PATH".into();
+            s.upstreams[0].health_check = Some(pb::HealthCheck {
+                url: url.into(),
+                interval_ms: 1000,
+                timeout_ms: 100,
+                ..Default::default()
+            });
+            let table = compile(&s);
+            let probe = &table.probes[0];
+            (probe.uri.to_string(), probe.authorization.is_some())
+        };
+        assert_eq!(
+            probe_of(pb::UpstreamKind::Vllm, ""),
+            ("http://h:8000/health".into(), true)
+        );
+        assert_eq!(
+            probe_of(pb::UpstreamKind::Openai, ""),
+            ("http://h:8000/v1/models".into(), true)
+        );
+        assert_eq!(
+            probe_of(pb::UpstreamKind::Vllm, "http://h:8000/ready"),
+            ("http://h:8000/ready".into(), true)
+        );
+        // The bearer token never leaves the upstream's origin.
+        assert_eq!(
+            probe_of(pb::UpstreamKind::Vllm, "http://h:9000/health"),
+            ("http://h:9000/health".into(), false)
+        );
+        assert_eq!(
+            probe_of(pb::UpstreamKind::Vllm, "https://h:8000/health"),
+            ("https://h:8000/health".into(), false)
+        );
+        assert_eq!(
+            probe_of(pb::UpstreamKind::Vllm, "http://H:8000/health"),
+            ("http://H:8000/health".into(), true)
+        );
+    }
+
+    #[test]
+    fn same_origin_compares_scheme_host_and_effective_port() {
+        let u = |s: &str| s.parse::<Uri>().unwrap();
+        assert!(same_origin(&u("https://h/v1"), &u("https://h:443/health")));
+        assert!(same_origin(&u("http://h:80/v1"), &u("http://h/x")));
+        assert!(!same_origin(
+            &u("https://h:8000/v1"),
+            &u("http://h:8000/health")
+        ));
+        assert!(!same_origin(&u("http://h/v1"), &u("http://g/v1")));
     }
 
     #[test]

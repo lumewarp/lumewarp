@@ -13,7 +13,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::{header::HeaderValue, Request, Uri};
 use lumewarp_proto::config::v1::{CircuitBreaker, HealthCheck};
 use prometheus_client::metrics::gauge::Gauge;
-use tokio::task::JoinHandle;
+use tokio::{sync::Notify, task::JoinHandle};
 
 use crate::{proxy::UpstreamClient, ratelimit::clock};
 
@@ -151,6 +151,9 @@ pub struct Registry {
     upstreams: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Running probe tasks with the probe each one was started for.
     tasks: Mutex<Vec<(Probe, JoinHandle<()>)>>,
+    /// Signalled when a probe changes state or the probed set changes (the
+    /// config stream reports it to the control plane).
+    changed: Arc<Notify>,
 }
 
 impl Registry {
@@ -178,7 +181,26 @@ impl Registry {
     /// (no immediate re-probe); only removed or changed probes are aborted
     /// and only new or changed ones are spawned. Returns how many tasks
     /// were spawned.
+    /// Waits until a probe changed state since the last call (one stored
+    /// permit, so changes before the call are not lost and bursts coalesce).
+    pub async fn changed(&self) {
+        self.changed.notified().await;
+    }
+
+    /// (upstream, healthy) for every probed upstream, sorted by name.
+    pub fn probed(&self) -> Vec<(String, bool)> {
+        let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out: Vec<_> = tasks
+            .iter()
+            .map(|(p, _)| (p.name.clone(), p.healthy.load(Ordering::Acquire)))
+            .collect();
+        out.sort();
+        out.dedup_by(|a, b| a.0 == b.0);
+        out
+    }
+
     pub fn configure(&self, probes: &[Probe], client: &UpstreamClient) -> usize {
+        self.changed.notify_one();
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         let mut old = std::mem::take(&mut *tasks);
         let mut spawned = 0;
@@ -190,7 +212,10 @@ impl Registry {
                 Some(i) => tasks.push(old.swap_remove(i)),
                 None => {
                     spawned += 1;
-                    tasks.push((probe.clone(), spawn_probe(probe.clone(), client.clone())));
+                    tasks.push((
+                        probe.clone(),
+                        spawn_probe(probe.clone(), client.clone(), self.changed.clone()),
+                    ));
                 }
             }
         }
@@ -201,7 +226,7 @@ impl Registry {
     }
 }
 
-fn spawn_probe(probe: Probe, client: UpstreamClient) -> JoinHandle<()> {
+fn spawn_probe(probe: Probe, client: UpstreamClient, changed: Arc<Notify>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut failures = 0u32;
         let mut successes = 0u32;
@@ -242,6 +267,7 @@ fn spawn_probe(probe: Probe, client: UpstreamClient) -> JoinHandle<()> {
                     probe.gauge.set(1);
                     if !was_healthy {
                         tracing::info!(upstream = %probe.name, healthy = true, "upstream health changed");
+                        changed.notify_one();
                     }
                 }
             } else {
@@ -257,6 +283,7 @@ fn spawn_probe(probe: Probe, client: UpstreamClient) -> JoinHandle<()> {
                     probe.gauge.set(0);
                     if was_healthy {
                         tracing::info!(upstream = %probe.name, healthy = false, "upstream health changed");
+                        changed.notify_one();
                     }
                 }
             }

@@ -200,6 +200,11 @@ class _PendingUpdate:
     retry_delay: float = _RETRY_INITIAL_SECONDS
 
 
+# UpstreamHealthReport bounds (upstream names are at most 200 characters).
+_MAX_HEALTH_ENTRIES = 10_000
+_MAX_UPSTREAM_NAME = 200
+
+
 @dataclass
 class _StreamState:
     identity: GatewayIdentity
@@ -224,6 +229,7 @@ class _StreamState:
     last_nack_version: int | None = None
     last_nack_code: str | None = None
     last_nack_reason: str | None = None
+    upstream_health: dict[str, bool] = field(default_factory=dict)
     # Set when the stream must end (replaced by a newer connection, token revoked).
     closed: tuple[grpc.StatusCode, str] | None = None
 
@@ -409,6 +415,7 @@ class SessionRegistry:
             "connected_at": state.connected_at,
             "disconnected_at": now if disconnected else None,
             "last_seen_at": now,
+            "upstream_health": state.upstream_health,
         }
         stmt = pg_insert(GatewaySession).values(**values)
         updates = {
@@ -736,6 +743,17 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
 
     async def _handle_reply(self, state: _StreamState, incoming, context) -> None:
         kind = incoming.WhichOneof("msg")
+        if kind == "upstream_health":
+            report = incoming.upstream_health.upstreams
+            if len(report) > _MAX_HEALTH_ENTRIES or any(
+                not 0 < len(u.name) <= _MAX_UPSTREAM_NAME for u in report
+            ):
+                await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "invalid health report")
+            health = {u.name: u.healthy for u in report}
+            if health != state.upstream_health:
+                state.upstream_health = health
+                await self.registry._mirror(state)
+            return
         if kind == "hello":
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Hello may only be sent once")
         pending = state.pending

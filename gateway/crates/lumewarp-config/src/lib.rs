@@ -153,8 +153,10 @@ pub struct Upstream {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthCheck {
+    /// Absolute http(s) URL. Empty: vLLM -> base_url without `/v1` + `/health`,
+    /// others -> base_url + `/models`.
     #[serde(default)]
-    pub path: String,
+    pub url: String,
     pub interval_ms: u32,
     pub timeout_ms: u32,
     #[serde(default)]
@@ -201,6 +203,36 @@ pub struct Model {
     /// Absent = price unknown (usage metered, cost unknown); explicit zeros = free.
     #[serde(default)]
     pub price: Option<Price>,
+    /// Upper bound for max_tokens / max_completion_tokens; absent = none.
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    /// Merged under every request body (the client's fields win).
+    #[serde(default)]
+    pub default_body: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+/// How `reasoning_effort` is handled (snapshot `ReasoningEffort`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReasoningEffort {
+    #[serde(default)]
+    pub mode: ReasoningMode,
+    /// `mapped`: level -> object merged into the request.
+    #[serde(default)]
+    pub fragments: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    pub default_level: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningMode {
+    #[default]
+    Passthrough,
+    Strip,
+    Mapped,
 }
 
 fn default_weight() -> u32 {
@@ -521,13 +553,14 @@ impl Config {
                 } as i32,
                 base_url: u.base_url.clone(),
                 api_key_ref: u.api_key_env.clone().unwrap_or_default(),
+                api_key_ciphertext: Vec::new(),
                 timeout_ms: u.timeout_ms,
                 stream_usage_mode: match u.stream_usage_mode {
                     StreamUsageMode::IncludeUsage => pb::StreamUsageMode::IncludeUsage,
                     StreamUsageMode::Passthrough => pb::StreamUsageMode::Passthrough,
                 } as i32,
                 health_check: u.health_check.as_ref().map(|h| pb::HealthCheck {
-                    path: h.path.clone(),
+                    url: h.url.clone(),
                     interval_ms: h.interval_ms,
                     timeout_ms: h.timeout_ms,
                     unhealthy_threshold: h.unhealthy_threshold,
@@ -550,6 +583,26 @@ impl Config {
                 price: d.price.as_ref().map(|p| pb::Price {
                     input_nano_usd_per_mtok: p.input_usd_per_mtok,
                     output_nano_usd_per_mtok: p.output_usd_per_mtok,
+                }),
+                max_output_tokens: d.max_output_tokens.unwrap_or(0),
+                default_body_json: params_json(&d.default_body),
+                reasoning_effort: d.reasoning_effort.as_ref().map(|r| pb::ReasoningEffort {
+                    mode: match r.mode {
+                        ReasoningMode::Passthrough => pb::ReasoningEffortMode::Passthrough,
+                        ReasoningMode::Strip => pb::ReasoningEffortMode::Strip,
+                        ReasoningMode::Mapped => pb::ReasoningEffortMode::Mapped,
+                    } as i32,
+                    fragments_json: r
+                        .fragments
+                        .iter()
+                        .map(|(level, body)| {
+                            (
+                                level.clone(),
+                                serde_json::to_string(body).expect("JSON object"),
+                            )
+                        })
+                        .collect(),
+                    default_level: r.default_level.clone(),
                 }),
             })
             .collect();
@@ -709,6 +762,20 @@ impl Config {
                     (
                         "vllm_load",
                         self.upstreams.iter().any(|u| !u.metrics_url.is_empty()),
+                    ),
+                    (
+                        "model_limits",
+                        self.models
+                            .iter()
+                            .any(|d| d.max_output_tokens.is_some_and(|n| n > 0)),
+                    ),
+                    (
+                        "default_body",
+                        self.models.iter().any(|d| !d.default_body.is_empty()),
+                    ),
+                    (
+                        "reasoning_effort",
+                        self.models.iter().any(|d| d.reasoning_effort.is_some()),
                     ),
                 ] {
                     if used {

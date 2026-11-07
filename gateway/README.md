@@ -111,6 +111,7 @@ teams and keys (including `server.api_keys`) are ignored in this mode.
 | `--scope SCOPE` | none | required in control-plane mode | Config scope this gateway serves. Must match the control plane and the cached snapshot. |
 | `--gateway-id ID` | none | `gateway` | Identity sent in the stream `Hello`; must match the id the token was issued for and is shown in the control-plane gateway list. The Helm chart sets `gateway.gatewayId`. |
 | `--local-config FILE` | none | unset | YAML with only `server:` listener/timeout settings. Without it the defaults from the YAML reference apply. |
+| none | `LUMEWARP_ENCRYPTION_KEY` | unset | Opens upstream API keys the control plane stores sealed (`api_key_ciphertext`). Must equal the control plane's value; a snapshot with a sealed key is NACKed without it. Read when a snapshot is applied, never per request. |
 
 A minimal local config only needs the listeners:
 
@@ -252,9 +253,9 @@ the gateway.
 | `upstreams[].api_key_env` | Absent | Name of the environment variable containing the raw upstream bearer token, **not** the token or a client-key hash. |
 | `upstreams[].timeout_ms` | `600000` | Unsigned 32-bit millisecond timeout from issuing the upstream request through receipt of response headers, including connection establishment. Does not limit response-body or stream lifetime. (A snapshot value of 0 also means the default.) |
 | `upstreams[].stream_usage_mode` | `include_usage` | `include_usage` (the gateway may force `stream_options.include_usage` upstream for metering and strips the extra chunk if the client did not ask) or `passthrough` (upstream does not support it; no injection). |
-| `upstreams[].health_check` | Absent | Active GET probe: `{path, interval_ms, timeout_ms, unhealthy_threshold, healthy_threshold}`. `path` defaults to `/models`, appended to `base_url`. Interval must be at least 1000 ms; timeout must be positive and less than interval. Thresholds of zero mean 3 failures / 1 success. Uses the existing upstream client and credentials. |
+| `upstreams[].health_check` | Absent | Active GET probe: `{url, interval_ms, timeout_ms, unhealthy_threshold, healthy_threshold}`. `url` is an absolute http(s) URL without userinfo; empty means `base_url` without a trailing `/v1` plus `/health` for `vllm` upstreams and `base_url` + `/models` otherwise. The upstream bearer token is sent only when the URL has the same scheme, host and port as `base_url`. Interval must be at least 1000 ms; timeout must be positive and less than interval. Thresholds of zero mean 3 failures / 1 success. Uses the existing upstream client. In control-plane mode, state changes are reported to the control plane (`UpstreamHealthReport`) for display. |
 | `upstreams[].circuit_breaker` | Absent | Per-model `{failure_threshold, open_ms}`; zero values mean 5 consecutive retryable failures and 30000 ms open. One half-open trial is allowed after the open interval. Only that trial's result closes or re-opens a half-open breaker; late results of requests admitted while closed never move an open/half-open breaker or extend its deadline. Removing `circuit_breaker` from an upstream resets its models' breakers to closed (gauge 0) when the snapshot is activated. |
-| `upstreams[].metrics_url` | Empty | Prometheus endpoint scraped every second by `vllm_load` routers. Empty means `base_url` with a trailing `/v1` removed plus `/metrics` (`http://vllm:8000/v1` -> `http://vllm:8000/metrics`). Must be absolute http(s) without userinfo. The upstream bearer token is sent only when the metrics URL has the same host and port as `base_url`. Setting it requires capability `vllm_load`. |
+| `upstreams[].metrics_url` | Empty | Prometheus endpoint scraped every second by `vllm_load` routers. Empty means `base_url` with a trailing `/v1` removed plus `/metrics` (`http://vllm:8000/v1` -> `http://vllm:8000/metrics`). Must be absolute http(s) without userinfo. The upstream bearer token is sent only when the metrics URL has the same scheme, host and port as `base_url`. Setting it requires capability `vllm_load`. |
 
 All upstreams are compiled at startup. A configured `api_key_env` must exist,
 contain a valid Unicode value, and produce a valid Authorization header;
@@ -277,6 +278,13 @@ rustls with WebPKI roots.
 | `models[].upstream` | Required | Name of an existing upstream. |
 | `models[].upstream_model` | Required | Model string substituted for the name the client called. |
 | `models[].price` | Absent | `{input_usd_per_mtok, output_usd_per_mtok}`: USD per one million tokens as decimals, e.g. `"0.15"` (quoted or plain). Parsed from the YAML text, never through floating point, and converted exactly to integer nano-USD; at most 9 fractional digits, no exponent or sign. Absent means the price is unknown (usage is metered, cost reported as unknown); explicit zeros mean free. |
+| `models[].max_output_tokens` | Absent | A request whose `max_tokens` or `max_completion_tokens` is larger gets a 400 (`max_output_tokens`) before reaching the upstream. Requires capability `model_limits`. |
+| `models[].default_body` | Empty | JSON object merged under every request body: the client's fields win, objects on both sides merge recursively. Must not set `model`, `stream`, `stream_options` or `reasoning_effort` (use `reasoning_effort.default_level`); at most 32 levels of nesting. Requires capability `default_body`. |
+| `models[].reasoning_effort` | Absent | `{mode, fragments, default_level}` for the OpenAI `reasoning_effort` field (levels `none`, `minimal`, `low`, `medium`, `high`, `xhigh`). `passthrough` forwards it unchecked, `strip` removes it, `mapped` replaces it with `fragments[level]` (e.g. `{chat_template_kwargs: {enable_thinking: false}}` for vLLM) and answers 400 for an unmapped level. `default_level` applies when the client sends none. Precedence: `default_body` < fragment < client. Requires capability `reasoning_effort`. |
+
+A model with none of the last three settings is not parsed on the request path.
+Only top-level body keys are parsed; untouched values keep their exact bytes.
+Rejections count in `lumewarp_requests_rejected_total{model,reason}`.
 
 ### Aliases
 

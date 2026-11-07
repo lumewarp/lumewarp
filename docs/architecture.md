@@ -80,6 +80,7 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 ### 憑證儲存與稽核
 
 - DB 只存不可逆或不可用的形式。API key、PAT、gateway token、session／CSRF token 與 OIDC state 只存 sha256：它們是 256-bit 隨機值，快速 hash 就足以防離線猜測。OIDC 的 nonce 與 PKCE code verifier 只放在 AES-256-GCM 封存的登入 cookie（金鑰由 `LUMEWARP_SECRET_KEY` 派生），`oidc_login_states` 只有 state hash、return path、redirect URI 與到期時間，用過即刪；SSO 開啟但沒設金鑰時服務拒絕啟動。Helm 以 `controlPlane.extraEnv` 的 `secretKeyRef` 傳入，範例見 [chart README](../deploy/helm/lumewarp/README.md#sso-and-authorization-backend)。
+- Upstream API key 有兩種來源，擇一：`api_key_ref`（gateway 環境變數名稱）或在 API 輸入的 key。輸入的 key 以 AES-256-GCM 封存在 `upstreams.api_key_ciphertext`（金鑰由 `LUMEWARP_ENCRYPTION_KEY` 以 HKDF 派生，與 `LUMEWARP_SECRET_KEY` 分開），API 只回 `api_key_set`，稽核只記 `credential_changed`。snapshot 帶密文（capability `encrypted_api_key`），gateway 用同一把 `LUMEWARP_ENCRYPTION_KEY` 在套用 snapshot 時解開，不在請求路徑上；落地的 snapshot 也只有密文。gateway 沒有或金鑰不符時 NACK `INVALID_CONFIG`。換這把金鑰後，已存的 key 必須重新輸入。Helm 以 `encryptionKey.secretName` 同時傳給 control plane 與 gateway。
 - `upstreams.metrics_url` 不帶 query string（`?token=...` 會把憑證放進 API 會回傳、也會進稽核的欄位）；API 與 compiler 都拒絕帶 query 或 userinfo 的值。
 - 稽核 `details` 是每個 action 的 allowlist：沒分類的欄位不記錄；`last_error` 類欄位只存 exception class。守門測試掃每個 Text／String／JSONB 欄位與原始碼中每個 `audit.record(action=...)`，新增而未分類就失敗。
 - e2e suite 會掃描資料庫，確認沒有明文憑證。
@@ -120,7 +121,7 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 
 ### Admin UI
 
-- 選單依角色出現，API 仍是最後的權限來源。member 看到 My keys、Usage、Settings；team admin 多 Overview、Teams（含單一 team 的 Members／Service accounts／Keys／Usage／Settings 分頁）與 Audit log；org admin 多 Orgs 與旗下 team（`RequestAuthz` 從 `org_id` 繼承，`/users/me` 的 `admin_orgs` 是 UI 的依據），不算直接成員；安裝層管理員多 Users、Upstreams、Models、Aliases、Routers、Gateways 與 Config versions。既非安裝層管理員也不是 team admin 的人首頁是 `/my-keys`，其餘是 Overview；緊急 session 不擁有 key，My keys 只說明這件事。
+- 選單依角色出現，API 仍是最後的權限來源。member 看到 My keys、Usage、Settings；team admin 多 Overview、Teams（含單一 team 的 Members／Service accounts／Keys／Usage／Settings 分頁）與 Audit log；org admin 多 Orgs 與旗下 team（`RequestAuthz` 從 `org_id` 繼承，`/users/me` 的 `admin_orgs` 是 UI 的依據），不算直接成員；安裝層管理員多 Users、Upstreams、Models、Aliases、Routers、Gateways 與 Config versions。Upstream 與 model 的新增與編輯是獨立頁面（`/upstreams/new`、`/upstreams/{id}`、`/models/new`、`/models/{id}`），離開未儲存的頁面會先確認；Models 列表只顯示名稱、`<upstream>/<upstream_model>`、輸入／輸出長度與價格。既非安裝層管理員也不是 team admin 的人首頁是 `/my-keys`，其餘是 Overview；緊急 session 不擁有 key，My keys 只說明這件事。
 - Orgs 頁（`/orgs`、`/orgs/{id}`）只在安裝層管理員與 org admin 的選單出現。列表只列未封存的 org：安裝層管理員可以建立、改名與設定 org 政策（模型、RPM／TPM／並行、預算）、指派或移除 org admin、封存（旗下還有未封存 team 時按鈕停用並說明原因）；org admin 只看到自己的 org，政策唯讀，但可以在其中建立與封存 team。明細頁有 org 政策摘要、旗下 team（建立／封存）、org admin 清單（僅安裝層管理員；外部授權後端下唯讀）與本月依 team 分組的用量。建立 team 的對話框在只有一個 org 時自動選它，多個 org 時顯示選單。
 - 只有一個 org 時，Orgs 頁以外不顯示 org 層：Teams 沒有 Org 欄、Audit 沒有 Org 篩選、team 設定不顯示所屬 org；多個 org 時三處都出現。Orgs 頁本身永遠顯示它的 org，否則無法建立第二個 org。
 - 沒有獨立的 `/keys` 管理頁：整個 team 的 key 在 team 的 Keys 分頁。team admin 看得到並管理別人的 key 與 service account 的 key；member 的 Keys 分頁只列自己的 key。Members／Service accounts 分頁只對 team admin 掛載，member 不會對這些端點發請求。Service account 可由 team admin 停用與恢復；停用後它的 key 不進快照，恢復後未撤銷的 key 重新生效。建立 key 的 owner 選單不列已停用的 service account。
@@ -165,7 +166,8 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 - 自動探索：定期讀 `/v1/models`，註冊模型與 LoRA adapter（延後）。
 - 負載感知路由：讀 vLLM `/metrics` 的等待中請求數與 KV cache 使用率。
 - prefix cache 親和（延後）。
-- 健康檢查：vLLM `/health`。
+- 健康檢查：`health_check.url` 是完整 URL；留空時 vLLM 用去掉 `/v1` 的 base URL 加 `/health`，其他用 `<base>/models`。bearer token 只送往與 base URL 同 origin（scheme、host、port）的 URL。gateway 在 `Hello` 後、每次 ACK 後與探測狀態改變時（每秒最多一次）送 `UpstreamHealthReport`，control plane 存進 `gateway_sessions.upstream_health`；Upstreams 頁的狀態是已連線 gateway 的彙總，任一台回報異常即異常。編輯頁的「Test now」由 control plane 立即探測一次健康 URL 與 `/models`（`POST /upstreams/{id}/test`）。
+- 模型清單：`GET /upstreams/{id}/models` 由 control plane 讀上游的 `/models`（OpenAI 格式，vLLM 另帶 `max_model_len`），給 model 編輯頁當選單；不在請求路徑上。
 - token 計量：用上游 usage（串流自動加 `stream_options.include_usage`）；自架 vLLM 可依 GPU 小時成本換算。
 
 ## Metrics 與 Alert
@@ -183,6 +185,7 @@ gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control 
 | `lumewarp_upstream_circuit_state` | model | 熔斷與健康 |
 | `lumewarp_upstream_attempts_total` | requested, model, outcome | 每次上游嘗試；success / retryable_status / connect_error / timeout / circuit_open / non_retryable |
 | `lumewarp_response_model_rewrite_compressed_total` | model | 需要改寫回應 `model` 但上游仍壓縮：原樣轉發、不解壓縮，用戶端看到上游模型名，usage 為 invalid |
+| `lumewarp_requests_rejected_total` | model, reason | model 設定在送往上游前回 400 的請求；reason 是 max_output_tokens／reasoning_effort／invalid_body |
 | `lumewarp_fallbacks_total` | router, model | 切換至 fallback model |
 | `lumewarp_retries_budget_exhausted_total` | router | 全域重試額度耗盡 |
 | `lumewarp_upstream_healthy` | upstream | 主動健康檢查狀態（1 正常、0 異常）；探測不計入請求與用量 |
@@ -251,7 +254,7 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 
 **路由（gateway + control plane）**
 
-- 快照與 standalone YAML 支援 `retry`、`fallbacks`、`health_check`、`circuit_breaker`、`traffic_split`、`vllm_load`、`rotation_grace` 與 `strategy:<name>` capability；control plane 只在欄位有用到時列出對應 capability，驗證規則與 gateway 一致（含 URI 文法）。fallback 只能是 model，需要至少 2 次 attempt 的 retry policy。
+- 快照與 standalone YAML 支援 `retry`、`fallbacks`、`health_check`、`circuit_breaker`、`traffic_split`、`vllm_load`、`rotation_grace`、`encrypted_api_key`、`model_limits`、`default_body`、`reasoning_effort` 與 `strategy:<name>` capability；control plane 只在欄位有用到時列出對應 capability，驗證規則與 gateway 一致（含 URI 文法）。fallback 只能是 model，需要至少 2 次 attempt 的 retry policy。
 - 重試僅限回應送出前，串流僅限收到上游 headers 前；最多五次，
   共用原路由 timeout 與全域重試額度（預設 20%，低流量允許三次 burst；
   只有設定 `retry` 的路由請求會存入額度）。`Retry-After` 使用 model
@@ -292,10 +295,11 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 - **Usage：** 每筆 event 保存 `requested`、`model`、`alias`、`router`、`upstream`、`upstream_model`、`fallback`、`attempts`、`endpoint`，加上 control plane 解析的 `model_id`、`alias_id`、`router_id`。`GET /usage` 不是每個欄位都能查：`group_by` 支援 `day`、`requested`、`model`、`upstream_model`、`alias`、`router`、`team`、`owner`、`key`；篩選支援 `from`、`to`、`team_id`、`user_id`、`service_account_id`、`key_id`、`requested`、`model`、`upstream_model`、`alias`、`router`、`model_id`、`alias_id`、`router_id`、`alias_missing`、`router_missing`。`upstream`、`fallback`、`attempts`、`endpoint` 只能從資料列讀。改名前後的用量連續。
 - **策略：** `register!` 宣告 params 與成員欄位，schema 從 struct 產生，在 `Hello` 回報，存進 `gateway_strategies`；寫入時依 schema 驗證，內建策略有 commit 的 manifest。見 [router strategies](router-strategies.md)。
 - **用 OTel 查請求：** gateway 不寫 access log。回應帶 `x-lumewarp-request-id`，等於 usage 的 `request_id` 與 span 的 `request_id`。`request` span 帶呼叫的名字、alias、router、最後的 model 與 attempts，每次嘗試一個 `upstream_attempt`。前提：沒設 OTLP endpoint 就沒有紀錄；取樣低於 100% 或 exporter 佇列滿了會查不到，要當 access log 建議 100%；保留多久由 OTel 後端決定。Sampler 不聽從用戶端 `traceparent` 的 sampled flag。Helm 的設定是 `gateway.otel.endpoint`、`gateway.otel.samplingRatio`。
+- **Model 設定：** `max_input_tokens` 只供顯示；`max_output_tokens` 由 gateway 檢查 `max_tokens` 與 `max_completion_tokens`，超過回 400。`default_body` 是 JSON 物件，合併在請求之下：用戶端有的欄位優先，兩邊都是物件時遞迴合併。`reasoning` 處理 OpenAI 的 `reasoning_effort`（none／minimal／low／medium／high／xhigh）：`passthrough` 原樣轉發（不檢查值），`strip` 直接移除，`mapped` 換成該等級對應的 JSON 片段（例如 vLLM 的 `chat_template_kwargs.enable_thinking`），沒有對應的等級回 400；`default_level` 在用戶端沒送時套用。優先順序 default_body < reasoning 片段 < 用戶端；`model`、`stream`、`stream_options` 不能設定，`default_body` 也不能設 `reasoning_effort`（改用 `default_level`）；巢狀最多 32 層。只解析最外層，沒動到的值保留原 bytes；沒有設定的 model 完全不經過這段（`transform.rs`）。稽核只記 `default_body_changed`／`reasoning_changed`，不記內容。
 - **Metrics：** 標籤 `model` 是實際服務的 model，`requested` 是呼叫的名字，`endpoint` 是 API 路徑。改名後 label 換成新名字，舊名字的時間序列就此結束，這是 Prometheus 的正常行為。
 - **驗收：** `tests/e2e/test_catalog.py`（真實 control plane + gateway）。
 
-**尚未包含：** 註冊時的連線測試、在 Models／Routers 顯示「已生效／被 NACK」、`api_key_ref` 錯誤的處理、成員自己 usage 列上的 model／`upstream_model` provenance 是否要再收窄、dropped spans 的 metric（span 遺失目前是無聲的）。
+**尚未包含：** 在 Models／Routers 顯示「已生效／被 NACK」、`api_key_ref` 錯誤的處理、成員自己 usage 列上的 model／`upstream_model` provenance 是否要再收窄、dropped spans 的 metric（span 遺失目前是無聲的）。
 
 ### 已定的決定（Andy，2026-11-02）
 

@@ -15,8 +15,7 @@ upstreams:
   - name: vllm-local
     kind: vllm
     base_url: http://localhost:8000/v1
-    # Relative to base_url: /v1/models. Use a prefix appropriate for your server.
-    health_check: {path: /models, interval_ms: 5000, timeout_ms: 1000}
+    health_check: {interval_ms: 5000, timeout_ms: 1000}  # url: default vLLM /health
     circuit_breaker: {failure_threshold: 5, open_ms: 30000}
     # Scraped every second by `vllm_load` routers. Empty = base_url minus a
     # trailing /v1, plus /metrics.

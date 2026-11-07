@@ -24,6 +24,7 @@ from tests.compiler.helpers import SCOPE, add_router, load_version, seed_scope, 
 
 GROUPS = [
     "upstream",
+    "stored_api_key",
     "health_check",
     "health_defaults",
     "circuit_breaker",
@@ -32,6 +33,7 @@ GROUPS = [
     "model",
     "price",
     "free_price",
+    "model_settings",
     "strategy",
     "custom_strategy",
     "custom_params",
@@ -75,11 +77,22 @@ async def _set_group(session, group, configured):
         upstream.stream_usage_mode = (
             StreamUsageMode.PASSTHROUGH if configured else StreamUsageMode.INCLUDE_USAGE
         )
+    elif group == "stored_api_key":
+        # Ciphertext only; the catalog sidecar must carry the bytes through JSON.
+        upstream.api_key_ciphertext = (b"\x01" + bytes(range(40))) if configured else None
+    elif group == "model_settings":
+        model.max_output_tokens = 512 if configured else None
+        model.default_body = {"top_k": 20, "extra_body": {"x": [1, 2]}} if configured else None
+        model.reasoning_mode = "mapped" if configured else "passthrough"
+        model.reasoning_fragments = (
+            {"none": {"chat_template_kwargs": {"enable_thinking": False}}} if configured else None
+        )
+        model.reasoning_default_level = "none" if configured else None
     elif group in ("health_check", "health_defaults"):
         explicit = configured and group == "health_check"
         upstream.health_check_interval_ms = 5000 if configured else None
         upstream.health_check_timeout_ms = 1200 if configured else None
-        upstream.health_check_path = "/ready" if explicit else None
+        upstream.health_check_url = "http://ready.internal/ready" if explicit else None
         upstream.health_check_unhealthy_threshold = 4 if explicit else None
         upstream.health_check_healthy_threshold = 2 if explicit else None
     elif group in ("circuit_breaker", "breaker_defaults"):

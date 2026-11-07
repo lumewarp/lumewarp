@@ -23,7 +23,22 @@ message GatewayMessage {
     Hello hello = 1;
     Ack ack = 2;
     Nack nack = 3;
+    // Any time after Hello; not a reply to an update.
+    UpstreamHealthReport upstream_health = 4;
   }
+}
+
+// Active health-check state of every probed upstream in the active snapshot. Sent
+// after an ACK and whenever a probe changes state (coalesced, at most once a
+// second). Each report replaces the previous one; an upstream without a health
+// check is absent. Display only: routing never depends on the control plane.
+message UpstreamHealthReport {
+  repeated UpstreamHealth upstreams = 1;
+}
+
+message UpstreamHealth {
+  string name = 1;
+  bool healthy = 2;
 }
 
 message Hello {

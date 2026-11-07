@@ -14,7 +14,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use common::{bounded, bytes, client, Prometheus, TestClient};
+use common::{bounded, bytes, client, Behavior, Mock, Prometheus, TestClient};
 use fake_cp::{Conn, FakeCp};
 use http_body_util::Full;
 use hyper::Request;
@@ -59,6 +59,7 @@ fn snapshot(version: u64, keys: &[(&str, &str)]) -> Snapshot {
             upstream: "u".into(),
             upstream_model: "actual".into(),
             price: None,
+            ..Default::default()
         }],
         routers: vec![Router {
             name: "m1".into(),
@@ -129,6 +130,16 @@ struct Gw {
 
 impl Gw {
     fn spawn(control_plane: &str, state: &Path, work: &Path, id: &str) -> Self {
+        Self::spawn_with_env(control_plane, state, work, id, &[])
+    }
+
+    fn spawn_with_env(
+        control_plane: &str,
+        state: &Path,
+        work: &Path,
+        id: &str,
+        vars: &[(&str, &str)],
+    ) -> Self {
         let listen = StdListener::bind("127.0.0.1:0").unwrap();
         let admin = StdListener::bind("127.0.0.1:0").unwrap();
         let (addr, admin_addr) = (listen.local_addr().unwrap(), admin.local_addr().unwrap());
@@ -148,6 +159,7 @@ impl Gw {
             .arg("--local-config")
             .arg(local)
             .env(TOKEN_ENV, "gw-token")
+            .envs(vars.iter().copied())
             .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
             .env("RUST_LOG", "error")
             .stdout(Stdio::null())
@@ -698,4 +710,122 @@ async fn cold_boot_delta_with_base_zero_is_refused_until_a_full_arrives() {
     conn.send(delta(1, 2, &[("k2", "secret-2")]));
     ack(&mut conn, 2, &env.state).await;
     assert_eq!(gw.models("secret-2").await, 200);
+}
+
+/// Sealed by the control plane's sealing.py with `ENCRYPTION_KEY`; opens to "sk-test-123".
+const SEALED: &str =
+    "01cf29abe2c0cabded1dee59a04699ce44e9a26482cb8e102d94504cd57206704404b13d0b01faf8";
+const ENCRYPTION_KEY: &str = "test-encryption-key-0123456789abcdef";
+
+fn sealed_snapshot(version: u64, upstream: SocketAddr) -> Snapshot {
+    let mut s = snapshot(version, &[("k1", "secret-1")]);
+    s.upstreams[0].base_url = format!("http://{upstream}/v1");
+    s.upstreams[0].api_key_ciphertext = hex::decode(SEALED).unwrap();
+    s.required_capabilities.push("encrypted_api_key".into());
+    s
+}
+
+#[tokio::test]
+async fn sealed_upstream_key_is_opened_with_the_encryption_key() {
+    let env = env();
+    let mut mock = Mock::start(Behavior::Json).await;
+    let mut cp = FakeCp::start().await;
+    let gw = Gw::spawn_with_env(
+        &cp.url(),
+        &env.state,
+        &env.work,
+        "gw-sealed",
+        &[("LUMEWARP_ENCRYPTION_KEY", ENCRYPTION_KEY)],
+    );
+    let mut conn = cp.accept().await;
+    hello(&mut conn).await;
+    conn.send(full(sealed_snapshot(1, mock.addr)));
+    ack(&mut conn, 1, &env.state).await;
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("http://{}/v1/chat/completions", gw.addr))
+        .header("authorization", "Bearer secret-1")
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from_static(br#"{"model":"m1"}"#)))
+        .unwrap();
+    let response = bounded(gw.http.request(request)).await.unwrap();
+    assert_eq!(response.status(), 200);
+    bytes(response).await;
+    assert_eq!(
+        mock.next().await.headers["authorization"],
+        "Bearer sk-test-123"
+    );
+    // The persisted snapshot keeps the ciphertext only.
+    let data = std::fs::read(env.state.join("snapshot.pb")).unwrap();
+    assert!(!data.windows(11).any(|w| w == b"sk-test-123"));
+}
+
+#[tokio::test]
+async fn sealed_upstream_key_without_the_encryption_key_is_nacked() {
+    let env = env();
+    let mut cp = FakeCp::start().await;
+    let _gw = Gw::spawn(&cp.url(), &env.state, &env.work, "gw-nokey");
+    let mut conn = cp.accept().await;
+    hello(&mut conn).await;
+    conn.send(full(sealed_snapshot(1, "127.0.0.1:1".parse().unwrap())));
+    let nack = recv_nack(&mut conn).await;
+    assert_eq!(nack.code, NackCode::InvalidConfig as i32);
+    assert!(
+        nack.reason.contains("LUMEWARP_ENCRYPTION_KEY"),
+        "{}",
+        nack.reason
+    );
+}
+
+#[tokio::test]
+async fn probe_state_changes_are_reported_to_the_control_plane() {
+    use lumewarp_proto::config::v1::{HealthCheck, UpstreamHealth};
+    let env = env();
+    let mock = Mock::start(Behavior::Json).await;
+    let mut cp = FakeCp::start().await;
+    let _gw = Gw::spawn(&cp.url(), &env.state, &env.work, "gw-health");
+    let mut conn = cp.accept().await;
+    hello(&mut conn).await;
+    let mut s = snapshot(1, &[]);
+    s.upstreams[0].base_url = format!("http://{}/v1", mock.addr);
+    s.upstreams.push(Upstream {
+        name: "down".into(),
+        kind: UpstreamKind::Vllm as i32,
+        // Nothing listens on port 1: every probe fails at once.
+        base_url: "http://127.0.0.1:1/v1".into(),
+        timeout_ms: 1000,
+        ..Default::default()
+    });
+    for u in &mut s.upstreams {
+        u.health_check = Some(HealthCheck {
+            interval_ms: 1000,
+            timeout_ms: 200,
+            unhealthy_threshold: 1,
+            ..Default::default()
+        });
+    }
+    s.required_capabilities.push("health_check".into());
+    conn.send(full(s));
+    ack(&mut conn, 1, &env.state).await;
+    let expected = vec![
+        UpstreamHealth {
+            name: "down".into(),
+            healthy: false,
+        },
+        UpstreamHealth {
+            name: "u".into(),
+            healthy: true,
+        },
+    ];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let report = conn.recv_health().await;
+        if report.upstreams == expected {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "last report: {report:?}"
+        );
+    }
 }

@@ -45,7 +45,7 @@ _POLICY_CHANGES: dict[str, DetailSpec] = {
     "is_active": None,
 }
 _HEALTH_CHECK: dict[str, DetailSpec] = {
-    "path": None,
+    "url": None,
     "interval_ms": None,
     "timeout_ms": None,
     "unhealthy_threshold": None,
@@ -128,6 +128,10 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
             "price_input_nano_usd_per_mtok": None,
             "price_output_nano_usd_per_mtok": None,
             "keep_old_name_as_alias": None,
+            "max_input_tokens": None,
+            "max_output_tokens": None,
+            "default_body_changed": None,
+            "reasoning_changed": None,
         },
     },
     "org.admin.assign": {"org_id": None, "user_id": None},
@@ -169,10 +173,11 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
             "max_member_key_lifetime_seconds": None,
         },
     },
-    "upstream.create": {"name": None, "base_url": None},
+    "upstream.create": {"name": None, "base_url": None, "credential_stored": None},
     "upstream.delete": {"name": None},
     "upstream.update": {
         "name": None,
+        "credential_changed": None,
         "changes": {
             "name": None,
             "kind": None,
@@ -194,19 +199,22 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
     },
 }
 
+# Names that match `_SENSITIVE` but hold no secret: an env var name and token counts.
+_NOT_SENSITIVE = frozenset({"api_key_ref", "max_input_tokens", "max_output_tokens"})
+
 _DROP = object()
 
 
 def redact(value: Any) -> Any:
-    """Recursively replace values under sensitive-looking keys (api_key_ref is kept: it is
-    an env var name, not a secret).
+    """Recursively replace values under sensitive-looking keys, except the known
+    non-secrets in `_NOT_SENSITIVE`.
     """
     if isinstance(value, Mapping):
         out: dict[str, Any] = {}
         for k, v in value.items():
             key = str(k)
             lowered = key.lower()
-            if lowered != "api_key_ref" and any(s in lowered for s in _SENSITIVE):
+            if lowered not in _NOT_SENSITIVE and any(s in lowered for s in _SENSITIVE):
                 out[key] = REDACTED
             else:
                 out[key] = redact(v)

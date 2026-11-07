@@ -543,6 +543,7 @@ never come from the IdP.
 | Setting | Meaning |
 | --- | --- |
 | `LUMEWARP_SECRET_KEY` | At least 32 bytes of random text; **required when SSO is enabled**. Derives the AES-256-GCM key for the login-state cookie. `serve` refuses to start with `LUMEWARP_OIDC_ISSUER` set and no key. Changing it invalidates pending logins only. |
+| `LUMEWARP_ENCRYPTION_KEY` | At least 32 bytes of random text; **required to store an upstream API key** (`api_key` on `/upstreams`). Seals the key with AES-256-GCM; every gateway needs the same value to open it. Changing it makes stored keys unreadable until they are entered again. |
 | `LUMEWARP_OIDC_ISSUER` | Issuer URL; unset disables SSO. |
 | `LUMEWARP_OIDC_CLIENT_ID`, `LUMEWARP_OIDC_CLIENT_SECRET` | Client credentials (secret optional for a public PKCE client). |
 | `LUMEWARP_OIDC_SCOPES` | Default `openid email profile`. |

@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     # `secret_key` seals the transient OIDC login cookie (nonce + PKCE verifier) with
     # AES-256-GCM; it is required whenever SSO is enabled and never leaves the process.
     secret_key: SecretStr | None = Field(default=None, min_length=32)
+    # Seals upstream API keys stored in the database (sealing.py). Every gateway gets the
+    # same value to open them; changing it makes stored keys unreadable until re-entered.
+    # Separate from `secret_key`, which never leaves the control plane.
+    encryption_key: SecretStr | None = Field(default=None, min_length=32)
     oidc_issuer: str | None = None
     oidc_client_id: str | None = None
     oidc_client_secret: SecretStr | None = None

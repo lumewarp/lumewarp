@@ -20,6 +20,13 @@ class UpstreamKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     UPSTREAM_KIND_VLLM: _ClassVar[UpstreamKind]
     UPSTREAM_KIND_OPENAI_COMPATIBLE: _ClassVar[UpstreamKind]
 
+class ReasoningEffortMode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    REASONING_EFFORT_MODE_UNSPECIFIED: _ClassVar[ReasoningEffortMode]
+    REASONING_EFFORT_MODE_PASSTHROUGH: _ClassVar[ReasoningEffortMode]
+    REASONING_EFFORT_MODE_STRIP: _ClassVar[ReasoningEffortMode]
+    REASONING_EFFORT_MODE_MAPPED: _ClassVar[ReasoningEffortMode]
+
 class StickyBy(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     STICKY_BY_NONE: _ClassVar[StickyBy]
@@ -41,6 +48,10 @@ UPSTREAM_KIND_UNSPECIFIED: UpstreamKind
 UPSTREAM_KIND_OPENAI: UpstreamKind
 UPSTREAM_KIND_VLLM: UpstreamKind
 UPSTREAM_KIND_OPENAI_COMPATIBLE: UpstreamKind
+REASONING_EFFORT_MODE_UNSPECIFIED: ReasoningEffortMode
+REASONING_EFFORT_MODE_PASSTHROUGH: ReasoningEffortMode
+REASONING_EFFORT_MODE_STRIP: ReasoningEffortMode
+REASONING_EFFORT_MODE_MAPPED: ReasoningEffortMode
 STICKY_BY_NONE: StickyBy
 STICKY_BY_HEADER: StickyBy
 STICKY_BY_TEAM: StickyBy
@@ -76,7 +87,7 @@ class Snapshot(_message.Message):
     def __init__(self, version: _Optional[int] = ..., upstreams: _Optional[_Iterable[_Union[Upstream, _Mapping]]] = ..., models: _Optional[_Iterable[_Union[Model, _Mapping]]] = ..., routers: _Optional[_Iterable[_Union[Router, _Mapping]]] = ..., api_keys: _Optional[_Iterable[_Union[ApiKey, _Mapping]]] = ..., teams: _Optional[_Iterable[_Union[Team, _Mapping]]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ..., aliases: _Optional[_Iterable[_Union[Alias, _Mapping]]] = ...) -> None: ...
 
 class Upstream(_message.Message):
-    __slots__ = ("name", "kind", "base_url", "api_key_ref", "timeout_ms", "stream_usage_mode", "health_check", "circuit_breaker", "metrics_url")
+    __slots__ = ("name", "kind", "base_url", "api_key_ref", "timeout_ms", "stream_usage_mode", "health_check", "circuit_breaker", "metrics_url", "api_key_ciphertext")
     NAME_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
     BASE_URL_FIELD_NUMBER: _ClassVar[int]
@@ -86,6 +97,7 @@ class Upstream(_message.Message):
     HEALTH_CHECK_FIELD_NUMBER: _ClassVar[int]
     CIRCUIT_BREAKER_FIELD_NUMBER: _ClassVar[int]
     METRICS_URL_FIELD_NUMBER: _ClassVar[int]
+    API_KEY_CIPHERTEXT_FIELD_NUMBER: _ClassVar[int]
     name: str
     kind: UpstreamKind
     base_url: str
@@ -95,21 +107,22 @@ class Upstream(_message.Message):
     health_check: HealthCheck
     circuit_breaker: CircuitBreaker
     metrics_url: str
-    def __init__(self, name: _Optional[str] = ..., kind: _Optional[_Union[UpstreamKind, str]] = ..., base_url: _Optional[str] = ..., api_key_ref: _Optional[str] = ..., timeout_ms: _Optional[int] = ..., stream_usage_mode: _Optional[_Union[StreamUsageMode, str]] = ..., health_check: _Optional[_Union[HealthCheck, _Mapping]] = ..., circuit_breaker: _Optional[_Union[CircuitBreaker, _Mapping]] = ..., metrics_url: _Optional[str] = ...) -> None: ...
+    api_key_ciphertext: bytes
+    def __init__(self, name: _Optional[str] = ..., kind: _Optional[_Union[UpstreamKind, str]] = ..., base_url: _Optional[str] = ..., api_key_ref: _Optional[str] = ..., timeout_ms: _Optional[int] = ..., stream_usage_mode: _Optional[_Union[StreamUsageMode, str]] = ..., health_check: _Optional[_Union[HealthCheck, _Mapping]] = ..., circuit_breaker: _Optional[_Union[CircuitBreaker, _Mapping]] = ..., metrics_url: _Optional[str] = ..., api_key_ciphertext: _Optional[bytes] = ...) -> None: ...
 
 class HealthCheck(_message.Message):
-    __slots__ = ("path", "interval_ms", "timeout_ms", "unhealthy_threshold", "healthy_threshold")
-    PATH_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("url", "interval_ms", "timeout_ms", "unhealthy_threshold", "healthy_threshold")
+    URL_FIELD_NUMBER: _ClassVar[int]
     INTERVAL_MS_FIELD_NUMBER: _ClassVar[int]
     TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
     UNHEALTHY_THRESHOLD_FIELD_NUMBER: _ClassVar[int]
     HEALTHY_THRESHOLD_FIELD_NUMBER: _ClassVar[int]
-    path: str
+    url: str
     interval_ms: int
     timeout_ms: int
     unhealthy_threshold: int
     healthy_threshold: int
-    def __init__(self, path: _Optional[str] = ..., interval_ms: _Optional[int] = ..., timeout_ms: _Optional[int] = ..., unhealthy_threshold: _Optional[int] = ..., healthy_threshold: _Optional[int] = ...) -> None: ...
+    def __init__(self, url: _Optional[str] = ..., interval_ms: _Optional[int] = ..., timeout_ms: _Optional[int] = ..., unhealthy_threshold: _Optional[int] = ..., healthy_threshold: _Optional[int] = ...) -> None: ...
 
 class CircuitBreaker(_message.Message):
     __slots__ = ("failure_threshold", "open_ms")
@@ -120,16 +133,39 @@ class CircuitBreaker(_message.Message):
     def __init__(self, failure_threshold: _Optional[int] = ..., open_ms: _Optional[int] = ...) -> None: ...
 
 class Model(_message.Message):
-    __slots__ = ("name", "upstream", "upstream_model", "price")
+    __slots__ = ("name", "upstream", "upstream_model", "price", "max_output_tokens", "default_body_json", "reasoning_effort")
     NAME_FIELD_NUMBER: _ClassVar[int]
     UPSTREAM_FIELD_NUMBER: _ClassVar[int]
     UPSTREAM_MODEL_FIELD_NUMBER: _ClassVar[int]
     PRICE_FIELD_NUMBER: _ClassVar[int]
+    MAX_OUTPUT_TOKENS_FIELD_NUMBER: _ClassVar[int]
+    DEFAULT_BODY_JSON_FIELD_NUMBER: _ClassVar[int]
+    REASONING_EFFORT_FIELD_NUMBER: _ClassVar[int]
     name: str
     upstream: str
     upstream_model: str
     price: Price
-    def __init__(self, name: _Optional[str] = ..., upstream: _Optional[str] = ..., upstream_model: _Optional[str] = ..., price: _Optional[_Union[Price, _Mapping]] = ...) -> None: ...
+    max_output_tokens: int
+    default_body_json: str
+    reasoning_effort: ReasoningEffort
+    def __init__(self, name: _Optional[str] = ..., upstream: _Optional[str] = ..., upstream_model: _Optional[str] = ..., price: _Optional[_Union[Price, _Mapping]] = ..., max_output_tokens: _Optional[int] = ..., default_body_json: _Optional[str] = ..., reasoning_effort: _Optional[_Union[ReasoningEffort, _Mapping]] = ...) -> None: ...
+
+class ReasoningEffort(_message.Message):
+    __slots__ = ("mode", "fragments_json", "default_level")
+    class FragmentsJsonEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: str
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+    MODE_FIELD_NUMBER: _ClassVar[int]
+    FRAGMENTS_JSON_FIELD_NUMBER: _ClassVar[int]
+    DEFAULT_LEVEL_FIELD_NUMBER: _ClassVar[int]
+    mode: ReasoningEffortMode
+    fragments_json: _containers.ScalarMap[str, str]
+    default_level: str
+    def __init__(self, mode: _Optional[_Union[ReasoningEffortMode, str]] = ..., fragments_json: _Optional[_Mapping[str, str]] = ..., default_level: _Optional[str] = ...) -> None: ...
 
 class Price(_message.Message):
     __slots__ = ("input_nano_usd_per_mtok", "output_nano_usd_per_mtok")

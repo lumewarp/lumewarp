@@ -5,11 +5,13 @@ snapshot remains the authority for published routing; this sidecar preserves dat
 identities and source-only fields that cannot be reconstructed from protobuf names.
 """
 
+import base64
+import binascii
 import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Uuid, delete, insert, select, update
+from sqlalchemy import DateTime, LargeBinary, Uuid, delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import catalog
@@ -40,6 +42,9 @@ def _encode(value: Any) -> Any:
         return str(value)
     if isinstance(value, datetime):
         return value.isoformat()
+    # Only a sealed upstream API key (ciphertext) is binary.
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode()
     return value
 
 
@@ -93,7 +98,11 @@ def _decode_state(state: Any) -> dict[str, list[dict[str, Any]]]:
                         if not isinstance(value, str):
                             raise TypeError
                         values[column.name] = datetime.fromisoformat(value)
-                except (TypeError, ValueError, AttributeError):
+                    elif isinstance(column.type, LargeBinary):
+                        if not isinstance(value, str):
+                            raise TypeError
+                        values[column.name] = base64.b64decode(value, validate=True)
+                except (TypeError, ValueError, AttributeError, binascii.Error):
                     raise ValueError(
                         f"catalog_state {table.name}.{column.name} has an invalid value"
                     ) from None

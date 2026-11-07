@@ -104,20 +104,28 @@ def test_metrics_query_rejected_like_base_query() -> None:
 
 
 @pytest.mark.parametrize(
-    "path", ["/bad path", "/bad\npath", '/bad"path', "/bad<path", "/bad\\path"]
+    "url",
+    [
+        "/relative",
+        "http://h/bad path",
+        'http://h/bad"path',
+        "http://user:pw@h/health",
+        "http://h/health?token=x",
+        "ftp://h/health",
+    ],
 )
-async def test_invalid_health_uri_rejected_by_api_and_compiler(factory, path) -> None:
+async def test_invalid_health_uri_rejected_by_api_and_compiler(factory, url) -> None:
     with pytest.raises(ValidationError):
-        HealthCheckIn(path=path, interval_ms=1000, timeout_ms=100)
+        HealthCheckIn(url=url, interval_ms=1000, timeout_ms=100)
     await seed_scope(factory)
     async with factory() as session, session.begin():
         await add_router(session, "name", [("a", None)])
         up = await session.scalar(select(Upstream))
-        up.health_check_path = path
+        up.health_check_url = url
         up.health_check_interval_ms = 1000
         up.health_check_timeout_ms = 100
     async with factory() as session:
-        with pytest.raises(CompileError, match="health path"):
+        with pytest.raises(CompileError, match="health url"):
             await compile_scope(session, SCOPE, now=OCT, require_local_membership=True)
 
 

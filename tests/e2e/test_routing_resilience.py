@@ -359,13 +359,14 @@ def test_uri_contract_snapshot_is_accepted_by_gateway(stack):
             )
             assert response.status_code == 422, response.text
     upstream = _upstream_id(stack, "mock")
+    base = stack.ok("GET", f"/upstreams/{upstream}")["base_url"].rstrip("/")
     with DatabaseEvents(stack.dsn) as events:
         stack.ok(
             "PATCH",
             f"/upstreams/{upstream}",
             json={
                 "health_check": {
-                    "path": "/a%20b;v=1",
+                    "url": f"{base}/a%20b;v=1",
                     "interval_ms": 1000,
                     "timeout_ms": 100,
                 }

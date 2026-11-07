@@ -6,7 +6,8 @@ checks follow `gateway/crates/lumewarp-gateway/src/snapshot.rs::validate` and
 `router.rs::RoutingTable::compile`; keep them in sync with those files.
 
 Not checkable here: `Upstream.api_key_ref` must name an env var that exists on every
-gateway (deployment environment configuration, not snapshot content).
+gateway, and `Upstream.api_key_ciphertext` must open with each gateway's
+LUMEWARP_ENCRYPTION_KEY (deployment environment configuration, not snapshot content).
 """
 
 import json
@@ -33,6 +34,10 @@ SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
         "traffic_split",
         "vllm_load",
         "rotation_grace",
+        "encrypted_api_key",
+        "model_limits",
+        "default_body",
+        "reasoning_effort",
         *(f"strategy:{name}" for name in BUILTIN_STRATEGIES),
     }
 )
@@ -148,19 +153,19 @@ def metrics_url_problem(url: str) -> str | None:
     return None
 
 
-def health_path_problem(path: str) -> str | None:
-    if path and (not path.startswith("/") or not _URI_PATH.fullmatch(path)):
-        return "health path must be an absolute path without query or fragment"
-    return None
+def health_url_problem(url: str) -> str | None:
+    """An explicit `HealthCheck.url`: the `metrics_url` rules (router.rs::health_uri
+    accepts plain http(s) without userinfo; the query is refused here for the same
+    credential-in-a-public-column reason).
+    """
+    return metrics_url_problem(url)
 
 
 def health_check_problem(h: pb.HealthCheck, base_url: str = "") -> str | None:
     if h.interval_ms < 1000 or h.timeout_ms == 0 or h.timeout_ms >= h.interval_ms:
         return "health interval must be >= 1000 ms and 0 < timeout < interval"
-    if problem := health_path_problem(h.path):
-        return problem
-    if len(base_url.rstrip("/")) + len(h.path or "/models") > MAX_URI_LEN:
-        return "health probe URL is too long"
+    if h.url and (problem := health_url_problem(h.url)):
+        return f"health url {problem}"
     return None
 
 
@@ -176,6 +181,15 @@ def capabilities_used(snap: pb.Snapshot) -> list[str]:
             used.add("circuit_breaker")
         if u.metrics_url:
             used.add("vllm_load")
+        if u.api_key_ciphertext:
+            used.add("encrypted_api_key")
+    for d in snap.models:
+        if d.max_output_tokens:
+            used.add("model_limits")
+        if d.default_body_json:
+            used.add("default_body")
+        if d.HasField("reasoning_effort"):
+            used.add("reasoning_effort")
     for r in snap.routers:
         if r.HasField("retry"):
             used.add("retry")
@@ -291,9 +305,32 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
             raise SnapshotInvalid(f"upstream {u.name!r}: {problem}")
         if u.metrics_url and (problem := metrics_url_problem(u.metrics_url)) is not None:
             raise SnapshotInvalid(f"upstream {u.name!r} metrics_url {problem}")
+        if u.api_key_ref and u.api_key_ciphertext:
+            raise SnapshotInvalid(f"upstream {u.name!r} sets both api_key_ref and a sealed key")
 
     models = _unique([d.name for d in snap.models], "model")
     for d in snap.models:
+        if d.default_body_json and (
+            problem := _wire_object(d.default_body_json, "default_body", DEFAULT_BODY_RESERVED_KEYS)
+        ):
+            raise SnapshotInvalid(f"model {d.name!r}: {problem}")
+        if d.HasField("reasoning_effort"):
+            r = d.reasoning_effort
+            mode = {
+                pb.REASONING_EFFORT_MODE_UNSPECIFIED: "passthrough",
+                pb.REASONING_EFFORT_MODE_PASSTHROUGH: "passthrough",
+                pb.REASONING_EFFORT_MODE_STRIP: "strip",
+                pb.REASONING_EFFORT_MODE_MAPPED: "mapped",
+            }.get(r.mode)
+            if mode is None:
+                raise SnapshotInvalid(f"model {d.name!r}: unknown reasoning mode")
+            fragments = {}
+            for level, text in r.fragments_json.items():
+                if problem := _wire_object(text, f"reasoning fragment {level!r}"):
+                    raise SnapshotInvalid(f"model {d.name!r}: {problem}")
+                fragments[level] = json.loads(text)
+            if problem := reasoning_problem(mode, fragments, r.default_level or None):
+                raise SnapshotInvalid(f"model {d.name!r}: {problem}")
         if d.upstream not in upstreams:
             raise SnapshotInvalid(f"model {d.name!r} references unknown upstream")
         if not d.upstream_model:
@@ -388,3 +425,78 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
             own.add(scope.id)
             if limits.setdefault(scope.id, scope.limit) != scope.limit:
                 raise SnapshotInvalid(f"rate limit scope {scope.id!r} has conflicting limits")
+
+
+# Model body rules: gateway/crates/lumewarp-gateway/src/transform.rs.
+RESERVED_BODY_KEYS = ("model", "stream", "stream_options")
+# A default body cannot set reasoning_effort: the model's reasoning default_level does,
+# in every mode (transform.rs).
+DEFAULT_BODY_RESERVED_KEYS = (*RESERVED_BODY_KEYS, "reasoning_effort")
+# Object/array nesting of a default body or fragment; the gateway checks the same bound.
+MAX_BODY_DEPTH = 32
+REASONING_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh")
+MAX_BODY_JSON_BYTES = 16 * 1024
+
+
+def _depth(value: object) -> int:
+    """Nesting of objects and arrays, without recursion (the outer object is 1)."""
+    deepest, stack = 0, [(value, 1)]
+    while stack:
+        item, level = stack.pop()
+        if isinstance(item, dict | list):
+            deepest = max(deepest, level)
+            if deepest > MAX_BODY_DEPTH:
+                break
+            children = item.values() if isinstance(item, dict) else item
+            stack.extend((child, level + 1) for child in children)
+    return deepest
+
+
+def body_object_problem(
+    value: object, what: str, reserved: tuple[str, ...] = RESERVED_BODY_KEYS
+) -> str | None:
+    """A default body or reasoning fragment: a JSON object without gateway-owned keys."""
+    if not isinstance(value, dict):
+        return f"{what} must be a JSON object"
+    if _depth(value) > MAX_BODY_DEPTH:
+        return f"{what} nests deeper than {MAX_BODY_DEPTH} levels"
+    try:
+        text = json.dumps(value, separators=(",", ":"))
+    except (TypeError, ValueError, RecursionError):
+        return f"{what} must be JSON"
+    if len(text.encode()) > MAX_BODY_JSON_BYTES:
+        return f"{what} exceeds 16 KiB"
+    for key in reserved:
+        if key in value:
+            return f"{what} must not set {key!r}"
+    return None
+
+
+def reasoning_problem(mode: str, fragments: dict | None, default_level: str | None) -> str | None:
+    if default_level is not None and default_level not in REASONING_LEVELS:
+        return f"unknown reasoning level {default_level!r}"
+    if mode == "mapped":
+        if not fragments:
+            return "mapped reasoning needs at least one level"
+        for level, fragment in fragments.items():
+            if level not in REASONING_LEVELS:
+                return f"unknown reasoning level {level!r}"
+            if problem := body_object_problem(fragment, f"reasoning fragment {level!r}"):
+                return problem
+        if default_level is not None and default_level not in fragments:
+            return "default_level has no mapping"
+    elif fragments:
+        return f"{mode} reasoning takes no level mapping"
+    if mode == "strip" and default_level is not None:
+        return "strip reasoning takes no default_level"
+    return None
+
+
+def _wire_object(
+    text: str, what: str, reserved: tuple[str, ...] = RESERVED_BODY_KEYS
+) -> str | None:
+    try:
+        value = json.loads(text)
+    except (ValueError, RecursionError):
+        return f"{what} must be a JSON object"
+    return body_object_problem(value, what, reserved)
