@@ -77,7 +77,7 @@ const fromUpstream = (u: Upstream): Values => ({
   timeout_ms: u.timeout_ms,
   stream_usage_mode: u.stream_usage_mode,
   health_enabled: !!u.health_check,
-  health_url: u.health_check?.url ?? "",
+  health_url: u.health_url ?? "",
   health_interval_ms: u.health_check?.interval_ms ?? blank.health_interval_ms,
   health_timeout_ms: u.health_check?.timeout_ms ?? blank.health_timeout_ms,
   health_unhealthy: u.health_check?.unhealthy_threshold ?? null,
@@ -102,9 +102,9 @@ const body = (v: Values, existing: Upstream | undefined) => ({
   ...credential(v, existing),
   timeout_ms: v.timeout_ms ?? 600000,
   stream_usage_mode: v.stream_usage_mode,
+  health_url: v.health_url.trim() || null,
   health_check: v.health_enabled
     ? {
-        url: v.health_url.trim() || null,
         interval_ms: v.health_interval_ms ?? 0,
         timeout_ms: v.health_timeout_ms ?? 0,
         unhealthy_threshold: v.health_unhealthy,
@@ -135,10 +135,10 @@ const validUrl = (v: string) => {
   }
 };
 
-/** What the gateway probes when the URL is left empty (router.rs): base URL without /v1, plus /health. */
+/** What is probed when the Health URL is left empty: the base URL plus /models. */
 export function defaultHealthUrl(baseUrl: string) {
   const base = baseUrl.trim().replace(/\/+$/, "");
-  return base ? `${base.replace(/\/v1$/, "")}/health` : "<base URL without /v1>/health";
+  return base ? `${base}/models` : "<base_url>/models";
 }
 
 export function UpstreamEdit() {
@@ -165,7 +165,7 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
     api_key: (v, all) => (all.key_source === "stored" && !existing?.api_key_set && !v.trim() ? "Enter the API key" : undefined),
     api_key_ref: (v, all) => (all.key_source === "env" && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(v.trim()) ? "An environment variable name" : undefined),
     metrics_url: (v) => (v.trim() ? validUrl(v) : undefined),
-    health_url: (v, all) => (all.health_enabled && v.trim() ? validUrl(v) : undefined),
+    health_url: (v) => (v.trim() ? validUrl(v) : undefined),
     health_interval_ms: (v, all) => (all.health_enabled && (v ?? 0) < 1000 ? "At least 1000 ms" : undefined),
     health_timeout_ms: (v, all) => (all.health_enabled && ((v ?? 0) < 1 || (v ?? 0) >= (all.health_interval_ms ?? 0)) ? "Must be above 0 and below the interval" : undefined),
   });
@@ -183,7 +183,12 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
       backLabel="Upstreams"
       dirty={dirty}
       submitLabel={existing ? "Save" : "Create"}
-      actions={existing && <HealthBadge health={existing.health} />}
+      actions={
+        <>
+          {existing && <HealthBadge health={existing.health} />}
+          {test.button}
+        </>
+      }
       onSubmit={async () => {
         if (!form.validate()) return false;
         const ok = await form.run(() => save.mutateAsync(v), ALIAS);
@@ -191,10 +196,13 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
         await navigate({ to: "/upstreams" });
       }}
     >
+      {test.panel}
+
       <Section title="Endpoint">
         <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus={!existing} />
         <SelectField label="Kind" value={v.kind} onChange={(x) => form.set("kind", x as Values["kind"])} options={KINDS} />
         <TextField label="Base URL" type="url" value={v.base_url} onChange={(x) => form.set("base_url", x)} error={form.errors.base_url} placeholder="http://vllm:8000/v1" />
+        <TextField label="Health URL" type="url" value={v.health_url} onChange={(x) => form.set("health_url", x)} error={form.errors.health_url} placeholder={defaultHealthUrl(v.base_url)} hint="Test now and the periodic probe call this URL (empty: the base URL plus /models), and a 2xx answer counts as healthy." />
         <div className="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-3">
           <NumberField label="Timeout (ms)" value={v.timeout_ms} onChange={(x) => form.set("timeout_ms", x)} error={form.errors.timeout_ms} min={1} />
           <SelectField label="Streaming usage" value={v.stream_usage_mode} onChange={(x) => form.set("stream_usage_mode", x as Values["stream_usage_mode"])} options={USAGE_MODES} />
@@ -220,14 +228,12 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
       </Section>
 
       <Section
-        title="Health check"
-        hint="Probed periodically while on; while it fails, the upstream gets no traffic if another candidate is available."
+        title="Periodic health probe"
+        hint="While the probe fails, the upstream gets no traffic if another candidate is available."
         toggle={{ label: "Probe periodically", checked: v.health_enabled, onChange: (x) => form.set("health_enabled", x) }}
-        actions={test.button}
       >
         {v.health_enabled && (
           <>
-            <TextField label="Health URL" type="url" value={v.health_url} onChange={(x) => form.set("health_url", x)} error={form.errors.health_url} placeholder={defaultHealthUrl(v.base_url)} hint="Empty uses the default shown; a 2xx answer counts as healthy." />
             <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
               <NumberField label="Interval (ms)" value={v.health_interval_ms} onChange={(x) => form.set("health_interval_ms", x)} error={form.errors.health_interval_ms} min={1000} placeholder="10000" />
               <NumberField label="Timeout (ms)" value={v.health_timeout_ms} onChange={(x) => form.set("health_timeout_ms", x)} error={form.errors.health_timeout_ms} min={1} placeholder="2000" />
@@ -236,7 +242,6 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
             </div>
           </>
         )}
-        {test.panel}
       </Section>
 
       <Section
@@ -262,7 +267,7 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
 /** The form as it stands, saved or not: a typed key wins, else the stored one, else the env variable. */
 function testBody(v: Values, upstream: Upstream | undefined) {
   const key = v.key_source === "stored" && v.api_key.trim() ? { api_key: v.api_key.trim() } : v.key_source === "stored" && upstream?.api_key_set ? { upstream_id: upstream.id } : v.key_source === "env" && v.api_key_ref.trim() ? { api_key_ref: v.api_key_ref.trim() } : {};
-  return { base_url: v.base_url.trim(), health_check_url: v.health_enabled ? v.health_url.trim() || null : null, ...key };
+  return { base_url: v.base_url.trim(), health_url: v.health_url.trim() || null, ...key };
 }
 
 const CREDENTIAL: Record<UpstreamTest["credential"], string> = {
@@ -273,8 +278,7 @@ const CREDENTIAL: Record<UpstreamTest["credential"], string> = {
   none: "Tested without a key.",
 };
 
-/** One probe now, from the control plane, of the form as it stands. */
-/** Test now of the form as it stands: the button goes in the section header, the panel in its body. */
+/** Test now of the form as it stands: the button goes in the page actions, the panel at the top of the form. */
 function useTestNow(upstream: Upstream | undefined, values: Values) {
   const [result, setResult] = useState<UpstreamTest | null>(null);
   const run = useMutation({ mutationFn: () => api.testUpstream(testBody(values, upstream)), onSuccess: setResult });
@@ -291,9 +295,7 @@ function useTestNow(upstream: Upstream | undefined, values: Values) {
       {result && <p className={result.credential === "env_unset" ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>{CREDENTIAL[result.credential]}</p>}
       {result && (
         <DescriptionList data-testid="upstream-test-result">
-          {(["health", "models"] as const).map((k) => (
-            <ProbeRow key={k} label={k === "health" ? "Health" : "/models"} probe={result[k]} />
-          ))}
+          <ProbeRow label="Probe" probe={result.probe} />
         </DescriptionList>
       )}
     </div>
@@ -301,7 +303,7 @@ function useTestNow(upstream: Upstream | undefined, values: Values) {
   return { button, panel };
 }
 
-export function ProbeRow({ label, probe }: { label: string; probe: UpstreamTest["health"] }) {
+export function ProbeRow({ label, probe }: { label: string; probe: UpstreamTest["probe"] }) {
   return (
     <>
       <DescriptionTerm>{label}</DescriptionTerm>

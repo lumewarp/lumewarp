@@ -45,7 +45,6 @@ _POLICY_CHANGES: dict[str, DetailSpec] = {
     "is_active": None,
 }
 _HEALTH_CHECK: dict[str, DetailSpec] = {
-    "url": None,
     "interval_ms": None,
     "timeout_ms": None,
     "unhealthy_threshold": None,
@@ -191,6 +190,7 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
             "api_key_ref": None,
             "timeout_ms": None,
             "stream_usage_mode": None,
+            "health_url": None,
             "health_check": _HEALTH_CHECK,
             "circuit_breaker": _CIRCUIT_BREAKER,
             "metrics_url": None,

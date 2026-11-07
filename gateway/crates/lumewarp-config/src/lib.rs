@@ -153,7 +153,7 @@ pub struct Upstream {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthCheck {
-    /// Absolute http(s) URL. Empty: base_url without `/v1` + `/health`.
+    /// Absolute http(s) URL. Empty: base_url (trailing slash stripped) + `/models`.
     #[serde(default)]
     pub url: String,
     pub interval_ms: u32,

@@ -1,13 +1,15 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
+import { ActivityIcon } from "lucide-react";
 import { useState } from "react";
 
 import { api, type Upstream } from "../api";
 import { Badge, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
-import { CreateButton, RowActions } from "../components/RowActions";
+import { CreateButton, IconAction, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { useCan, useMut } from "../hooks";
+import { useToast } from "../components/Toast";
 
 export const KINDS = [
   { value: "vllm", label: "vLLM" },
@@ -67,11 +69,29 @@ export function Upstreams() {
           { key: "kind", header: "Kind", cell: (r) => <Badge tone="info">{KINDS.find((k) => k.value === r.kind)?.label ?? r.kind}</Badge> },
           { key: "url", header: "Base URL", cell: (r) => <code>{r.base_url}</code> },
           { key: "health", header: "Health", cell: (r) => <HealthBadge health={r.health} /> },
-          { key: "ref", header: "API key", hideBelow: "lg", cell: (r) => (r.api_key_set ? <Badge tone="info">stored</Badge> : r.api_key_ref ? <code>${r.api_key_ref}</code> : <span className="text-muted-foreground">none</span>) },
-          { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => edit(r)} onDelete={() => setDeleting(r)} /> },
+          { key: "actions", header: "", cell: (r) => <RowActions extra={perms.isInstallationAdmin && <TestUpstreamAction upstream={r} />} canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => edit(r)} onDelete={() => setDeleting(r)} /> },
         ]}
       />
       <ConfirmDialog open={!!deleting} title="Delete upstream" message={`Delete “${deleting?.name}”? It must not be used by any model.`} onConfirm={() => remove.mutateAsync(deleting!.id)} onClose={() => setDeleting(null)} />
     </>
   );
+}
+
+/** Probes the saved upstream from the control plane and reports in a toast. */
+function TestUpstreamAction({ upstream }: { upstream: Upstream }) {
+  const toast = useToast();
+  const run = useMutation({
+    mutationFn: () => {
+      const key = upstream.api_key_set ? { upstream_id: upstream.id } : upstream.api_key_ref ? { api_key_ref: upstream.api_key_ref } : {};
+      return api.testUpstream({ base_url: upstream.base_url, health_url: upstream.health_url, ...key });
+    },
+    onSuccess: (r) => {
+      const { probe, credential } = r;
+      const note = credential === "env_unset" ? " · variable not set on the control plane, sent no key" : "";
+      if (probe.ok) toast("success", `${upstream.name}: OK · HTTP ${probe.status} · ${probe.latency_ms} ms${note}`);
+      else toast("error", `${upstream.name}: ${probe.status !== null ? `HTTP ${probe.status}` : (probe.error ?? "Failed")} · ${probe.latency_ms} ms${note}`);
+    },
+    onError: (e: Error) => toast("error", `${upstream.name}: ${e.message}`),
+  });
+  return <IconAction label="Test" icon={ActivityIcon} busy={run.isPending} onClick={() => run.mutate()} />;
 }

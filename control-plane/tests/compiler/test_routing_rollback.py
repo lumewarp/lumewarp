@@ -95,7 +95,7 @@ async def _set_group(session, group, configured):
         explicit = configured and group == "health_check"
         upstream.health_check_interval_ms = 5000 if configured else None
         upstream.health_check_timeout_ms = 1200 if configured else None
-        upstream.health_check_url = "http://ready.internal/ready" if explicit else None
+        upstream.health_url = "http://ready.internal/ready" if explicit else None
         upstream.health_check_unhealthy_threshold = 4 if explicit else None
         upstream.health_check_healthy_threshold = 2 if explicit else None
     elif group in ("circuit_breaker", "breaker_defaults"):

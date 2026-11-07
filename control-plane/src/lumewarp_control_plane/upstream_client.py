@@ -215,15 +215,15 @@ async def _post(
 
 
 def health_url(row: Upstream) -> str:
-    """The URL the gateway probes (router.rs): explicit, or the default per kind."""
-    return default_health_url(row.base_url, row.health_check_url)
+    """The URL the gateway probes (router.rs): explicit, or base_url + /models."""
+    return default_health_url(row.base_url, row.health_url)
 
 
 def default_health_url(base_url: str, explicit: str | None) -> str:
-    """Explicit, or base_url without a trailing /v1 plus /health (every kind)."""
+    """Explicit, or base_url with its path preserved plus /models (every kind)."""
     if explicit:
         return explicit
-    return f"{base_url.rstrip('/').removesuffix('/v1')}/health"
+    return f"{base_url.rstrip('/')}/models"
 
 
 def _same_origin(a: str, b: str) -> bool:
@@ -236,13 +236,7 @@ def _same_origin(a: str, b: str) -> bool:
     )
 
 
-async def test_upstream(
-    base_url: str, health_check_url: str | None, token: str | None
-) -> tuple[ProbeResult, ProbeResult]:
-    """Probe the health URL and `/models` once each, as the gateway would."""
-    health = default_health_url(base_url, health_check_url)
-    models = f"{base_url.rstrip('/')}/models"
-    return (
-        await probe(health, token if _same_origin(health, base_url) else None),
-        await probe(models, token),
-    )
+async def test_upstream(base_url: str, health_url: str | None, token: str | None) -> ProbeResult:
+    """Probe one health URL, as the gateway would."""
+    url = default_health_url(base_url, health_url)
+    return await probe(url, token if _same_origin(url, base_url) else None)

@@ -1,12 +1,14 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
+import { ActivityIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { api, type Model } from "../api";
 import { fmtTokens, fmtUsd, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
-import { CreateButton, RowActions } from "../components/RowActions";
+import { CreateButton, IconAction, RowActions } from "../components/RowActions";
 import { SearchBox } from "../components/Search";
+import { useToast } from "../components/Toast";
 import { DataTable } from "../components/Table";
 import { useCan, useMut, useNames, useUpstreams } from "../hooks";
 import { matches } from "../lib/catalog";
@@ -58,10 +60,25 @@ export function Models() {
           { key: "health", header: "Health", cell: (r) => <HealthBadge health={r.health} /> },
           { key: "length", header: "Input / Output length", align: "right", hideBelow: "lg", cell: (r) => <span title={`${r.max_input_tokens ?? "—"} / ${r.max_output_tokens ?? "—"} tokens`}>{`${fmtTokens(r.max_input_tokens)} / ${fmtTokens(r.max_output_tokens)}`}</span> },
           { key: "cost", header: "Input / Output cost (1M tok)", align: "right", hideBelow: "lg", cell: (r) => (r.price_input_nano_usd_per_mtok === null ? <span className="text-muted-foreground">unpriced</span> : `${fmtUsd(r.price_input_nano_usd_per_mtok)} / ${fmtUsd(r.price_output_nano_usd_per_mtok)}`) },
-          { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => void navigate({ to: "/models/$modelId", params: { modelId: r.id } })} onDelete={() => setDeleting(r)} /> },
+          { key: "actions", header: "", cell: (r) => <RowActions extra={perms.isInstallationAdmin && <TestModelAction model={r} />} canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => void navigate({ to: "/models/$modelId", params: { modelId: r.id } })} onDelete={() => setDeleting(r)} /> },
         ]}
       />
       <ConfirmDialog open={!!deleting} title="Delete model" message={`Delete “${deleting?.name}”? It must not be used by any router, fallback or alias.`} onConfirm={() => remove.mutateAsync(deleting!.id)} onClose={() => setDeleting(null)} />
     </>
   );
+}
+
+/** Sends a short chat completion to the saved model from the control plane and reports in a toast. */
+function TestModelAction({ model }: { model: Model }) {
+  const toast = useToast();
+  const run = useMutation({
+    mutationFn: () => api.testModel({ upstream_id: model.upstream_id, upstream_model: model.upstream_model, default_body: model.default_body ?? null }),
+    onSuccess: (r) => {
+      const { probe, reply } = r;
+      if (probe.ok) toast("success", `${model.name}: OK · HTTP ${probe.status} · ${probe.latency_ms} ms${reply ? ` · ${reply}` : ""}`);
+      else toast("error", `${model.name}: ${probe.status !== null ? `HTTP ${probe.status}` : (probe.error ?? "Failed")} · ${probe.latency_ms} ms`);
+    },
+    onError: (e: Error) => toast("error", `${model.name}: ${e.message}`),
+  });
+  return <IconAction label="Test" icon={ActivityIcon} busy={run.isPending} onClick={() => run.mutate()} />;
 }

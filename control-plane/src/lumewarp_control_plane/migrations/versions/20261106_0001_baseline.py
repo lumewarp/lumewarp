@@ -252,7 +252,7 @@ def upgrade() -> None:
             server_default="include_usage",
             nullable=False,
         ),
-        sa.Column("health_check_url", sa.Text(), nullable=True),
+        sa.Column("health_url", sa.Text(), nullable=True),
         sa.Column("health_check_interval_ms", sa.Integer(), nullable=True),
         sa.Column("health_check_timeout_ms", sa.Integer(), nullable=True),
         sa.Column("health_check_unhealthy_threshold", sa.Integer(), nullable=True),
@@ -288,7 +288,7 @@ def upgrade() -> None:
             name=op.f("ck_upstreams_circuit_breaker_positive"),
         ),
         sa.CheckConstraint(
-            "(health_check_interval_ms IS NULL) = (health_check_timeout_ms IS NULL) AND (health_check_interval_ms IS NOT NULL OR (health_check_url IS NULL AND health_check_unhealthy_threshold IS NULL AND health_check_healthy_threshold IS NULL))",
+            "(health_check_interval_ms IS NULL) = (health_check_timeout_ms IS NULL) AND (health_check_interval_ms IS NOT NULL OR (health_check_unhealthy_threshold IS NULL AND health_check_healthy_threshold IS NULL))",
             name=op.f("ck_upstreams_health_check_shape"),
         ),
         sa.CheckConstraint(

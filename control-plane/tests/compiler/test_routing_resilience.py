@@ -110,7 +110,7 @@ async def test_health_check(factory) -> None:
             ("openai", None, None),
         ):
             up = await s.scalar(select(Upstream).where(Upstream.name == name))
-            up.health_check_url = url
+            up.health_url = url
             up.health_check_interval_ms = 5000
             up.health_check_timeout_ms = 1000
             up.health_check_unhealthy_threshold = unhealthy

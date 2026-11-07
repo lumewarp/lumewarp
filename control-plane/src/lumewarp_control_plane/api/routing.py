@@ -138,7 +138,6 @@ async def _existing_models(session: AsyncSession, ids: list[uuid.UUID], field_na
 
 
 def _apply_health(row: Upstream, health: HealthCheckIn | None) -> None:
-    row.health_check_url = health.url if health else None
     row.health_check_interval_ms = health.interval_ms if health else None
     row.health_check_timeout_ms = health.timeout_ms if health else None
     row.health_check_unhealthy_threshold = health.unhealthy_threshold if health else None
@@ -523,6 +522,7 @@ async def create_upstream(
             timeout_ms=body.timeout_ms,
             stream_usage_mode=body.stream_usage_mode,
             metrics_url=body.metrics_url,
+            health_url=body.health_url,
         )
         _apply_health(row, body.health_check)
         _apply_breaker(row, body.circuit_breaker)
@@ -584,7 +584,7 @@ async def test_upstream(
     body: UpstreamTestIn, authz: Authz, session: SessionDep, settings: SettingsDep
 ) -> UpstreamTestOut:
     """Probe an upstream once now from the control plane, as the form stands (saved or
-    not): its health URL (configured or default) and `/models`. Reflects the control
+    not): its health URL (configured or base_url + /models). Reflects the control
     plane's network, not each gateway's. A key typed in the form is used once and never
     stored.
     """
@@ -606,12 +606,8 @@ async def test_upstream(
             except upstream_client.UpstreamCallFailed as exc:
                 raise ApiError(502, "upstream_unavailable", str(exc)) from None
             credential = "stored"
-    health, models = await upstream_client.test_upstream(
-        body.base_url, body.health_check_url, token
-    )
-    return UpstreamTestOut(
-        credential=credential, health=ProbeOut(**vars(health)), models=ProbeOut(**vars(models))
-    )
+    probe = await upstream_client.test_upstream(body.base_url, body.health_url, token)
+    return UpstreamTestOut(credential=credential, probe=ProbeOut(**vars(probe)))
 
 
 @router.patch("/upstreams/{upstream_id}", response_model=UpstreamOut, operation_id="updateUpstream")
@@ -642,6 +638,8 @@ async def update_upstream(
             )
             if body.api_key is not None:
                 row.api_key_ref = None
+        if "health_url" in body.model_fields_set:
+            row.health_url = body.health_url
         if "metrics_url" in body.model_fields_set:
             row.metrics_url = body.metrics_url
         if "health_check" in body.model_fields_set:

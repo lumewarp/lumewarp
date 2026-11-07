@@ -550,7 +550,9 @@ impl RoutingTable {
                         invalid(format!("upstream {name:?} has an invalid health url"))
                     })?
                 } else {
-                    root_uri(&base, "/health")
+                    format!("{}/models", upstream.base_url.trim_end_matches('/'))
+                        .parse::<Uri>()
+                        .ok()
                         .ok_or_else(|| invalid(format!("upstream {name:?} has an invalid URL")))?
                 };
                 // The upstream's bearer token goes only to its own origin.
@@ -1248,8 +1250,8 @@ fn same_origin(a: &Uri, b: &Uri) -> bool {
         && port(a) == port(b)
 }
 
-/// `base_url` minus a trailing `/v1`, plus `suffix` (vLLM serves `/metrics` and
-/// `/health` beside, not under, its OpenAI API).
+/// `base_url` minus a trailing `/v1`, plus `suffix` (vLLM serves `/metrics`
+/// beside, not under, its OpenAI API).
 fn root_uri(base: &Uri, suffix: &str) -> Option<Uri> {
     let path = base.path().trim_end_matches('/');
     let path = path.strip_suffix("/v1").unwrap_or(path);
@@ -2320,12 +2322,12 @@ mod tests {
         };
         assert_eq!(
             probe_of(pb::UpstreamKind::Vllm, ""),
-            ("http://h:8000/health".into(), true)
+            ("http://h:8000/v1/models".into(), true)
         );
-        // Every kind defaults to base_url without /v1, plus /health.
+        // Every kind defaults to base_url with its path kept, plus /models.
         assert_eq!(
             probe_of(pb::UpstreamKind::Openai, ""),
-            ("http://h:8000/health".into(), true)
+            ("http://h:8000/v1/models".into(), true)
         );
         assert_eq!(
             probe_of(pb::UpstreamKind::Vllm, "http://h:8000/ready"),

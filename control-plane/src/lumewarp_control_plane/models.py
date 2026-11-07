@@ -715,8 +715,8 @@ class Upstream(TimestampMixin, Base):
         # only exist together with them.
         CheckConstraint(
             "(health_check_interval_ms IS NULL) = (health_check_timeout_ms IS NULL)"
-            " AND (health_check_interval_ms IS NOT NULL OR (health_check_url IS NULL"
-            " AND health_check_unhealthy_threshold IS NULL"
+            " AND (health_check_interval_ms IS NOT NULL OR ("
+            "health_check_unhealthy_threshold IS NULL"
             " AND health_check_healthy_threshold IS NULL))",
             name="health_check_shape",
         ),
@@ -760,10 +760,10 @@ class Upstream(TimestampMixin, Base):
         default=StreamUsageMode.INCLUDE_USAGE,
         server_default=StreamUsageMode.INCLUDE_USAGE.value,
     )
-    # Active health probe (proto HealthCheck). NULL interval = not probed. URL NULL =
-    # gateway default (vLLM: <base without /v1>/health, else <base>/models); thresholds
-    # NULL = gateway defaults (3 / 1).
-    health_check_url: Mapped[str | None] = mapped_column(Text)
+    # Endpoint health URL, independent of active probing; NULL = <base>/models.
+    # Active health probe (proto HealthCheck): NULL interval = not probed;
+    # thresholds NULL = gateway defaults (3 / 1).
+    health_url: Mapped[str | None] = mapped_column(Text)
     health_check_interval_ms: Mapped[int | None] = mapped_column(Integer)
     health_check_timeout_ms: Mapped[int | None] = mapped_column(Integer)
     health_check_unhealthy_threshold: Mapped[int | None] = mapped_column(Integer)

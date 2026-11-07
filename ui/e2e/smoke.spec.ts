@@ -601,7 +601,7 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
     .getByRole("button", { name: "Edit" })
     .click();
   const u = page.locator("#main");
-  const health = u.locator("[data-slot=card]", { hasText: "Health check" });
+  const health = u.locator("[data-slot=card]", { hasText: "Periodic health probe" });
   await u.getByLabel("Probe periodically").check();
   await u.getByLabel("Health URL").fill("http://127.0.0.1:9/health");
   await health.getByLabel("Interval (ms)").fill("5000");
@@ -615,7 +615,8 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
   await u.getByRole("button", { name: "Save" }).click();
   await expect(page).toHaveURL(/\/upstreams$/);
   const up = await (await request.get(`/api/v1/upstreams/${upstream.id}`, { headers: admin })).json();
-  expect(up.health_check).toEqual({ url: "http://127.0.0.1:9/health", interval_ms: 5000, timeout_ms: 1000, unhealthy_threshold: null, healthy_threshold: null });
+  expect(up.health_url).toBe("http://127.0.0.1:9/health");
+  expect(up.health_check).toEqual({ interval_ms: 5000, timeout_ms: 1000, unhealthy_threshold: null, healthy_threshold: null });
   expect(up.circuit_breaker).toEqual({ failure_threshold: 3, open_ms: null });
   await expect(page.getByRole("row").filter({ hasText: "smoke-up" })).toContainText("Unknown");
 });

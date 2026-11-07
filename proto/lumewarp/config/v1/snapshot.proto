@@ -56,8 +56,8 @@ message Upstream {
 
 // GET <url> every interval; 2xx within timeout = success.
 message HealthCheck {
-  // Absolute http(s) URL without userinfo. Empty = base_url with a trailing
-  // "/v1" removed plus "/health". The upstream's bearer token is sent only to
+  // Absolute http(s) URL without userinfo. Empty = base_url with trailing
+  // slashes stripped plus "/models". The upstream's bearer token is sent only to
   // base_url's origin (scheme, host and port).
   string url = 1;
   uint32 interval_ms = 2;

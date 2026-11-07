@@ -22,7 +22,7 @@ def _test(client, up: dict, **extra):
     body = {
         "base_url": up["base_url"],
         "upstream_id": up["id"],
-        "health_check_url": (up["health_check"] or {}).get("url"),
+        "health_url": up["health_url"],
         **extra,
     }
     return client.post("/api/v1/upstreams/test", json=body, headers=ADMIN_AUTH)
@@ -100,56 +100,67 @@ def replies(monkeypatch):
     return calls, table
 
 
-def test_on_demand_test_probes_health_and_models(client, replies) -> None:
+def test_on_demand_test_probes_one_url(client, replies) -> None:
     calls, table = replies
-    table["http://vllm.test/health"] = httpx.Response(200)
     table["http://vllm.test/v1/models"] = httpx.Response(401, text=KEY)
     up = _upstream(client, api_key=KEY)
     response = _test(client, up)
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["health"]["url"] == "http://vllm.test/health"
-    assert body["health"]["ok"] is True and body["health"]["status"] == 200
-    assert body["models"]["ok"] is False and body["models"]["status"] == 401
+    assert set(body) == {"credential", "probe"}
+    assert body["probe"]["url"] == "http://vllm.test/v1/models"
+    assert body["probe"]["ok"] is False and body["probe"]["status"] == 401
     assert KEY not in response.text
-    assert all(c.headers["authorization"] == f"Bearer {KEY}" for c in calls)
+    assert len(calls) == 1
+    assert calls[0].headers["authorization"] == f"Bearer {KEY}"
 
 
 def test_explicit_health_url_on_another_host_gets_no_token(client, replies) -> None:
     calls, table = replies
     table["http://probe.test/ready"] = httpx.Response(204)
-    up = _upstream(
-        client,
-        kind="openai",
-        api_key=KEY,
-        health_check={**HEALTH, "url": "http://probe.test/ready"},
-    )
-    body = _test(client, up).json()
-    assert body["health"] == {
+    up = _upstream(client, api_key=KEY, health_url="http://probe.test/ready")
+    response = _test(client, up)
+    body = response.json()
+    assert body["probe"] == {
         "url": "http://probe.test/ready",
         "ok": True,
         "status": 204,
-        "latency_ms": body["health"]["latency_ms"],
+        "latency_ms": body["probe"]["latency_ms"],
         "error": None,
     }
-    assert body["models"]["url"] == "http://vllm.test/v1/models"
-    assert body["models"]["error"] == "connection failed"
-    by_url = {str(c.url): c for c in calls}
-    assert "authorization" not in by_url["http://probe.test/ready"].headers
-    assert by_url["http://vllm.test/v1/models"].headers["authorization"] == f"Bearer {KEY}"
+    assert len(calls) == 1
+    assert "authorization" not in calls[0].headers
+    assert KEY not in response.text
 
 
-def test_default_health_url_is_root_health_for_every_kind(client, replies) -> None:
+@pytest.mark.parametrize("kind", ["vllm", "openai", "openai_compatible"])
+def test_default_health_url_preserves_base_path(client, replies, kind) -> None:
     _, table = replies
-    table["http://vllm.test/health"] = httpx.Response(200)
-    up = _upstream(client, kind="openai_compatible")
+    table["http://vllm.test/v1/models"] = httpx.Response(200)
+    up = _upstream(client, kind=kind)
     body = _test(client, up).json()
-    assert body["health"]["url"] == "http://vllm.test/health"
-    assert body["health"]["ok"] is True
-    # Without a trailing /v1 the path is kept.
-    table["http://plain.test/api/health"] = httpx.Response(200)
-    plain = _upstream(client, kind="openai", base_url="http://plain.test/api")
-    assert _test(client, plain).json()["health"]["url"] == "http://plain.test/api/health"
+    assert body["probe"]["url"] == "http://vllm.test/v1/models"
+    assert body["probe"]["ok"] is True
+    table["http://plain.test/api/models"] = httpx.Response(200)
+    plain = _upstream(client, kind=kind, base_url="http://plain.test/api/")
+    assert _test(client, plain).json()["probe"]["url"] == "http://plain.test/api/models"
+
+
+def test_health_url_saved_and_cleared_without_periodic_probing(client) -> None:
+    up = _upstream(client, health_url="http://probe.test/ready")
+    assert up["health_url"] == "http://probe.test/ready"
+    assert up["health_check"] is None
+    path = f"/api/v1/upstreams/{up['id']}"
+    enabled = client.patch(path, json={"health_check": HEALTH}, headers=ADMIN_AUTH)
+    assert enabled.status_code == 200
+    disabled = client.patch(path, json={"health_check": None}, headers=ADMIN_AUTH).json()
+    assert disabled["health_url"] == up["health_url"]
+    assert disabled["health_check"] is None
+    for value in (None, ""):
+        response = client.patch(path, json={"health_url": value}, headers=ADMIN_AUTH)
+        assert response.status_code == 200, response.text
+        assert response.json()["health_url"] is None
+        assert response.json()["health_check"] is None
 
 
 def test_unsaved_form_is_tested_with_the_typed_key(client, replies) -> None:
@@ -159,7 +170,7 @@ def test_unsaved_form_is_tested_with_the_typed_key(client, replies) -> None:
     response = client.post("/api/v1/upstreams/test", json=body, headers=ADMIN_AUTH)
     assert response.status_code == 200, response.text
     assert response.json()["credential"] == "entered"
-    assert response.json()["models"]["ok"] is True
+    assert response.json()["probe"]["ok"] is True
     assert KEY not in response.text
     assert all(c.headers["authorization"] == f"Bearer {KEY}" for c in calls)
 

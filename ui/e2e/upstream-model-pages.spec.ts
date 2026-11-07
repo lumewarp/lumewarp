@@ -34,7 +34,7 @@ test("Test now on a new upstream sends the typed key and saves nothing", async (
   const sent: any[] = [];
   await page.route("**/api/v1/upstreams/test", async (route) => {
     sent.push(route.request().postDataJSON());
-    await route.fulfill({ json: { credential: "entered", health: probe("http://up.test/health"), models: probe("http://up.test/v1/models") } });
+    await route.fulfill({ json: { credential: "entered", probe: probe("http://up.test/v1/models") } });
   });
   const main = page.locator("#main");
   await expect(main.getByRole("button", { name: "Test now" })).toBeDisabled();
@@ -46,7 +46,7 @@ test("Test now on a new upstream sends the typed key and saves nothing", async (
   await main.getByRole("button", { name: "Test now" }).click();
   await expect(main.getByText("Tested with the key typed above.")).toBeVisible();
   await expect(main.getByTestId("upstream-test-result")).toContainText("HTTP 200");
-  expect(sent).toEqual([{ base_url: "http://up.test/v1", health_check_url: null, api_key: "sk-typed-123" }]);
+  expect(sent).toEqual([{ base_url: "http://up.test/v1", health_url: null, api_key: "sk-typed-123" }]);
   const saved = (await (await request.get("/api/v1/upstreams?limit=200", { headers: admin })).json()).items as { name: string }[];
   expect(saved.map((u) => u.name)).not.toContain("pg-new");
 });
@@ -107,7 +107,6 @@ test("model Test now asks the model, and the periodic check is saved", async ({ 
   await page.getByRole("option", { name: "Use “qwen” (custom)" }).click();
   await main.getByLabel("JSON object").fill('{"top_k": 20}');
   await main.getByLabel("Input length (tokens)").fill("131072");
-  await expect(main.getByText("128k tokens.")).toBeVisible();
   await main.getByRole("button", { name: "Test now" }).click();
   await expect(main.getByTestId("model-test-result")).toContainText("HTTP 200");
   await expect(main.getByTestId("model-test-result")).toContainText("2");

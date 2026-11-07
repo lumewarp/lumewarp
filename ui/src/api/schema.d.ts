@@ -398,7 +398,7 @@ export interface paths {
         /**
          * Test Upstream
          * @description Probe an upstream once now from the control plane, as the form stands (saved or
-         *     not): its health URL (configured or default) and `/models`. Reflects the control
+         *     not): its health URL (configured or base_url + /models). Reflects the control
          *     plane's network, not each gateway's. A key typed in the form is used once and never
          *     stored.
          */
@@ -1257,11 +1257,6 @@ export interface components {
          * @description Active probe: GET <url> every interval; 2xx within timeout = success.
          */
         HealthCheckIn: {
-            /**
-             * Url
-             * @description Absolute http(s) URL; null = vLLM: base_url without /v1 + /health, others: base_url + /models.
-             */
-            url?: string | null;
             /** Interval Ms */
             interval_ms: number;
             /**
@@ -1282,8 +1277,6 @@ export interface components {
         };
         /** HealthCheckOut */
         HealthCheckOut: {
-            /** Url */
-            url: string | null;
             /** Interval Ms */
             interval_ms: number;
             /** Timeout Ms */
@@ -2787,6 +2780,8 @@ export interface components {
         };
         /** UpstreamCreate */
         UpstreamCreate: {
+            /** Health Url */
+            health_url?: string | null;
             /** Name */
             name: string;
             kind: components["schemas"]["UpstreamKind"];
@@ -2838,6 +2833,8 @@ export interface components {
         };
         /** UpstreamOut */
         UpstreamOut: {
+            /** Health Url */
+            health_url: string | null;
             /**
              * Id
              * Format: uuid
@@ -2899,8 +2896,8 @@ export interface components {
              * @description A saved upstream whose stored key is used when api_key is not given.
              */
             upstream_id?: string | null;
-            /** Health Check Url */
-            health_check_url?: string | null;
+            /** Health Url */
+            health_url?: string | null;
         };
         /** UpstreamTestOut */
         UpstreamTestOut: {
@@ -2910,8 +2907,7 @@ export interface components {
              * @enum {string}
              */
             credential: "entered" | "stored" | "env" | "env_unset" | "none";
-            health: components["schemas"]["ProbeOut"];
-            models: components["schemas"]["ProbeOut"];
+            probe: components["schemas"]["ProbeOut"];
         };
         /**
          * UpstreamUpdate
@@ -2920,6 +2916,8 @@ export interface components {
          *     (and clears `api_key_ref`); null removes it. Setting `api_key_ref` removes a stored key.
          */
         UpstreamUpdate: {
+            /** Health Url */
+            health_url?: string | null;
             /** Name */
             name?: string | null;
             kind?: components["schemas"]["UpstreamKind"] | null;

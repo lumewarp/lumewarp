@@ -138,8 +138,8 @@ def test_upstream_health_breaker_metrics_roundtrip(client) -> None:
     up = _ok(
         _upstream(
             client,
+            health_url="http://127.0.0.1:9/health",
             health_check={
-                "url": "http://127.0.0.1:9/health",
                 "interval_ms": 5000,
                 "timeout_ms": 1000,
             },
@@ -147,8 +147,8 @@ def test_upstream_health_breaker_metrics_roundtrip(client) -> None:
             metrics_url="http://127.0.0.1:9/metrics",
         )
     )
+    assert up["health_url"] == "http://127.0.0.1:9/health"
     assert up["health_check"] == {
-        "url": "http://127.0.0.1:9/health",
         "interval_ms": 5000,
         "timeout_ms": 1000,
         "unhealthy_threshold": None,
@@ -185,11 +185,11 @@ def test_upstream_health_breaker_metrics_roundtrip(client) -> None:
         ({"health_check": {"interval_ms": 1000, "timeout_ms": 1000}}, "below interval_ms"),
         ({"health_check": {"interval_ms": 2000, "timeout_ms": 0}}, "timeout_ms"),
         (
-            {"health_check": {"interval_ms": 2000, "timeout_ms": 10, "url": "health"}},
+            {"health_url": "health"},
             "http(s)",
         ),
         (
-            {"health_check": {"interval_ms": 2000, "timeout_ms": 10, "url": "http://h/h?x=1"}},
+            {"health_url": "http://h/h?x=1"},
             "query",
         ),
         (

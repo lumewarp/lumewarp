@@ -425,14 +425,6 @@ def _metrics_url(value: str | None) -> str | None:
 class HealthCheckIn(ApiModel):
     """Active probe: GET <url> every interval; 2xx within timeout = success."""
 
-    url: str | None = Field(
-        default=None,
-        max_length=2000,
-        description=(
-            "Absolute http(s) URL; null = vLLM: base_url without /v1 + /health,"
-            " others: base_url + /models."
-        ),
-    )
     interval_ms: int = Field(ge=1000, le=INT32_MAX)
     timeout_ms: int = Field(ge=1, le=INT32_MAX, description="Must be below interval_ms.")
     unhealthy_threshold: int | None = Field(
@@ -442,16 +434,6 @@ class HealthCheckIn(ApiModel):
         default=None, ge=1, le=1000, description="Consecutive successes; null = 1."
     )
 
-    @field_validator("url")
-    @classmethod
-    def _url(cls, value: str | None) -> str | None:
-        if value is None or not value.strip():
-            return None
-        value = value.strip()
-        if problem := health_url_problem(value):
-            raise ValueError(f"url {problem}")
-        return value
-
     @model_validator(mode="after")
     def _timeout_below_interval(self) -> HealthCheckIn:
         if self.timeout_ms >= self.interval_ms:
@@ -460,7 +442,6 @@ class HealthCheckIn(ApiModel):
 
 
 class HealthCheckOut(ReadModel):
-    url: str | None
     interval_ms: int
     timeout_ms: int
     unhealthy_threshold: int | None
@@ -497,7 +478,19 @@ def _api_key(value: SecretStr | None) -> SecretStr | None:
     return value
 
 
+def _health_url(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    value = value.strip()
+    if problem := health_url_problem(value):
+        raise ValueError(f"health_url {problem}")
+    return value
+
+
 class UpstreamCreate(ApiModel):
+    health_url: str | None = Field(default=None, max_length=2000)
+
+    _check_health_url = field_validator("health_url")(_health_url)
     name: Name
     kind: UpstreamKind
     base_url: str = Field(min_length=1)
@@ -544,6 +537,10 @@ class UpstreamUpdate(ApiModel):
     (and clears `api_key_ref`); null removes it. Setting `api_key_ref` removes a stored key.
     """
 
+    health_url: str | None = Field(default=None, max_length=2000)
+
+    _check_health_url = field_validator("health_url")(_health_url)
+
     name: Name | None = None
     kind: UpstreamKind | None = None
     base_url: str | None = Field(default=None, min_length=1)
@@ -585,6 +582,7 @@ class UpstreamUpdate(ApiModel):
 
 
 class UpstreamOut(ReadModel):
+    health_url: str | None
     id: uuid.UUID
     name: str
     kind: UpstreamKind
@@ -616,7 +614,6 @@ class UpstreamOut(ReadModel):
         health = None
         if data.health_check_interval_ms is not None:
             health = HealthCheckOut(
-                url=data.health_check_url,
                 interval_ms=data.health_check_interval_ms,
                 timeout_ms=data.health_check_timeout_ms,
                 unhealthy_threshold=data.health_check_unhealthy_threshold,
@@ -636,6 +633,7 @@ class UpstreamOut(ReadModel):
             "api_key_set": data.api_key_ciphertext is not None,
             "timeout_ms": data.timeout_ms,
             "stream_usage_mode": data.stream_usage_mode,
+            "health_url": data.health_url,
             "health_check": health,
             "circuit_breaker": breaker,
             "metrics_url": data.metrics_url,
@@ -1446,7 +1444,7 @@ class UpstreamTestIn(ApiModel):
         default=None,
         description="A saved upstream whose stored key is used when api_key is not given.",
     )
-    health_check_url: str | None = Field(default=None, max_length=2000)
+    health_url: str | None = Field(default=None, max_length=2000)
 
     @field_validator("base_url")
     @classmethod
@@ -1463,15 +1461,7 @@ class UpstreamTestIn(ApiModel):
     def _check_api_key(cls, value: SecretStr | None) -> SecretStr | None:
         return _api_key(value)
 
-    @field_validator("health_check_url")
-    @classmethod
-    def _check_health_url(cls, value: str | None) -> str | None:
-        if value is None or not value.strip():
-            return None
-        value = value.strip()
-        if problem := health_url_problem(value):
-            raise ValueError(f"health_check_url {problem}")
-        return value
+    _check_health_url = field_validator("health_url")(_health_url)
 
     @model_validator(mode="after")
     def _one_key_source(self) -> UpstreamTestIn:
@@ -1508,5 +1498,4 @@ class UpstreamTestOut(ReadModel):
             " control plane's own env var, that env var missing here, or none."
         )
     )
-    health: ProbeOut
-    models: ProbeOut
+    probe: ProbeOut

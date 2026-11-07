@@ -357,7 +357,7 @@ async def compile_scope(
         if u.health_check_interval_ms is not None:
             up.health_check.CopyFrom(
                 pb.HealthCheck(
-                    url=u.health_check_url or "",
+                    url=u.health_url or "",
                     interval_ms=u.health_check_interval_ms,
                     timeout_ms=u.health_check_timeout_ms or 0,
                     unhealthy_threshold=u.health_check_unhealthy_threshold or 0,

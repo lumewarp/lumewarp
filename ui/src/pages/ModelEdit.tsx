@@ -4,7 +4,7 @@ import { PlusIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 
 import { api, type Model, type ModelTest } from "../api";
-import { Badge, fmtTokens, nanoToUsd, usdToNano } from "../components/Bits";
+import { Badge, nanoToUsd, usdToNano } from "../components/Bits";
 import { EditPage, Section } from "../components/EditPage";
 import { CheckField, Field, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
 import { Alert, AlertDescription } from "../components/ui/alert";
@@ -262,7 +262,12 @@ function ModelForm({ existing }: { existing?: Model }) {
       backLabel="Models"
       dirty={dirty}
       submitLabel={existing ? "Save" : "Create"}
-      actions={existing && <HealthBadge health={existing.health} />}
+      actions={
+        <>
+          {existing && <HealthBadge health={existing.health} />}
+          {test.button}
+        </>
+      }
       onSubmit={async () => {
         if (!form.validate()) return false;
         const ok = await form.run(() => save.mutateAsync(v), ALIAS);
@@ -270,6 +275,8 @@ function ModelForm({ existing }: { existing?: Model }) {
         await navigate({ to: "/models" });
       }}
     >
+      {test.panel}
+
       <Section title="Model">
         <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus={!existing} hint="What clients send as model." />
         {renamed && <CheckField label="Keep old name as alias" checked={v.keep_old_name_as_alias} onChange={(c) => form.set("keep_old_name_as_alias", c)} />}
@@ -288,10 +295,10 @@ function ModelForm({ existing }: { existing?: Model }) {
 
       <Section title="Limits and pricing">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <NumberField label="Input length (tokens)" value={v.max_input_tokens} onChange={(x) => form.set("max_input_tokens", x)} error={form.errors.max_input_tokens} min={1} placeholder="unknown" note={v.max_input_tokens ? `${fmtTokens(v.max_input_tokens)} tokens.` : undefined} />
-          <NumberField label="Max output (tokens)" value={v.max_output_tokens} onChange={(x) => form.set("max_output_tokens", x)} error={form.errors.max_output_tokens} min={1} hint="A larger max_tokens gets a 400." note={v.max_output_tokens ? `${fmtTokens(v.max_output_tokens)} tokens.` : undefined} />
-          <NumberField label="Input price (USD / 1M tokens)" value={v.price_in} onChange={(x) => form.set("price_in", x)} error={form.errors.price_in} step="any" placeholder="unpriced" />
-          <NumberField label="Output price (USD / 1M tokens)" value={v.price_out} onChange={(x) => form.set("price_out", x)} error={form.errors.price_out} step="any" placeholder="unpriced" />
+          <NumberField label="Input length (tokens)" value={v.max_input_tokens} onChange={(x) => form.set("max_input_tokens", x)} error={form.errors.max_input_tokens} min={1} placeholder="" />
+          <NumberField label="Max output (tokens)" value={v.max_output_tokens} onChange={(x) => form.set("max_output_tokens", x)} error={form.errors.max_output_tokens} min={1} placeholder="" />
+          <NumberField label="Input price (USD / 1M tokens)" value={v.price_in} onChange={(x) => form.set("price_in", x)} error={form.errors.price_in} step="any" placeholder="0" />
+          <NumberField label="Output price (USD / 1M tokens)" value={v.price_out} onChange={(x) => form.set("price_out", x)} error={form.errors.price_out} step="any" placeholder="0" />
         </div>
       </Section>
 
@@ -369,12 +376,10 @@ function ModelForm({ existing }: { existing?: Model }) {
       </Section>
 
       <Section
-        title="Health check"
+        title="Periodic health check"
         hint="A short chat completion to this model. While on, each gateway sends it on this schedule (it uses tokens), and while it fails the model gets no traffic if another candidate is available."
         toggle={{ label: "Check periodically", checked: v.check_enabled, onChange: (x) => form.set("check_enabled", x) }}
-        actions={test.button}
       >
-        {test.panel}
         {v.check_enabled && (
           <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
             <NumberField label="Interval (ms)" value={v.check_interval_ms} onChange={(x) => form.set("check_interval_ms", x)} error={form.errors.check_interval_ms} min={1000} placeholder="60000" />
@@ -396,8 +401,7 @@ const CREDENTIAL: Record<ModelTest["credential"], string> = {
   env_unset: "The upstream's variable is not set on the control plane, so this test sent no key; gateways use their own environment.",
   none: "Sent without a key.",
 };
-/** One chat completion now, from the control plane, of the form as it stands: the button goes in the section header, the result in its body. */
-/** One chat completion now, from the control plane, of the form as it stands (saved or not). */
+/** One chat completion now, from the control plane, of the form as it stands: the button goes in the page actions, the result at the top of the form. */
 function useChatTest(values: Values) {
   const [result, setResult] = useState<ModelTest | null>(null);
   const run = useMutation({
