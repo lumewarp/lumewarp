@@ -210,7 +210,7 @@ function Chat({ keys }: { keys: PlaygroundKey[] }) {
       if (controller.signal.aborted) {
         patch(reply.id, { streaming: false, requestId: seen.requestId, ...timing() });
       } else {
-        const message = seen.error ?? (err instanceof Error ? err.message : String(err));
+        const message = seen.error ?? describe(err);
         patch(reply.id, { streaming: false, error: message, requestId: seen.requestId });
         patch(user.id, { skip: true });
       }
@@ -363,6 +363,16 @@ function Message({ turn }: { turn: Turn }) {
 
 function formatSeconds(ms: number | undefined) {
   return ms === undefined ? "a moment" : `${(ms / 1000).toFixed(1)}s`;
+}
+
+/** An error with its causes, so "Failed to process successful response" says what failed. */
+function describe(err: unknown): string {
+  const parts: string[] = [];
+  for (let e: unknown = err; e && parts.length < 4; e = (e as { cause?: unknown }).cause) {
+    parts.push(e instanceof Error ? e.message : String(e));
+    if (!(e instanceof Error)) break;
+  }
+  return parts.join(": ");
 }
 
 const ms = (v: number) => (v < 1000 ? `${Math.round(v)} ms` : `${(v / 1000).toFixed(2)} s`);
