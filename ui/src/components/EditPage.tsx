@@ -1,12 +1,13 @@
 import { Link, useBlocker } from "@tanstack/react-router";
 import { ArrowLeftIcon } from "lucide-react";
-import { useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Children, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog";
 import { Alert, AlertDescription } from "./ui/alert";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { HelpTip } from "./ui/help-tip";
+import { Switch } from "./ui/switch";
 
 /**
  * A create/edit form on its own page: back link, sections, and a Save bar. Leaving with unsaved changes asks
@@ -113,15 +114,41 @@ export function EditPage({
   );
 }
 
-/** One titled block of fields on an EditPage; `hint` is static help behind a "?" next to the title. */
-export function Section({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
+/**
+ * One titled block of fields on an EditPage. `hint` is static help behind a "?" next to the title. `toggle`
+ * puts a switch at the right of the header that turns the block's settings on or off (the caller renders those
+ * fields only while it is on); `actions` (e.g. a Test now button) sit left of it. The body is left out when
+ * there is nothing to show.
+ */
+export function Section({
+  title,
+  hint,
+  toggle,
+  actions,
+  children,
+}: {
+  title: string;
+  hint?: string;
+  toggle?: { label: string; checked: boolean; onChange: (on: boolean) => void };
+  actions?: ReactNode;
+  children?: ReactNode;
+}) {
+  const body = Children.toArray(children).length > 0;
   return (
     <Card className="gap-4">
-      <CardHeader className="flex items-center gap-1">
-        <CardTitle>{title}</CardTitle>
-        {hint && <HelpTip text={hint} label={title} />}
+      <CardHeader className="flex-row items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-1">
+          <CardTitle>{title}</CardTitle>
+          {hint && <HelpTip text={hint} label={title} />}
+        </div>
+        {(actions || toggle) && (
+          <div className="flex shrink-0 items-center gap-3">
+            {actions}
+            {toggle && <Switch aria-label={toggle.label} checked={toggle.checked} onCheckedChange={toggle.onChange} />}
+          </div>
+        )}
       </CardHeader>
-      <CardContent className="flex flex-col gap-3.5">{children}</CardContent>
+      {body && <CardContent className="flex flex-col gap-3.5">{children}</CardContent>}
     </Card>
   );
 }

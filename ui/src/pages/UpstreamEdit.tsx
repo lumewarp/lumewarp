@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { api, type Upstream, type UpstreamTest } from "../api";
 import { Badge } from "../components/Bits";
 import { EditPage, Section } from "../components/EditPage";
-import { NumberField, required, SelectField, SwitchField, TextField, useForm } from "../components/Form";
+import { NumberField, required, SelectField, TextField, useForm } from "../components/Form";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { DescriptionDetails, DescriptionList, DescriptionTerm } from "../components/ui/description-list";
@@ -170,6 +170,7 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
     health_timeout_ms: (v, all) => (all.health_enabled && ((v ?? 0) < 1 || (v ?? 0) >= (all.health_interval_ms ?? 0)) ? "Must be above 0 and below the interval" : undefined),
   });
   const dirty = JSON.stringify(form.values) !== JSON.stringify(initial);
+  const test = useTestNow(existing, form.values);
   const save = useMut(
     (v: Values) => (existing ? api.updateUpstream(existing.id, body(v, existing)) : api.createUpstream(body(v, undefined))),
     existing ? "Upstream saved" : "Upstream created",
@@ -218,8 +219,12 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
         )}
       </Section>
 
-      <Section title="Health check">
-        <SwitchField label="Probe periodically" checked={v.health_enabled} onChange={(x) => form.set("health_enabled", x)} hint="While it fails, the upstream gets no traffic if another candidate is available." />
+      <Section
+        title="Health check"
+        hint="Probed periodically while on; while it fails, the upstream gets no traffic if another candidate is available."
+        toggle={{ label: "Probe periodically", checked: v.health_enabled, onChange: (x) => form.set("health_enabled", x) }}
+        actions={test.button}
+      >
         {v.health_enabled && (
           <>
             <TextField label="Health URL" type="url" value={v.health_url} onChange={(x) => form.set("health_url", x)} error={form.errors.health_url} placeholder={defaultHealthUrl(v.base_url)} hint="Empty uses the default shown; a 2xx answer counts as healthy." />
@@ -231,11 +236,14 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
             </div>
           </>
         )}
-        <TestNow upstream={existing} values={v} />
+        {test.panel}
       </Section>
 
-      <Section title="Circuit breaker">
-        <SwitchField label="Enabled" checked={v.breaker_enabled} onChange={(x) => form.set("breaker_enabled", x)} hint="Stops sending to a model after repeated failures, then lets one request through to retry." />
+      <Section
+        title="Circuit breaker"
+        hint="Stops sending to a model after repeated failures, then lets one request through to retry."
+        toggle={{ label: "Circuit breaker", checked: v.breaker_enabled, onChange: (x) => form.set("breaker_enabled", x) }}
+      >
         {v.breaker_enabled && (
           <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
             <NumberField label="Consecutive failures" value={v.breaker_failures} onChange={(x) => form.set("breaker_failures", x)} error={form.errors.breaker_failures} min={1} placeholder="5" />
@@ -266,19 +274,19 @@ const CREDENTIAL: Record<UpstreamTest["credential"], string> = {
 };
 
 /** One probe now, from the control plane, of the form as it stands. */
-function TestNow({ upstream, values }: { upstream?: Upstream; values: Values }) {
+/** Test now of the form as it stands: the button goes in the section header, the panel in its body. */
+function useTestNow(upstream: Upstream | undefined, values: Values) {
   const [result, setResult] = useState<UpstreamTest | null>(null);
   const run = useMutation({ mutationFn: () => api.testUpstream(testBody(values, upstream)), onSuccess: setResult });
   useEffect(() => setResult(null), [upstream?.id]);
   const urlProblem = values.base_url.trim() ? validUrl(values.base_url.trim()) : "Enter the base URL first.";
-  return (
+  const button = (
+    <Button type="button" variant="outline" size="sm" title={urlProblem ?? undefined} disabled={!!urlProblem || run.isPending} onClick={() => run.mutate()}>
+      {run.isPending ? "Testing…" : "Test now"}
+    </Button>
+  );
+  const panel = (run.error || result) && (
     <div className="flex flex-col gap-2 rounded-lg border border-dashed p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        {urlProblem && <span className="text-sm text-muted-foreground">{urlProblem}</span>}
-        <Button type="button" variant="outline" size="sm" className="ml-auto" disabled={!!urlProblem || run.isPending} onClick={() => run.mutate()}>
-          {run.isPending ? "Testing…" : "Test now"}
-        </Button>
-      </div>
       {run.error && <p className="text-sm text-destructive">{run.error.message}</p>}
       {result && <p className={result.credential === "env_unset" ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>{CREDENTIAL[result.credential]}</p>}
       {result && (
@@ -290,6 +298,7 @@ function TestNow({ upstream, values }: { upstream?: Upstream; values: Values }) 
       )}
     </div>
   );
+  return { button, panel };
 }
 
 export function ProbeRow({ label, probe }: { label: string; probe: UpstreamTest["health"] }) {

@@ -610,7 +610,7 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
   await expect(u.getByText("Must be above 0 and below the interval")).toBeVisible();
   await health.getByLabel("Timeout (ms)").fill("1000");
   const breaker = u.locator("[data-slot=card]", { hasText: "Circuit breaker" });
-  await breaker.getByLabel("Enabled").check();
+  await breaker.getByRole("switch", { name: "Circuit breaker" }).check();
   await breaker.getByLabel("Consecutive failures").fill("3");
   await u.getByRole("button", { name: "Save" }).click();
   await expect(page).toHaveURL(/\/upstreams$/);

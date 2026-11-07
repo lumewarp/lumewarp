@@ -6,7 +6,7 @@ import { useState } from "react";
 import { api, type Model, type ModelTest } from "../api";
 import { Badge, fmtTokens, nanoToUsd, usdToNano } from "../components/Bits";
 import { EditPage, Section } from "../components/EditPage";
-import { CheckField, Field, NumberField, required, SelectField, SwitchField, TextField, useForm } from "../components/Form";
+import { CheckField, Field, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { ComboboxField } from "../components/ui/combobox-field";
@@ -220,6 +220,7 @@ function ModelForm({ existing }: { existing?: Model }) {
   });
   const v = form.values;
   const dirty = JSON.stringify(v) !== JSON.stringify(initial);
+  const test = useChatTest(v);
   const renamed = !!existing && v.name.trim() !== existing.name;
   const save = useMut(
     (x: Values) => (existing ? api.updateModel(existing.id, { ...body(x), keep_old_name_as_alias: renamed && x.keep_old_name_as_alias }) : api.createModel(body(x))),
@@ -298,13 +299,11 @@ function ModelForm({ existing }: { existing?: Model }) {
         <JsonField label="JSON object" value={v.default_body} onChange={(x) => form.set("default_body", x)} error={form.errors.default_body} placeholder={'{\n  "temperature": 0.6,\n  "top_k": 20\n}'} rows={5} />
       </Section>
 
-      <Section title="Reasoning effort">
-        <SwitchField
-          label="Handle reasoning effort"
-          checked={v.reasoning_on}
-          onChange={(x) => form.set("reasoning_on", x)}
-          hint="Off forwards the client's reasoning_effort untouched."
-        />
+      <Section
+        title="Reasoning effort"
+        hint="Off forwards the client's reasoning_effort untouched."
+        toggle={{ label: "Handle reasoning effort", checked: v.reasoning_on, onChange: (x) => form.set("reasoning_on", x) }}
+      >
         {v.reasoning_on && (
           <>
             <div className="flex flex-wrap gap-2">
@@ -369,9 +368,13 @@ function ModelForm({ existing }: { existing?: Model }) {
         )}
       </Section>
 
-      <Section title="Health check">
-        <ChatTestNow values={v} />
-        <SwitchField label="Check periodically" checked={v.check_enabled} onChange={(x) => form.set("check_enabled", x)} hint="Each gateway sends a short chat completion on this schedule (it uses tokens), and while it fails the model gets no traffic if another candidate is available." />
+      <Section
+        title="Health check"
+        hint="A short chat completion to this model. While on, each gateway sends it on this schedule (it uses tokens), and while it fails the model gets no traffic if another candidate is available."
+        toggle={{ label: "Check periodically", checked: v.check_enabled, onChange: (x) => form.set("check_enabled", x) }}
+        actions={test.button}
+      >
+        {test.panel}
         {v.check_enabled && (
           <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
             <NumberField label="Interval (ms)" value={v.check_interval_ms} onChange={(x) => form.set("check_interval_ms", x)} error={form.errors.check_interval_ms} min={1000} placeholder="60000" />
@@ -393,9 +396,9 @@ const CREDENTIAL: Record<ModelTest["credential"], string> = {
   env_unset: "The upstream's variable is not set on the control plane, so this test sent no key; gateways use their own environment.",
   none: "Sent without a key.",
 };
-
+/** One chat completion now, from the control plane, of the form as it stands: the button goes in the section header, the result in its body. */
 /** One chat completion now, from the control plane, of the form as it stands (saved or not). */
-function ChatTestNow({ values }: { values: Values }) {
+function useChatTest(values: Values) {
   const [result, setResult] = useState<ModelTest | null>(null);
   const run = useMutation({
     mutationFn: () => {
@@ -410,14 +413,13 @@ function ChatTestNow({ values }: { values: Values }) {
     onSuccess: setResult,
   });
   const missing = !values.upstream_id ? "Pick the upstream first." : !values.upstream_model.trim() ? "Enter the upstream model first." : null;
-  return (
+  const button = (
+    <Button type="button" variant="outline" size="sm" title={missing ?? undefined} disabled={!!missing || run.isPending} onClick={() => run.mutate()}>
+      {run.isPending ? "Testing…" : "Test now"}
+    </Button>
+  );
+  const panel = (run.error || result) && (
     <div className="flex flex-col gap-2 rounded-lg border border-dashed p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        {missing && <span className="text-sm text-muted-foreground">{missing}</span>}
-        <Button type="button" variant="outline" size="sm" className="ml-auto" disabled={!!missing || run.isPending} onClick={() => run.mutate()}>
-          {run.isPending ? "Testing…" : "Test now"}
-        </Button>
-      </div>
       {run.error && <p className="text-sm text-destructive">{run.error.message}</p>}
       {result && <p className={result.credential === "env_unset" ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>{CREDENTIAL[result.credential]}</p>}
       {result && (
@@ -433,6 +435,7 @@ function ChatTestNow({ values }: { values: Values }) {
       )}
     </div>
   );
+  return { button, panel };
 }
 
 function JsonField({ label, hideLabel, value, onChange, error, placeholder, rows }: { label: string; hideLabel?: boolean; value: string; onChange: (v: string) => void; error?: string; placeholder?: string; rows: number }) {
