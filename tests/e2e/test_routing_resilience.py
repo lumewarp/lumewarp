@@ -149,7 +149,7 @@ def _bad_upstream(stack, **settings) -> str:
     )["id"]
 
 
-def _model(stack, name: str, upstream_id: str) -> str:
+def _model(stack, name: str, upstream_id: str, **settings) -> str:
     return stack.ok(
         "POST",
         "/models",
@@ -159,6 +159,7 @@ def _model(stack, name: str, upstream_id: str) -> str:
             "upstream_model": "mock",
             "price_input_nano_usd_per_mtok": 1_000_000_000,
             "price_output_nano_usd_per_mtok": 2_000_000_000,
+            **settings,
         },
     )["id"]
 
@@ -426,3 +427,35 @@ def test_circuit_breaker_opens_and_stops_traffic(stack):
     assert _attempts(gw, "good-a") == before_good + 20
     assert _attempts(gw, "bad-a", "circuit_open") >= 20
     assert gw.metric(state) == 2
+
+
+def test_failing_model_chat_check_takes_only_that_model_out(stack):
+    """The bad upstream answers every chat completion 503, so its model's chat check
+    fails; the gateway skips that model, reports it, and probes count as no attempt.
+    """
+    seeded = stack.seed()
+    bad = _bad_upstream(stack)
+    good = _upstream_id(stack, "mock")
+    check = {"interval_ms": 1000, "timeout_ms": 500, "unhealthy_threshold": 1}
+    bad_id = _model(stack, "bad-a", bad, chat_check=check)
+    good_id = _model(stack, "good-a", good, chat_check=check)
+    members = [{"model_id": bad_id, "weight": BAD_WEIGHT}, {"model_id": good_id}]
+    stack.ok("POST", "/routers", json={"name": "checked", "members": members})
+    gw = stack.start_gateway()
+    _wait_served(gw, seeded.a.secret, "checked")
+
+    wait_for(
+        lambda: gw.metric('lumewarp_model_healthy{model="bad-a"}') == 0,
+        15,
+        "bad-a marked unhealthy by its chat check",
+    )
+    assert gw.metric('lumewarp_model_healthy{model="good-a"}') == 1
+    for _ in range(20):
+        r = gw.chat(seeded.a.secret, model="checked")
+        assert r.status_code == 200, r.text
+    assert _attempts(gw, "bad-a") == 0, "an unhealthy model gets no traffic"
+    assert _attempts(gw, "good-a") == 20
+
+    health = lambda mid: stack.ok("GET", f"/models/{mid}")["health"]  # noqa: E731
+    wait_for(lambda: health(bad_id) == "unhealthy", 15, "bad-a reported unhealthy")
+    wait_for(lambda: health(good_id) == "healthy", 15, "good-a reported healthy")

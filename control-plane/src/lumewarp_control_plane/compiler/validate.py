@@ -38,6 +38,7 @@ SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
         "model_limits",
         "default_body",
         "reasoning_effort",
+        "model_chat_check",
         *(f"strategy:{name}" for name in BUILTIN_STRATEGIES),
     }
 )
@@ -169,6 +170,12 @@ def health_check_problem(h: pb.HealthCheck, base_url: str = "") -> str | None:
     return None
 
 
+def chat_check_problem(c: pb.ChatCheck) -> str | None:
+    if c.interval_ms < 1000 or c.timeout_ms == 0 or c.timeout_ms >= c.interval_ms:
+        return "chat_check interval must be >= 1000 ms and 0 < timeout < interval"
+    return None
+
+
 def capabilities_used(snap: pb.Snapshot) -> list[str]:
     """Capabilities the snapshot's fields need, exactly as snapshot.rs::validate requires
     them: a capability is listed iff a field that needs it is set. Sorted.
@@ -190,6 +197,8 @@ def capabilities_used(snap: pb.Snapshot) -> list[str]:
             used.add("default_body")
         if d.HasField("reasoning_effort"):
             used.add("reasoning_effort")
+        if d.HasField("chat_check"):
+            used.add("model_chat_check")
     for r in snap.routers:
         if r.HasField("retry"):
             used.add("retry")
@@ -310,6 +319,8 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
 
     models = _unique([d.name for d in snap.models], "model")
     for d in snap.models:
+        if d.HasField("chat_check") and (problem := chat_check_problem(d.chat_check)):
+            raise SnapshotInvalid(f"model {d.name!r}: {problem}")
         if d.default_body_json and (
             problem := _wire_object(d.default_body_json, "default_body", DEFAULT_BODY_RESERVED_KEYS)
         ):

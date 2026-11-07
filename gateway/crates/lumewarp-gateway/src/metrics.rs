@@ -286,6 +286,7 @@ pub struct Metrics {
     budget_exhausted: Family<RouterLabels, Counter>,
     circuit: Family<ModelLabels, Gauge>,
     healthy: Family<UpstreamLabels, Gauge>,
+    model_healthy: Family<ModelLabels, Gauge>,
     splits: Family<SplitLabels, Counter>,
     vllm_queue: Family<ModelLabels, Gauge>,
     vllm_kv: Family<ModelLabels, Gauge<f64, AtomicU64>>,
@@ -326,6 +327,7 @@ impl Metrics {
         let budget_exhausted = Family::default();
         let circuit = Family::default();
         let healthy = Family::default();
+        let model_healthy = Family::default();
         let splits = Family::default();
         let vllm_queue = Family::default();
         let vllm_kv = Family::default();
@@ -392,6 +394,11 @@ impl Metrics {
             "lumewarp_upstream_healthy",
             "Active upstream health: healthy 1, unhealthy 0",
             healthy.clone(),
+        );
+        registry.register(
+            "lumewarp_model_healthy",
+            "Model chat check: healthy 1, unhealthy 0 (1 while a model has no chat_check)",
+            model_healthy.clone(),
         );
         registry.register(
             "lumewarp_requests",
@@ -516,6 +523,7 @@ impl Metrics {
             budget_exhausted,
             circuit,
             healthy,
+            model_healthy,
             splits,
             vllm_queue,
             vllm_kv,
@@ -626,6 +634,14 @@ impl Metrics {
         self.healthy
             .get_or_create(&UpstreamLabels {
                 upstream: upstream.into(),
+            })
+            .clone()
+    }
+
+    pub fn model_health_gauge(&self, model: &str) -> Gauge {
+        self.model_healthy
+            .get_or_create(&ModelLabels {
+                model: model.into(),
             })
             .clone()
     }

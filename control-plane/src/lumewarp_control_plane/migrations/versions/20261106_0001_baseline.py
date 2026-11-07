@@ -718,6 +718,10 @@ def upgrade() -> None:
         ),
         sa.Column("reasoning_fragments", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("reasoning_default_level", sa.String(length=16), nullable=True),
+        sa.Column("chat_check_interval_ms", sa.Integer(), nullable=True),
+        sa.Column("chat_check_timeout_ms", sa.Integer(), nullable=True),
+        sa.Column("chat_check_unhealthy_threshold", sa.Integer(), nullable=True),
+        sa.Column("chat_check_healthy_threshold", sa.Integer(), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -750,6 +754,18 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "(reasoning_mode = 'mapped') = (reasoning_fragments IS NOT NULL) AND (reasoning_mode <> 'strip' OR reasoning_default_level IS NULL)",
             name=op.f("ck_models_reasoning_shape"),
+        ),
+        sa.CheckConstraint(
+            "(chat_check_interval_ms IS NULL) = (chat_check_timeout_ms IS NULL) AND (chat_check_interval_ms IS NOT NULL OR (chat_check_unhealthy_threshold IS NULL AND chat_check_healthy_threshold IS NULL))",
+            name=op.f("ck_models_chat_check_shape"),
+        ),
+        sa.CheckConstraint(
+            "chat_check_interval_ms IS NULL OR (chat_check_interval_ms >= 1000 AND chat_check_timeout_ms > 0 AND chat_check_timeout_ms < chat_check_interval_ms)",
+            name=op.f("ck_models_chat_check_bounds"),
+        ),
+        sa.CheckConstraint(
+            "(chat_check_unhealthy_threshold IS NULL OR chat_check_unhealthy_threshold > 0) AND (chat_check_healthy_threshold IS NULL OR chat_check_healthy_threshold > 0)",
+            name=op.f("ck_models_chat_check_thresholds"),
         ),
         sa.ForeignKeyConstraint(
             ["name_id", "kind"],
@@ -1113,6 +1129,12 @@ def upgrade() -> None:
         sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "upstream_health",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default=sa.text("'{}'::jsonb"),
+            nullable=False,
+        ),
+        sa.Column(
+            "model_health",
             postgresql.JSONB(astext_type=sa.Text()),
             server_default=sa.text("'{}'::jsonb"),
             nullable=False,

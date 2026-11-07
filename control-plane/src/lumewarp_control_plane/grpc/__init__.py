@@ -200,9 +200,10 @@ class _PendingUpdate:
     retry_delay: float = _RETRY_INITIAL_SECONDS
 
 
-# UpstreamHealthReport bounds (upstream names are at most 200 characters).
+# HealthReport bounds: upstream names are at most 200 characters, catalog names 400.
 _MAX_HEALTH_ENTRIES = 10_000
 _MAX_UPSTREAM_NAME = 200
+_MAX_MODEL_NAME = 400
 
 
 @dataclass
@@ -230,6 +231,7 @@ class _StreamState:
     last_nack_code: str | None = None
     last_nack_reason: str | None = None
     upstream_health: dict[str, bool] = field(default_factory=dict)
+    model_health: dict[str, bool] = field(default_factory=dict)
     # Set when the stream must end (replaced by a newer connection, token revoked).
     closed: tuple[grpc.StatusCode, str] | None = None
 
@@ -416,6 +418,7 @@ class SessionRegistry:
             "disconnected_at": now if disconnected else None,
             "last_seen_at": now,
             "upstream_health": state.upstream_health,
+            "model_health": state.model_health,
         }
         stmt = pg_insert(GatewaySession).values(**values)
         updates = {
@@ -743,15 +746,19 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
 
     async def _handle_reply(self, state: _StreamState, incoming, context) -> None:
         kind = incoming.WhichOneof("msg")
-        if kind == "upstream_health":
-            report = incoming.upstream_health.upstreams
-            if len(report) > _MAX_HEALTH_ENTRIES or any(
-                not 0 < len(u.name) <= _MAX_UPSTREAM_NAME for u in report
+        if kind == "health":
+            upstreams, models = incoming.health.upstreams, incoming.health.models
+            if (
+                len(upstreams) + len(models) > _MAX_HEALTH_ENTRIES
+                or any(not 0 < len(u.name) <= _MAX_UPSTREAM_NAME for u in upstreams)
+                or any(not 0 < len(m.name) <= _MAX_MODEL_NAME for m in models)
             ):
                 await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "invalid health report")
-            health = {u.name: u.healthy for u in report}
-            if health != state.upstream_health:
-                state.upstream_health = health
+            upstream_health = {u.name: u.healthy for u in upstreams}
+            model_health = {m.name: m.healthy for m in models}
+            if (upstream_health, model_health) != (state.upstream_health, state.model_health):
+                state.upstream_health = upstream_health
+                state.model_health = model_health
                 await self.registry._mirror(state)
             return
         if kind == "hello":

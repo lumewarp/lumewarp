@@ -115,7 +115,7 @@ Standalone YAML has no previous-hash field.
 ### Routing capabilities
 
 The gateway advertises `retry`, `fallbacks`, `health_check`, `circuit_breaker`,
-`traffic_split`, `vllm_load`, `rotation_grace` and `strategy:<name>` for each
+`traffic_split`, `vllm_load`, `rotation_grace`, `model_chat_check` and `strategy:<name>` for each
 strategy it has, built-ins included. Compilers add a capability only when it is used:
 
 | Capability | Fields |
@@ -127,6 +127,7 @@ strategy it has, built-ins included. Compilers add a capability only when it is 
 | `traffic_split` | Nonempty split, non-NONE sticky, or nonempty sticky header |
 | `vllm_load` | Nonempty `Upstream.metrics_url` |
 | `rotation_grace` | Nonempty `ApiKey.previous_key_hash` |
+| `model_chat_check` | Present `Model.chat_check` |
 | `strategy:<name>` | Any router with `Router.strategy = <name>`, including `strategy:weighted` |
 
 Using a field without its capability is `INVALID_CONFIG`; requiring an
@@ -135,7 +136,7 @@ this gateway does not have, whatever the snapshot lists. No field can bypass the
 gate by omitting its capability. A snapshot with no routers requires no strategy
 capability. Standalone YAML emits the same presence-based capabilities. Retry
 attempts are capped at five; statuses must be 400..599; fallbacks must name
-existing models. Health intervals must be at least 1000 ms with a positive
+existing models. Health and chat-check intervals must be at least 1000 ms with a positive
 timeout below the interval. Fallbacks do not recurse: a model has none. If all
 candidates are unhealthy/open, routing tries one anyway, except that a half-open
 trial already in progress is never duplicated (another candidate is used

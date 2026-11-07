@@ -12,8 +12,8 @@ use std::{
 use lumewarp_config::AuthMode;
 use lumewarp_proto::config::v1::{
     config_service_client::ConfigServiceClient, config_update::Update, gateway_message::Msg, Ack,
-    ConfigUpdate, GatewayMessage, Hello, Nack, NackCode, Snapshot, StrategyDescriptor,
-    UpstreamHealth, UpstreamHealthReport,
+    ConfigUpdate, GatewayMessage, HealthReport, Hello, Nack, NackCode, Snapshot,
+    StrategyDescriptor, TargetHealth,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::ReceiverStream;
@@ -227,15 +227,18 @@ impl Client {
     }
 
     fn health_report(&self) -> GatewayMessage {
-        let upstreams = self
-            .runtime
-            .health
-            .probed()
-            .into_iter()
-            .map(|(name, healthy)| UpstreamHealth { name, healthy })
-            .collect();
+        let (upstreams, models) = self.runtime.health.probed();
+        let wire = |probed: Vec<(String, bool)>| {
+            probed
+                .into_iter()
+                .map(|(name, healthy)| TargetHealth { name, healthy })
+                .collect()
+        };
         GatewayMessage {
-            msg: Some(Msg::UpstreamHealth(UpstreamHealthReport { upstreams })),
+            msg: Some(Msg::Health(HealthReport {
+                upstreams: wire(upstreams),
+                models: wire(models),
+            })),
         }
     }
 

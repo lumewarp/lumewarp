@@ -313,6 +313,34 @@
       ]
     },
     {
+      "name": "LumewarpModelUnhealthy fires after hold",
+      "interval": "1m",
+      "input_series": [{"series": "lumewarp_model_healthy{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\"}", "values": "0+0x40"}],
+      "alert_rule_test": [
+        {"eval_time": "0m", "alertname": "LumewarpModelUnhealthy", "exp_alerts": []},
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpModelUnhealthy",
+          "exp_alerts": [
+            {
+              "exp_labels": {"namespace": "demo", "job": "lumewarp-gateway", "instance": "gw:9464", "model": "m", "severity": "warning"},
+              "exp_annotations": {
+                "summary": "Model chat checks are failing",
+                "description": "Model m has failed its chat check for 2 minutes.",
+                "runbook": "Run Test now on the model page; check the upstream model name, default body and credentials."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpModelUnhealthy healthy",
+      "interval": "1m",
+      "input_series": [{"series": "lumewarp_model_healthy{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",model=\"m\"}", "values": "1+0x40"}],
+      "alert_rule_test": [{"eval_time": "30m", "alertname": "LumewarpModelUnhealthy", "exp_alerts": []}]
+    },
+    {
       "name": "LumewarpRetryBudgetExhausted fires after hold",
       "interval": "1m",
       "input_series": [

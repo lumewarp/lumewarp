@@ -88,6 +88,9 @@ async def _set_group(session, group, configured):
             {"none": {"chat_template_kwargs": {"enable_thinking": False}}} if configured else None
         )
         model.reasoning_default_level = "none" if configured else None
+        model.chat_check_interval_ms = 30000 if configured else None
+        model.chat_check_timeout_ms = 5000 if configured else None
+        model.chat_check_unhealthy_threshold = 2 if configured else None
     elif group in ("health_check", "health_defaults"):
         explicit = configured and group == "health_check"
         upstream.health_check_interval_ms = 5000 if configured else None

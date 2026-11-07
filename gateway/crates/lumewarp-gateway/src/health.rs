@@ -1,4 +1,5 @@
-//! Passive per-model breakers and off-path active upstream probes.
+//! Passive per-model breakers and off-path active probes: a GET health check
+//! per upstream and an optional chat completion per model.
 use std::{
     collections::HashMap,
     sync::{
@@ -145,10 +146,14 @@ impl Breaker {
     }
 }
 
+/// (name, healthy) pairs sorted by name.
+pub type Probed = Vec<(String, bool)>;
+
 #[derive(Default)]
 pub struct Registry {
     breakers: Mutex<HashMap<String, Arc<Breaker>>>,
     upstreams: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    models: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Running probe tasks with the probe each one was started for.
     tasks: Mutex<Vec<(Probe, JoinHandle<()>)>>,
     /// Signalled when a probe changes state or the probed set changes (the
@@ -167,8 +172,16 @@ impl Registry {
     }
 
     pub fn upstream(&self, name: &str) -> Arc<AtomicBool> {
-        self.upstreams
-            .lock()
+        Self::flag(&self.upstreams, name)
+    }
+
+    /// A model's chat-check state, shared by name across swaps.
+    pub fn model(&self, name: &str) -> Arc<AtomicBool> {
+        Self::flag(&self.models, name)
+    }
+
+    fn flag(map: &Mutex<HashMap<String, Arc<AtomicBool>>>, name: &str) -> Arc<AtomicBool> {
+        map.lock()
             .unwrap_or_else(|e| e.into_inner())
             .entry(name.into())
             .or_insert_with(|| Arc::new(AtomicBool::new(true)))
@@ -187,16 +200,21 @@ impl Registry {
         self.changed.notified().await;
     }
 
-    /// (upstream, healthy) for every probed upstream, sorted by name.
-    pub fn probed(&self) -> Vec<(String, bool)> {
+    /// (name, healthy) for every probed upstream and every probed model,
+    /// each sorted by name.
+    pub fn probed(&self) -> (Probed, Probed) {
         let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        let mut out: Vec<_> = tasks
-            .iter()
-            .map(|(p, _)| (p.name.clone(), p.healthy.load(Ordering::Acquire)))
-            .collect();
-        out.sort();
-        out.dedup_by(|a, b| a.0 == b.0);
-        out
+        let of = |target: Target| {
+            let mut out: Vec<_> = tasks
+                .iter()
+                .filter(|(p, _)| p.target == target)
+                .map(|(p, _)| (p.name.clone(), p.healthy.load(Ordering::Acquire)))
+                .collect();
+            out.sort();
+            out.dedup_by(|a, b| a.0 == b.0);
+            out
+        };
+        (of(Target::Upstream), of(Target::Model))
     }
 
     pub fn configure(&self, probes: &[Probe], client: &UpstreamClient) -> usize {
@@ -235,8 +253,15 @@ fn spawn_probe(probe: Probe, client: UpstreamClient, changed: Arc<Notify>) -> Jo
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            let mut request = Request::new(Full::new(Bytes::new()));
+            let mut request = Request::new(Full::new(probe.body.clone().unwrap_or_default()));
             *request.uri_mut() = probe.uri.clone();
+            if probe.body.is_some() {
+                *request.method_mut() = hyper::Method::POST;
+                request.headers_mut().insert(
+                    hyper::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+            }
             if let Some(value) = &probe.authorization {
                 request
                     .headers_mut()
@@ -266,7 +291,7 @@ fn spawn_probe(probe: Probe, client: UpstreamClient, changed: Arc<Notify>) -> Jo
                     let was_healthy = probe.healthy.swap(true, Ordering::AcqRel);
                     probe.gauge.set(1);
                     if !was_healthy {
-                        tracing::info!(upstream = %probe.name, healthy = true, "upstream health changed");
+                        tracing::info!(target_kind = probe.target.label(), name = %probe.name, healthy = true, "health changed");
                         changed.notify_one();
                     }
                 }
@@ -282,7 +307,7 @@ fn spawn_probe(probe: Probe, client: UpstreamClient, changed: Arc<Notify>) -> Jo
                     let was_healthy = probe.healthy.swap(false, Ordering::AcqRel);
                     probe.gauge.set(0);
                     if was_healthy {
-                        tracing::info!(upstream = %probe.name, healthy = false, "upstream health changed");
+                        tracing::info!(target_kind = probe.target.label(), name = %probe.name, healthy = false, "health changed");
                         changed.notify_one();
                     }
                 }
@@ -304,10 +329,30 @@ impl Drop for Registry {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// GET of the upstream's health URL.
+    Upstream,
+    /// POST of a chat completion through the model.
+    Model,
+}
+
+impl Target {
+    fn label(self) -> &'static str {
+        match self {
+            Target::Upstream => "upstream",
+            Target::Model => "model",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Probe {
+    pub target: Target,
     pub name: String,
     pub uri: Uri,
+    /// A JSON body to POST (model chat checks); `None` sends a GET.
+    pub body: Option<Bytes>,
     pub authorization: Option<HeaderValue>,
     pub config: HealthCheck,
     pub healthy: Arc<AtomicBool>,
@@ -315,11 +360,13 @@ pub struct Probe {
 }
 
 impl Probe {
-    /// Same upstream probed the same way. `healthy` and `gauge` are shared
-    /// by upstream name, so a kept task keeps updating the right state.
+    /// Same upstream or model probed the same way. `healthy` and `gauge` are
+    /// shared by name, so a kept task keeps updating the right state.
     fn same_target(&self, other: &Probe) -> bool {
-        self.name == other.name
+        self.target == other.target
+            && self.name == other.name
             && self.uri == other.uri
+            && self.body == other.body
             && self.config == other.config
             && self.authorization == other.authorization
     }
@@ -475,9 +522,11 @@ mod tests {
         let registry = Registry::default();
         let client = crate::proxy::client();
         let probe = Probe {
+            target: Target::Upstream,
             name: "u".into(),
             // Nothing is ever sent: the first tick fires after the asserts.
             uri: "http://127.0.0.1:9/v1/models".parse().unwrap(),
+            body: None,
             authorization: None,
             config: HealthCheck {
                 interval_ms: 60_000,
@@ -495,7 +544,18 @@ mod tests {
         changed.config.unhealthy_threshold = 2;
         let mut other = probe.clone();
         other.name = "v".into();
-        assert_eq!(registry.configure(&[changed, other], &client), 2);
+        assert_eq!(
+            registry.configure(&[changed.clone(), other.clone()], &client),
+            2
+        );
+        // A model of the same name is another target.
+        let mut model = changed.clone();
+        model.target = Target::Model;
+        model.body = Some(Bytes::from_static(b"{}"));
+        assert_eq!(registry.configure(&[changed, other, model], &client), 1);
+        let (upstreams, models) = registry.probed();
+        assert_eq!(upstreams.len(), 2);
+        assert_eq!(models, vec![("u".to_string(), true)]);
         assert_eq!(registry.configure(&[], &client), 0);
         assert!(registry.tasks.lock().unwrap().is_empty());
     }

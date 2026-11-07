@@ -1,21 +1,22 @@
+import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 
 import { api, type Model } from "../api";
-import { fmtNumber, fmtUsd, PageHeader } from "../components/Bits";
+import { fmtTokens, fmtUsd, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { SearchBox } from "../components/Search";
 import { DataTable } from "../components/Table";
-import { useCan, useModels, useMut, useNames, useUpstreams } from "../hooks";
+import { useCan, useMut, useNames, useUpstreams } from "../hooks";
 import { matches } from "../lib/catalog";
-
-const tokens = (n: number | null) => (n === null ? "—" : fmtNumber(n));
+import { HealthBadge } from "./Upstreams";
 
 export function Models() {
   const perms = useCan();
   const navigate = useNavigate();
-  const list = useModels();
+  // Health comes from gateway reports; refresh it while the page is open.
+  const list = useQuery({ queryKey: ["models"], queryFn: () => api.models(), refetchInterval: 15000 });
   const upstreams = useUpstreams();
   const upstreamName = useNames(upstreams.data);
   const [search, setSearch] = useState("");
@@ -54,7 +55,8 @@ export function Models() {
             ),
           },
           { key: "maps", header: "Mapped name", sort: (a, b) => mapped(a).localeCompare(mapped(b)), cell: (r) => <code className="text-muted-foreground">{mapped(r)}</code> },
-          { key: "length", header: "Input / Output length", align: "right", hideBelow: "lg", cell: (r) => `${tokens(r.max_input_tokens)} / ${tokens(r.max_output_tokens)}` },
+          { key: "health", header: "Health", cell: (r) => <HealthBadge health={r.health} /> },
+          { key: "length", header: "Input / Output length", align: "right", hideBelow: "lg", cell: (r) => <span title={`${r.max_input_tokens ?? "—"} / ${r.max_output_tokens ?? "—"} tokens`}>{`${fmtTokens(r.max_input_tokens)} / ${fmtTokens(r.max_output_tokens)}`}</span> },
           { key: "cost", header: "Input / Output cost (1M tok)", align: "right", hideBelow: "lg", cell: (r) => (r.price_input_nano_usd_per_mtok === null ? <span className="text-muted-foreground">unpriced</span> : `${fmtUsd(r.price_input_nano_usd_per_mtok)} / ${fmtUsd(r.price_output_nano_usd_per_mtok)}`) },
           { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => void navigate({ to: "/models/$modelId", params: { modelId: r.id } })} onDelete={() => setDeleting(r)} /> },
         ]}

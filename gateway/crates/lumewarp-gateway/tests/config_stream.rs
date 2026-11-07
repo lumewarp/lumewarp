@@ -779,7 +779,7 @@ async fn sealed_upstream_key_without_the_encryption_key_is_nacked() {
 
 #[tokio::test]
 async fn probe_state_changes_are_reported_to_the_control_plane() {
-    use lumewarp_proto::config::v1::{HealthCheck, UpstreamHealth};
+    use lumewarp_proto::config::v1::{ChatCheck, HealthCheck, TargetHealth};
     let env = env();
     let mock = Mock::start(Behavior::Json).await;
     let mut cp = FakeCp::start().await;
@@ -805,22 +805,35 @@ async fn probe_state_changes_are_reported_to_the_control_plane() {
         });
     }
     s.required_capabilities.push("health_check".into());
+    // A model chat check against the mock (answers any chat completion).
+    s.models[0].chat_check = Some(ChatCheck {
+        interval_ms: 1000,
+        timeout_ms: 500,
+        unhealthy_threshold: 1,
+        ..Default::default()
+    });
+    s.required_capabilities.push("model_chat_check".into());
+    let model = s.models[0].name.clone();
     conn.send(full(s));
     ack(&mut conn, 1, &env.state).await;
     let expected = vec![
-        UpstreamHealth {
+        TargetHealth {
             name: "down".into(),
             healthy: false,
         },
-        UpstreamHealth {
+        TargetHealth {
             name: "u".into(),
             healthy: true,
         },
     ];
+    let expected_models = vec![TargetHealth {
+        name: model,
+        healthy: true,
+    }];
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let report = conn.recv_health().await;
-        if report.upstreams == expected {
+        if report.upstreams == expected && report.models == expected_models {
             break;
         }
         assert!(

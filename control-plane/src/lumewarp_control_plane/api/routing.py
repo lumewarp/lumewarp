@@ -40,6 +40,8 @@ from lumewarp_control_plane.api.schemas import (
     HealthCheckIn,
     ModelCreate,
     ModelOut,
+    ModelTestIn,
+    ModelTestOut,
     ModelUpdate,
     Page,
     ProbeOut,
@@ -152,28 +154,51 @@ def _sealed_api_key(settings: Settings, api_key: SecretStr) -> bytes:
         ) from exc
 
 
+async def _reports(session: AsyncSession, settings: Settings, column) -> list[dict]:
+    """The latest health reports of the connected gateways (one column of them)."""
+    return list(
+        (
+            await session.scalars(
+                select(column).where(
+                    GatewaySession.scope == settings.scope, GatewaySession.connected.is_(True)
+                )
+            )
+        ).all()
+    )
+
+
+def _health(reports: list[dict], name: str) -> str:
+    """Unhealthy if any connected gateway says so; unknown before any has reported."""
+    seen = [r[name] for r in reports if isinstance(r.get(name), bool)]
+    return "unhealthy" if False in seen else "healthy" if seen else "unknown"
+
+
 async def _upstreams_out(
     session: AsyncSession, settings: Settings, rows: Sequence[Upstream]
 ) -> list[UpstreamOut]:
     """UpstreamOut with `health` from the connected gateways' latest reports."""
-    reports = (
-        await session.scalars(
-            select(GatewaySession.upstream_health).where(
-                GatewaySession.scope == settings.scope, GatewaySession.connected.is_(True)
-            )
-        )
-    ).all()
+    reports = await _reports(session, settings, GatewaySession.upstream_health)
     out = []
     for row in rows:
         item = UpstreamOut.model_validate(row)
         if row.health_check_interval_ms is not None:
-            seen = [r[row.name] for r in reports if isinstance(r.get(row.name), bool)]
-            item.health = "unhealthy" if False in seen else "healthy" if seen else "unknown"
+            item.health = _health(reports, row.name)
         out.append(item)
     return out
 
 
-_MODEL_SETTINGS = ("max_input_tokens", "max_output_tokens", "default_body", "reasoning")
+async def _models_out(
+    session: AsyncSession, settings: Settings, rows: Sequence[Model]
+) -> list[ModelOut]:
+    """ModelOut with `health` from the connected gateways' chat-check reports."""
+    reports = await _reports(session, settings, GatewaySession.model_health)
+    out = []
+    for row in rows:
+        item = ModelOut.model_validate(row)
+        if row.chat_check_interval_ms is not None:
+            item.health = _health(reports, row.name)
+        out.append(item)
+    return out
 
 
 def _apply_model_settings(row: Model, body: ModelCreate | ModelUpdate, *, create: bool) -> None:
@@ -187,6 +212,12 @@ def _apply_model_settings(row: Model, body: ModelCreate | ModelUpdate, *, create
         row.reasoning_mode = r.mode if r else "passthrough"
         row.reasoning_fragments = r.fragments if r else None
         row.reasoning_default_level = r.default_level if r else None
+    if create or "chat_check" in sent:
+        c = body.chat_check
+        row.chat_check_interval_ms = c.interval_ms if c else None
+        row.chat_check_timeout_ms = c.timeout_ms if c else None
+        row.chat_check_unhealthy_threshold = c.unhealthy_threshold if c else None
+        row.chat_check_healthy_threshold = c.healthy_threshold if c else None
 
 
 def _model_changes(body: ModelUpdate) -> dict[str, Any]:
@@ -576,7 +607,7 @@ async def test_upstream(
                 raise ApiError(502, "upstream_unavailable", str(exc)) from None
             credential = "stored"
     health, models = await upstream_client.test_upstream(
-        body.kind, body.base_url, body.health_check_url, token
+        body.base_url, body.health_check_url, token
     )
     return UpstreamTestOut(
         credential=credential, health=ProbeOut(**vars(health)), models=ProbeOut(**vars(models))
@@ -695,6 +726,7 @@ async def list_catalog(
 async def list_models(
     authz: Authz,
     session: SessionDep,
+    settings: SettingsDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[ModelOut]:
@@ -702,7 +734,7 @@ async def list_models(
     stmt = select(Model).order_by(Model.name_id)
     rows, next_cursor = await uuid_page(session, stmt, Model.name_id, limit, cursor)
     return Page[ModelOut](
-        items=[ModelOut.model_validate(row) for row in rows],
+        items=await _models_out(session, settings, rows),
         next_cursor=next_cursor,
     )
 
@@ -746,7 +778,7 @@ async def create_model(
             details={"name": row.name, "upstream": upstream.name},
         )
         await enqueue_recompile(session, settings, "api.model.create")
-    return ModelOut.model_validate(row)
+    return (await _models_out(session, settings, [row]))[0]
 
 
 @router.get(
@@ -754,12 +786,41 @@ async def create_model(
     response_model=ModelOut,
     operation_id="getModel",
 )
-async def get_model(model_id: uuid.UUID, authz: Authz, session: SessionDep) -> ModelOut:
+async def get_model(
+    model_id: uuid.UUID, authz: Authz, session: SessionDep, settings: SettingsDep
+) -> ModelOut:
     await authz.require(Action.ROUTING_READ)
     row = await session.get(Model, model_id)
     if row is None:
         raise not_found("model not found")
-    return ModelOut.model_validate(row)
+    return (await _models_out(session, settings, [row]))[0]
+
+
+@router.post("/models/test", response_model=ModelTestOut, operation_id="testModel")
+async def test_model(
+    body: ModelTestIn, authz: Authz, session: SessionDep, settings: SettingsDep
+) -> ModelTestOut:
+    """Send one "1 + 1 = ?" chat completion now, from the control plane straight to the
+    upstream, as the form stands (saved or not), with the upstream's credential and the
+    default body. Reflects the control plane's network, not each gateway's.
+    """
+    await authz.require(Action.ROUTING_MANAGE)
+    upstream = await session.get(Upstream, body.upstream_id)
+    if upstream is None:
+        raise validation_error("upstream_id", "unknown upstream")
+    credential = "none"
+    try:
+        token = upstream_client.bearer(settings, upstream)
+    except upstream_client.UpstreamCallFailed as exc:
+        raise ApiError(502, "upstream_unavailable", str(exc)) from None
+    if upstream.api_key_ciphertext is not None:
+        credential = "stored"
+    elif upstream.api_key_ref:
+        credential = "env" if token else "env_unset"
+    probe, reply = await upstream_client.chat_check(
+        upstream.base_url, token, body.upstream_model, body.default_body
+    )
+    return ModelTestOut(credential=credential, probe=ProbeOut(**vars(probe)), reply=reply)
 
 
 @router.patch(
@@ -855,7 +916,7 @@ async def update_model(
             details={"name": row.name, "changes": _model_changes(body)},
         )
         await enqueue_recompile(session, settings, "api.model.update")
-    return ModelOut.model_validate(row)
+    return (await _models_out(session, settings, [row]))[0]
 
 
 @router.delete(

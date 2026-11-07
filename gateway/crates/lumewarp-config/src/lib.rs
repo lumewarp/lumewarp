@@ -153,8 +153,7 @@ pub struct Upstream {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthCheck {
-    /// Absolute http(s) URL. Empty: vLLM -> base_url without `/v1` + `/health`,
-    /// others -> base_url + `/models`.
+    /// Absolute http(s) URL. Empty: base_url without `/v1` + `/health`.
     #[serde(default)]
     pub url: String,
     pub interval_ms: u32,
@@ -211,6 +210,21 @@ pub struct Model {
     pub default_body: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Periodic "1 + 1 = ?" chat completion through this model.
+    #[serde(default)]
+    pub chat_check: Option<ChatCheck>,
+}
+
+/// Snapshot `ChatCheck`: the timing rules of a health check, without a URL.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatCheck {
+    pub interval_ms: u32,
+    pub timeout_ms: u32,
+    #[serde(default)]
+    pub unhealthy_threshold: u32,
+    #[serde(default)]
+    pub healthy_threshold: u32,
 }
 
 /// How `reasoning_effort` is handled (snapshot `ReasoningEffort`).
@@ -604,6 +618,12 @@ impl Config {
                         .collect(),
                     default_level: r.default_level.clone(),
                 }),
+                chat_check: d.chat_check.as_ref().map(|c| pb::ChatCheck {
+                    interval_ms: c.interval_ms,
+                    timeout_ms: c.timeout_ms,
+                    unhealthy_threshold: c.unhealthy_threshold,
+                    healthy_threshold: c.healthy_threshold,
+                }),
             })
             .collect();
         let aliases = self
@@ -750,6 +770,10 @@ impl Config {
                     (
                         "circuit_breaker",
                         self.upstreams.iter().any(|u| u.circuit_breaker.is_some()),
+                    ),
+                    (
+                        "model_chat_check",
+                        self.models.iter().any(|d| d.chat_check.is_some()),
                     ),
                     (
                         "traffic_split",

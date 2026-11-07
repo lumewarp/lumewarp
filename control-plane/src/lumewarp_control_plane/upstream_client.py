@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from lumewarp_control_plane import sealing
-from lumewarp_control_plane.models import Upstream, UpstreamKind
+from lumewarp_control_plane.models import Upstream
 from lumewarp_control_plane.settings import Settings
 
 TIMEOUT_SECONDS = 5.0
@@ -162,18 +162,68 @@ def _elapsed(started: float) -> int:
     return round((time.monotonic() - started) * 1000)
 
 
+CHAT_CHECK_PROMPT = "1 + 1 = ?"
+MAX_REPLY_CHARS = 200
+
+
+async def chat_check(
+    base_url: str, token: str | None, upstream_model: str, default_body: dict | None
+) -> tuple[ProbeResult, str | None]:
+    """One "1 + 1 = ?" chat completion, as the gateway's periodic check sends it (the
+    default body below the probe's own fields). Returns the probe and the start of the
+    answer; an error never carries the response body.
+    """
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    body = {
+        **(default_body or {}),
+        "model": upstream_model,
+        "messages": [{"role": "user", "content": CHAT_CHECK_PROMPT}],
+        "max_tokens": 16,
+        "stream": False,
+    }
+    started = time.monotonic()
+    try:
+        async with _client() as client:
+            status, raw = await _post(client, url, token, body)
+    except (httpx.HTTPError, UpstreamCallFailed) as exc:
+        message = _describe(exc) if isinstance(exc, httpx.HTTPError) else str(exc)
+        return ProbeResult(url, None, _elapsed(started), False, message), None
+    ok = 200 <= status < 300
+    return ProbeResult(url, status, _elapsed(started), ok, None), _reply(raw) if ok else None
+
+
+def _reply(raw: bytes) -> str | None:
+    try:
+        choice = json.loads(raw)["choices"][0]
+        message = choice.get("message") or {}
+        text = message.get("content") or message.get("reasoning_content") or choice.get("text")
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        return None
+    return text.strip()[:MAX_REPLY_CHARS] if isinstance(text, str) else None
+
+
+async def _post(
+    client: httpx.AsyncClient, url: str, token: str | None, body: dict
+) -> tuple[int, bytes]:
+    async with client.stream("POST", url, headers=_headers(token), json=body) as response:
+        out = bytearray()
+        async for chunk in response.aiter_bytes():
+            out += chunk
+            if len(out) > MAX_BODY_BYTES:
+                raise UpstreamCallFailed("response larger than 4 MiB")
+        return response.status_code, bytes(out)
+
+
 def health_url(row: Upstream) -> str:
     """The URL the gateway probes (router.rs): explicit, or the default per kind."""
-    return default_health_url(row.kind, row.base_url, row.health_check_url)
+    return default_health_url(row.base_url, row.health_check_url)
 
 
-def default_health_url(kind: UpstreamKind, base_url: str, explicit: str | None) -> str:
+def default_health_url(base_url: str, explicit: str | None) -> str:
+    """Explicit, or base_url without a trailing /v1 plus /health (every kind)."""
     if explicit:
         return explicit
-    base = base_url.rstrip("/")
-    if kind == UpstreamKind.VLLM:
-        return f"{base.removesuffix('/v1')}/health"
-    return f"{base}/models"
+    return f"{base_url.rstrip('/').removesuffix('/v1')}/health"
 
 
 def _same_origin(a: str, b: str) -> bool:
@@ -187,10 +237,10 @@ def _same_origin(a: str, b: str) -> bool:
 
 
 async def test_upstream(
-    kind: UpstreamKind, base_url: str, health_check_url: str | None, token: str | None
+    base_url: str, health_check_url: str | None, token: str | None
 ) -> tuple[ProbeResult, ProbeResult]:
     """Probe the health URL and `/models` once each, as the gateway would."""
-    health = default_health_url(kind, base_url, health_check_url)
+    health = default_health_url(base_url, health_check_url)
     models = f"{base_url.rstrip('/')}/models"
     return (
         await probe(health, token if _same_origin(health, base_url) else None),

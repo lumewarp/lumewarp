@@ -847,6 +847,23 @@ class Model(TimestampMixin, Base):
             " AND (reasoning_mode <> 'strip' OR reasoning_default_level IS NULL)",
             name="reasoning_shape",
         ),
+        CheckConstraint(
+            "(chat_check_interval_ms IS NULL) = (chat_check_timeout_ms IS NULL)"
+            " AND (chat_check_interval_ms IS NOT NULL OR (chat_check_unhealthy_threshold IS NULL"
+            " AND chat_check_healthy_threshold IS NULL))",
+            name="chat_check_shape",
+        ),
+        CheckConstraint(
+            "chat_check_interval_ms IS NULL OR (chat_check_interval_ms >= 1000"
+            " AND chat_check_timeout_ms > 0"
+            " AND chat_check_timeout_ms < chat_check_interval_ms)",
+            name="chat_check_bounds",
+        ),
+        CheckConstraint(
+            "(chat_check_unhealthy_threshold IS NULL OR chat_check_unhealthy_threshold > 0)"
+            " AND (chat_check_healthy_threshold IS NULL OR chat_check_healthy_threshold > 0)",
+            name="chat_check_thresholds",
+        ),
     )
 
     name_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
@@ -871,6 +888,11 @@ class Model(TimestampMixin, Base):
     )
     reasoning_fragments: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     reasoning_default_level: Mapped[str | None] = mapped_column(String(16))
+    # Periodic "1 + 1 = ?" chat completion by the gateway; interval NULL = not probed.
+    chat_check_interval_ms: Mapped[int | None] = mapped_column(Integer)
+    chat_check_timeout_ms: Mapped[int | None] = mapped_column(Integer)
+    chat_check_unhealthy_threshold: Mapped[int | None] = mapped_column(Integer)
+    chat_check_healthy_threshold: Mapped[int | None] = mapped_column(Integer)
 
     id = synonym("name_id")
 
@@ -1317,8 +1339,11 @@ class GatewaySession(Base):
     connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Latest UpstreamHealthReport: upstream name -> healthy, probed upstreams only.
+    # Latest HealthReport: name -> healthy, probed upstreams / models only.
     upstream_health: Mapped[dict[str, bool]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    model_health: Mapped[dict[str, bool]] = mapped_column(
         JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
     )
 

@@ -74,6 +74,16 @@ groups:
           summary: "Upstream health checks are failing"
           description: "Upstream {{ $labels.upstream }} has been unhealthy for 2 minutes."
           runbook: "Check upstream health endpoint, credentials and network reachability; shift traffic to another model if needed."
+      # Same hold as upstream health: one failed chat check is not an incident.
+      - alert: LumewarpModelUnhealthy
+        expr: "lumewarp_model_healthy == 0"
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model chat checks are failing"
+          description: "Model {{ $labels.model }} has failed its chat check for 2 minutes."
+          runbook: "Run Test now on the model page; check the upstream model name, default body and credentials."
       # Any sustained exhaustion deserves investigation; five-minute counter window tolerates scrape jitter.
       - alert: LumewarpRetryBudgetExhausted
         expr: "sum by (namespace, router) (increase(lumewarp_retries_budget_exhausted_total[5m])) > 0"

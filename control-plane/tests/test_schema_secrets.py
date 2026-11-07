@@ -58,6 +58,7 @@ CLASSIFIED: dict[tuple[str, str], ColumnClass] = {
     ("gateway_sessions", "last_nack_reason"): ColumnClass.PUBLIC,
     ("gateway_sessions", "peer"): ColumnClass.PUBLIC,
     ("gateway_sessions", "upstream_health"): ColumnClass.PUBLIC,
+    ("gateway_sessions", "model_health"): ColumnClass.PUBLIC,
     ("gateway_sessions", "scope"): ColumnClass.PUBLIC,
     ("gateway_strategies", "descriptor"): ColumnClass.PROTOCOL,
     ("gateway_strategies", "digest"): ColumnClass.PUBLIC,

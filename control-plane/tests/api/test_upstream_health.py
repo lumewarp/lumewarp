@@ -20,7 +20,6 @@ KEY = "sk-health-test-secret-4411"
 def _test(client, up: dict, **extra):
     """Test a saved upstream as its form stands (no key typed)."""
     body = {
-        "kind": up["kind"],
         "base_url": up["base_url"],
         "upstream_id": up["id"],
         "health_check_url": (up["health_check"] or {}).get("url"),
@@ -140,19 +139,23 @@ def test_explicit_health_url_on_another_host_gets_no_token(client, replies) -> N
     assert by_url["http://vllm.test/v1/models"].headers["authorization"] == f"Bearer {KEY}"
 
 
-def test_default_health_url_for_non_vllm_is_models(client, replies) -> None:
+def test_default_health_url_is_root_health_for_every_kind(client, replies) -> None:
     _, table = replies
-    table["http://vllm.test/v1/models"] = httpx.Response(200, json={"data": []})
+    table["http://vllm.test/health"] = httpx.Response(200)
     up = _upstream(client, kind="openai_compatible")
     body = _test(client, up).json()
-    assert body["health"]["url"] == "http://vllm.test/v1/models"
+    assert body["health"]["url"] == "http://vllm.test/health"
     assert body["health"]["ok"] is True
+    # Without a trailing /v1 the path is kept.
+    table["http://plain.test/api/health"] = httpx.Response(200)
+    plain = _upstream(client, kind="openai", base_url="http://plain.test/api")
+    assert _test(client, plain).json()["health"]["url"] == "http://plain.test/api/health"
 
 
 def test_unsaved_form_is_tested_with_the_typed_key(client, replies) -> None:
     calls, table = replies
     table["http://new.test/v1/models"] = httpx.Response(200, json={"data": []})
-    body = {"kind": "openai", "base_url": "http://new.test/v1", "api_key": KEY}
+    body = {"base_url": "http://new.test/v1", "api_key": KEY}
     response = client.post("/api/v1/upstreams/test", json=body, headers=ADMIN_AUTH)
     assert response.status_code == 200, response.text
     assert response.json()["credential"] == "entered"
@@ -180,5 +183,5 @@ def test_credential_sources(client, replies, monkeypatch) -> None:
     plain = _upstream(client, kind="openai")
     assert _test(client, plain).json()["credential"] == "none"
     assert _test(client, {**up, "id": str(uuid.uuid4())}).status_code == 404
-    bad = {"kind": "openai", "base_url": "ftp://x"}
+    bad = {"base_url": "ftp://x"}
     assert client.post("/api/v1/upstreams/test", json=bad, headers=ADMIN_AUTH).status_code == 422

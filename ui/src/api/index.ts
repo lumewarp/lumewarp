@@ -18,6 +18,7 @@ export type Member = Schemas["MemberOut"];
 export type ServiceAccount = Schemas["ServiceAccountOut"];
 export type Upstream = Schemas["UpstreamOut"];
 export type UpstreamTest = Schemas["UpstreamTestOut"];
+export type ModelTest = Schemas["ModelTestOut"];
 export type Model = Schemas["ModelOut"];
 export type Router = Schemas["RouterOut"];
 export type Alias = Schemas["AliasOut"];
@@ -153,6 +154,7 @@ export const api = {
   deleteUpstream: (id: string) => unwrap(client.DELETE("/api/v1/upstreams/{upstream_id}", { params: { path: { upstream_id: id } } })),
   upstreamModels: (id: string) => unwrap(client.GET("/api/v1/upstreams/{upstream_id}/models", { params: { path: { upstream_id: id } } })),
   testUpstream: (body: Schemas["UpstreamTestIn"]) => unwrap(client.POST("/api/v1/upstreams/test", { body })),
+  testModel: (body: Schemas["ModelTestIn"]) => unwrap(client.POST("/api/v1/models/test", { body })),
 
   models: () => listAll((c) => unwrap(client.GET("/api/v1/models", { params: { query: q(c) } }))),
   createModel: (body: Schemas["ModelCreate"]) => unwrap(client.POST("/api/v1/models", { body })),

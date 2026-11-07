@@ -56,9 +56,9 @@ message Upstream {
 
 // GET <url> every interval; 2xx within timeout = success.
 message HealthCheck {
-  // Absolute http(s) URL without userinfo. Empty = for VLLM upstreams base_url
-  // with a trailing "/v1" removed plus "/health", otherwise base_url + "/models".
-  // The upstream's bearer token is sent only to base_url's host and port.
+  // Absolute http(s) URL without userinfo. Empty = base_url with a trailing
+  // "/v1" removed plus "/health". The upstream's bearer token is sent only to
+  // base_url's origin (scheme, host and port).
   string url = 1;
   uint32 interval_ms = 2;
   uint32 timeout_ms = 3;
@@ -122,6 +122,22 @@ message Model {
   // How the OpenAI `reasoning_effort` field is handled. Absent = passed
   // through untouched. Capability "reasoning_effort".
   ReasoningEffort reasoning_effort = 8;
+  // Periodic chat completion ("1 + 1 = ?") sent through this model's own body
+  // rules to <upstream base_url>/chat/completions; while it fails the model gets
+  // no traffic (on top of its upstream's health check). Absent = not probed.
+  // Probes are not metered. Capability "model_chat_check".
+  ChatCheck chat_check = 9;
+}
+
+// Same timing rules as HealthCheck: interval at least 1000 ms, timeout above 0
+// and below the interval. A 2xx answer within the timeout is a success.
+message ChatCheck {
+  uint32 interval_ms = 1;
+  uint32 timeout_ms = 2;
+  // Consecutive failures before the model is marked unhealthy (0 = 3).
+  uint32 unhealthy_threshold = 3;
+  // Consecutive successes before it is healthy again (0 = 1).
+  uint32 healthy_threshold = 4;
 }
 
 // Request bodies are only re-encoded for a model with default_body_json or

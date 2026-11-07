@@ -1,17 +1,21 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
+import { useState } from "react";
 
-import { api, type Model } from "../api";
-import { Badge, nanoToUsd, usdToNano } from "../components/Bits";
+import { api, type Model, type ModelTest } from "../api";
+import { Badge, fmtTokens, nanoToUsd, usdToNano } from "../components/Bits";
 import { EditPage, Section } from "../components/EditPage";
 import { CheckField, Field, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { ComboboxField } from "../components/ui/combobox-field";
+import { DescriptionDetails, DescriptionList, DescriptionTerm } from "../components/ui/description-list";
 import { Textarea } from "../components/ui/textarea";
 import { useAliases, useModels, useMut, useNames, useRouters, useUpstreams } from "../hooks";
 import { usedBy } from "../lib/catalog";
 import { PageLoading } from "./Access";
+import { ProbeRow } from "./UpstreamEdit";
+import { HealthBadge } from "./Upstreams";
 
 const LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh"] as const;
 type Level = (typeof LEVELS)[number];
@@ -46,6 +50,11 @@ interface Values {
   reasoning_mode: Mode;
   fragments: Record<Level, string>;
   reasoning_default: Level | "";
+  check_enabled: boolean;
+  check_interval_ms: number | null;
+  check_timeout_ms: number | null;
+  check_unhealthy: number | null;
+  check_healthy: number | null;
 }
 
 const noFragments = () => Object.fromEntries(LEVELS.map((l) => [l, ""])) as Record<Level, string>;
@@ -63,6 +72,11 @@ const blank: Values = {
   reasoning_mode: "passthrough",
   fragments: noFragments(),
   reasoning_default: "",
+  check_enabled: false,
+  check_interval_ms: 60000,
+  check_timeout_ms: 10000,
+  check_unhealthy: null,
+  check_healthy: null,
 };
 
 const fromModel = (m: Model): Values => ({
@@ -78,6 +92,11 @@ const fromModel = (m: Model): Values => ({
   reasoning_mode: m.reasoning.mode,
   fragments: { ...noFragments(), ...Object.fromEntries(Object.entries(m.reasoning.fragments ?? {}).map(([k, v]) => [k, JSON.stringify(v)])) },
   reasoning_default: (m.reasoning.default_level as Level | null) ?? "",
+  check_enabled: !!m.chat_check,
+  check_interval_ms: m.chat_check?.interval_ms ?? blank.check_interval_ms,
+  check_timeout_ms: m.chat_check?.timeout_ms ?? blank.check_timeout_ms,
+  check_unhealthy: m.chat_check?.unhealthy_threshold ?? null,
+  check_healthy: m.chat_check?.healthy_threshold ?? null,
 });
 
 /** An empty string is "not set"; anything else must be a JSON object without gateway-owned keys. */
@@ -114,6 +133,9 @@ const body = (v: Values) => ({
   max_output_tokens: v.max_output_tokens,
   default_body: parseObject(v.default_body),
   reasoning: reasoning(v),
+  chat_check: v.check_enabled
+    ? { interval_ms: v.check_interval_ms ?? 0, timeout_ms: v.check_timeout_ms ?? 0, unhealthy_threshold: v.check_unhealthy, healthy_threshold: v.check_healthy }
+    : null,
 });
 
 /** Leaf field names of 422 messages mapped to form fields. */
@@ -124,6 +146,10 @@ const ALIAS = {
   mode: "reasoning_mode",
   fragments: "reasoning_mode",
   default_level: "reasoning_default",
+  interval_ms: "check_interval_ms",
+  timeout_ms: "check_timeout_ms",
+  unhealthy_threshold: "check_unhealthy",
+  healthy_threshold: "check_healthy",
 } as const;
 
 export function ModelEdit() {
@@ -155,6 +181,8 @@ function ModelForm({ existing }: { existing?: Model }) {
     fragments: (x, all) => (all.reasoning_mode === "mapped" ? LEVELS.map((l) => jsonObjectProblem(x[l])).find(Boolean) : undefined),
     reasoning_mode: (x, all) => (x === "mapped" && !mappedLevels(all).length ? "Map at least one level" : undefined),
     reasoning_default: (x, all) => (x && all.reasoning_mode === "mapped" && !all.fragments[x].trim() ? "This level has no mapping" : undefined),
+    check_interval_ms: (x, all) => (all.check_enabled && (x ?? 0) < 1000 ? "At least 1000 ms" : undefined),
+    check_timeout_ms: (x, all) => (all.check_enabled && ((x ?? 0) < 1 || (x ?? 0) >= (all.check_interval_ms ?? 0)) ? "Must be above 0 and below the interval" : undefined),
   });
   const v = form.values;
   const dirty = JSON.stringify(v) !== JSON.stringify(initial);
@@ -198,6 +226,7 @@ function ModelForm({ existing }: { existing?: Model }) {
       backLabel="Models"
       dirty={dirty}
       submitLabel={existing ? "Save" : "Create"}
+      actions={existing && <HealthBadge health={existing.health} />}
       onSubmit={async () => {
         if (!form.validate()) return false;
         const ok = await form.run(() => save.mutateAsync(v), ALIAS);
@@ -223,8 +252,8 @@ function ModelForm({ existing }: { existing?: Model }) {
 
       <Section title="Limits and pricing">
         <div className="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-3">
-          <NumberField label="Input length (tokens)" value={v.max_input_tokens} onChange={(x) => form.set("max_input_tokens", x)} error={form.errors.max_input_tokens} min={1} placeholder="unknown" />
-          <NumberField label="Max output (tokens)" value={v.max_output_tokens} onChange={(x) => form.set("max_output_tokens", x)} error={form.errors.max_output_tokens} min={1} hint="Larger max_tokens gets a 400." />
+          <NumberField label="Input length (tokens)" value={v.max_input_tokens} onChange={(x) => form.set("max_input_tokens", x)} error={form.errors.max_input_tokens} min={1} placeholder="unknown" hint={v.max_input_tokens ? `${fmtTokens(v.max_input_tokens)} tokens.` : undefined} />
+          <NumberField label="Max output (tokens)" value={v.max_output_tokens} onChange={(x) => form.set("max_output_tokens", x)} error={form.errors.max_output_tokens} min={1} hint={`${v.max_output_tokens ? `${fmtTokens(v.max_output_tokens)} tokens. ` : ""}Larger max_tokens gets a 400.`} />
           <NumberField label="Input price (USD / 1M tokens)" value={v.price_in} onChange={(x) => form.set("price_in", x)} error={form.errors.price_in} step="any" placeholder="unpriced" />
           <NumberField label="Output price (USD / 1M tokens)" value={v.price_out} onChange={(x) => form.set("price_out", x)} error={form.errors.price_out} step="any" placeholder="unpriced" />
         </div>
@@ -275,8 +304,72 @@ function ModelForm({ existing }: { existing?: Model }) {
         )}
       </Section>
 
+      <Section title="Health check" description="A one-line chat completion (“1 + 1 = ?”) to this model, with its default body.">
+        <ChatTestNow values={v} />
+        <CheckField label="Check periodically" checked={v.check_enabled} onChange={(x) => form.set("check_enabled", x)} />
+        {v.check_enabled && (
+          <>
+            <p className="text-sm text-muted-foreground">Each gateway sends it on this schedule. While it fails, the model gets no traffic as long as another candidate (router member or fallback) is available.</p>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
+              <NumberField label="Interval (ms)" value={v.check_interval_ms} onChange={(x) => form.set("check_interval_ms", x)} error={form.errors.check_interval_ms} min={1000} placeholder="60000" />
+              <NumberField label="Timeout (ms)" value={v.check_timeout_ms} onChange={(x) => form.set("check_timeout_ms", x)} error={form.errors.check_timeout_ms} min={1} placeholder="10000" />
+              <NumberField label="Failures to mark down" value={v.check_unhealthy} onChange={(x) => form.set("check_unhealthy", x)} error={form.errors.check_unhealthy} min={1} placeholder="3" />
+              <NumberField label="Successes to mark up" value={v.check_healthy} onChange={(x) => form.set("check_healthy", x)} error={form.errors.check_healthy} min={1} placeholder="1" />
+            </div>
+          </>
+        )}
+      </Section>
+
       {existing && <UsedBy model={existing} />}
     </EditPage>
+  );
+}
+
+const CREDENTIAL: Record<ModelTest["credential"], string> = {
+  stored: "Sent with the upstream's stored key.",
+  env: "Sent with the variable from the control plane's environment.",
+  env_unset: "The upstream's variable is not set on the control plane, so this test sent no key; gateways use their own environment.",
+  none: "Sent without a key.",
+};
+
+/** One chat completion now, from the control plane, of the form as it stands (saved or not). */
+function ChatTestNow({ values }: { values: Values }) {
+  const [result, setResult] = useState<ModelTest | null>(null);
+  const run = useMutation({
+    mutationFn: () => {
+      let defaultBody: Record<string, unknown> | null = null;
+      try {
+        defaultBody = parseObject(values.default_body);
+      } catch {
+        // An invalid body is flagged on the field; test without it.
+      }
+      return api.testModel({ upstream_id: values.upstream_id, upstream_model: values.upstream_model.trim(), default_body: defaultBody });
+    },
+    onSuccess: setResult,
+  });
+  const missing = !values.upstream_id ? "Pick the upstream first." : !values.upstream_model.trim() ? "Enter the upstream model first." : null;
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-dashed p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-sm text-muted-foreground">{missing ?? "Ask the model now, from the control plane. Nothing is saved."}</span>
+        <Button type="button" variant="outline" size="sm" disabled={!!missing || run.isPending} onClick={() => run.mutate()}>
+          {run.isPending ? "Testing…" : "Test now"}
+        </Button>
+      </div>
+      {run.error && <p className="text-sm text-destructive">{run.error.message}</p>}
+      {result && <p className={result.credential === "env_unset" ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>{CREDENTIAL[result.credential]}</p>}
+      {result && (
+        <DescriptionList data-testid="model-test-result">
+          <ProbeRow label="Chat" probe={result.probe} />
+          {result.reply !== null && (
+            <>
+              <DescriptionTerm>Reply</DescriptionTerm>
+              <DescriptionDetails className="min-w-0 break-words">{result.reply || <span className="text-muted-foreground">(empty)</span>}</DescriptionDetails>
+            </>
+          )}
+        </DescriptionList>
+      )}
+    </div>
   );
 }
 

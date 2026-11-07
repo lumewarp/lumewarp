@@ -29,6 +29,7 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     "model_limits",
     "default_body",
     "reasoning_effort",
+    "model_chat_check",
     "strategy:weighted",
     "strategy:least_in_flight",
     "strategy:lowest_latency",
@@ -267,6 +268,15 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
         require(d.max_output_tokens > 0, "model_limits")?;
         require(!d.default_body_json.is_empty(), "default_body")?;
         require(d.reasoning_effort.is_some(), "reasoning_effort")?;
+        require(d.chat_check.is_some(), "model_chat_check")?;
+        if let Some(c) = &d.chat_check {
+            if c.interval_ms < 1000 || c.timeout_ms == 0 || c.timeout_ms >= c.interval_ms {
+                return Err(ApplyError::invalid(format!(
+                    "model {:?} chat_check interval must be >= 1000 ms and 0 < timeout < interval",
+                    d.name
+                )));
+            }
+        }
         if !upstreams.contains(d.upstream.as_str()) {
             return Err(ApplyError::invalid(format!(
                 "model {:?} references unknown upstream {:?}",
@@ -968,6 +978,13 @@ pub(crate) mod tests {
                 "encrypted_api_key" => s.upstreams[0].api_key_ciphertext = vec![1; 40],
                 "model_limits" => s.models[0].max_output_tokens = 10,
                 "default_body" => s.models[0].default_body_json = r#"{"a":1}"#.into(),
+                "model_chat_check" => {
+                    s.models[0].chat_check = Some(pb::ChatCheck {
+                        interval_ms: 1000,
+                        timeout_ms: 100,
+                        ..Default::default()
+                    })
+                }
                 "reasoning_effort" => {
                     s.models[0].reasoning_effort = Some(pb::ReasoningEffort::default())
                 }

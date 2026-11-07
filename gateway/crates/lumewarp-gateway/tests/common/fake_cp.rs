@@ -12,7 +12,7 @@ use std::{
 };
 
 use lumewarp_proto::config::v1::{
-    gateway_message::Msg, ConfigUpdate, GatewayMessage, UpstreamHealthReport,
+    gateway_message::Msg, ConfigUpdate, GatewayMessage, HealthReport,
 };
 use tokio::{
     net::TcpListener,
@@ -33,7 +33,7 @@ pub struct Conn {
     /// Dropping it ends the stream from the server side.
     pub outbound: mpsc::UnboundedSender<Result<ConfigUpdate, Status>>,
     /// Health reports `recv` skipped, oldest first.
-    pub health: Vec<UpstreamHealthReport>,
+    pub health: Vec<HealthReport>,
 }
 
 impl Conn {
@@ -50,14 +50,14 @@ impl Conn {
                 .await
                 .expect("gateway closed the stream");
             match message.msg {
-                Some(Msg::UpstreamHealth(report)) => self.health.push(report),
+                Some(Msg::Health(report)) => self.health.push(report),
                 _ => return message,
             }
         }
     }
 
     /// The next health report, including one `recv` already skipped.
-    pub async fn recv_health(&mut self) -> UpstreamHealthReport {
+    pub async fn recv_health(&mut self) -> HealthReport {
         loop {
             if !self.health.is_empty() {
                 return self.health.remove(0);
@@ -65,7 +65,7 @@ impl Conn {
             let message = super::bounded(self.inbound.recv())
                 .await
                 .expect("gateway closed the stream");
-            if let Some(Msg::UpstreamHealth(report)) = message.msg {
+            if let Some(Msg::Health(report)) = message.msg {
                 return report;
             }
         }

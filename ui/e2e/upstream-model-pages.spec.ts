@@ -46,7 +46,7 @@ test("Test now on a new upstream sends the typed key and saves nothing", async (
   await main.getByRole("button", { name: "Test now" }).click();
   await expect(main.getByText("Tested with the key typed above.")).toBeVisible();
   await expect(main.getByTestId("upstream-test-result")).toContainText("HTTP 200");
-  expect(sent).toEqual([{ kind: "vllm", base_url: "http://up.test/v1", health_check_url: null, api_key: "sk-typed-123" }]);
+  expect(sent).toEqual([{ base_url: "http://up.test/v1", health_check_url: null, api_key: "sk-typed-123" }]);
   const saved = (await (await request.get("/api/v1/upstreams?limit=200", { headers: admin })).json()).items as { name: string }[];
   expect(saved.map((u) => u.name)).not.toContain("pg-new");
 });
@@ -86,4 +86,41 @@ test("the model picker offers the upstream's list and a custom name, and fills t
   await expect(page).toHaveURL(/\/models$/);
   const stored = ((await (await request.get("/api/v1/models?limit=200", { headers: admin })).json()).items as any[]).find((m) => m.name === "pg-model");
   expect([stored.upstream_model, stored.max_input_tokens, stored.max_output_tokens]).toEqual(["my-finetune", 131072, 8192]);
+});
+
+test("model Test now asks the model, and the periodic check is saved", async ({ page, request }) => {
+  const up = await (await request.post("/api/v1/upstreams", { headers: admin, data: { name: "pg-up2", kind: "vllm", base_url: "http://127.0.0.1:9/v1" } })).json();
+  await page.route(`**/api/v1/upstreams/${up.id}/models`, (route) => route.fulfill({ json: { models: [] } }));
+  const sent: any[] = [];
+  await page.route("**/api/v1/models/test", async (route) => {
+    sent.push(route.request().postDataJSON());
+    await route.fulfill({ json: { credential: "none", probe: probe("http://127.0.0.1:9/v1/chat/completions"), reply: "2" } });
+  });
+  await signIn(page, request, "/models/new");
+  const main = page.locator("#main");
+  await expect(main.getByRole("button", { name: "Test now" })).toBeDisabled();
+  await main.getByLabel("Name", { exact: true }).fill("pg-checked");
+  await main.getByRole("combobox", { name: "Upstream", exact: true }).click();
+  await page.getByRole("option", { name: "pg-up2" }).click();
+  const picker = main.getByRole("combobox", { name: "Upstream model", exact: true });
+  await picker.fill("qwen");
+  await page.getByRole("option", { name: "Use “qwen” (custom)" }).click();
+  await main.getByLabel("JSON object").fill('{"top_k": 20}');
+  await main.getByLabel("Input length (tokens)").fill("131072");
+  await expect(main.getByText("128k tokens.")).toBeVisible();
+  await main.getByRole("button", { name: "Test now" }).click();
+  await expect(main.getByTestId("model-test-result")).toContainText("HTTP 200");
+  await expect(main.getByTestId("model-test-result")).toContainText("2");
+  expect(sent).toEqual([{ upstream_id: up.id, upstream_model: "qwen", default_body: { top_k: 20 } }]);
+
+  await main.getByLabel("Check periodically").check();
+  await main.getByLabel("Interval (ms)").fill("30000");
+  await main.getByLabel("Timeout (ms)").fill("5000");
+  await main.getByRole("button", { name: "Create" }).click();
+  await expect(page).toHaveURL(/\/models$/);
+  const row = page.getByRole("row", { name: /pg-checked/ });
+  await expect(row).toContainText("Unknown");
+  await expect(row).toContainText("128k / —");
+  const stored = ((await (await request.get("/api/v1/models?limit=200", { headers: admin })).json()).items as any[]).find((m) => m.name === "pg-checked");
+  expect(stored.chat_check).toEqual({ interval_ms: 30000, timeout_ms: 5000, unhealthy_threshold: null, healthy_threshold: null });
 });

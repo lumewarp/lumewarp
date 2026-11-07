@@ -14,8 +14,8 @@ use hyper::{
 };
 use lumewarp_config::AuthMode;
 use lumewarp_proto::config::v1::{
-    CircuitBreaker, KeyStatus, Price, RateLimit, RetryPolicy, RouterMember, Snapshot, StickyBy,
-    StreamUsageMode,
+    self as pb, CircuitBreaker, HealthCheck, KeyStatus, Price, RateLimit, RetryPolicy,
+    RouterMember, Snapshot, StickyBy, StreamUsageMode,
 };
 use lumewarp_router_api::{
     Builtin, CandidateSource, Candidates, Load, MemberInfo, Needs, RequestInfo, RouterInfo,
@@ -26,7 +26,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use crate::{
     auth::Caller,
     balance::{self, Latency, Scrape, VllmLoad},
-    health::{Breaker, Probe},
+    health::{Breaker, Probe, Target},
     metrics::{HandleKey, LabelId, Metrics, RequestMetrics, API_ENDPOINTS},
     ratelimit::clock,
     runtime::Runtime,
@@ -61,7 +61,10 @@ pub struct Model {
     pub label: LabelId,
     pub breaker: Arc<Breaker>,
     pub circuit: Option<CircuitBreaker>,
+    /// The upstream's health check (shared by every model on it).
     pub healthy: Arc<AtomicBool>,
+    /// This model's own chat check; true while it has none.
+    pub model_healthy: Arc<AtomicBool>,
     /// Shared by model name through `Runtime::balance` (survive swaps).
     pub latency: Arc<Latency>,
     /// Feed `latency` only when a `lowest_latency` router uses this model.
@@ -358,6 +361,7 @@ impl Pool {
                 && (excluded.is_none() || d.breaker.retry_after.load(Ordering::Relaxed) <= now)
                 && if strict {
                     d.healthy.load(Ordering::Acquire)
+                        && d.model_healthy.load(Ordering::Acquire)
                         && (d.circuit.is_none() || d.breaker.available(now))
                 } else {
                     // Failing open never piles onto a half-open trial: the
@@ -545,17 +549,17 @@ impl RoutingTable {
                     plain_http_uri(&config.url).ok_or_else(|| {
                         invalid(format!("upstream {name:?} has an invalid health url"))
                     })?
-                } else if upstream.kind == lumewarp_proto::config::v1::UpstreamKind::Vllm as i32 {
+                } else {
                     root_uri(&base, "/health")
                         .ok_or_else(|| invalid(format!("upstream {name:?} has an invalid URL")))?
-                } else {
-                    endpoint("/models")?
                 };
                 // The upstream's bearer token goes only to its own origin.
                 let authorization = authorization.clone().filter(|_| same_origin(&uri, &base));
                 probes.push(Probe {
+                    target: Target::Upstream,
                     name: name.clone(),
                     uri,
+                    body: None,
                     authorization,
                     config: config.clone(),
                     healthy: healthy.clone(),
@@ -603,6 +607,30 @@ impl RoutingTable {
                 circuit,
             ) = &upstreams[d.upstream.as_str()];
             metrics.register_model(&d.name);
+            let transform = Transform::compile(d)
+                .map_err(|e| invalid(format!("model {:?}: {e}", d.name)))?
+                .map(Arc::new);
+            let model_healthy = runtime.health.model(&d.name);
+            let model_gauge = metrics.model_health_gauge(&d.name);
+            match &d.chat_check {
+                Some(check) => probes.push(Probe {
+                    target: Target::Model,
+                    name: d.name.clone(),
+                    uri: endpoints[0].clone(),
+                    body: Some(chat_check_body(d, transform.as_deref())),
+                    authorization: authorization.clone(),
+                    config: HealthCheck {
+                        url: String::new(),
+                        interval_ms: check.interval_ms,
+                        timeout_ms: check.timeout_ms,
+                        unhealthy_threshold: check.unhealthy_threshold,
+                        healthy_threshold: check.healthy_threshold,
+                    },
+                    healthy: model_healthy.clone(),
+                    gauge: model_gauge,
+                }),
+                None => unprobed.push((model_healthy.clone(), model_gauge)),
+            }
             models.insert(
                 d.name.as_str(),
                 Arc::new(Model {
@@ -625,12 +653,11 @@ impl RoutingTable {
                         .breaker(&d.name, metrics.circuit_gauge(&d.name)),
                     circuit: *circuit,
                     healthy: healthy.clone(),
+                    model_healthy,
                     latency: runtime.balance.latency(&d.name),
                     track_latency: latency_tracked.contains(d.name.as_str()),
                     load: runtime.balance.load(&d.name, metrics),
-                    transform: Transform::compile(d)
-                        .map_err(|e| invalid(format!("model {:?}: {e}", d.name)))?
-                        .map(Arc::new),
+                    transform,
                 }),
             );
         }
@@ -1182,6 +1209,28 @@ pub fn plain_http_uri(text: &str) -> Option<Uri> {
     let plain = matches!(uri.scheme_str(), Some("http" | "https"))
         && uri.authority().is_some_and(|a| !a.as_str().contains('@'));
     plain.then_some(uri)
+}
+
+/// The model chat check: "1 + 1 = ?" with a small max_tokens, through the
+/// model's own default body and reasoning rules, as real traffic would be.
+fn chat_check_body(d: &pb::Model, transform: Option<&Transform>) -> Bytes {
+    let max_tokens = match d.max_output_tokens {
+        0 => 16,
+        n => n.min(16),
+    };
+    let raw = Bytes::from(
+        serde_json::to_vec(&serde_json::json!({
+            "model": d.upstream_model,
+            "messages": [{"role": "user", "content": "1 + 1 = ?"}],
+            "max_tokens": max_tokens,
+            "stream": false,
+        }))
+        .expect("json serializes"),
+    );
+    // A rule that rejects even this request leaves the plain probe.
+    transform
+        .and_then(|t| t.apply(raw.clone()).ok())
+        .unwrap_or(raw)
 }
 
 /// Same scheme, host and effective port: the only URLs the upstream's bearer token may go
@@ -2273,9 +2322,10 @@ mod tests {
             probe_of(pb::UpstreamKind::Vllm, ""),
             ("http://h:8000/health".into(), true)
         );
+        // Every kind defaults to base_url without /v1, plus /health.
         assert_eq!(
             probe_of(pb::UpstreamKind::Openai, ""),
-            ("http://h:8000/v1/models".into(), true)
+            ("http://h:8000/health".into(), true)
         );
         assert_eq!(
             probe_of(pb::UpstreamKind::Vllm, "http://h:8000/ready"),
@@ -2293,6 +2343,68 @@ mod tests {
         assert_eq!(
             probe_of(pb::UpstreamKind::Vllm, "http://H:8000/health"),
             ("http://H:8000/health".into(), true)
+        );
+    }
+
+    #[test]
+    fn model_chat_check_posts_through_the_models_body_rules() {
+        let mut s = snapshot("weighted");
+        s.required_capabilities.push("model_chat_check".into());
+        s.upstreams[0].base_url = "http://h:8000/v1".into();
+        s.models[0].upstream_model = "Qwen/Qwen3-8B".into();
+        s.models[0].max_output_tokens = 8;
+        s.models[0].default_body_json = r#"{"temperature":0}"#.into();
+        s.models[0].chat_check = Some(pb::ChatCheck {
+            interval_ms: 1000,
+            timeout_ms: 100,
+            ..Default::default()
+        });
+        s.required_capabilities
+            .extend(["model_limits".into(), "default_body".into()]);
+        let table = compile(&s);
+        let probe = table
+            .probes
+            .iter()
+            .find(|p| p.target == Target::Model)
+            .expect("model probe");
+        assert_eq!(probe.name, s.models[0].name);
+        assert_eq!(probe.uri.to_string(), "http://h:8000/v1/chat/completions");
+        let body: serde_json::Value = serde_json::from_slice(probe.body.as_ref().unwrap()).unwrap();
+        assert_eq!(body["model"], "Qwen/Qwen3-8B");
+        assert_eq!(body["messages"][0]["content"], "1 + 1 = ?");
+        assert_eq!(body["max_tokens"], 8);
+        assert_eq!(body["temperature"], 0);
+        assert_eq!(body["stream"], false);
+        // A model without a check is not probed.
+        assert_eq!(
+            table
+                .probes
+                .iter()
+                .filter(|p| p.target == Target::Model)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn unhealthy_model_check_skips_only_that_model() {
+        let s = snapshot("weighted");
+        let table = RoutingTable::compile(&s, AuthMode::Open, &Runtime::new()).unwrap();
+        let pool = &table.names["public"].pools[0];
+        let down = pool.models.iter().position(|d| d.name == "b").unwrap();
+        pool.models[down]
+            .model_healthy
+            .store(false, Ordering::Release);
+        for _ in 0..50 {
+            let guard = table.acquire(&table.names["public"], 0, &Caller::Anonymous);
+            assert_eq!(
+                guard.model.name, "a",
+                "a failing chat check takes the model out"
+            );
+        }
+        assert!(
+            pool.models[down].healthy.load(Ordering::Acquire),
+            "upstream unaffected"
         );
     }
 

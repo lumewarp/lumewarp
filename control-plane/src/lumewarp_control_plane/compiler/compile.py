@@ -398,6 +398,15 @@ async def compile_scope(
                     )
                 )
             _model_body_rules(out, d, warnings)
+            if d.chat_check_interval_ms is not None:
+                out.chat_check.CopyFrom(
+                    pb.ChatCheck(
+                        interval_ms=d.chat_check_interval_ms,
+                        timeout_ms=d.chat_check_timeout_ms or 0,
+                        unhealthy_threshold=d.chat_check_unhealthy_threshold or 0,
+                        healthy_threshold=d.chat_check_healthy_threshold or 0,
+                    )
+                )
             snap.models.append(out)
     valid_model_ids = {d.id for d in valid_models}
     model_name = {d.id: d.name for d in valid_models}

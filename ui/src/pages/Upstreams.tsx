@@ -15,15 +15,18 @@ export const KINDS = [
   { value: "openai_compatible", label: "OpenAI-compatible" },
 ];
 
-const HEALTH: Record<Upstream["health"], { tone: "ok" | "danger" | "muted"; label: string; title: string }> = {
-  healthy: { tone: "ok", label: "Healthy", title: "Every connected gateway that probes it reports it healthy." },
+type HealthState = Upstream["health"];
+
+const HEALTH: Record<HealthState, { tone: "ok" | "danger" | "muted"; label: string; title: string }> = {
+  healthy: { tone: "ok", label: "Healthy", title: "Every connected gateway that checks it reports it healthy." },
   unhealthy: { tone: "danger", label: "Unhealthy", title: "At least one connected gateway reports it unhealthy." },
   unknown: { tone: "muted", label: "Unknown", title: "No connected gateway has reported it yet." },
-  not_probed: { tone: "muted", label: "Not probed", title: "No periodic health check is configured." },
+  not_probed: { tone: "muted", label: "Not probed", title: "No periodic check is configured." },
 };
 
-export function HealthBadge({ upstream }: { upstream: Upstream }) {
-  const h = HEALTH[upstream.health];
+/** An upstream's probe or a model's chat check, as the connected gateways report it. */
+export function HealthBadge({ health }: { health: HealthState }) {
+  const h = HEALTH[health];
   return (
     <span title={h.title}>
       <Badge tone={h.tone}>{h.label}</Badge>
@@ -63,7 +66,7 @@ export function Upstreams() {
           },
           { key: "kind", header: "Kind", cell: (r) => <Badge tone="info">{KINDS.find((k) => k.value === r.kind)?.label ?? r.kind}</Badge> },
           { key: "url", header: "Base URL", cell: (r) => <code>{r.base_url}</code> },
-          { key: "health", header: "Health", cell: (r) => <HealthBadge upstream={r} /> },
+          { key: "health", header: "Health", cell: (r) => <HealthBadge health={r.health} /> },
           { key: "ref", header: "API key", hideBelow: "lg", cell: (r) => (r.api_key_set ? <Badge tone="info">stored</Badge> : r.api_key_ref ? <code>${r.api_key_ref}</code> : <span className="text-muted-foreground">none</span>) },
           { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => edit(r)} onDelete={() => setDeleting(r)} /> },
         ]}

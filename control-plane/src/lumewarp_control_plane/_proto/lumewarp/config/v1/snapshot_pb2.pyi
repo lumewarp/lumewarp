@@ -133,7 +133,7 @@ class CircuitBreaker(_message.Message):
     def __init__(self, failure_threshold: _Optional[int] = ..., open_ms: _Optional[int] = ...) -> None: ...
 
 class Model(_message.Message):
-    __slots__ = ("name", "upstream", "upstream_model", "price", "max_output_tokens", "default_body_json", "reasoning_effort")
+    __slots__ = ("name", "upstream", "upstream_model", "price", "max_output_tokens", "default_body_json", "reasoning_effort", "chat_check")
     NAME_FIELD_NUMBER: _ClassVar[int]
     UPSTREAM_FIELD_NUMBER: _ClassVar[int]
     UPSTREAM_MODEL_FIELD_NUMBER: _ClassVar[int]
@@ -141,6 +141,7 @@ class Model(_message.Message):
     MAX_OUTPUT_TOKENS_FIELD_NUMBER: _ClassVar[int]
     DEFAULT_BODY_JSON_FIELD_NUMBER: _ClassVar[int]
     REASONING_EFFORT_FIELD_NUMBER: _ClassVar[int]
+    CHAT_CHECK_FIELD_NUMBER: _ClassVar[int]
     name: str
     upstream: str
     upstream_model: str
@@ -148,7 +149,20 @@ class Model(_message.Message):
     max_output_tokens: int
     default_body_json: str
     reasoning_effort: ReasoningEffort
-    def __init__(self, name: _Optional[str] = ..., upstream: _Optional[str] = ..., upstream_model: _Optional[str] = ..., price: _Optional[_Union[Price, _Mapping]] = ..., max_output_tokens: _Optional[int] = ..., default_body_json: _Optional[str] = ..., reasoning_effort: _Optional[_Union[ReasoningEffort, _Mapping]] = ...) -> None: ...
+    chat_check: ChatCheck
+    def __init__(self, name: _Optional[str] = ..., upstream: _Optional[str] = ..., upstream_model: _Optional[str] = ..., price: _Optional[_Union[Price, _Mapping]] = ..., max_output_tokens: _Optional[int] = ..., default_body_json: _Optional[str] = ..., reasoning_effort: _Optional[_Union[ReasoningEffort, _Mapping]] = ..., chat_check: _Optional[_Union[ChatCheck, _Mapping]] = ...) -> None: ...
+
+class ChatCheck(_message.Message):
+    __slots__ = ("interval_ms", "timeout_ms", "unhealthy_threshold", "healthy_threshold")
+    INTERVAL_MS_FIELD_NUMBER: _ClassVar[int]
+    TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
+    UNHEALTHY_THRESHOLD_FIELD_NUMBER: _ClassVar[int]
+    HEALTHY_THRESHOLD_FIELD_NUMBER: _ClassVar[int]
+    interval_ms: int
+    timeout_ms: int
+    unhealthy_threshold: int
+    healthy_threshold: int
+    def __init__(self, interval_ms: _Optional[int] = ..., timeout_ms: _Optional[int] = ..., unhealthy_threshold: _Optional[int] = ..., healthy_threshold: _Optional[int] = ...) -> None: ...
 
 class ReasoningEffort(_message.Message):
     __slots__ = ("mode", "fragments_json", "default_level")

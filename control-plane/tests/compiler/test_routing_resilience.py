@@ -79,6 +79,7 @@ def test_supported_capabilities_match_gateway() -> None:
         "model_limits",
         "default_body",
         "reasoning_effort",
+        "model_chat_check",
         "strategy:weighted",
         "strategy:least_in_flight",
         "strategy:lowest_latency",
@@ -307,6 +308,8 @@ async def test_all_capabilities_together(factory) -> None:
         a.max_output_tokens = 100
         a.default_body = {"top_k": 20}
         a.reasoning_mode = "strip"
+        a.chat_check_interval_ms = 30000
+        a.chat_check_timeout_ms = 5000
     snap = (await compile_(factory)).snapshot
     assert list(snap.required_capabilities) == sorted(
         SUPPORTED_CAPABILITIES - {"strategy:weighted", "strategy:least_in_flight", "rotation_grace"}
@@ -344,6 +347,12 @@ def _split_router(snap: pb.Snapshot, *splits: pb.TrafficSplit) -> pb.Router:
 
 
 INVALID = {
+    "chat check interval": lambda s: s.models[0].chat_check.CopyFrom(
+        pb.ChatCheck(interval_ms=999, timeout_ms=100)
+    ),
+    "chat check timeout": lambda s: s.models[0].chat_check.CopyFrom(
+        pb.ChatCheck(interval_ms=2000, timeout_ms=2000)
+    ),
     "health interval": lambda s: s.upstreams[0].health_check.CopyFrom(
         pb.HealthCheck(interval_ms=999, timeout_ms=100)
     ),
@@ -459,6 +468,7 @@ def test_validate_accepts_full_routing_snapshot() -> None:
             default_level="none",
         )
     )
+    snap.models[0].chat_check.CopyFrom(pb.ChatCheck(interval_ms=1000, timeout_ms=999))
     _check(snap)
     assert list(snap.required_capabilities) == sorted(
         SUPPORTED_CAPABILITIES

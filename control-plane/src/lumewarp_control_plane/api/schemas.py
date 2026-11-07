@@ -691,6 +691,33 @@ class ReasoningOut(ReadModel):
     default_level: str | None
 
 
+class ChatCheckIn(ApiModel):
+    interval_ms: int = Field(ge=1000, le=INT32_MAX)
+    timeout_ms: int = Field(ge=1, le=INT32_MAX)
+    unhealthy_threshold: int | None = Field(
+        default=None, ge=1, le=1000, description="Consecutive failures; null = 3."
+    )
+    healthy_threshold: int | None = Field(
+        default=None, ge=1, le=1000, description="Consecutive successes; null = 1."
+    )
+
+    @model_validator(mode="after")
+    def _timeout_below_interval(self) -> ChatCheckIn:
+        if self.timeout_ms >= self.interval_ms:
+            raise ValueError("timeout_ms must be below interval_ms")
+        return self
+
+
+class ChatCheckOut(ReadModel):
+    interval_ms: int
+    timeout_ms: int
+    unhealthy_threshold: int | None
+    healthy_threshold: int | None
+
+
+HealthState = Literal["healthy", "unhealthy", "unknown", "not_probed"]
+
+
 class _ModelSettings(ApiModel):
     max_input_tokens: int | None = Field(
         default=None, ge=1, le=INT32_MAX, description="Context window; informational."
@@ -709,6 +736,14 @@ class _ModelSettings(ApiModel):
         ),
     )
     reasoning: ReasoningIn | None = Field(default=None, description="null = passthrough.")
+    chat_check: ChatCheckIn | None = Field(
+        default=None,
+        description=(
+            "Periodic '1 + 1 = ?' chat completion sent by every gateway through this model;"
+            " while it fails the model gets no traffic. null = not probed (Test now still"
+            " works). Every probe uses tokens."
+        ),
+    )
 
     @field_validator("default_body")
     @classmethod
@@ -759,6 +794,14 @@ class ModelOut(ReadModel):
     max_output_tokens: int | None
     default_body: dict[str, Any] | None
     reasoning: ReasoningOut
+    chat_check: ChatCheckOut | None
+    health: HealthState = Field(
+        default="not_probed",
+        description=(
+            "Chat check as connected gateways report it: unhealthy if any says so, unknown"
+            " when none has reported it yet."
+        ),
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -781,6 +824,14 @@ class ModelOut(ReadModel):
                 mode=data.reasoning_mode,
                 fragments=data.reasoning_fragments,
                 default_level=data.reasoning_default_level,
+            ),
+            "chat_check": None
+            if data.chat_check_interval_ms is None
+            else ChatCheckOut(
+                interval_ms=data.chat_check_interval_ms,
+                timeout_ms=data.chat_check_timeout_ms,
+                unhealthy_threshold=data.chat_check_unhealthy_threshold,
+                healthy_threshold=data.chat_check_healthy_threshold,
             ),
             "created_at": data.created_at,
             "updated_at": data.updated_at,
@@ -1382,7 +1433,6 @@ class ProbeOut(ReadModel):
 class UpstreamTestIn(ApiModel):
     """The upstream form as it stands, saved or not."""
 
-    kind: UpstreamKind
     base_url: str = Field(min_length=1)
     api_key: SecretStr | None = Field(
         default=None,
@@ -1427,6 +1477,27 @@ class UpstreamTestIn(ApiModel):
         if self.api_key is not None and self.api_key_ref is not None:
             raise ValueError("set api_key or api_key_ref, not both")
         return self
+
+
+class ModelTestIn(ApiModel):
+    """The model form as it stands, saved or not."""
+
+    upstream_id: uuid.UUID
+    upstream_model: str = Field(min_length=1, max_length=400)
+    default_body: dict[str, Any] | None = None
+
+    @field_validator("default_body")
+    @classmethod
+    def _check_default_body(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return _body_object(value, "default_body") or None
+
+
+class ModelTestOut(ReadModel):
+    credential: Literal["stored", "env", "env_unset", "none"]
+    probe: ProbeOut
+    reply: str | None = Field(
+        description="The start of the model's answer (at most 200 characters), on success."
+    )
 
 
 class UpstreamTestOut(ReadModel):

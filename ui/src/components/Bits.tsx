@@ -40,6 +40,19 @@ export const fmtUsd = (nano: number | null | undefined, empty = "—") =>
 /** Counts and token totals, in the reader's locale. The table and the charts share it. */
 export const fmtNumber = (value: number) => value.toLocaleString();
 
+/**
+ * A token length as k/M: binary steps when the number is a multiple of 1024 (32768 → 32k,
+ * 1048576 → 1M), decimal otherwise (128000 → 128k), at most one decimal place.
+ */
+export function fmtTokens(n: number | null): string {
+  if (n === null) return "—";
+  const step = n % 1024 === 0 ? 1024 : 1000;
+  const short = (x: number) => String(Math.round(x * 10) / 10);
+  if (n >= step * step) return `${short(n / (step * step))}M`;
+  if (n >= step) return `${short(n / step)}k`;
+  return String(n);
+}
+
 /** Shows a secret exactly once, with copy. Parent decides when to drop it. */
 export function SecretOnce({ secret }: { secret: string }) {
   const [copied, setCopied] = useState(false);

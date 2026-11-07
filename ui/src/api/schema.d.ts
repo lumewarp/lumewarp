@@ -463,6 +463,28 @@ export interface paths {
         patch: operations["updateModel"];
         trace?: never;
     };
+    "/api/v1/models/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Model
+         * @description Send one "1 + 1 = ?" chat completion now, from the control plane straight to the
+         *     upstream, as the form stands (saved or not), with the upstream's credential and the
+         *     default body. Reflects the control plane's network, not each gateway's.
+         */
+        post: operations["testModel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/aliases": {
         parameters: {
             query?: never;
@@ -1072,6 +1094,34 @@ export interface components {
          * @enum {string}
          */
         CatalogKind: "model" | "alias" | "router";
+        /** ChatCheckIn */
+        ChatCheckIn: {
+            /** Interval Ms */
+            interval_ms: number;
+            /** Timeout Ms */
+            timeout_ms: number;
+            /**
+             * Unhealthy Threshold
+             * @description Consecutive failures; null = 3.
+             */
+            unhealthy_threshold?: number | null;
+            /**
+             * Healthy Threshold
+             * @description Consecutive successes; null = 1.
+             */
+            healthy_threshold?: number | null;
+        };
+        /** ChatCheckOut */
+        ChatCheckOut: {
+            /** Interval Ms */
+            interval_ms: number;
+            /** Timeout Ms */
+            timeout_ms: number;
+            /** Unhealthy Threshold */
+            unhealthy_threshold: number | null;
+            /** Healthy Threshold */
+            healthy_threshold: number | null;
+        };
         /** CircuitBreakerIn */
         CircuitBreakerIn: {
             /**
@@ -1667,6 +1717,8 @@ export interface components {
             } | null;
             /** @description null = passthrough. */
             reasoning?: components["schemas"]["ReasoningIn"] | null;
+            /** @description Periodic '1 + 1 = ?' chat completion sent by every gateway through this model; while it fails the model gets no traffic. null = not probed (Test now still works). Every probe uses tokens. */
+            chat_check?: components["schemas"]["ChatCheckIn"] | null;
             /** Name */
             name: string;
             /**
@@ -1710,6 +1762,14 @@ export interface components {
                 [key: string]: unknown;
             } | null;
             reasoning: components["schemas"]["ReasoningOut"];
+            chat_check: components["schemas"]["ChatCheckOut"] | null;
+            /**
+             * Health
+             * @description Chat check as connected gateways report it: unhealthy if any says so, unknown when none has reported it yet.
+             * @default not_probed
+             * @enum {string}
+             */
+            health: "healthy" | "unhealthy" | "unknown" | "not_probed";
             /**
              * Created At
              * Format: date-time
@@ -1720,6 +1780,37 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+        };
+        /**
+         * ModelTestIn
+         * @description The model form as it stands, saved or not.
+         */
+        ModelTestIn: {
+            /**
+             * Upstream Id
+             * Format: uuid
+             */
+            upstream_id: string;
+            /** Upstream Model */
+            upstream_model: string;
+            /** Default Body */
+            default_body?: {
+                [key: string]: unknown;
+            } | null;
+        };
+        /** ModelTestOut */
+        ModelTestOut: {
+            /**
+             * Credential
+             * @enum {string}
+             */
+            credential: "stored" | "env" | "env_unset" | "none";
+            probe: components["schemas"]["ProbeOut"];
+            /**
+             * Reply
+             * @description The start of the model's answer (at most 200 characters), on success.
+             */
+            reply: string | null;
         };
         /**
          * ModelUpdate
@@ -1746,6 +1837,8 @@ export interface components {
             } | null;
             /** @description null = passthrough. */
             reasoning?: components["schemas"]["ReasoningIn"] | null;
+            /** @description Periodic '1 + 1 = ?' chat completion sent by every gateway through this model; while it fails the model gets no traffic. null = not probed (Test now still works). Every probe uses tokens. */
+            chat_check?: components["schemas"]["ChatCheckIn"] | null;
             /** Name */
             name?: string | null;
             /** Upstream Id */
@@ -2792,7 +2885,6 @@ export interface components {
          * @description The upstream form as it stands, saved or not.
          */
         UpstreamTestIn: {
-            kind: components["schemas"]["UpstreamKind"];
             /** Base Url */
             base_url: string;
             /**
@@ -5954,6 +6046,75 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ModelOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    testModel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelTestIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelTestOut"];
                 };
             };
             /** @description Missing or invalid credentials */

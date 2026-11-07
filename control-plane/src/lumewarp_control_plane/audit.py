@@ -132,6 +132,12 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
             "max_output_tokens": None,
             "default_body_changed": None,
             "reasoning_changed": None,
+            "chat_check": {
+                "interval_ms": None,
+                "timeout_ms": None,
+                "unhealthy_threshold": None,
+                "healthy_threshold": None,
+            },
         },
     },
     "org.admin.assign": {"org_id": None, "user_id": None},

@@ -22,24 +22,26 @@ NACK_CODE_UNSUPPORTED_FEATURE: NackCode
 NACK_CODE_PERSIST_FAILED: NackCode
 
 class GatewayMessage(_message.Message):
-    __slots__ = ("hello", "ack", "nack", "upstream_health")
+    __slots__ = ("hello", "ack", "nack", "health")
     HELLO_FIELD_NUMBER: _ClassVar[int]
     ACK_FIELD_NUMBER: _ClassVar[int]
     NACK_FIELD_NUMBER: _ClassVar[int]
-    UPSTREAM_HEALTH_FIELD_NUMBER: _ClassVar[int]
+    HEALTH_FIELD_NUMBER: _ClassVar[int]
     hello: Hello
     ack: Ack
     nack: Nack
-    upstream_health: UpstreamHealthReport
-    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., ack: _Optional[_Union[Ack, _Mapping]] = ..., nack: _Optional[_Union[Nack, _Mapping]] = ..., upstream_health: _Optional[_Union[UpstreamHealthReport, _Mapping]] = ...) -> None: ...
+    health: HealthReport
+    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., ack: _Optional[_Union[Ack, _Mapping]] = ..., nack: _Optional[_Union[Nack, _Mapping]] = ..., health: _Optional[_Union[HealthReport, _Mapping]] = ...) -> None: ...
 
-class UpstreamHealthReport(_message.Message):
-    __slots__ = ("upstreams",)
+class HealthReport(_message.Message):
+    __slots__ = ("upstreams", "models")
     UPSTREAMS_FIELD_NUMBER: _ClassVar[int]
-    upstreams: _containers.RepeatedCompositeFieldContainer[UpstreamHealth]
-    def __init__(self, upstreams: _Optional[_Iterable[_Union[UpstreamHealth, _Mapping]]] = ...) -> None: ...
+    MODELS_FIELD_NUMBER: _ClassVar[int]
+    upstreams: _containers.RepeatedCompositeFieldContainer[TargetHealth]
+    models: _containers.RepeatedCompositeFieldContainer[TargetHealth]
+    def __init__(self, upstreams: _Optional[_Iterable[_Union[TargetHealth, _Mapping]]] = ..., models: _Optional[_Iterable[_Union[TargetHealth, _Mapping]]] = ...) -> None: ...
 
-class UpstreamHealth(_message.Message):
+class TargetHealth(_message.Message):
     __slots__ = ("name", "healthy")
     NAME_FIELD_NUMBER: _ClassVar[int]
     HEALTHY_FIELD_NUMBER: _ClassVar[int]
