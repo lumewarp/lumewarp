@@ -1,8 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { streamText, type ModelMessage } from "ai";
-import { ChevronDownIcon, ChevronRightIcon, SendIcon, SquareIcon, Trash2Icon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowDownIcon, ArrowUpIcon, BrainIcon, ChevronDownIcon, ChevronRightIcon, CircleHelpIcon, ClockIcon, GaugeIcon, HashIcon, SendIcon, SigmaIcon, SquareIcon, TimerIcon, Trash2Icon, type LucideIcon } from "lucide-react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import { api } from "../api";
 import { playgroundProvider, type PlaygroundKey, type ResponseInfo } from "../api/playground";
@@ -14,7 +16,7 @@ import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/ui/empty";
-import { HelpTip } from "../components/ui/help-tip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
 import { Textarea } from "../components/ui/textarea";
 import { useMe } from "../hooks";
 import type { Values } from "../lib/schema";
@@ -31,6 +33,11 @@ interface Turn {
   /** Time to the first streamed token, and output tokens per second after it (needs reported usage). */
   ttftMs?: number;
   tps?: number;
+  /** How long the model reasoned: first reasoning token to first answer token (or the end). */
+  reasoningMs?: number;
+  /** First token to the end, and send to the end. */
+  generationMs?: number;
+  totalMs?: number;
   streaming?: boolean;
   /** A user turn whose reply failed: shown, but not sent again. */
   skip?: boolean;
@@ -147,11 +154,24 @@ function Chat({ keys }: { keys: PlaygroundKey[] }) {
     let thinking = "";
     const started = performance.now();
     let first: number | undefined;
+    let reasoningStart: number | undefined;
+    let reasoningDone = false;
+    const endReasoning = () => {
+      if (reasoningStart === undefined || reasoningDone) return;
+      reasoningDone = true;
+      patch(reply.id, { reasoningMs: performance.now() - reasoningStart });
+    };
     let output: number | undefined;
     const timing = () => {
-      if (first === undefined) return {};
-      const seconds = (performance.now() - first) / 1000;
-      return { ttftMs: first - started, tps: output !== undefined && seconds > 0 ? output / seconds : undefined };
+      const end = performance.now();
+      if (first === undefined) return { totalMs: end - started };
+      const seconds = (end - first) / 1000;
+      return {
+        ttftMs: first - started,
+        generationMs: end - first,
+        totalMs: end - started,
+        tps: output !== undefined && seconds > 0 ? output / seconds : undefined,
+      };
     };
     try {
       const result = streamText({
@@ -164,6 +184,8 @@ function Chat({ keys }: { keys: PlaygroundKey[] }) {
         if ((part.type === "text-delta" || part.type === "reasoning-delta") && part.text && first === undefined) {
           first = performance.now();
         }
+        if (part.type === "reasoning-delta" && part.text && reasoningStart === undefined) reasoningStart = performance.now();
+        if (part.type === "text-delta" && part.text) endReasoning();
         if (part.type === "text-delta") {
           // Models often open with blank lines or spaces; they are not part of the answer.
           answer = (answer + part.text).trimStart();
@@ -181,8 +203,10 @@ function Chat({ keys }: { keys: PlaygroundKey[] }) {
           throw part.error;
         }
       }
+      endReasoning();
       patch(reply.id, { streaming: false, requestId: seen.requestId, ...timing() });
     } catch (err) {
+      endReasoning();
       if (controller.signal.aborted) {
         patch(reply.id, { streaming: false, requestId: seen.requestId, ...timing() });
       } else {
@@ -275,25 +299,26 @@ function Message({ turn }: { turn: Turn }) {
     );
   }
   const usage = turn.usage;
-  const details = [
-    turn.requestId && `Request id ${turn.requestId}`,
-    usage && `${usage.input ?? "?"} in · ${usage.output ?? "?"} out${usage.total !== undefined ? ` · ${usage.total} total` : ""} tokens`,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  const thinking = turn.streaming && turn.reasoningMs === undefined;
   return (
     <div className="flex max-w-[85%] min-w-0 flex-col gap-1.5" data-testid="turn-assistant">
       {turn.reasoning && (
-        <div className="text-xs text-muted-foreground">
-          <Button type="button" variant="ghost" size="sm" className="-ml-2 h-6 px-2 text-xs" aria-expanded={open} onClick={() => setOpen(!open)}>
-            {open ? <ChevronDownIcon aria-hidden="true" /> : <ChevronRightIcon aria-hidden="true" />} Reasoning
+        <div className="overflow-hidden rounded-lg border border-dashed text-xs text-muted-foreground">
+          <Button type="button" variant="ghost" size="sm" className="h-7 w-full justify-start rounded-none px-2.5 text-xs font-normal text-muted-foreground" aria-expanded={open} onClick={() => setOpen(!open)}>
+            <BrainIcon aria-hidden="true" className={thinking ? "animate-pulse" : undefined} />
+            {thinking ? "Thinking…" : `Thought for ${formatSeconds(turn.reasoningMs)}`}
+            {open ? <ChevronDownIcon aria-hidden="true" className="ml-auto" /> : <ChevronRightIcon aria-hidden="true" className="ml-auto" />}
           </Button>
-          {open && <p className="m-0 border-l-2 pl-3 whitespace-pre-wrap" data-testid="reasoning-text">{turn.reasoning}</p>}
+          {open && (
+            <p className="m-0 max-h-64 overflow-y-auto border-t px-3 py-2 leading-relaxed whitespace-pre-wrap" data-testid="reasoning-text">
+              {turn.reasoning}
+            </p>
+          )}
         </div>
       )}
       {(turn.text || turn.streaming) && (
-        <div className="rounded-lg bg-muted px-3 py-2 text-sm whitespace-pre-wrap" data-testid="assistant-text">
-          {turn.text || "…"}
+        <div className="rounded-lg bg-muted px-3 py-2 text-sm" data-testid="assistant-text">
+          {turn.text ? <Markdown text={turn.text} /> : "…"}
         </div>
       )}
       {turn.error && (
@@ -302,12 +327,76 @@ function Message({ turn }: { turn: Turn }) {
         </Alert>
       )}
       {!turn.streaming && (turn.ttftMs !== undefined || turn.requestId || usage) && (
-        <p className="m-0 flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground" data-testid="turn-meta">
-          {turn.ttftMs !== undefined && <span>TTFT {Math.round(turn.ttftMs)} ms</span>}
-          {turn.tps !== undefined && <span>{turn.tps.toFixed(1)} tok/s</span>}
-          {details && <HelpTip text={details} id={`turn-${turn.id}-details`} className="-ml-2" />}
-        </p>
+        <div className="flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground" data-testid="turn-meta">
+          {turn.ttftMs !== undefined && (
+            <span className="inline-flex items-center gap-1">
+              <TimerIcon className="size-3.5" aria-hidden="true" />
+              TTFT {Math.round(turn.ttftMs)} ms
+            </span>
+          )}
+          {turn.tps !== undefined && (
+            <span className="inline-flex items-center gap-1">
+              <GaugeIcon className="size-3.5" aria-hidden="true" />
+              {turn.tps.toFixed(1)} tok/s
+            </span>
+          )}
+          {(turn.requestId || usage || turn.totalMs !== undefined) && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button type="button" variant="ghost" size="icon" aria-label="Response details" className="-ml-2 size-5 rounded-full text-muted-foreground hover:text-foreground">
+                  <CircleHelpIcon className="size-3.5" aria-hidden="true" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-none">
+                <Details turn={turn} />
+              </TooltipContent>
+            </Tooltip>
+          )}
+          <span className="sr-only">
+            <Details turn={turn} />
+          </span>
+        </div>
       )}
+    </div>
+  );
+}
+
+function formatSeconds(ms: number | undefined) {
+  return ms === undefined ? "a moment" : `${(ms / 1000).toFixed(1)}s`;
+}
+
+const ms = (v: number) => (v < 1000 ? `${Math.round(v)} ms` : `${(v / 1000).toFixed(2)} s`);
+
+function Details({ turn }: { turn: Turn }) {
+  const { requestId, usage } = turn;
+  const rows: [LucideIcon, string, ReactNode][] = [];
+  if (turn.ttftMs !== undefined) rows.push([TimerIcon, "Time to first token", ms(turn.ttftMs)]);
+  if (turn.generationMs !== undefined) rows.push([GaugeIcon, "Generation time", ms(turn.generationMs)]);
+  if (turn.totalMs !== undefined) rows.push([ClockIcon, "Total time", ms(turn.totalMs)]);
+  if (usage) {
+    rows.push([ArrowUpIcon, "Input tokens", usage.input ?? "?"]);
+    rows.push([ArrowDownIcon, "Output tokens", usage.output ?? "?"]);
+    if (usage.total !== undefined) rows.push([SigmaIcon, "Total tokens", usage.total]);
+  }
+  if (requestId) rows.push([HashIcon, "Request id", <code className="whitespace-nowrap">{requestId}</code>]);
+  return (
+    <span className="grid grid-cols-[auto_auto_auto] items-center gap-x-2 gap-y-1">
+      {rows.map(([Icon, label, value]) => (
+        <Fragment key={label}>
+          <Icon className="size-3.5 opacity-70" aria-hidden="true" />
+          <span>{label}</span>
+          <span className="text-right whitespace-nowrap tabular-nums">{value}</span>
+        </Fragment>
+      ))}
+    </span>
+  );
+}
+
+/** Model output as GitHub-flavoured Markdown; raw HTML in it is shown as text, never rendered. */
+function Markdown({ text }: { text: string }) {
+  return (
+    <div className="prose prose-sm max-w-none dark:prose-invert prose-pre:bg-background prose-pre:text-foreground prose-code:before:content-none prose-code:after:content-none [&>:first-child]:mt-0 [&>:last-child]:mb-0">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
     </div>
   );
 }

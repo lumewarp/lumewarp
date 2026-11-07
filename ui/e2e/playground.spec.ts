@@ -45,7 +45,7 @@ test("sends the act-as and CSRF headers, streams text and shows the request id a
         delta({ reasoning_content: "thinking hard" }),
         delta({ content: "\n\n " }),
         delta({ content: "Hello " }),
-        delta({ content: "world" }),
+        delta({ content: "**world**" }),
         {
           id: "c1",
           object: "chat.completion.chunk",
@@ -67,12 +67,13 @@ test("sends the act-as and CSRF headers, streams text and shows the request id a
   await page.getByLabel("Message").press("Enter");
 
   await expect(page.getByTestId("assistant-text")).toHaveText("Hello world");
+  await expect(page.getByTestId("assistant-text").locator("strong")).toHaveText("world");
   await expect(page.getByTestId("turn-meta")).toContainText(/TTFT \d+ ms/);
   await expect(page.getByTestId("turn-meta")).toContainText("req-123");
-  await expect(page.getByTestId("turn-meta")).toContainText("7 in · 3 out · 10 total tokens");
+  await expect(page.getByTestId("turn-meta")).toContainText("Output tokens3");
   // Reasoning is collapsed until opened.
   await expect(page.getByTestId("reasoning-text")).toHaveCount(0);
-  await page.getByRole("button", { name: "Reasoning" }).click();
+  await page.getByRole("button", { name: /Thought for/ }).click();
   await expect(page.getByTestId("reasoning-text")).toHaveText("thinking hard");
 
   expect(seen?.headers["x-lumewarp-act-as"]).toBe(KEY.id);
