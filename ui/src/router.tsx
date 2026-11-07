@@ -30,6 +30,7 @@ const AuditPage = lazy(() => import("./pages/Audit").then((module) => ({ default
 const TeamsPage = lazy(() => import("./pages/Teams").then((module) => ({ default: module.Teams })));
 const OrgsPage = lazy(() => import("./pages/Orgs").then((module) => ({ default: module.Orgs })));
 const OrgDetailPage = lazy(() => import("./pages/Orgs").then((module) => ({ default: module.OrgDetail })));
+const PlaygroundPage = lazy(() => import("./pages/Playground").then((module) => ({ default: module.Playground })));
 const SettingsPage = lazy(() => import("./pages/Settings").then((module) => ({ default: module.Settings })));
 const TeamDetailPage = lazy(() => import("./pages/TeamDetail").then((module) => ({ default: module.TeamDetail })));
 
@@ -157,6 +158,7 @@ const routeTree = rootRoute.addChildren([
   appRoute.addChildren([
     page("/", Home),
     page("/my-keys", MyKeys),
+    page("/playground", () => <PlaygroundPage />),
     page("/orgs", () => <OrgsPage />, "orgAdmin"),
     orgDetailRoute,
     page("/teams", () => <TeamsPage />, "teamAdmin"),

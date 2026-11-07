@@ -10,6 +10,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  MessageSquare,
   Monitor,
   Moon,
   Radio,
@@ -47,7 +48,7 @@ import {
   useSidebar,
 } from "./ui/sidebar";
 
-type NavItem = { to: string; label: string; icon: LucideIcon; access?: Access };
+type NavItem = { to: string; label: string; icon: LucideIcon; access?: Access; /** Hidden in the emergency session, which owns no keys. */ noBreakGlass?: boolean };
 
 // My keys is first and for everyone. Admin pages are shown to an installation admin, or to a team admin
 // when the page is about a team they can administer.
@@ -56,6 +57,7 @@ const NAV: { group: string | null; items: NavItem[] }[] = [
     group: null,
     items: [
       { to: "/my-keys", label: "My keys", icon: KeyRound },
+      { to: "/playground", label: "Playground", icon: MessageSquare, noBreakGlass: true },
       { to: "/", label: "Overview", icon: LayoutDashboard, access: "teamAdmin" },
     ],
   },
@@ -114,7 +116,7 @@ function NavToggle() {
   );
 }
 
-function NavSidebar({ installationAdmin, orgAdmin, teamAdmin }: { installationAdmin: boolean; orgAdmin: boolean; teamAdmin: boolean }) {
+function NavSidebar({ installationAdmin, orgAdmin, teamAdmin, breakGlass }: { installationAdmin: boolean; orgAdmin: boolean; teamAdmin: boolean; breakGlass: boolean }) {
   const { setOpenMobile } = useSidebar();
   const perms = { isInstallationAdmin: installationAdmin, isOrgAdmin: orgAdmin, isTeamAdmin: teamAdmin };
   return (
@@ -128,7 +130,7 @@ function NavSidebar({ installationAdmin, orgAdmin, teamAdmin }: { installationAd
       <SidebarContent>
         <nav aria-label="Main" className="flex min-h-0 flex-col gap-1 overflow-y-auto">
           {NAV.map((section) => {
-            const items = section.items.filter((n) => hasAccess(perms, n.access ?? "member"));
+            const items = section.items.filter((n) => hasAccess(perms, n.access ?? "member") && !(breakGlass && n.noBreakGlass));
             if (!items.length) return null;
             return (
               <SidebarGroup key={section.group ?? "top"} role="group" aria-label={section.group ?? undefined}>
@@ -193,7 +195,7 @@ export function Layout() {
       >
         Skip to content
       </a>
-      <NavSidebar installationAdmin={perms.isInstallationAdmin} orgAdmin={perms.isOrgAdmin} teamAdmin={perms.isTeamAdmin} />
+      <NavSidebar installationAdmin={perms.isInstallationAdmin} orgAdmin={perms.isOrgAdmin} teamAdmin={perms.isTeamAdmin} breakGlass={me.data?.kind === "break_glass"} />
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-40 flex items-center gap-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur md:px-6">
           <NavToggle />

@@ -142,6 +142,10 @@ struct ModelLabels {
     model: String,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct PlaygroundLabels {
+    result: &'static str,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct RejectionLabels {
     model: String,
     reason: &'static str,
@@ -294,6 +298,7 @@ pub struct Metrics {
     latency_ewma: Family<ModelLabels, Gauge<f64, AtomicU64>>,
     rewrite_compressed: Family<ModelLabels, Counter>,
     rejected: Family<RejectionLabels, Counter>,
+    pub playground: [Counter; 2],
 }
 
 impl Metrics {
@@ -334,6 +339,17 @@ impl Metrics {
         let vllm_scrape_failures = Family::default();
         let latency_ewma = Family::default();
         let rewrite_compressed = Family::default();
+        let playground_family = Family::<PlaygroundLabels, Counter>::default();
+        let playground = ["ok", "rejected"].map(|result| {
+            playground_family
+                .get_or_create(&PlaygroundLabels { result })
+                .clone()
+        });
+        registry.register(
+            "lumewarp_playground_requests",
+            "Playground token authentication attempts by result",
+            playground_family,
+        );
         let rejected = Family::default();
         registry.register(
             "lumewarp_requests_rejected",
@@ -531,6 +547,7 @@ impl Metrics {
             latency_ewma,
             rewrite_compressed,
             rejected,
+            playground,
         }
     }
 

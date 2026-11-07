@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use hyper::{header, HeaderMap, Response, StatusCode};
 use lumewarp_config::AuthMode;
 use lumewarp_proto::config::v1::KeyStatus;
@@ -132,11 +133,60 @@ pub fn authenticate(
         return Ok(Caller::Anonymous);
     }
     let key = bearer(headers).ok_or(AuthError::InvalidApiKey)?;
+    if key.starts_with("lwpg.") {
+        let result = authenticate_playground(routing_table, key);
+        routing_table.runtime.metrics.playground[usize::from(result.is_err())].inc();
+        return result;
+    }
     let hash: [u8; 32] = Sha256::digest(key.as_bytes()).into();
     let key = routing_table
         .keys
         .get(&hash)
         .ok_or(AuthError::InvalidApiKey)?;
+    authenticate_key(key)
+}
+
+/// Verify the signed delegation before resolving a key, so forged tokens never
+/// produce attributed rejection usage. `ring::hmac::verify` compares in constant time.
+fn authenticate_playground(table: &RoutingTable, token: &str) -> Result<Caller, AuthRejection> {
+    let invalid = AuthError::InvalidApiKey;
+    let signing_key = table.playground_key.as_ref().ok_or(invalid)?;
+    let (message, mac) = token.rsplit_once('.').ok_or(invalid)?;
+    let rest = message.strip_prefix("lwpg.").ok_or(invalid)?;
+    let (id, expiry) = rest.split_once('.').ok_or(invalid)?;
+    if id.len() != 36
+        || !id.bytes().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                b == b'-'
+            } else {
+                b.is_ascii_digit() || (b'a'..=b'f').contains(&b)
+            }
+        })
+        || expiry.is_empty()
+        || !expiry.bytes().all(|b| b.is_ascii_digit())
+        || (expiry.len() > 1 && expiry.starts_with('0'))
+        || mac.len() != 43
+    {
+        return Err(invalid.into());
+    }
+    let expires_at: i64 = expiry.parse().map_err(|_| invalid)?;
+    let now = clock::unix_ms();
+    // Bound delegated credential lifetime even if the issuer signs a bad expiry.
+    if expires_at <= now || expires_at > now.saturating_add(300_000) {
+        return Err(invalid.into());
+    }
+    let mut signature = [0u8; 32];
+    let len = URL_SAFE_NO_PAD
+        .decode_slice(mac, &mut signature)
+        .map_err(|_| invalid)?;
+    if len != 32 || ring::hmac::verify(signing_key, message.as_bytes(), &signature).is_err() {
+        return Err(invalid.into());
+    }
+    authenticate_key(table.keys_by_id.get(id).ok_or(invalid)?)
+}
+
+#[inline]
+fn authenticate_key(key: &Arc<KeyContext>) -> Result<Caller, AuthRejection> {
     let reject = |error| AuthRejection {
         error,
         key: Some(key.clone()),
@@ -186,6 +236,114 @@ mod tests {
 
     fn routing_table(snapshot: &pb::Snapshot, mode: AuthMode) -> RoutingTable {
         RoutingTable::compile(snapshot, mode, &Runtime::new()).unwrap()
+    }
+
+    const PLAYGROUND_SECRET: &str = "test-encryption-key-0123456789abcdef";
+    const PLAYGROUND_ID: &str = "00000000-0000-0000-0000-000000000001";
+    const PLAYGROUND_VECTOR: &str = "lwpg.00000000-0000-0000-0000-000000000001.4102444800000.9q0Juo2V6Fupxe8pQezrHCPUq0zIgfqz-fmT_azFrrE";
+
+    fn signed(id: &str, expiry: i64) -> String {
+        let message = format!("lwpg.{id}.{expiry}");
+        let key = crate::sealed::playground_key(PLAYGROUND_SECRET);
+        let mac = ring::hmac::sign(&key, message.as_bytes());
+        format!("{message}.{}", URL_SAFE_NO_PAD.encode(mac.as_ref()))
+    }
+
+    fn playground_table() -> RoutingTable {
+        let mut s = base();
+        s.api_keys[0].key_id = PLAYGROUND_ID.into();
+        let mut table = routing_table(&s, AuthMode::RequireKey);
+        table.playground_key = Some(crate::sealed::playground_key(PLAYGROUND_SECRET));
+        table
+    }
+
+    #[test]
+    fn playground_vector_and_normal_key() {
+        assert_eq!(signed(PLAYGROUND_ID, 4_102_444_800_000), PLAYGROUND_VECTOR);
+        let table = playground_table();
+        let token = signed(PLAYGROUND_ID, clock::unix_ms() + 60_000);
+        let caller = authenticate(&table, &headers(&format!("Bearer {token}"))).unwrap();
+        assert!(matches!(caller, Caller::Key(k) if &*k.key_id == PLAYGROUND_ID));
+        assert!(authenticate(&table, &headers("Bearer s1")).is_ok());
+        let encoded = table
+            .runtime
+            .metrics
+            .encode(&table.runtime.inflight)
+            .unwrap();
+        assert!(encoded.contains("lumewarp_playground_requests_total{result=\"ok\"} 1"));
+    }
+
+    #[test]
+    fn playground_rejects_invalid_tokens() {
+        let table = playground_table();
+        let expiry = clock::unix_ms() + 60_000;
+        let token = signed(PLAYGROUND_ID, expiry);
+        let mut tampered = token.clone();
+        let replacement = if tampered.ends_with('A') { "E" } else { "A" };
+        tampered.replace_range(tampered.len() - 1.., replacement);
+        for token in [
+            signed(PLAYGROUND_ID, 1),
+            signed("00000000-0000-0000-0000-000000000002", expiry),
+            tampered,
+            "lwpg.".into(),
+            "lwpg.id.exp.mac".into(),
+            format!("{token}.extra"),
+            token.replace(&expiry.to_string(), &format!("0{expiry}")),
+            token.replace(&expiry.to_string(), "9223372036854775808"),
+        ] {
+            let rejection = authenticate(&table, &headers(&format!("Bearer {token}")))
+                .err()
+                .unwrap();
+            assert_eq!(rejection.error, AuthError::InvalidApiKey);
+            assert!(rejection.key.is_none());
+        }
+        let mut table = table;
+        table.playground_key = None;
+        assert_eq!(
+            err(authenticate(&table, &headers(&format!("Bearer {token}")))),
+            Some(AuthError::InvalidApiKey)
+        );
+        assert!(authenticate(&table, &headers("Bearer s1")).is_ok());
+    }
+
+    #[test]
+    fn playground_rejects_expiry_more_than_five_minutes_ahead() {
+        let table = playground_table();
+        let now = clock::unix_ms();
+        for expiry in [now + 360_000, 4_102_444_800_000, i64::MAX] {
+            let token = signed(PLAYGROUND_ID, expiry);
+            let rejection = authenticate(&table, &headers(&format!("Bearer {token}")))
+                .err()
+                .unwrap();
+            assert_eq!(rejection.error, AuthError::InvalidApiKey);
+            assert!(rejection.key.is_none());
+        }
+        let token = signed(PLAYGROUND_ID, now + 300_000);
+        assert!(authenticate(&table, &headers(&format!("Bearer {token}"))).is_ok());
+    }
+
+    #[test]
+    fn playground_applies_current_key_lifecycle_and_budget() {
+        for (status, expiry, expected) in [
+            (KeyStatus::Revoked, 0, AuthError::InvalidApiKey),
+            (KeyStatus::Suspended, 0, AuthError::InvalidApiKey),
+            (KeyStatus::Active, 1, AuthError::InvalidApiKey),
+            (KeyStatus::BudgetExceeded, 0, AuthError::InsufficientQuota),
+            (KeyStatus::BudgetExceeded, 1, AuthError::InvalidApiKey),
+        ] {
+            let mut s = base();
+            s.api_keys[0].key_id = PLAYGROUND_ID.into();
+            s.api_keys[0].status = status as i32;
+            s.api_keys[0].expires_at_unix_ms = expiry;
+            let mut table = routing_table(&s, AuthMode::RequireKey);
+            table.playground_key = Some(crate::sealed::playground_key(PLAYGROUND_SECRET));
+            let token = signed(PLAYGROUND_ID, clock::unix_ms() + 60_000);
+            let rejection = authenticate(&table, &headers(&format!("Bearer {token}")))
+                .err()
+                .unwrap();
+            assert_eq!(rejection.error, expected);
+            assert_eq!(&*rejection.key.unwrap().key_id, PLAYGROUND_ID);
+        }
     }
 
     #[test]

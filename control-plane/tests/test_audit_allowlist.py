@@ -126,8 +126,9 @@ def test_nested_fields_are_filtered_too() -> None:
                 "base_url": "https://api.example/v1",
                 "api_key_ref": "OPENAI_API_KEY",
                 "secret": "sk-...",
+                "health_url": "http://h/health",
                 "health_check": {
-                    "url": "http://h/health",
+                    "interval_ms": 5000,
                     "headers": {"authorization": "Bearer x"},
                 },
             },
@@ -138,7 +139,8 @@ def test_nested_fields_are_filtered_too() -> None:
         "changes": {
             "base_url": "https://api.example/v1",
             "api_key_ref": "OPENAI_API_KEY",
-            "health_check": {"url": "http://h/health"},
+            "health_url": "http://h/health",
+            "health_check": {"interval_ms": 5000},
         },
     }
 

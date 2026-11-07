@@ -9,7 +9,7 @@
 //! Called while a snapshot is applied, never per request. Errors never carry key
 //! material.
 
-use ring::{aead, hkdf};
+use ring::{aead, hkdf, hmac};
 
 pub const ENV: &str = "LUMEWARP_ENCRYPTION_KEY";
 const VERSION: u8 = 1;
@@ -28,6 +28,17 @@ pub enum OpenError {
 /// The key from the environment, when set.
 pub fn env_secret() -> Option<String> {
     std::env::var(ENV).ok().filter(|s| !s.is_empty())
+}
+
+/// Domain-separated Playground signing key, derived only at config load.
+pub fn playground_key(secret: &str) -> hmac::Key {
+    let mut key = [0u8; 32];
+    hkdf::Salt::new(hkdf::HKDF_SHA256, &[])
+        .extract(secret.as_bytes())
+        .expand(&[b"lumewarp-playground-v1"], hmac::HMAC_SHA256)
+        .and_then(|okm| okm.fill(&mut key))
+        .expect("32-byte HKDF output");
+    hmac::Key::new(hmac::HMAC_SHA256, &key)
 }
 
 pub fn open(secret: Option<&str>, sealed: &[u8]) -> Result<String, OpenError> {

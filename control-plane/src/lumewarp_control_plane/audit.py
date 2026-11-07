@@ -146,6 +146,7 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
     "org.update": {"name": None, "policy_changed": None, "changes": _POLICY_CHANGES},
     "pat.create": {"name": None, "user_id": None},
     "pat.revoke": {"name": None},
+    "playground.request": {"key_id": None, "model": None},
     "router.create": {"name": None, "members": None, "settings": _ROUTER_SETTINGS},
     "router.delete": {"name": None},
     "router.force_save": {"name": None, "strategy": None, "missing_gateways": None},

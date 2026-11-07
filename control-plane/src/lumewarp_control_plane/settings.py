@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     # same value to open them; changing it makes stored keys unreadable until re-entered.
     # Separate from `secret_key`, which never leaves the control plane.
     encryption_key: SecretStr | None = Field(default=None, min_length=32)
+    # Gateway client listener for the session-authenticated Playground proxy; unset disables it.
+    playground_gateway_url: str | None = None
     oidc_issuer: str | None = None
     oidc_client_id: str | None = None
     oidc_client_secret: SecretStr | None = None

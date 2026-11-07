@@ -99,6 +99,7 @@ export const api = {
   logoutSession: () => unwrap(client.POST("/api/v1/session/logout")),
 
   me: () => unwrap(client.GET("/api/v1/users/me")),
+  playground: () => unwrap(client.GET("/api/v1/playground")),
 
   orgs: () => listAll((c) => unwrap(client.GET("/api/v1/orgs", { params: { query: q(c) } }))),
   org: (id: string) => unwrap(client.GET("/api/v1/orgs/{org_id}", { params: { path: { org_id: id } } })),

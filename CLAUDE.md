@@ -25,7 +25,7 @@ The owner, Andy, writes in Traditional Chinese — reply to him in Traditional C
 
 ## Current state
 
-The Rust gateway with its bench against LiteLLM, the control plane, the gRPC config stream, usage and budgets, the Admin UI, identity, routing, the model catalog, self-service keys and credential storage are implemented. `docs/architecture.md` lists what exists and what is deferred.
+The Rust gateway with its bench against LiteLLM, the control plane, the gRPC config stream, usage and budgets, the Admin UI, identity, routing, the model catalog, self-service keys, credential storage and the Playground (own keys only, through the gateway with a short-lived `lwpg.` token) are implemented. `docs/architecture.md` lists what exists and what is deferred.
 
 Identity, routing and observability:
 

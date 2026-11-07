@@ -23,6 +23,7 @@ lumewarp-config.workspace = true
 lumewarp-proto.workspace = true
 lumewarp-router-api = { path = "../lumewarp-router-api" }
 
+base64 = "0.22"
 anyhow.workspace = true
 arc-swap.workspace = true
 bytes.workspace = true

@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -177,18 +178,23 @@ async def stop_background(runtime: Runtime, grace: float = SHUTDOWN_GRACE_SECOND
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
-    runtime = await start_background(app) if settings.background_enabled else Runtime()
-    app.state.runtime = runtime
-    app.state.tasks = runtime.tasks
-    try:
-        yield
-    finally:
-        await stop_background(runtime)
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(300, connect=5), follow_redirects=False
+    ) as playground_client:
+        app.state.playground_client = playground_client
+        app.state.playground_warned_misconfigured = False
+        runtime = await start_background(app) if settings.background_enabled else Runtime()
+        app.state.runtime = runtime
+        app.state.tasks = runtime.tasks
         try:
-            if (close := getattr(app.state.authorizer.backend, "aclose", None)) is not None:
-                await close()
+            yield
         finally:
-            await app.state.engine.dispose()
+            await stop_background(runtime)
+            try:
+                if (close := getattr(app.state.authorizer.backend, "aclose", None)) is not None:
+                    await close()
+            finally:
+                await app.state.engine.dispose()
 
 
 def _static_module():

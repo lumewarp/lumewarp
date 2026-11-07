@@ -410,6 +410,8 @@ impl Drop for InFlight {
 pub struct RoutingTable {
     pub version: u64,
     pub keys: HashMap<[u8; 32], Arc<KeyContext>>,
+    pub keys_by_id: HashMap<Arc<str>, Arc<KeyContext>>,
+    pub playground_key: Option<ring::hmac::Key>,
     /// Every callable name, whatever its kind. A request does one lookup here.
     pub names: HashMap<Box<str>, Arc<Callable>>,
     pub models_json: Bytes,
@@ -447,12 +449,8 @@ impl RoutingTable {
         for router in &snapshot.routers {
             strategies.insert(router.name.as_str(), CompiledStrategy::configure(router)?);
         }
-        let encryption_secret = snapshot
-            .upstreams
-            .iter()
-            .any(|u| !u.api_key_ciphertext.is_empty())
-            .then(sealed::env_secret)
-            .flatten();
+        let encryption_secret = sealed::env_secret();
+        let playground_key = encryption_secret.as_deref().map(sealed::playground_key);
         let mut upstreams = HashMap::new();
         let mut probes = Vec::new();
         let mut unprobed = Vec::new();
@@ -827,6 +825,7 @@ impl RoutingTable {
             shared
         };
         let mut keys = HashMap::with_capacity(snapshot.api_keys.len());
+        let mut keys_by_id = HashMap::with_capacity(snapshot.api_keys.len());
         for key in &snapshot.api_keys {
             let policy = key.policy.as_ref().expect("validated policy");
             let (team_label, team_id) = match teams.get(key.team_id.as_str()) {
@@ -854,7 +853,9 @@ impl RoutingTable {
                     team_label,
                 })
             };
-            keys.insert(hash, context(key.expires_at_unix_ms));
+            let current = context(key.expires_at_unix_ms);
+            keys_by_id.insert(current.key_id.clone(), current.clone());
+            keys.insert(hash, current);
             if !key.previous_key_hash.is_empty() {
                 let previous: [u8; 32] = key
                     .previous_key_hash
@@ -879,6 +880,8 @@ impl RoutingTable {
         Ok(Self {
             version: snapshot.version,
             keys,
+            keys_by_id,
+            playground_key,
             names,
             models_json: models_json(listed.iter()),
             auth_mode,

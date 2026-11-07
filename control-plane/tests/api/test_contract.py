@@ -10,6 +10,8 @@ from lumewarp_control_plane.settings import Settings
 from tests.api.helpers import ADMIN_AUTH, create_org, suffix
 
 EXPECTED_OPERATION_IDS = {
+    "getPlayground",
+    "playgroundChatCompletions",
     "createAlias",
     "deleteAlias",
     "getAlias",

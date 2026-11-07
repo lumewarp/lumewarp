@@ -23,6 +23,7 @@ from lumewarp_control_plane.api import (
     keys,
     members,
     orgs,
+    playground,
     routing,
     service_accounts,
     session,
@@ -52,6 +53,7 @@ router.include_router(orgs.router)
 router.include_router(members.router)
 router.include_router(service_accounts.router)
 router.include_router(keys.router)
+router.include_router(playground.router)
 router.include_router(routing.router)
 router.include_router(strategies.router)
 router.include_router(users.router)
