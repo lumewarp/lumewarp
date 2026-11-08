@@ -11,12 +11,14 @@
 #
 #   DEV_AUTHZ=openfga         authorization backend (default builtin)
 #   LUMEWARP_BREAK_GLASS_PASSWORD  override the development emergency password
+#   DEV_DATABASE=name         use this database in the dev Postgres, created if missing
 #
 # Ports: UI 5173 (Vite, proxies /api to the CP), CP 8091 (+ gRPC 50051, metrics 9465),
 # gateway 4000 (+ admin 9464), mock upstream 9100, example MCP 9110, example A2A 9120.
 # An empty database gets a model `mock-local`, a router `demo` over it, an alias
 # `demo-latest` to the router, a team `demo` and one key; the key secret is kept in
-# .dev/demo-key. Each start issues a fresh gateway token (.dev/env).
+# .dev/demo-key. One with no MCP server or A2A agent gets `example` and `helper`,
+# the example servers above. Each start issues a fresh gateway token (.dev/env).
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -78,6 +80,20 @@ prepare() {
   cargo build --release -q --bins --manifest-path "$root/bench/mock-upstream/Cargo.toml"
   cargo build --release -q --manifest-path "$root/gateway/Cargo.toml"
 
+  log "building the example WASM plugins"
+  bash "$root/gateway/plugins/build.sh" >/dev/null
+
+  if [[ -n ${DEV_DATABASE:-} ]]; then
+    [[ $DEV_DATABASE =~ ^[a-z][a-z0-9_]*$ ]] || die "DEV_DATABASE must be a plain lowercase name"
+    log "using database $DEV_DATABASE"
+    local psql=(docker exec -i lumewarp-dev-postgres-1 psql -U lumewarp -d lumewarp -Atq)
+    if [[ -z "$("${psql[@]}" -c "SELECT 1 FROM pg_database WHERE datname = '$DEV_DATABASE'")" ]]; then
+      "${psql[@]}" -c "CREATE DATABASE $DEV_DATABASE"
+    fi
+    export LUMEWARP_DATABASE_URL="postgresql+asyncpg://lumewarp:lumewarp@127.0.0.1:55432/$DEV_DATABASE"
+    echo "export LUMEWARP_DATABASE_URL=$LUMEWARP_DATABASE_URL" >>"$env"
+  fi
+
   log "migrating the database"
   (
     cd "$root/control-plane"
@@ -95,6 +111,12 @@ prepare() {
     printf 'export LUMEWARP_BREAK_GLASS_PASSWORD=%q\n' "$break_glass_password"
     echo "export LUMEWARP_INITIAL_ADMIN_EMAIL=alice@example.com"
     echo "export LUMEWARP_GATEWAY_TOKEN=$token"
+    # Without an id key the gateway answers 503 on /mcp and /a2a.
+    echo "export LUMEWARP_GATEWAY_ID_KEY=ZGV2LW9ubHktbHVtZXdhcnAtZ2F0ZXdheS1pZC1rZXktMDEyMzQ1Njc4OQ=="
+    echo "export LUMEWARP_GATEWAY_PUBLIC_URL=http://127.0.0.1:4000"
+    echo "export LUMEWARP_ROUTER_PLUGIN_DIR=$root/gateway/target/plugins/router"
+    echo "export LUMEWARP_AUTH_PLUGIN_DIR=$root/gateway/target/plugins/auth"
+    echo "export LUMEWARP_A2A_MIDDLEWARE_DIR=$root/gateway/target/plugins/a2a-middleware"
   } >>"$env"
 
   if [[ ! -d $root/ui/node_modules ]]; then
@@ -135,6 +157,14 @@ seed() {
     --data-binary "$(jq -nc --arg password "$break_glass_password" '{password:$password}')" \
     "$cp_url/api/v1/session/break-glass" >/dev/null
   admin_csrf="$(curl -fsS -b "$state/admin-cookie" "$cp_url/api/v1/session" | jq -r .csrf_token)"
+  if [[ $(api GET /mcp-servers | jq '.items | length') == 0 ]]; then
+    log "seeding the example MCP server"
+    api POST /mcp-servers '{"name":"example","url":"http://127.0.0.1:9110/mcp","auth":{"plugin":"none","params":{}}}' >/dev/null
+  fi
+  if [[ $(api GET /a2a-agents | jq '.items | length') == 0 ]]; then
+    log "seeding the example A2A agent"
+    api POST /a2a-agents '{"name":"helper","url":"http://127.0.0.1:9120/a2a","auth":{"plugin":"none","params":{}}}' >/dev/null
+  fi
   [[ $(api GET /upstreams | jq '.items | length') == 0 ]] || return 0
   log "seeding demo upstream, model, router, alias, team and key"
   local org up model router team sa
@@ -195,6 +225,7 @@ case "${1:-all}" in
       fi
       herdr tab create --label "$tab_label" --cwd "$root" --env DEV_IN_TAB=1 \
         --env "DEV_AUTHZ=$authz" --env "LUMEWARP_BREAK_GLASS_PASSWORD=$break_glass_password" \
+        --env "DEV_DATABASE=${DEV_DATABASE:-}" \
         --focus | jq -r '.result.root_pane.pane_id' | {
         read -r pane
         herdr pane run "$pane" "$self tab" >/dev/null
