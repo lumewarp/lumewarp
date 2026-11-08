@@ -159,3 +159,32 @@ test("does not send a failed turn again", async ({ page }) => {
   expect(bodies[1]?.messages).toEqual([{ role: "user", content: "second" }]);
   await expect(page.getByTestId("turn-user")).toHaveCount(2);
 });
+
+test("an answer cut off mid-stream is kept with a warning and stays in the history", async ({ page }) => {
+  await mockInfo(page, { enabled: true, keys: [KEY] });
+  const bodies: { messages: { role: string; content: string }[] }[] = [];
+  let calls = 0;
+  await page.route("**/api/v1/playground/v1/chat/completions", async (route) => {
+    bodies.push(route.request().postDataJSON());
+    calls += 1;
+    const body =
+      calls === 1
+        ? `data: ${JSON.stringify(delta({ content: "partial answer" }))}\n\ndata: {broken\n\n`
+        : sse(delta({ content: "ok" }));
+    await route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body });
+  });
+  await signIn(page, VIEWER, "/playground");
+  await page.getByLabel("Message").fill("first");
+  await page.getByLabel("Message").press("Enter");
+  await expect(page.getByTestId("assistant-text").first()).toHaveText("partial answer");
+  await expect(page.getByTestId("turn-warning")).toContainText("stopped before it finished");
+  await expect(page.getByTestId("turn-error")).toHaveCount(0);
+  await page.getByLabel("Message").fill("second");
+  await page.getByLabel("Message").press("Enter");
+  await expect(page.getByTestId("assistant-text").nth(1)).toHaveText("ok");
+  expect(bodies[1]?.messages).toEqual([
+    { role: "user", content: "first" },
+    { role: "assistant", content: "partial answer" },
+    { role: "user", content: "second" },
+  ]);
+});

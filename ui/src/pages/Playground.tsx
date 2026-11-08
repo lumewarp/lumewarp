@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { streamText, type ModelMessage } from "ai";
-import { ArrowDownIcon, ArrowUpIcon, BrainIcon, ChevronDownIcon, ChevronRightIcon, CircleHelpIcon, ClockIcon, GaugeIcon, HashIcon, SendIcon, SigmaIcon, SquareIcon, TimerIcon, Trash2Icon, type LucideIcon } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, BrainIcon, ChevronDownIcon, ChevronRightIcon, CircleHelpIcon, ClockIcon, GaugeIcon, HashIcon, SendIcon, SigmaIcon, SquareIcon, TimerIcon, TriangleAlertIcon, Trash2Icon, type LucideIcon } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -28,6 +28,8 @@ interface Turn {
   text: string;
   reasoning: string;
   error?: string;
+  /** The answer arrived only in part. */
+  warning?: string;
   requestId?: string | null;
   usage?: { input?: number; output?: number; total?: number };
   /** Time to the first streamed token, and output tokens per second after it (needs reported usage). */
@@ -223,8 +225,13 @@ function Chat({ keys, reasoning }: { keys: PlaygroundKey[]; reasoning: Record<st
         patch(reply.id, { streaming: false, requestId: seen.requestId, ...timing() });
       } else {
         const message = seen.error ?? describe(err);
-        patch(reply.id, { streaming: false, error: message, requestId: seen.requestId });
-        patch(user.id, { skip: true });
+        if (answer && seen.status !== undefined && seen.status < 400) {
+          // The answer was streaming and the connection broke: keep what arrived, and keep the turn.
+          patch(reply.id, { streaming: false, warning: `The response stopped before it finished: ${message}`, requestId: seen.requestId, ...timing() });
+        } else {
+          patch(reply.id, { streaming: false, error: message, requestId: seen.requestId });
+          patch(user.id, { skip: true });
+        }
       }
     } finally {
       setBusy(false);
@@ -372,6 +379,12 @@ function Message({ turn }: { turn: Turn }) {
         <Alert variant="destructive" data-testid="turn-error">
           <AlertDescription>{turn.error}</AlertDescription>
         </Alert>
+      )}
+      {turn.warning && (
+        <p className="m-0 flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400" data-testid="turn-warning">
+          <TriangleAlertIcon className="size-3.5 shrink-0" aria-hidden="true" />
+          {turn.warning}
+        </p>
       )}
       {!turn.streaming && (turn.ttftMs !== undefined || turn.requestId || usage) && (
         <div className="flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground" data-testid="turn-meta">
