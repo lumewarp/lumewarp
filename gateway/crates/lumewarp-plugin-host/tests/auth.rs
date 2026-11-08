@@ -492,15 +492,25 @@ async fn a_bad_configure_refuses_and_does_not_pollute_the_cache() {
         return;
     }
     let cache = Cache::new();
-    let error = cache
-        .get_or_configure(&spec(
-            Traffic::Mcp,
-            "bad-mode",
-            serde_json::json!({"mode": "nope"}),
-        ))
-        .unwrap_err();
-    assert!(matches!(error, Error::Configure(_)), "{error:?}");
+    // The apply path refuses the version: `configure` runs there, under the
+    // configure budget.
+    let bad = spec(
+        Traffic::Mcp,
+        "bad-mode",
+        serde_json::json!({"mode": "nope"}),
+    );
+    let refused = cache.stage(std::slice::from_ref(&bad)).unwrap_err();
+    assert!(
+        matches!(refused.source, Error::Configure(_)),
+        "{:?}",
+        refused.source
+    );
     assert!(cache.get(Traffic::Mcp, "bad-mode").is_none());
+    // The request path configures lazily (no `block_on` on a worker): the same
+    // bad settings surface as a 502 on the first call instead.
+    let lazy = cache.get_or_configure(&bad).unwrap();
+    let error = lazy.authorize(request(), TIMEOUT).await.unwrap_err();
+    assert!(matches!(error, Error::Configure(_)), "{error:?}");
     // A missing plugin is its own error, not a configure one.
     let mut missing = spec(Traffic::Mcp, "missing", serde_json::json!({}));
     missing.plugin = "not_loaded".to_owned();
@@ -519,4 +529,78 @@ async fn a_bad_configure_refuses_and_does_not_pollute_the_cache() {
             .unwrap_err(),
         Error::Params(_)
     ));
+}
+
+// ------------------------------------------------ review-w2-gw M4 and m1
+
+/// An apply-time `configure` that never returns is refused once the configure
+/// budget elapses, and nothing of that target is published (M4).
+#[tokio::test]
+async fn a_configure_that_never_returns_refuses_the_version() {
+    if !init() {
+        return;
+    }
+    let cache = Cache::new();
+    let started = Instant::now();
+    let refused = cache
+        .stage_within(
+            &[spec(
+                Traffic::Mcp,
+                "stuck-configure",
+                serde_json::json!({"mode": "stuck_configure"}),
+            )],
+            Duration::from_millis(150),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(refused.source, Error::ConfigureTimeout),
+        "{:?}",
+        refused.source
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(cache.get(Traffic::Mcp, "stuck-configure").is_none());
+}
+
+/// A staged set does not serve until the version is accepted (m1).
+#[tokio::test]
+async fn a_staged_set_serves_only_after_publish() {
+    if !init() {
+        return;
+    }
+    let cache = Cache::new();
+    let target = spec(
+        Traffic::Mcp,
+        "staged",
+        serde_json::json!({"mode": "fixed", "cache_ms": 0}),
+    );
+    let staged = cache.stage(std::slice::from_ref(&target)).unwrap();
+    assert_eq!(staged.len(), 1);
+    assert!(
+        cache.get(Traffic::Mcp, "staged").is_none(),
+        "a staged set must not serve before the version is accepted"
+    );
+    cache.publish(staged);
+    assert!(cache.get(Traffic::Mcp, "staged").is_some());
+}
+
+/// The request-path fallback configures lazily: no instance, no `block_on`
+/// pre-warm on a tokio worker (m1).
+#[test]
+fn the_request_path_configures_without_prewarming() {
+    if !init() {
+        return;
+    }
+    let cache = Cache::new();
+    let auth = cache
+        .get_or_configure(&spec(
+            Traffic::Mcp,
+            "lazy",
+            serde_json::json!({"mode": "fixed", "cache_ms": 0}),
+        ))
+        .unwrap();
+    assert_eq!(
+        auth.idle(),
+        0,
+        "the request path must not warm a pool synchronously"
+    );
 }

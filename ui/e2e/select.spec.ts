@@ -18,11 +18,11 @@ test.beforeEach(async ({ request }) => {
   expect(response.status()).toBe(204);
   const session = await (await request.get("/api/v1/session")).json();
   admin["X-Lumewarp-CSRF"] = session.csrf_token;
-  // serve.py seeds gateways and usage after the control plane answers: wait for the strategies.
+  // serve.py seeds gateways and usage after the control plane answers: wait for the plugins they report.
   await expect
     .poll(async () => {
-      const strategies = (await (await request.get("/api/v1/strategies", { headers: admin })).json()).items as { name: string; missing_gateways: string[] }[];
-      return strategies.find((s) => s.name === "e2e_tuned") !== undefined && strategies.find((s) => s.name === "priority_failover")?.missing_gateways.length === 1;
+      const plugins = (await (await request.get("/api/v1/plugins?kind=router-strategy", { headers: admin })).json()).items as { name: string; missing_gateways: string[] }[];
+      return plugins.find((s) => s.name === "e2e_tuned") !== undefined && plugins.find((s) => s.name === "priority_failover")?.missing_gateways.length === 1;
     })
     .toBe(true);
 });
@@ -117,7 +117,7 @@ test("select contract: a stored value that is not an option is shown as such, ne
   const m = await model(request, "sel-stale/m", up.id);
   const stored = await post<any>(request, "/routers", { name: "sel-stale", strategy: "e2e_tuned", params: { max_waiting: 7, scope: "wide", level: 1 }, members: [{ model_id: m.id, weight: 1, params: {} }] });
   // The page knows a newer schema: "wide" is no longer one of the scopes.
-  await page.route("**/api/v1/strategies", async (route) => {
+  await page.route(/\/api\/v1\/plugins\?kind=router-strategy$/, async (route) => {
     const response = await route.fetch();
     const body = await response.json();
     body.items.find((s: any) => s.name === "e2e_tuned").params_schema.properties.scope.enum = ["", "narrow"];

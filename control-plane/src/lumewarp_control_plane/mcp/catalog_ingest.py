@@ -5,15 +5,23 @@ gateway reports the definitions it observed (`ObservedDefinition`) and the agent
 fetched (`AgentCardReport`) on the config stream, next to `HealthReport`. Each report adds
 to what was reported before; unlike a health report it never replaces it.
 
-The report is untrusted. Nothing here trusts it (L3): the server/agent id must still match
-the current name, the hash is recomputed from `definition_json` and a mismatch discards the
-entry, a report published before the target's last edit is discarded, and the plan's
-bounds (P5) are enforced again. The decisions:
+The report is untrusted. Nothing here trusts it (L3): the target id must be present and
+still match the name, the config version must be one this scope published and must have
+been compiled after the target's last write (see `McpServer.config_revision`; a card write
+never moves it, so a fetch cannot make the report it came in stale), the hash is
+recomputed from `definition_json` and a mismatch discards the entry, and the plan's
+bounds (P5) are enforced again. A malformed item (NUL where Postgres text cannot hold it,
+a timestamp outside the calendar, JSON an incomplete number or string makes unhashable) is
+counted `invalid` and dropped: it never cancels the valid items of the same report or the
+gateway's stream.
+
+The decisions:
 
 - First writer wins per (server, kind, name): a name the control plane has never seen is
-  approved when the gateway already served it (`auto_approved`, TOFU first sight) and
-  pending otherwise. A name the control plane has seen is never served from a new hash
-  without a review, whatever the report says.
+  approved when the gateway already served it (`auto_approved`, TOFU first sight) *and*
+  the server's current review mode allows it; MANUAL never auto-approves, whatever the
+  report says. A name the control plane has seen is never served from a new hash without
+  a review.
 - A hash that was rejected stays rejected: the row for that (server, kind, name, hash) is
   never rewritten, only its `last_seen_at` moves.
 - Ingestion takes the scope row lock, then the target rows, in the same order as every API
@@ -45,6 +53,7 @@ from lumewarp_control_plane.models import (
     McpDefinition,
     McpDefinitionKind,
     McpDefinitionState,
+    McpReviewMode,
     McpServer,
     Scope,
 )
@@ -123,19 +132,52 @@ async def lock_scope(session: AsyncSession, scope: str) -> bool:
     return locked is not None
 
 
-async def _version_times(
+async def _version_revisions(
     session: AsyncSession, scope: str, versions: Iterable[int]
-) -> dict[int, datetime]:
-    """When each named config version was published (compaction keeps the metadata)."""
-    wanted = sorted({version for version in versions if version})
+) -> dict[int, int]:
+    """The source revision each named config version was compiled from.
+
+    Compaction keeps the metadata, so a retained older version can still be checked. A
+    version 0 or one this scope never published has no entry: it cannot be proven and the
+    item that claims it is discarded.
+    """
+    wanted = sorted({version for version in versions if version > 0})
     if not wanted:
         return {}
     rows = await session.execute(
-        select(ConfigVersion.version, ConfigVersion.created_at).where(
+        select(ConfigVersion.version, ConfigVersion.source_revision).where(
             ConfigVersion.scope == scope, ConfigVersion.version.in_(wanted)
         )
     )
-    return {version: created_at for version, created_at in rows}
+    return {version: revision for version, revision in rows}
+
+
+# How far a gateway's clock may run ahead of the control plane before its card is refused
+# (the timestamp is display data, but it must not be arbitrary).
+MAX_FETCH_SKEW_MS = 60_000
+
+
+def _text_ok(*values: str) -> bool:
+    """Whether Postgres can store each value as text (it cannot hold U+0000)."""
+    return not any("\x00" in value for value in values)
+
+
+def _card_time(fetched_at_unix_ms: int, now: datetime) -> datetime | None:
+    """The reported fetch time, or None when it cannot be a real observation.
+
+    A legal int64 millisecond timestamp is outside `datetime`'s range (M3), and a future
+    one cannot describe a fetch that already happened. 0 means "now" (the gateway did not
+    say). Never raises.
+    """
+    if fetched_at_unix_ms <= 0:
+        return now
+    now_ms = int(now.timestamp() * 1000)
+    if fetched_at_unix_ms > now_ms + MAX_FETCH_SKEW_MS:
+        return None
+    try:
+        return min(datetime.fromtimestamp(fetched_at_unix_ms / 1000, UTC), now)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def observe(
@@ -144,6 +186,11 @@ def observe(
     """The definition as the control plane can trust it, or None (counting the reason)."""
     definition_kind = DEFINITION_KIND.get(kind)
     if definition_kind is None:
+        result.discarded["invalid"] += 1
+        return None
+    # An untrusted upstream can put U+0000 anywhere; Postgres text cannot hold it, and a
+    # failed INSERT would abort the transaction of the whole report (M3).
+    if not _text_ok(item.name, item.definition_json):
         result.discarded["invalid"] += 1
         return None
     if not 0 < len(item.definition_json.encode("utf-8")) <= MAX_DEFINITION_BYTES:
@@ -190,7 +237,8 @@ async def record_observations(
     """Store observations of one server under the first-writer rule.
 
     The caller holds the scope row lock and has locked `server`, so the read-decide-insert
-    sequence cannot interleave with another writer.
+    sequence cannot interleave with another writer. `auto_approved` only applies to a name
+    nobody has seen, and never under MANUAL: a report's flag cannot overrule the review mode.
     """
     result = IngestResult()
     now = now or datetime.now(UTC)
@@ -223,7 +271,11 @@ async def record_observations(
             )
             .limit(1)
         )
-        approved = observation.auto_approved and seen_name is None
+        approved = (
+            observation.auto_approved
+            and seen_name is None
+            and server.review_mode is not McpReviewMode.MANUAL
+        )
         if total >= MAX_DEFINITIONS_PER_SERVER:
             result.discarded["definition_limit"] += 1
             continue
@@ -263,9 +315,13 @@ async def ingest_report(
 ) -> IngestResult:
     """Record one `CatalogReport` from `gateway_id` in the caller's transaction.
 
-    Bounded before this point (`grpc._MAX_CATALOG_*`) and again here. `gateway_id` is
-    unused for the decision (any gateway's observation counts the same) but documents the
-    provenance; it is never stored on a definition.
+    Every item names the target id and the config version the gateway served (L3). Both are
+    required: a missing or mismatched id is `stale_id`, and a version this scope never
+    published, or one compiled before the target's last write, is `stale_version`. The
+    alternative (trusting whatever a report says) would let an old upstream's definitions
+    be recorded against the current one. Bounded before this point (`grpc._MAX_CATALOG_*`)
+    and again here; `gateway_id` is unused for the decision (any gateway's observation
+    counts the same) but documents the provenance; it is never stored on a definition.
     """
     del gateway_id  # provenance is the authenticated stream, not a stored label
     scope = scope or get_settings().scope
@@ -273,10 +329,15 @@ async def ingest_report(
     result = IngestResult()
     if not await lock_scope(session, scope):
         return result
-    version_times = await _version_times(
-        session, scope, (item.config_version for item in report.definitions)
+    revisions = await _version_revisions(
+        session,
+        scope,
+        (
+            *(item.config_version for item in report.definitions),
+            *(card.config_version for card in report.cards),
+        ),
     )
-    names = sorted({item.server for item in report.definitions})
+    names = sorted({item.server for item in report.definitions if _text_ok(item.server)})
     servers: dict[str, McpServer] = {}
     if names:
         rows = await session.scalars(
@@ -296,17 +357,21 @@ async def ingest_report(
         if seen_bytes > MAX_REPORT_BYTES:
             result.discarded["report_limit"] += 1
             continue
+        if not _text_ok(item.server):
+            result.discarded["invalid"] += 1
+            continue
         server = servers.get(item.server)
         if server is None:
             result.discarded["unknown_target"] += 1
             continue
-        if item.server_id and item.server_id != str(server.id):
+        # L3: an empty id is not "no opinion"; a report we cannot place is discarded.
+        if item.server_id != str(server.id):
             result.discarded["stale_id"] += 1
             continue
-        published = version_times.get(item.config_version)
-        if published is not None and server.updated_at > published:
-            # Observed against a snapshot older than the server's last edit: what the
-            # gateway saw may describe a different upstream.
+        # The version must exist and have been compiled after the server's last write: a
+        # target created or edited outside the API carries revision 0 and cannot be proven.
+        revision = revisions.get(item.config_version)
+        if revision is None or not 0 < server.config_revision <= revision:
             result.discarded["stale_version"] += 1
             continue
         observation = observe(item.kind, item, result)
@@ -317,9 +382,6 @@ async def ingest_report(
     for server, observations in grouped.values():
         result.merge(await record_observations(session, server, observations, now=now))
 
-    agent_times = await _version_times(
-        session, scope, (card.config_version for card in report.cards)
-    )
     agents = await _lock_agents(session, report)
     seen_bytes = 0
     for index, card in enumerate(report.cards):
@@ -330,22 +392,32 @@ async def ingest_report(
         if seen_bytes > MAX_REPORT_BYTES:
             result.discarded["report_limit"] += 1
             continue
+        if not _text_ok(card.agent):
+            result.discarded["invalid"] += 1
+            continue
         agent = agents.get(card.agent)
         if agent is None:
             result.discarded["unknown_target"] += 1
             continue
-        if card.agent_id and card.agent_id != str(agent.id):
+        if card.agent_id != str(agent.id):
             result.discarded["stale_id"] += 1
             continue
-        published = agent_times.get(card.config_version)
-        if published is not None and agent.updated_at > published:
+        revision = revisions.get(card.config_version)
+        if revision is None or not 0 < agent.config_revision <= revision:
             result.discarded["stale_version"] += 1
+            continue
+        if not _text_ok(card.card_json, card.error):
+            result.discarded["invalid"] += 1
             continue
         if len(card.card_json.encode("utf-8")) > MAX_CARD_BYTES:
             result.discarded["invalid"] += 1
             continue
         if len(card.error.encode("utf-8")) > MAX_CARD_ERROR_BYTES:
             # Over the contract's bound: drop this card, keep the stream.
+            result.discarded["invalid"] += 1
+            continue
+        card_time = _card_time(card.fetched_at_unix_ms, now)
+        if card_time is None:
             result.discarded["invalid"] += 1
             continue
         error = card.error
@@ -358,10 +430,7 @@ async def ingest_report(
         if card.card_json:
             agent.last_card_json = card.card_json
         agent.last_card_error = error
-        fetched = card.fetched_at_unix_ms
-        agent.last_card_at = (
-            min(datetime.fromtimestamp(fetched / 1000, UTC), now) if fetched > 0 else now
-        )
+        agent.last_card_at = card_time
         result.cards += 1
     await session.flush()
 
@@ -372,7 +441,7 @@ async def ingest_report(
 
 async def _lock_agents(session: AsyncSession, report: cpb.CatalogReport) -> dict[str, A2aAgent]:
     """The live agents the report names, row-locked for the card update."""
-    names = sorted({card.agent for card in report.cards})
+    names = sorted({card.agent for card in report.cards if _text_ok(card.agent)})
     if not names:
         return {}
     rows = await session.scalars(

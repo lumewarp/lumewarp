@@ -11,6 +11,8 @@ interface Props {
   title: string;
   message: string;
   confirmLabel?: string;
+  /** Appointing, approving and the like are a plain primary button; delete, revoke and reject are red. */
+  destructive?: boolean;
   onConfirm: () => Promise<unknown>;
   onClose: () => void;
 }
@@ -26,7 +28,7 @@ export function parseReferrers(message: string): string[] | null {
  * button is a plain button, not AlertDialogAction (that one closes on click without waiting): the dialog
  * closes only when the delete succeeded; a 409 turns it into the "Cannot delete" view with the referrers.
  */
-export function ConfirmDialog({ open, title, message, confirmLabel = "Delete", onConfirm, onClose }: Props) {
+export function ConfirmDialog({ open, title, message, confirmLabel = "Delete", destructive = true, onConfirm, onClose }: Props) {
   const [busy, setBusy] = useState(false);
   const [blocked, setBlocked] = useState<ApiError | null>(null);
   const toast = useToast();
@@ -94,7 +96,7 @@ export function ConfirmDialog({ open, title, message, confirmLabel = "Delete", o
           ) : (
             <>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <Button type="button" variant="destructive" disabled={busy} onClick={run}>
+              <Button type="button" variant={destructive ? "destructive" : "default"} disabled={busy} onClick={run}>
                 {busy ? "Working…" : confirmLabel}
               </Button>
             </>

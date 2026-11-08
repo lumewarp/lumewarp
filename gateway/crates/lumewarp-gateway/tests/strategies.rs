@@ -88,6 +88,102 @@ async fn looping_plugin_times_out_and_request_is_served_by_fallback() {
     assert!(metrics.contains("lumewarp_plugin_calls_total{kind=\"router-strategy\",plugin=\"loop_test\",result=\"timeout\"} 1"), "{metrics}");
 }
 
+/// A WASM strategy that answers an ineligible or out-of-range index is counted
+/// as a trap, and the request takes the router's fall-through paths instead of
+/// being sent to the wrong model (review M1).
+#[tokio::test]
+async fn an_ineligible_pick_answer_is_a_trap_and_the_fallback_serves() {
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper::Request;
+    use std::time::Duration;
+    let plugin_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/plugins-test/router");
+    if !plugin_dir.join("misbehave-test.wasm").exists() {
+        eprintln!("SKIP: build the fixture with bash gateway/plugins/build.sh --tests");
+        return;
+    }
+    let upstream = common::Mock::start(common::Behavior::Json).await;
+    let listen = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listen.local_addr().unwrap();
+    let admin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let admin_addr = admin.local_addr().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.yaml");
+    // The router has one member (position 0); the strategy answers 7, which is
+    // not an eligible candidate, so the fallback model has to serve.
+    std::fs::write(&path, format!("server: {{listen: '{addr}', admin_listen: '{admin_addr}'}}\nupstreams: [{{name: u, kind: vllm, base_url: 'http://{}/prefix/v1'}}]\nmodels: [{{name: m, upstream: u, upstream_model: actual}}]\nrouters: [{{name: public, strategy: misbehave_test, plugin_timeout_ms: 2000, params: {{mode: bad_index, index: 7}}, members: [{{model: m}}], fallbacks: [m]}}]\n", upstream.addr)).unwrap();
+    drop(listen);
+    drop(admin);
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut process = Child(
+        Command::new(env!("CARGO_BIN_EXE_lumewarp"))
+            .arg("--config")
+            .arg(path)
+            .env("LUMEWARP_ROUTER_PLUGIN_DIR", plugin_dir)
+            .env_remove("LUMEWARP_AUTH_PLUGIN_DIR")
+            .env_remove("LUMEWARP_A2A_MIDDLEWARE_DIR")
+            .spawn()
+            .unwrap(),
+    );
+    let client = common::client();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            assert!(process.0.try_wait().unwrap().is_none(), "gateway exited");
+            let req = Request::builder()
+                .uri(format!("http://{admin_addr}/readyz"))
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+            if let Ok(response) = client.request(req).await {
+                if response.status() == 200 {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("http://{addr}/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from_static(
+            br#"{"model":"public","messages":[{"role":"user","content":"hello"}]}"#,
+        )))
+        .unwrap();
+    let response = client.request(request).await.unwrap();
+    assert_eq!(response.status(), 200, "the fallback serves");
+    response.into_body().collect().await.unwrap();
+    let metrics = client
+        .request(
+            Request::builder()
+                .uri(format!("http://{admin_addr}/metrics"))
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let metrics = String::from_utf8_lossy(&metrics);
+    assert!(
+        metrics.contains(
+            "lumewarp_plugin_calls_total{kind=\"router-strategy\",plugin=\"misbehave_test\",result=\"trap\"} 1"
+        ),
+        "{metrics}"
+    );
+}
+
 fn command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_lumewarp"));
     for var in [

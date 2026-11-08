@@ -481,6 +481,12 @@ pub struct RoutingTable {
     /// MCP servers and A2A agents of this snapshot (`docs/plugins.md`). Empty
     /// when none is configured; the LLM request path never reads it.
     pub targets: Arc<crate::targets::Targets>,
+    /// Outbound-auth plugins configured for this version. Applied to the
+    /// process-wide cache by [`RoutingTable::activate`], so a version the
+    /// gateway refuses never changes what the previous table serves (m1).
+    staged_auth: Option<lumewarp_plugin_host::authenticator::Staged>,
+    /// The same for the A2A middleware plugins.
+    staged_middleware: Option<lumewarp_plugin_host::a2a_middleware::Staged>,
     /// Pre-routing rejections and local endpoints (model "", team "").
     pub rejected: [Arc<RequestMetrics>; API_ENDPOINTS.len()],
     /// Every callable name, sorted, for filtered `/v1/models`.
@@ -521,6 +527,12 @@ impl RoutingTable {
             snapshot,
             encryption_secret.as_deref(),
         )?);
+        // Configure the plugins of every target that names one, into sets that
+        // do not serve yet: a refused `configure` (or one that outlives the
+        // configure budget) NACKs this version, and a version refused by any
+        // later step leaves the previous plugins serving (m1, M4).
+        let staged_auth = Some(crate::upstream_auth::precompile(&mcp_targets)?);
+        let staged_middleware = Some(crate::a2a::precompile(&mcp_targets)?);
         let mut upstreams = HashMap::new();
         let mut probes = Vec::new();
         let mut unprobed = Vec::new();
@@ -959,6 +971,8 @@ impl RoutingTable {
             rejected: std::array::from_fn(|endpoint| metrics.handles("", "", endpoint, "")),
             runtime: runtime.clone(),
             targets: mcp_targets,
+            staged_auth,
+            staged_middleware,
             listed,
             unknown_label: metrics.label_id("unknown"),
             probes,
@@ -1236,10 +1250,33 @@ impl RoutingTable {
                 PickStep::Ask(task) => task.await,
             };
             if let Some(index) = picked {
-                return pool.models.get(index);
+                if let Some(model) = pool.models.get(index) {
+                    return Some(model);
+                }
+                // The adapter already refused an ineligible answer; an index
+                // past the pool is the same kind of misbehaviour. Treat it as
+                // no answer and keep looking (M1).
+                tracing::warn!(
+                    model = %root.name,
+                    index,
+                    "a router strategy answered an index outside its pool"
+                );
             }
         }
         None
+    }
+
+    /// Accepts this table: starts the health probes and publishes the plugin
+    /// configuration it staged. Called exactly once, just before the table is
+    /// swapped in — never for a version that is refused (m1).
+    pub fn activate(&mut self) {
+        self.activate_health();
+        if let Some(staged) = self.staged_auth.take() {
+            crate::upstream_auth::publish(staged);
+        }
+        if let Some(staged) = self.staged_middleware.take() {
+            crate::a2a::publish(staged);
+        }
     }
 
     /// Returns how many probe and scrape tasks were (re)started.

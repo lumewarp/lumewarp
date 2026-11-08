@@ -2,8 +2,10 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import {
   BarChart3,
+  Bot,
   Boxes,
   Building2,
+  Cable,
   CornerDownRight,
   History,
   KeyRound,
@@ -13,6 +15,7 @@ import {
   MessageSquare,
   Monitor,
   Moon,
+  Plug,
   Radio,
   Route,
   ScrollText,
@@ -79,6 +82,13 @@ const NAV: { group: string | null; items: NavItem[] }[] = [
     ],
   },
   {
+    group: "MCP & A2A",
+    items: [
+      { to: "/mcp-servers", label: "MCP servers", icon: Cable, access: "installationAdmin" },
+      { to: "/a2a-agents", label: "A2A agents", icon: Bot, access: "installationAdmin" },
+    ],
+  },
+  {
     group: "Activity",
     items: [
       { to: "/usage", label: "Usage", icon: BarChart3 },
@@ -89,6 +99,7 @@ const NAV: { group: string | null; items: NavItem[] }[] = [
     group: "Data plane",
     items: [
       { to: "/gateways", label: "Gateways", icon: Radio, access: "installationAdmin" },
+      { to: "/plugins", label: "Plugins", icon: Plug, access: "installationAdmin" },
       { to: "/config", label: "Config versions", icon: History, access: "installationAdmin" },
       { to: "/settings", label: "Settings", icon: Settings },
     ],

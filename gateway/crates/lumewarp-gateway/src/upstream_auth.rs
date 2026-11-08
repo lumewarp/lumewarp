@@ -159,13 +159,15 @@ pub async fn authorize_a2a(
 }
 
 /// Configures outbound auth for every MCP server and A2A agent of one compiled
-/// configuration, reusing unchanged targets. Call from `Targets::compile`,
+/// configuration, reusing unchanged targets. Call from `RoutingTable::compile`,
 /// after validation: a refused plugin then NACKs the version (`INVALID_CONFIG`)
 /// instead of failing the first request to that target.
 ///
-/// Without this call the first request configures the plugin lazily and a bad
-/// `configure` is a 502.
-pub fn precompile(targets: &Targets) -> Result<(), ApplyError> {
+/// The result is **staged**: nothing serves until [`publish`] is called, which
+/// a later step can still skip when the version is refused (m1). A `configure`
+/// that never returns is bounded by [`lumewarp_plugin_host::CONFIGURE_TIMEOUT`]
+/// and refuses the version too (M4). This is apply-time work only.
+pub fn precompile(targets: &Targets) -> Result<authenticator::Staged, ApplyError> {
     let mut specs = Vec::new();
     for server in targets.servers() {
         if let Auth::Plugin(plugin) = &server.auth {
@@ -195,12 +197,13 @@ pub fn precompile(targets: &Targets) -> Result<(), ApplyError> {
             ));
         }
     }
-    authenticator::global().replace(&specs).map_err(|refused| {
+    authenticator::global().stage(&specs).map_err(|refused| {
         // The plugin's own configure text stays out of the NACK, which the
         // control plane stores and shows; the log has it.
         let reason = match &refused.source {
             PluginError::Missing(plugin) => format!("auth plugin {plugin:?} is not loaded"),
             PluginError::Params(detail) => format!("outbound auth: {detail}"),
+            PluginError::ConfigureTimeout => "configure timed out".to_owned(),
             other => {
                 tracing::warn!(
                     target = %refused.target,
@@ -216,6 +219,12 @@ pub fn precompile(targets: &Targets) -> Result<(), ApplyError> {
         tracing::warn!(target = %refused.target, %reason, "outbound auth refused");
         ApplyError::invalid(format!("outbound auth for {:?}: {reason}", refused.target))
     })
+}
+
+/// Makes a staged set the one serving. Called once a version is accepted; a
+/// refused version never reaches it, so the previous set keeps serving (m1).
+pub fn publish(staged: authenticator::Staged) {
+    authenticator::global().publish(staged);
 }
 
 fn spec_of(traffic: Traffic, id: &str, name: &str, url: &Uri, plugin: &Plugin) -> Spec {
@@ -339,9 +348,10 @@ async fn plugin_credentials(
             .map_err(|error| {
                 tracing::warn!(%name, plugin = %plugin.name, error = %error, "outbound auth could not be configured");
                 match error {
-                    PluginError::Missing(_) | PluginError::Params(_) | PluginError::Configure(_) => {
-                        Failure::Configure
-                    }
+                    PluginError::Missing(_)
+                    | PluginError::Params(_)
+                    | PluginError::Configure(_)
+                    | PluginError::ConfigureTimeout => Failure::Configure,
                     PluginError::Timeout => Failure::Timeout,
                     PluginError::Trap => Failure::Trap,
                     PluginError::Plugin(_) | PluginError::Canceled => Failure::Plugin,
@@ -366,9 +376,10 @@ async fn plugin_credentials(
         let failure = match &error {
             PluginError::Timeout => Failure::Timeout,
             PluginError::Trap => Failure::Trap,
-            PluginError::Missing(_) | PluginError::Params(_) | PluginError::Configure(_) => {
-                Failure::Configure
-            }
+            PluginError::Missing(_)
+            | PluginError::Params(_)
+            | PluginError::Configure(_)
+            | PluginError::ConfigureTimeout => Failure::Configure,
             PluginError::Plugin(_) | PluginError::Canceled => Failure::Plugin,
         };
         // The guest's message can contain its settings: it goes to the log at

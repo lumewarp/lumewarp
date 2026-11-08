@@ -131,25 +131,12 @@ pub async fn json(response: Response<Incoming>) -> Result<Value, ()> {
     if !sse {
         return serde_json::from_slice(&bytes).map_err(|_| ());
     }
-    let text = std::str::from_utf8(&bytes).map_err(|_| ())?;
-    for event in text.replace("\r\n", "\n").split("\n\n") {
-        if event.len() > EVENT_LIMIT {
-            return Err(());
-        }
-        let data = event
-            .lines()
-            .filter_map(|l| {
-                l.strip_prefix("data:")
-                    .map(|s| s.strip_prefix(' ').unwrap_or(s))
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        if data.is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_str(&data).map_err(|_| ())?;
-        if value.get("result").is_some() || value.get("error").is_some() {
-            return Ok(value);
+    let mut parser = super::sse::Events::default();
+    for byte in bytes {
+        if let Some(event) = parser.push(byte)? {
+            if let Some(value) = event_result(&event)? {
+                return Ok(value);
+            }
         }
     }
     Err(())
@@ -160,6 +147,25 @@ pub fn is_sse(headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.starts_with("text/event-stream"))
 }
+fn event_result(event: &[u8]) -> Result<Option<Value>, ()> {
+    let text = std::str::from_utf8(event)
+        .map_err(|_| ())?
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let data = text
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("data:")
+                .map(|s| s.strip_prefix(' ').unwrap_or(s))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if data.is_empty() {
+        return Ok(None);
+    }
+    let value: Value = serde_json::from_str(&data).map_err(|_| ())?;
+    Ok((value.get("result").is_some() || value.get("error").is_some()).then_some(value))
+}
 fn rewrite_event(event: &[u8], server: Option<&str>) -> Result<Bytes, ()> {
     if event.len() > EVENT_LIMIT {
         return Err(());
@@ -169,7 +175,8 @@ fn rewrite_event(event: &[u8], server: Option<&str>) -> Result<Bytes, ()> {
     };
     let text = std::str::from_utf8(event)
         .map_err(|_| ())?
-        .replace("\r\n", "\n");
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
     let data = text
         .lines()
         .filter_map(|l| l.strip_prefix("data:").map(str::trim_start))
@@ -229,7 +236,7 @@ pub fn relay(
     tokio::spawn(async move {
         let mut usage = usage;
         let mut outcome = RequestOutcome::Completed;
-        let mut held = BytesMut::new();
+        let mut events = super::sse::Events::default();
         let mut total = 0usize;
         loop {
             let frame = tokio::select! {
@@ -263,15 +270,20 @@ pub fn relay(
                 }
                 continue;
             }
-            for byte in data {
-                held.extend_from_slice(&[byte]);
-                if held.len() > EVENT_LIMIT {
-                    let _ = tx.send(Err(std::io::Error::other("MCP event limit"))).await;
-                    finish(&mut usage, RequestOutcome::UpstreamError);
-                    return;
-                }
-                if held.ends_with(b"\n\n") || held.ends_with(b"\r\n\r\n") {
-                    match rewrite_event(&held.split().freeze(), server.as_deref()) {
+            for &byte in data.iter() {
+                let event = match events.push(byte) {
+                    Ok(event) => event,
+                    Err(()) => {
+                        let _ = tx.send(Err(std::io::Error::other("MCP event limit"))).await;
+                        finish(&mut usage, RequestOutcome::UpstreamError);
+                        return;
+                    }
+                };
+                if let Some(event) = event {
+                    if server.is_none() {
+                        continue;
+                    }
+                    match rewrite_event(&event, server.as_deref()) {
                         Ok(out) => {
                             if tx.send(Ok(Frame::data(out))).await.is_err() {
                                 return;
@@ -286,6 +298,11 @@ pub fn relay(
                         }
                     }
                 }
+            }
+            // Direct endpoints preserve the exact upstream wire bytes. The
+            // scanner is only used for bounds, not for reserializing CRLF.
+            if server.is_none() && tx.send(Ok(Frame::data(data))).await.is_err() {
+                return;
             }
         }
         finish(&mut usage, outcome);

@@ -126,6 +126,9 @@ pub enum Error {
     Plugin(String),
     #[error("the call exceeded its configured timeout")]
     Timeout,
+    /// Apply-time `configure` did not finish inside [`crate::CONFIGURE_TIMEOUT`].
+    #[error("configuring the plugin timed out")]
+    ConfigureTimeout,
     #[error("authorize trapped")]
     Trap,
     #[error("the plugin task did not finish")]
@@ -299,8 +302,46 @@ impl Authenticator {
             flight: tokio::sync::Mutex::new(()),
             cacheable: AtomicU8::new(UNKNOWN),
         };
-        authenticator.prewarm()?;
         Ok(authenticator)
+    }
+
+    /// Creates the warm instances, bounded by [`crate::CONFIGURE_TIMEOUT`]; the
+    /// first one is mandatory, so a refused `configure` refuses the version.
+    /// Only the apply path calls this (never a request), and it does not hold a
+    /// cache lock (M4).
+    fn warm(&self, timeout: Duration) -> Result<(), Error> {
+        if self.prewarm == 0 {
+            return Ok(());
+        }
+        let Some(slot) = self.pool.reserve() else {
+            return Ok(());
+        };
+        let first = crate::block_on_timeout(self.create_waiting(slot, Some(timeout)), timeout)
+            .ok_or(Error::ConfigureTimeout)??;
+        self.pool.push(first);
+        for _ in 1..self.prewarm {
+            let Some(slot) = self.pool.reserve() else {
+                break;
+            };
+            match crate::block_on_timeout(self.create_now(slot, Some(timeout)), timeout) {
+                Some(Ok(Some(instance))) => self.pool.push(instance),
+                Some(Ok(None)) => break,
+                None => {
+                    tracing::warn!(plugin = %self.spec.plugin, "pre-warming an auth plugin instance timed out");
+                    break;
+                }
+                Some(Err(error)) => {
+                    // m1: a configuration that fails while warming up is a
+                    // counted failure, not a silently smaller pool.
+                    tracing::warn!(%error, plugin = %self.spec.plugin, "pre-warming an auth plugin instance failed");
+                    self.plugin.traps.fetch_add(1, Ordering::Relaxed);
+                    self.plugin.record_failure();
+                    crate::record(KIND_LABEL, &self.spec.plugin, "trap", Duration::ZERO);
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The plugin name, as the manifest declared it.
@@ -347,8 +388,17 @@ impl Authenticator {
         self.pool.shrink(keep);
     }
 
-    async fn create(&self, slot: pool::Slot) -> Result<Instance, Error> {
+    async fn create(
+        &self,
+        slot: pool::Slot,
+        _permit: MemoryReservation,
+        budget: Option<Duration>,
+    ) -> Result<Instance, Error> {
         let mut store = self.plugin.store();
+        // Apply-time `configure` gets a hard epoch budget (M4).
+        if let Some(budget) = budget {
+            crate::set_apply_deadline(&mut store, budget);
+        }
         let crate::Prepared::Auth(pre) = self.plugin.prepared() else {
             return Err(Error::Configure(
                 "the component does not implement the auth world".to_owned(),
@@ -367,14 +417,49 @@ impl Authenticator {
             .authenticator()
             .call_configure(&mut store, &self.target)
             .await
-            .map_err(|error| Error::Configure(format!("{error:#}")))?
+            .map_err(|error| {
+                if budget.is_some() && crate::is_epoch_trap(&error) {
+                    Error::ConfigureTimeout
+                } else {
+                    Error::Configure(format!("{error:#}"))
+                }
+            })?
             .map_err(Error::Configure)?;
+        if budget.is_some() {
+            // Back to yielding: a request-path call is cancelled by its own
+            // timeout, never trapped by the configure budget.
+            crate::set_fair_epoch(&mut store);
+        }
         Ok(Instance {
             store,
             binding,
             resource,
             _slot: slot,
         })
+    }
+
+    /// Creates an instance, waiting for a memory permit.
+    async fn create_waiting(
+        &self,
+        slot: pool::Slot,
+        budget: Option<Duration>,
+    ) -> Result<Instance, Error> {
+        let permit = MemoryReservation::acquire(Arc::clone(&self.memory))
+            .await
+            .ok_or(Error::Canceled)?;
+        self.create(slot, permit, budget).await
+    }
+
+    /// Creates an instance only when a memory permit is free right now.
+    async fn create_now(
+        &self,
+        slot: pool::Slot,
+        budget: Option<Duration>,
+    ) -> Result<Option<Instance>, Error> {
+        let Some(permit) = MemoryReservation::try_acquire(Arc::clone(&self.memory)) else {
+            return Ok(None);
+        };
+        self.create(slot, permit, budget).await.map(Some)
     }
 
     async fn checkout(&self) -> Result<Instance, Error> {
@@ -384,7 +469,9 @@ impl Authenticator {
                 return Ok(instance);
             }
             if let Some(slot) = self.pool.reserve() {
-                match self.create(slot).await {
+                // The permit covers instantiation only; queueing for this
+                // pool never holds one (M2).
+                match self.create_waiting(slot, None).await {
                     Ok(instance) => return Ok(instance),
                     // Out of budget: give the pool's idle instances back and
                     // try once more before failing the call.
@@ -398,35 +485,6 @@ impl Authenticator {
             }
             self.pool.wait().await;
         }
-    }
-
-    fn prewarm(&self) -> Result<(), Error> {
-        if self.prewarm == 0 {
-            return Ok(());
-        }
-        let Some(slot) = self.pool.reserve() else {
-            return Ok(());
-        };
-        let first = crate::block_on(self.create(slot))?;
-        self.pool.push(first);
-        for _ in 1..self.prewarm {
-            let Some(slot) = self.pool.reserve() else {
-                break;
-            };
-            match crate::block_on(self.create(slot)) {
-                Ok(instance) => self.pool.push(instance),
-                Err(error) => {
-                    // m1: a configuration that fails while warming up is a
-                    // counted failure, not a silently smaller pool.
-                    tracing::warn!(%error, plugin = %self.spec.plugin, "pre-warming an auth plugin instance failed");
-                    self.plugin.traps.fetch_add(1, Ordering::Relaxed);
-                    self.plugin.record_failure();
-                    crate::record(KIND_LABEL, &self.spec.plugin, "trap", Duration::ZERO);
-                    break;
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Headers for one upstream request, bounded by `timeout` (a cached result
@@ -505,9 +563,6 @@ impl Authenticator {
                 "the auth plugin is paused after failures".into(),
             ));
         }
-        let Some(_permit) = MemoryReservation::acquire(Arc::clone(&self.memory)).await else {
-            return Err(Error::Canceled);
-        };
         let request = wire::OutboundRequest {
             method: request.method.to_owned(),
             url: request.url.to_owned(),
@@ -523,6 +578,14 @@ impl Authenticator {
         );
         let mut instance = match self.checkout().await {
             Ok(instance) => instance,
+            // A `configure` failure is an error result, not a trap.
+            Err(error @ Error::Configure(_)) => {
+                let _entered = span.enter();
+                self.plugin.record_failure();
+                crate::record(KIND_LABEL, &self.spec.plugin, "error", started.elapsed());
+                tracing::warn!(%error, plugin = %self.spec.plugin, "an auth plugin instance failed");
+                return Err(error);
+            }
             Err(error) => {
                 let _entered = span.enter();
                 self.plugin.traps.fetch_add(1, Ordering::Relaxed);
@@ -531,6 +594,12 @@ impl Authenticator {
                 tracing::warn!(%error, plugin = %self.spec.plugin, "an auth plugin instance failed");
                 return Err(Error::Trap);
             }
+        };
+        // The permit is held for the call only; the instance is already ours,
+        // so a queue for this target never blocks another plugin (M2).
+        let Some(_permit) = MemoryReservation::acquire(Arc::clone(&self.memory)).await else {
+            self.pool.push(instance);
+            return Err(Error::Canceled);
         };
         // Each call may install its own host: the secret cache lives in `Scope`.
         instance.store.data_mut().auth_host = Some(Arc::new(CallHost {
@@ -634,13 +703,20 @@ impl Cache {
         Ok(configured)
     }
 
-    /// The authenticators of one applied configuration. Instances whose name,
-    /// settings and destination did not change are kept (their token cache with
-    /// them); everything else is dropped once no call is using it.
+    /// Configures `specs` into a set that does **not** serve yet: a version the
+    /// gateway later refuses leaves the previous set untouched (m1).
     ///
-    /// All of `specs` is configured before anything is replaced, so a refused
-    /// version leaves the previous set serving.
-    pub fn replace(&self, specs: &[Spec]) -> Result<(), Refused> {
+    /// Instances whose name, settings and destination did not change are kept
+    /// (their token cache with them); a fresh one is warmed, so a `configure`
+    /// error — or its [`crate::CONFIGURE_TIMEOUT`] — refuses the version. This
+    /// is apply-time work and holds no lock while it runs.
+    pub fn stage(&self, specs: &[Spec]) -> Result<Staged, Refused> {
+        self.stage_within(specs, crate::CONFIGURE_TIMEOUT)
+    }
+
+    /// [`Cache::stage`] with an explicit configure budget (tests use a short
+    /// one; the gateway always takes the default).
+    pub fn stage_within(&self, specs: &[Spec], timeout: Duration) -> Result<Staged, Refused> {
         // A copy of the Arc table, not a read guard: configuring a plugin can
         // take a while, and the request path must not wait behind it.
         let current: HashMap<_, _> = self
@@ -652,13 +728,22 @@ impl Cache {
             HashMap::with_capacity(specs.len());
         for spec in specs {
             let key = spec.key();
-            let configured = match current.get(&key) {
-                Some(existing) if existing.matches(spec) => Arc::clone(existing),
-                _ => Arc::new(Authenticator::new(spec.clone()).map_err(|source| Refused {
+            let (configured, fresh) = match current.get(&key) {
+                Some(existing) if existing.matches(spec) => (Arc::clone(existing), false),
+                _ => (
+                    Arc::new(Authenticator::new(spec.clone()).map_err(|source| Refused {
+                        target: spec.name.clone(),
+                        source,
+                    })?),
+                    true,
+                ),
+            };
+            if fresh {
+                configured.warm(timeout).map_err(|source| Refused {
                     target: spec.name.clone(),
                     source,
-                })?),
-            };
+                })?;
+            }
             if next.insert(key, configured).is_some() {
                 return Err(Refused {
                     target: spec.name.clone(),
@@ -666,8 +751,36 @@ impl Cache {
                 });
             }
         }
-        *self.entries.write().unwrap_or_else(|e| e.into_inner()) = next;
+        Ok(Staged { entries: next })
+    }
+
+    /// Makes a staged set the one serving. Called once the version is accepted.
+    pub fn publish(&self, staged: Staged) {
+        *self.entries.write().unwrap_or_else(|e| e.into_inner()) = staged.entries;
+    }
+
+    /// Stage and publish in one step (tests and standalone load).
+    pub fn replace(&self, specs: &[Spec]) -> Result<(), Refused> {
+        let staged = self.stage(specs)?;
+        self.publish(staged);
         Ok(())
+    }
+}
+
+/// Authenticators configured for one version that has not been accepted yet.
+#[derive(Debug, Default)]
+pub struct Staged {
+    entries: HashMap<(Traffic, String), Arc<Authenticator>>,
+}
+
+impl Staged {
+    /// How many targets it configures (tests and logging).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 

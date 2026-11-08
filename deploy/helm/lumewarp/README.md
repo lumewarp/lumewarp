@@ -217,7 +217,8 @@ kubectl -n lumewarp create secret generic lumewarp-gateway-id \
 trusted) and must be an absolute http(s) URL without a query. The id key (base64, at least
 32 bytes) MACs A2A task and context ids and seals MCP sessions, so it must be identical on
 every gateway that serves the same installation; the chart takes it only from a Secret.
-When either is unset the MCP and A2A endpoints answer 503 and nothing else is affected.
+When the id key is unset both MCP and A2A answer 503; when only `publicUrl` is unset,
+MCP still works and A2A answers 503. Nothing else is affected.
 
 Both are read at startup: changing `publicUrl` or rotating the id key is a rollout, and a
 rotation invalidates MCP sessions and the A2A task ids already handed out.

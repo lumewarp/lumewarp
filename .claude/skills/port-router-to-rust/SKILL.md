@@ -1,30 +1,36 @@
 ---
 name: port-router-to-rust
-description: Port an existing Python router policy into a Lumewarp Rust strategy crate. Use when the user wants to move a custom router, a LiteLLM-style deployment chooser, or any Python class that picks a model into the Rust gateway; when they ask how to add a router strategy crate; or when a Python policy needs to keep deciding routes on Lumewarp's request path. Covers the real register!/Configure contract, params and member_params schemas, a Python-vs-Rust comparison table, tests, linking the feature, standalone YAML and the bench.
+description: Port an existing Python router policy into a Lumewarp WASM router-strategy plugin written in Rust. Use when the user wants to move a custom router, a LiteLLM-style deployment chooser, or any Python class that picks a model onto the Lumewarp gateway; when they ask how to add or install a router strategy component; or when a Python policy needs to keep deciding routes on Lumewarp's request path. Covers the real register!/Configure contract, params and member_params schemas, the schema subset, a Python-vs-Rust comparison table, tests, building the component, installing it in the router plugin directory, standalone YAML and the bench.
 ---
 
-# Port a Python router to a Rust strategy
+# Port a Python router to a Rust router-strategy plugin
 
-A Lumewarp router strategy is a Rust crate compiled into the gateway
-(`docs/router-strategies.md`, API version 2). The control plane learns it from
-the gateway's `Hello`, validates router writes against the schema the crate
-declares, and the UI renders that schema. Nothing else changes.
+A Lumewarp router strategy is a Rust crate compiled to a WASM component and
+loaded from `LUMEWARP_ROUTER_PLUGIN_DIR` when the gateway starts
+(`docs/router-strategies.md`, `docs/plugins.md`, plugin ABI 1). The control
+plane learns it from the gateway's `Hello.plugins`, validates router writes
+against the schema the component's `manifest()` declares, and the UI renders
+that schema. The gateway is not rebuilt, and nothing in `proto/`,
+`control-plane/src/` or `ui/src/` names the strategy.
 
 This skill takes the Python policy the user already runs and produces
-`gateway/strategies/<name>/`, the two edits that link it, tests that compare it
-with the Python, and the bench and deployment steps.
+`gateway/plugins/router/<name>/`, a built `.wasm` file installed in the router
+plugin directory, tests that compare it with the Python, and the bench and
+deployment steps.
 
 Read before writing code:
 
-- `docs/router-strategies.md` — the contract, the schema subset, the three
-  validation layers.
-- `gateway/strategies/priority-failover/` — the smallest complete crate.
-- `gateway/plugins/router/cheapest-first/` — this skill's worked example, with its
-  Python input at `example/cheapest_first.py`.
+- `docs/router-strategies.md` — the contract, validation on write, compatible
+  changes, building and installing.
+- `docs/plugins.md` — the manifest, the schema subset, the sandbox (no WASI),
+  failure behaviour and metrics.
+- `gateway/plugins/router/priority-failover/` — the smallest complete crate.
+- `gateway/plugins/router/cheapest-first/` — this skill's worked example, with
+  its Python input at `example/cheapest_first.py`.
 
 ## 1. Decide whether it can be a strategy
 
-`pick` runs on the request path. It may read only:
+`pick` runs on the request path, inside the WASM sandbox. It may read only:
 
 | Source | What it gives |
 |---|---|
@@ -36,9 +42,11 @@ Read before writing code:
 | `RngCore` | Range draws, only if the policy is randomized and deterministic given the RNG stream |
 
 It may not read the prompt, the response body, the database, the control plane,
-another service, the clock, or global mutable state. Model catalog prices are
-not visible either: if the Python policy used a price table, it becomes member
-params (the worked example).
+another service, the clock, the filesystem, or global mutable state. Model
+catalog prices are not visible either: if the Python policy used a price table,
+it becomes member params (the worked example). The router world has no host
+imports at all: no `secret()` and no `http-fetch` (those exist only for
+`upstream-auth`).
 
 Health, retries, retry budget, fallbacks, traffic splits, stickiness, circuit
 breakers and weights belong to the gateway. `Candidates` already contains only
@@ -65,7 +73,7 @@ Write down every input the Python `choose` reads and where it lands:
 | Team, key, called name | `RequestInfo::{team_id, key_id, requested}` |
 | Estimated prompt size | `RequestInfo::estimated_input_tokens`, but it is `None` today: do not rely on it |
 | Prompt, response, embeddings | Not available: this cannot be a `pick` policy |
-| DB/HTTP/env in the decision | `configure` may read the environment for secrets; never do I/O per request |
+| DB/HTTP/clock/env in the decision | Not available inside the sandbox: stop, or move it to `configure`-time settings with no I/O |
 
 Record the tuning: tie-breaks, defaults, caps, and the "nothing acceptable"
 case. Each becomes either a param, a member param, or the `None` return that
@@ -73,42 +81,55 @@ lets the gateway fall through.
 
 ## 3. Create the crate
 
-    mkdir -p gateway/strategies/<name>/src gateway/strategies/<name>/testdata
+    mkdir -p gateway/plugins/router/<name>
+    cp gateway/plugins/router/priority-failover/Cargo.toml \
+       gateway/plugins/router/<name>/
+    cp -r gateway/plugins/router/priority-failover/src \
+          gateway/plugins/router/priority-failover/testdata \
+          gateway/plugins/router/<name>/
 
-`gateway/Cargo.toml` already has `strategies/*` as workspace members, so it
-needs no edit. `Cargo.toml`, copying `gateway/plugins/router/cheapest-first`:
+The example is its own Cargo workspace (`[workspace]` in `Cargo.toml`), so it is
+not a member of `gateway/Cargo.toml` and that file needs no edit. `Cargo.toml`:
 
 ```toml
 [package]
-name = "lumewarp-strategy-<name>"
-description = "<one line>"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
+name = "lumewarp-plugin-<name>"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
 publish = false
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[workspace]
+
 [dependencies]
-lumewarp-router-api = { path = "../../crates/lumewarp-router-api" }
-schemars.workspace = true
-serde.workspace = true
+lumewarp-plugin-sdk = { path = "../../../crates/lumewarp-plugin-sdk" }
+schemars = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+lto = true
+panic = "abort"
+opt-level = "z"
+codegen-units = 1
 
 [dev-dependencies]
-serde_json.workspace = true
+serde_json = "1"
 ```
 
-The registered name uses underscores (`cheapest_first`); the directory, crate
-and feature use dashes (`cheapest-first`, `strategy-cheapest-first`). The name
-must match `^[a-z][a-z0-9_]{0,62}$` and must be unique: two crates with one
-name make the gateway refuse it.
+The registered name uses underscores (`cheapest_first`); the directory and crate
+use dashes (`cheapest-first`). The `register!` name must match
+`^[a-z][a-z0-9_]{0,62}$` and must be unique across the kind, built-ins
+included: a duplicate refuses gateway startup.
 
 ## 4. Settings, `register!`, `configure`, `pick`
 
 Follow the types in `docs/router-strategies.md` exactly. The shape:
 
 ```rust
-use lumewarp_router_api::{
+use lumewarp_plugin_sdk::{
     Candidates, ConfigError, Configure, Needs, RequestInfo, RngCore, RouterInfo, Strategy,
 };
 use schemars::JsonSchema;
@@ -163,7 +184,8 @@ impl Strategy for MyStrategy {
     }
 }
 
-lumewarp_router_api::register! {
+lumewarp_plugin_sdk::register! {
+    kind: "router-strategy",
     name: "my_strategy",
     title: "My strategy",
     description: "One sentence for the UI.",
@@ -188,20 +210,23 @@ Rules that the compiler will not catch:
   in the common case, no `format!`/`Vec`/`sort`/`collect`. Build boxes and
   arrays in `configure`; compare stack tuples in `pick`. Randomized policies
   must draw only through `RngCore`.
+- **No WASI in the guest.** `HashMap::new()` asks for entropy and traps
+  (`wasi:random`); `println!`, `Instant::now()` and `std::env` trap too. Use a
+  `BTreeMap` or a fixed hasher (`BuildHasherDefault`), and no clock. Do not put
+  request- or key-derived data in globals: instances are pooled and reused
+  across requests and keys.
 - **Return `c.index`, not `c.member_index()`.** Return `None` when nothing is
   acceptable; the gateway then takes its fall-through paths.
 - **`params` are public:** they go into the snapshot, the API, the audit trail
-  and every gateway's disk. Put no credential there. Read a secret from the
-  environment in `configure` (as upstream `api_key_ref` does).
+  and every gateway's disk. Put no credential there.
 - **`ConfigError` text is dropped** before it reaches the caller (params may be
   private). Say what is safe to log; do not include param values.
 - **Headers are opt-in:** only names in `params.headers` are readable through
   `RequestInfo::header`. Do not declare `headers`; the gateway owns and removes
   that field. Credential headers are refused.
-- **One `register!` per module.** The macro generates a test module with a
-  fixed name; two in one module do not compile. Registering a schema outside
-  the supported subset fails that generated test in `cargo test`, naming the
-  field.
+- **One `register!` per crate.** The macro generates the component's exports,
+  `manifest()` and a test that fails `cargo test` when a schema leaves the
+  subset, naming the field.
 
 ## 5. Port the decision
 
@@ -219,8 +244,9 @@ Do not re-implement health checks, retries or fallbacks. A policy that said
 
 ## 6. Test against the Python and the contract
 
-Use `lookup(name)` and the factory, not the concrete type: that is the path the
-gateway takes (`create` deserializes the JSON the control plane stores). Cover:
+`register!` also registers the strategy natively on non-WASM targets, so the
+crate's own tests can call the same factory path the gateway uses
+(`lookup(name)`, `descriptors()`) without a gateway. Cover:
 
 1. **The Python comparison table.** Keep the Python policy and a generator
    beside it, run the Python to write the expected picks, and read the file in
@@ -236,7 +262,10 @@ gateway takes (`create` deserializes the JSON the control plane stores). Cover:
 
 2. **`configure` refusals.** The schema is not enforced at runtime: pass JSON
    that the schema rejects (unknown fields, wrong types, out-of-range values)
-   to the factory and assert that `configure` rejects it too.
+   to the factory and assert that `configure` rejects it too. Also test a list
+   of boundary payloads through both the control plane and standalone YAML, as
+   `priority-failover/testdata/boundaries.json` and
+   `tests/e2e/test_strategy_crate.py` do.
 
 3. **Split/member-index behaviour.** Put the same model in two splits with
    different member params and assert the pick uses the right entry, in both
@@ -244,81 +273,71 @@ gateway takes (`create` deserializes the JSON the control plane stores). Cover:
    `member_index`.
 
 4. **Allocation.** If the policy claims to allocate nothing, count allocations
-   around `pick` (the worked example has a small test allocator) or state that
-   the gateway's path test covers it.
+   around `pick` with a small test allocator (the worked example has one).
 
-5. **End to end through a snapshot.** Add `tests/e2e/test_strategy_<name>.py`
-   modelled on `tests/e2e/test_strategy_crate.py`: prove nothing under
-   `proto/`, `control-plane/src/` or `ui/src/` names it, build a gateway with
-   the feature (or use an env-provided binary), start it against the control
-   plane, save a router using the strategy, call it, and assert the usage row's
-   `model` is the member the policy should have chosen. The example also asserts
-   that the control plane enforces the derived schema and that the gateway's
-   `capabilities` in `Hello` carry `strategy:<name>`. From the repo root:
-
-       flock /tmp/lumewarp-e2e.lock scripts/e2e-core.sh -k <name>
-
-   Build the feature gateway into its own target directory
-   (`CARGO_TARGET_DIR=<repo>/gateway/target/<name>-e2e`), never the default
-   `gateway/target/debug/lumewarp`: `tests/e2e/test_routing_resilience.py` asserts that
-   binary's exact list of `strategy:` capabilities, and a backup/restore can be
-   skipped by a timeout or an interrupt.
+5. **End to end through a snapshot.** Add
+   `tests/e2e/test_strategy_<name>.py` modelled on
+   `tests/e2e/test_strategy_cheapest_first.py`: build the components with
+   `bash gateway/plugins/build.sh`, start a gateway with
+   `LUMEWARP_ROUTER_PLUGIN_DIR` set, save a router using the strategy through
+   the admin API, call it, and assert the usage row's `model` is the member the
+   policy should have chosen. Also assert that `GET /plugins?kind=router-strategy`
+   shows the descriptor and that the control plane enforces its schema (422 on
+   bad member params). `tests/e2e/test_strategy_crate.py` is the variant that
+   reuses the gateway binary and plugin directory from `scripts/e2e-core.sh`
+   via `E2E_STRATEGY_GATEWAY_BIN`.
 
 Run:
 
-    cd gateway && cargo test -p lumewarp-strategy-<name>
-    cd gateway && cargo fmt --all --check
-    cd gateway && cargo clippy --all-targets -- -D warnings
+    cd gateway && cargo test --manifest-path plugins/router/<name>/Cargo.toml
+    cargo fmt --manifest-path plugins/router/<name>/Cargo.toml -- --check
+    cargo clippy --manifest-path plugins/router/<name>/Cargo.toml \
+      --all-targets -- -D warnings
+    cargo fmt --all --check
+
+The component crate is outside the gateway workspace, so `cargo clippy
+--workspace` does not lint it; the `--manifest-path` call above does. The last
+`cargo fmt --all --check` covers the gateway itself if you changed anything
+there.
 
 Prove each test once by breaking the behaviour and watching it fail, then put
 the change back.
 
-## 7. Link it into the gateway
+## 7. Build and install the component
 
-A crate must be named to be linked. Two files, both named in
-`docs/router-strategies.md`:
+The crate is one component. Build it for the plugin target (once per machine,
+add the target):
 
-`gateway/crates/lumewarp-gateway/Cargo.toml`:
-
-```toml
-[features]
-strategy-<name> = ["dep:lumewarp-strategy-<name>"]
-
-[dependencies]
-lumewarp-strategy-<name> = { path = "../../strategies/<name>", optional = true }
-```
-
-`gateway/crates/lumewarp-gateway/src/main.rs`:
-
-```rust
-// A strategy crate must be named to be linked; its `register!` does the rest.
-#[cfg(feature = "strategy-my-strategy")]
-use lumewarp_strategy_my_strategy as _;
-```
-
-(`register!` would say `name: "my_strategy"`.) The feature, dependency and
-path use the dashed form; the `register!` name uses underscores.
-
-Then:
-
+    rustup target add wasm32-wasip2
     cd gateway
-    cargo build -p lumewarp-gateway --features strategy-<name>
-    ./target/debug/lumewarp strategies
-    ./target/debug/lumewarp strategies --json
-    cargo test --features strategy-<name>
-    cargo test --all-features
+    cargo build --release --target wasm32-wasip2 \
+      --manifest-path plugins/router/<name>/Cargo.toml
 
-The listing must show the title; `--json` is the manifest the control plane
-receives through `Hello`. Commit the updated `gateway/Cargo.lock` (CI runs
-`cargo run --locked`).
+Because the crate is its own workspace, the file is
+`plugins/router/<name>/target/wasm32-wasip2/release/lumewarp_plugin_<name_with_underscores>.wasm`.
 
-Both test forms must pass: `crates/lumewarp-gateway/tests/strategies.rs` compares
-the built-in entries with the committed manifest and checks the custom entries
-against the features compiled into the binary, so a strategy feature does not
-make the manifest test fail. Add the new name to its
-`compiled_custom_strategies()` list next to the feature.
+Copy it into the directory `LUMEWARP_ROUTER_PLUGIN_DIR` names and restart the
+gateway. The file name is yours; the plugin name comes from the manifest:
 
-Standalone mode, with the same schema and the same `configure` checks:
+    cp plugins/router/<name>/target/wasm32-wasip2/release/lumewarp_plugin_<name_with_underscores>.wasm \
+       /etc/lumewarp/plugins/router/<name>.wasm
+    LUMEWARP_ROUTER_PLUGIN_DIR=/etc/lumewarp/plugins/router ./target/debug/lumewarp plugins
+
+`plugins` lists built-ins and every loaded component; `--json` prints the
+descriptor array the gateway reports in `Hello`. A file that does not implement
+the router world, declares another kind, reuses a name or has an invalid
+manifest refuses startup. There is no hot reload: replacing the file requires a
+restart.
+
+For a local run, `bash gateway/plugins/build.sh` builds the committed examples
+into `gateway/target/plugins/router/`, so
+`LUMEWARP_ROUTER_PLUGIN_DIR=gateway/target/plugins/router` is enough.
+
+Commit the crate and its `Cargo.lock`. There is no feature flag, no gateway
+dependency and no `gateway/Cargo.lock` change: the gateway binary is the same
+for every router strategy.
+
+Standalone mode uses the same component and the same schema checks:
 
 ```yaml
 routers:
@@ -332,16 +351,20 @@ routers:
         params: {input_price_nano_usd_per_mtok: 100}
 ```
 
-    cd gateway && ./target/debug/lumewarp --config /tmp/cost-aware.yaml
+    LUMEWARP_ROUTER_PLUGIN_DIR=gateway/target/plugins/router \
+      ./gateway/target/debug/lumewarp --config /tmp/cost-aware.yaml
 
 Invalid settings exit non-zero with `router "<name>" strategy configuration
 failed`; the param values are not printed.
 
 ## 8. Bench the request path
 
-A custom strategy costs one virtual call plus whatever `pick` does. Bench it
-with the real driver (`bench/README.md`), never by writing a micro-benchmark
-that skips the gateway.
+A WASM strategy costs one host call, the wire copy of the request and the
+eligible candidates, plus whatever `pick` does; a native built-in does not cross
+the boundary. Bench it with the real driver (`bench/README.md`), never by
+writing a micro-benchmark that skips the gateway. There is no fixed latency
+budget for a plugin: report the numbers, and `lumewarp_plugin_duration_seconds`
+shows slowness in production.
 
 The bench always calls the router named `mock` in `bench/lumewarp/config.yaml`.
 Make a local, uncommitted edit that points that router at the strategy, e.g.:
@@ -355,30 +378,37 @@ Make a local, uncommitted edit that points that router at the strategy, e.g.:
         params: {input_price_nano_usd_per_mtok: 1}
 ```
 
-Then, from the repo root (the release build in `scripts/run.sh` has no features,
-so build the binary first and pass it through `LUMEWARP_BIN`):
+Then, from the repo root (the gateway binary needs no special feature; it only
+needs the directory):
 
     (cd bench/mock-upstream && cargo build --release)
-    (cd gateway && cargo build --release -p lumewarp-gateway --features strategy-<name>)
-    LUMEWARP_BIN=$PWD/gateway/target/release/lumewarp bench/scripts/run.sh --quick --no-build
+    (cd gateway && cargo build --release -p lumewarp-gateway)
+    LUMEWARP_ROUTER_PLUGIN_DIR=$PWD/gateway/target/plugins/router \
+      LUMEWARP_BIN=$PWD/gateway/target/release/lumewarp \
+      bench/scripts/run.sh --quick --no-build
 
 `--quick` is 1000 RPS for 15 s plus SSE clients; use `--full` for the
-300/1000/5000/10000 RPS run. Compare overhead p99 with the built-in run, not
-absolute latency. Revert the config edit afterwards.
+300/1000/5000/10000 RPS run. Compare overhead p99 with the same gateway using
+the native `weighted` strategy, not absolute latency. For the LiteLLM
+comparison, run the same routing policy there (a LiteLLM custom routing
+strategy) and report the difference; do not add a plugin-specific budget.
+Revert the config edit afterwards.
 
 ## 9. Deploy
 
-1. Upgrade every gateway that will serve a router using the strategy first: a
-   gateway without the crate NACKs the whole config version, including key
-   revocations. `force: true` saves a router a connected gateway cannot serve,
-   audits `router.force_save`, and leaves that gateway behind.
-2. `GET /api/v1/strategies` shows the descriptor, its schemas and the gateways
-   that report it. The UI form is built from the schema.
+1. Put the component on every gateway that will serve a router using it,
+   before saving the router. A gateway without it NACKs the whole config
+   version, including key revocations. `force: true` saves a router a connected
+   gateway cannot serve, audits `router.force_save`, and leaves that gateway
+   behind.
+2. `GET /api/v1/plugins?kind=router-strategy` shows the descriptor, its schemas
+   and the gateways that report it. The UI form is built from the schema.
 3. Saved routers are validated against every connected gateway's schema;
    `configure` is still the final authority on the gateway.
 4. Under one name, only **add optional fields**. Removing, renaming, making a
    field required, or narrowing a type/range needs a new strategy name; saved
-   routers would otherwise turn `config_invalid` or be NACKed.
+   routers would otherwise turn `config_invalid` or be NACKed. Changing only
+   the code (schema unchanged) is free: replace the file and restart.
 
 ## Worked example: `CheapestFirstRouter` → `cheapest-first`
 
@@ -386,7 +416,10 @@ Input: `example/cheapest_first.py`. It chooses the healthy deployment with the
 lowest input price (nano-USD per Mtok from a code table), ties by fewer
 requests in flight then configuration order, puts unpriced deployments last,
 and supports a maximum input price. The port is
-`gateway/plugins/router/cheapest-first/`.
+`gateway/plugins/router/cheapest-first/`, and `testdata/pick-table.json` is
+generated by the Python in 13 scenarios (cheapest, both tie-breaks, zero price,
+five unpriced cases, four cap cases, ineligible priced members, empty pool);
+the Rust test compares every row.
 
 | Python | Rust in the crate | Why |
 |---|---|---|
@@ -398,23 +431,26 @@ and supports a maximum input price. The port is
 | Returns `None` | Returns `None` | No acceptable candidate: the gateway's fall-through paths |
 | `in_flight` tie-break | `Candidate::in_flight()` | Third tuple key, then `member_index()` |
 
-`testdata/pick-table.json` is generated by the Python in 13 scenarios (cheapest,
-both tie-breaks, zero price, five unpriced cases, four cap cases, ineligible
-priced members, empty pool); the Rust test compares every row. The crate
-additionally tests split member indices, `configure` refusals, the descriptor
-and zero allocations in `pick`.
+The crate additionally tests split member indices, `configure` refusals, the
+descriptor and zero allocations in `pick`. The e2e
+`tests/e2e/test_strategy_cheapest_first.py` proves the component from `Hello`
+to the member that serves a request.
 
 ## Checklist
 
 - [ ] The policy can run from `params`/`member_params`/`Candidate`/`RequestInfo` only.
 - [ ] `configure` enforces every bound the schema states and precomputes tables.
 - [ ] `pick` uses `member_index()` for member tables and allocates nothing.
+- [ ] No `HashMap::new()`, `println!`, clock or environment access in the guest.
 - [ ] The unpriced/unknown rule is written down and covered by a table case.
 - [ ] The comparison table is generated by the Python, not by hand.
-- [ ] `cargo test -p lumewarp-strategy-<name>`, `cargo test --features
-      strategy-<name>`, `cargo test --all-features`, `cargo fmt --all --check`
-      and `cargo clippy --all-targets -- -D warnings` pass.
+- [ ] `cargo test --manifest-path plugins/router/<name>/Cargo.toml`, the crate's
+      clippy and `cargo fmt --manifest-path plugins/router/<name>/Cargo.toml --
+      --check` pass.
+- [ ] The component builds for `wasm32-wasip2` and `lumewarp plugins` lists it
+      from its directory.
 - [ ] The e2e proves `Hello` → router → served request through a snapshot.
-- [ ] The feature, the `use` line and `Cargo.lock` are committed.
+- [ ] The crate and its `Cargo.lock` are committed; no gateway feature or
+      `gateway/Cargo.lock` change.
 - [ ] Standalone YAML accepts valid settings and refuses invalid ones.
 - [ ] The bench was run with the strategy wired into the bench router.

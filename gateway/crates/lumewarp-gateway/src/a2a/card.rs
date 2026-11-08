@@ -39,7 +39,7 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{
     header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, ETAG, IF_NONE_MATCH},
-    Method, Request, Response, StatusCode,
+    Method, Request, Response, StatusCode, Uri,
 };
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -59,8 +59,9 @@ pub const MAX_CARD_BYTES: usize = targets::MAX_CARD_BYTES;
 /// Most agents whose cards are fetched by one process.
 pub const MAX_AGENTS: usize = 200;
 /// The card's `Cache-Control` lifetime; the gateway itself refetches every
-/// [`REFRESH`].
-const CARD_MAX_AGE: &str = "public, max-age=300";
+/// [`REFRESH`]. `private`: the response is grant-gated by `X-Lumewarp-Key`, so a
+/// shared cache must not serve it to another key (m6).
+const CARD_MAX_AGE: &str = "private, max-age=300";
 
 /// The rewritten card bytes and its validator.
 pub struct Card {
@@ -280,12 +281,9 @@ pub async fn supervise(runtime: Arc<Runtime>, snapshot: crate::server::Snapshot)
 
 fn reconcile(runtime: &Arc<Runtime>, snapshot: &crate::server::Snapshot, tasks: &mut Tasks) {
     let table = snapshot.load_full();
-    let (version, agents): (u64, Vec<Arc<A2aTarget>>) = match &table {
-        Some(table) => (
-            table.version,
-            table.targets.agents().take(MAX_AGENTS).cloned().collect(),
-        ),
-        None => (0, Vec::new()),
+    let agents: Vec<Arc<A2aTarget>> = match &table {
+        Some(table) => table.targets.agents().take(MAX_AGENTS).cloned().collect(),
+        None => Vec::new(),
     };
     let mut desired = HashSet::with_capacity(agents.len());
     for target in agents {
@@ -302,7 +300,11 @@ fn reconcile(runtime: &Arc<Runtime>, snapshot: &crate::server::Snapshot, tasks: 
         if let Some((_, task)) = tasks.running.remove(&key) {
             task.abort();
         }
-        let task = tokio::spawn(fetch_loop(Arc::clone(runtime), target, version));
+        let task = tokio::spawn(fetch_loop(
+            Arc::clone(runtime),
+            target,
+            Arc::clone(snapshot),
+        ));
         tasks.running.insert(key, (signature, task));
     }
     // Stop tasks for removed agents. Their cached card may stay until the
@@ -318,7 +320,19 @@ fn reconcile(runtime: &Arc<Runtime>, snapshot: &crate::server::Snapshot, tasks: 
     });
 }
 
-async fn fetch_loop(runtime: Arc<Runtime>, target: Arc<A2aTarget>, version: u64) {
+/// The version of the snapshot the process is serving right now. A card task
+/// lives across snapshots, so every report must carry the current version, not
+/// the one it was spawned with (M7); the control plane discards a card whose
+/// version is older than the target's last edit.
+fn snapshot_version(snapshot: &crate::server::Snapshot) -> u64 {
+    snapshot.load().as_ref().map_or(0, |table| table.version)
+}
+
+async fn fetch_loop(
+    runtime: Arc<Runtime>,
+    target: Arc<A2aTarget>,
+    snapshot: crate::server::Snapshot,
+) {
     // Spread the herd: a snapshot reaches every replica at once.
     tokio::time::sleep(Duration::from_millis(fastrand::u64(0..2_000))).await;
     loop {
@@ -329,9 +343,11 @@ async fn fetch_loop(runtime: Arc<Runtime>, target: Arc<A2aTarget>, version: u64)
             .metrics
             .a2a_upstream_duration(&target.name)
             .observe(started.elapsed().as_secs_f64());
+        let public_url = runtime.public_url.as_deref();
+        let version = snapshot_version(&snapshot);
         match result {
-            Ok(card) => report_success(&runtime.catalog, &target, card, version),
-            Err(error) => report_error(&runtime.catalog, &target, &error, version),
+            Ok(card) => report_success(&runtime.catalog, &target, card, public_url, version),
+            Err(error) => report_error(&runtime.catalog, &target, &error, public_url, version),
         }
         // Five minutes, +/- 10%: a whole fleet does not refetch in lockstep.
         let jitter = REFRESH / 10;
@@ -343,18 +359,44 @@ async fn fetch_loop(runtime: Arc<Runtime>, target: Arc<A2aTarget>, version: u64)
     }
 }
 
+/// Whether two URLs share scheme, host and effective port. A token for one
+/// destination must not be sent to another (`auth.rs`), so the card fetch
+/// attaches the agent's credential only on its own origin.
+fn same_origin(left: &Uri, right: &Uri) -> bool {
+    fn effective_port(uri: &Uri) -> Option<u16> {
+        uri.port_u16().or_else(|| match uri.scheme_str() {
+            Some("http") => Some(80),
+            Some("https") => Some(443),
+            _ => None,
+        })
+    }
+    left.scheme_str() == right.scheme_str()
+        && left
+            .host()
+            .zip(right.host())
+            .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+        && effective_port(left) == effective_port(right)
+}
+
 async fn fetch(target: &A2aTarget, client: &UpstreamClient) -> Result<String, String> {
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-    // The agent's own outbound auth, exactly like a JSON-RPC call (P7).
-    upstream_auth::authorize_a2a(target, &target.card_url, &Method::GET, &[], &mut headers)
-        .await
-        .map_err(|failure| format!("outbound auth failed: {}", failure.label()))?;
-    let request = Request::builder()
+    // The agent's own outbound auth, exactly like a JSON-RPC call (P7), but only
+    // when the card is on the agent's origin. A `card_url` on another origin
+    // gets no credential (R6 B1; docs/plugins.md, "Agent cards").
+    if same_origin(&target.url, &target.card_url) {
+        upstream_auth::authorize_a2a(target, &target.card_url, &Method::GET, &[], &mut headers)
+            .await
+            .map_err(|failure| format!("outbound auth failed: {}", failure.label()))?;
+    }
+    let mut request = Request::builder()
         .method(Method::GET)
         .uri(target.card_url.clone())
         .body(Full::new(Bytes::new()))
         .map_err(|_| "invalid card request".to_string())?;
+    // The review found this line missing: `headers` (Accept and the outbound
+    // auth) was computed but the request never carried it.
+    *request.headers_mut() = headers;
     let response = tokio::time::timeout(target.timeout, client.request(request))
         .await
         .map_err(|_| "card fetch timed out".to_string())?
@@ -419,19 +461,43 @@ fn last_good(target: &A2aTarget) -> Option<Arc<str>> {
         .and_then(|fetched| fetched.card.clone())
 }
 
-fn report_success(catalog: &Registry, target: &A2aTarget, card: String, config_version: u64) {
-    let card: Arc<str> = Arc::from(card);
-    remember(target, Arc::clone(&card));
+/// The card as the control plane should store and display it: the rewrite clients
+/// receive (gateway URL, gateway auth scheme, no signatures, push off). The raw
+/// upstream bytes stay in the process for serving; without a public URL there is
+/// no rewrite and the raw card is reported.
+fn reported_card(target: &A2aTarget, raw: &str, public_url: Option<&str>) -> String {
+    let (Some(public_url), Ok(mut card)) = (public_url, serde_json::from_str::<Value>(raw)) else {
+        return raw.to_owned();
+    };
+    rewrite(&mut card, &target.name, public_url);
+    serde_json::to_string(&card).unwrap_or_else(|_| raw.to_owned())
+}
+
+fn report_success(
+    catalog: &Registry,
+    target: &A2aTarget,
+    card: String,
+    public_url: Option<&str>,
+    config_version: u64,
+) {
+    let reported = reported_card(target, &card, public_url);
+    remember(target, Arc::from(card));
     catalog.card(&CardObservation {
         agent: &target.name,
         agent_id: &target.id,
-        card_json: &card,
+        card_json: &reported,
         error: "",
         config_version,
     });
 }
 
-fn report_error(catalog: &Registry, target: &A2aTarget, error: &str, config_version: u64) {
+fn report_error(
+    catalog: &Registry,
+    target: &A2aTarget,
+    error: &str,
+    public_url: Option<&str>,
+    config_version: u64,
+) {
     let error = truncate_error(error);
     // A failed fetch keeps the last good card and reports both.
     let card = last_good(target);
@@ -450,10 +516,13 @@ fn report_error(catalog: &Registry, target: &A2aTarget, error: &str, config_vers
             },
         );
     }
+    let reported = card
+        .as_deref()
+        .map(|card| reported_card(target, card, public_url));
     catalog.card(&CardObservation {
         agent: &target.name,
         agent_id: &target.id,
-        card_json: card.as_deref().unwrap_or(""),
+        card_json: reported.as_deref().unwrap_or(""),
         error: &error,
         config_version,
     });
@@ -544,6 +613,16 @@ mod tests {
     }
 
     #[test]
+    fn the_served_card_is_private_to_the_callers_key() {
+        let rendered = render(&card(), "a", PUBLIC).unwrap();
+        let response = response(&rendered, &HeaderMap::new());
+        assert_eq!(
+            response.headers().get("cache-control").unwrap(),
+            "private, max-age=300"
+        );
+    }
+
+    #[test]
     fn a_changed_card_has_a_different_etag() {
         let first = render(&card(), "a", PUBLIC).unwrap();
         let mut modified = card();
@@ -583,10 +662,10 @@ mod tests {
     fn a_cached_card_belongs_to_one_agent_id_and_failures_keep_it() {
         let agent = target("cached-card-agent", "id-1", "http://127.0.0.1:1/a2a");
         let catalog = Registry::new();
-        report_success(&catalog, &agent, "{\"name\":\"Mock\"}".to_owned(), 3);
+        report_success(&catalog, &agent, "{\"name\":\"Mock\"}".to_owned(), None, 3);
         assert!(cached("cached-card-agent", "id-1").is_some());
         assert!(cached("cached-card-agent", "id-2").is_none());
-        report_error(&catalog, &agent, "card fetch returned status 500", 3);
+        report_error(&catalog, &agent, "card fetch returned status 500", None, 3);
         // A failed fetch keeps the last good card and reports the error with it.
         assert_eq!(
             cached("cached-card-agent", "id-1").as_deref(),
@@ -599,6 +678,123 @@ mod tests {
         assert_eq!(report.cards[0].error, "card fetch returned status 500");
         assert!(report.cards[0].card_json.contains("Mock"));
         assert_eq!(report.cards[0].config_version, 3);
+    }
+
+    /// A tiny one-shot HTTP server: records the raw request (headers included)
+    /// and answers with `body` as a JSON document.
+    fn serve_card_once(
+        body: String,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<Mutex<Option<String>>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(None));
+        let recorded = Arc::clone(&seen);
+        let thread = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut raw = Vec::new();
+            let mut chunk = [0u8; 512];
+            while !raw.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => raw.extend_from_slice(&chunk[..read]),
+                }
+            }
+            *recorded.lock().unwrap() = Some(String::from_utf8_lossy(&raw).into_owned());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        (address, seen, thread)
+    }
+
+    fn card_target(url: &str, card_url: &str, auth: crate::targets::Auth) -> A2aTarget {
+        A2aTarget {
+            id: "card-auth".into(),
+            name: "card-auth".into(),
+            url: url.parse().unwrap(),
+            card_url: card_url.parse().unwrap(),
+            auth,
+            middleware: None,
+            timeout: targets::DEFAULT_TIMEOUT,
+            card_json: None,
+        }
+    }
+
+    fn static_bearer() -> crate::targets::Auth {
+        crate::targets::Auth::StaticBearer {
+            authorization: hyper::header::HeaderValue::from_static("Bearer secret"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_card_fetch_sends_the_agent_auth_on_its_own_origin() {
+        let body = r#"{"name":"Auth","description":"d","version":"1","skills":[]}"#;
+        let (address, seen, thread) = serve_card_once(body.to_owned());
+        let target = card_target(
+            &format!("http://{address}/a2a"),
+            &format!("http://{address}/.well-known/agent-card.json"),
+            static_bearer(),
+        );
+        let text = fetch(&target, &crate::proxy::client()).await.unwrap();
+        thread.join().unwrap();
+        assert_eq!(text, body);
+        let request = seen.lock().unwrap().clone().expect("the card request");
+        let lower = request.to_ascii_lowercase();
+        assert!(
+            lower.contains("authorization: bearer secret"),
+            "the credential was not sent: {request}"
+        );
+        assert!(lower.contains("accept: application/json"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn a_card_on_another_origin_is_fetched_without_credentials() {
+        let body = r#"{"name":"Public","description":"d","version":"1","skills":[]}"#;
+        let (address, seen, thread) = serve_card_once(body.to_owned());
+        // The agent endpoint is on a different port, hence a different origin.
+        let target = card_target(
+            "http://127.0.0.1:1/a2a",
+            &format!("http://{address}/.well-known/agent-card.json"),
+            static_bearer(),
+        );
+        let text = fetch(&target, &crate::proxy::client()).await.unwrap();
+        thread.join().unwrap();
+        assert_eq!(text, body);
+        let request = seen.lock().unwrap().clone().expect("the card request");
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization:"),
+            "the agent's credential went to another origin: {request}"
+        );
+    }
+
+    #[test]
+    fn a_card_report_reads_the_current_snapshot_version() {
+        use crate::router::RoutingTable;
+        use arc_swap::ArcSwapOption;
+        let runtime = Runtime::new();
+        let yaml = "a2a_agents:\n  - {name: versioned, url: 'http://127.0.0.1:1/a2a'}\n";
+        let (_, mut snapshot) = lumewarp_config::Config::parse(yaml).unwrap();
+        snapshot.version = 7;
+        let table = RoutingTable::compile(
+            &snapshot,
+            lumewarp_config::AuthMode::standalone(&snapshot),
+            &runtime,
+        )
+        .unwrap();
+        let slot: crate::server::Snapshot = Arc::new(ArcSwapOption::from_pointee(table));
+        assert_eq!(snapshot_version(&slot), 7);
+        let empty: crate::server::Snapshot = Arc::new(ArcSwapOption::empty());
+        assert_eq!(snapshot_version(&empty), 0);
     }
 
     #[test]
@@ -646,7 +842,14 @@ mod tests {
         let yaml =
             format!("a2a_agents:\n  - {{name: supervised_agent, url: 'http://{addr}/a2a'}}\n");
         let (_, snapshot) = lumewarp_config::Config::parse(&yaml).unwrap();
-        let runtime = Runtime::new();
+        let runtime = Runtime::with_usage_and_env(
+            Arc::new(crate::metrics::Metrics::new()),
+            crate::usage::UsageSink::disabled(),
+            crate::runtime::EnvOptions {
+                id_key: None,
+                public_url: Some("https://gw.example.test".into()),
+            },
+        );
         let table = RoutingTable::compile(
             &snapshot,
             lumewarp_config::AuthMode::standalone(&snapshot),
@@ -674,6 +877,14 @@ mod tests {
             "{}",
             cards[0].card_json
         );
+        // Reported as the rewritten card: gateway URL, no upstream signatures.
+        let reported: Value = serde_json::from_str(&cards[0].card_json).unwrap();
+        assert_eq!(
+            reported["supportedInterfaces"][0]["url"],
+            "https://gw.example.test/a2a/supervised_agent"
+        );
+        assert!(reported.get("signatures").is_none());
+        assert_eq!(reported["capabilities"]["pushNotifications"], false);
         assert_eq!(cards[0].config_version, 0);
         assert!(cached("supervised_agent", "supervised_agent").is_some());
     }

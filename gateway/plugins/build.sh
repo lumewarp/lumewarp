@@ -18,7 +18,7 @@ for name in strip-artifacts; do
   cp "$root/target/plugin-build/wasm32-wasip2/release/lumewarp_plugin_${name//-/_}.wasm" "$root/target/plugins/a2a-middleware/$name.wasm"
 done
 if [[ "${1:-}" == "--tests" ]]; then
-  for entry in auth/noop-test auth/fixture a2a-middleware/noop-test router/loop-test; do
+  for entry in auth/noop-test auth/fixture a2a-middleware/noop-test router/loop-test router/misbehave-test; do
     kind="${entry%/*}"
     cargo build --release --target wasm32-wasip2 --manifest-path "$root/plugins/$entry/Cargo.toml" --target-dir "$root/target/plugin-build"
     case "$entry" in
@@ -26,6 +26,7 @@ if [[ "${1:-}" == "--tests" ]]; then
       auth/fixture) file=lumewarp_plugin_auth_fixture ;;
       a2a-middleware/noop-test) file=lumewarp_plugin_middleware_noop_test ;;
       router/loop-test) file=lumewarp_plugin_loop_test ;;
+      router/misbehave-test) file=lumewarp_plugin_router_misbehave_test ;;
     esac
     mkdir -p "$root/target/plugins-test/$kind"
     cp "$root/target/plugin-build/wasm32-wasip2/release/$file.wasm" "$root/target/plugins-test/$entry.wasm"

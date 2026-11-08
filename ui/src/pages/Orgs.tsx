@@ -80,7 +80,7 @@ function NewTeamDialog({ org, onClose }: { org: Org; onClose: () => void }) {
         error={form.errors.name}
         autoFocus
       />
-      <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam />
+      <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam parent={org} />
     </FormDialog>
   );
 }

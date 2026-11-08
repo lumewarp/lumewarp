@@ -210,3 +210,29 @@ async def test_config_invalid_reports_a_vanished_middleware(client, committed) -
     listed = client.get(f"/api/v1/a2a-agents/{body['id']}", headers=H).json()
     assert listed["config_invalid"] is True
     assert "no gateway reports" in listed["config_problems"][0]
+
+
+async def test_pagination_walks_every_agent_once(client) -> None:
+    """The list is id-ordered and the cursor is an id, so names that sort against creation
+    order cannot skip or repeat an item."""
+    names = []
+    for name in ("zeta", "alpha", "race"):
+        response = _create(client, name=name)
+        assert response.status_code == 201, response.text
+        names.append(name)
+    seen: list[str] = []
+    cursor = None
+    for _ in range(10):
+        params: dict[str, object] = {"limit": 1}
+        if cursor is not None:
+            params["cursor"] = cursor
+        page = client.get("/api/v1/a2a-agents", params=params, headers=H)
+        assert page.status_code == 200, page.text
+        body = page.json()
+        seen.extend(item["name"] for item in body["items"])
+        cursor = body["next_cursor"]
+        if cursor is None:
+            break
+    ours = [name for name in seen if name in set(names)]
+    assert ours == names
+    assert len(seen) == len(set(seen))

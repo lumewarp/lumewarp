@@ -10,6 +10,7 @@
 //! | `echo` | Returns `x-echo: <value of echo_header>`, or `absent`. |
 //! | `secret` | Returns what `secret(secret_name)` gave, or `none`. |
 //! | `error` | Returns `Err("fixture error")`. |
+//! | `stuck_configure` | Never returns from `configure` (the apply-time budget must cut it). |
 //! | `loop` | Spins forever, so the epoch deadline trips. |
 //!
 //! `x-calls` is what proves a cache hit (`1` on both answers) and a configure
@@ -58,6 +59,9 @@ impl ConfigureAuth<Params> for Fixture {
     fn configure(_: &auth_types::TargetInfo, params: Params) -> Result<Self, ConfigError> {
         match params.mode.as_str() {
             "fixed" | "fetch" | "echo" | "secret" | "error" | "loop" => {}
+            "stuck_configure" => loop {
+                std::hint::spin_loop();
+            },
             other => return Err(ConfigError(format!("unknown mode {other:?}"))),
         }
         if params.mode == "fetch" && params.url.is_empty() {

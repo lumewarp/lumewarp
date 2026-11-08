@@ -113,7 +113,13 @@ export function Teams() {
           </p>
         )}
         {perms.canCreateTeam && (
-          <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam />
+          <PolicyFields
+            values={form.values}
+            errors={form.errors}
+            set={form.set}
+            isTeam
+            parent={(orgs.data ?? []).find((org) => org.id === form.values.org_id) ?? orgs.data?.[0]}
+          />
         )}
       </FormDialog>
       <ConfirmDialog

@@ -346,6 +346,7 @@ impl Context<'_> {
             || name == "notifications/roots/list_changed"
         {
             let mut status = StatusCode::NO_CONTENT;
+            let mut missing_session = false;
             for leg in &s.legs {
                 if !self.grants().may_see_server(&leg.name) {
                     continue;
@@ -366,13 +367,14 @@ impl Context<'_> {
                 )
                 .await
                 {
-                    Ok(r) if r.status() == StatusCode::NOT_FOUND => {
-                        return fail(StatusCode::NOT_FOUND, "Upstream session ended")
-                    }
+                    Ok(r) if r.status() == StatusCode::NOT_FOUND => missing_session = true,
                     Ok(r) if !r.status().is_success() => status = r.status(),
                     Err(error) => status = error.status(),
                     _ => (),
                 }
+            }
+            if missing_session {
+                return fail(StatusCode::NOT_FOUND, "Upstream session ended");
             }
             return transport::empty(if *method == Method::POST && status.is_success() {
                 StatusCode::ACCEPTED
@@ -462,7 +464,12 @@ impl Context<'_> {
                     .runtime
                     .observed
                     .last(&server, kind, raw)
-                    .is_some_and(|last| super::local::first(target, kind, raw, last) == Some(last));
+                    .is_some_and(|last| {
+                        self.runtime
+                            .observed
+                            .first(&target.name, &target.id, kind, raw, last)
+                            == Some(last)
+                    });
             if !local_tofu
                 && !self.runtime.observed.may_call(
                     target.review,
@@ -553,7 +560,7 @@ impl Context<'_> {
                         usage,
                     )
                 } else {
-                    relay_json(response).await
+                    relay_json(response, target.timeout).await
                 }
             }
             Err(error) => fail(error.status(), "MCP upstream failed"),
@@ -773,6 +780,7 @@ impl Context<'_> {
                 };
             }
         }
+        let mut last_failure = None;
         while cursor.index < s.legs.len() {
             let leg = &s.legs[cursor.index];
             if !self.grants().may_see_server(&leg.name) {
@@ -787,39 +795,76 @@ impl Context<'_> {
                     value["params"]["cursor"] = upstream.clone().into();
                 }
             }
-            let response = match transport::send(
-                self.runtime,
-                target,
-                self.headers,
-                Method::POST,
-                Some(leg),
-                Bytes::from(value.to_string()),
-            )
-            .await
-            {
-                Ok(r) if r.status() == StatusCode::NOT_FOUND => {
+            let page = async {
+                let response = transport::send(
+                    self.runtime,
+                    target,
+                    self.headers,
+                    Method::POST,
+                    Some(leg),
+                    Bytes::from(value.to_string()),
+                )
+                .await
+                .map_err(|error| error.status())?;
+                if response.status() == StatusCode::NOT_FOUND {
+                    return Err(StatusCode::NOT_FOUND);
+                }
+                let result = tokio::time::timeout(target.timeout, transport::json(response))
+                    .await
+                    .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
+                    .map_err(|_| StatusCode::BAD_GATEWAY)?;
+                if result.get("error").is_some() {
+                    return if aggregate {
+                        Err(StatusCode::BAD_GATEWAY)
+                    } else {
+                        Ok(result)
+                    };
+                }
+                if !result
+                    .pointer(&format!("/result/{field}"))
+                    .is_some_and(Value::is_array)
+                {
+                    return Err(StatusCode::BAD_GATEWAY);
+                }
+                if aggregate {
+                    if let Some(next) = result.pointer("/result/nextCursor") {
+                        let next = next.as_str().ok_or(StatusCode::BAD_GATEWAY)?;
+                        if cursor.upstream.as_deref() == Some(next) {
+                            return Err(StatusCode::BAD_GATEWAY);
+                        }
+                    }
+                }
+                Ok(result)
+            }
+            .await;
+            let mut result = match page {
+                Ok(result) => result,
+                Err(StatusCode::NOT_FOUND) => {
                     return fail(StatusCode::NOT_FOUND, "Upstream session ended")
                 }
-                Ok(r) => r,
-                Err(error) => return fail(error.status(), "MCP list failed"),
+                Err(status) if aggregate => {
+                    // Only configured server names, fixed method labels and HTTP status
+                    // labels enter observability; upstream errors/bodies never do.
+                    tracing::warn!(server = %target.name, status = status.as_u16(), "Skipping failed aggregate MCP discovery leg");
+                    self.runtime
+                        .metrics
+                        .mcp_request_handles(&target.name, method_label(&method))
+                        [metrics::status_index(status.as_u16())]
+                    .inc();
+                    last_failure = Some(status);
+                    cursor.index += 1;
+                    cursor.upstream = None;
+                    continue;
+                }
+                Err(status) => return fail(status, "MCP list failed"),
             };
-            let mut result =
-                match tokio::time::timeout(target.timeout, transport::json(response)).await {
-                    Ok(Ok(v)) => v,
-                    Err(_) => return fail(StatusCode::GATEWAY_TIMEOUT, "MCP list timed out"),
-                    Ok(Err(())) => {
-                        return fail(StatusCode::BAD_GATEWAY, "Invalid or oversized MCP list")
-                    }
-                };
             if result.get("error").is_some() {
                 return transport::reply(StatusCode::OK, result);
             }
-            let Some(definitions) = result
+            let definitions = result
                 .pointer_mut(&format!("/result/{field}"))
                 .and_then(Value::as_array_mut)
-            else {
-                return fail(StatusCode::BAD_GATEWAY, "Invalid MCP list response");
-            };
+                .expect("validated list page");
             definitions.retain_mut(|definition| {
                 let Some(observed) = mcp_hash::observe(kind, definition) else {
                     return false;
@@ -830,7 +875,13 @@ impl Context<'_> {
                     .accepts(kind, &observed.name, &observed.hash);
                 // Preserve immediate local TOFU until its authoritative snapshot arrives.
                 if !known && target.review == crate::targets::ReviewMode::Tofu {
-                    let first = super::local::first(target, kind, &observed.name, observed.hash);
+                    let first = self.runtime.observed.first(
+                        &target.name,
+                        &target.id,
+                        kind,
+                        &observed.name,
+                        observed.hash,
+                    );
                     if first != Some(observed.hash) {
                         known = true;
                         approved = false;
@@ -902,16 +953,22 @@ impl Context<'_> {
             }
             return transport::reply(StatusCode::OK, result);
         }
-        ok(id, json!({field:[]}))
+        match last_failure {
+            Some(status) => fail(status, "No MCP discovery leg could answer"),
+            None => ok(id, json!({field:[]})),
+        }
     }
 }
 /// A non-streaming upstream response, forwarded as it is. SSE responses go
 /// through `transport::relay`, which records their usage when the stream ends.
-async fn relay_json(response: hyper::Response<hyper::body::Incoming>) -> Response<ProxyBody> {
+async fn relay_json(
+    response: hyper::Response<hyper::body::Incoming>,
+    timeout: std::time::Duration,
+) -> Response<ProxyBody> {
     let (mut parts, body) = response.into_parts();
     transport::response_headers(&mut parts.headers);
-    match transport::collect(body, transport::RESPONSE_LIMIT).await {
-        Ok(bytes) => {
+    match tokio::time::timeout(timeout, transport::collect(body, transport::RESPONSE_LIMIT)).await {
+        Ok(Ok(bytes)) => {
             if serde_json::from_slice::<Value>(&bytes)
                 .ok()
                 .is_some_and(|v| {
@@ -925,10 +982,11 @@ async fn relay_json(response: hyper::Response<hyper::body::Incoming>) -> Respons
             }
             Response::from_parts(parts, crate::proxy::full_body(bytes))
         }
-        Err(()) => fail(
+        Ok(Err(())) => fail(
             StatusCode::BAD_GATEWAY,
             "MCP response exceeds 16 MiB or is unreadable",
         ),
+        Err(_) => fail(StatusCode::GATEWAY_TIMEOUT, "MCP response body timed out"),
     }
 }
 fn accepts(headers: &HeaderMap, media: &str) -> bool {

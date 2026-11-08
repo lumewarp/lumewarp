@@ -43,6 +43,9 @@ pub struct PoolConfig {
     /// Wasm memory budget the pool's Stores count against; `None` uses the
     /// process budget (`LUMEWARP_PLUGIN_MEMORY_LIMIT_BYTES`).
     pub budget: Option<Arc<limits::Budget>>,
+    /// How long an apply-time `configure`/pre-warm may take. Defaults to
+    /// [`crate::CONFIGURE_TIMEOUT`]; expiry refuses the version.
+    pub configure_timeout: Duration,
 }
 
 impl Default for PoolConfig {
@@ -56,6 +59,7 @@ impl Default for PoolConfig {
             prewarm: target,
             memory: None,
             budget: None,
+            configure_timeout: crate::CONFIGURE_TIMEOUT,
         }
     }
 }
@@ -95,17 +99,24 @@ pub(crate) struct Slot {
 pub(crate) struct InstancePool<I> {
     idle: Mutex<Vec<I>>,
     live: Arc<PoolLive>,
+    budget: Arc<limits::IdleBudget>,
     target: usize,
 }
 
 impl<I> InstancePool<I> {
     pub(crate) fn new(target: usize) -> Self {
+        Self::with_budget(target, Arc::clone(limits::idle_budget()))
+    }
+
+    /// A pool drawing from `budget` instead of the process-wide instance cap.
+    pub(crate) fn with_budget(target: usize, budget: Arc<limits::IdleBudget>) -> Self {
         Self {
             idle: Mutex::new(Vec::new()),
             live: Arc::new(PoolLive {
                 live: AtomicUsize::new(0),
                 notify: Notify::new(),
             }),
+            budget,
             target,
         }
     }
@@ -130,10 +141,15 @@ impl<I> InstancePool<I> {
 
     /// Claims one live slot and one process-wide instance slot, or `None` when
     /// either is exhausted (the caller then waits for an instance to come back).
+    ///
+    /// The process-wide slot is claimed **first**: taking a live slot and then
+    /// dropping it would notify the waiters and spin them (m2).
     pub(crate) fn reserve(&self) -> Option<Slot> {
+        let idle = self.budget.acquire()?;
         let mut live = self.live.live.load(Ordering::Acquire);
         loop {
             if live >= self.target {
+                // Releasing `idle` here does not notify: no live slot changed.
                 return None;
             }
             match self.live.live.compare_exchange_weak(
@@ -142,15 +158,15 @@ impl<I> InstancePool<I> {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => break,
+                Ok(_) => {
+                    return Some(Slot {
+                        _live: LiveGuard(Arc::clone(&self.live)),
+                        _idle: idle,
+                    })
+                }
                 Err(current) => live = current,
             }
         }
-        let live = LiveGuard(Arc::clone(&self.live));
-        limits::idle_budget().acquire().map(|idle| Slot {
-            _live: live,
-            _idle: idle,
-        })
     }
 
     /// Waits until an instance is returned or a slot is freed.
@@ -199,6 +215,10 @@ pub enum Error {
     Instantiate(String),
     #[error("configuring the strategy failed: {0}")]
     Configure(String),
+    /// Apply-time `configure` did not finish inside
+    /// [`crate::CONFIGURE_TIMEOUT`]; the version is refused.
+    #[error("configuring the strategy timed out")]
+    ConfigureTimeout,
 }
 
 /// One router's configured strategy instances.
@@ -209,6 +229,7 @@ pub struct RouterPool {
     memory: Arc<Semaphore>,
     budget: Arc<limits::Budget>,
     prewarm: usize,
+    configure_timeout: Duration,
 }
 
 impl RouterPool {
@@ -223,6 +244,7 @@ impl RouterPool {
                 .clone()
                 .unwrap_or_else(|| Arc::clone(limits::memory_budget())),
             prewarm: config.prewarm.min(config.target),
+            configure_timeout: config.configure_timeout,
         }
     }
 
@@ -246,10 +268,21 @@ impl RouterPool {
         self.pool.shrink(keep);
     }
 
-    /// Creates one configured instance. Async: instantiation and `configure`
-    /// run on the caller's executor, never blocking a thread.
-    async fn create(&self, slot: Slot) -> Result<PooledInstance, Error> {
+    /// Creates one configured instance while holding a memory permit. Async:
+    /// instantiation and `configure` run on the caller's executor, never
+    /// blocking a thread.
+    async fn create(
+        &self,
+        slot: Slot,
+        _permit: MemoryReservation,
+        budget: Option<Duration>,
+    ) -> Result<PooledInstance, Error> {
         let mut store = crate::store_with_budget(self.plugin.engine(), Arc::clone(&self.budget));
+        // Apply-time `configure` gets a hard epoch budget; a request-path
+        // instance yields for fairness only (M4).
+        if let Some(budget) = budget {
+            crate::set_apply_deadline(&mut store, budget);
+        }
         let Prepared::Router(pre) = self.plugin.prepared() else {
             return Err(Error::Instantiate(
                 "the component does not implement the router world".to_owned(),
@@ -264,14 +297,50 @@ impl RouterPool {
             .strategy()
             .call_configure(&mut store, &self.info)
             .await
-            .map_err(|error| Error::Instantiate(format!("{error:#}")))?
+            .map_err(|error| {
+                if budget.is_some() && crate::is_epoch_trap(&error) {
+                    Error::ConfigureTimeout
+                } else {
+                    Error::Instantiate(format!("{error:#}"))
+                }
+            })?
             .map_err(Error::Configure)?;
+        if budget.is_some() {
+            // Back to yielding: a request-path call is cancelled by its own
+            // timeout, never trapped by the configure budget.
+            crate::set_fair_epoch(&mut store);
+        }
         Ok(PooledInstance {
             store,
             binding,
             resource,
             _slot: slot,
         })
+    }
+
+    /// Creates an instance, waiting for a memory permit (the caller's timeout
+    /// bounds the wait).
+    async fn create_waiting(
+        &self,
+        slot: Slot,
+        budget: Option<Duration>,
+    ) -> Result<PooledInstance, Error> {
+        let permit = MemoryReservation::acquire(Arc::clone(&self.memory))
+            .await
+            .ok_or_else(|| Error::Instantiate("the memory budget was closed".to_owned()))?;
+        self.create(slot, permit, budget).await
+    }
+
+    /// Creates an instance only when a memory permit is free right now.
+    async fn create_now(
+        &self,
+        slot: Slot,
+        budget: Option<Duration>,
+    ) -> Result<Option<PooledInstance>, Error> {
+        let Some(permit) = MemoryReservation::try_acquire(Arc::clone(&self.memory)) else {
+            return Ok(None);
+        };
+        self.create(slot, permit, budget).await.map(Some)
     }
 
     /// An instance from the pool, a new one, or one that becomes free — waiting
@@ -283,7 +352,10 @@ impl RouterPool {
                 return Ok(instance);
             }
             if let Some(slot) = self.pool.reserve() {
-                match self.create(slot).await {
+                // The memory permit covers instantiation and the call only; a
+                // request queueing for this pool never holds one, so a stuck
+                // plugin cannot starve the others (M2).
+                match self.create_waiting(slot, None).await {
                     Ok(instance) => return Ok(instance),
                     // Out of budget: give this pool's own idle instances back
                     // and try once more before failing the call.
@@ -300,8 +372,10 @@ impl RouterPool {
     }
 
     /// Creates the configured instances. The first one is mandatory: its
-    /// `configure` error refuses the version. The rest are best effort, so a
-    /// tight memory budget leaves a smaller warm pool instead of failing.
+    /// `configure` error — or a `configure` that outlives
+    /// [`crate::CONFIGURE_TIMEOUT`] — refuses the version. The rest are best
+    /// effort, so a tight memory budget leaves a smaller warm pool instead of
+    /// failing.
     fn prewarm(&self) -> Result<(), Error> {
         if self.prewarm == 0 {
             return Ok(());
@@ -309,15 +383,29 @@ impl RouterPool {
         let Some(slot) = self.pool.reserve() else {
             return Ok(());
         };
-        let first = crate::block_on(self.create(slot))?;
+        let first = crate::block_on_timeout(
+            self.create_waiting(slot, Some(self.configure_timeout)),
+            self.configure_timeout,
+        )
+        .ok_or(Error::ConfigureTimeout)??;
         self.pool.push(first);
         for _ in 1..self.prewarm {
             let Some(slot) = self.pool.reserve() else {
                 break;
             };
-            match crate::block_on(self.create(slot)) {
-                Ok(instance) => self.pool.push(instance),
-                Err(error) => {
+            match crate::block_on_timeout(
+                self.create_now(slot, Some(self.configure_timeout)),
+                self.configure_timeout,
+            ) {
+                Some(Ok(Some(instance))) => self.pool.push(instance),
+                Some(Ok(None)) => break,
+                None => {
+                    // An extra instance is not worth wedging the apply: the
+                    // pool keeps what it already has.
+                    tracing::warn!(plugin = %self.plugin.descriptor.name, "pre-warming a router strategy instance timed out");
+                    break;
+                }
+                Some(Err(error)) => {
                     // m1: a configuration that fails while warming up is a
                     // counted failure, not a silently smaller pool.
                     tracing::warn!(%error, plugin = %self.plugin.descriptor.name, "pre-warming a router strategy instance failed");
@@ -371,8 +459,9 @@ impl RouterPool {
         seed: u64,
     ) -> Option<u32> {
         let name = self.plugin.descriptor.name.as_str();
-        let _permit = MemoryReservation::acquire(Arc::clone(&self.memory)).await?;
         let started = Instant::now();
+        // The instance comes first: queueing for a pool never holds a
+        // process-wide memory permit (M2).
         let mut instance = match self.checkout().await {
             Ok(instance) => instance,
             Err(error) => {
@@ -382,6 +471,11 @@ impl RouterPool {
                 crate::record("router-strategy", name, "trap", started.elapsed());
                 return None;
             }
+        };
+        // The permit is held for the call only; the instance is already ours.
+        let Some(_permit) = MemoryReservation::acquire(Arc::clone(&self.memory)).await else {
+            self.pool.push(instance);
+            return None;
         };
         let result = instance
             .binding
@@ -397,6 +491,17 @@ impl RouterPool {
             .await;
         let elapsed = started.elapsed();
         match result {
+            // A guest answer must name one of the eligible candidates it was
+            // given; anything else is a misbehaving plugin, counted as a trap,
+            // and the caller falls through to the next pool (M1).
+            Ok(Some(index)) if !candidates.iter().any(|candidate| candidate.index == index) => {
+                tracing::warn!(plugin = %name, index, "router strategy picked an ineligible candidate");
+                self.plugin.traps.fetch_add(1, Ordering::Relaxed);
+                self.plugin.record_failure();
+                crate::record("router-strategy", name, "trap", elapsed);
+                self.pool.push(instance);
+                None
+            }
             Ok(answer) => {
                 self.plugin.record_success();
                 crate::record("router-strategy", name, "ok", elapsed);
@@ -438,16 +543,26 @@ impl RouterInstance {
             plugin.descriptor.wasm_sha256.clone(),
             router_info_digest(&info),
         );
+        {
+            let mut pools = shared_pools()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            pools.retain(|_, weak| weak.strong_count() > 0);
+            if let Some(pool) = pools.get(&key).and_then(Weak::upgrade) {
+                return Ok(Self { pool });
+            }
+        }
+        // Pre-warm **outside** the lock: a `configure` that hangs for its 60 s
+        // budget must not block another apply or a lookup (M4).
+        let pool = Arc::new(RouterPool::new(plugin, info, config));
+        pool.prewarm()?;
         let mut pools = shared_pools()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        pools.retain(|_, weak| weak.strong_count() > 0);
-        if let Some(pool) = pools.get(&key).and_then(Weak::upgrade) {
-            return Ok(Self { pool });
+        // Another apply may have published the same pool meanwhile.
+        if let Some(existing) = pools.get(&key).and_then(Weak::upgrade) {
+            return Ok(Self { pool: existing });
         }
-        let pool = Arc::new(RouterPool::new(plugin, info, config));
-        // Pre-warm before publishing: a concurrent apply then finds a warm pool.
-        pool.prewarm()?;
         pools.insert(key, Arc::downgrade(&pool));
         Ok(Self { pool })
     }
@@ -577,6 +692,21 @@ fn router_info_digest(info: &types::RouterInfo) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reservation that fails on the process-wide instance cap must not
+    /// notify the waiters: with the old order it took a live slot and dropped
+    /// it, so `wait()` returned at once and the worker spun (m2).
+    #[tokio::test]
+    async fn a_full_instance_budget_waits_instead_of_spinning() {
+        let pool: InstancePool<()> = InstancePool::with_budget(1, limits::IdleBudget::new(0));
+        assert!(pool.reserve().is_none(), "the process-wide cap is full");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), pool.wait())
+                .await
+                .is_err(),
+            "wait() returned although nothing was returned or freed"
+        );
+    }
 
     #[test]
     fn the_router_digest_sees_every_setting() {

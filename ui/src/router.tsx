@@ -33,6 +33,11 @@ const OrgDetailPage = lazy(() => import("./pages/Orgs").then((module) => ({ defa
 const PlaygroundPage = lazy(() => import("./pages/Playground").then((module) => ({ default: module.Playground })));
 const SettingsPage = lazy(() => import("./pages/Settings").then((module) => ({ default: module.Settings })));
 const TeamDetailPage = lazy(() => import("./pages/TeamDetail").then((module) => ({ default: module.TeamDetail })));
+const McpServersPage = lazy(() => import("./pages/McpServers").then((module) => ({ default: module.McpServers })));
+const McpServerEditPage = lazy(() => import("./pages/McpServerEdit").then((module) => ({ default: module.McpServerEdit })));
+const PluginsPage = lazy(() => import("./pages/Plugins").then((module) => ({ default: module.Plugins })));
+const A2aAgentsPage = lazy(() => import("./pages/A2aAgents").then((module) => ({ default: module.A2aAgents })));
+const A2aAgentEditPage = lazy(() => import("./pages/A2aAgentEdit").then((module) => ({ default: module.A2aAgentEdit })));
 
 /** A chunk in flight shows the shell's loading line; a chunk that fails shows its own error, not a blank page. */
 function suspended(Page: () => ReactNode) {
@@ -172,6 +177,13 @@ const routeTree = rootRoute.addChildren([
     page("/upstreams", () => <UpstreamsPage />, "installationAdmin"),
     page("/upstreams/new", () => <UpstreamEditPage />, "installationAdmin"),
     page("/upstreams/$upstreamId", () => <UpstreamEditPage />, "installationAdmin"),
+    page("/mcp-servers", () => <McpServersPage />, "installationAdmin"),
+    page("/mcp-servers/new", () => <McpServerEditPage />, "installationAdmin"),
+    page("/mcp-servers/$serverId", () => <McpServerEditPage />, "installationAdmin"),
+    page("/plugins", () => <PluginsPage />, "installationAdmin"),
+    page("/a2a-agents", () => <A2aAgentsPage />, "installationAdmin"),
+    page("/a2a-agents/new", () => <A2aAgentEditPage />, "installationAdmin"),
+    page("/a2a-agents/$id", () => <A2aAgentEditPage />, "installationAdmin"),
     page("/usage", Usage),
     page("/audit", () => <AuditPage />, "teamAdmin"),
     page("/gateways", () => <GatewaysPage />, "installationAdmin"),

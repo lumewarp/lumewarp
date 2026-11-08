@@ -23,8 +23,8 @@ from uuid import uuid4
 import httpx
 import pytest
 import secret_scan
-from no_secret import assert_no_secret
 from identity import cookie_api
+from no_secret import assert_no_secret
 from secret_scan import (
     database_name,
     describe,
@@ -64,6 +64,59 @@ def positions(hits):
 # ------------------------------------------------------------------ scanned shapes
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "/mcp-servers/discover",
+        "/mcp-servers/id/definitions?state=pending",
+        "/api/v1/mcp-servers/id/definitions/id/approve",
+        "/mcp-servers/id/definitions/id/reject",
+    ],
+)
+def test_response_state_catalog_enums_are_not_credentials(
+    tmp_path, monkeypatch, endpoint
+):
+    log = tmp_path / "secrets.jsonl"
+    log.touch()
+    monkeypatch.setenv("E2E_SECRET_LOG", str(log))
+    record_response_secrets(
+        {
+            "items": [
+                {"state": state}
+                for state in ("approved", "pending", "rejected", "unrecorded")
+            ],
+            "secret": SHORT_VALUE,
+        },
+        endpoint=endpoint,
+    )
+    assert [item["value"] for item in load_literals(str(log))] == [SHORT_VALUE]
+
+
+@pytest.mark.parametrize(
+    "endpoint", [None, "/session", "/oidc/callback", "/mcp-servers/id"]
+)
+def test_response_state_outside_review_endpoints_is_still_scanned(
+    tmp_path, monkeypatch, endpoint
+):
+    log = tmp_path / "secrets.jsonl"
+    log.touch()
+    monkeypatch.setenv("E2E_SECRET_LOG", str(log))
+    record_response_secrets({"state": SHORT_VALUE}, endpoint=endpoint)
+    assert [item["value"] for item in load_literals(str(log))] == [SHORT_VALUE]
+    with pytest.raises(RuntimeError, match="shorter than 8"):
+        record_response_secrets({"state": "pending"}, endpoint=endpoint)
+
+
+def test_response_state_unknown_catalog_value_is_still_scanned(tmp_path, monkeypatch):
+    log = tmp_path / "secrets.jsonl"
+    log.touch()
+    monkeypatch.setenv("E2E_SECRET_LOG", str(log))
+    record_response_secrets(
+        {"state": SHORT_VALUE}, endpoint="/mcp-servers/id/definitions"
+    )
+    assert [item["value"] for item in load_literals(str(log))] == [SHORT_VALUE]
+
+
 def test_a_full_token_of_every_kind_is_a_hit():
     keys = [
         full_token(prefix, salt)
@@ -89,8 +142,14 @@ def test_display_prefixes_hashes_and_literal_prefixes_pass():
     token = full_token("lw-", "seed")
     digest = hashlib.sha256(token.encode()).digest()
     text = dump(
-        ("api_keys", f"1\t{DISPLAY}\t\\x{digest.hex()}\t{base64.b64encode(digest).decode()}"),
-        ("personal_access_tokens", f"1\tlwp-AbCdEf\t{base64.urlsafe_b64encode(digest).decode()}"),
+        (
+            "api_keys",
+            f"1\t{DISPLAY}\t\\x{digest.hex()}\t{base64.b64encode(digest).decode()}",
+        ),
+        (
+            "personal_access_tokens",
+            f"1\tlwp-AbCdEf\t{base64.urlsafe_b64encode(digest).decode()}",
+        ),
         ("gateway_tokens", "1\tlwg-AbCdEf"),
     )
     # The full token is recorded, but only its 6-character display form and its hash are
@@ -112,7 +171,9 @@ def test_a_recorded_literal_is_found_plain_and_encoded():
         assert len(hits) == 1, (encoding, hits)
         assert hits[0]["kind"].startswith("session cookie")
         assert hits[0]["table"] == "api_keys"
-        assert_no_secret(describe(hits), [secret, needle], "the scan report contains a secret")
+        assert_no_secret(
+            describe(hits), [secret, needle], "the scan report contains a secret"
+        )
 
 
 def test_copy_and_jsonb_escaped_literals_are_found():
@@ -284,7 +345,10 @@ def test_stack_api_and_ok_record_the_secret_they_return(tmp_path, monkeypatch):
         ("gateway_tokens", f"1\t{base64.b64encode(second.encode()).decode()}"),
     )
     hits = scan_text(leaked, recorded)
-    assert {hit["table"] for hit in hits} == {"personal_access_tokens", "gateway_tokens"}
+    assert {hit["table"] for hit in hits} == {
+        "personal_access_tokens",
+        "gateway_tokens",
+    }
 
 
 # ------------------------------------------------------- a failure never prints a secret
@@ -321,6 +385,7 @@ def test_a_planted_failure_through_real_assertion_rewriting_has_no_secret(tmp_pa
             "no:cacheprovider",
             "--tb=line",
         ],
+        check=False,
         capture_output=True,
         text=True,
         env=env,
@@ -336,7 +401,9 @@ def test_a_planted_failure_through_real_assertion_rewriting_has_no_secret(tmp_pa
 # ---------------------------------------------------------------- fail-closed inputs
 
 
-def test_a_missing_or_corrupt_recorded_secret_log_is_a_hard_failure(tmp_path, monkeypatch):
+def test_a_missing_or_corrupt_recorded_secret_log_is_a_hard_failure(
+    tmp_path, monkeypatch
+):
     with pytest.raises(RuntimeError):
         load_literals(None)
     with pytest.raises(FileNotFoundError):
@@ -409,7 +476,9 @@ def test_finalize_stack_free_needs_no_database_server(tmp_path, monkeypatch):
         raise AssertionError("the scanner connected to Postgres for a stack-free run")
 
     monkeypatch.setattr(secret_scan, "_existing_databases", no_server)
-    assert finalize(str(directory), "postgresql://127.0.0.1:1/none", stack_free=True) == 0
+    assert (
+        finalize(str(directory), "postgresql://127.0.0.1:1/none", stack_free=True) == 0
+    )
 
 
 def test_finalize_refuses_a_stack_free_run_that_lists_a_database(tmp_path, monkeypatch):
@@ -420,7 +489,9 @@ def test_finalize_refuses_a_stack_free_run_that_lists_a_database(tmp_path, monke
         raise AssertionError("no server for a stack-free run")
 
     monkeypatch.setattr(secret_scan, "_existing_databases", no_server)
-    assert finalize(str(directory), "postgresql://127.0.0.1:1/none", stack_free=True) == 1
+    assert (
+        finalize(str(directory), "postgresql://127.0.0.1:1/none", stack_free=True) == 1
+    )
 
 
 def clean_result(name: str) -> dict:
@@ -432,11 +503,21 @@ def hit_result(name: str) -> dict:
         "database": name,
         "literals": 0,
         "dump_chars": 0,
-        "hits": [{"kind": "full token lw-", "table": "t", "line": 1, "offset": 0, "length": 46}],
+        "hits": [
+            {
+                "kind": "full token lw-",
+                "table": "t",
+                "line": 1,
+                "offset": 0,
+                "length": 46,
+            }
+        ],
     }
 
 
-def test_finalize_scans_an_unregistered_database_with_this_run_name(tmp_path, monkeypatch):
+def test_finalize_scans_an_unregistered_database_with_this_run_name(
+    tmp_path, monkeypatch
+):
     name = "lumewarp_e2e_feedface_0123456789ab"
     directory = run_dir(tmp_path, monkeypatch)
     scanned: list[str] = []
@@ -453,12 +534,16 @@ def test_finalize_scans_an_unregistered_database_with_this_run_name(tmp_path, mo
     assert name in (directory / "dbs").read_text().split()
 
 
-def test_finalize_accepts_a_clean_unregistered_database_and_registers_it(tmp_path, monkeypatch):
+def test_finalize_accepts_a_clean_unregistered_database_and_registers_it(
+    tmp_path, monkeypatch
+):
     name = "lumewarp_e2e_feedface_ba9876543210"
     directory = run_dir(tmp_path, monkeypatch)
     monkeypatch.setattr(secret_scan, "_existing_databases", lambda url: {name})
     monkeypatch.setattr(
-        secret_scan, "scan_database", lambda dsn, literals: clean_result(database_name(dsn))
+        secret_scan,
+        "scan_database",
+        lambda dsn, literals: clean_result(database_name(dsn)),
     )
     assert finalize(str(directory), "postgresql://server/lumewarp") == 0
     assert name in (directory / "dbs").read_text().split()
@@ -466,7 +551,9 @@ def test_finalize_accepts_a_clean_unregistered_database_and_registers_it(tmp_pat
     assert finalize(str(directory), "postgresql://server/lumewarp") == 0
 
 
-def test_finalize_fails_when_a_registered_database_vanished_unscanned(tmp_path, monkeypatch):
+def test_finalize_fails_when_a_registered_database_vanished_unscanned(
+    tmp_path, monkeypatch
+):
     name = "lumewarp_e2e_feedface_aaaaaaaaaaaa"
     directory = run_dir(tmp_path, monkeypatch, manifest=[name])
     monkeypatch.setattr(secret_scan, "_existing_databases", lambda url: set())
@@ -474,7 +561,9 @@ def test_finalize_fails_when_a_registered_database_vanished_unscanned(tmp_path, 
 
 
 def test_finalize_refuses_to_run_without_a_run_id(tmp_path, monkeypatch):
-    directory = run_dir(tmp_path, monkeypatch, manifest=["lumewarp_e2e_other_aaaaaaaaaaaa"])
+    directory = run_dir(
+        tmp_path, monkeypatch, manifest=["lumewarp_e2e_other_aaaaaaaaaaaa"]
+    )
     monkeypatch.delenv("E2E_RUN_ID")
     with pytest.raises(RuntimeError, match="E2E_RUN_ID"):
         finalize(str(directory), "postgresql://server/lumewarp")
@@ -508,9 +597,17 @@ def test_a_real_pg_dump_keeps_an_escaped_text_and_jsonb_literal_findable(real_du
     secret = 'pw\\back\ttab\nnl"quote\x01'
     with disposable_database() as dsn:
         pg(dsn, "CREATE TABLE t (id int, txt text, j jsonb)")
-        pg(dsn, "INSERT INTO t VALUES ($1, $2, $3)", 1, secret, json.dumps({"k": secret}))
+        pg(
+            dsn,
+            "INSERT INTO t VALUES ($1, $2, $3)",
+            1,
+            secret,
+            json.dumps({"k": secret}),
+        )
         text = dump_database(dsn)
-    assert_no_secret(text, [secret], "the raw literal is in the real dump before the scan")
+    assert_no_secret(
+        text, [secret], "the raw literal is in the real dump before the scan"
+    )
     hits = scan_text(text, [{"kind": "env password", "value": secret}])
     kinds = {hit["kind"] for hit in hits}
     assert any(kind.endswith("(copy)") for kind in kinds), kinds
@@ -589,7 +686,9 @@ def assert_short_value_is_a_hit(dsn, log, value, kind_prefix):
     [hit] = result["hits"]
     assert hit["table"] == "leaked"
     assert hit["kind"].startswith(kind_prefix), hit["kind"]
-    assert_no_secret(describe(result["hits"]), [value], "the scan report contains the secret")
+    assert_no_secret(
+        describe(result["hits"]), [value], "the scan report contains the secret"
+    )
 
 
 @pytest.mark.parametrize("length", [8, 9, 11])
@@ -633,11 +732,15 @@ def test_a_credential_below_the_floor_fails_the_run_instead_of_being_dropped(
     ):
         with pytest.raises(RuntimeError, match="shorter than 8") as caught:
             record()
-        assert_no_secret(str(caught.value), [short], "the failure names the short credential")
+        assert_no_secret(
+            str(caught.value), [short], "the failure names the short credential"
+        )
     assert load_literals(str(log)) == []
 
 
-def test_non_secret_env_names_are_excluded_before_the_length_rule(tmp_path, monkeypatch):
+def test_non_secret_env_names_are_excluded_before_the_length_rule(
+    tmp_path, monkeypatch
+):
     log = tmp_path / "secrets.jsonl"
     log.touch()
     monkeypatch.setenv("E2E_SECRET_LOG", str(log))

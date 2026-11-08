@@ -905,7 +905,9 @@ function TeamSettings({ team }: { team: TeamAny }) {
       </Card>
       <FormDialog open={editing} title="Edit team settings" onClose={() => setEditing(false)} onSubmit={submit}>
         <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
-        {canSetQuota && <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam />}
+        {canSetQuota && (
+          <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam parent={orgs.data?.find((org) => org.id === team.org_id)} />
+        )}
         <NumberField
           label="Member default requests per minute"
           min={1}

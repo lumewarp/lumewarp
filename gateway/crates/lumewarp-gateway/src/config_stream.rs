@@ -315,8 +315,8 @@ impl Client {
         .await
         .unwrap_or_else(|_| Err(ApplyError::invalid("apply task failed")));
         match applied {
-            Ok((next, routing_table, digest)) => {
-                routing_table.activate_health();
+            Ok((next, mut routing_table, digest)) => {
+                routing_table.activate();
                 // L1: observations of a server this snapshot no longer
                 // configures are dropped with it.
                 self.runtime

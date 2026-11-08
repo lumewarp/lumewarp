@@ -34,6 +34,7 @@ from lumewarp_control_plane.api.common import (
     lock_scope,
     mutation,
     parse_uuid_cursor,
+    uuid_page,
     validation_error,
 )
 from lumewarp_control_plane.api.schemas import (
@@ -268,17 +269,12 @@ async def list_mcp_servers(
     cursor: str | None = None,
 ) -> Page[McpServerOut]:
     await authz.require(Action.ROUTING_READ)
-    stmt = (
-        select(McpServer)
-        .where(McpServer.deleted_at.is_(None))
-        .order_by(McpServer.name, McpServer.id)
-    )
-    if cursor is not None:
-        stmt = stmt.where(McpServer.id > parse_uuid_cursor(cursor))
-    rows = list((await session.scalars(stmt.limit(limit + 1))).all())
-    next_cursor = str(rows[limit - 1].id) if len(rows) > limit else None
+    # One ordering and one cursor rule for every list (m1): the previous cursor is an id and
+    # the next page is "id greater than it". Ordering by name made the two disagree.
+    stmt = select(McpServer).where(McpServer.deleted_at.is_(None)).order_by(McpServer.id)
+    rows, next_cursor = await uuid_page(session, stmt, McpServer.id, limit, cursor)
     return Page[McpServerOut](
-        items=await _mcp_servers_out(session, settings, rows[:limit]), next_cursor=next_cursor
+        items=await _mcp_servers_out(session, settings, rows), next_cursor=next_cursor
     )
 
 
@@ -308,6 +304,13 @@ async def create_mcp_server(
         )
         session.add(row)
         await session.flush()
+        # Provenance for a CatalogReport: only a version compiled at least this new can be
+        # trusted about this row (catalog_ingest). Set before the refresh, so the refreshed
+        # row (and its server-side `updated_at`) is what the response reads.
+        row.config_revision = await enqueue_recompile(session, settings, "api.mcp_server.create")
+        # refresh() does not autoflush, so flush the new revision first: otherwise the
+        # reload discards the assignment and the row keeps the server default 0.
+        await session.flush()
         await session.refresh(row)
         audit.record(
             session,
@@ -331,7 +334,6 @@ async def create_mcp_server(
             missing=missing,
             principal=authz.principal,
         )
-        await enqueue_recompile(session, settings, "api.mcp_server.create")
     return (await _mcp_servers_out(session, settings, [row]))[0]
 
 
@@ -370,6 +372,7 @@ async def update_mcp_server(
         for name in ("name", "url", "timeout_ms", "review_mode"):
             if name in body.model_fields_set:
                 setattr(row, name, getattr(body, name))
+        row.config_revision = await enqueue_recompile(session, settings, "api.mcp_server.update")
         await session.flush()
         await session.refresh(row)
         audit.record(
@@ -393,7 +396,6 @@ async def update_mcp_server(
             missing=missing,
             principal=authz.principal,
         )
-        await enqueue_recompile(session, settings, "api.mcp_server.update")
     return (await _mcp_servers_out(session, settings, [row]))[0]
 
 
@@ -618,13 +620,18 @@ async def discover_mcp_server(
 
     The token is used once, never stored and never audited. With `server_id` the result is
     recorded as observed definitions of that server, under the same first-writer rules as a
-    gateway's `CatalogReport`; without it nothing is written. A server behind a WASM
-    upstream-auth plugin cannot be discovered here (the control plane does not run WASM).
+    gateway's `CatalogReport`; without it nothing is written. Nothing is recorded for a URL
+    other than the saved one, or when the server's configuration changed while the call was
+    in flight (`recorded` is false): a preview must not decide a review for a configuration
+    it did not observe. A server behind a WASM upstream-auth plugin cannot be discovered
+    here (the control plane does not run WASM).
     """
     await authz.require(Action.ROUTING_MANAGE)
     server_id = body.server_id
     server_name: str | None = None
-    review_mode = McpReviewMode.TOFU
+    # What the saved server looked like when the call went out: (config revision, URL).
+    # Recording needs both unchanged afterwards (M5).
+    captured: tuple[int, str] | None = None
     token: str | None = None
     credential: Literal["entered", "stored", "env", "env_unset", "none"] = "none"
     if body.token is not None:
@@ -640,7 +647,11 @@ async def discover_mcp_server(
                 server.secret_ref,
                 server.secret_ciphertext,
             )
-            server_name, review_mode = server.name, server.review_mode
+            server_name = server.name
+            # A preview of a URL that is not the saved one observes a different upstream:
+            # it is shown, never recorded against this server.
+            if body.url == server.url:
+                captured = (server.config_revision, server.url)
         if plugin not in BUILTIN_AUTH:
             raise validation_error(
                 "server_id",
@@ -653,61 +664,69 @@ async def discover_mcp_server(
         discovered = await discover.discover(body.url, token=token, timeout_ms=body.timeout_ms)
     except discover.DiscoverFailed as exc:
         metrics.mcp_discover.labels("failed").inc()
+        # The message is a fixed text, the method and a validated numeric code; upstream
+        # text (which may reflect the token) never reaches the API (M4).
         raise ApiError(502, "upstream_unavailable", str(exc)) from None
     metrics.mcp_discover.labels("ok").inc()
 
     states: dict[tuple[McpDefinitionKind, str, bytes], McpDefinitionState] = {}
     result = catalog_ingest.IngestResult()
-    if server_id is not None:
+    recorded = captured is not None
+    if recorded:
         async with mutation(session):
             await lock_scope(session, settings)
             server = await session.get(
                 McpServer, server_id, populate_existing=True, with_for_update=True
             )
-            if server is None or server.deleted_at is not None:
-                raise not_found("MCP server not found")
-            observations = [
-                catalog_ingest.Observation(
-                    kind=kind,
-                    name=item.name,
-                    canonical_json=item.canonical_json,
-                    hash=item.hash,
-                    # The control plane observes too: a name nobody has seen is served by
-                    # TOFU (and OFF serves everything), only MANUAL withholds it.
-                    auto_approved=review_mode is not McpReviewMode.MANUAL,
-                )
-                for kind, item in discovered.observations()
-            ]
-            result = await catalog_ingest.record_observations(session, server, observations)
-            if result.changed:
-                await enqueue_recompile(session, settings, "api.mcp_server.discover")
-            audit.record(
-                session,
-                action="mcp_server.discover",
-                resource_type="mcp_server",
-                resource_id=server.id,
-                principal=authz.principal,
-                details={
-                    "server": server.name,
-                    "credential": credential,
-                    "definitions": result.stored,
-                    "approved": result.approved,
-                    "pending": result.pending,
-                },
-            )
-            if observations:
-                rows = await session.execute(
-                    select(
-                        McpDefinition.kind,
-                        McpDefinition.name,
-                        McpDefinition.hash,
-                        McpDefinition.state,
-                    ).where(
-                        McpDefinition.server_id == server.id,
-                        McpDefinition.hash.in_([item.hash for item in observations]),
+            live = server is not None and server.deleted_at is None
+            # An edit while the call was in flight — URL, auth, review mode, a rename — means
+            # the answer describes a configuration that is no longer saved. Record nothing
+            # rather than auto-approve an old upstream under the new one.
+            if not live or (server.config_revision, server.url) != captured:
+                recorded = False
+            else:
+                observations = [
+                    catalog_ingest.Observation(
+                        kind=kind,
+                        name=item.name,
+                        canonical_json=item.canonical_json,
+                        hash=item.hash,
+                        # Decided by the locked row: a preview whose review mode changed is
+                        # not recorded, and MANUAL never auto-approves anyway.
+                        auto_approved=server.review_mode is not McpReviewMode.MANUAL,
                     )
+                    for kind, item in discovered.observations()
+                ]
+                result = await catalog_ingest.record_observations(session, server, observations)
+                if result.changed:
+                    await enqueue_recompile(session, settings, "api.mcp_server.discover")
+                audit.record(
+                    session,
+                    action="mcp_server.discover",
+                    resource_type="mcp_server",
+                    resource_id=server.id,
+                    principal=authz.principal,
+                    details={
+                        "server": server.name,
+                        "credential": credential,
+                        "definitions": result.stored,
+                        "approved": result.approved,
+                        "pending": result.pending,
+                    },
                 )
-                states = {(kind, name, digest): state for kind, name, digest, state in rows}
+                if observations:
+                    rows = await session.execute(
+                        select(
+                            McpDefinition.kind,
+                            McpDefinition.name,
+                            McpDefinition.hash,
+                            McpDefinition.state,
+                        ).where(
+                            McpDefinition.server_id == server.id,
+                            McpDefinition.hash.in_([item.hash for item in observations]),
+                        )
+                    )
+                    states = {(kind, name, digest): state for kind, name, digest, state in rows}
     metrics.record_catalog(result.counts(), result.discarded)
 
     def out(kind: McpDefinitionKind, item: hashing.Observed) -> McpDiscoveredOut:
@@ -731,7 +750,7 @@ async def discover_mcp_server(
         tools=[out(McpDefinitionKind.TOOL, item) for item in discovered.tools],
         prompts=[out(McpDefinitionKind.PROMPT, item) for item in discovered.prompts],
         truncated=discovered.truncated,
-        recorded=server_id is not None,
+        recorded=recorded,
     )
 
 
@@ -796,15 +815,10 @@ async def list_a2a_agents(
     cursor: str | None = None,
 ) -> Page[A2aAgentOut]:
     await authz.require(Action.ROUTING_READ)
-    stmt = (
-        select(A2aAgent).where(A2aAgent.deleted_at.is_(None)).order_by(A2aAgent.name, A2aAgent.id)
-    )
-    if cursor is not None:
-        stmt = stmt.where(A2aAgent.id > parse_uuid_cursor(cursor))
-    rows = list((await session.scalars(stmt.limit(limit + 1))).all())
-    next_cursor = str(rows[limit - 1].id) if len(rows) > limit else None
+    stmt = select(A2aAgent).where(A2aAgent.deleted_at.is_(None)).order_by(A2aAgent.id)
+    rows, next_cursor = await uuid_page(session, stmt, A2aAgent.id, limit, cursor)
     return Page[A2aAgentOut](
-        items=await _agents_out(session, settings, rows[:limit]), next_cursor=next_cursor
+        items=await _agents_out(session, settings, rows), next_cursor=next_cursor
     )
 
 
@@ -839,6 +853,9 @@ async def create_a2a_agent(
         )
         session.add(row)
         await session.flush()
+        row.config_revision = await enqueue_recompile(session, settings, "api.a2a_agent.create")
+        # refresh() does not autoflush; flush the revision or the reload keeps 0.
+        await session.flush()
         await session.refresh(row)
         audit.record(
             session,
@@ -863,7 +880,6 @@ async def create_a2a_agent(
             missing=missing,
             principal=authz.principal,
         )
-        await enqueue_recompile(session, settings, "api.a2a_agent.create")
     return (await _agents_out(session, settings, [row]))[0]
 
 
@@ -912,6 +928,7 @@ async def update_a2a_agent(
             row.timeout_ms = body.timeout_ms
         if "card_json" in body.model_fields_set:
             row.card_json = body.card_json or ""
+        row.config_revision = await enqueue_recompile(session, settings, "api.a2a_agent.update")
         await session.flush()
         await session.refresh(row)
         audit.record(
@@ -935,7 +952,6 @@ async def update_a2a_agent(
             missing=missing,
             principal=authz.principal,
         )
-        await enqueue_recompile(session, settings, "api.a2a_agent.update")
     return (await _agents_out(session, settings, [row]))[0]
 
 

@@ -12,6 +12,8 @@
 //! | `push` | adds `configuration.taskPushNotificationConfig` |
 //! | `drop_status` | drops a `statusUpdate` stream event |
 //! | `slow` | spins `spin` iterations in `on-request`, then passes through |
+//! | `refuse` | answers a deliberate JSON-RPC error (`rpc-error`) |
+//! | `stuck_configure` | never returns from `configure` (the apply-time budget must cut it) |
 
 use lumewarp_plugin_sdk::{
     middleware_types, register, ConfigError, ConfigureMiddleware, Middleware,
@@ -41,9 +43,21 @@ impl ConfigureMiddleware<Params> for Misbehave {
     fn configure(_: &middleware_types::AgentInfo, params: Params) -> Result<Self, ConfigError> {
         if !matches!(
             params.mode.as_str(),
-            "pass" | "method" | "add_id" | "push" | "drop_status" | "slow"
+            "pass"
+                | "method"
+                | "add_id"
+                | "push"
+                | "drop_status"
+                | "slow"
+                | "refuse"
+                | "stuck_configure"
         ) {
             return Err(ConfigError(format!("unknown mode {:?}", params.mode)));
+        }
+        if params.mode == "stuck_configure" {
+            loop {
+                std::hint::spin_loop();
+            }
         }
         Ok(Self {
             mode: params.mode,
@@ -90,6 +104,12 @@ impl Middleware for Misbehave {
                     );
                 }
                 Ok(serde_json::to_vec(&value).unwrap_or(body))
+            }
+            "refuse" => {
+                return Err(middleware_types::RpcError {
+                    code: -32001,
+                    message: "refused by policy".into(),
+                })
             }
             "slow" => {
                 // Epoch ticks make the guest yield to the executor; there is no

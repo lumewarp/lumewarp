@@ -124,6 +124,110 @@ function CallableModels({ team }: { team: Team }) {
   );
 }
 
+/** The MCP servers this key may reach, and the tools it is held to on each. */
+function McpAccess({ team }: { team: Team }) {
+  if (team.all_mcp) {
+    return (
+      <span data-testid="all-mcp">
+        All servers <HelpTip label="All servers" text="Includes servers added later." />
+      </span>
+    );
+  }
+  if (team.mcp_servers.length === 0) return <span className="text-muted-foreground">No servers</span>;
+  return (
+    <div className="flex max-h-28 flex-col gap-1 overflow-y-auto pr-1" data-testid="mcp-servers" role="list" aria-label="MCP servers">
+      {team.mcp_servers.map((grant) => (
+        <span key={grant.server} role="listitem" className="[overflow-wrap:anywhere]">
+          <UiBadge variant="muted">{grant.server}</UiBadge>{" "}
+          <span className="text-xs text-muted-foreground">
+            {grant.all_tools ? "all tools" : grant.tools.length ? grant.tools.join(", ") : "no tools"}
+          </span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** The A2A agents this key may call: an agent is granted whole, so a name is the whole answer. */
+function AgentAccess({ team }: { team: Team }) {
+  if (team.all_agents) {
+    return (
+      <span data-testid="all-agents">
+        All agents <HelpTip label="All agents" text="Includes agents added later." />
+      </span>
+    );
+  }
+  if (team.agents.length === 0) return <span className="text-muted-foreground">No agents</span>;
+  return (
+    <div className="flex max-h-28 flex-wrap gap-1 overflow-y-auto pr-1" data-testid="callable-agents" role="list" aria-label="A2A agents">
+      {team.agents.map((name) => (
+        <UiBadge key={name} variant="muted" role="listitem">
+          {name}
+        </UiBadge>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * How a key of this team reaches the MCP and A2A endpoints: the paths, the header they take, and one server or
+ * agent as an example. The key itself is a placeholder — this page never holds a secret.
+ */
+function connectionSnippet(team: Team): string {
+  const servers = team.all_mcp ? ["<server>"] : team.mcp_servers.map((grant) => grant.server);
+  const agents = team.all_agents ? ["<agent>"] : team.agents;
+  const more = (count: number, what: string) => (count > 2 ? [`# and ${count - 2} more ${what}`, ""] : []);
+  return [
+    "# exactly one on every MCP and A2A request",
+    "X-Lumewarp-Key: lw-YOUR-KEY",
+    "",
+    "# MCP: every server this key may use, then one server",
+    "POST <gateway>/mcp",
+    ...servers.slice(0, 2).map((name) => `POST <gateway>/mcp/servers/${name}`),
+    ...more(servers.length, "servers"),
+    "",
+    "# A2A: the agents this key may use, then one agent",
+    "GET  <gateway>/a2a",
+    ...agents.slice(0, 2).map((name) => `POST <gateway>/a2a/${name}`),
+    ...more(agents.length, "agents"),
+  ]
+    .join("\n")
+    .trimEnd();
+}
+
+function Connection({ team }: { team: Team }) {
+  const [copied, setCopied] = useState(false);
+  const snippet = connectionSnippet(team);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(snippet);
+      setCopied(true);
+    } catch {
+      /* clipboard blocked: the block is selectable */
+    }
+  };
+  return (
+    <section className="flex flex-col gap-2" aria-label={`MCP and A2A connection for ${team.team_name}`}>
+      <div className="flex items-center gap-1 text-sm font-semibold">
+        MCP and A2A
+        <HelpTip label="MCP and A2A" text="Prefix the paths with the gateway's public URL; a key sees only what its grants allow." />
+      </div>
+      <div className="flex items-stretch gap-2">
+        <code
+          className="min-w-0 flex-1 overflow-x-auto rounded-md border bg-secondary px-2.5 py-2 font-mono text-xs whitespace-pre"
+          data-testid="connection-snippet"
+          tabIndex={0}
+        >
+          {snippet}
+        </code>
+        <Button type="button" variant="outline" className="self-start" onClick={copy}>
+          {copied ? "Copied" : "Copy"}
+        </Button>
+      </div>
+    </section>
+  );
+}
+
 function rateLimits(team: Team) {
   const parts = [
     team.limits.rpm_limit !== null ? `${team.limits.rpm_limit} requests/min` : null,
@@ -189,6 +293,12 @@ function TeamSection({
         <Fact label="Callable models">
           <CallableModels team={team} />
         </Fact>
+        <Fact label="MCP servers" hint="A server with a tool list allows only those tools.">
+          <McpAccess team={team} />
+        </Fact>
+        <Fact label="A2A agents">
+          <AgentAccess team={team} />
+        </Fact>
         <Fact label="Rate limits" hint="Counted per gateway instance.">
           {rateLimits(team)}
         </Fact>
@@ -211,6 +321,7 @@ function TeamSection({
           until then the server refuses a new key.
         </p>
       )}
+      <Connection team={team} />
       <DataTable
         rows={keys}
         loading={loading}

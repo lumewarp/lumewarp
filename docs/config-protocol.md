@@ -14,7 +14,7 @@ Normative rules for `lumewarp.config.v1.ConfigService` and `lumewarp.usage.v1.Us
 1. Every source mutation (API write, budget flip, rollover) and its audit row commit in one DB transaction together with an outbox row "recompile scope".
 2. A single compiler loop per scope (serialized with a Postgres advisory lock) reads source state at one consistent snapshot, compiles, validates and stores `config_versions(scope, version, payload, digest, source_revision, created_at)`. A compile failure leaves the previous version current and marks the outbox row failed with a reason; it never publishes a partial snapshot.
 3. A later compile always sees a later source revision; a slower, older compile must not publish after a newer one (check `source_revision` under the lock).
-4. Rollback restores models, aliases, routers and their names by id from the version's `catalog_state` and re-publishes its **routing** content (upstreams, models, aliases, routers) as a new version; grants are not restored, so those on an item deleted since then stay gone; API keys, teams, policies and statuses are always taken from current source state, so a revoked key can never be revived by a rollback. Restored routers meet the same strategy rules as a router write, against the gateways of today: a rejection is a 422 that changes nothing, and `force` saves past connected gateways lacking a strategy, with the same audit.
+4. Rollback restores models, aliases, routers, MCP servers and A2A agents and their names by id from the version's `catalog_state` and re-publishes its **routing** content (upstreams, models, aliases, routers, MCP servers, A2A agents) as a new version. Grants are not restored: grants on a catalog item deleted since then stay gone, while an MCP server or A2A agent absent from the state is archived rather than deleted, so its definitions and grants survive. Reviewed definition states are not part of the state: a rollback never re-decides a definition. API keys, teams, policies and statuses are always taken from current source state, so a revoked key can never be revived by a rollback. Restored routers meet the same plugin rules as a router write, against the gateways of today: a rejection is a 422 that changes nothing, and `force` saves past connected gateways lacking a strategy, with the same audit.
 5. Retention: keep the latest version, the last 50 versions and anything referenced by a connected session; older payloads may be compacted. A gateway whose base was compacted gets a full snapshot.
 6. Limits: a snapshot larger than 64 MiB or with more than 200k keys fails compilation. gRPC max message size is 64 MiB on both sides.
 
@@ -22,7 +22,7 @@ Normative rules for `lumewarp.config.v1.ConfigService` and `lumewarp.usage.v1.Us
 
 ```
 gateway                                   control plane
-  |-- Hello{gateway_id, have_version, scope, supported_capabilities, strategies} -->
+  |-- Hello{gateway_id, have_version, scope, supported_capabilities, plugins, plugin_abi} -->
   |                                       authenticate token; bind gateway_id
   |<-- full(desired) or delta(have_version -> desired) ---------------
   |   apply privately, persist, swap
@@ -34,8 +34,8 @@ gateway                                   control plane
 - The base of a delta is always the session's ACKed version (or Hello.have_version before the first ACK) — never a global "last sent" version.
 - The first update after Hello is a delta only when `Hello.scope` matches, `have_version` is retained, `have_version <= desired` and `Hello.have_digest` equals the stored digest of `have_version`; otherwise full. Until the first ACK after a full, the session has **no** delta base (a NACKed full is never followed by a delta).
 - Digest = `config_versions.digest` (sha256 of the control plane's serialized payload). It is sent as `ConfigUpdate.target_digest`; the gateway treats it as opaque, persists it with the snapshot and echoes it in `Hello.have_digest` (serialization is not byte-identical across languages, so the gateway never recomputes it). `have_version > desired` (control plane restored from backup) → full.
-- `Hello.strategies` lists a `StrategyDescriptor` (name, title, description, uses_weight, needs, params and member JSON Schema, digest) for every strategy compiled into the gateway, built-ins included. It is untrusted and only informs the API and router validation: nothing in it can end the stream, and it does not gate snapshots, which `supported_capabilities` and the gateway's own `configure` still do. `docs/router-strategies.md` has the schema rules.
-  - Normalized off the event loop: at most 128 strategies per gateway, descriptors first, then `strategy:<name>` capabilities, names matching `^[a-z][a-z0-9_]{0,62}$`; each schema capped at 16 KiB and restricted to a subset, or dropped. The rest is ignored, logged and counted in `lumewarp_cp_gateway_strategies_ignored_total`. Other capabilities are capped at 64, of at most 128 characters each. The session's stored capabilities list every kept strategy.
+- `Hello.plugins` lists a `PluginDescriptor` per plugin the gateway has: built-ins and the WASM components loaded from its three plugin directories at startup. A descriptor carries the kind (`router-strategy`, `upstream-auth`, `a2a-middleware`), name, title, description, `builtin`, the params JSON Schema, the router-only `uses_weight`/`needs`/member schema, the component's `wasm_sha256` (empty for built-ins) and a `digest` that changes whenever any other field does. `Hello.plugin_abi` is the WIT package major version the gateway hosts (1). The list is untrusted and only informs the API and UI, which validate writes against its schemas: nothing in it can end the stream, and it does not gate snapshots, which `supported_capabilities` and the gateway's own `configure` still do. [Gateway plugins](plugins.md) has the manifest and schema rules.
+  - Normalized off the event loop: at most 128 plugins per kind per gateway, descriptors first, then that kind's capabilities, names matching `^[a-z][a-z0-9_]{0,62}$`; each schema capped at 16 KiB and restricted to a subset, or dropped. The rest is ignored, logged and counted in `lumewarp_cp_gateway_plugins_ignored_total`. Other capabilities are capped at 64, of at most 128 characters each. The session's stored capabilities list every kept plugin.
   - The status row and the stored descriptors change in one transaction, under that row's lock, and only for the session owning the row. Session ids move forward, so a slower older connection neither overwrites a newer one's report nor replaces its stream: it ends with `UNAVAILABLE`. A reader sees one Hello, never parts of two.
   - A Hello replaces all the gateway reported before. A gateway counts while the token of its latest Hello is unrevoked and it is connected or was seen in the last 30 days; a report counts while the token that made it is unrevoked. A connected gateway has what its latest Hello lists, an offline one what it last reported.
 - ACK/NACK must name the session's pending version; anything else is a protocol error and the control plane closes the stream.
@@ -45,7 +45,39 @@ gateway                                   control plane
   - `PERSIST_FAILED` → retry the same version with exponential backoff (1 s → 60 s).
 - ACK timeout: 30 s, then the control plane closes the stream; the gateway reconnects with backoff (0.5 s → 30 s, full jitter).
 - Keepalive: the gateway sends an HTTP/2 PING every 30 s, also while the stream is idle, and drops the connection if no ACK arrives within 10 s. The control plane must accept pings without data at least every 10 s (`grpc.http2.min_ping_interval_without_data_ms`, `grpc.keepalive_permit_without_calls`); gRPC core's default (5 min) answers them with GOAWAY `too_many_pings` and resets the stream every few minutes. The control plane pings every 60 s (20 s timeout) to notice gateways that vanished. Any L7 proxy between them must allow the same ping rate.
-- Delta semantics: upserts replace the whole entity by key (name / key_id / team id); removes delete by key; `created_at_unix_ms` and `required_capabilities` replace the target metadata. Removing an entity that does not exist is not an error. A delta whose result fails validation is NACKed `INVALID_CONFIG`.
+- Delta semantics: upserts replace the whole entity by key (name / key_id / team id); removes delete by key; MCP servers and A2A agents are keyed by name, and removing one drops its grants from the next compile; `created_at_unix_ms` and `required_capabilities` replace the target metadata. Removing an entity that does not exist is not an error. A delta whose result fails validation is NACKed `INVALID_CONFIG`.
+
+## Catalog reports
+
+A gateway reports what it observed upstream that the control plane cannot fetch
+itself (it does not run WASM auth plugins and holds no user's token). A
+`CatalogReport` travels on the same stream as `HealthReport`, any time after
+`Hello`; unlike `HealthReport` it adds to what was reported before rather than
+replacing it.
+
+- `ObservedDefinition { server, server_id, kind, name, hash, definition_json,
+  auto_approved, observed_at_unix_ms, config_version }`: one MCP tool or prompt.
+  Every definition the gateway withheld is reported, and every definition TOFU
+  served on first sight is reported once so grants can be written against it.
+  `definition_json` is the canonical definition, at most 64 KiB; `hash` is its
+  sha256. `auto_approved` is true only for a TOFU first sight.
+- `AgentCardReport { agent, agent_id, card_json, error, fetched_at_unix_ms,
+  config_version }`: the card the gateway fetched (rewritten as the gateway
+  serves it) or the sanitized fetch error (at most 500 bytes); a failed fetch
+  carries the last good card too. A `passthrough` agent usually has no card the
+  gateway can fetch, and an administrator's pasted `card_json` stays the
+  fallback.
+- `server_id`/`agent_id` and `config_version` are provenance: the control plane
+  discards a report whose id no longer matches the name, whose `config_version` it never
+  published, or whose version was compiled before the target's last write
+  (`McpServer.config_revision` / `A2aAgent.config_revision`). It recomputes the definition
+  hash itself and honours `auto_approved` only when the name is also new to it and the server is not `MANUAL` (first
+  writer wins).
+- Bounds: a gateway holds at most 200 unreported definitions per server, reports
+  the same (server, hash) at most once per gateway per 10 minutes, and drops what
+  exceeds a definition's 64 KiB or a report's size limits, counting
+  `lumewarp_mcp_catalog_reports_dropped_total{reason}`. The control plane shows
+  the result as text only.
 
 ## Gateway: applying an update
 
@@ -60,7 +92,7 @@ receive → apply to a private copy → validate (capabilities, references, hash
 - One background apply task; blocking file I/O never runs on the request path.
 - Persist failure → NACK `PERSIST_FAILED`, keep serving the previous version in memory.
 - ACK means "active and durable": a gateway restarted right after ACK boots into that version.
-- Validation failure (including an unresolvable `api_key_ref`, or an `api_key_ciphertext` that does not open with the gateway's `LUMEWARP_ENCRYPTION_KEY`) → NACK `INVALID_CONFIG`, keep the previous version.
+- Validation failure (including a WASM plugin `configure` error, an unresolvable `api_key_ref`, or an `api_key_ciphertext` that does not open with the gateway's `LUMEWARP_ENCRYPTION_KEY`) → NACK `INVALID_CONFIG`, keep the previous version.
 - State survives swaps: per-model in-flight counters and circuit breakers,
   upstream health, the gateway retry budget, rate-limit buckets (by
   `RateLimitScope.id`) and the metrics registry are process-lifetime. Active
@@ -90,8 +122,10 @@ is reserved in every kind.
 
 `params_json` is empty or a JSON object, at most 16 KiB; empty means `{}`. A
 built-in strategy takes no router params. `Router.strategy` is a name:
-`weighted`, `least_in_flight`, `lowest_latency`, `vllm_load`, or a strategy
-compiled into the gateway.
+`weighted`, `least_in_flight`, `lowest_latency`, `vllm_load`, or a
+`router-strategy` plugin the gateway loaded at startup (built-in or WASM).
+`Router.plugin_timeout_ms` bounds one WASM `pick`; `0` means 60 s and built-in
+strategies ignore it. The name's capability is `strategy:<name>`.
 
 `ApiKey.policy.allowed_models` holds expanded names. A grant covers exactly the
 named entry: a key allowed a router cannot call its members by name, and a key
@@ -99,6 +133,49 @@ allowed an alias cannot call its target by name, unless those names are granted
 too. A rename therefore changes affected keys, which go out in the same delta
 with the upserts and removes of the renamed entry and of whatever references it.
 `GET /v1/models` lists every name the key may call, of any kind, sorted.
+
+### MCP servers and A2A agents
+
+A snapshot also carries the MCP servers and A2A agents the gateway proxies. A
+server needs capability `mcp`; an agent needs `a2a`. Their names match
+`^[a-z][a-z0-9_-]{0,62}$` and contain no `__` (the aggregate MCP endpoint splits
+on the first `__`), and are unique within their kind. The snapshot and grants
+reference them by name; usage carries the name as `target`; a catalog report
+also carries the id so the control plane can reject stale data.
+
+- `McpServer { id, name, url, auth, timeout_ms, review_mode, definitions }`:
+  `url` is the upstream Streamable HTTP endpoint (absolute http(s), no
+  userinfo); `timeout_ms` bounds one upstream HTTP request, `0` = the gateway
+  default. `auth` is an `UpstreamAuth`: `plugin` names a built-in (`none`,
+  `static_bearer`, `passthrough`) or a `upstream-auth` plugin, with
+  `params_json` (at most 16 KiB, never a secret) and `timeout_ms` (WASM plugins only:
+  one plugin call, `0` = 60 s; built-in auth ignores it). `static_bearer` takes its token
+  from `secret_ref` (a gateway environment variable) or `secret_ciphertext` (sealed like
+  `Upstream.api_key_ciphertext`), never from settings.
+- `definitions` is the review state of every tool and prompt the control plane
+  knows, never the definition itself: `McpDefinition { kind, name, hash,
+  state }`. `hash` is 32 bytes of sha256 over the canonical definition JSON;
+  `state` is `APPROVED`, `PENDING` or `REJECTED`, and `UNSPECIFIED` counts as
+  pending. `review_mode` is `TOFU` (also the meaning of `UNSPECIFIED`),
+  `MANUAL` or `OFF`. [Gateway plugins](plugins.md#mcp-definition-review) has
+  what each mode does with an observed definition.
+- `A2aAgent { id, name, url, card_url, auth, middleware, timeout_ms,
+  card_json }`: `url` is the JSON-RPC endpoint; `card_url` empty means the
+  origin of `url` plus `/.well-known/agent-card.json`. `middleware` is an
+  optional `PluginRef` naming an `a2a-middleware` plugin (at most one per
+  agent); `card_json` is the card served when the gateway has not fetched one
+  (at most 64 KiB).
+- `PluginRef { plugin, params_json, timeout_ms }` is the same reference an MCP
+  server's `auth` and an A2A agent's `middleware` use. A plugin a gateway does
+  not have is `UNSUPPORTED_FEATURE` for that gateway; using one without its
+  `auth:<name>` or `a2a_middleware:<name>` capability is `INVALID_CONFIG`.
+- `ApiKey.policy` carries the MCP and A2A grants: `allow_all_mcp` with
+  `mcp_grants []McpGrant{server, all_tools, tools}`, and `allow_all_agents`
+  with `allowed_agents`. A server absent from `mcp_grants` is invisible. A
+  granted server exposes the tools its grant covers and all of its prompts.
+  MCP `tools/call` is charged as one request against the key's
+  `requests_per_minute` scopes; A2A is not rate limited, and neither charges
+  tokens or budget.
 
 ### Key rotation grace
 
@@ -115,8 +192,10 @@ Standalone YAML has no previous-hash field.
 ### Routing capabilities
 
 The gateway advertises `retry`, `fallbacks`, `health_check`, `circuit_breaker`,
-`traffic_split`, `vllm_load`, `rotation_grace`, `model_chat_check` and `strategy:<name>` for each
-strategy it has, built-ins included. Compilers add a capability only when it is used:
+`traffic_split`, `vllm_load`, `rotation_grace`, `model_chat_check`, `mcp`, `a2a`,
+`strategy:<name>`, `auth:<name>` and `a2a_middleware:<name>`: the last three name
+plugins the gateway has (built-ins included), and `mcp`/`a2a` gate MCP servers
+and A2A agents. Compilers add a capability only when it is used:
 
 | Capability | Fields |
 | --- | --- |
@@ -128,7 +207,11 @@ strategy it has, built-ins included. Compilers add a capability only when it is 
 | `vllm_load` | Nonempty `Upstream.metrics_url` |
 | `rotation_grace` | Nonempty `ApiKey.previous_key_hash` |
 | `model_chat_check` | Present `Model.chat_check` |
+| `mcp` | Nonempty `Snapshot.mcp_servers` |
+| `a2a` | Nonempty `Snapshot.a2a_agents` |
 | `strategy:<name>` | Any router with `Router.strategy = <name>`, including `strategy:weighted` |
+| `auth:<name>` | Any MCP server or A2A agent whose `auth.plugin = <name>` |
+| `a2a_middleware:<name>` | Any A2A agent whose `middleware.plugin = <name>` |
 
 Using a field without its capability is `INVALID_CONFIG`; requiring an
 unsupported capability is `UNSUPPORTED_FEATURE`, and so is a `Router.strategy`
@@ -219,6 +302,12 @@ swaps; scrapers, like probes, are diffed only after a snapshot is accepted.
 
 ## Gateway: boot
 
+- The three plugin directories are read before any configuration is applied (a
+  persisted snapshot in control-plane mode, the YAML in standalone mode). A
+  configured directory that is missing or unreadable, a file that does not
+  implement its directory's world, a duplicate or built-in name, an unsupported
+  ABI or an invalid manifest refuses to start: a gateway never skips a plugin
+  silently. There is no hot reload. See [Gateway plugins](plugins.md#loading).
 - CP mode always requires keys: zero keys means every `/v1/*` request is 401.
 - With a valid on-disk snapshot of the configured scope: serve it immediately, then connect in the background.
 - Without one (missing, wrong scope, corrupt, or written in an older format — the file starts with the format marker `LWSNAP02`, has a trailing sha256 and is size-capped): do not serve `/v1/*` (503 `not_ready`, readiness false) until the first full snapshot is applied. Never fall back to an open router. A file without the marker is not decoded: protobuf skips unknown fields, so an older file would otherwise decode into a snapshot with empty routers. `Hello` then offers version 0, the control plane sends a full, and the file is replaced.
@@ -254,5 +343,13 @@ swaps; scrapers, like probes, are diffed only after a snapshot is accepted.
   | Same, members failed, fallback serves | the fallback | `latest` | `coder` | true |
 
   `upstream` and `upstream_model` are what the final attempt used, sent by the gateway so a later catalog change cannot misattribute them. `attempts` counts all upstream attempts of the request; 0 means none was made. A rejected request with a known name carries its `alias` and `router`.
+- MCP and A2A requests emit one event per JSON-RPC request with `kind`
+  (`MCP` or `A2A`), `target` (server or agent name), `method`, `tool` for MCP
+  tool and prompt calls, `status` and the final outcome and duration. They carry
+  no model, tokens, cost or `requested`, and the control plane records them
+  without adding them to the team or owner totals; budgets and limits never see
+  them. A streaming request's event is emitted when the stream ends, with the
+  final outcome (`COMPLETED`, `UPSTREAM_ERROR`, or `CLIENT_CANCELLED`/499 when
+  the client disappears).
 - Budget enforcement is **eventual**: once usage is ingested, an exhausted scope flips affected keys to `BUDGET_EXCEEDED` and a new version is published within 5 s. Lost events (gateway crash, full queue) are not recovered, and streams in flight when a budget runs out are not cut.
 - Month rollover is driven by a scheduler (runs at startup and at each UTC month boundary), not by incoming usage. While the control plane is down, blocked keys stay blocked.

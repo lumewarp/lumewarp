@@ -1,6 +1,6 @@
 import { TriangleAlert } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
-import { api, type Model, type Router, type Strategy } from "../api";
+import { api, type Model, type Plugin, type Router } from "../api";
 import { Badge, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { CheckField, Field, FormDialog, NumberField, required, SelectField, SwitchField, TextField, useForm } from "../components/Form";
@@ -48,6 +48,8 @@ interface Values {
   name: string;
   strategy: string;
   params: Params;
+  /** One strategy call's timeout; only a WASM strategy has one (0 = the 60 s default). */
+  plugin_timeout_ms: number | null;
   members: MemberV[];
   retry_enabled: boolean;
   retry_max_attempts: number | null;
@@ -63,6 +65,7 @@ const blank: Values = {
   name: "",
   strategy: "weighted",
   params: {},
+  plugin_timeout_ms: null,
   members: [],
   retry_enabled: false,
   retry_max_attempts: null,
@@ -79,6 +82,7 @@ const fromRouter = (r: Router): Values => ({
   name: r.name,
   strategy: r.strategy,
   params: r.params,
+  plugin_timeout_ms: r.plugin_timeout_ms || null,
   members: r.members.map((m) => ({ ...m })),
   retry_enabled: !!r.retry,
   retry_max_attempts: r.retry?.max_attempts ?? null,
@@ -102,18 +106,20 @@ function parseStatuses(text: string): number[] | undefined {
 interface Shape {
   /** The picked strategy's name: the identity settings editors are keyed on. */
   name: string;
-  desc: Strategy | undefined;
+  desc: Plugin | undefined;
   params: ParsedSchema | null;
   member: ParsedSchema | null;
   usesWeight: boolean;
   /** No usable member schema at all: members get a JSON editor. */
   memberJson: boolean;
+  /** A WASM plugin (`builtin === false`): the only strategies with a timeout of their own. */
+  wasm: boolean;
 }
 
-function shapeOf(name: string, desc: Strategy | undefined): Shape {
+function shapeOf(name: string, desc: Plugin | undefined): Shape {
   const params = parseSchema(desc?.params_schema);
   const member = parseSchema(desc?.member_schema);
-  return { name, desc, params, member, usesWeight: desc?.uses_weight ?? true, memberJson: !member };
+  return { name, desc, params, member, usesWeight: desc?.uses_weight ?? true, memberJson: !member, wasm: !!desc && !desc.builtin };
 }
 
 /** An existing member keeps its weight and settings exactly: hiding a weight is not deleting it. */
@@ -123,6 +129,7 @@ const body = (v: Values, missing: boolean) => ({
   name: v.name.trim(),
   strategy: v.strategy,
   params: v.params,
+  plugin_timeout_ms: v.plugin_timeout_ms ?? 0,
   // A split router has its members under each split.
   members: v.splits.length ? [] : v.members.map(memberBody),
   retry: v.retry_enabled
@@ -139,7 +146,7 @@ const body = (v: Values, missing: boolean) => ({
   ...(v.force && missing ? { force: true } : {}),
 });
 
-const PATCHABLE = ["name", "strategy", "params", "members", "retry", "fallback_model_ids", "traffic_split", "sticky", "sticky_header"] as const;
+const PATCHABLE = ["name", "strategy", "params", "plugin_timeout_ms", "members", "retry", "fallback_model_ids", "traffic_split", "sticky", "sticky_header"] as const;
 
 /**
  * The PATCH of an edit: only what the form changed against the router as it was loaded. A save never
@@ -152,7 +159,7 @@ export function patchBody(original: Router, v: Values, missing: boolean): Record
   const strategyChanged = next.strategy !== before.strategy;
   const out: Record<string, unknown> = {};
   for (const key of PATCHABLE) {
-    const dependsOnStrategy = key === "params" || key === "members" || key === "traffic_split";
+    const dependsOnStrategy = key === "params" || key === "plugin_timeout_ms" || key === "members" || key === "traffic_split";
     if ((strategyChanged && dependsOnStrategy) || !sameJson(next[key], before[key])) out[key] = next[key];
   }
   if (next.force) out.force = true;
@@ -273,7 +280,7 @@ function MemberEditor({ scope, label, options, members, onChange, shape, errors,
   );
 }
 
-function memberSummary(m: { model_id: string; weight: number; params: Record<string, unknown> }, name: (id: string) => string, strategy: Strategy | undefined) {
+function memberSummary(m: { model_id: string; weight: number; params: Record<string, unknown> }, name: (id: string) => string, strategy: Plugin | undefined) {
   const extras = Object.entries(m.params)
     .map(([k, v]) => `${k} ${typeof v === "object" ? JSON.stringify(v) : String(v)}`)
     .join(", ");
@@ -286,7 +293,7 @@ function memberSummary(m: { model_id: string; weight: number; params: Record<str
   );
 }
 
-function Health({ router, strategy }: { router: Router; strategy: Strategy | undefined }) {
+function Health({ router, strategy }: { router: Router; strategy: Plugin | undefined }) {
   if (router.config_invalid) {
     return (
       <div className="flex flex-col items-start gap-1" data-testid="config-invalid">
@@ -373,6 +380,7 @@ export function Routers() {
     // Settings belong to one strategy's schema: they do not carry over.
     form.set("strategy", name);
     form.set("params", {});
+    form.set("plugin_timeout_ms", null);
     form.set("force", false);
     form.set("members", v.members.map((m) => ({ ...m, params: {} })));
     form.set("splits", v.splits.map((s) => ({ ...s, members: s.members.map((m) => ({ ...m, params: {} })) })));
@@ -508,6 +516,9 @@ export function Routers() {
       <FormDialog variant="wide-drawer" open={!!editing} title={editing === "new" ? "New router" : "Edit router"} submitLabel={editing === "new" ? "Create" : "Save"} onClose={() => setEditing(null)} onSubmit={submit}>
         <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus hint="Must be unique across models, aliases and routers." />
         <ComboboxField label="Strategy" value={v.strategy} onChange={changeStrategy} options={strategyOptions} error={form.errors.strategy} hint={shape.desc ? strategyDescription(shape.desc) || undefined : undefined} />
+        {shape.wasm && (
+          <NumberField label="Timeout (ms)" value={v.plugin_timeout_ms} onChange={(x) => form.set("plugin_timeout_ms", x)} error={form.errors.plugin_timeout_ms} min={0} placeholder="0" hint="0 uses the 60 second default." />
+        )}
 
         {missing.length > 0 && (
           <Alert variant="warn" data-testid="missing-gateways">
@@ -677,7 +688,7 @@ function StrategySettings({ shape, strategy, params, onChange, errors, error, on
   );
 }
 
-function StrategiesTable({ strategies, loading, error, onRetry }: { strategies: Strategy[] | undefined; loading: boolean; error: Error | null; onRetry: () => void }) {
+function StrategiesTable({ strategies, loading, error, onRetry }: { strategies: Plugin[] | undefined; loading: boolean; error: Error | null; onRetry: () => void }) {
   // Connected gateways known from any strategy's support or missing list.
   const total = useMemo(() => {
     const ids = new Set<string>();
@@ -710,7 +721,7 @@ function StrategiesTable({ strategies, loading, error, onRetry }: { strategies: 
               </div>
             ),
           },
-          { key: "source", header: "Source", cell: (s) => <Badge tone={s.builtin ? "muted" : "info"}>{s.builtin ? "Built-in" : "Extension"}</Badge> },
+          { key: "source", header: "Source", cell: (s) => <Badge tone={s.builtin ? "muted" : "info"}>{s.builtin ? "Built-in" : "WASM"}</Badge> },
           {
             key: "settings",
             header: "Settings",

@@ -854,8 +854,13 @@ test("a failed background check keeps an open create-key form and its draft", as
   await form.getByLabel("Name").fill("s8-draft-key");
   await form.getByLabel("Expires").fill(expiry);
 
-  // Let the keys query go stale, then fail its focus refetch; its 403 revalidates /users/me, which fails too.
-  await page.waitForTimeout(16_000);
+  // Stale the keys query (React Query's staleTime is 15 s), then fail its focus refetch; its 403
+  // revalidates /users/me, which fails too. Step the page's clock rather than sleeping: a 16 s sleep
+  // against a 15 s staleTime left a one-second margin that a host clock step could eat.
+  await page.evaluate(() => {
+    const now = Date.now;
+    Date.now = () => now() + 20_000;
+  });
   const forbidden = { status: 403, contentType: "application/json", body: JSON.stringify({ error: { code: "forbidden", message: "temporary" } }) };
   await page.route("**/api/v1/users/me/keys*", (route) => route.fulfill(forbidden));
   await page.route("**/api/v1/users/me", (route) => route.fulfill(forbidden));
@@ -883,8 +888,12 @@ test("a failed guard check keeps the guarded page and an open create-key form", 
   const form = page.getByRole("dialog", { name: "New API key" });
   await form.getByLabel("Name").fill("s8-guard-draft");
 
-  // Stale the team keys query, fail its focus refetch; its 403 revalidates /users/me, which fails too.
-  await page.waitForTimeout(16_000);
+  // Stale the team keys query the same way as the My keys test above, then fail its focus refetch;
+  // its 403 revalidates /users/me, which fails too.
+  await page.evaluate(() => {
+    const now = Date.now;
+    Date.now = () => now() + 20_000;
+  });
   const forbidden = { status: 403, contentType: "application/json", body: JSON.stringify({ error: { code: "forbidden", message: "temporary" } }) };
   await page.route(`**/api/v1/teams/${team.id}/keys*`, (route) => route.fulfill(forbidden));
   await page.route("**/api/v1/users/me", (route) => route.fulfill(forbidden));

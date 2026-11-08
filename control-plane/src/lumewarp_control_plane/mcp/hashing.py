@@ -87,7 +87,12 @@ def definition_name(definition: dict[str, object]) -> str | None:
 
 
 def observe(kind: McpDefinitionKind | None, definition: object) -> Observed | None:
-    """Projection plus canonical text plus hash, in one step; None when unusable."""
+    """Projection plus canonical text plus hash, in one step; None when unusable.
+
+    A definition comes from an untrusted upstream: nothing in it may raise here. Beyond
+    `UnhashableDefinition`, a number too large for a double (`OverflowError`) and a string
+    JSON accepted but UTF-8 cannot (`UnicodeError`) are both "cannot be hashed".
+    """
     projection = project(kind, definition)
     if projection is None:
         return None
@@ -95,7 +100,7 @@ def observe(kind: McpDefinitionKind | None, definition: object) -> Observed | No
     assert name is not None
     try:
         canonical_json = canonicalize(projection)
-    except UnhashableDefinition:
+    except (UnhashableDefinition, OverflowError, UnicodeError):
         return None
     return Observed(
         name=name,
@@ -201,8 +206,13 @@ def _write_int(value: int, out: list[str]) -> None:
     """A double holds 2**53 exactly; a bigger integer is rounded like ECMAScript does."""
     if abs(value) <= MAX_EXACT_INT:
         out.append(str(value))
-    else:
-        _write_float(float(value), out)
+        return
+    try:
+        rounded = float(value)
+    except OverflowError:
+        # An integer JSON accepts (any number of digits) but no double can hold.
+        raise UnhashableDefinition("integer is too large for a double") from None
+    _write_float(rounded, out)
 
 
 def _write_float(value: float, out: list[str]) -> None:

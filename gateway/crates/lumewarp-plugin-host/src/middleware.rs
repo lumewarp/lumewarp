@@ -40,8 +40,12 @@ pub const KIND: i32 = 3;
 pub const KIND_LABEL: &str = "a2a-middleware";
 /// One hook call when the target's `PluginRef.timeout_ms` is 0.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
-/// A request body, response body or SSE event the hooks may see (plan L10).
-pub const MAX_BODY: usize = 4 * 1024 * 1024;
+/// A JSON-RPC request body a request hook may see (plan L10).
+pub const MAX_REQUEST_BODY: usize = 4 * 1024 * 1024;
+/// A non-streaming JSON-RPC response body a response hook may see (plan L10).
+pub const MAX_RESPONSE_BODY: usize = 16 * 1024 * 1024;
+/// One SSE event's data a stream hook may see (plan L10).
+pub const MAX_STREAM_EVENT: usize = 1024 * 1024;
 /// Configured middlewares kept without a snapshot replacing them.
 pub const MAX_CONFIGURED: usize = 4096;
 
@@ -63,6 +67,17 @@ impl Hook {
             Self::Request => "on-request",
             Self::Response => "on-response",
             Self::Stream => "on-stream-event",
+        }
+    }
+
+    /// The L10 body bound for this hook: 4 MiB request, 16 MiB non-stream
+    /// response, 1 MiB per SSE event. The proxy checks the same bounds on the
+    /// hook's output; the adapter must accept what the proxy can hand it.
+    pub fn limit(self) -> usize {
+        match self {
+            Self::Request => MAX_REQUEST_BODY,
+            Self::Response => MAX_RESPONSE_BODY,
+            Self::Stream => MAX_STREAM_EVENT,
         }
     }
 }
@@ -111,7 +126,10 @@ pub enum Error {
     /// The plugin's breaker is open after repeated failures.
     #[error("the plugin is paused after repeated failures")]
     Paused,
-    #[error("hook input or output exceeds {MAX_BODY} bytes")]
+    /// Apply-time `configure` did not finish inside [`crate::CONFIGURE_TIMEOUT`].
+    #[error("configuring the middleware timed out")]
+    ConfigureTimeout,
+    #[error("hook input or output exceeds its size bound")]
     TooLarge,
 }
 
@@ -162,6 +180,12 @@ impl Middleware {
             .filter(|plugin| plugin.descriptor.kind == KIND)
             .cloned()
             .ok_or_else(|| Error::Missing(spec.plugin.clone()))?;
+        Self::with_plugin(plugin, spec)
+    }
+
+    /// Builds a middleware around an explicit plugin, so a test can own its
+    /// breaker instead of sharing the process-wide one.
+    pub(crate) fn with_plugin(plugin: Arc<Plugin>, spec: Spec) -> Result<Self, Error> {
         let params = match serde_json::from_str::<serde_json::Value>(&spec.params_json) {
             Ok(serde_json::Value::Object(params)) => params,
             _ => return Err(Error::Params("params_json must be a JSON object".into())),
@@ -243,7 +267,8 @@ impl Middleware {
         data: &[u8],
         timeout: Duration,
     ) -> Result<Option<Vec<u8>>, Error> {
-        if data.len() > MAX_BODY {
+        let limit = hook.limit();
+        if data.len() > limit {
             return Err(Error::TooLarge);
         }
         let this = Arc::clone(self);
@@ -296,9 +321,7 @@ impl Middleware {
             };
             let elapsed = started.elapsed();
             let (result, reusable, label) = match result {
-                Ok(Some(Ok(value))) if value.len() > MAX_BODY => {
-                    (Err(Error::TooLarge), true, "error")
-                }
+                Ok(Some(Ok(value))) if value.len() > limit => (Err(Error::TooLarge), true, "error"),
                 Ok(Some(Ok(value))) => (Ok(Some(value)), true, "ok"),
                 Ok(None) if hook == Hook::Stream => (Ok(None), true, "ok"),
                 Ok(None) => (Err(Error::Trap), true, "trap"),
@@ -318,7 +341,11 @@ impl Middleware {
             };
             match &result {
                 Ok(_) => this.plugin.record_success(),
-                // The breaker counts a guest error, a trap and a timeout.
+                // A guest `rpc-error` is a client-facing refusal and a size
+                // refusal is the host rejecting one body: neither says the
+                // plugin is broken, so neither trips the breaker (M3). The
+                // breaker counts a trap, a timeout and a failed configure.
+                Err(Error::Rpc { .. }) | Err(Error::TooLarge) => {}
                 Err(_) => this.plugin.record_failure(),
             }
             crate::record(KIND_LABEL, &this.spec.plugin, label, elapsed);
@@ -359,16 +386,24 @@ impl Middleware {
             .acquire_owned()
             .await
             .map_err(|_| Error::Canceled)?;
-        self.instantiate(permit).await
+        self.instantiate(permit, None).await
     }
 
-    async fn instantiate(&self, permit: OwnedSemaphorePermit) -> Result<Instance, Error> {
+    async fn instantiate(
+        &self,
+        permit: OwnedSemaphorePermit,
+        budget: Option<Duration>,
+    ) -> Result<Instance, Error> {
         let Prepared::Middleware(pre) = self.plugin.prepared() else {
             return Err(Error::Missing(self.spec.plugin.clone()));
         };
         // The shared lane: fairness epoch, the process memory budget and the
-        // circuit breaker state live on `Plugin`.
+        // circuit breaker state live on `Plugin`. Apply-time `configure` gets a
+        // hard epoch budget instead of the fairness yield (M4).
         let mut store = self.plugin.store();
+        if let Some(budget) = budget {
+            crate::set_apply_deadline(&mut store, budget);
+        }
         let binding = pre
             .instantiate_async(&mut store)
             .await
@@ -378,8 +413,19 @@ impl Middleware {
             .middleware()
             .call_configure(&mut store, &self.agent)
             .await
-            .map_err(|error| Error::Configure(format!("{error:#}")))?
+            .map_err(|error| {
+                if budget.is_some() && crate::is_epoch_trap(&error) {
+                    Error::ConfigureTimeout
+                } else {
+                    Error::Configure(format!("{error:#}"))
+                }
+            })?
             .map_err(Error::Configure)?;
+        if budget.is_some() {
+            // Back to yielding: a hook is cancelled by its own timeout, never
+            // trapped by the configure budget.
+            crate::set_fair_epoch(&mut store);
+        }
         Ok(Instance {
             store,
             binding,
@@ -389,13 +435,13 @@ impl Middleware {
     }
 
     /// Apply-time pre-warm: one configured Store in the idle pool. Called only
-    /// through [`precompile`], never from a request.
-    async fn warm(self: &Arc<Self>) -> Result<(), Error> {
+    /// through [`Cache::stage`], never from a request, and bounded there.
+    async fn warm(self: &Arc<Self>, timeout: Duration) -> Result<(), Error> {
         let permit = Arc::clone(&self.permits)
             .acquire_owned()
             .await
             .map_err(|_| Error::Canceled)?;
-        let instance = self.instantiate(permit).await?;
+        let instance = self.instantiate(permit, Some(timeout)).await?;
         self.idle
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -457,13 +503,21 @@ impl Cache {
         Ok(configured)
     }
 
-    /// Registers the middlewares of one applied configuration. Agents whose
-    /// name, settings and destination did not change keep their configured
-    /// value; everything else is dropped once no hook is using it.
+    /// Configures `specs` into a set that does not serve yet (m1): a version
+    /// the gateway later refuses leaves the previous set untouched.
     ///
-    /// All of `specs` is registered before anything is replaced, so a refused
-    /// or unknown plugin leaves the previous set serving.
-    pub fn replace(&self, specs: &[Spec]) -> Result<(), Refused> {
+    /// Agents whose name, settings and destination did not change keep their
+    /// configured value; a fresh one is warmed inside
+    /// [`crate::CONFIGURE_TIMEOUT`], so a `configure` error or a `configure`
+    /// that never returns refuses the version (M4). No lock is held while it
+    /// runs.
+    pub fn stage(&self, specs: &[Spec]) -> Result<Staged, Refused> {
+        self.stage_within(specs, crate::CONFIGURE_TIMEOUT)
+    }
+
+    /// [`Cache::stage`] with an explicit configure budget (tests use a short
+    /// one; the gateway always takes the default).
+    pub fn stage_within(&self, specs: &[Spec], timeout: Duration) -> Result<Staged, Refused> {
         let current: HashMap<_, _> = self
             .entries
             .read()
@@ -484,16 +538,28 @@ impl Cache {
             };
             if fresh {
                 // Pre-warm on the apply path: a refused `configure` is a NACK,
-                // not a 502 on the first request. `block_on` runs on its own
-                // thread and runtime (`lib.rs`), so this works from a tokio
-                // worker or a plain thread.
+                // not a 502 on the first request, and the wait is bounded so a
+                // `configure` that never returns cannot wedge the config
+                // stream. `block_on` runs on its own thread and runtime
+                // (`lib.rs`), so this works from a tokio worker or a thread.
                 let middleware = Arc::clone(&configured);
-                crate::block_on(async move { middleware.warm().await }).map_err(|source| {
-                    Refused {
-                        agent: spec.name.clone(),
-                        source,
+                let warmed =
+                    crate::block_on_timeout(async move { middleware.warm(timeout).await }, timeout);
+                match warmed {
+                    Some(Ok(())) => {}
+                    Some(Err(source)) => {
+                        return Err(Refused {
+                            agent: spec.name.clone(),
+                            source,
+                        })
                     }
-                })?;
+                    None => {
+                        return Err(Refused {
+                            agent: spec.name.clone(),
+                            source: Error::ConfigureTimeout,
+                        })
+                    }
+                }
             }
             if next.insert(key, configured).is_some() {
                 return Err(Refused {
@@ -502,11 +568,39 @@ impl Cache {
                 });
             }
         }
+        Ok(Staged { entries: next })
+    }
+
+    /// Makes a staged set the one serving; called once the version is accepted.
+    pub fn publish(&self, staged: Staged) {
         *self
             .entries
             .write()
-            .unwrap_or_else(|error| error.into_inner()) = next;
+            .unwrap_or_else(|error| error.into_inner()) = staged.entries;
+    }
+
+    /// Stage and publish in one step (tests and standalone load).
+    pub fn replace(&self, specs: &[Spec]) -> Result<(), Refused> {
+        let staged = self.stage(specs)?;
+        self.publish(staged);
         Ok(())
+    }
+}
+
+/// Middlewares configured for one version that has not been accepted yet.
+#[derive(Debug, Default)]
+pub struct Staged {
+    entries: HashMap<String, Arc<Middleware>>,
+}
+
+impl Staged {
+    /// How many agents it configures (tests and logging).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
@@ -523,14 +617,13 @@ pub fn get(agent_id: &str) -> Option<Arc<Middleware>> {
     global().get(agent_id)
 }
 
-/// The apply-path hook: register every agent's middleware and keep the ones
-/// that did not change. Call it from `RoutingTable::compile` (next to
-/// `upstream_auth::precompile`). A missing plugin or unparseable settings
-/// becomes an `INVALID_CONFIG` NACK; a guest `configure` error is deferred to
-/// the first hook, which answers 502 (async support makes a synchronous
-/// configure on the apply path impossible).
+/// Stage and publish in one step, for a caller that is already sure the version
+/// is accepted (the gateway uses [`Cache::stage`] at compile time and
+/// [`Cache::publish`] on activation instead, so a refused version never changes
+/// what is serving).
 ///
-/// `specs` is empty for a snapshot with no agents, which clears the cache.
+/// A missing plugin, unparseable settings or a `configure` that fails or times
+/// out becomes a `Refused` (an `INVALID_CONFIG` NACK for the gateway).
 pub fn precompile(specs: &[Spec]) -> Result<(), Refused> {
     global().replace(specs)
 }
@@ -545,6 +638,13 @@ mod tests {
         assert_eq!(Hook::Request.label(), "on-request");
         assert_eq!(Hook::Response.label(), "on-response");
         assert_eq!(Hook::Stream.label(), "on-stream-event");
+    }
+
+    #[test]
+    fn hook_limits_follow_l10() {
+        assert_eq!(Hook::Request.limit(), 4 * 1024 * 1024);
+        assert_eq!(Hook::Response.limit(), 16 * 1024 * 1024);
+        assert_eq!(Hook::Stream.limit(), 1024 * 1024);
     }
 
     #[test]
@@ -600,6 +700,145 @@ mod tests {
             digest: [0; 32],
         };
         global().get_or_configure(&spec).unwrap()
+    }
+
+    /// A deliberate guest `rpc-error` and a size refusal are answers, not
+    /// plugin failures: they must not pause the plugin for every tenant (M3).
+    /// A timeout still does (the breaker keeps working).
+    #[tokio::test]
+    async fn refusals_do_not_trip_the_breaker() {
+        if install_fixtures().is_none() {
+            return;
+        }
+        // A plugin of this test only: the breaker is per plugin, and the other
+        // tests in this binary share the globally installed one.
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let mut registry = crate::Registry::default();
+        registry
+            .load_dir(&fixtures.join("plugins-test/a2a-middleware"), KIND)
+            .unwrap();
+        let plugin = registry.get(KIND, "misbehave_test").unwrap().clone();
+        let spec = |id: &str, params: &str| Spec {
+            id: id.into(),
+            name: id.into(),
+            url: format!("http://127.0.0.1:1/{id}"),
+            plugin: "misbehave_test".into(),
+            params_json: params.into(),
+            digest: [3; 32],
+        };
+        let refuse = Arc::new(
+            Middleware::with_plugin(
+                Arc::clone(&plugin),
+                spec("refuse-agent", r#"{"mode":"refuse"}"#),
+            )
+            .unwrap(),
+        );
+        for _ in 0..(crate::BREAKER_FAILURES + 1) {
+            let error = refuse
+                .on_request("SendMessage", b"{}", Duration::from_secs(10))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, Error::Rpc { .. }), "{error:?}");
+        }
+        // Still answering: no pause was recorded.
+        assert!(matches!(
+            refuse
+                .on_request("SendMessage", b"{}", Duration::from_secs(10))
+                .await,
+            Err(Error::Rpc { .. })
+        ));
+        // A size refusal is the host rejecting one body, not a plugin failure.
+        let oversized = vec![b'x'; MAX_REQUEST_BODY + 1];
+        for _ in 0..(crate::BREAKER_FAILURES + 1) {
+            assert!(matches!(
+                refuse
+                    .on_request("SendMessage", &oversized, Duration::from_secs(10))
+                    .await,
+                Err(Error::TooLarge)
+            ));
+        }
+        assert!(matches!(
+            refuse
+                .on_request("SendMessage", b"{}", Duration::from_secs(10))
+                .await,
+            Err(Error::Rpc { .. })
+        ));
+
+        // A timeout does trip it: after the pause every hook answers `Paused`.
+        let slow = Arc::new(
+            Middleware::with_plugin(
+                Arc::clone(&plugin),
+                spec("slow-agent", r#"{"mode":"slow","spin":4000000000}"#),
+            )
+            .unwrap(),
+        );
+        for _ in 0..crate::BREAKER_FAILURES {
+            let error = slow
+                .on_request("SendMessage", b"{}", Duration::from_millis(20))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, Error::Timeout), "{error:?}");
+        }
+        assert!(matches!(
+            slow.on_request("SendMessage", b"{}", Duration::from_secs(10))
+                .await,
+            Err(Error::Paused)
+        ));
+    }
+
+    /// An apply-time `configure` that never returns refuses the version once
+    /// the configure budget elapses (M4).
+    #[test]
+    fn a_configure_that_never_returns_refuses_the_version() {
+        if install_fixtures().is_none() {
+            return;
+        }
+        let cache = Cache::new();
+        let spec = Spec {
+            id: "stuck-configure".into(),
+            name: "stuck-configure".into(),
+            url: "http://127.0.0.1:1/stuck".into(),
+            plugin: "misbehave_test".into(),
+            params_json: r#"{"mode":"stuck_configure"}"#.into(),
+            digest: [1; 32],
+        };
+        let started = Instant::now();
+        let refused = cache
+            .stage_within(std::slice::from_ref(&spec), Duration::from_millis(100))
+            .unwrap_err();
+        assert!(
+            matches!(refused.source, Error::ConfigureTimeout),
+            "{:?}",
+            refused.source
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+        // Nothing was published.
+        assert!(cache.get("stuck-configure").is_none());
+    }
+
+    /// A staged set serves only once it is published (m1).
+    #[test]
+    fn a_staged_middleware_serves_only_after_publish() {
+        if install_fixtures().is_none() {
+            return;
+        }
+        let cache = Cache::new();
+        let spec = Spec {
+            id: "staged-agent".into(),
+            name: "staged-agent".into(),
+            url: "http://127.0.0.1:1/staged".into(),
+            plugin: "misbehave_test".into(),
+            params_json: r#"{"mode":"pass"}"#.into(),
+            digest: [2; 32],
+        };
+        let staged = cache.stage(std::slice::from_ref(&spec)).unwrap();
+        assert_eq!(staged.len(), 1);
+        assert!(
+            cache.get("staged-agent").is_none(),
+            "a staged set does not serve before the version is accepted"
+        );
+        cache.publish(staged);
+        assert!(cache.get("staged-agent").is_some());
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -21,11 +21,12 @@ from datetime import UTC, datetime, timedelta
 from lumewarp_control_plane.auth.sessions import csrf_token
 from lumewarp_control_plane.models import (
     KeyOwnerKind,
+    PluginKind,
     RequestOutcome,
     UsageEvent,
     UsageState,
+    GatewayPlugin,
     GatewaySession,
-    GatewayStrategy,
     GatewayToken,
     User,
     UserIdentity,
@@ -286,13 +287,69 @@ STRATEGY_DESCRIPTORS: dict[str, dict] = {
         "schema_problems": ["$: keyword 'oneOf' is outside the subset"],
     },
 }
-# Not on gateway B: saving them needs "Save anyway".
-ONLY_ON_A = {"priority_failover"}
+# Not on gateway B: saving it needs "Save anyway".
+ONLY_ON_A = {"priority_failover", "hmac_signature"}
+
+# A WASM upstream-auth plugin and a WASM A2A middleware, as a gateway that loaded them reports them.
+# `hmac_signature` is on gateway A only, so a form that names it needs "Save anyway".
+WASM_SHA256 = "ab" * 32
+TARGET_PLUGINS: dict[str, dict] = {
+    "hmac_signature": {
+        "kind": "upstream-auth",
+        "title": "HMAC signature",
+        "description": "Sign the request with a shared secret from the gateway environment.",
+        "params_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["header"],
+            "properties": {
+                "header": {"type": "string", "title": "Header", "description": "Header the signature is sent in."},
+                "clock_skew_s": {"type": "integer", "minimum": 0, "title": "Clock skew (s)"},
+            },
+        },
+        "member_schema": None,
+    },
+    "strip_artifacts": {
+        "kind": "a2a-middleware",
+        "title": "Strip artifacts",
+        "description": "Remove artifact parts of the listed MIME types from a response.",
+        "params_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"mime": {"type": "string", "title": "MIME type", "description": "Artifacts of this type are dropped."}},
+        },
+        "member_schema": None,
+    },
+}
+# What every connected gateway advertises for the built-ins: without it a built-in would look
+# missing on every gateway and every form would ask for "Save anyway".
+BUILTIN_CAPABILITIES = [
+    *[f"strategy:{name}" for name in BUILTINS],
+    *[f"auth:{name}" for name in ("none", "static_bearer", "passthrough")],
+]
+
+
+def plugin_descriptors() -> dict[str, dict]:
+    """Every plugin the two gateways report, by name, as `GatewayPlugin.descriptor`."""
+    out: dict[str, dict] = {}
+    for name, body in STRATEGY_DESCRIPTORS.items():
+        out[name] = {
+            "kind": "router-strategy",
+            "name": name,
+            "needs": [],
+            "schema_problems": [],
+            "wasm_sha256": WASM_SHA256,
+            **body,
+        }
+    for name, body in TARGET_PLUGINS.items():
+        out[name] = {"name": name, "schema_problems": [], "wasm_sha256": WASM_SHA256, **body}
+    return out
 
 
 async def seed_gateways(url: str) -> None:
-    """Two connected gateways. Done after the server is up: serving marks every stored gateway
-    disconnected, and only connected gateways make a strategy "missing"."""
+    """Two connected gateways that report the plugins the specs use. Done after the server is up:
+    serving marks every stored gateway disconnected, and only connected gateways make a plugin
+    "missing"."""
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -311,8 +368,15 @@ async def seed_gateways(url: str) -> None:
             )
             session.add(token_b)
             await session.flush()
+            descriptors = plugin_descriptors()
             for token in (token_a, token_b):
-                names = [n for n in STRATEGY_DESCRIPTORS if token is token_a or n not in ONLY_ON_A]
+                names = [n for n, d in descriptors.items() if token is token_a or n not in ONLY_ON_A]
+                capabilities = [
+                    *BUILTIN_CAPABILITIES,
+                    *[f"strategy:{n}" for n in names if descriptors[n]["kind"] == "router-strategy"],
+                    *[f"auth:{n}" for n in names if descriptors[n]["kind"] == "upstream-auth"],
+                    *[f"a2a_middleware:{n}" for n in names if descriptors[n]["kind"] == "a2a-middleware"],
+                ]
                 session.add(
                     GatewaySession(
                         scope=token.scope,
@@ -320,26 +384,24 @@ async def seed_gateways(url: str) -> None:
                         token_id=token.id,
                         connected=True,
                         gateway_version="e2e",
-                        capabilities=[f"strategy:{n}" for n in [*BUILTINS, *names]],
+                        capabilities=capabilities,
                         connected_at=now,
                         last_seen_at=now,
                     )
                 )
             await session.flush()
             for token in (token_a, token_b):
-                for name in [n for n in STRATEGY_DESCRIPTORS if token is token_a or n not in ONLY_ON_A]:
+                for name, descriptor in descriptors.items():
+                    if token is not token_a and name in ONLY_ON_A:
+                        continue
                     session.add(
-                        GatewayStrategy(
+                        GatewayPlugin(
                             scope=token.scope,
                             gateway_id=token.gateway_id,
+                            kind=PluginKind(descriptor["kind"]),
                             name=name,
                             digest="e2e" + name.replace("_", "")[:20],
-                            descriptor={
-                                "name": name,
-                                "needs": [],
-                                "schema_problems": [],
-                                **STRATEGY_DESCRIPTORS[name],
-                            },
+                            descriptor=descriptor,
                             token_id=token.id,
                             seen_at=now,
                         )
@@ -502,6 +564,8 @@ def main() -> None:
         **os.environ,
         "LUMEWARP_DATABASE_URL": url,
         "LUMEWARP_BREAK_GLASS_PASSWORD": BREAK_GLASS_PASSWORD,
+        # Seals an API key or an MCP/A2A token stored through the API; a deployment sets this too.
+        "LUMEWARP_ENCRYPTION_KEY": "e2e-encryption-key-0123456789abcdef",
         "LUMEWARP_DEV_MODE": "true",
         "LUMEWARP_SESSION_COOKIE_SECURE": "false",
         "LUMEWARP_METRICS_BIND": "",

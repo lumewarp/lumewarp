@@ -651,12 +651,14 @@ type ServerObserved = HashMap<McpDefinitionKind, HashMap<Arc<str>, [u8; 32]>>;
 /// configuring them. Called from the apply task and the MCP proxy only.
 pub struct Observed {
     servers: Mutex<HashMap<Arc<str>, ServerObserved>>,
+    first: crate::mcp::First,
 }
 
 impl Default for Observed {
     fn default() -> Self {
         Self {
             servers: Mutex::new(HashMap::new()),
+            first: crate::mcp::First::default(),
         }
     }
 }
@@ -664,6 +666,19 @@ impl Default for Observed {
 impl Observed {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The runtime's first hash, bounded independently per server and pruned
+    /// on snapshot application together with the L1 memory.
+    pub fn first(
+        &self,
+        server: &str,
+        server_id: &str,
+        kind: McpDefinitionKind,
+        name: &str,
+        hash: [u8; 32],
+    ) -> Option<[u8; 32]> {
+        self.first.record(server, server_id, kind, name, hash)
     }
 
     /// Records the definition the upstream just sent (list response, or the
@@ -729,6 +744,7 @@ impl Observed {
         let keep: HashSet<&str> = servers.into_iter().collect();
         let mut memory = lock(&self.servers);
         memory.retain(|server, _| keep.contains(server.as_ref()));
+        self.first.retain_servers(&keep);
     }
 
     /// Servers and names held; proves pruning bounds memory.
@@ -752,6 +768,96 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn tofu_first_hashes_are_runtime_owned_per_server_bounded_and_snapshot_pruned() {
+        let memory = Observed::new();
+        for i in 0..MAX_APPROVED_DEFINITIONS {
+            assert_eq!(
+                memory.first(
+                    "flood",
+                    "id-flood",
+                    McpDefinitionKind::Tool,
+                    &format!("tool-{i}"),
+                    [1; 32]
+                ),
+                Some([1; 32])
+            );
+        }
+        assert!(memory
+            .first(
+                "flood",
+                "id-flood",
+                McpDefinitionKind::Prompt,
+                "overflow",
+                [2; 32]
+            )
+            .is_none());
+        assert_eq!(
+            memory.first(
+                "healthy",
+                "id-healthy",
+                McpDefinitionKind::Tool,
+                "echo",
+                [3; 32]
+            ),
+            Some([3; 32])
+        );
+        // First sight is immutable and one Runtime cannot poison another's TOFU.
+        assert_eq!(
+            memory.first(
+                "healthy",
+                "id-healthy",
+                McpDefinitionKind::Tool,
+                "echo",
+                [4; 32]
+            ),
+            Some([3; 32])
+        );
+        assert_eq!(
+            Observed::new().first(
+                "healthy",
+                "id-healthy",
+                McpDefinitionKind::Tool,
+                "echo",
+                [4; 32]
+            ),
+            Some([4; 32])
+        );
+        memory.retain_servers(["healthy"]);
+        assert_eq!(
+            memory.first(
+                "flood",
+                "id-flood",
+                McpDefinitionKind::Tool,
+                "tool-0",
+                [5; 32]
+            ),
+            Some([5; 32])
+        );
+        // Same-name replacement with a new stable id is a distinct server.
+        assert_eq!(
+            memory.first(
+                "healthy",
+                "replacement",
+                McpDefinitionKind::Tool,
+                "echo",
+                [6; 32]
+            ),
+            Some([6; 32])
+        );
+        memory.retain_servers([]);
+        assert_eq!(
+            memory.first(
+                "healthy",
+                "replacement",
+                McpDefinitionKind::Tool,
+                "echo",
+                [7; 32]
+            ),
+            Some([7; 32])
+        );
+    }
 
     fn observed<'a>(server: &'a str, hash: u8, json: &'a str) -> Observation<'a> {
         Observation {

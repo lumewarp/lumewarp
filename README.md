@@ -17,13 +17,15 @@ dashboards; and self-service API keys: any IdP user can sign in and
 manage their own keys in their teams, with per-team key caps and rotation grace. See
 the [architecture document](docs/architecture.md) for the
 design and the current status; deferred work includes
-JWT/mTLS client auth, MCP/A2A and an HA control plane.
+JWT/mTLS client auth, MCP resources/subscriptions, A2A push notifications and
+an HA control plane.
 
 Clients call a name, and a name is a **model** (one upstream model), an **alias** (another
 name for a model or router) or a **router** (a strategy over models, with retries, fallbacks
 and traffic splits). Responses carry the called name, usage records what actually served it,
-and names can be renamed without breaking references. New router strategies are Rust crates
-([docs/router-strategies.md](docs/router-strategies.md)).
+and names can be renamed without breaking references. New router strategies are
+WASM components loaded from a directory ([docs/router-strategies.md](docs/router-strategies.md));
+MCP servers and A2A agents are proxied on the same gateway ([docs/plugins.md](docs/plugins.md)).
 
 | Directory | What |
 | --- | --- |

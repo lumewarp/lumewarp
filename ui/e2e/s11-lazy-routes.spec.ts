@@ -33,7 +33,7 @@ async function signInAsAdmin(page: Page, request: import("@playwright/test").API
 }
 
 /** A page chunk: the shell and the shared chunks are not pages. */
-const pageChunk = (name: string) => /^(Routers|TeamDetail|Teams|Upstreams|Models|Aliases|Gateways|Config|Users|Audit|Settings)-/.test(name);
+const pageChunk = (name: string) => /^(Routers|TeamDetail|Teams|Upstreams|Models|Aliases|Gateways|Config|Users|Audit|Settings|A2aAgent|McpServer|Plugins)-/.test(name);
 
 test("landing: an installation admin downloads the shell only, and a page chunk when its page is opened", async ({ page, request }) => {
   const response = await request.post("/api/v1/session/break-glass", { data: { password: BREAK_GLASS } });

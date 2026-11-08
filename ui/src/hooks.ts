@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Key, type Me, type Schemas, type TeamAny } from "./api";
+import { api, type Key, type McpDefinition, type McpDefinitionState, type Me, type PluginKind, type Schemas, type TeamAny } from "./api";
 import { useMemo } from "react";
 import { useToast } from "./components/Toast";
 import { runSecretMutation } from "./lib/keySecret";
@@ -191,8 +191,84 @@ export const useAliases = () => useQuery({ queryKey: ["aliases"], queryFn: () =>
 // Settings and schemas may hold a `__proto__` key; structural sharing would rebuild them by assignment and lose it.
 export const useRouters = () => useQuery({ queryKey: ["routers"], queryFn: () => api.routers(), structuralSharing: false });
 export const useUpstreams = () => useQuery({ queryKey: ["upstreams"], queryFn: () => api.upstreams() });
-export const useStrategies = () => useQuery({ queryKey: ["strategies"], queryFn: () => api.strategies(), structuralSharing: false });
+// A plugin's title, description and settings schema are gateway data and may hold a `__proto__` key.
+export const usePlugins = (kind?: PluginKind, enabled = true) =>
+  useQuery({ queryKey: ["plugins", kind ?? "all"], queryFn: () => api.plugins(kind), structuralSharing: false, enabled });
+export const useStrategies = () => usePlugins("router-strategy");
 export const useCatalog = (enabled = true) => useQuery({ queryKey: ["catalog"], queryFn: () => api.catalog(), enabled });
+export const useMcpServers = () => useQuery({ queryKey: ["mcp-servers"], queryFn: () => api.mcpServers() });
+
+export type McpToolCatalog = { servers: string[]; tools: Map<string, string[]> };
+
+/**
+ * Every server and the tool names its definitions carry (kind `tool`, any state, deduped), for the grant picker.
+ *
+ * A grant may only name tools the control plane has seen, so the definitions API is the picker's tool list.
+ * Tool names are gateway data, kept in a Map and never rebuilt into an object (a name may be `__proto__`).
+ */
+export const useMcpToolCatalog = (enabled: boolean) =>
+  useQuery({
+    queryKey: ["mcp-tool-catalog"],
+    enabled,
+    staleTime: 60_000,
+    structuralSharing: false,
+    queryFn: async (): Promise<McpToolCatalog> => {
+      const servers = await api.mcpServers();
+      const tools = new Map<string, string[]>();
+      for (const server of servers) {
+        const names = new Set<string>();
+        let cursor: string | undefined;
+        do {
+          const page = await api.mcpDefinitions(server.id, { kind: "tool", limit: 200, cursor });
+          for (const row of page.items) names.add(row.name);
+          cursor = page.next_cursor ?? undefined;
+        } while (cursor);
+        tools.set(server.name, [...names].sort((a, b) => a.localeCompare(b)));
+      }
+      return { servers: servers.map((server) => server.name), tools };
+    },
+  });
+
+/** One page of a server's review queue; a definition carries gateway data, so no structural sharing. */
+export const useMcpDefinitions = (serverId: string | undefined, state: McpDefinitionState | undefined, cursor: string | undefined) =>
+  useQuery({
+    queryKey: ["mcp-definitions", serverId ?? "", state ?? "all", cursor ?? ""],
+    queryFn: () => api.mcpDefinitions(serverId!, { state, limit: 20, cursor }),
+    enabled: !!serverId,
+    structuralSharing: false,
+  });
+
+/**
+ * The approved definition of each `(kind, name)` a caller asks about, for a pending hash's diff.
+ *
+ * The definitions API filters by state and kind but not by name, and pages newest first with a `<`-cursor. The
+ * whole approved set of one server is read page by page (stopping as soon as every wanted name is found) and
+ * only the wanted rows are kept, so the cost is one request for the usual queue and bounded memory for a
+ * noisy server.
+ */
+export const useApprovedDefinitions = (serverId: string | undefined, wanted: string[]) =>
+  useQuery({
+    queryKey: ["mcp-approved", serverId ?? "", wanted],
+    enabled: !!serverId && wanted.length > 0,
+    structuralSharing: false,
+    queryFn: async () => {
+      const need = new Set(wanted);
+      const found: Record<string, McpDefinition> = {};
+      let cursor: string | undefined;
+      do {
+        const page = await api.mcpDefinitions(serverId!, { state: "approved", limit: 200, cursor });
+        for (const row of page.items) {
+          const key = `${row.kind}:${row.name}`;
+          if (need.has(key) && !(key in found)) found[key] = row;
+        }
+        cursor = page.next_cursor ?? undefined;
+      } while (cursor && Object.keys(found).length < need.size);
+      return found;
+    },
+  });
+// A pasted or gateway-fetched agent card may hold a `__proto__` key: no structural sharing.
+export const useA2aAgents = (enabled = true) =>
+  useQuery({ queryKey: ["a2a-agents"], queryFn: () => api.a2aAgents(), structuralSharing: false, enabled });
 
 /** id → row lookup. */
 export function useById<T extends { id: string }>(rows: T[] | undefined) {

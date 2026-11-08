@@ -123,6 +123,37 @@ fn start_mock(bin: &Path, auth: &str) -> (Process, SocketAddr) {
     (Process(child), addr)
 }
 
+/// A tiny upstream that answers every request with an SSE body. Used to prove
+/// that a non-streaming method answering `text/event-stream` is refused.
+fn start_sse_agent() -> SocketAddr {
+    use std::io::{Read, Write};
+    let listener = StdListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                let mut raw = Vec::new();
+                let mut chunk = [0u8; 512];
+                while !raw.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => raw.extend_from_slice(&chunk[..read]),
+                    }
+                }
+                let body = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"task\":{\"id\":\"t\",\"status\":{\"state\":\"TASK_STATE_WORKING\"}}}}\n\n";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            });
+        }
+    });
+    addr
+}
+
 struct Gateway {
     _process: Process,
     _dir: tempfile::TempDir,
@@ -130,7 +161,13 @@ struct Gateway {
     admin: SocketAddr,
 }
 
-fn config(listen: SocketAddr, admin: SocketAddr, helper: SocketAddr, pt: SocketAddr) -> String {
+fn config(
+    listen: SocketAddr,
+    admin: SocketAddr,
+    helper: SocketAddr,
+    pt: SocketAddr,
+    sse: SocketAddr,
+) -> String {
     let agent = |name: &str, port: SocketAddr, middleware: &str| {
         format!("  - name: {name}\n    url: 'http://{port}/a2a'\n    auth: {{plugin: none}}\n{middleware}")
     };
@@ -164,9 +201,13 @@ fn config(listen: SocketAddr, admin: SocketAddr, helper: SocketAddr, pt: SocketA
     yaml.push_str(&format!(
         "  - name: error_auth\n    url: 'http://{helper}/a2a'\n    auth: {{plugin: auth_fixture, params: {{mode: error}}}}\n"
     ));
+    // Answers even a non-streaming method with SSE; the gateway must refuse it.
+    yaml.push_str(&format!(
+        "  - name: sse-agent\n    url: 'http://{sse}/a2a'\n    auth: {{plugin: none}}\n"
+    ));
     yaml.push_str("keys:\n");
     yaml.push_str(&format!(
-        "  - key_id: key-a\n    key_sha256: '{}'\n    allow_all_models: true\n    allowed_agents: [helper, pt, bad_method, bad_add_id, bad_push, bad_drop, slow, slow_auth, error_auth]\n",
+        "  - key_id: key-a\n    key_sha256: '{}'\n    allow_all_models: true\n    allowed_agents: [helper, pt, bad_method, bad_add_id, bad_push, bad_drop, slow, slow_auth, error_auth, sse-agent]\n",
         hex::encode(Sha256::digest(SECRET_A.as_bytes())),
     ));
     yaml.push_str(&format!(
@@ -394,6 +435,7 @@ async fn a2a_proxy_end_to_end() {
     let client = client();
     let (_helper_process, helper) = start_mock(&bin, "none");
     let (_pt_process, pt) = start_mock(&bin, "any-bearer");
+    let sse = start_sse_agent();
     wait_http(&client, &format!("http://{helper}/health")).await;
     wait_http(&client, &format!("http://{pt}/health")).await;
 
@@ -403,7 +445,7 @@ async fn a2a_proxy_end_to_end() {
     let gateway = start_gateway(
         addr,
         admin,
-        &config(addr, admin, helper, pt),
+        &config(addr, admin, helper, pt, sse),
         Some(&plugin_root),
         Some(ID_KEY),
         Some(&public_url),
@@ -594,6 +636,58 @@ async fn a2a_proxy_end_to_end() {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response["error"]["code"], -32009, "{version:?}");
     }
+
+    // B2: only the 11 v1.0 methods are forwarded; v0.3 names and unknown names
+    // are -32601, and a non-object `params` is -32602, before any upstream call.
+    for method in [
+        "tasks/get",
+        "message/send",
+        "tasks/pushNotificationConfig/set",
+        "nope",
+    ] {
+        let (status, response) = post(
+            &client,
+            &gateway,
+            "helper",
+            SECRET_A,
+            &rpc_body(method, json!({"id": "raw-task-id"})),
+            Some("1.0"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{method}: {response}");
+        assert_eq!(response["error"]["code"], -32601, "{method}: {response}");
+    }
+    let (status, response) = post(
+        &client,
+        &gateway,
+        "helper",
+        SECRET_A,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": []}),
+        Some("1.0"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["error"]["code"], -32602, "{response}");
+
+    // m5: a non-streaming method that answers SSE must be refused, not relayed
+    // (the extended card rewrite and the response hook live on the non-stream path).
+    let (status, response) = post(
+        &client,
+        &gateway,
+        "sse-agent",
+        SECRET_A,
+        &rpc_body("SendMessage", json!({"message": message("sse")})),
+        Some("1.0"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(
+        response["error"]["code"], -32006,
+        "a non-streaming method answered SSE: {response}"
+    );
 
     // Push notification configuration is refused in every entry point (D12).
     let (_, response) = post(
@@ -786,7 +880,7 @@ async fn a2a_proxy_end_to_end() {
     let gateway2 = start_gateway(
         addr2,
         admin2,
-        &config(addr2, admin2, helper, pt),
+        &config(addr2, admin2, helper, pt, sse),
         Some(&plugin_root),
         Some(ID_KEY),
         Some(&format!("http://{addr2}")),

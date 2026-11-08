@@ -14,7 +14,7 @@ Built-ins are native code inside the gateway, reported as plugins so the control
 
 One file is one plugin: it implements exactly one world and exports `manifest()`. A name is configuration — a router stores it in `strategy`, an MCP server or A2A agent in `auth.plugin` and `middleware.plugin` — so renaming or repurposing one is a breaking change.
 
-The capability is how a snapshot gates a plugin: a gateway advertises `strategy:<name>`, `auth:<name>` or `a2a_middleware:<name>` for every plugin it has, built-ins included. A gateway that serves the MCP and A2A endpoints also advertises `mcp` and `a2a`: a snapshot that carries an MCP server requires `mcp`, and one that carries an A2A agent requires `a2a`. Requiring a capability the gateway does not advertise is NACKed `UNSUPPORTED_FEATURE`; using a field without its capability is `INVALID_CONFIG`. See "Routing capabilities" in [config-protocol.md](config-protocol.md).
+The gateway advertises `strategy:<name>`, `auth:<name>` or `a2a_middleware:<name>` for every plugin it has, built-ins included. The gateway also advertises `mcp` and `a2a`: a snapshot that carries an MCP server requires `mcp`, and one that carries an A2A agent requires `a2a`. Requiring a capability the gateway does not advertise is NACKed `UNSUPPORTED_FEATURE`; using a field without its capability is `INVALID_CONFIG`. See "Routing capabilities" in [config-protocol.md](config-protocol.md).
 
 A router strategy runs on the LLM request path, so the four built-in strategies are dispatched inline; an LLM request reaches WebAssembly only when a router names a WASM strategy. Traffic splits, retries, fallbacks, stickiness and circuit breakers belong to the gateway, never to a strategy.
 
@@ -263,7 +263,7 @@ The pipeline for one request is fixed: authenticate the key, check the agent gra
 - adds or removes a task or context id field;
 - adds push-notification configuration;
 - is not a JSON-RPC message of the same shape; or
-- exceeds the body bound (4 MiB for a request).
+- exceeds the L10 body bound (4 MiB for a request, 16 MiB for a non-streaming response, 1 MiB per SSE event).
 
 Hooks see upstream ids: the gateway unwraps ids before `on-request` and wraps them after `on-response` and `on-stream-event`, so a hook never sees an `lwt.` id. Id fields are the A2A `taskId`, `contextId`, `referenceTaskIds` and the `id` a task request names; the check does not rewrite arbitrary JSON values. On a response, the output's set of task and context ids must be a subset of the input's: removing an id is allowed, adding one is refused. Each SSE event is handled on its own.
 
@@ -319,19 +319,19 @@ The control plane cannot fetch definitions itself when a server uses a WASM auth
 - every definition it withheld, and
 - every definition `tofu` approved on first sight, once, so the control plane has the tool list that grants are written against.
 
-Each report adds to what was reported before; unlike `HealthReport` it does not replace it. A definition report carries the server name and id, the kind, the upstream name, the canonical definition JSON and its hash, the observation time, `auto_approved`, and the config version the gateway was serving. A card report carries the agent name and id, the card, the fetch time or error, and the same config version. The control plane discards a report whose id no longer matches the name or whose version is older than the one it has, and it honours `auto_approved` only when the name is also new to it.
+Each report adds to what was reported before; unlike `HealthReport` it does not replace it. A definition report carries the server name and id, the kind, the upstream name, the canonical definition JSON and its hash, the observation time, `auto_approved`, and the config version the gateway was serving. A card report carries the agent name and id, the card, the fetch time or error, and the same config version. The control plane discards a report whose id no longer matches the name, whose `config_version` it never published, or whose version was compiled before the target's last write; it honours `auto_approved` only when the name is also new to it and the server is not `MANUAL`.
 
 The bounds: a definition is at most 64 KiB, a gateway holds at most 200 unreported definitions per server, and the same (server, hash) is reported at most once per gateway per 10 minutes. Anything beyond that is dropped and counted in `lumewarp_mcp_catalog_reports_dropped_total`. Reports are untrusted data and are shown only as text.
 
 ### Discover now
 
-For a server whose auth the control plane can reproduce — `none`, `static_bearer` or `passthrough` — the edit page can fetch `tools/list` and `prompts/list` once, using a token an administrator pastes for that call (`none` needs none). The token is not stored, not audited and not returned. The results are recorded like observed definitions, with the same hashes, so they can be approved before traffic has seen them.
+For a server whose auth the control plane can reproduce — `none`, `static_bearer` or `passthrough` — the edit page can fetch `tools/list` and `prompts/list` once. `none` needs no token; `static_bearer` uses the server's stored secret (an environment reference or the sealed ciphertext) or a token an administrator pastes for that call; `passthrough` needs the administrator to paste the user's token. A pasted token is used once, not stored, not audited and not returned. The results are recorded like observed definitions, with the same hashes, so they can be approved before traffic has seen them, but only when the URL and the saved configuration are unchanged while the call runs; otherwise the answer is a preview and nothing is recorded.
 
 A server behind a WASM auth plugin shows "observable from traffic only": the control plane does not run WASM, so those definitions arrive only in `CatalogReport`.
 
 ### Agent cards
 
-The gateway fetches an A2A agent's card from `A2aAgent.card_url` (empty means the origin of `url` plus `/.well-known/agent-card.json`) with the agent's outbound auth, every 5 minutes by default, and reports it in `CatalogReport.cards` with the fetch time or the error. The control plane displays it, and a failed fetch keeps the last card that arrived.
+The gateway fetches an A2A agent's card from `A2aAgent.card_url` (empty means the origin of `url` plus `/.well-known/agent-card.json`) with the agent's outbound auth, every 5 minutes by default, and reports it in `CatalogReport.cards` with the fetch time or the error. The credential is attached only when `card_url` is on the same origin as `url`; a card URL on another origin is fetched without it. The report carries the card as the gateway serves it (the rewrite), so the control plane displays what clients receive; a failed fetch keeps the last card that arrived.
 
 A `passthrough` agent has no token of its own, so its fetch usually fails: an administrator pastes the card, which is stored as `A2aAgent.card_json` and used when the gateway has no fetched card. The card the gateway serves to clients is its own rewrite, as described in [MCP and A2A endpoints](#mcp-and-a2a-endpoints).
 
@@ -468,12 +468,16 @@ lumewarp_plugin_sdk::register! {
 | `gateway/plugins/router/priority-failover` | `router-strategy`; unit tests and boundary payloads |
 | `gateway/plugins/router/cheapest-first` | `router-strategy`; Python-derived pick table |
 | `gateway/plugins/router/loop-test` | `router-strategy`; always loops, for the timeout test |
+| `gateway/plugins/router/misbehave-test` | `router-strategy`; answers an ineligible index or hangs in `configure`, for host tests |
 | `gateway/plugins/auth/hmac-signature` | `upstream-auth`; signs each request with `x-hmac-signature`, secret from `secret()` |
 | `gateway/plugins/auth/noop-test` | `upstream-auth`; returns no headers |
 | `gateway/plugins/auth/fixture` | `upstream-auth`; cache, `http-fetch`, `secret`, error and timeout modes |
 | `gateway/plugins/a2a-middleware/noop-test` | `a2a-middleware`; passes bodies through |
+| `gateway/plugins/a2a-middleware/strip-artifacts/fixtures/misbehave` | `a2a-middleware`; method, id, push, drop and slow modes |
 
-`loop-test`, `noop-test` and `fixture` are test fixtures, built only with `--tests`; the two router strategies and `hmac-signature` are examples built by default.
+`loop-test`, `misbehave-test`, `noop-test`, `fixture` and the `misbehave` fixtures are test
+fixtures, built only with `--tests`; the two router strategies, `hmac-signature` and
+`strip-artifacts` are examples built by default.
 
 `cheapest-first` is also the worked example of `.claude/skills/port-router-to-rust/SKILL.md`, which turns a policy that already runs in Python into a plugin crate.
 
@@ -492,7 +496,7 @@ cargo build --release --target wasm32-wasip2 \
 
 The example crates are their own Cargo workspace (`[workspace]` in `Cargo.toml`), so the build writes the component to the crate's target directory: `plugins/router/priority-failover/target/wasm32-wasip2/release/lumewarp_plugin_priority_failover.wasm` (the crate name with underscores). Copy it into the directory for its kind and restart the gateway; `lumewarp plugins --json` then shows the descriptor the gateway reports in `Hello`.
 
-`bash gateway/plugins/build.sh` builds the example components it lists (the two router strategies and `hmac-signature`) and copies them to `gateway/target/plugins/<kind>/<name>.wasm`; `--tests` also builds the four test fixtures into `gateway/target/plugins-test/<kind>/`. A new crate is built with the `cargo build` command above.
+`bash gateway/plugins/build.sh` builds the example components it lists (the two router strategies, `hmac-signature` and `strip-artifacts`) and copies them to `gateway/target/plugins/<kind>/<name>.wasm`; `--tests` also builds the six test fixtures into `gateway/target/plugins-test/<kind>/`. A new crate is built with the `cargo build` command above.
 
 Deploy the plugin to every gateway first. A gateway without it NACKs every version that references it, and the control plane refuses a write that names it unless the write is forced; see [Control-plane validation](#control-plane-validation).
 

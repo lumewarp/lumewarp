@@ -23,7 +23,8 @@ const slot = (page: Page, day: string) => page.locator(`[data-day="${day}"]`);
 /** The same numbers the chart draws, from the API: `day,model` rows for an inclusive UTC day range. */
 async function apiRows(request: APIRequestContext, from: string, to: string): Promise<ApiRow[]> {
   const end = isoDay(new Date(Date.parse(`${to}T00:00:00Z`) + 86_400_000));
-  const query = new URLSearchParams({ group_by: "day,model", from: `${from}T00:00:00Z`, to: `${end}T00:00:00Z`, limit: "500" });
+  // LLM only, as both pages ask: the MCP and A2A tabs are the traffic reads.
+  const query = new URLSearchParams({ group_by: "day,model", kind: "llm", from: `${from}T00:00:00Z`, to: `${end}T00:00:00Z`, limit: "500" });
   const response = await request.get(`/api/v1/usage?${query}`);
   expect(response.status(), await response.text()).toBe(200);
   return ((await response.json()) as { items: ApiRow[] }).items;

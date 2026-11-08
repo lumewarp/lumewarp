@@ -32,9 +32,9 @@ test.beforeEach(async ({ request }) => {
   // serve.py seeds gateways and usage after the control plane answers: wait for it.
   await expect
     .poll(async () => {
-      const strategies = (await (await request.get("/api/v1/strategies", { headers: admin })).json()).items as { name: string; missing_gateways: string[] }[];
+      const plugins = (await (await request.get("/api/v1/plugins?kind=router-strategy", { headers: admin })).json()).items as { name: string; missing_gateways: string[] }[];
       const usage = (await (await request.get("/api/v1/usage?group_by=model", { headers: admin })).json()).items as unknown[];
-      return strategies.find((s) => s.name === "priority_failover")?.missing_gateways.length === 1 && usage.length > 0;
+      return plugins.find((s) => s.name === "priority_failover")?.missing_gateways.length === 1 && usage.length > 0;
     })
     .toBe(true);
 });
@@ -285,7 +285,7 @@ test("reference strategy: form from its descriptor, weight hidden, Save anyway f
   await page.getByLabel("Search routers").fill("");
   const installedTable = page.getByRole("region", { name: "Strategies" });
   const installed = installedTable.getByRole("row").filter({ has: page.getByText("priority_failover", { exact: true }) });
-  await expect(installed).toContainText("Extension");
+  await expect(installed).toContainText("WASM");
   await expect(installed).toContainText("Max in flight, Priority");
   await expect(installed).toContainText("1 / 2");
   await expect(installedTable.getByRole("row").filter({ has: page.getByText("weighted", { exact: true }) })).toContainText("Built-in");
@@ -365,7 +365,7 @@ test("no usable schema: a JSON editor, for null and for a schema outside the sub
   const a = await model(request, "json/a", up.id);
   // A strategy a gateway reported in a shape outside the subset: the control plane would not store it,
   // but the form must cope should one arrive.
-  await page.route("**/api/v1/strategies", async (route) => {
+  await page.route(/\/api\/v1\/plugins\?kind=router-strategy$/, async (route) => {
     const response = await route.fetch();
     const body = await response.json();
     body.items.push({ ...body.items[0], name: "e2e_weird", title: "E2E weird", builtin: false, params_schema: { type: "object", oneOf: [{ required: ["a"] }], properties: {} }, member_schema: { $ref: "#/x" }, missing_gateways: [], gateways: [] });
@@ -828,7 +828,7 @@ test("saving a router sends only what changed: settings, hidden weights and spli
     ],
   });
   // The page knows an older shape of the strategy: `prefix` and `tuning.note` are settings it cannot show.
-  await page.route("**/api/v1/strategies", async (route) => {
+  await page.route(/\/api\/v1\/plugins\?kind=router-strategy$/, async (route) => {
     const response = await route.fetch();
     const body = await response.json();
     const schema = body.items.find((s: any) => s.name === "e2e_presence").params_schema;

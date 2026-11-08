@@ -593,15 +593,187 @@ export interface paths {
         patch: operations["updateRouter"];
         trace?: never;
     };
-    "/api/v1/strategies": {
+    "/api/v1/mcp-servers": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List Strategies */
-        get: operations["listStrategies"];
+        /** List Mcp Servers */
+        get: operations["listMcpServers"];
+        put?: never;
+        /** Create Mcp Server */
+        post: operations["createMcpServer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mcp-servers/{server_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Mcp Server */
+        get: operations["getMcpServer"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Mcp Server
+         * @description Archive the server: the name is free again, definitions and grants stay for history,
+         *     and the compiler leaves it out of the snapshot.
+         */
+        delete: operations["deleteMcpServer"];
+        options?: never;
+        head?: never;
+        /** Update Mcp Server */
+        patch: operations["updateMcpServer"];
+        trace?: never;
+    };
+    "/api/v1/mcp-servers/{server_id}/definitions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Mcp Definitions */
+        get: operations["listMcpDefinitions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mcp-servers/{server_id}/definitions/{definition_id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve Mcp Definition
+         * @description Approve one hash. Other pending hashes of the same name are superseded (deleted);
+         *     rejected hashes are left alone. Idempotent on an already-approved row.
+         */
+        post: operations["approveMcpDefinition"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mcp-servers/{server_id}/definitions/{definition_id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reject Mcp Definition
+         * @description Reject one hash: the gateway never serves it, and reporting it again leaves it
+         *     rejected. Idempotent on an already-rejected row.
+         */
+        post: operations["rejectMcpDefinition"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mcp-servers/discover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Discover Mcp Server
+         * @description Call `initialize`, `notifications/initialized`, `tools/list` and `prompts/list` once.
+         *
+         *     The token is used once, never stored and never audited. With `server_id` the result is
+         *     recorded as observed definitions of that server, under the same first-writer rules as a
+         *     gateway's `CatalogReport`; without it nothing is written. A server behind a WASM
+         *     upstream-auth plugin cannot be discovered here (the control plane does not run WASM).
+         */
+        post: operations["discoverMcp"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/a2a-agents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List A2A Agents */
+        get: operations["listA2aAgents"];
+        put?: never;
+        /** Create A2A Agent */
+        post: operations["createA2aAgent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/a2a-agents/{agent_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get A2A Agent */
+        get: operations["getA2aAgent"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete A2A Agent
+         * @description Archive the agent: the name is free again and the compiler leaves it out.
+         */
+        delete: operations["deleteA2aAgent"];
+        options?: never;
+        head?: never;
+        /** Update A2A Agent */
+        patch: operations["updateA2aAgent"];
+        trace?: never;
+    };
+    "/api/v1/plugins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Plugins
+         * @description The plugins a write may name, and which connected gateways have each.
+         *
+         *     Connected gateways come first in `gateways`; `missing_gateways` is what a forced save is
+         *     saving past. A schema the control plane cannot use is null, with the reason in
+         *     `schema_problems`: only the gateway's own `configure` validates those settings.
+         */
+        get: operations["listPlugins"];
         put?: never;
         post?: never;
         delete?: never;
@@ -803,6 +975,9 @@ export interface paths {
          *     that name/id; no orphan-only filter is provided. Catalog provenance refs
          *     are collected for catalog/upstream-model groupings, not scope-only/default
          *     day,requested loads. Empty upstream_model means unavailable; null means mixed.
+         *     `kind`, `target`, `method` and `tool` filter the gateway protocol and what an
+         *     MCP or A2A request named; the team totals fast path covers LLM requests only,
+         *     so any of them (and every non-LLM kind) reads raw events.
          */
         get: operations["getUsage"];
         put?: never;
@@ -1029,6 +1204,112 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** A2aAgentCreate */
+        A2aAgentCreate: {
+            /** Name */
+            name: string;
+            /** Url */
+            url: string;
+            /** Card Url */
+            card_url?: string | null;
+            auth?: components["schemas"]["TargetAuthIn"];
+            middleware?: components["schemas"]["PluginRefIn"] | null;
+            /**
+             * Timeout Ms
+             * @default 0
+             */
+            timeout_ms: number;
+            /**
+             * Card Json
+             * @description A pasted Agent Card (JSON object, at most 64 KiB).
+             */
+            card_json?: string | null;
+            /**
+             * Force
+             * @description Save although connected gateways lack the plugin; they will NACK.
+             */
+            force?: boolean;
+        };
+        /** A2aAgentOut */
+        A2aAgentOut: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /** Url */
+            url: string;
+            /**
+             * Card Url
+             * @description Empty = the gateway derives it from `url`.
+             */
+            card_url: string;
+            auth: components["schemas"]["PluginRefOut"];
+            /** Secret Ref */
+            secret_ref: string | null;
+            /** Secret Set */
+            secret_set: boolean;
+            middleware: components["schemas"]["PluginRefOut"] | null;
+            /** Timeout Ms */
+            timeout_ms: number;
+            /**
+             * Card Json
+             * @description Pasted card served until the gateway fetched one.
+             */
+            card_json: string;
+            /**
+             * Last Card Json
+             * @description Newest card a gateway fetched, as text.
+             */
+            last_card_json: string;
+            /**
+             * Last Card Error
+             * @description Newest fetch error, empty on success.
+             */
+            last_card_error: string;
+            /** Last Card At */
+            last_card_at: string | null;
+            /** Config Invalid */
+            config_invalid: boolean;
+            /** Config Problems */
+            config_problems: string[];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * A2aAgentUpdate
+         * @description PATCH: omitted fields are unchanged; null clears `card_url`, `middleware` or the
+         *     pasted `card_json`. `auth` replaces the whole outbound auth.
+         */
+        A2aAgentUpdate: {
+            /** Name */
+            name?: string | null;
+            /** Url */
+            url?: string | null;
+            /** Card Url */
+            card_url?: string | null;
+            auth?: components["schemas"]["TargetAuthIn"] | null;
+            middleware?: components["schemas"]["PluginRefIn"] | null;
+            /** Timeout Ms */
+            timeout_ms?: number | null;
+            /** Card Json */
+            card_json?: string | null;
+            /**
+             * Force
+             * @description Save although connected gateways lack the plugin; they will NACK.
+             */
+            force?: boolean;
+        };
         /** AliasCreate */
         AliasCreate: {
             /** Name */
@@ -1477,6 +1758,253 @@ export interface components {
             max_parallel?: number | null;
         };
         /**
+         * McpDefinitionKind
+         * @description Which kind of MCP definition a reviewed hash belongs to (proto McpDefinitionKind).
+         * @enum {string}
+         */
+        McpDefinitionKind: "tool" | "prompt";
+        /** McpDefinitionOut */
+        McpDefinitionOut: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Server Id
+             * Format: uuid
+             */
+            server_id: string;
+            kind: components["schemas"]["McpDefinitionKind"];
+            /** Name */
+            name: string;
+            /**
+             * Hash
+             * @description sha256 of the canonical definition, hex.
+             */
+            hash: string;
+            /**
+             * Definition Json
+             * @description Canonical projection the hash covers; plain text.
+             */
+            definition_json: string;
+            state: components["schemas"]["McpDefinitionState"];
+            /**
+             * First Seen At
+             * Format: date-time
+             */
+            first_seen_at: string;
+            /**
+             * Last Seen At
+             * Format: date-time
+             */
+            last_seen_at: string;
+            /** Decided By User Id */
+            decided_by_user_id: string | null;
+            /** Decided At */
+            decided_at: string | null;
+        };
+        /**
+         * McpDefinitionState
+         * @description Where a reported definition stands. A definition the gateway serves is APPROVED;
+         *     PENDING and REJECTED are never served, and a name that has any row is no longer
+         *     "seen for the first time" (proto McpDefinitionState).
+         * @enum {string}
+         */
+        McpDefinitionState: "approved" | "pending" | "rejected";
+        /**
+         * McpDiscoverIn
+         * @description One `tools/list`/`prompts/list` from the control plane, with a token used once.
+         *
+         *     Give `server_id` to record the result as observed definitions of that server (the same
+         *     rules as a gateway report). Without it nothing is stored. A server whose auth is a WASM
+         *     plugin cannot be discovered here.
+         */
+        McpDiscoverIn: {
+            /** Url */
+            url: string;
+            /**
+             * Server Id
+             * @description Record the result against this saved server; its stored credential is used when no token is given.
+             */
+            server_id?: string | null;
+            /**
+             * Token
+             * @description A token typed in the form: used once, never stored, never audited.
+             */
+            token?: string | null;
+            /**
+             * Timeout Ms
+             * @default 10000
+             */
+            timeout_ms: number;
+        };
+        /** McpDiscoverOut */
+        McpDiscoverOut: {
+            /**
+             * Credential
+             * @description Where the token came from: typed in the form, the saved server's sealed token, the control plane's own env var, that env var missing here, or none.
+             * @enum {string}
+             */
+            credential: "entered" | "stored" | "env" | "env_unset" | "none";
+            /** Server Id */
+            server_id: string | null;
+            /** Server */
+            server: string | null;
+            /** Protocol Version */
+            protocol_version: string;
+            /** Tools */
+            tools: components["schemas"]["McpDiscoveredOut"][];
+            /** Prompts */
+            prompts: components["schemas"]["McpDiscoveredOut"][];
+            /**
+             * Truncated
+             * @description The plan's per-server bound stopped the listing.
+             */
+            truncated: boolean;
+            /** Recorded */
+            recorded: boolean;
+        };
+        /** McpDiscoveredOut */
+        McpDiscoveredOut: {
+            kind: components["schemas"]["McpDefinitionKind"];
+            /** Name */
+            name: string;
+            /** Hash */
+            hash: string;
+            /** Definition Json */
+            definition_json: string;
+            /**
+             * State
+             * @description The state after recording; 'unrecorded' when no server_id was given.
+             * @enum {string}
+             */
+            state: "approved" | "pending" | "rejected" | "unrecorded";
+        };
+        /**
+         * McpGrantIn
+         * @description One MCP server grant: every approved tool, or exactly `tools`.
+         */
+        McpGrantIn: {
+            /** Server */
+            server: string;
+            /**
+             * All Tools
+             * @default false
+             */
+            all_tools: boolean;
+            /** Tools */
+            tools?: string[];
+        };
+        /** McpGrantOut */
+        McpGrantOut: {
+            /** Server */
+            server: string;
+            /** All Tools */
+            all_tools: boolean;
+            /** Tools */
+            tools: string[];
+        };
+        /**
+         * McpReviewMode
+         * @description How a gateway treats a definition it observes upstream (proto McpReviewMode).
+         *
+         *     TOFU: a name seen for the first time is served and reported as auto-approved; a
+         *     different definition of a known name is withheld until an administrator approves the
+         *     hash. MANUAL: every definition not in the approved set is withheld. OFF: no check.
+         * @enum {string}
+         */
+        McpReviewMode: "tofu" | "manual" | "off";
+        /** McpServerCreate */
+        McpServerCreate: {
+            /** Name */
+            name: string;
+            /** Url */
+            url: string;
+            auth?: components["schemas"]["TargetAuthIn"];
+            /**
+             * Timeout Ms
+             * @default 0
+             */
+            timeout_ms: number;
+            /** @default tofu */
+            review_mode: components["schemas"]["McpReviewMode"];
+            /**
+             * Force
+             * @description Save although connected gateways lack the plugin; they will NACK.
+             */
+            force?: boolean;
+        };
+        /** McpServerOut */
+        McpServerOut: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /** Url */
+            url: string;
+            auth: components["schemas"]["PluginRefOut"];
+            /**
+             * Secret Ref
+             * @description Name of the gateway's env var holding the token; never the value.
+             */
+            secret_ref: string | null;
+            /**
+             * Secret Set
+             * @description A sealed token is stored (its value is never returned).
+             */
+            secret_set: boolean;
+            /** Timeout Ms */
+            timeout_ms: number;
+            review_mode: components["schemas"]["McpReviewMode"];
+            /**
+             * Definitions
+             * @description Definition counts by review state: approved, pending, rejected.
+             */
+            definitions: {
+                [key: string]: number;
+            };
+            /**
+             * Config Invalid
+             * @description The auth plugin or its settings cannot be served by the gateways today.
+             */
+            config_invalid: boolean;
+            /** Config Problems */
+            config_problems: string[];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * McpServerUpdate
+         * @description PATCH: omitted fields are unchanged. `auth` replaces the whole outbound auth.
+         */
+        McpServerUpdate: {
+            /** Name */
+            name?: string | null;
+            /** Url */
+            url?: string | null;
+            auth?: components["schemas"]["TargetAuthIn"] | null;
+            /** Timeout Ms */
+            timeout_ms?: number | null;
+            review_mode?: components["schemas"]["McpReviewMode"] | null;
+            /**
+             * Force
+             * @description Save although connected gateways lack the plugin; they will NACK.
+             */
+            force?: boolean;
+        };
+        /**
          * MeBudgetOut
          * @description Per-scope monthly budgets and spend for the caller's key in one team.
          *
@@ -1557,6 +2085,21 @@ export interface components {
             max_parallel: number | null;
         };
         /**
+         * MeMcpGrantOut
+         * @description One MCP server the caller's key in this team could reach, and the tools on it.
+         */
+        MeMcpGrantOut: {
+            /** Server */
+            server: string;
+            /** All Tools */
+            all_tools: boolean;
+            /**
+             * Tools
+             * @description Upstream tool names (without the prefix); empty when all_tools.
+             */
+            tools: string[];
+        };
+        /**
          * MeOrgOut
          * @description An org the caller administers directly (`admin_orgs`).
          *
@@ -1611,6 +2154,14 @@ export interface components {
             models: string[];
             /** All Models */
             all_models: boolean;
+            /** Mcp Servers */
+            mcp_servers: components["schemas"]["MeMcpGrantOut"][];
+            /** All Mcp */
+            all_mcp: boolean;
+            /** Agents */
+            agents: string[];
+            /** All Agents */
+            all_agents: boolean;
             limits: components["schemas"]["MeLimitsOut"];
             key_limits: components["schemas"]["MeKeyLimitsOut"];
             budget: components["schemas"]["MeBudgetOut"];
@@ -1620,6 +2171,12 @@ export interface components {
             model_access?: components["schemas"]["ModelAccess"] | null;
             /** Allowed Models */
             allowed_models?: string[] | null;
+            mcp_access?: components["schemas"]["ModelAccess"] | null;
+            /** Mcp Servers */
+            mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            a2a_access?: components["schemas"]["ModelAccess"] | null;
+            /** A2A Agents */
+            a2a_agents?: string[] | null;
             /** Rpm Limit */
             rpm_limit?: number | null;
             /** Tpm Limit */
@@ -1639,6 +2196,12 @@ export interface components {
             model_access: components["schemas"]["ModelAccess"];
             /** Allowed Models */
             allowed_models: string[];
+            mcp_access: components["schemas"]["ModelAccess"];
+            /** Mcp Servers */
+            mcp_servers: components["schemas"]["McpGrantOut"][];
+            a2a_access: components["schemas"]["ModelAccess"];
+            /** A2A Agents */
+            a2a_agents: string[];
             /** Rpm Limit */
             rpm_limit: number | null;
             /** Tpm Limit */
@@ -1685,6 +2248,12 @@ export interface components {
             model_access?: components["schemas"]["ModelAccess"] | null;
             /** Allowed Models */
             allowed_models?: string[] | null;
+            mcp_access?: components["schemas"]["ModelAccess"] | null;
+            /** Mcp Servers */
+            mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            a2a_access?: components["schemas"]["ModelAccess"] | null;
+            /** A2A Agents */
+            a2a_agents?: string[] | null;
             /** Rpm Limit */
             rpm_limit?: number | null;
             /** Tpm Limit */
@@ -1700,6 +2269,12 @@ export interface components {
             model_access?: components["schemas"]["ModelAccess"] | null;
             /** Allowed Models */
             allowed_models?: string[] | null;
+            mcp_access?: components["schemas"]["ModelAccess"] | null;
+            /** Mcp Servers */
+            mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            a2a_access?: components["schemas"]["ModelAccess"] | null;
+            /** A2A Agents */
+            a2a_agents?: string[] | null;
             /** Rpm Limit */
             rpm_limit?: number | null;
             /** Tpm Limit */
@@ -1914,6 +2489,12 @@ export interface components {
             model_access?: components["schemas"]["ModelAccess"] | null;
             /** Allowed Models */
             allowed_models?: string[] | null;
+            mcp_access?: components["schemas"]["ModelAccess"] | null;
+            /** Mcp Servers */
+            mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            a2a_access?: components["schemas"]["ModelAccess"] | null;
+            /** A2A Agents */
+            a2a_agents?: string[] | null;
             /** Rpm Limit */
             rpm_limit?: number | null;
             /** Tpm Limit */
@@ -1930,6 +2511,12 @@ export interface components {
             model_access: components["schemas"]["ModelAccess"];
             /** Allowed Models */
             allowed_models: string[];
+            mcp_access: components["schemas"]["ModelAccess"];
+            /** Mcp Servers */
+            mcp_servers: components["schemas"]["McpGrantOut"][];
+            a2a_access: components["schemas"]["ModelAccess"];
+            /** A2A Agents */
+            a2a_agents: string[];
             /** Rpm Limit */
             rpm_limit: number | null;
             /** Tpm Limit */
@@ -1990,6 +2577,12 @@ export interface components {
             model_access?: components["schemas"]["ModelAccess"] | null;
             /** Allowed Models */
             allowed_models?: string[] | null;
+            mcp_access?: components["schemas"]["ModelAccess"] | null;
+            /** Mcp Servers */
+            mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            a2a_access?: components["schemas"]["ModelAccess"] | null;
+            /** A2A Agents */
+            a2a_agents?: string[] | null;
             /** Rpm Limit */
             rpm_limit?: number | null;
             /** Tpm Limit */
@@ -2024,6 +2617,13 @@ export interface components {
             cost_nano_usd: number;
             /** Unknown Cost Count */
             unknown_cost_count: number;
+        };
+        /** Page[A2aAgentOut] */
+        Page_A2aAgentOut_: {
+            /** Items */
+            items: components["schemas"]["A2aAgentOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
         };
         /** Page[AliasOut] */
         Page_AliasOut_: {
@@ -2074,6 +2674,20 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
+        /** Page[McpDefinitionOut] */
+        Page_McpDefinitionOut_: {
+            /** Items */
+            items: components["schemas"]["McpDefinitionOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
+        /** Page[McpServerOut] */
+        Page_McpServerOut_: {
+            /** Items */
+            items: components["schemas"]["McpServerOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
         /** Page[MemberOut] */
         Page_MemberOut_: {
             /** Items */
@@ -2102,6 +2716,13 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
+        /** Page[PluginOut] */
+        Page_PluginOut_: {
+            /** Items */
+            items: components["schemas"]["PluginOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
         /** Page[RouterOut] */
         Page_RouterOut_: {
             /** Items */
@@ -2113,13 +2734,6 @@ export interface components {
         Page_ServiceAccountOut_: {
             /** Items */
             items: components["schemas"]["ServiceAccountOut"][];
-            /** Next Cursor */
-            next_cursor?: string | null;
-        };
-        /** Page[StrategyOut] */
-        Page_StrategyOut_: {
-            /** Items */
-            items: components["schemas"]["StrategyOut"][];
             /** Next Cursor */
             next_cursor?: string | null;
         };
@@ -2202,6 +2816,111 @@ export interface components {
             levels: string[];
             /** Default Level */
             default_level: string | null;
+        };
+        /** PluginGatewayOut */
+        PluginGatewayOut: {
+            /** Gateway Id */
+            gateway_id: string;
+            /** Connected */
+            connected: boolean;
+            /**
+             * Digest
+             * @description Null when known only from its capabilities.
+             */
+            digest: string | null;
+            /** Seen At */
+            seen_at: string | null;
+        };
+        /**
+         * PluginKind
+         * @description What a gateway plugin changes (proto PluginKind). The value is the manifest's `kind`,
+         *     and the capability it advertises is `<prefix>:<name>` (see compiler/plugins.py).
+         * @enum {string}
+         */
+        PluginKind: "router-strategy" | "upstream-auth" | "a2a-middleware";
+        /**
+         * PluginOut
+         * @description A gateway plugin of any kind (docs/plugins.md).
+         *
+         *     Everything but `kind`, `name` and `builtin` is data from a gateway: render it as plain
+         *     text. `uses_weight`, `needs` and `member_schema` are for router strategies only.
+         */
+        PluginOut: {
+            kind: components["schemas"]["PluginKind"];
+            /** Name */
+            name: string;
+            /** Title */
+            title: string;
+            /** Description */
+            description: string;
+            /** Builtin */
+            builtin: boolean;
+            /** Uses Weight */
+            uses_weight: boolean;
+            /** Needs */
+            needs: string[];
+            /**
+             * Params Schema
+             * @description Null when unusable or not reported: settings then cannot be validated here.
+             */
+            params_schema: {
+                [key: string]: unknown;
+            } | null;
+            /** Member Schema */
+            member_schema: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Schema Problems
+             * @description Why a schema reported is not usable.
+             */
+            schema_problems: string[];
+            /**
+             * Wasm Sha256
+             * @description Hex sha256 of the loaded file; empty for built-ins.
+             */
+            wasm_sha256: string;
+            /**
+             * Gateways
+             * @description Gateways that have it, newest first.
+             */
+            gateways: components["schemas"]["PluginGatewayOut"][];
+            /**
+             * Missing Gateways
+             * @description Connected gateways that do not have it.
+             */
+            missing_gateways: string[];
+        };
+        /** PluginRefIn */
+        PluginRefIn: {
+            /** Plugin */
+            plugin: string;
+            /**
+             * Params
+             * @description Strategy-defined settings.
+             */
+            params?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Timeout Ms
+             * @default 0
+             */
+            timeout_ms: number;
+        };
+        /** PluginRefOut */
+        PluginRefOut: {
+            /** Plugin */
+            plugin: string;
+            /** Params */
+            params: {
+                [key: string]: unknown;
+            };
+            /**
+             * Timeout Ms
+             * @description One plugin call's timeout in ms; 0 = the gateway's 60 s default.
+             */
+            timeout_ms: number;
         };
         /** ProbeOut */
         ProbeOut: {
@@ -2305,7 +3024,7 @@ export interface components {
             version: number;
             /**
              * Force
-             * @description Save although connected gateways lack the strategy; they will NACK.
+             * @description Save although connected gateways lack the plugin; they will NACK.
              */
             force?: boolean;
         };
@@ -2348,8 +3067,13 @@ export interface components {
             /** Sticky Header */
             sticky_header?: string | null;
             /**
+             * Plugin Timeout Ms
+             * @default 0
+             */
+            plugin_timeout_ms: number;
+            /**
              * Force
-             * @description Save although connected gateways lack the strategy; they will NACK.
+             * @description Save although connected gateways lack the plugin; they will NACK.
              */
             force?: boolean;
         };
@@ -2414,6 +3138,11 @@ export interface components {
             /** Sticky Header */
             sticky_header: string | null;
             /**
+             * Plugin Timeout Ms
+             * @description One strategy call's timeout in ms; 0 = the gateway's 60 s default.
+             */
+            plugin_timeout_ms: number;
+            /**
              * Config Invalid
              * @description Stored settings fail the strategy's current schema, or nothing reports it.
              */
@@ -2455,9 +3184,11 @@ export interface components {
             sticky?: components["schemas"]["StickyBy"] | null;
             /** Sticky Header */
             sticky_header?: string | null;
+            /** Plugin Timeout Ms */
+            plugin_timeout_ms?: number | null;
             /**
              * Force
-             * @description Save although connected gateways lack the strategy; they will NACK.
+             * @description Save although connected gateways lack the plugin; they will NACK.
              */
             force?: boolean;
         };
@@ -2466,6 +3197,12 @@ export interface components {
             model_access?: components["schemas"]["ModelAccess"] | null;
             /** Allowed Models */
             allowed_models?: string[] | null;
+            mcp_access?: components["schemas"]["ModelAccess"] | null;
+            /** Mcp Servers */
+            mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            a2a_access?: components["schemas"]["ModelAccess"] | null;
+            /** A2A Agents */
+            a2a_agents?: string[] | null;
             /** Rpm Limit */
             rpm_limit?: number | null;
             /** Tpm Limit */
@@ -2487,6 +3224,12 @@ export interface components {
             model_access: components["schemas"]["ModelAccess"];
             /** Allowed Models */
             allowed_models: string[];
+            mcp_access: components["schemas"]["ModelAccess"];
+            /** Mcp Servers */
+            mcp_servers: components["schemas"]["McpGrantOut"][];
+            a2a_access: components["schemas"]["ModelAccess"];
+            /** A2A Agents */
+            a2a_agents: string[];
             /** Rpm Limit */
             rpm_limit: number | null;
             /** Tpm Limit */
@@ -2529,6 +3272,12 @@ export interface components {
             model_access?: components["schemas"]["ModelAccess"] | null;
             /** Allowed Models */
             allowed_models?: string[] | null;
+            mcp_access?: components["schemas"]["ModelAccess"] | null;
+            /** Mcp Servers */
+            mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            a2a_access?: components["schemas"]["ModelAccess"] | null;
+            /** A2A Agents */
+            a2a_agents?: string[] | null;
             /** Rpm Limit */
             rpm_limit?: number | null;
             /** Tpm Limit */
@@ -2587,69 +3336,43 @@ export interface components {
          * @enum {string}
          */
         StickyBy: "none" | "header" | "team" | "key";
-        /** StrategyGatewayOut */
-        StrategyGatewayOut: {
-            /** Gateway Id */
-            gateway_id: string;
-            /** Connected */
-            connected: boolean;
-            /**
-             * Digest
-             * @description Null when known only from its capabilities.
-             */
-            digest: string | null;
-            /** Seen At */
-            seen_at: string | null;
-        };
-        /**
-         * StrategyOut
-         * @description Everything but `name` and `builtin` is data from a gateway: render it as plain text.
-         */
-        StrategyOut: {
-            /** Name */
-            name: string;
-            /** Title */
-            title: string;
-            /** Description */
-            description: string;
-            /** Uses Weight */
-            uses_weight: boolean;
-            /** Needs */
-            needs: string[];
-            /**
-             * Params Schema
-             * @description Null when unusable or not reported: settings then cannot be validated here.
-             */
-            params_schema: {
-                [key: string]: unknown;
-            } | null;
-            /** Member Schema */
-            member_schema: {
-                [key: string]: unknown;
-            } | null;
-            /**
-             * Schema Problems
-             * @description Why a schema reported is not usable.
-             */
-            schema_problems: string[];
-            /** Builtin */
-            builtin: boolean;
-            /**
-             * Gateways
-             * @description Gateways that have it, newest first.
-             */
-            gateways: components["schemas"]["StrategyGatewayOut"][];
-            /**
-             * Missing Gateways
-             * @description Connected gateways that do not have it.
-             */
-            missing_gateways: string[];
-        };
         /**
          * StreamUsageMode
          * @enum {string}
          */
         StreamUsageMode: "include_usage" | "passthrough";
+        /**
+         * TargetAuthIn
+         * @description The outbound auth of an MCP server or A2A agent (proto `UpstreamAuth`).
+         *
+         *     `plugin` is a built-in (`none`, `static_bearer`, `passthrough`) or a WASM upstream-auth
+         *     plugin a gateway reports, with its `params`. Only `static_bearer` carries a credential:
+         *     the name of an env var on the gateway (`secret_ref`) or a token sealed here (`secret`).
+         *     A WASM plugin reads its own secrets from the gateway environment, so it takes neither.
+         */
+        TargetAuthIn: {
+            /**
+             * Plugin
+             * @default none
+             */
+            plugin: string;
+            /**
+             * Params
+             * @description Strategy-defined settings.
+             */
+            params?: {
+                [key: string]: unknown;
+            };
+            /** Secret Ref */
+            secret_ref?: string | null;
+            /** Secret */
+            secret?: string | null;
+            /**
+             * Timeout Ms
+             * @default 0
+             */
+            timeout_ms: number;
+        };
         /**
          * TeamBasicOut
          * @description What any member of a team may read: no team policy.
@@ -2701,6 +3424,12 @@ export interface components {
             model_access?: components["schemas"]["ModelAccess"] | null;
             /** Allowed Models */
             allowed_models?: string[] | null;
+            mcp_access?: components["schemas"]["ModelAccess"] | null;
+            /** Mcp Servers */
+            mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            a2a_access?: components["schemas"]["ModelAccess"] | null;
+            /** A2A Agents */
+            a2a_agents?: string[] | null;
             /** Rpm Limit */
             rpm_limit?: number | null;
             /** Tpm Limit */
@@ -2757,6 +3486,12 @@ export interface components {
             model_access: components["schemas"]["ModelAccess"];
             /** Allowed Models */
             allowed_models: string[];
+            mcp_access: components["schemas"]["ModelAccess"];
+            /** Mcp Servers */
+            mcp_servers: components["schemas"]["McpGrantOut"][];
+            a2a_access: components["schemas"]["ModelAccess"];
+            /** A2A Agents */
+            a2a_agents: string[];
             /** Rpm Limit */
             rpm_limit: number | null;
             /** Tpm Limit */
@@ -2786,6 +3521,12 @@ export interface components {
             model_access?: components["schemas"]["ModelAccess"] | null;
             /** Allowed Models */
             allowed_models?: string[] | null;
+            mcp_access?: components["schemas"]["ModelAccess"] | null;
+            /** Mcp Servers */
+            mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            a2a_access?: components["schemas"]["ModelAccess"] | null;
+            /** A2A Agents */
+            a2a_agents?: string[] | null;
             /** Rpm Limit */
             rpm_limit?: number | null;
             /** Tpm Limit */
@@ -2833,6 +3574,13 @@ export interface components {
             /** Revoked At */
             revoked_at: string | null;
         };
+        /**
+         * TrafficKind
+         * @description Which gateway protocol a usage event belongs to (proto TrafficKind). Only `llm`
+         *     requests carry a model, tokens or cost: MCP and A2A have no budgets or limits.
+         * @enum {string}
+         */
+        TrafficKind: "llm" | "mcp" | "a2a";
         /** TrafficSplitIn */
         TrafficSplitIn: {
             /**
@@ -3036,10 +3784,23 @@ export interface components {
          *     mixed/not collected. Lists omit empty values. Model grouping collects all refs;
          *     alias/router grouping collects its refs and Served by; upstream-model grouping
          *     collects Served by. Default/scope-only grouping does not collect catalog refs.
+         *
+         *     `error_count` and `total_duration_ms` describe how the group's requests ended
+         *     (an error outcome, or a 4xx/5xx status that is not a client cancellation;
+         *     summed duration, so the mean is the sum over `requests`). The LLM tabs ignore them; the MCP and A2A tabs read them in
+         *     place of tokens and cost. The monthly totals fast path (LLM requests only)
+         *     reports both as 0.
          */
         UsageRowOut: {
             /** Date */
             date?: string | null;
+            kind?: components["schemas"]["TrafficKind"] | null;
+            /** Target */
+            target?: string | null;
+            /** Method */
+            method?: string | null;
+            /** Tool */
+            tool?: string | null;
             /** Requested */
             requested?: string | null;
             /** Model */
@@ -3083,6 +3844,16 @@ export interface components {
             cost_nano_usd: number;
             /** Unknown Cost Count */
             unknown_cost_count: number;
+            /**
+             * Error Count
+             * @default 0
+             */
+            error_count: number;
+            /**
+             * Total Duration Ms
+             * @default 0
+             */
+            total_duration_ms: number;
         };
         /** UserCreate */
         UserCreate: {
@@ -7051,9 +7822,12 @@ export interface operations {
             };
         };
     };
-    listStrategies: {
+    listMcpServers: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -7066,7 +7840,964 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Page_StrategyOut_"];
+                    "application/json": components["schemas"]["Page_McpServerOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    createMcpServer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["McpServerCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpServerOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getMcpServer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpServerOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    deleteMcpServer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    updateMcpServer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["McpServerUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpServerOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listMcpDefinitions: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+                state?: components["schemas"]["McpDefinitionState"] | null;
+                kind?: components["schemas"]["McpDefinitionKind"] | null;
+            };
+            header?: never;
+            path: {
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_McpDefinitionOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    approveMcpDefinition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                server_id: string;
+                definition_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpDefinitionOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    rejectMcpDefinition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                server_id: string;
+                definition_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpDefinitionOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    discoverMcp: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["McpDiscoverIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpDiscoverOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listA2aAgents: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_A2aAgentOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    createA2aAgent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["A2aAgentCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["A2aAgentOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getA2aAgent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["A2aAgentOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    deleteA2aAgent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    updateA2aAgent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                agent_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["A2aAgentUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["A2aAgentOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listPlugins: {
+        parameters: {
+            query?: {
+                /** @description Only this kind; omitted lists all three. */
+                kind?: components["schemas"]["PluginKind"] | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_PluginOut_"];
                 };
             };
             /** @description Missing or invalid credentials */
@@ -8079,6 +9810,10 @@ export interface operations {
                 user_id?: string | null;
                 service_account_id?: string | null;
                 key_id?: string | null;
+                kind?: components["schemas"]["TrafficKind"] | null;
+                target?: string | null;
+                method?: string | null;
+                tool?: string | null;
                 requested?: string | null;
                 model?: string | null;
                 upstream_model?: string | null;

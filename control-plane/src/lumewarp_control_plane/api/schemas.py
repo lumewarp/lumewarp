@@ -1378,9 +1378,9 @@ class UsageRowOut(ApiModel):
 
     `error_count` and `total_duration_ms` describe how the group's requests ended
     (an error outcome, or a 4xx/5xx status that is not a client cancellation;
-    summed duration, so the mean is the sum over `requests`). The LLM tabs ignore them; the MCP and A2A tabs read them in
-    place of tokens and cost. The monthly totals fast path (LLM requests only)
-    reports both as 0.
+    summed duration, so the mean is the sum over `requests`). The LLM tabs
+    ignore them; the MCP and A2A tabs read them in place of tokens and cost. The
+    monthly totals fast path (LLM requests only) reports both as 0.
     """
 
     date: date_type | None = None
@@ -1795,8 +1795,9 @@ class McpDiscoverIn(ApiModel):
     """One `tools/list`/`prompts/list` from the control plane, with a token used once.
 
     Give `server_id` to record the result as observed definitions of that server (the same
-    rules as a gateway report). Without it nothing is stored. A server whose auth is a WASM
-    plugin cannot be discovered here.
+    rules as a gateway report). Without it nothing is stored, and nothing is stored either
+    for a URL other than the saved one or when the server changed while the call ran. A
+    server whose auth is a WASM plugin cannot be discovered here.
     """
 
     url: str = Field(min_length=1, max_length=2000)
@@ -1825,7 +1826,10 @@ class McpDiscoveredOut(ApiModel):
     hash: str
     definition_json: str
     state: Literal["approved", "pending", "rejected", "unrecorded"] = Field(
-        description="The state after recording; 'unrecorded' when no server_id was given."
+        description=(
+            "The state after recording; 'unrecorded' when nothing was recorded (no server_id,"
+            " a URL other than the saved one, or a configuration that changed meanwhile)."
+        )
     )
 
 
@@ -1842,7 +1846,12 @@ class McpDiscoverOut(ApiModel):
     tools: list[McpDiscoveredOut]
     prompts: list[McpDiscoveredOut]
     truncated: bool = Field(description="The plan's per-server bound stopped the listing.")
-    recorded: bool
+    recorded: bool = Field(
+        description=(
+            "Whether the result was recorded against the saved server. False means the"
+            " states above are 'unrecorded'."
+        )
+    )
 
 
 class A2aAgentCreate(ApiModel):

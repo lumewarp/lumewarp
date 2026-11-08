@@ -12,7 +12,9 @@ contain the token and never echo a response body: an upstream can reflect creden
 Wire: Streamable HTTP, MCP revision 2025-11-25 — `initialize` (JSON-RPC over POST, an SSE
 stream or a JSON body in the answer), `notifications/initialized`, then paged `tools/list`
 and `prompts/list`. A session id the server returns (`Mcp-Session-Id`) is echoed on every
-later request of this discovery.
+later request of this discovery, together with the negotiated protocol version
+(`MCP-Protocol-Version`, the version the server answered `initialize` with; 2025-06-18 is
+accepted as D8 allows). Errors are the control plane's own text: never the server's.
 """
 
 from __future__ import annotations
@@ -27,6 +29,9 @@ from lumewarp_control_plane.mcp import hashing
 from lumewarp_control_plane.models import McpDefinitionKind
 
 PROTOCOL_VERSION = "2025-11-25"
+# D8: the gateway speaks 2025-11-25 and also accepts an upstream's 2025-06-18. Discovery
+# initializes with the newest and must then echo whatever the server negotiated.
+SUPPORTED_VERSIONS = (PROTOCOL_VERSION, "2025-06-18")
 CLIENT_NAME = "lumewarp-control-plane"
 CLIENT_VERSION = "0.1.0"
 DEFAULT_TIMEOUT_MS = 10_000
@@ -72,12 +77,18 @@ def _client(timeout_ms: int) -> httpx.AsyncClient:
     )
 
 
-def _headers(token: str | None, session_id: str | None) -> dict[str, str]:
+def _headers(
+    token: str | None, session_id: str | None, protocol_version: str | None = None
+) -> dict[str, str]:
     headers = {"content-type": "application/json"}
     if token:
         headers["authorization"] = f"Bearer {token}"
     if session_id:
         headers["mcp-session-id"] = session_id
+    # Required on every request after `initialize` (2025-11-25) with the negotiated version;
+    # a server that checks it refuses the session without it.
+    if protocol_version:
+        headers["mcp-protocol-version"] = protocol_version
     return headers
 
 
@@ -126,12 +137,18 @@ def _message(text: str) -> dict[str, Any]:
 
 
 def _error(message: dict[str, Any], what: str) -> str:
+    """A fixed message, the method and a validated numeric code.
+
+    Upstream text never reaches the API: an MCP server can reflect the Authorization header
+    it received (the administrator's typed token or the stored sealed one) in
+    `error.message`, and a 502 body would then leak a credential the API never returns.
+    """
     error = message.get("error")
     if isinstance(error, dict):
         code = error.get("code")
-        text = error.get("message")
-        detail = f"{code}: {text}" if code is not None else str(text)
-        return f"{what} failed: {detail[:300]}"
+        if isinstance(code, int) and not isinstance(code, bool) and -(2**31) <= code < 2**31:
+            return f"{what} failed: JSON-RPC error {code}"
+        return f"{what} failed"
     return f"{what} failed: the server sent no result"
 
 
@@ -141,6 +158,7 @@ async def _call(
     *,
     token: str | None,
     session_id: str | None,
+    protocol_version: str | None = None,
     request_id: int,
     method: str,
     params: dict[str, Any] | None,
@@ -151,7 +169,10 @@ async def _call(
         payload["params"] = params
     try:
         async with client.stream(
-            "POST", url, headers=_headers(token, session_id), json=payload
+            "POST",
+            url,
+            headers=_headers(token, session_id, protocol_version),
+            json=payload,
         ) as response:
             body = await _read_body(response)
             new_session = response.headers.get("mcp-session-id") or session_id
@@ -173,14 +194,19 @@ async def _call(
 
 
 async def _notify(
-    client: httpx.AsyncClient, url: str, *, token: str | None, session_id: str | None
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    token: str | None,
+    session_id: str | None,
+    protocol_version: str,
 ) -> str | None:
     """`notifications/initialized`: a notification, so any 2xx (or 202) ends it."""
     try:
         async with client.stream(
             "POST",
             url,
-            headers=_headers(token, session_id),
+            headers=_headers(token, session_id, protocol_version),
             json={"jsonrpc": "2.0", "method": "notifications/initialized"},
         ) as response:
             await _read_body(response)
@@ -207,6 +233,7 @@ async def _list(
     *,
     token: str | None,
     session: list[str | None],
+    protocol_version: str,
     method: str,
     key: str,
     next_request_id: list[int],
@@ -224,6 +251,7 @@ async def _list(
             url,
             token=token,
             session_id=session[0],
+            protocol_version=protocol_version,
             request_id=next_request_id[0],
             method=method,
             params=params,
@@ -269,9 +297,12 @@ async def discover(
             },
         )
         version = result.get("protocolVersion")
-        if isinstance(version, str) and version:
-            discovered.protocol_version = version
-        session = [await _notify(client, url, token=token, session_id=session_id)]
+        if not isinstance(version, str) or version not in SUPPORTED_VERSIONS:
+            raise DiscoverFailed("the server negotiated an unsupported protocol version")
+        discovered.protocol_version = version
+        session = [
+            await _notify(client, url, token=token, session_id=session_id, protocol_version=version)
+        ]
         counter = [1]
         # A capability object may be empty: its presence under its name is what counts.
         capabilities = result.get("capabilities")
@@ -284,6 +315,7 @@ async def discover(
                 url,
                 token=token,
                 session=session,
+                protocol_version=version,
                 method="tools/list",
                 key="tools",
                 next_request_id=counter,
@@ -296,6 +328,7 @@ async def discover(
                 url,
                 token=token,
                 session=session,
+                protocol_version=version,
                 method="prompts/list",
                 key="prompts",
                 next_request_id=counter,

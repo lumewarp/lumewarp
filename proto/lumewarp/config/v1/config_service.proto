@@ -142,7 +142,7 @@ message ObservedDefinition {
 message AgentCardReport {
   // A2aAgent.name.
   string agent = 1;
-  // As fetched from upstream, at most 64 KiB; empty when the fetch failed.
+  // The card as the gateway serves it (rewritten), at most 64 KiB; empty when no card is available.
   string card_json = 2;
   // Sanitized fetch error, empty on success.
   string error = 3;

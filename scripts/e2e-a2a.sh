@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
-# A2A v1.0 end-to-end gate (plan acceptance 5), standalone YAML mode.
+# A2A v1.0 end-to-end gate (plan acceptance 5).
 #
-# T2b (the control-plane A2A API) is not available in this wave, so the gateway
-# is started with a standalone config file, exactly as `docs/plugins.md`
-# documents for a single-process deployment. Everything else is real: the
-# `mcp-a2a-mock` agent, two API keys, the built `strip-artifacts` middleware and
-# the gateway binary.
+# Two modes:
+#   standalone — a YAML config, two keys and the built `strip-artifacts`
+#                middleware against the real `mcp-a2a-mock` agent.
+#   cp         — Postgres + control plane + gateway over the gRPC config
+#                stream: the agent, middleware, teams, keys and grants are
+#                created through the admin API; the card, ownership, streaming,
+#                usage row, metrics and middleware timeout are asserted.
+#                Runs the pytest gate `tests/e2e/test_a2a_gate.py` through
+#                `scripts/e2e-core.sh` (database reaping + plaintext-secret scan).
 #
-#   scripts/e2e-a2a.sh
+#   scripts/e2e-a2a.sh                 # both modes
+#   E2E_A2A_MODE=standalone ...        # or cp
 #
 # Environment:
+#   E2E_A2A_MODE        both (default) | standalone | cp
 #   E2E_A2A_MOCK_BIN   path to mcp-a2a-mock (default bench/mock-upstream release)
 #   E2E_A2A_GATEWAY_BIN path to the gateway binary (default gateway debug)
 set -euo pipefail
@@ -52,16 +58,29 @@ key_hash() {
 }
 
 echo "== build middleware components, gateway and mock agent"
-bash "$root/gateway/plugins/build.sh"
+bash "$root/gateway/plugins/build.sh" --tests
 (cd "$root/gateway" && cargo build -p lumewarp-gateway)
 gateway_bin="${E2E_A2A_GATEWAY_BIN:-$root/gateway/target/debug/lumewarp}"
 (cd "$root/bench/mock-upstream" && cargo build --release --bin mcp-a2a-mock)
 mock_bin="${E2E_A2A_MOCK_BIN:-$root/bench/mock-upstream/target/release/mcp-a2a-mock}"
 for file in "$gateway_bin" "$mock_bin" \
-    "$root/gateway/target/plugins/a2a-middleware/strip-artifacts.wasm"; do
+    "$root/gateway/target/plugins/a2a-middleware/strip-artifacts.wasm" \
+    "$root/gateway/target/plugins-test/a2a-middleware/misbehave.wasm"; do
   [[ -e "$file" ]] || { echo "error: missing $file" >&2; exit 1; }
 done
 
+mode="${E2E_A2A_MODE:-both}"
+case "$mode" in
+  standalone|cp|both) ;;
+  *) echo "error: E2E_A2A_MODE must be standalone, cp or both" >&2; exit 2 ;;
+esac
+stop_bg() {
+  for pid in "${pids[@]:-}"; do kill "$pid" 2>/dev/null || true; done
+  for pid in "${pids[@]:-}"; do wait "$pid" 2>/dev/null || true; done
+  pids=()
+}
+
+if [[ "$mode" != cp ]]; then
 helper_port="$(free_port)"
 pt_port="$(free_port)"
 gw_port="$(free_port)"
@@ -343,3 +362,21 @@ check(
 )
 print("all A2A end-to-end assertions passed")
 PY
+stop_bg
+fi
+
+if [[ "$mode" != standalone ]]; then
+  echo "== control-plane A2A gate (Postgres + control plane + gateway)"
+  export E2E_A2A_MOCK_BIN="$mock_bin"
+  # The gate is skipped when a plain `scripts/e2e-core.sh` run collects it.
+  export E2E_A2A_CP=1
+  ignores=()
+  for file in "$root"/tests/e2e/test_*.py; do
+    [[ "$(basename "$file")" == "test_a2a_gate.py" ]] && continue
+    ignores+=("--ignore=$file")
+  done
+  # e2e-core owns the run directory, the database reaping and the plaintext-secret
+  # scan; it builds the gateway and the mock-upstream library, while this script
+  # already built the A2A agent and the middleware fixtures.
+  "$root/scripts/e2e-core.sh" "${ignores[@]}"
+fi

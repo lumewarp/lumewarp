@@ -31,7 +31,9 @@
 mod engine;
 mod local;
 mod session;
+mod sse;
 mod transport;
+pub(crate) use local::First;
 
 use std::time::Duration;
 

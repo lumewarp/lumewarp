@@ -15,10 +15,10 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import asyncpg
 import httpx
-
 from secret_scan import (
     DB_PREFIX,
     MIN_CREDENTIAL_CHARS,
@@ -76,7 +76,9 @@ def record_secret(value: str | None, kind: str) -> None:
 # `cp_env` names that merely contain a credential word but hold a setting, not a secret.
 # Listed by full name: a suffix would also exclude a credential such as VAULT_SECRET_ID,
 # and a value's length says nothing about whether it is a credential.
-NON_SECRET_ENV_NAMES = frozenset({"E2E_SECRET_LOG", "E2E_SECRET_SCAN", "E2E_SKIP_SECRET_SCAN"})
+NON_SECRET_ENV_NAMES = frozenset(
+    {"E2E_SECRET_LOG", "E2E_SECRET_SCAN", "E2E_SKIP_SECRET_SCAN"}
+)
 
 CREDENTIAL_ENV_PARTS = ("SECRET", "PASSWORD", "TOKEN", "API_KEY")
 
@@ -119,7 +121,9 @@ RESPONSE_SECRET_FIELDS = {
 }
 
 
-def record_response_secrets(payload, source: str = "") -> None:
+def record_response_secrets(
+    payload, source: str = "", *, endpoint: str | None = None
+) -> None:
     """Record every credential an API response hands back, at the boundary.
 
     Called on the response path (Stack.api/ok and the cookie-session helper) so no test
@@ -136,10 +140,34 @@ def record_response_secrets(payload, source: str = "") -> None:
         except (AttributeError, ValueError):
             return
 
+    # MCP catalog `state` is a typed review enum, not an OAuth state token.
+    # Match endpoints AND the documented enum values; an unknown state value,
+    # another endpoint, or an unspecified endpoint remains conservatively scanned.
+    path = urlsplit(endpoint or "").path.removeprefix("/api/v1")
+    parts = path.strip("/").split("/")
+    catalog_review = path == "/mcp-servers/discover" or (
+        len(parts) in (3, 5)
+        and parts[0] == "mcp-servers"
+        and parts[2] == "definitions"
+        and (len(parts) == 3 or parts[4] in ("approve", "reject"))
+    )
+
     def walk(node, where: str) -> None:
         if isinstance(node, dict):
             for key, value in node.items():
-                field = RESPONSE_SECRET_FIELDS.get(key.lower()) if isinstance(key, str) else None
+                field = (
+                    RESPONSE_SECRET_FIELDS.get(key.lower())
+                    if isinstance(key, str)
+                    else None
+                )
+                if (
+                    isinstance(key, str)
+                    and key.lower() == "state"
+                    and catalog_review
+                    and isinstance(value, str)
+                    and value in {"approved", "pending", "rejected", "unrecorded"}
+                ):
+                    continue
                 if field and isinstance(value, str):
                     # record_secret fails the run on a value too short to search, rather
                     # than dropping it here and reporting a clean database.
@@ -160,7 +188,9 @@ def env_path(name: str, default: str) -> Path:
 GATEWAY_BIN = env_path("E2E_GATEWAY_BIN", "gateway/target/debug/lumewarp")
 MOCK_BIN = env_path("E2E_MOCK_BIN", "bench/mock-upstream/target/release/mock-upstream")
 # Server-level DSN (any database on the server, used to create/drop the test database).
-PG_DSN = os.environ.get("E2E_PG_URL", "postgresql://lumewarp:lumewarp@127.0.0.1:55432/lumewarp")
+PG_DSN = os.environ.get(
+    "E2E_PG_URL", "postgresql://lumewarp:lumewarp@127.0.0.1:55432/lumewarp"
+)
 
 
 def free_port() -> int:
@@ -172,7 +202,9 @@ def free_port() -> int:
             return port
 
 
-def wait_for(predicate: Callable[[], object], timeout: float, what: str, interval: float = 0.05):
+def wait_for(
+    predicate: Callable[[], object], timeout: float, what: str, interval: float = 0.05
+):
     deadline = time.monotonic() + timeout
     last: Exception | None = None
     while True:
@@ -201,7 +233,9 @@ def pg(dsn: str, sql: str, *args):
 
 
 class Proc:
-    def __init__(self, name: str, argv: list[str], env: dict[str, str], logdir: Path) -> None:
+    def __init__(
+        self, name: str, argv: list[str], env: dict[str, str], logdir: Path
+    ) -> None:
         self.name = name
         self.argv = argv
         self.env = env
@@ -308,14 +342,18 @@ class Gateway:
         def up():
             assert self.proc.alive(), f"gateway exited:\n{self.proc.text()}"
             return (
-                httpx.get(f"http://127.0.0.1:{self.admin_port}/healthz", timeout=1).status_code
+                httpx.get(
+                    f"http://127.0.0.1:{self.admin_port}/healthz", timeout=1
+                ).status_code
                 == 200
             )
 
         wait_for(up, 15, "gateway admin listener")
 
     def readyz(self) -> int:
-        return httpx.get(f"http://127.0.0.1:{self.admin_port}/readyz", timeout=2).status_code
+        return httpx.get(
+            f"http://127.0.0.1:{self.admin_port}/readyz", timeout=2
+        ).status_code
 
     def wait_ready(self, timeout: float = 15) -> None:
         wait_for(lambda: self.readyz() == 200, timeout, "gateway /readyz 200")
@@ -329,12 +367,16 @@ class Gateway:
                 return float(line.split()[1])
         return None
 
-    def chat(self, key: str | None, *, stream: bool = False, model: str = "mock") -> httpx.Response:
+    def chat(
+        self, key: str | None, *, stream: bool = False, model: str = "mock"
+    ) -> httpx.Response:
         headers = {"authorization": f"Bearer {key}"} if key else {}
         body = {"model": model, "messages": [{"role": "user", "content": "hi"}]}
         if stream:
             body["stream"] = True
-        return self.http.post(self.url("/v1/chat/completions"), json=body, headers=headers)
+        return self.http.post(
+            self.url("/v1/chat/completions"), json=body, headers=headers
+        )
 
     def stop(self) -> None:
         self.proc.stop()
@@ -358,7 +400,9 @@ class Stack:
     """One database, control plane, mock upstream; gateways are started by the tests."""
 
     def __init__(self) -> None:
-        self.dir = Path(tempfile.mkdtemp(prefix="lumewarp-e2e-", dir=os.environ.get("E2E_RUN_DIR")))
+        self.dir = Path(
+            tempfile.mkdtemp(prefix="lumewarp-e2e-", dir=os.environ.get("E2E_RUN_DIR"))
+        )
         # The run id in the name is what lets the finalizer find a database whose creator
         # forgot to register it, and tell it apart from another run's databases.
         self.db_name = f"{DB_PREFIX}{run_id()}_{uuid.uuid4().hex[:12]}"
@@ -374,7 +418,9 @@ class Stack:
         self.dsn = f"{base}/{self.db_name}"
         self.sa_url = self.dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
         self.base_env = {
-            k: v for k, v in os.environ.items() if not k.startswith(("LUMEWARP_", "OTEL_"))
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith(("LUMEWARP_", "OTEL_"))
         }
         self.cp_env = {
             **self.base_env,
@@ -437,7 +483,10 @@ class Stack:
         self.mock.start()
         wait_for(
             lambda: (
-                httpx.get(f"http://127.0.0.1:{self.mock_port}/health", timeout=1).status_code == 200
+                httpx.get(
+                    f"http://127.0.0.1:{self.mock_port}/health", timeout=1
+                ).status_code
+                == 200
             ),
             10,
             "mock upstream",
@@ -447,7 +496,12 @@ class Stack:
 
     def _run_cli(self, *args: str) -> str:
         res = subprocess.run(
-            [*self.cp_cmd, *args], env=self.cp_env, capture_output=True, text=True, timeout=60
+            [*self.cp_cmd, *args],
+            check=False,
+            env=self.cp_env,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         assert res.returncode == 0, f"{args} failed:\n{res.stdout}\n{res.stderr}"
         return res.stdout
@@ -458,12 +512,16 @@ class Stack:
         def up():
             assert self.cp.alive(), f"control plane exited:\n{self.cp.text()}"
             return (
-                httpx.get(f"http://127.0.0.1:{self.http_port}/readyz", timeout=1).status_code == 200
+                httpx.get(
+                    f"http://127.0.0.1:{self.http_port}/readyz", timeout=1
+                ).status_code
+                == 200
             )
 
         wait_for(up, 30, "control plane /readyz")
         response = self.admin.post(
-            self.api_url + "/session/break-glass", json={"password": BREAK_GLASS_PASSWORD}
+            self.api_url + "/session/break-glass",
+            json={"password": BREAK_GLASS_PASSWORD},
         )
         assert response.status_code == 204, response.text
         info = self.admin.get(self.api_url + "/session").json()
@@ -471,21 +529,31 @@ class Stack:
         from lumewarp_control_plane.auth.sessions import COOKIE_NAME
 
         record_secret(self.admin.cookies.get(COOKIE_NAME), "Lumewarp session cookie")
-        record_response_secrets(info, "GET /session")
+        record_response_secrets(info, "GET /session", endpoint="/session")
 
     def start_mock(self, tag: str, *args: str) -> int:
         """Start another mock upstream (e.g. with fault injection); returns its port."""
         port = free_port()
         proc = Proc(
             tag,
-            [str(MOCK_BIN), "--listen", f"127.0.0.1:{port}", "--latency-ms", "5", *args],
+            [
+                str(MOCK_BIN),
+                "--listen",
+                f"127.0.0.1:{port}",
+                "--latency-ms",
+                "5",
+                *args,
+            ],
             self.base_env,
             self.dir,
         )
         self.extra_mocks.append(proc)
         proc.start()
         wait_for(
-            lambda: httpx.get(f"http://127.0.0.1:{port}/health", timeout=1).status_code == 200,
+            lambda: (
+                httpx.get(f"http://127.0.0.1:{port}/health", timeout=1).status_code
+                == 200
+            ),
             10,
             f"mock upstream {tag}",
         )
@@ -504,7 +572,12 @@ class Stack:
     ) -> Gateway:
         tag = tag or f"gateway-{len(self.gateways)}"
         gw = Gateway(
-            self, state_dir or self.dir / "state", GATEWAY_ID, self.gateway_token, tag, extra_env
+            self,
+            state_dir or self.dir / "state",
+            GATEWAY_ID,
+            self.gateway_token,
+            tag,
+            extra_env,
         )
         self.gateways.append(gw)
         gw.wait_listening()
@@ -569,7 +642,9 @@ class Stack:
 
     # REST --------------------------------------------------------------------------
 
-    def api(self, method: str, path: str, token: str | None = None, **kwargs) -> httpx.Response:
+    def api(
+        self, method: str, path: str, token: str | None = None, **kwargs
+    ) -> httpx.Response:
         response = self.admin.request(
             method,
             self.api_url + path,
@@ -577,7 +652,7 @@ class Stack:
             **kwargs,
         )
         # Every credential an endpoint issues is recorded here, before the caller sees it.
-        record_response_secrets(response, f"{method.upper()} {path}")
+        record_response_secrets(response, f"{method.upper()} {path}", endpoint=path)
         return response
 
     def ok(self, method: str, path: str, token: str | None = None, **kwargs) -> dict:
@@ -609,7 +684,11 @@ class Stack:
                 "price_output_nano_usd_per_mtok": 2_000_000_000,
             }
         dep = self.ok("POST", "/models", json=dep)
-        self.ok("POST", "/routers", json={"name": "mock", "members": [{"model_id": dep["id"]}]})
+        self.ok(
+            "POST",
+            "/routers",
+            json={"name": "mock", "members": [{"model_id": dep["id"]}]},
+        )
         body = {"name": "ml", "model_access": "all"}
         if team_budget is not None:
             body["budget_nano_usd"] = team_budget
@@ -627,7 +706,9 @@ class Stack:
         else:
             assert owner_kind == "service_account"
             owner_id = self.ok(
-                "POST", f"/teams/{team['id']}/service-accounts", json={"name": "chat", **body}
+                "POST",
+                f"/teams/{team['id']}/service-accounts",
+                json={"name": "chat", **body},
             )["id"]
             key_body = {"service_account_id": owner_id}
         keys = {}
@@ -680,7 +761,9 @@ class Stack:
         """Publishing is asynchronous (outbox + compiler loop): wait until a version has them."""
         wait_for(
             lambda: (
-                self.ok("GET", "/config/versions", params={"limit": 1})["items"][0]["key_count"]
+                self.ok("GET", "/config/versions", params={"limit": 1})["items"][0][
+                    "key_count"
+                ]
                 == count
             ),
             10,
@@ -688,7 +771,9 @@ class Stack:
         )
 
     def current_version(self) -> int:
-        return self.ok("GET", "/config/versions", params={"limit": 1})["items"][0]["version"]
+        return self.ok("GET", "/config/versions", params={"limit": 1})["items"][0][
+            "version"
+        ]
 
 
 class Key:

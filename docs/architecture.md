@@ -14,10 +14,10 @@ Lumewarp 是比 LiteLLM 更快、更好管理的 LLM gateway，拆成兩個獨�
 核心原則：
 
 1. 熱路徑不碰 DB、不跑 Python；計數與用量非同步送出。
-2. 客製化（換 OAuth、接授權後端）用 Python plugin，結果編譯進設定快照由 gateway 執行；router 策略是編譯進 gateway 的 Rust crate。
-3. 只做 OpenAI 相容 API，上游只有 vLLM 與 OpenAI（及 OpenAI 相容端點），不做其他 provider 轉換。
+2. 客製化分成兩層：control plane 的認證與授權用 Python plugin（`lumewarp.auth`、`lumewarp.authz`），產生的宣告式設定編譯進快照；gateway 端的 plugin（router 策略、上游認證、A2A middleware）是 WASM 元件，開機時從目錄載入，內建策略與內建認證仍是 native。
+3. 只做 OpenAI 相容 API，上游只有 vLLM 與 OpenAI（及 OpenAI 相容端點），不做其他 provider 轉換；MCP 與 A2A 只做代理轉發。
 4. 設定是不可變的版本快照，可 canary、可回滾。
-5. LLM、MCP、A2A 三種流量共用同一套認證、配額、稽核。
+5. LLM、MCP、A2A 三種流量共用同一套 API key 認證與用量、metrics、trace；限流與預算只在 LLM 路徑。
 
 ## 架構
 
@@ -32,7 +32,9 @@ flowchart TB
   COMP -->|"gRPC 設定串流：全量 + delta、ACK/NACK"| SNAP
   subgraph DP["Data plane (Rust) · 可水平擴展"]
     SNAP["ArcSwap 設定快照（本地磁碟保留最後一版）"]
-    AUTH["認證<br/>API key / JWT / mTLS"] --> POL["策略引擎<br/>預算、限流、權限"] --> RT["Router<br/>vLLM 負載感知、fallback"] --> PX["上游轉接<br/>零轉換轉發"]
+    AUTH["認證<br/>API key（MCP／A2A 用 X-Lumewarp-Key）"] --> POL["策略引擎<br/>預算、限流、權限"] --> RT["Router<br/>vLLM 負載感知、fallback"] --> PX["上游轉接<br/>零轉換轉發"]
+    PLUG["WASM plugins<br/>策略／出站認證／middleware"] --> RT
+    PLUG --> MCP
     POL --> MCP["MCP / A2A 代理"]
   end
   Clients["Clients: App / IDE / agent"] -->|OpenAI 相容 API| AUTH
@@ -46,6 +48,7 @@ flowchart TB
 | 元件 | 技術 | 理由 |
 | --- | --- | --- |
 | gateway | Rust：tokio、hyper、rustls、ArcSwap | 無 GC、p99 穩定、大量串流連線記憶體低 |
+| gateway plugin | WASM（wasmtime、Component Model、WIT，Rust SDK） | 換 plugin 不需重 build image，同一個沙箱介面涵蓋三種擴充點 |
 | control plane | Python：FastAPI、SQLAlchemy + Alembic、Authlib、grpcio | plugin 門檻最低，OIDC 生態成熟 |
 | Admin UI | React + Vite 靜態 SPA、TanStack Query / Router、Tailwind v4、shadcn/ui（Radix primitives） | 編譯成靜態檔由 FastAPI 提供，部署不需 Node.js；型別由 OpenAPI 產生。可換 Preact 更輕 |
 | 合約 | protobuf（設定快照 schema） | 兩種語言各自產生型別，schema 是唯一定義 |
@@ -112,7 +115,7 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
   - `TEAM_ADMIN_READ` 才是成員與 service account 清單、他人 key、team 用量與 audit。member 讀這些清單回 403，非成員仍是 404。
   - `TEAM_SETTINGS_UPDATE`（team admin，org admin 繼承）只含名稱、member key 上限與 member 預設限流；team 的模型清單、限流、並行與預算是 `TEAM_QUOTA_SET`，指派／降級／移除 team admin 是 `TEAM_ADMIN_ASSIGN`；建立 team 在 body 的 `org_id` 上檢查、封存 team 在 URL 那支 team 所屬的 org 上檢查，所以 org admin 只能管自己 org 的 team，team admin 完全不能建立、封存或設定。team 更新依實際變更判斷（`proposed != base`），team admin 重送未改動的政策值可以成功。
   - 讀他人 key 是 team admin（含 org admin 繼承）或本人：`GET /keys/{id}` 對同 team 的其他 member 回 403，team 外的人仍是 404；`GET /teams/{id}/keys` 對 member 一律 AND 上「自己的 user key」，指定別人的 `user_id`／`service_account_id`／`owner_kind` 只會得到空清單。usage 由伺服器加 owner 條件，member 只看得到自己在所屬 team 的 key 的列（含任何 group by 的加總），查詢參數不能擴大；team admin 與 org admin 維持自己管理的 team 的完整視圖。audit 只給 team admin 以上：team admin 只看得到掛在自己 team 的列，org admin 還看得到 org 層事件（org 政策、org admin、org 預算，`team_id` 為 NULL）與旗下所有 team（含已封存）的列；`GET /audit` 可用 `org_id` 篩選（`AuditOut` 也回傳 `org_id`，UI 在有多個 org 時顯示 Org 欄與篩選），member 一律 403。
-  - `ROUTING_READ` 是安裝層（upstreams、models、aliases、routers、strategies，含 GET）；任何已認證呼叫者可以讀 `/catalog`（只有 id、name、kind），因為設定 allowlist 只需要名字。
+  - `ROUTING_READ` 是安裝層（upstreams、models、aliases、routers、plugins、MCP servers 與 A2A agents，含 GET）；任何已認證呼叫者可以讀 `/catalog`（只有 id、name、kind），因為設定 allowlist 只需要名字。
   - 沒有「最後一位 team admin」限制：安裝層管理員永遠在 team 之上，team 可以沒有 admin。
 - 安裝層角色管理：`GET /installation-admins` 列出角色，`PUT /installation-admins/{user_id}` 指派 `admin`，`DELETE /installation-admins/{user_id}` 移除 `admin`，`POST /installation-admins/transfer` 轉移 `proxy_admin`。任何安裝層管理員都能指派／移除 `admin`（含自己）；`proxy_admin` 不能透過指派或移除被降級或拔除，只能轉移；轉移只允許目前的 `proxy_admin` 或緊急 session。`proxy_admin` 帳號本身受保護：只有該帳號自己或緊急 session 能停用、刪除、改 email 或代發 PAT，其他安裝層管理員一律 403。指派與轉移要求目標至少已有一個 IdP identity（先登入過一次），否則回 409；這是因為新的 IdP identity 不能連結到已有安裝層角色的帳號，先給角色會讓該帳號永遠無法登入。每次角色變更寫 audit（`installation_admin.assign`／`remove`／`transfer`／`bootstrap`）。
 - 授權後端可換：內建用 `org_admins` 與 `team_members`；內附 `openfga` 與 `http` 後端，也可用 `lumewarp.authz` entry point 接外部系統。全部後端（含三個內建）都經同一個 entry point 載入，factory 可收 `AuthzContext`（settings、session factory、metrics）或零參數。後端只回答直接關係，單一 async 函式 `check(user_id, relation, resource) -> Decision`：`relation` 是 `admin`（org 或 team）或 `member`（只限 team），`resource` 是 `org:<uuid>` 或 `team:<uuid>`；安裝層角色永遠不問後端。`admin` 隱含 `member` 由後端保證；`member` 只代表直接成員，org 繼承只由 `RequestAuthz` 套用，team→org 一律讀 Postgres、不信任 payload。`ERROR`（後端不可用或逾時）不是 deny：管理 API 回 503，解析繼承權限時也一樣，不會變成空清單。`openfga` 可用 `LUMEWARP_OPENFGA_OBJECT_TYPES`／`LUMEWARP_OPENFGA_RELATIONS` 接既有 store 的不同 type／relation 名稱，Check、BatchCheck、ListObjects、ReadChanges 共用同一份對應；`changes()` 遇到無法對應到使用者的變更（userset、wildcard）改成要求全掃，不丟棄。
@@ -122,12 +125,12 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 ### Admin UI
 
 - Playground（`/playground`，所有人的選單都有，緊急 session 除外）透過 session 與 CSRF 保護的 control plane 代理呼叫 gateway，只能選擇本人在未封存 team 中仍有效的 user key，模型清單沿用有效政策交集；模型（或指向它的 alias）有設定 reasoning 檔位時可以選擇，預設用模型的 default level。需設定 `LUMEWARP_PLAYGROUND_GATEWAY_URL` 並與 gateway 共用 `LUMEWARP_ENCRYPTION_KEY`；代理以 HKDF 派生的 HMAC 短效 token 委派該 key，SSE 不緩衝轉送，稽核 `playground.request` 只記 key id 與有效政策允許且不超過 256 字元的模型名稱，不記 prompt。Token 由 `LUMEWARP_ENCRYPTION_KEY` 派生，所有持有該金鑰的服務都能簽發 token；`LUMEWARP_PLAYGROUND_GATEWAY_URL` 跨主機連線必須使用 TLS。
-- 選單依角色出現，API 仍是最後的權限來源。member 看到 My keys、Usage、Settings；team admin 多 Overview、Teams（含單一 team 的 Members／Service accounts／Keys／Usage／Settings 分頁）與 Audit log；org admin 多 Orgs 與旗下 team（`RequestAuthz` 從 `org_id` 繼承，`/users/me` 的 `admin_orgs` 是 UI 的依據），不算直接成員；安裝層管理員多 Users、Upstreams、Models、Aliases、Routers、Gateways 與 Config versions。Upstream 與 model 的新增與編輯是獨立頁面（`/upstreams/new`、`/upstreams/{id}`、`/models/new`、`/models/{id}`），離開未儲存的頁面會先確認；Models 列表只顯示名稱、`<upstream>/<upstream_model>`、輸入／輸出長度與價格。既非安裝層管理員也不是 team admin 的人首頁是 `/my-keys`，其餘是 Overview；緊急 session 不擁有 key，My keys 只說明這件事。
+- 選單依角色出現，API 仍是最後的權限來源。member 看到 My keys、Usage、Settings；team admin 多 Overview、Teams（含單一 team 的 Members／Service accounts／Keys／Usage／Settings 分頁）與 Audit log；org admin 多 Orgs 與旗下 team（`RequestAuthz` 從 `org_id` 繼承，`/users/me` 的 `admin_orgs` 是 UI 的依據），不算直接成員；安裝層管理員多 Users、Upstreams、Models、Aliases、Routers、MCP servers、A2A agents、Plugins、Gateways 與 Config versions。Upstream、model、MCP server 與 A2A agent 的新增與編輯是獨立頁面（`/upstreams/new`、`/upstreams/{id}`、`/models/new`、`/models/{id}`、`/mcp-servers/new`、`/mcp-servers/{id}`、`/a2a-agents/new`、`/a2a-agents/{id}`），離開未儲存的頁面會先確認；Models 列表只顯示名稱、`<upstream>/<upstream_model>`、輸入／輸出長度與價格。Plugins 頁唯讀，列出每個 plugin 的 schema 與哪些 gateway 回報它。既非安裝層管理員也不是 team admin 的人首頁是 `/my-keys`，其餘是 Overview；緊急 session 不擁有 key，My keys 只說明這件事。
 - Orgs 頁（`/orgs`、`/orgs/{id}`）只在安裝層管理員與 org admin 的選單出現。列表只列未封存的 org：安裝層管理員可以建立、改名與設定 org 政策（模型、RPM／TPM／並行、預算）、指派或移除 org admin、封存（旗下還有未封存 team 時按鈕停用並說明原因）；org admin 只看到自己的 org，政策唯讀，但可以在其中建立與封存 team。明細頁有 org 政策摘要、旗下 team（建立／封存）、org admin 清單（僅安裝層管理員；外部授權後端下唯讀）與本月依 team 分組的用量。建立 team 的對話框在只有一個 org 時自動選它，多個 org 時顯示選單。
 - 只有一個 org 時，Orgs 頁以外不顯示 org 層：Teams 沒有 Org 欄、Audit 沒有 Org 篩選、team 設定不顯示所屬 org；多個 org 時三處都出現。Orgs 頁本身永遠顯示它的 org，否則無法建立第二個 org。
 - 沒有獨立的 `/keys` 管理頁：整個 team 的 key 在 team 的 Keys 分頁。team admin 看得到並管理別人的 key 與 service account 的 key；member 的 Keys 分頁只列自己的 key。Members／Service accounts 分頁只對 team admin 掛載，member 不會對這些端點發請求。Service account 可由 team admin 停用與恢復；停用後它的 key 不進快照，恢復後未撤銷的 key 重新生效。建立 key 的 owner 選單不列已停用的 service account。
 - team admin 的 Settings 分頁把 team quota（模型、限流、預算）顯示為唯讀，能改名稱、member key 上限、member 預設限流（`member_*_default`）與每個 member 的例外政策；org admin 可以改 team quota。member 只看得到名稱與 member key 上限，沒有編輯按鈕。Teams 頁與 team 設定頁的刪除都是封存，確認對話框說明不可逆（撤銷 key、停用 service account、釋放名稱）；封存後 team 從列表與 org 明細消失，用量與 audit 歷史仍保留。
-- My keys 逐 team（只列自己所屬的 team）顯示可呼叫的 model（取交集後的實際清單）、有效限流（含 org 與 team 預設）、本月剩餘預算、key 上限與最長效期，並可建立、改名、改到期日、輪替（可選寬限）、暫停、恢復與撤銷自己的 key，下方是本月個人用量。
+- My keys 逐 team（只列自己所屬的 team）顯示可呼叫的 model（取交集後的實際清單）、MCP server／tool 與 A2A agent grant、有效限流（含 org 與 team 預設）、本月剩餘預算、key 上限與最長效期，並可建立、改名、改到期日、輪替（可選寬限）、暫停、恢復與撤銷自己的 key，下方是本月個人用量與這個 team 的 MCP／A2A 連線片段（路徑、`X-Lumewarp-Key`）。
 - Key 的建立與編輯對話框（My keys 與 team 的 Keys 分頁共用）都有 `rpm_limit`、`tpm_limit`、`max_parallel`；表單以 key owner 的有效限額為上限並顯示提示，超過時伺服器回 422，訊息顯示在對應欄位。team admin 改他人 key 時上限取自 member 例外／team 預設再夾 team 政策（org 可能再調降，仍由伺服器把關）。所有編輯限流的地方都註明限流是每個 gateway instance 各算一份。
 - 存取變更：受保護頁面每次進入都重驗 `/users/me`。快取允許時頁面先掛上，背景重驗發現權限被收回就換成「沒有權限」；快取拒絕時先等重驗。用網址打開看不到的頁面只顯示說明，不對該 team 發請求。
 - 授權後端不可用時顯示「暫時無法確認、這不是拒絕」的狀態（`authz_unavailable`），管理 API 回 503；My keys 不會把它當成「沒有 team」。
@@ -137,19 +140,39 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 
 - 用戶端呼叫的是「名字」，一個名字是 model（一個 upstream 上的一個模型）、alias（model 或 router 的另一個名字，只有一層）或 router（把請求分給後面的 models）。三種共用名字空間，都可以改名，內部參照都用 id。權限依呼叫的名字檢查。完整規則見下方「模型目錄已實作」。
 - 回應的 `model` 是呼叫時的名字；usage 的 `model` 是實際服務的 model，另外記錄來源的 alias、router、fallback 與 attempts。
-- 策略是 Rust crate（`docs/router-strategies.md`），重新 build gateway 即可，proto、control plane、UI 都不用改。Retry、fallback、traffic split 只在 router 上；直接呼叫 model 就是一次嘗試。
+- 策略是 gateway 的 plugin（`docs/router-strategies.md`）：`weighted`、`least_in_flight`、`lowest_latency`、`vllm_load` 是 native，其他策略是 WASM 元件，放在 `LUMEWARP_ROUTER_PLUGIN_DIR`，開機載入，換策略不必重 build gateway，proto、control plane、UI 都不用改。Retry、fallback、traffic split 只在 router 上；直接呼叫 model 就是一次嘗試。
 - 策略：加權、最低延遲（EWMA）、最少進行中請求、vLLM 負載感知；依 team、header、輸入 token 數條件分流（延後）。
 - 彈性：fallback 鏈、有上限的重試、circuit breaker、主動健康檢查、尊重 Retry-After。
 - cache 親和：相同 session 或 prompt 前綴黏在同一 model（延後）。
 - 變更即設定版本，可回滾；路由層百分比切流（traffic split，可依 header／team／key sticky）已實作，設定版本 canary 延後。
 
-### MCP / A2A gateway（尚未實作）
+### MCP gateway
 
-- 註冊上游 MCP server（Streamable HTTP；stdio 由 sidecar 包裝），依 team 組成虛擬 MCP server，工具名加 namespace。
-- 工具級權限、高風險工具需人工核准。
-- gateway 是 MCP authorization 規範中的 OAuth resource server，代管上游使用者 OAuth token。
-- A2A：Agent Card 註冊表，代理 JSON-RPC 與串流任務。
-- 每次工具/agent 呼叫都進稽核並串在同一 trace。
+- **端點：** `POST /mcp` 是依 key 聚合的虛擬 server，工具與 prompt 名是 `<server>__<name>`，在第一個 `__` 切分；`POST /mcp/servers/<name>` 是單一上游，名字不加前綴。`DELETE` 轉給對應上游；`GET /mcp` 回 405，`GET /mcp/servers/<name>` 原樣轉發（`list_changed` 只在單一 server 端點收得到）。MCP 2025-11-25（Streamable HTTP）；上游回 2025-06-18 時原樣轉發，不做欄位轉換。
+- **認證：** 兩個端點都只接受恰好一個 `X-Lumewarp-Key`；0 個或多個回 401，`Authorization: Bearer` 與 Playground 的 `lwpg.` token 都不算。撤銷、暫停、過期的 key 拒絕；`BUDGET_EXCEEDED` 接受，因為預算屬於 LLM 路徑。
+- **出站認證：** 每個 server 一個 `UpstreamAuth`：內建 `none`（不加憑證）、`static_bearer`（token 來自 gateway 環境變數或封存的密文）、`passthrough`（把 client 的 `Authorization` 原樣送上游），或 WASM `upstream-auth` plugin。gateway 一律移除 `X-Lumewarp-Key`、`Cookie`、`Proxy-Authorization`；client 的 `Authorization` 只有 `passthrough` 保留。auth 結果依（流量、target id、params digest）快取，`passthrough` 不快取。
+- **Session 與 id：** 聚合端點的 `initialize` 由 gateway 自己回答，回一個封存的 `Mcp-Session-Id`：以 `LUMEWARP_GATEWAY_ID_KEY` 經 HKDF 派生金鑰的 AES-256-GCM，內含 key id、各上游 session id 與協商版本，24 小時過期；任何一台同金鑰的 gateway 都能接手，不需要 sticky。initialize 時平行初始化這把 key 看得到的所有上游，失敗的上游在這個 session 內視為不存在，membership 之後不變。上游回 404 → client 也回 404，讓它重新 initialize。上游發給 client 的 request（elicitation、sampling、roots）id 改寫成 `"lw:<server>:<原 id JSON>"`；聚合端點的 cursor 是 gateway 封存的 (server 序號, 上游 cursor)。
+- **授權與限流：** grant 依呼叫的名字（server）檢查，工具再細到單一 tool（`McpGrant` 的 `all_tools` 或 `tools`）；被授權 server 的所有 prompt 都可用。未授權的 server／tool 在清單看不到、呼叫被拒。`tools/call` 計入 key 既有的 `requests_per_minute` scope，不計 token、並行與預算。
+- **定義審核：** `review_mode` 是 `tofu`（預設）／`manual`／`off`。gateway 從上游觀察 tools 與 prompts；hash 是 RFC 8785 正規化 JSON 的 sha256（tool 取 name、title、description、inputSchema、outputSchema、annotations；prompt 取 name、title、description、arguments，其他欄位丟棄）。`tofu` 對沒見過的名稱自動核准並回報，已知名稱換了定義就從 list 移除、呼叫也拒絕，直到核准；`manual` 一律要核准；`off` 不檢查。快照只帶每個已知定義的名稱、hash 與 state（approved／pending／rejected），不帶定義本身；未指定的 state 視為 pending。
+- **回報：** 被擋下的定義與 `tofu` 首次核准的定義用 `CatalogReport` 回報（與 `HealthReport` 同一條 config stream），control plane 自行重算 hash；同一 (server, hash) 每台 gateway 每 10 分鐘最多一次，每 server 待回報最多 200 筆、每筆 64 KiB，超過丟棄並計 `lumewarp_mcp_catalog_reports_dropped_total`。
+- **TOFU 是多 gateway 的本地決定：** 第一台看到新名稱的 gateway 立刻服務並回報，control plane 對該名稱以第一筆回報為準（first writer wins），之後不同的 hash 一律 pending；在回報與新快照抵達其他 gateway 之前，兩台可能短暫服務同一名稱的不同定義。這只偵測定義變更，不證明上游實際執行什麼。
+- **Discover now：** auth 是 `none`、`static_bearer` 或 `passthrough` 的 server，編輯頁可由 control plane 打一次 `tools/list` 與 `prompts/list`。`none` 不需要 token；`static_bearer` 用 server 已存的 secret（環境變數或封存密文）或管理員當次貼上的 token；`passthrough` 需要管理員貼上使用者自己的 token。貼上的 token 只用一次、不儲存、不稽核，錯誤訊息也不回上游內容。只有 URL 與已存設定在呼叫期間沒變時，結果才以同樣的 hash 記錄，否則只是預覽；WASM auth 的 server 只能從流量觀察。
+- **大小上限：** request body 4 MiB（413）、非串流回應 16 MiB、單一 SSE event 1 MiB（502）。
+
+### A2A gateway
+
+- **端點：** `POST /a2a/<agent>`（JSON-RPC，含 SSE 串流與 `SubscribeToTask`）、`GET /a2a/<agent>/.well-known/agent-card.json`、`GET /a2a`（列出這把 key 能用的 agent）。認證規則與 MCP 相同（恰好一個 `X-Lumewarp-Key`），出站認證也用同一個 `UpstreamAuth`。A2A v1.0 JSON-RPC binding；每個請求要 `A2A-Version: 1.0`，缺或不同回 `-32009`；push notification 設定一律回 `-32003`。
+- **id 擁有權：** task 與 context id 包成 `lwt.<owner>.<原 id>.<HMAC>`，owner 是 key 本身（同一個人的另一把 key 也看不到），MAC 金鑰是 `LUMEWARP_GATEWAY_ID_KEY`。`ListTasks` 只在 agent 的出站 auth 是 `passthrough` 時轉發（上游以使用者自己的 token 隔離），其他回 `-32004`。
+- **Agent Card：** gateway 用 agent 的出站 auth 定期抓 card（預設 5 分鐘，含 jitter；`card_url` 留空是 `url` 的 origin 加 `/.well-known/agent-card.json`；憑證只送往同 origin 的 card URL），經 `CatalogReport` 回報，抓失敗時沿用上次的 card。對外的 card 是 gateway 改寫的：`supportedInterfaces` 只留一個 JSON-RPC 1.0 介面，URL 是 `LUMEWARP_GATEWAY_PUBLIC_URL` 加 `/a2a/<agent>`（不看 Host header）；`securitySchemes`／`securityRequirements` 換成 apiKey `X-Lumewarp-Key`；移除 `signatures`；`capabilities.pushNotifications=false`。`GetExtendedAgentCard` 同樣改寫。`passthrough` agent 抓不到 card 時用管理員貼上的 `card_json`。
+- **Middleware：** 一個 agent 最多一個 WASM `a2a-middleware`，request 與 response（含每個 SSE event）都能改；只有 `TaskArtifactUpdateEvent` 可以被丟棄，丟棄其他 event 視為錯誤。
+- 沒有 `LUMEWARP_GATEWAY_ID_KEY` 時 MCP 與 A2A 都回 503；只有 `LUMEWARP_GATEWAY_PUBLIC_URL` 缺少時只有 A2A 回 503。LLM 不受影響。
+
+### Gateway plugin（WASM）
+
+- 三種 gateway plugin 都是 WASM component（wasmtime + Component Model，WIT 介面在 `gateway/wit/`）：`router-strategy`、`upstream-auth`、`a2a-middleware`。開機時讀三個目錄：`LUMEWARP_ROUTER_PLUGIN_DIR`、`LUMEWARP_AUTH_PLUGIN_DIR`、`LUMEWARP_A2A_MIDDLEWARE_DIR`，每個 `.wasm` 呼叫一次它 export 的 `manifest()`（name、kind、title、description、params schema、ABI）。換 plugin 是換檔加上重啟，沒有熱載入；kind 不符、名稱重複、ABI 不符或 manifest 不合法都拒絕啟動。內建策略與內建認證（`none`、`static_bearer`、`passthrough`）是 native code，LLM 熱路徑只有 router 指名 WASM 策略時才進 WASM。
+- **回報與 capability：** `Hello.plugins` 帶每個 plugin 的 descriptor（含 `builtin`、`wasm_sha256`、`digest`），`Hello.plugin_abi` 帶 ABI；gateway 為每個 plugin 廣告 `strategy:<name>`、`auth:<name>` 或 `a2a_middleware:<name>`。快照用到 gateway 沒有的 plugin → 該 gateway NACK `UNSUPPORTED_FEATURE`；control plane 對指名它的寫入回 422，帶 `force` 才能存。
+- **沙箱與時限：** 每次呼叫有 timeout（`Router.plugin_timeout_ms`、`PluginRef.timeout_ms`，0 = 60 s；WASM plugin 適用，內建 plugin 忽略），只有設定的 timeout 或 client 斷線會取消，慢的 plugin 只拖慢呼叫它的請求，不佔 tokio worker。每個 instance 上限 32 MiB，全部 instance 共用 1 GiB（`LUMEWARP_PLUGIN_MEMORY_LIMIT_BYTES`）。`upstream-auth` 另有 `http-fetch`（只限 `params.allowed_origins`）與 `secret()`（只讀 `LUMEWARP_PLUGIN_SECRET_*`）；router 與 middleware 沒有任何 host I/O。trap／timeout：router 走 fall-through，auth 與 middleware 回 502／504，串流中則以最後一個 JSON-RPC error event 結束。
+- `lumewarp plugins [--json]` 只讀目錄、不連 control plane，列出這個 process 會有的 plugin（含 built-ins），是部署前的檢查。完整介面、manifest 與載入規則見 [gateway plugins](plugins.md)。
 
 ## Python plugin
 
@@ -181,7 +204,7 @@ gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control 
 | `lumewarp_playground_requests_total` | result（ok／rejected） | Playground token 認證結果，不含 key 標籤 |
 | `lumewarp_request_duration_seconds` | requested, endpoint, model | 端到端延遲 |
 | `lumewarp_gateway_overhead_seconds` | endpoint | gateway 自身額外延遲 |
-| `lumewarp_ttft_seconds`、`lumewarp_tpot_seconds` | requested, model | 串流延遲 |
+| `lumewarp_ttft_seconds` | requested, model | 串流 TTFT（沒有 TPOT 指標） |
 | `lumewarp_tokens_total` | requested, team, direction | token 用量 |
 | `lumewarp_spend_total` | team | 花費 |
 | `lumewarp_upstream_circuit_state` | model | 熔斷與健康 |
@@ -196,11 +219,24 @@ gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control 
 | `lumewarp_vllm_scrape_failures_total` | upstream | vLLM metrics 抓取失敗（失敗即退回 in-flight 比較） |
 | `lumewarp_upstream_latency_ewma_seconds` | model | `lowest_latency` 使用的回應標頭時間 EWMA（於 `/metrics` 抓取時計算） |
 | `lumewarp_split_requests_total` | router, split | 依 traffic split 分配的請求數（canary 比例） |
-| `lumewarp_mcp_tool_calls_total` | server, tool, team, status | MCP 使用（尚未實作） |
+| `lumewarp_mcp_requests_total` | server, method, status | MCP 請求；method 是轉發的方法或 `notification`／`other`，status 是 HTTP 狀態 |
+| `lumewarp_mcp_tool_calls_total` | server, tool, team, status | MCP tool 呼叫；`tool` 只放已核准的名稱，其餘是 `_unapproved`（避免上游製造標籤） |
+| `lumewarp_mcp_upstream_duration_seconds` | server | MCP 上游回應標頭時間 |
+| `lumewarp_mcp_catalog_reports_dropped_total` | reason（oversized／pending_limit／invalid） | 定義觀察在回報前被丟棄 |
+| `lumewarp_a2a_requests_total` | agent, method, status | A2A 請求；method 是 JSON-RPC 方法標籤，card 端點是 `agent_card` |
+| `lumewarp_a2a_upstream_duration_seconds` | agent | A2A 上游（含 card 抓取）回應標頭時間 |
+| `lumewarp_plugin_calls_total` | kind, plugin, result（ok／error／timeout／trap） | 請求路徑上的 plugin 呼叫；`manifest`／`configure` 與 built-ins 不計 |
+| `lumewarp_plugin_duration_seconds` | kind, plugin | 同一批呼叫的延遲直方圖 |
 | `lumewarp_config_version`、`lumewarp_config_apply_failures_total` | gateway | 設定同步 |
 | `lumewarp_cp_compile_duration_seconds`、`lumewarp_cp_compile_failures_total` | — | 設定編譯（CP） |
 | `lumewarp_cp_config_version`、`lumewarp_cp_outbox_pending` | — | 最新發布版本與 outbox 積壓（CP） |
 | `lumewarp_cp_gateway_sessions`、`lumewarp_cp_gateway_acks_total` | result（ack／nack） | config stream 連線與回覆（CP） |
+| `lumewarp_cp_gateway_plugins_ignored_total` | kind | `Hello` 中超出上限或名稱不合法而被忽略的 plugin（CP） |
+| `lumewarp_cp_mcp_catalog_definitions_total` | result（approved／pending／known） | 從回報與 Discover 存入的 MCP 定義（CP） |
+| `lumewarp_cp_mcp_catalog_discarded_total` | reason | 被丟棄的 MCP 定義回報（id／版本過舊、hash 不符、超出上限等；CP） |
+| `lumewarp_cp_mcp_definition_reviews_total` | action（approve／reject） | 管理員的定義審核（CP） |
+| `lumewarp_cp_mcp_discover_requests_total` | result（ok／failed） | Discover now 呼叫（CP） |
+| `lumewarp_cp_a2a_agent_cards_total` | result（stored／discarded） | 從 gateway 回報記錄的 A2A card（CP） |
 | `lumewarp_cp_usage_events_ingested_total`、`lumewarp_cp_usage_events_skipped_total` | reason（skipped） | 用量匯入（CP） |
 | `lumewarp_cp_authz_checks_total` | backend, decision | 授權後端（CP） |
 | `lumewarp_cp_keys_suspended_total`、`lumewarp_cp_key_reconcile_last_success_timestamp_seconds` | reason（suspended） | key 停用與 reconciler 新鮮度（CP） |
@@ -210,7 +246,7 @@ gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control 
 
 上表之外，gateway 另有 `lumewarp_request_body_read_seconds`、`lumewarp_upstream_errors_total`、`lumewarp_in_flight_requests` 與 `lumewarp_config_info`，都由獨立 admin listener 的 `/metrics` 輸出；`lumewarp_config_version` 在 YAML 模式為 0。OTLP traces 為選用，沒有 OTLP metrics。非串流與串流的 overhead 均為「body 讀完 → upstream request 送出」加「upstream headers 收到 → handler 返回」；串流再加第一個 frame 已 ready 到轉交的本地處理時間，不含等待 upstream headers、prefill、後續 body 生成或 client socket flush／ACK。未路由的請求以 body 讀完到 handler 返回近似，未讀 body 則從 request start 計；取消中的 upload 只進 body-read duration，不算 overhead。此為內部處理時間近似，不同於 bench 的 gateway／direct 端到端延遲差值。完整操作、TTFT／body-read 與標籤定義見 [gateway README](../gateway/README.md)。
 
-API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可選 ServiceMonitor（gateway admin port 與 control plane metrics port）；Prometheus 告警規則（`deploy/prometheus/rules.yaml`，附 promtool 測試）與四張 Grafana dashboard（`deploy/grafana/dashboards/`，Helm 可選安裝）；每個請求一條 OTel trace，接續 W3C `traceparent`。log 預設不記 prompt/response。
+API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可選 ServiceMonitor（gateway admin port 與 control plane metrics port）；Prometheus 告警規則（`deploy/prometheus/rules.yaml`，26 條 alert、4 條 recording rule，附 promtool 測試）與五張 Grafana dashboard（`deploy/grafana/dashboards/`，Helm 可選安裝）；每個請求一條 OTel trace，接續 W3C `traceparent`。log 預設不記 prompt/response。
 
 ## Control plane 與 gateway
 
@@ -220,28 +256,30 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 
 - 單一 Python 程序：FastAPI（HTTP 8091）＋ gRPC（50051）的 ConfigService／UsageService／health，加上 compiler loop 與月結 rollover；`/readyz` 檢查 DB、migration head 與背景服務，`/healthz` 為 liveness，gRPC 意外停止會讓程序結束。
 - Postgres schema 由 Alembic 管理（單一 scope）；每人 PAT；授權為安裝層管理員、org admin 與 team admin／member，成員關係在 `team_members`，每人例外配額與 grants 在獨立的 `member_policies`，也可換成外部 `lumewarp.authz` 後端。
-- REST `/api/v1`：org（建立、改名與政策、封存、org admin、用量彙總）、team／member／service account／key（含撤銷與輪替）、預算／限流／模型 allowlist、upstream／model／router（含價格）、使用者、安裝層角色（`/installation-admins`）、usage 聚合、audit、gateway 狀態與 token、config versions 與 routing rollback。
+- REST `/api/v1`：org（建立、改名與政策、封存、org admin、用量彙總）、team／member／service account／key（含撤銷與輪替）、預算／限流／模型 allowlist、upstream／model／router（含價格）、MCP server（含定義清單、核准／拒絕、Discover now）與 A2A agent、`/plugins`（三種 kind 的唯讀 descriptor）、使用者、安裝層角色（`/installation-admins`）、usage 聚合、audit、gateway 狀態與 token、config versions 與 routing rollback。
 - 設定發布：寫入交易內同時寫 outbox；compiler 以 advisory lock 序列化，產生不可變版本快照；gRPC 串流支援全量／delta、digest、ACK／NACK、base mismatch 重送全量、壞版本隔離與 persist 重試，舊版 payload 依保留策略壓縮。
 - 用量與預算：`UsageService.Report` 以 `request_id` 冪等寫入，同一交易累計 team 與 owner（member／service account）的 UTC 月總額並評估預算；org 的花費由旗下 team 加總，只有設了預算的 org 才檢查，超額寫一筆 `org_budget_windows` 與一筆 audit；調高或移除預算會清掉當月 window，之後再超額會重新 audit／compile。超額把 key 翻成 `BUDGET_EXCEEDED` 並推新版本（eventual，約 5 秒內；不切斷進行中的串流）。
-- Plugin：`lumewarp.auth`（首次 SSO 登入的身分對應）與 `lumewarp.authz`（授權後端）已接上。
-- Admin UI：Vite 靜態檔由 control plane 掛在 `/`，用 SSO 或緊急登入；API 文件在 `/docs`，OpenAPI 可離線輸出。UI 沒 build 時只有 API。
+- Plugin：Python 的 `lumewarp.auth`（首次 SSO 登入的身分對應）與 `lumewarp.authz`（授權後端）已接上；gateway 端的 `router-strategy`、`upstream-auth`、`a2a-middleware` 是 WASM，由 gateway 自己載入，control plane 只驗證 gateway 在 `Hello.plugins` 回報的 schema。
+- Admin UI：Vite 靜態檔由 control plane 掛在 `/`，用 SSO 或緊急登入；API 文件在 `/docs`，OpenAPI 可離線輸出。UI 沒 build 時只有 API。MCP servers 與 A2A agents 各有列表與編輯頁（A2A 編輯頁有 card 預覽），Plugins 頁唯讀列出哪台 gateway 載了什麼；team／member 的政策編輯含 MCP server／tool 與 agent grant；Usage 有 LLM／MCP／A2A 三個分頁；My keys 顯示這個 team 的 MCP 與 A2A 連線片段。
 
 **Gateway（`gateway/`）**
 
 - 新增 control-plane 模式：`--control-plane`、`--gateway-token-env`、`--state-dir`、`--scope`、`--gateway-id`、`--local-config`；standalone YAML 模式不變。
-- 開機先載入 `<state-dir>/snapshot.pb`（驗證 scope、長度與結尾 SHA-256）並立即服務，再背景連線；沒有可用快照時 `/v1/*` 與 `/readyz` 回 503，不會退回 open router。每次套用先持久化再 swap 再 ACK，重啟可回到最後 ACK 的版本。
+- 開機先載入三種 plugin 目錄，再載入 `<state-dir>/snapshot.pb`（驗證 scope、長度與結尾 SHA-256）並立即服務，再背景連線；沒有可用快照時 `/v1/*` 與 `/readyz` 回 503，不會退回 open router。每次套用先持久化再 swap 再 ACK，重啟可回到最後 ACK 的版本。
+- MCP／A2A 端點（`/mcp`、`/mcp/servers/*`、`/a2a`、`/a2a/*`）與 LLM 端點共用同一個 listener；它們只讀設定快照與 `LUMEWARP_GATEWAY_ID_KEY`／`LUMEWARP_GATEWAY_PUBLIC_URL`，不碰資料庫或 control plane。
 - CP 模式一律要求 key；status／expiry／allowlist 與預算狀態照舊（401／403／429）。rpm、tpm、max_parallel 在每個 gateway 行程本機累計（N 個實例可有 N 倍上限），429 帶 `Retry-After`。
-- 用量：串流在上游支援時注入 `stream_options.include_usage`，客戶端沒要求時剝除多出的 usage chunk；事件經有界佇列（100k）每 1 秒或 500 筆批次送出，滿了就丟並計數；token／spend 指標與 `model.price` 成本換算已接上。
+- 用量：串流在上游支援時注入 `stream_options.include_usage`，客戶端沒要求時剝除多出的 usage chunk；事件經有界佇列（100k）每 1 秒或 500 筆批次送出，滿了就丟並計數；token／spend 指標與 `model.price` 成本換算已接上。MCP／A2A 的請求也產生 usage event（`kind`、`target`、`method`、`tool`、`status`、duration），但不計成本、不進預算。
 - 指標：config stream 連線／版本／NACK code、usage 佇列與 capture 狀態、tokens／spend 皆已輸出；`/metrics` 仍在 admin listener。
 
 **部署**
 
-- `deploy/helm/lumewarp`：control plane 與 gateway 的 Deployment／Service、DB URL 與 gateway token 的既有 Secret 參照、`/readyz`＋`/healthz` probes、gateway state dir（emptyDir 預設、PVC 選用）、migration hook Job、可選 ServiceMonitor。
+- `deploy/helm/lumewarp`：control plane 與 gateway 的 Deployment／Service、DB URL 與 gateway token 的既有 Secret 參照、`/readyz`＋`/healthz` probes、gateway state dir（emptyDir 預設、PVC 選用）、plugin 目錄的 volume 掛載（三個子目錄與 `LUMEWARP_PLUGIN_MEMORY_LIMIT_BYTES`、`LUMEWARP_GATEWAY_ID_KEY`、`LUMEWARP_GATEWAY_PUBLIC_URL`）、migration hook Job、可選 ServiceMonitor。
 - `deploy/dev/compose.yaml` 提供本機 Postgres 16。
 
 **已知限制**
 
 - 預算為 eventual；佇列滿或 gateway 重啟會遺失用量事件，進行中的串流不會因超額被切斷；月窗口固定為 UTC 日曆月。org 超額由推導花費判定，並行批次尚未互相可見時最多延後到下一次 ingest 或 compile。限流是每個 gateway 行程各算一份，N 個 instance 最多 N 倍。
+- MCP／A2A 的已知邊界：聚合端點的 `GET /mcp` 回 405；聚合端點的反向 request（elicitation 等）與反向回應只在同一個 POST SSE 串流上，取消／進度通知的路由是 process-local；session 與 cursor 靠 `LUMEWARP_GATEWAY_ID_KEY` 跨 instance，換金鑰會讓未到期的 session 與 task id 失效。TOFU 在回報與快照傳播前可能讓兩台 gateway 短暫服務同一名稱的不同定義。A2A `ListTasks` 只支援 `passthrough` agent。plugin 沒有熱載入，換檔要重啟。
 
 ## 權限、路由與可觀測性
 
@@ -257,7 +295,7 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 
 **路由（gateway + control plane）**
 
-- 快照與 standalone YAML 支援 `retry`、`fallbacks`、`health_check`、`circuit_breaker`、`traffic_split`、`vllm_load`、`rotation_grace`、`encrypted_api_key`、`model_limits`、`default_body`、`reasoning_effort` 與 `strategy:<name>` capability；control plane 只在欄位有用到時列出對應 capability，驗證規則與 gateway 一致（含 URI 文法）。fallback 只能是 model，需要至少 2 次 attempt 的 retry policy。
+- 快照與 standalone YAML 支援 `retry`、`fallbacks`、`health_check`、`circuit_breaker`、`traffic_split`、`vllm_load`、`rotation_grace`、`encrypted_api_key`、`model_limits`、`default_body`、`reasoning_effort`、`mcp`、`a2a` 與三種 plugin capability（`strategy:`、`auth:`、`a2a_middleware:`）；control plane 只在欄位有用到時列出對應 capability，驗證規則與 gateway 一致（含 URI 文法）。fallback 只能是 model，需要至少 2 次 attempt 的 retry policy。
 - 重試僅限回應送出前，串流僅限收到上游 headers 前；最多五次，
   共用原路由 timeout 與全域重試額度（預設 20%，低流量允許三次 burst；
   只有設定 `retry` 的路由請求會存入額度）。`Retry-After` 使用 model
@@ -280,23 +318,26 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 **可觀測性**
 
 - gateway 新指標見上表；control plane 在獨立 listener 輸出 `lumewarp_cp_*`。
-- 19 條告警規則與 promtool 測試、四張 dashboard、Helm 可選 PrometheusRule／dashboard ConfigMap／兩個 ServiceMonitor。
+- 26 條告警規則（另有 4 條 recording rule）與 promtool 測試、五張 dashboard、Helm 可選 PrometheusRule／dashboard ConfigMap／兩個 ServiceMonitor。
 
 **驗收**
 
 - `scripts/e2e-identity.sh`：builtin 與 openfga 各跑一次 OIDC 登入、建 key、呼叫、用量對帳、撤權（實測 builtin 0.2 s、openfga 1.1 s 內回 401）、IAM 故障不誤停；另含路由 e2e（重試、fallback、熔斷、URI 契約）。
 - `scripts/e2e-core.sh`（含路由 e2e）、`scripts/load-e2e.sh` 8/8。
+- `scripts/e2e-mcp.sh`：獨立與 CP-backed 兩段。聚合與單一 server 端點、tool grant、rug-pull 後待審與核准 2 秒內恢復、`passthrough`／`static_bearer`／`hmac-signature` 的出站 header、`auth` plugin timeout（504）、usage `kind=mcp`、DB 無明文憑證。
+- `scripts/e2e-a2a.sh`：card 改寫與 `strip-artifacts` SSE、以他人 key 的 task id 或竄改 MAC 被拒、push 設定被拒、middleware timeout（504）、usage `kind=a2a`、沒有 `LUMEWARP_GATEWAY_ID_KEY` 時 503。
+- `ui/` Playwright 涵蓋 MCP servers、A2A agents 與 grant 編輯。
 
 ## 模型目錄已實作
 
 目錄的核心是 model、alias、router。以下先列現況，後面是已定的決定、實作取捨與尚未做的項目。
 
-- **目錄與 API：** `/models`、`/aliases`、`/routers`、`/strategies`、`/catalog`。名字跨種類唯一（`catalog_names`），參照與權限都用 id（`policy_grants`），改名不弄斷關係；舊名字立刻 404，只有 model 可以 `keep_old_name_as_alias`。被參照的名字不能刪（409）。
-- **快照：** `Snapshot` 直接帶 models、aliases、routers，gateway 在套用時建成一張名字表，請求路徑仍是一次查表。`Router.strategy` 是字串。`ApiKey.allowed_models` 由 control plane 展開成當下的名字。
-- **Rollback：** 依 id 還原目錄（`config_versions.catalog_state`），已刪除的項目用原 id 重建；授權不還原。
+- **目錄與 API：** `/models`、`/aliases`、`/routers`、`/plugins?kind=router-strategy`、`/catalog`。名字跨種類唯一（`catalog_names`），參照與權限都用 id（`policy_grants`），改名不弄斷關係；舊名字立刻 404，只有 model 可以 `keep_old_name_as_alias`。被參照的名字不能刪（409）。
+- **快照：** `Snapshot` 直接帶 models、aliases、routers、MCP servers 與 A2A agents，gateway 在套用時建成名字表，請求路徑仍是一次查表。`Router.strategy` 是 built-in 或 WASM plugin 的名字。`ApiKey.allowed_models` 由 control plane 展開成當下的名字。
+- **Rollback：** 依 id 還原目錄（model、alias、router，以及 MCP server／A2A agent）並重推該版本的 routing；不在 `catalog_state` 的 MCP server／A2A agent 會封存而非刪除，所以定義與 grant 留著，但 rollback 不重審定義。授權本身不還原。
 - **回應改寫：** 不緩衝的掃描器（`rewrite.rs`）把 JSON 與 SSE 最外層的 `model` 換成呼叫的名字，大小不設上限。呼叫的名字等於 `upstream_model` 時走快速路徑。需要改寫時移除送往上游的 `Accept-Encoding`；上游仍壓縮就原樣轉發並累加 metric。契約見 [config protocol](config-protocol.md)。
 - **Usage：** 每筆 event 保存 `requested`、`model`、`alias`、`router`、`upstream`、`upstream_model`、`fallback`、`attempts`、`endpoint`，加上 control plane 解析的 `model_id`、`alias_id`、`router_id`。`GET /usage` 不是每個欄位都能查：`group_by` 支援 `day`、`requested`、`model`、`upstream_model`、`alias`、`router`、`team`、`owner`、`key`；篩選支援 `from`、`to`、`team_id`、`user_id`、`service_account_id`、`key_id`、`requested`、`model`、`upstream_model`、`alias`、`router`、`model_id`、`alias_id`、`router_id`、`alias_missing`、`router_missing`。`upstream`、`fallback`、`attempts`、`endpoint` 只能從資料列讀。改名前後的用量連續。
-- **策略：** `register!` 宣告 params 與成員欄位，schema 從 struct 產生，在 `Hello` 回報，存進 `gateway_strategies`；寫入時依 schema 驗證，內建策略有 commit 的 manifest。見 [router strategies](router-strategies.md)。
+- **策略：** plugin 的 `register!` 宣告 kind、params 與成員欄位，schema 從 struct 產生，在 `Hello.plugins` 回報，存進 `gateway_plugins`；寫入時依 schema 驗證，內建 plugin 的 descriptor 有 commit 的 manifest（`compiler/builtin_plugins.json`）。見 [router strategies](router-strategies.md) 與 [gateway plugins](plugins.md)。
 - **用 OTel 查請求：** gateway 不寫 access log。回應帶 `x-lumewarp-request-id`，等於 usage 的 `request_id` 與 span 的 `request_id`。`request` span 帶呼叫的名字、alias、router、最後的 model 與 attempts，每次嘗試一個 `upstream_attempt`。前提：沒設 OTLP endpoint 就沒有紀錄；取樣低於 100% 或 exporter 佇列滿了會查不到，要當 access log 建議 100%；保留多久由 OTel 後端決定。Sampler 不聽從用戶端 `traceparent` 的 sampled flag。Helm 的設定是 `gateway.otel.endpoint`、`gateway.otel.samplingRatio`。
 - **Model 設定：** `max_input_tokens` 只供顯示；`max_output_tokens` 由 gateway 檢查 `max_tokens` 與 `max_completion_tokens`，超過回 400。`default_body` 是 JSON 物件，合併在請求之下：用戶端有的欄位優先，兩邊都是物件時遞迴合併。`reasoning` 處理 OpenAI 的 `reasoning_effort`（等級名稱可自訂，符合 `^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$`；mapped 可設 1–16 個等級）：`passthrough` 原樣轉發（不檢查值），`strip` 直接移除，`mapped` 換成該等級對應的 JSON 片段（例如 vLLM 的 `chat_template_kwargs.enable_thinking`），沒有對應的等級回 400；`default_level` 在用戶端沒送時套用。優先順序 default_body < reasoning 片段 < 用戶端；`model`、`stream`、`stream_options` 不能設定，`default_body` 也不能設 `reasoning_effort`（改用 `default_level`）；巢狀最多 32 層。只解析最外層，沒動到的值保留原 bytes；沒有設定的 model 完全不經過這段（`transform.rs`）。稽核只記 `default_body_changed`／`reasoning_changed`，不記內容。
 - **Metrics：** 標籤 `model` 是實際服務的 model，`requested` 是呼叫的名字，`endpoint` 是 API 路徑。改名後 label 換成新名字，舊名字的時間序列就此結束，這是 Prometheus 的正常行為。
@@ -319,11 +360,11 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 11. **內部命名全部一起改。** 目前沒有遷移成本，不保留舊詞。
 12. **Team 設成 All 就包含之後新增的名字。** 需要限制的 team 改用 Selected。
 13. **Usage 的 `model` 記最後實際服務的 model，另外記錄來源的 alias 和 router。**
-14. **Router 的設定由 Rust 擴充介面定義。** 內建和自訂策略走同一套，UI 依策略宣告的 schema 產生表單。策略只定義自己的設定，成員清單、retry、fallback、traffic split 由 gateway 統一提供。
+14. **Router 的設定由 plugin 的 manifest 定義。** 內建和自訂策略走同一套宣告，UI 依策略宣告的 schema 產生表單。策略只定義自己的設定，成員清單、retry、fallback、traffic split 由 gateway 統一提供。
 15. **Gateway 不寫 access log，要查單一請求就到 OTel 找。**
 16. **只有 model 改名有「Keep old name as alias」。** 預設勾選；router 和 alias 沒有。
-17. **有 gateway 沒有某個策略時，預設不能儲存。** API 回 422 並列出缺少的 gateway，帶 `force` 才能存。
-18. **路由細節只給安裝層管理員。** `/catalog` 的名字與種類任何已登入者都能讀，因為 team admin 設定 allowlist 只需要名字；`/upstreams`、`/models`、`/aliases`、`/routers`、`/strategies` 的細節需要安裝層權限。Team member 仍可從自己的 usage 看到實際服務的 model 與 `upstream_model` 名稱，那是用量紀錄，不是路由設定。回應改寫只影響 API 用戶端看到的名字，不算保密。
+17. **有 gateway 沒有某個 plugin 時，預設不能儲存。** API 回 422 並列出缺少的 gateway，帶 `force` 才能存。
+18. **路由細節只給安裝層管理員。** `/catalog` 的名字與種類任何已登入者都能讀，因為 team admin 設定 allowlist 只需要名字；`/upstreams`、`/models`、`/aliases`、`/routers`、`/plugins`、`/mcp-servers`、`/a2a-agents` 的細節需要安裝層權限。Team member 仍可從自己的 usage 看到實際服務的 model 與 `upstream_model` 名稱，那是用量紀錄，不是路由設定。回應改寫只影響 API 用戶端看到的名字，不算保密。
 
 - **價格放在 model 上。** 費用永遠依實際服務的 model 計算。
 - **權限清單驗證名字存在。** Member / service account 的清單必須是 team 範圍的子集，UI 也只列 team 範圍內的名字。
@@ -334,11 +375,11 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 
 - **讀 body 前被拒絕的請求，`requested` 是空的。** 403、404、429（限流）在讀完 body 之後才決定，有值；已撤銷、停用、過期和超過預算的 key 在讀 body 之前就被拒絕，那時還不知道名字。要補就得為了被拒絕的請求讀 body，所以維持空值。
 - **快速路徑可能回傳上游更具體的名字。** 呼叫的名字等於 `upstream_model` 時不走掃描器，例如呼叫 `gpt-4o`，OpenAI 可能回 `gpt-4o-2024-08-06`。這是第 10 點「一律改寫」之外的例外，另外兩個例外是錯誤回應和上游仍然壓縮的回應。
-- **Binary 叫 `lumewarp`，** 指令是 `lumewarp strategies --json`。
+- **Binary 叫 `lumewarp`，** 指令是 `lumewarp plugins --json`。
 - **解析 usage 名字有寬限時間。** 依請求開始時間（`started_at`，舊 gateway 用完成時間），查不到精確的區間時，寬限時間內只有一個同種類的擁有者才補 id。預設 300 秒，`LUMEWARP_USAGE_CATALOG_GRACE_SECONDS`，0 是關閉。這容忍時鐘偏差和傳播延遲，不是身分證明：同種類舊名字在寬限時間內被重複使用時，落後的 gateway 仍可能算到新擁有者。
-- **非串流回應超過 4 MiB 時，usage 是 `INVALID`。** 回應本身正常轉發和改寫，只是 usage 的 capture 上限 `MAX_JSON_CAPTURE` 讀不到 token。這個上限原本就有，但以前這種回應需要改寫時會中斷，現在會送達，所以比較容易遇到。
-- **沒有 gateway 回報的策略也算 `config_invalid`。** 遷移過來的自訂 router 在 gateway 回報該策略之前都會顯示 `Config invalid`，資料不會被修改。
-- **內建策略拒絕成員 params。** 以前填了會被忽略，現在 API 回 422、gateway NACK，因為空 schema 是 `additionalProperties: false`。已存的這種資料會顯示 `config_invalid`。
+- **非串流回應超過 4 MiB 時，usage 是 `INVALID`。** 回應本身正常轉發和改寫，只是 usage 的 capture 上限 `MAX_JSON_CAPTURE` 讀不到 token。這個上限原本就有；需要改寫的回應仍會送達，所以比較容易遇到。
+- **沒有 gateway 回報的 plugin 也算 `config_invalid`。** 已存的 router 設定若在升級後不再符合任何已回報的 schema，會顯示 `Config invalid`，資料不會被修改。
+- **內建策略拒絕成員 params。** 填了成員 params 會被拒絕：API 回 422、gateway NACK，因為空 schema 是 `additionalProperties: false`。已存的這種資料會顯示 `config_invalid`。
 - **`Configure` trait。** `configure` 透過新的 `Configure<P, M>` trait 收到已解析的 struct，讓驗證的型別和讀取的型別是同一份；`Strategy` 只剩 `pick`。
 
 ### 尚未做
@@ -362,7 +403,12 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 
 ## Roadmap
 
-下一步是 MCP / A2A（MCP 註冊聚合、工具權限、OAuth 代管；A2A 代理；三種流量共用稽核與 tracing），尚未規劃。
+MCP 與 A2A 代理、工具級 grant、定義審核（TOFU／manual／off）、Agent Card 改寫、A2A middleware 與三種 WASM plugin 已實作。刻意延後、這一期不做的：
+
+- MCP resources、subscriptions 與 `completion`；聚合端點的 `GET` 串流（回 405）與跨 instance 的取消／進度路由；人工核准高風險 tool；stdio sidecar（由部署方自行包裝）；MCP OAuth resource server 與代管上游使用者 token。
+- A2A gRPC／REST binding、push notification、Agent Card 簽章、上游使用者 token 代管；非 `passthrough` agent 的 `ListTasks`。
+- plugin 熱載入、plugin 簽章／來源驗證、跨 gateway 的 plugin 一致性檢查；plugin 沒有延遲預算，只有設定的 timeout。
+- MCP／A2A 的限流與預算（只有 `tools/call` 計入 key 的 RPM）。
 
 其他尚未實作的項目：
 

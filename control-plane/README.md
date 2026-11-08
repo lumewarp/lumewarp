@@ -734,11 +734,14 @@ The compiler lists a capability in `required_capabilities` exactly when a field 
 `fallbacks`, `traffic_split` (split or sticky) and `strategy:<name>` for every strategy in use.
 `lowest_latency` is not a capability of its own any more: it is `strategy:lowest_latency`.
 
-**Rollback** restores models, aliases, routers and their names by id from the version's
-`catalog_state`, recreating deleted items under their old id, and re-publishes that version's
-routing as a new version. Grants are not routing config: grants on an item deleted since then
-do not come back. Keys, teams and policies come from current state, so a revoked key stays
-revoked. It goes through the same strategy checks as a router write.
+**Rollback** restores models, aliases, routers, MCP servers and A2A agents by id from the
+version's `catalog_state`, recreating deleted items under their old id, and re-publishes that
+version's routing as a new version. An MCP server or A2A agent absent from the state is
+archived rather than deleted, so its definitions and grants survive; reviewed definition
+states are not captured, so a rollback never re-decides a definition. Grants are not routing
+config: grants on a deleted catalog item do not come back. Keys, teams and policies come
+from current state, so a revoked key stays revoked. It goes through the same plugin checks
+as a router write.
 
 ## Config publishing and usage
 
@@ -752,7 +755,9 @@ revoked. It goes through the same strategy checks as a router write.
 - Gateways get a full snapshot, then deltas; each update is applied, validated, persisted
   and swapped by the gateway before it ACKs. NACK `BASE_MISMATCH` triggers a full,
   `INVALID_CONFIG`/`UNSUPPORTED_FEATURE` quarantines the version, `PERSIST_FAILED` retries.
-  Rollback restores the catalog by id and republishes an older version's **routing** only; keys
+  Rollback restores the catalog by id (including MCP servers and A2A agents, archiving the
+  ones absent from the state so their definitions and grants survive) and republishes an
+  older version's **routing** only; keys
   and policies always come from current source state. Full rules: [config protocol](../docs/config-protocol.md).
 - `UsageService.Report` validates per event (an invalid event is skipped and logged, the
   rest of the batch is kept; `REJECTED` events may omit model/model, and an MCP or A2A event
@@ -787,6 +792,11 @@ these names.
 | `lumewarp_cp_gateway_sessions` | gauge | | Connected config-stream sessions in this process (`grpc/` session registry). |
 | `lumewarp_cp_gateway_acks_total` | counter | `result` = `ack` \| `nack` | Each valid ACK/NACK of a pending update. Protocol errors are not counted. |
 | `lumewarp_cp_gateway_plugins_ignored_total` | counter | `kind` = `router-strategy` \| `upstream-auth` \| `a2a-middleware` \| `other` | Entries of a `Hello` ignored: past the per-gateway limit of 128 per kind, an invalid name, or (for `other`) a descriptor whose kind is unusable or a non-plugin capability over its own limit of 64. The stream stays up. |
+| `lumewarp_cp_mcp_catalog_definitions_total` | counter | `result` = `approved` \| `pending` \| `known` | MCP definitions stored from a gateway `CatalogReport` or Discover now (`known`: the exact hash was already there). |
+| `lumewarp_cp_mcp_catalog_discarded_total` | counter | `reason` = `unknown_target` \| `stale_id` \| `stale_version` \| `hash_mismatch` \| `invalid` \| `pending_limit` \| `definition_limit` \| `report_limit` | Definition reports dropped by validation or bounds. |
+| `lumewarp_cp_mcp_definition_reviews_total` | counter | `action` = `approve` \| `reject` | Administrator decisions on pending definitions. |
+| `lumewarp_cp_mcp_discover_requests_total` | counter | `result` = `ok` \| `failed` | Discover-now calls against an MCP server. |
+| `lumewarp_cp_a2a_agent_cards_total` | counter | `result` = `stored` \| `discarded` | A2A agent cards recorded from gateway reports. |
 | `lumewarp_cp_usage_events_ingested_total` | counter | | Events accepted by a committed `UsageService.Report` (an identical replay is accepted again but not re-costed). |
 | `lumewarp_cp_usage_events_skipped_total` | counter | `reason` = `invalid_event` \| `request_id_conflict` \| `key_mismatch` | Events skipped by per-event validation of a committed report: malformed fields; a request id reused with different data in the batch or vs. a stored event; unknown key or key not in the event's team. Batch-level rejections (`INVALID_ARGUMENT`) count nothing. |
 | `lumewarp_cp_authz_checks_total` | counter | `backend`, `decision` = `allow` \| `deny` \| `error` | Every `Authorizer.check` and every item of `Authorizer.batch_check` (native batch failures count one `error` per item). `backend` is `LUMEWARP_AUTHZ_BACKEND`. |

@@ -87,6 +87,11 @@ pub const BREAKER_FAILURES: u32 = 5;
 /// How long a tripped breaker pauses its plugin.
 pub const BREAKER_PAUSE: Duration = Duration::from_secs(10);
 
+/// Longest an apply-time `configure`/pre-warm may take, for any plugin kind.
+/// Expiry refuses the version (`INVALID_CONFIG`) instead of wedging the config
+/// stream; request-path calls are bounded by their own configured timeout.
+pub const CONFIGURE_TIMEOUT: Duration = Duration::from_secs(60);
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
@@ -274,6 +279,38 @@ pub fn store_with_budget(engine: &Engine, budget: Arc<limits::Budget>) -> Store<
     store
 }
 
+/// Whether a wasmtime error is the epoch deadline of [`set_apply_deadline`].
+pub fn is_epoch_trap(error: &wasmtime::Error) -> bool {
+    error.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt)
+}
+
+/// Epoch ticks covering `budget` (one tick is [`EPOCH_TICK`]).
+pub fn epoch_ticks(budget: Duration) -> u64 {
+    u64::try_from(budget.as_micros().div_ceil(EPOCH_TICK.as_micros()))
+        .unwrap_or(u64::MAX)
+        .max(1)
+}
+
+/// Gives a Store a hard apply-time budget: once it elapses the guest **traps**
+/// instead of yielding.
+///
+/// A timer alone cannot cut a guest that spins and re-wakes itself — it never
+/// lets the executor park, so the deadline is enforced by the epoch instead
+/// (M4). Only apply-time `configure` uses this; request-path calls have no
+/// fixed limit and yield for fairness only.
+pub fn set_apply_deadline(store: &mut Store<State>, budget: Duration) {
+    store.epoch_deadline_trap();
+    store.set_epoch_deadline(epoch_ticks(budget));
+}
+
+/// Restores the request-path behaviour after an apply-time `configure`: the
+/// guest yields at every tick instead of trapping, so a call can be cancelled
+/// by its own timeout or by the caller going away.
+pub fn set_fair_epoch(store: &mut Store<State>) {
+    store.epoch_deadline_async_yield_and_update(1);
+    store.set_epoch_deadline(1);
+}
+
 /// Drives a future to completion for apply-time work (`configure`, pre-warming).
 ///
 /// Never call this on a request: it runs on its own thread and runtime so it
@@ -300,6 +337,18 @@ where
             .join()
             .expect("plugin apply thread panicked")
     })
+}
+
+/// [`block_on`] with a bound: `None` when `timeout` elapses first.
+///
+/// The bound runs inside the apply runtime so the timer is driven; the plugin's
+/// own future is dropped then, which discards any Store it created.
+pub(crate) fn block_on_timeout<F>(future: F, timeout: Duration) -> Option<F::Output>
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    block_on(async move { tokio::time::timeout(timeout, future).await.ok() })
 }
 
 /// The component worlds a plugin can implement, prepared once at load.
@@ -392,6 +441,12 @@ impl Plugin {
     /// A call that answered: the breaker starts over.
     pub fn record_success(&self) {
         self.failures.store(0, Ordering::Relaxed);
+    }
+
+    /// Clears the breaker, including an open pause (operations and tests).
+    pub fn reset_breaker(&self) {
+        self.failures.store(0, Ordering::Relaxed);
+        self.paused_until.store(0, Ordering::Relaxed);
     }
 }
 
@@ -674,7 +729,7 @@ pub fn builtins() -> Vec<PluginDescriptor> {
     all
 }
 
-pub use pool::{PoolConfig, RouterInstance, RouterPool};
+pub use pool::{Error as PoolError, PoolConfig, RouterInstance, RouterPool};
 
 #[cfg(test)]
 mod tests {

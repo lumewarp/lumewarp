@@ -421,13 +421,10 @@ impl Targets {
         }
         targets.server_list.sort_by(|a, b| a.name.cmp(&b.name));
         targets.agent_list.sort_by(|a, b| a.name.cmp(&b.name));
-        // Configure the `upstream-auth` plugins and the A2A middleware of every
-        // target that names one, so a refused `configure` answers this version
-        // with a NACK instead of failing the first request to that target.
-        // Plugins this gateway did not load are skipped here; the capability
-        // check in `snapshot::validate` already NACKed such a snapshot.
-        crate::upstream_auth::precompile(&targets)?;
-        crate::a2a::precompile(&targets)?;
+        // The outbound-auth and A2A-middleware plugins are configured by
+        // `RoutingTable::compile` (staged, published on activation), not here:
+        // this function must not touch a process-wide cache for a version that
+        // may still be refused.
         Ok(targets)
     }
 

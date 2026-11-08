@@ -15,8 +15,11 @@ use std::{
 
 use lumewarp_plugin_host::{
     limits::{self, Budget},
-    types, PoolConfig, Registry, RouterInstance,
+    types, PoolConfig, PoolError, Registry, RouterInstance,
 };
+
+/// What the gateway passes for `Router.plugin_timeout_ms` in these tests.
+const TIMEOUT: Duration = Duration::from_secs(60);
 use wasm_encoder::{
     CodeSection, ExportKind, ExportSection, Function, FunctionSection, HeapType, Instruction,
     MemorySection, MemoryType, Module, RefType, TableSection, TableType, TypeSection, ValType,
@@ -184,6 +187,7 @@ async fn a_failed_configure_while_pre_warming_is_counted_not_hidden() {
             prewarm: 1,
             memory: None,
             budget: Some(Arc::clone(&probe)),
+            configure_timeout: lumewarp_plugin_host::CONFIGURE_TIMEOUT,
         },
     )
     .unwrap();
@@ -205,6 +209,7 @@ async fn a_failed_configure_while_pre_warming_is_counted_not_hidden() {
             prewarm: 4,
             memory: None,
             budget: Some(tight),
+            configure_timeout: lumewarp_plugin_host::CONFIGURE_TIMEOUT,
         },
     )
     .unwrap();
@@ -213,6 +218,219 @@ async fn a_failed_configure_while_pre_warming_is_counted_not_hidden() {
         plugin.traps.load(Ordering::Relaxed) > traps,
         "the failed instantiation is counted, not swallowed"
     );
+}
+
+// ------------------------------------------------ review-w2-gw M1, M2, M4
+
+/// A router over `members`, keyed by `name`, configured with `params`.
+fn router_with(
+    plugin: Arc<lumewarp_plugin_host::Plugin>,
+    name: &str,
+    params: serde_json::Value,
+    members: types::RouterInfo,
+    config: PoolConfig,
+) -> Arc<RouterInstance> {
+    Arc::new(
+        RouterInstance::configure_with(
+            plugin,
+            types::RouterInfo {
+                name: name.into(),
+                params_json: params.to_string(),
+                ..members
+            },
+            config,
+        )
+        .expect("the fixture configures"),
+    )
+}
+
+/// Members with the cheapest-first fixture's per-member settings.
+fn priced_members() -> types::RouterInfo {
+    four_members()
+}
+
+/// Members with no per-member settings (the misbehave fixture).
+fn bare_members() -> types::RouterInfo {
+    types::RouterInfo {
+        name: "r".into(),
+        params_json: "{}".into(),
+        members: (0..4)
+            .map(|i| types::MemberInfo {
+                model: format!("m{i}"),
+                weight: 1,
+                split: None,
+                params_json: "{}".into(),
+            })
+            .collect(),
+    }
+}
+
+fn pool_config() -> PoolConfig {
+    PoolConfig {
+        target: 1,
+        prewarm: 1,
+        memory: None,
+        budget: None,
+        configure_timeout: lumewarp_plugin_host::CONFIGURE_TIMEOUT,
+    }
+}
+
+/// A guest answer that is not one of the eligible candidates it was given is a
+/// trap: it is counted, no model is returned (the caller falls through to the
+/// next pool), and the plugin keeps working for eligible answers (M1).
+#[tokio::test]
+async fn an_ineligible_pick_answer_is_a_trap_and_no_answer() {
+    let Some(registry) = load() else { return };
+    let plugin = registry.get(1, "misbehave_test").unwrap().clone();
+    let request = types::RequestInfo {
+        requested: "r".into(),
+        team_id: String::new(),
+        key_id: String::new(),
+        estimated_input_tokens: None,
+        headers: Vec::new(),
+    };
+    for answer in [1u32, 99] {
+        let instance = router_with(
+            plugin.clone(),
+            &format!("ineligible-{answer}"),
+            serde_json::json!({"mode": "bad_index", "index": answer}),
+            bare_members(),
+            pool_config(),
+        );
+        // Only positions 0 and 2 are eligible in this picture.
+        let all = candidates();
+        let eligible = vec![all[0], all[2]];
+        let traps = plugin.traps.load(Ordering::Relaxed);
+        assert_eq!(
+            instance.pick(&request, &eligible, 1, TIMEOUT).await,
+            None,
+            "answer {answer} must not be served"
+        );
+        assert!(
+            plugin.traps.load(Ordering::Relaxed) > traps,
+            "answer {answer} counts as a trap"
+        );
+        // The Store is reused: the plugin answers an eligible index next.
+        let honest = router_with(
+            plugin.clone(),
+            &format!("eligible-after-{answer}"),
+            serde_json::json!({"mode": "pass"}),
+            bare_members(),
+            pool_config(),
+        );
+        assert_eq!(honest.pick(&request, &eligible, 1, TIMEOUT).await, Some(0));
+    }
+}
+
+/// A plugin whose calls are stuck must delay only its own requests: another
+/// plugin still answers even when the process memory gate is one permit short
+/// (M2). With the old order (permit first, instance second) the queueing picks
+/// took the last permit and starved the healthy plugin.
+#[tokio::test(flavor = "current_thread")]
+async fn a_stuck_plugin_does_not_starve_another_plugin() {
+    let Some(registry) = load() else { return };
+    let memory = Arc::new(tokio::sync::Semaphore::new(2));
+    // Both pools share the same two-permit gate, so a queueing call that took a
+    // permit would starve the other plugin.
+    let gate = || PoolConfig {
+        memory: Some(Arc::clone(&memory)),
+        ..pool_config()
+    };
+    let stuck = router_with(
+        registry.get(1, "loop_test").unwrap().clone(),
+        "stuck",
+        serde_json::json!({}),
+        bare_members(),
+        gate(),
+    );
+    let healthy = router_with(
+        registry.get(1, "cheapest_first").unwrap().clone(),
+        "healthy",
+        serde_json::json!({}),
+        priced_members(),
+        gate(),
+    );
+    let stuck = Arc::new(stuck);
+    let healthy = Arc::new(healthy);
+
+    let request = types::RequestInfo {
+        requested: "r".into(),
+        team_id: String::new(),
+        key_id: String::new(),
+        estimated_input_tokens: None,
+        headers: Vec::new(),
+    };
+    let eligible = candidates();
+    let mut tasks = Vec::new();
+    for _ in 0..3 {
+        let instance = Arc::clone(&stuck);
+        let request = request.clone();
+        let eligible = eligible.clone();
+        tasks.push(tokio::spawn(async move {
+            instance
+                .pick(&request, &eligible, 1, Duration::from_secs(3600))
+                .await
+        }));
+    }
+    // Let the running pick enter the guest and the other two queue for its pool.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        memory.available_permits(),
+        1,
+        "only the running call holds a permit"
+    );
+    let answer = tokio::time::timeout(
+        Duration::from_secs(2),
+        healthy.pick(&request, &eligible, 1, TIMEOUT),
+    )
+    .await
+    .expect("a stuck plugin must not block another plugin");
+    assert_eq!(answer, Some(0));
+    for task in tasks {
+        task.abort();
+    }
+}
+
+/// An apply-time `configure` that never returns is refused once its budget
+/// elapses (M4), and the failure does not leave a published pool behind.
+#[tokio::test]
+async fn a_configure_that_never_returns_is_refused() {
+    let Some(registry) = load() else { return };
+    let plugin = registry.get(1, "misbehave_test").unwrap().clone();
+    let started = Instant::now();
+    let error = RouterInstance::configure_with(
+        plugin.clone(),
+        types::RouterInfo {
+            name: "stuck-configure".into(),
+            params_json: serde_json::json!({"mode": "stuck_configure"}).to_string(),
+            ..bare_members()
+        },
+        PoolConfig {
+            configure_timeout: Duration::from_millis(150),
+            ..pool_config()
+        },
+    )
+    .err()
+    .expect("a configure that never returns is refused");
+    assert!(matches!(error, PoolError::ConfigureTimeout), "{error:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the configure budget cut it"
+    );
+    // Nothing was published for that identity: configuring again still runs.
+    let again = RouterInstance::configure_with(
+        plugin,
+        types::RouterInfo {
+            name: "stuck-configure".into(),
+            params_json: serde_json::json!({"mode": "stuck_configure"}).to_string(),
+            ..bare_members()
+        },
+        PoolConfig {
+            configure_timeout: Duration::from_millis(100),
+            ..pool_config()
+        },
+    );
+    assert!(again.is_err());
 }
 
 // ------------------------------------------------- the async call lifecycle
@@ -231,6 +449,7 @@ fn loop_router(plugin: Arc<lumewarp_plugin_host::Plugin>, name: &str) -> Arc<Rou
                 prewarm: 1,
                 memory: None,
                 budget: None,
+                configure_timeout: lumewarp_plugin_host::CONFIGURE_TIMEOUT,
             },
         )
         .unwrap(),
@@ -363,6 +582,7 @@ async fn a_pool_miss_awaits_a_new_instance() {
             prewarm: 0,
             memory: None,
             budget: None,
+            configure_timeout: lumewarp_plugin_host::CONFIGURE_TIMEOUT,
         },
     )
     .unwrap();
@@ -403,6 +623,7 @@ async fn concurrent_calls_share_the_pool() {
                 prewarm: 0,
                 memory: None,
                 budget: None,
+                configure_timeout: lumewarp_plugin_host::CONFIGURE_TIMEOUT,
             },
         )
         .unwrap(),

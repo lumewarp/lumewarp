@@ -949,6 +949,14 @@ class McpServer(TimestampMixin, Base):
     )
     # Per upstream request; 0 = the gateway default.
     timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # The scope's config revision (`scopes.source_revision`) of the last write to this row.
+    # Provenance for a CatalogReport: the gateway reports the config version it served, and
+    # that version is trusted only when it was compiled from a revision at least this new
+    # (otherwise the report may describe a different upstream, L3). Observed definition and
+    # card data never move it; only an API write (or a rollback restoring this row) does.
+    config_revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
     review_mode: Mapped[McpReviewMode] = mapped_column(
         _enum(McpReviewMode, "mcp_review_mode"),
         nullable=False,
@@ -1057,6 +1065,11 @@ class A2aAgent(TimestampMixin, Base):
         Integer, nullable=False, default=0, server_default="0"
     )
     timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # The scope's config revision of the last write to this row; a fetched card never moves
+    # it (see McpServer.config_revision).
+    config_revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
     # Card an administrator pasted (JSON object, at most 64 KiB); served until the gateway
     # has fetched one. Never trusted: shown as text and rewritten by the gateway.
     card_json: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")

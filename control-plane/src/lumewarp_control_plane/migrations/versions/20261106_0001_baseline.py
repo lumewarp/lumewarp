@@ -1835,6 +1835,7 @@ def upgrade() -> None:
         sa.Column("secret_ciphertext", sa.LargeBinary(), nullable=True),
         sa.Column("auth_timeout_ms", sa.Integer(), server_default="0", nullable=False),
         sa.Column("timeout_ms", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("config_revision", sa.BigInteger(), server_default="0", nullable=False),
         sa.Column(
             "review_mode",
             sa.Enum(
@@ -1912,6 +1913,7 @@ def upgrade() -> None:
         ),
         sa.Column("middleware_timeout_ms", sa.Integer(), server_default="0", nullable=False),
         sa.Column("timeout_ms", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("config_revision", sa.BigInteger(), server_default="0", nullable=False),
         sa.Column("card_json", sa.Text(), server_default="", nullable=False),
         sa.Column("last_card_json", sa.Text(), server_default="", nullable=False),
         sa.Column("last_card_error", sa.String(length=1000), server_default="", nullable=False),

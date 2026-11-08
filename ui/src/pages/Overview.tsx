@@ -32,7 +32,8 @@ export function Overview() {
   const [metric, setMetric] = useUsageMetric();
   const today = isoDay(new Date());
   const from = shiftDay(today, -13);
-  const filters = { from: dayStart(from), to: dayStart(shiftDay(today, 1)), group_by: "day,model" };
+  // LLM requests only: an MCP or A2A event has no model, token or cost, and this card is spend.
+  const filters = { from: dayStart(from), to: dayStart(shiftDay(today, 1)), group_by: "day,model", kind: "llm" as const };
   const usage = useQuery({
     queryKey: ["usage", filters],
     queryFn: () => api.usage(filters),

@@ -24,6 +24,7 @@ from lumewarp_control_plane.models import (
     McpDefinition,
     McpDefinitionKind,
     McpDefinitionState,
+    McpReviewMode,
     McpServer,
 )
 from tests.api.helpers import ADMIN_AUTH, report_plugins, suffix
@@ -571,3 +572,291 @@ def test_discover_reports_a_jsonrpc_error(client, monkeypatch) -> None:
     )
     assert response.status_code == 502
     assert "-32601" in response.json()["error"]["message"]
+
+
+# --------------------------------------------------------------------------- protocol version
+
+
+def protocol_version_server(version: str, seen: list | None = None) -> httpx.MockTransport:
+    """A server that refuses every request after `initialize` without the negotiated version."""
+    tools = [{"name": "echo", "description": "Echoes text", "inputSchema": {"type": "object"}}]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        method = payload.get("method")
+        if method == "initialize":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": payload["id"],
+                    "result": {
+                        "protocolVersion": version,
+                        "capabilities": {"tools": {}, "prompts": {}},
+                        "serverInfo": {"name": "strict"},
+                    },
+                },
+            )
+        header = request.headers.get("mcp-protocol-version")
+        if seen is not None:
+            seen.append((method, header))
+        if header != version:
+            return httpx.Response(400, text="missing or wrong MCP-Protocol-Version")
+        if method == "notifications/initialized":
+            return httpx.Response(202)
+        result = {"tools": tools} if method == "tools/list" else {"prompts": []}
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": payload["id"], "result": result})
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.parametrize("version", ["2025-11-25", "2025-06-18"])
+async def test_discover_sends_the_negotiated_protocol_version(client, monkeypatch, version) -> None:
+    """M6: after `initialize` every request carries the negotiated MCP-Protocol-Version."""
+    seen: list = []
+    monkeypatch.setattr(discover, "transport", protocol_version_server(version, seen))
+    response = client.post(
+        "/api/v1/mcp-servers/discover", json={"url": "http://mcp.test/mcp"}, headers=H
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["protocol_version"] == version
+    assert [item["name"] for item in body["tools"]] == ["echo"]
+    assert [method for method, _ in seen] == [
+        "notifications/initialized",
+        "tools/list",
+        "prompts/list",
+    ]
+    assert {header for _, header in seen} == {version}
+
+
+def test_discover_refuses_an_unsupported_protocol_version(client, monkeypatch) -> None:
+    monkeypatch.setattr(discover, "transport", protocol_version_server("1999-01-01"))
+    response = client.post(
+        "/api/v1/mcp-servers/discover", json={"url": "http://mcp.test/mcp"}, headers=H
+    )
+    assert response.status_code == 502
+    assert (
+        response.json()["error"]["message"]
+        == "the server negotiated an unsupported protocol version"
+    )
+
+
+# --------------------------------------------------------------------------- error text (M4)
+
+
+def reflecting_error_server(seen: list | None = None) -> httpx.MockTransport:
+    """A hostile MCP server: it reflects the Authorization header it received."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        authorization = request.headers.get("authorization", "")
+        if seen is not None:
+            seen.append(authorization)
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": payload.get("id"),
+                "error": {
+                    "code": -32000,
+                    "message": f"invalid credential {authorization}",
+                },
+            },
+        )
+
+    return httpx.MockTransport(handler)
+
+
+def test_discover_never_returns_a_reflected_entered_token(client, monkeypatch) -> None:
+    sentinel = "REVIEW_SENTINEL_TOKEN"
+    monkeypatch.setattr(discover, "transport", reflecting_error_server())
+    response = client.post(
+        "/api/v1/mcp-servers/discover",
+        json={"url": "http://mcp.test/mcp", "token": sentinel},
+        headers=H,
+    )
+    assert response.status_code == 502
+    assert sentinel not in response.text
+    assert response.json()["error"]["message"] == "initialize failed: JSON-RPC error -32000"
+
+
+def test_discover_never_returns_a_reflected_stored_token(client, monkeypatch) -> None:
+    """The stored credential is write-only in the API; a reflected 502 must not undo that."""
+    created = _create(client, auth={"plugin": "static_bearer", "secret": PLAINTEXT})
+    assert created.status_code == 201, created.text
+    body = created.json()
+    monkeypatch.setattr(discover, "transport", reflecting_error_server())
+    response = client.post(
+        "/api/v1/mcp-servers/discover",
+        json={"url": body["url"], "server_id": body["id"]},
+        headers=H,
+    )
+    assert response.status_code == 502
+    assert PLAINTEXT not in response.text
+    assert response.json()["error"]["message"] == "initialize failed: JSON-RPC error -32000"
+
+
+@pytest.mark.parametrize("code", ["-32000", 2**40, None])
+def test_discover_only_reports_a_validated_numeric_error_code(client, monkeypatch, code) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        error = {"message": "boom"}
+        if code is not None:
+            error["code"] = code
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": payload["id"], "error": error})
+
+    monkeypatch.setattr(discover, "transport", httpx.MockTransport(handler))
+    response = client.post(
+        "/api/v1/mcp-servers/discover", json={"url": "http://mcp.test/mcp"}, headers=H
+    )
+    assert response.status_code == 502
+    body = response.json()
+    message = body["error"]["message"]
+    assert message in {
+        "initialize failed",
+        "initialize failed: JSON-RPC error -32000",
+    }
+    assert "boom" not in message
+    if code == 2**40:
+        assert str(code) not in message
+
+
+# --------------------------------------------------------------------------- recording (M5)
+
+
+async def test_discover_records_nothing_for_an_unsaved_url(client, committed, fake) -> None:
+    """A preview of a URL that is not the saved one must not decide a review for the server."""
+    created = _create(client)
+    assert created.status_code == 201, created.text
+    body = created.json()
+    response = client.post(
+        "/api/v1/mcp-servers/discover",
+        json={"url": "http://other.test/mcp", "server_id": body["id"]},
+        headers=H,
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["recorded"] is False
+    assert {item["state"] for item in result["tools"]} == {"unrecorded"}
+    assert [item["name"] for item in result["tools"]] == ["add", "echo"]
+    committed.expire_all()
+    stored = (
+        await committed.scalars(
+            select(McpDefinition).where(McpDefinition.server_id == uuid.UUID(body["id"]))
+        )
+    ).all()
+    assert stored == []
+    assert "mcp_server.discover" not in [
+        entry.action for entry in await _audit(committed, body["id"])
+    ]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"url": "http://changed.test/mcp"}, {"review_mode": McpReviewMode.MANUAL}],
+    ids=["url", "review-mode"],
+)
+async def test_discover_records_nothing_when_the_config_changed_in_flight(
+    client, api_engine, api_settings, monkeypatch, change
+) -> None:
+    """M5: an edit while the network call runs makes the answer describe an old upstream.
+
+    The URL case is the review's repro; the review-mode case changes nothing the URL check
+    can see, so only the captured config revision can catch it.
+    """
+    from lumewarp_control_plane import outbox
+    from lumewarp_control_plane.api import targets
+    from lumewarp_control_plane.api.schemas import McpDiscoverIn
+    from lumewarp_control_plane.authz import RequestAuthz
+    from lumewarp_control_plane.metrics import DISCARD
+    from lumewarp_control_plane.security import Principal, PrincipalKind
+
+    created = _create(client)
+    assert created.status_code == 201, created.text
+    body = created.json()
+    server_id = uuid.UUID(body["id"])
+    base = fake_server()
+
+    class Handler(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            # Another administrator saves the server while this request is in flight.
+            async with (
+                AsyncSession(api_engine, expire_on_commit=False) as other,
+                other.begin(),
+            ):
+                row = await other.get(McpServer, server_id, with_for_update=True)
+                for name, value in change.items():
+                    setattr(row, name, value)
+                row.config_revision = await outbox.enqueue_recompile(
+                    other, api_settings.scope, "test.in_flight_edit"
+                )
+            return await base.handle_async_request(request)
+
+    monkeypatch.setattr(discover, "transport", Handler())
+    authz = RequestAuthz(Principal(kind=PrincipalKind.BREAK_GLASS), client.app.state.authorizer)
+    async with AsyncSession(api_engine, expire_on_commit=False) as session:
+        result = await targets.discover_mcp_server(
+            McpDiscoverIn(url=body["url"], server_id=server_id),
+            authz,
+            session,
+            api_settings,
+            DISCARD,
+        )
+    assert result.recorded is False
+    assert {item.state for item in result.tools} == {"unrecorded"}
+    async with AsyncSession(api_engine) as check:
+        stored = (
+            await check.scalars(select(McpDefinition).where(McpDefinition.server_id == server_id))
+        ).all()
+        assert stored == []
+        assert "mcp_server.discover" not in [
+            entry.action for entry in await _audit(check, body["id"])
+        ]
+
+
+# --------------------------------------------------------------------------- pagination (m1)
+
+
+async def test_pagination_walks_every_server_once(client) -> None:
+    """The list is id-ordered and the cursor is an id: names that sort against creation
+    order must not skip or repeat an item."""
+    names = []
+    for name in ("zeta", "alpha", "race"):
+        response = _create(client, name=name)
+        assert response.status_code == 201, response.text
+        names.append(name)
+    seen: list[str] = []
+    cursor = None
+    for _ in range(10):
+        params: dict[str, object] = {"limit": 1}
+        if cursor is not None:
+            params["cursor"] = cursor
+        page = client.get("/api/v1/mcp-servers", params=params, headers=H)
+        assert page.status_code == 200, page.text
+        body = page.json()
+        seen.extend(item["name"] for item in body["items"])
+        cursor = body["next_cursor"]
+        if cursor is None:
+            break
+    ours = [name for name in seen if name in set(names)]
+    assert ours == names
+    assert len(seen) == len(set(seen))
+
+
+async def test_discover_respects_manual_review(client, committed, fake) -> None:
+    """M1: the control plane's own observation follows the saved review mode too."""
+    created = _create(client, review_mode="manual")
+    assert created.status_code == 201, created.text
+    body = created.json()
+    response = client.post(
+        "/api/v1/mcp-servers/discover",
+        json={"url": body["url"], "server_id": body["id"]},
+        headers=H,
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["recorded"] is True
+    # MANUAL withholds every name the control plane has not approved, first sight included.
+    assert {item["state"] for item in result["tools"]} == {"pending"}
+    assert {item["state"] for item in result["prompts"]} == {"pending"}

@@ -21,8 +21,15 @@ export type UpstreamTest = Schemas["UpstreamTestOut"];
 export type ModelTest = Schemas["ModelTestOut"];
 export type Model = Schemas["ModelOut"];
 export type Router = Schemas["RouterOut"];
+export type A2aAgent = Schemas["A2aAgentOut"];
 export type Alias = Schemas["AliasOut"];
-export type Strategy = Schemas["StrategyOut"];
+/** A gateway plugin of any kind; its title, description and schema are untrusted gateway data. */
+export type Plugin = Schemas["PluginOut"];
+export type PluginKind = Schemas["PluginKind"];
+export type McpServer = Schemas["McpServerOut"];
+export type McpDefinition = Schemas["McpDefinitionOut"];
+export type McpDefinitionState = Schemas["McpDefinitionState"];
+export type McpDiscover = Schemas["McpDiscoverOut"];
 export type CatalogEntry = Schemas["CatalogEntryOut"];
 export type CatalogKind = Schemas["CatalogKind"];
 export type UsageRow = Schemas["UsageRowOut"];
@@ -32,7 +39,21 @@ export type Org = Schemas["OrgOut"];
 export type OrgAdmin = Schemas["OrgAdminOut"];
 export type OrgUsage = Schemas["OrgUsageOut"];
 export type ModelAccess = Schemas["ModelAccess"];
-export type PolicyOut = Pick<Team, "model_access" | "allowed_models" | "rpm_limit" | "tpm_limit" | "max_parallel" | "budget_nano_usd">;
+/** One MCP server a policy level grants, and either every tool or the named ones. */
+export type McpGrant = Schemas["McpGrantIn"];
+export type PolicyOut = Pick<
+  Team,
+  | "model_access"
+  | "allowed_models"
+  | "mcp_access"
+  | "mcp_servers"
+  | "a2a_access"
+  | "a2a_agents"
+  | "rpm_limit"
+  | "tpm_limit"
+  | "max_parallel"
+  | "budget_nano_usd"
+>;
 
 export const client = createClient<paths>({ baseUrl: "", credentials: "same-origin" });
 
@@ -172,7 +193,23 @@ export const api = {
   updateAlias: (id: string, body: Schemas["AliasUpdate"]) => unwrap(client.PATCH("/api/v1/aliases/{alias_id}", { params: { path: { alias_id: id } }, body })),
   deleteAlias: (id: string) => unwrap(client.DELETE("/api/v1/aliases/{alias_id}", { params: { path: { alias_id: id } } })),
 
-  strategies: async () => (await unwrap(client.GET("/api/v1/strategies"))).items,
+  /** Every plugin of one kind, or all three kinds: built-ins plus what connected gateways report. */
+  plugins: async (kind?: PluginKind) => (await unwrap(client.GET("/api/v1/plugins", { params: { query: kind ? { kind } : {} } }))).items,
+
+  mcpServers: () => listAll((c) => unwrap(client.GET("/api/v1/mcp-servers", { params: { query: q(c) } }))),
+  mcpServer: (id: string) => unwrap(client.GET("/api/v1/mcp-servers/{server_id}", { params: { path: { server_id: id } } })),
+  createMcpServer: (body: Schemas["McpServerCreate"]) => unwrap(client.POST("/api/v1/mcp-servers", { body })),
+  updateMcpServer: (id: string, body: Schemas["McpServerUpdate"]) =>
+    unwrap(client.PATCH("/api/v1/mcp-servers/{server_id}", { params: { path: { server_id: id } }, body })),
+  deleteMcpServer: (id: string) => unwrap(client.DELETE("/api/v1/mcp-servers/{server_id}", { params: { path: { server_id: id } } })),
+  /** One page of a server's definitions, newest first (a `<`-cursor: only forward). */
+  mcpDefinitions: (id: string, query: { state?: McpDefinitionState; kind?: Schemas["McpDefinitionKind"]; limit?: number; cursor?: string } = {}) =>
+    unwrap(client.GET("/api/v1/mcp-servers/{server_id}/definitions", { params: { path: { server_id: id }, query: { ...query, limit: query.limit ?? 50 } } })),
+  approveMcpDefinition: (serverId: string, definitionId: string) =>
+    unwrap(client.POST("/api/v1/mcp-servers/{server_id}/definitions/{definition_id}/approve", { params: { path: { server_id: serverId, definition_id: definitionId } } })),
+  rejectMcpDefinition: (serverId: string, definitionId: string) =>
+    unwrap(client.POST("/api/v1/mcp-servers/{server_id}/definitions/{definition_id}/reject", { params: { path: { server_id: serverId, definition_id: definitionId } } })),
+  discoverMcp: (body: Schemas["McpDiscoverIn"]) => unwrap(client.POST("/api/v1/mcp-servers/discover", { body })),
   catalog: () => listAll((c) => unwrap(client.GET("/api/v1/catalog", { params: { query: q(c) } }))),
 
   users: () => listAll((c) => unwrap(client.GET("/api/v1/users", { params: { query: q(c) } }))),
@@ -198,4 +235,11 @@ export const api = {
 
   configVersions: () => listAll((c) => unwrap(client.GET("/api/v1/config/versions", { params: { query: q(c) } }))),
   rollback: (version: number, force = false) => unwrap(client.POST("/api/v1/config/rollback", { body: force ? { version, force } : { version } })),
+
+  a2aAgents: () => listAll((c) => unwrap(client.GET("/api/v1/a2a-agents", { params: { query: q(c) } }))),
+  createA2aAgent: (body: Schemas["A2aAgentCreate"]) => unwrap(client.POST("/api/v1/a2a-agents", { body })),
+  updateA2aAgent: (id: string, body: Schemas["A2aAgentUpdate"]) =>
+    unwrap(client.PATCH("/api/v1/a2a-agents/{agent_id}", { params: { path: { agent_id: id } }, body })),
+  deleteA2aAgent: (id: string) =>
+    unwrap(client.DELETE("/api/v1/a2a-agents/{agent_id}", { params: { path: { agent_id: id } } })),
 };

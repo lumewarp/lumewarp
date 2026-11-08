@@ -44,7 +44,7 @@ message UsageEvent {
   // The model that finally served the request; prices and cost follow it.
   // Empty when no model was selected.
   string model = 8;
-  // Endpoint: chat_completions | completions | embeddings.
+  // Endpoint: chat_completions | completions | embeddings | mcp | a2a.
   string endpoint = 9;
   uint32 status = 10;
   bool stream = 11;

@@ -300,13 +300,14 @@ Rejections count in `lumewarp_requests_rejected_total{model,reason}`.
 | --- | --- | --- |
 | `routers[].name` | Required | Unique name across models, aliases and routers; callable and listed by `/v1/models`. `unknown` is reserved. |
 | `routers[].members` | Required without `traffic_split` | Nonempty list of `{model, weight, params}` on distinct existing models. `weight` defaults to `1`, is an unsigned 32-bit relative weight and belongs to this router, so a model can weigh differently in two routers. Zero is allowed, but a weighted router must have positive total weight; other built-in strategies ignore it. `params` is an object read only by a strategy that declares it. Ignored (may be empty) when `traffic_split` is set. |
-| `routers[].strategy` | `weighted` | `weighted`, `least_in_flight`, `lowest_latency`, `vllm_load` or a compiled-in strategy; see "Load-aware routing". With `traffic_split` it picks the model inside the chosen split. An unknown name is refused. |
-| `routers[].params` | `{}` | Object for a compiled-in strategy, at most 16 KiB. Built-in strategies take none. |
+| `routers[].strategy` | `weighted` | `weighted`, `least_in_flight`, `lowest_latency`, `vllm_load` or a router-strategy plugin loaded from `LUMEWARP_ROUTER_PLUGIN_DIR`; see "Load-aware routing". With `traffic_split` it picks the model inside the chosen split. An unknown name is refused. |
+| `routers[].params` | `{}` | Object for a plugin strategy, at most 16 KiB. Built-in strategies take none. A WASM strategy is bounded by `plugin_timeout_ms`. |
 | `routers[].retry` | Absent (one attempt) | `{max_attempts, retry_on_status, total_timeout_ms}`. An empty object enables two total attempts. `max_attempts` includes the first and is at most 5; `retry_on_status` defaults to `[429, 502, 503, 504]` and accepts only 400..599. `total_timeout_ms: 0` leaves only each upstream's header timeout. |
 | `routers[].fallbacks` | `[]` | Existing model names, in order; never routers or aliases. Uses the router's attempt/deadline budget. Configure a retry budget of at least two attempts for failure-triggered fallback. |
 | `routers[].traffic_split` | `[]` | Canary split: `[{name, members, weight}]`. A request picks a split with probability `weight / sum(weights)`, then a model inside it with `strategy`. At most 16 splits; names unique, 1..=32 of `[A-Za-z0-9_.-]` (they are the `split` metric label); each split has a nonempty list of members (`{model, weight, params}`) on distinct existing models; weights must sum to more than 0 (a single split may have weight 0: it only receives retries). |
 | `routers[].sticky` | `none` | `none`, `header` (hash of the `sticky_header` value; requests without the header are not sticky), `team` (the key's team id) or `key` (the key id). Anonymous or team-less callers are not sticky for `team`/`key`. Requires `traffic_split`. |
 | `routers[].sticky_header` | Empty | Request header hashed for `sticky: header`; required there, rejected otherwise. |
+| `routers[].plugin_timeout_ms` | `0` (60 s) | WASM router strategies only: how long one `pick` may run before the gateway cancels it. Built-in strategies ignore it. |
 
 ### Retry and health behavior
 
@@ -744,10 +745,16 @@ gateway does not yet implement:
 - Redis-backed or global rate limits (limits are local per gateway instance);
   budgets are eventual and in-flight streams are not cut; usage events are lost
   when the bounded queue is full or the gateway crashes;
-- TPOT or MCP metrics; JWT/mTLS client authentication and MCP/A2A proxying;
+- TPOT metrics; JWT/mTLS client authentication;
 - an idle timeout on upstream response bodies after headers (including
   non-stream bodies); `timeout_ms` stops at response headers;
 - client TLS termination (terminate it in front of the gateway).
+
+MCP and A2A are served on the same listener: `POST /mcp`, `POST /mcp/servers/<name>`,
+`POST /a2a/<agent>`, the agent-card endpoint and `GET /a2a`. They authenticate only
+`X-Lumewarp-Key`, read the snapshot, and need `LUMEWARP_GATEWAY_ID_KEY` (both) and
+`LUMEWARP_GATEWAY_PUBLIC_URL` (A2A). Their settings, routes and the three WASM plugin
+directories are documented in [gateway plugins](../docs/plugins.md).
 
 See the [architecture](../docs/architecture.md) for planned capabilities, not a
 statement that those features ship today.

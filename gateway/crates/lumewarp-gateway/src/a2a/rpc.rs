@@ -63,6 +63,37 @@ pub const MAX_STREAM_EVENT: usize = 1024 * 1024;
 /// Error message used by both the blocking and the streaming path.
 const BAD_AGENT_RESPONSE: &str = "The agent returned an invalid response";
 
+/// The A2A v1.0 JSON-RPC methods (`ref/specs.md` §2.2). Anything else is
+/// refused with `-32601` and never forwarded: id unwrapping, the D12 push
+/// refusal and the D18 `ListTasks` gate key off these exact names, so an
+/// unknown method would bypass all three (and the agent's response would be
+/// wrapped as the caller's).
+pub const METHODS: [&str; 11] = [
+    "SendMessage",
+    "SendStreamingMessage",
+    "GetTask",
+    "ListTasks",
+    "CancelTask",
+    "SubscribeToTask",
+    "CreateTaskPushNotificationConfig",
+    "GetTaskPushNotificationConfig",
+    "ListTaskPushNotificationConfigs",
+    "DeleteTaskPushNotificationConfig",
+    "GetExtendedAgentCard",
+];
+
+/// Whether `method` is one of the v1.0 methods.
+pub fn known_method(method: &str) -> bool {
+    METHODS.contains(&method)
+}
+
+/// Whether a method's result is an SSE stream. Only these two may answer with
+/// `text/event-stream`; a card or task result that arrives that way would skip
+/// the non-stream response path (including the L6 card rewrite).
+pub fn method_streams(method: &str) -> bool {
+    matches!(method, "SendStreamingMessage" | "SubscribeToTask")
+}
+
 /// The metrics method label of one v1.0 method (`metrics::A2A_METHODS`).
 pub fn method_label(method: &str) -> &'static str {
     match method {
@@ -203,7 +234,7 @@ pub async fn serve(call: Call<'_>, agent: &str) -> Response<ProxyBody> {
                 runtime,
                 routing_table,
                 request,
-                key,
+                &Caller::Key(Arc::clone(key)),
                 agent,
                 &reply.method_name,
                 status,
@@ -308,6 +339,33 @@ async fn run(
             rpc_method,
             RequestOutcome::Rejected,
         );
+    }
+    // B2: only the v1.0 methods are forwarded. Unknown names would skip id
+    // unwrapping, the push refusal and the ListTasks gate, so they are refused
+    // here — before the upstream span is created with the client's string.
+    if !known_method(&rpc_method) {
+        return Reply::protocol_error(
+            id.as_ref(),
+            -32601,
+            "Method not found",
+            "METHOD_NOT_FOUND",
+            "other",
+            rpc_method,
+            RequestOutcome::Rejected,
+        );
+    }
+    if let Some(params) = request.get("params") {
+        if !params.is_object() {
+            return Reply::protocol_error(
+                id.as_ref(),
+                -32602,
+                "Invalid parameters",
+                "INVALID_PARAMS",
+                label,
+                rpc_method,
+                RequestOutcome::Rejected,
+            );
+        }
     }
     // D12: push notifications are not supported, in any entry point.
     if ids::push_config_present(&rpc_method, request.get("params")) {
@@ -452,6 +510,19 @@ async fn run(
         .and_then(|value| value.to_str().ok())
         .map(|value| value.split(';').next().unwrap_or("").trim().to_owned());
     if response.status() == StatusCode::OK && content_type.as_deref() == Some("text/event-stream") {
+        if !method_streams(&rpc_method) {
+            // A non-streaming method that answers SSE would skip the response
+            // hook and, for GetExtendedAgentCard, the card rewrite (m5).
+            return Reply::protocol_error(
+                id.as_ref(),
+                -32006,
+                BAD_AGENT_RESPONSE,
+                "INVALID_AGENT_RESPONSE",
+                label,
+                rpc_method_name(&request),
+                RequestOutcome::UpstreamError,
+            );
+        }
         return start_stream(
             runtime,
             &target,
@@ -723,6 +794,7 @@ fn upstream_headers(client: &HeaderMap) -> HeaderMap {
                 | "proxy-authorization"
                 | "x-lumewarp-key"
                 | "a2a-version"
+                | "accept-encoding"
         ) || connection_named.contains(name)
         {
             continue;
@@ -1082,21 +1154,31 @@ fn start_stream(
     }
 }
 
-async fn pump(
-    mut incoming: Incoming,
+async fn pump<B>(
+    mut incoming: B,
     tx: tokio::sync::mpsc::Sender<Result<Frame<Bytes>, std::io::Error>>,
     state: StreamState,
     started: Instant,
     mut usage: TrafficRecorder,
-) {
+) where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+{
     let mut parser = SseParser::default();
     let mut finished = false;
     // `None` while the stream is healthy; a mid-stream failure decides the
     // recorded outcome. The upstream ending its stream normally is `Completed`.
     let mut failure: Option<RequestOutcome> = None;
     'outer: loop {
+        // A client that goes away is noticed even while the upstream is silent
+        // or a hook is running (M5): `tx.closed()` resolves when the response
+        // body (and its receiver) is dropped. Without it the upstream
+        // connection, the task and the usage recorder would stay alive until
+        // the agent wrote again.
+        let frame = tokio::select! {
+            frame = incoming.frame() => frame,
+            _ = tx.closed() => return,
+        };
         // `frame()` returns None at EOF.
-        let frame = incoming.frame().await;
         let Some(frame) = frame else { break };
         let Ok(frame) = frame else {
             failure = Some(RequestOutcome::UpstreamError);
@@ -1123,7 +1205,13 @@ async fn pump(
                 failure = Some(RequestOutcome::UpstreamError);
                 break 'outer;
             };
-            match handle_event(&state, event).await {
+            // A hook must not outlive the client either; dropping the future
+            // aborts the guest at its next epoch yield.
+            let result = tokio::select! {
+                result = handle_event(&state, event) => result,
+                _ = tx.closed() => return,
+            };
+            match result {
                 EventResult::Emit(bytes) => {
                     if tx.send(Ok(Frame::data(bytes))).await.is_err() {
                         return;
@@ -1163,7 +1251,13 @@ async fn pump(
                 failure = Some(RequestOutcome::UpstreamError);
                 break;
             };
-            match handle_event(&state, event).await {
+            // A hook must not outlive the client either; dropping the future
+            // aborts the guest at its next epoch yield.
+            let result = tokio::select! {
+                result = handle_event(&state, event) => result,
+                _ = tx.closed() => return,
+            };
+            match result {
                 EventResult::Emit(bytes) => {
                     if tx.send(Ok(Frame::data(bytes))).await.is_err() {
                         return;
@@ -1277,23 +1371,53 @@ type ParsedEvent = Result<SseEvent, ()>;
 
 #[derive(Default)]
 struct SseParser {
-    /// Bytes after the last newline, not yet a line.
+    /// Bytes after the last processed line: the current partial line, if any.
     pending: Vec<u8>,
+    /// Bytes of `pending` already searched for a terminator, so a byte is
+    /// scanned at most once across chunks.
+    scanned: usize,
     /// Complete lines of the event under construction.
     lines: Vec<Vec<u8>>,
     /// Bytes held for the event under construction.
     size: usize,
+    /// The previous chunk ended with a bare CR; a leading LF of the next chunk
+    /// belongs to that CRLF (m10).
+    skip_lf: bool,
 }
 
 impl SseParser {
     fn push(&mut self, chunk: &[u8]) -> Vec<ParsedEvent> {
         let mut out = Vec::new();
+        if chunk.is_empty() {
+            return out;
+        }
+        let mut chunk = chunk;
+        if self.skip_lf {
+            if chunk.first() == Some(&b'\n') {
+                chunk = &chunk[1..];
+            }
+            self.skip_lf = false;
+        }
         self.pending.extend_from_slice(chunk);
-        while let Some(position) = self.pending.iter().position(|byte| *byte == b'\n') {
-            let raw: Vec<u8> = self.pending.drain(..=position).collect();
-            let mut line = &raw[..raw.len() - 1];
-            if line.last() == Some(&b'\r') {
-                line = &line[..line.len() - 1];
+        let mut start = 0usize;
+        let mut scan = self.scanned.min(self.pending.len());
+        // One linear walk per chunk: a frame of many short lines is O(n), not
+        // O(n^2) from draining the front per line (m11).
+        while let Some(offset) = self.pending[scan..]
+            .iter()
+            .position(|byte| *byte == b'\r' || *byte == b'\n')
+        {
+            let terminator = scan + offset;
+            let line = self.pending[start..terminator].to_vec();
+            let mut next = terminator + 1;
+            if self.pending[terminator] == b'\r' {
+                if next == self.pending.len() {
+                    // A CR at the end of the buffer terminates the line; a LF
+                    // starting the next chunk is the second half of a CRLF.
+                    self.skip_lf = true;
+                } else if self.pending[next] == b'\n' {
+                    next += 1;
+                }
             }
             if line.is_empty() {
                 if let Some(event) = self.take_event() {
@@ -1302,35 +1426,48 @@ impl SseParser {
             } else {
                 self.size = self.size.saturating_add(line.len() + 1);
                 if self.size > MAX_STREAM_EVENT {
+                    self.pending.clear();
+                    self.scanned = 0;
                     self.lines.clear();
                     self.size = 0;
+                    self.skip_lf = false;
                     out.push(Err(()));
-                    break;
+                    return out;
                 }
-                self.lines.push(line.to_vec());
+                self.lines.push(line);
             }
+            start = next;
+            scan = next;
         }
+        if start > 0 {
+            self.pending.drain(..start);
+        }
+        // Everything left is the partial line just searched to its end.
+        self.scanned = self.pending.len();
         if self.pending.len() > MAX_STREAM_EVENT {
             self.pending.clear();
+            self.scanned = 0;
             self.lines.clear();
             self.size = 0;
+            self.skip_lf = false;
             out.push(Err(()));
         }
         out
     }
 
-    /// Handles an event whose final newline never arrived (EOF).
+    /// Handles the line (and any unterminated event) left at EOF.
     fn finish(&mut self) -> Vec<ParsedEvent> {
         let mut out = Vec::new();
         if !self.pending.is_empty() {
             let line = std::mem::take(&mut self.pending);
-            if !line.is_empty() {
-                self.size = self.size.saturating_add(line.len());
-                if self.size > MAX_STREAM_EVENT {
-                    return vec![Err(())];
-                }
-                self.lines.push(line);
+            self.scanned = 0;
+            self.size = self.size.saturating_add(line.len());
+            if self.size > MAX_STREAM_EVENT {
+                self.lines.clear();
+                self.size = 0;
+                return vec![Err(())];
             }
+            self.lines.push(line);
         }
         if let Some(event) = self.take_event() {
             out.push(event);
@@ -1487,11 +1624,14 @@ mod tests {
         headers.insert("cookie", HeaderValue::from_static("a=b"));
         headers.insert("a2a-version", HeaderValue::from_static("0.3"));
         headers.insert("a2a-extensions", HeaderValue::from_static("urn:x"));
+        headers.insert("accept-encoding", HeaderValue::from_static("gzip, br"));
         headers.insert("x-custom", HeaderValue::from_static("kept"));
         let forwarded = upstream_headers(&headers);
         assert!(forwarded.get("authorization").is_some());
         assert!(forwarded.get("x-lumewarp-key").is_none());
         assert!(forwarded.get("cookie").is_none());
+        // The gateway never decompresses, so it must not invite compression (M9).
+        assert!(forwarded.get("accept-encoding").is_none());
         assert_eq!(forwarded.get("a2a-version").unwrap(), "1.0");
         assert_eq!(forwarded.get("a2a-extensions").unwrap(), "urn:x");
         assert_eq!(forwarded.get("x-custom").unwrap(), "kept");
@@ -1505,6 +1645,146 @@ mod tests {
         headers.insert("x-hop", HeaderValue::from_static("1"));
         let forwarded = upstream_headers(&headers);
         assert!(forwarded.get("x-hop").is_none());
+    }
+
+    #[test]
+    fn only_the_v1_0_methods_are_accepted() {
+        assert_eq!(METHODS.len(), 11);
+        for method in METHODS {
+            assert!(known_method(method), "{method}");
+        }
+        for method in [
+            "tasks/get",
+            "tasks/cancel",
+            "tasks/resubscribe",
+            "message/send",
+            "message/stream",
+            "sendmessage",
+            "",
+            "SendMessage ",
+            "GetTaskExtra",
+        ] {
+            assert!(!known_method(method), "{method:?}");
+        }
+    }
+
+    #[test]
+    fn only_streaming_methods_may_answer_sse() {
+        assert!(method_streams("SendStreamingMessage"));
+        assert!(method_streams("SubscribeToTask"));
+        for method in METHODS
+            .iter()
+            .filter(|method| !matches!(**method, "SendStreamingMessage" | "SubscribeToTask"))
+        {
+            assert!(!method_streams(method), "{method}");
+        }
+    }
+
+    #[test]
+    fn an_event_with_a_bare_cr_terminator_is_parsed() {
+        let mut parser = SseParser::default();
+        let events = collect(&mut parser, b"data: one\r\rdata: two\r\r");
+        assert_eq!(events.len(), 2);
+        let Ok(SseEvent::Data { data, .. }) = &events[0] else {
+            panic!("data event");
+        };
+        assert_eq!(data, b"one");
+        let Ok(SseEvent::Data { data, .. }) = &events[1] else {
+            panic!("data event");
+        };
+        assert_eq!(data, b"two");
+    }
+
+    #[test]
+    fn a_crlf_split_across_chunks_is_one_line_end() {
+        let mut parser = SseParser::default();
+        assert!(collect(&mut parser, b"data: x\r").is_empty());
+        let events = collect(&mut parser, b"\n\r\n");
+        assert_eq!(events.len(), 1);
+        let Ok(SseEvent::Data { data, .. }) = &events[0] else {
+            panic!("data event");
+        };
+        assert_eq!(data, b"x");
+    }
+
+    #[test]
+    fn a_frame_with_many_short_lines_is_one_event() {
+        let mut parser = SseParser::default();
+        let mut frame = Vec::new();
+        for index in 0..10_000 {
+            frame.extend_from_slice(format!("data: {index}\n").as_bytes());
+        }
+        frame.push(b'\n');
+        let events = collect(&mut parser, &frame);
+        assert_eq!(events.len(), 1);
+        let Ok(SseEvent::Data { data, .. }) = &events[0] else {
+            panic!("data event");
+        };
+        assert_eq!(data.split(|byte| *byte == b'\n').count(), 10_000);
+    }
+
+    #[tokio::test]
+    async fn a_client_disconnect_cancels_a_silent_stream() {
+        use lumewarp_proto::config::v1::KeyStatus;
+        struct SilentBody;
+        impl hyper::body::Body for SilentBody {
+            type Data = Bytes;
+            type Error = std::io::Error;
+            fn poll_frame(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, std::io::Error>>>
+            {
+                std::task::Poll::Pending
+            }
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        drop(rx);
+        let runtime = crate::runtime::Runtime::new();
+        let key = Arc::new(KeyContext {
+            key_id: "key".into(),
+            team_id: "team".into(),
+            status: KeyStatus::Active,
+            expires_at_ms: 0,
+            allow_all_models: true,
+            allowed_models: Default::default(),
+            scopes: Vec::new(),
+            team_label: 0,
+            grants: crate::grants::Grants::none(),
+        });
+        let caller = Caller::Key(key);
+        let request = RequestCtx::new(Instant::now());
+        let recorder = TrafficRecorder::new(
+            &runtime,
+            &TrafficEvent {
+                kind: TrafficKind::A2a,
+                request: &request,
+                caller: &caller,
+                target: "agent",
+                method: "SubscribeToTask",
+                tool: "",
+                status: 200,
+                outcome: RequestOutcome::Completed,
+                stream: true,
+                config_version: 0,
+            },
+        );
+        let state = StreamState {
+            key: IdKey::from_secret(vec![7u8; 32]).unwrap(),
+            agent: "agent".into(),
+            owner: "owner".into(),
+            method: "SubscribeToTask".into(),
+            middleware: None,
+            timeout: Duration::from_secs(60),
+            id: json!(1),
+            metrics: Arc::new(Metrics::new()),
+        };
+        let pump = tokio::spawn(pump(SilentBody, tx, state, Instant::now(), recorder));
+        tokio::time::timeout(Duration::from_millis(500), pump)
+            .await
+            .expect("the pump did not notice the dropped client")
+            .unwrap();
     }
 
     #[test]
@@ -1533,5 +1813,19 @@ mod tests {
             "taskId": "t1", "contextId": "c1", "artifact": {}
         }}});
         assert!(check_response_unchanged(&before, &wrong_id).is_err());
+        // `wrap_error_data` rewrites typed error metadata, so adding a raw id there
+        // must be refused too (m4).
+        let error_added = json!({"jsonrpc": "2.0", "id": 1, "error": {
+            "code": -32001, "message": "x", "data": [{"metadata": {"taskId": "raw"}}]
+        }});
+        let event_without_error = json!({"jsonrpc": "2.0", "id": 1, "result": {}});
+        assert!(check_response_unchanged(
+            &ids::response_fields(&event_without_error),
+            &error_added
+        )
+        .is_err());
+        assert!(ids::response_fields(&error_added)
+            .iter()
+            .any(|(path, value)| path == "error.data[0].metadata.taskId" && value == "raw"));
     }
 }

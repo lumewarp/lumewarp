@@ -374,27 +374,32 @@ pub fn response_fields(body: &Value) -> Vec<(String, String)> {
             out.push(("$id".to_owned(), id.to_string()));
         }
     }
-    let Some(result) = body.get("result") else {
-        return out;
-    };
-    if let Some(object) = result.as_object() {
-        if object.contains_key("status") && object.contains_key("id") {
-            add_path(&mut out, "result.id".to_owned(), &result["id"]);
-        }
-        if let Some(task) = object.get("task") {
-            if let Some(id) = task.get("id") {
-                add_path(&mut out, "result.task.id".to_owned(), id);
+    if let Some(result) = body.get("result") {
+        if let Some(object) = result.as_object() {
+            if object.contains_key("status") && object.contains_key("id") {
+                add_path(&mut out, "result.id".to_owned(), &result["id"]);
             }
-        }
-        if let Some(tasks) = object.get("tasks").and_then(Value::as_array) {
-            for (index, task) in tasks.iter().enumerate() {
+            if let Some(task) = object.get("task") {
                 if let Some(id) = task.get("id") {
-                    add_path(&mut out, format!("result.tasks[{index}].id"), id);
+                    add_path(&mut out, "result.task.id".to_owned(), id);
+                }
+            }
+            if let Some(tasks) = object.get("tasks").and_then(Value::as_array) {
+                for (index, task) in tasks.iter().enumerate() {
+                    if let Some(id) = task.get("id") {
+                        add_path(&mut out, format!("result.tasks[{index}].id"), id);
+                    }
                 }
             }
         }
+        collect_named(result, "result", &mut out);
     }
-    collect_named(result, "result", &mut out);
+    // `wrap_error_data` rewrites typed error metadata, so the hook check must see
+    // those fields too: a hook that adds a raw id there must not get it wrapped
+    // as the caller's (m4).
+    if let Some(error) = body.get("error") {
+        collect_named(error, "error", &mut out);
+    }
     out
 }
 

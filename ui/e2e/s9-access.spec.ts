@@ -94,7 +94,7 @@ test("team detail: an own team is readable and its back link is My keys for a pl
   const forbidden: string[] = [];
   page.on("request", (request) => {
     const path = new URL(request.url()).pathname;
-    if (/\/members$|\/service-accounts(\/|$)|\/models$|\/upstreams$|\/routers$|\/strategies$|\/audit$/.test(path)) forbidden.push(path);
+    if (/\/members$|\/service-accounts(\/|$)|\/models$|\/upstreams$|\/routers$|\/plugins$|\/audit$/.test(path)) forbidden.push(path);
   });
   await signIn(page, OUTSIDER, `/teams/${own.id}`);
   await expect(page.getByRole("heading", { name: own.name, level: 1 })).toBeVisible();

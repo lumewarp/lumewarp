@@ -2,6 +2,8 @@
 #[path = "../src/a2a_ids.rs"]
 mod a2a_ids;
 mod common;
+#[path = "mcp/regressions.rs"]
+mod regressions;
 #[allow(dead_code)]
 #[path = "../src/mcp/session.rs"]
 mod sealed_session;

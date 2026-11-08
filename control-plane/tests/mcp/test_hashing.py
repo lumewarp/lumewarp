@@ -219,3 +219,14 @@ def test_observe_json_rejects_non_json_and_lone_surrogates() -> None:
     assert hashing.observe_json(TOOL, '{"name":"t"}') is not None
     # A lone surrogate cannot be UTF-8: refuse to hash rather than produce other bytes.
     assert hashing.observe(TOOL, {"name": "t", "description": "\ud800"}) is None
+
+
+def test_an_integer_a_double_cannot_hold_is_unhashable_not_fatal() -> None:
+    """M3: JSON accepts any number of digits; a 310-digit integer is not a double."""
+    huge = 10**310
+    with pytest.raises(hashing.UnhashableDefinition):
+        hashing.canonicalize(huge)
+    assert hashing.observe(TOOL, {"name": "t", "inputSchema": huge}) is None
+    assert hashing.observe_json(TOOL, '{"name":"t","inputSchema":' + "9" * 310 + "}") is None
+    # The largest integer a double holds still rounds like ECMAScript, rather than raising.
+    assert hashing.canonicalize(int(1.7976931348623157e308)) == "1.7976931348623157e+308"

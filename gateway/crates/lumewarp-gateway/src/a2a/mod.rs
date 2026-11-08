@@ -240,13 +240,17 @@ fn json_response(status: StatusCode, value: &Value) -> Response<ProxyBody> {
         .expect("static response parts are valid")
 }
 
-/// The apply-path hook for the A2A middleware: register and configure every
-/// agent's plugin, reusing the ones whose name, settings and destination did
-/// not change. Call it from `RoutingTable::compile` next to
-/// `upstream_auth::precompile`; a refused `configure` becomes an
+/// The apply-path hook for the A2A middleware: configure every agent's plugin,
+/// reusing the ones whose name, settings and destination did not change. Call
+/// it from `RoutingTable::compile` next to `upstream_auth::precompile`; a
+/// refused `configure` — or one that outlives the configure budget — becomes an
 /// `INVALID_CONFIG` NACK instead of a 502 on the first request.
-#[allow(dead_code)] // wired by the lead in `RoutingTable::compile`, next to auth's hook
-pub fn precompile(targets: &targets::Targets) -> Result<(), crate::snapshot::ApplyError> {
+///
+/// The result is staged: [`publish`] is called when the version is accepted, so
+/// a version refused by a later step leaves the previous middlewares serving.
+pub fn precompile(
+    targets: &targets::Targets,
+) -> Result<a2a_middleware::Staged, crate::snapshot::ApplyError> {
     let specs: Vec<a2a_middleware::Spec> = targets
         .agents()
         .filter_map(|agent| {
@@ -265,7 +269,7 @@ pub fn precompile(targets: &targets::Targets) -> Result<(), crate::snapshot::App
             })
         })
         .collect();
-    a2a_middleware::precompile(&specs).map_err(|refused| {
+    a2a_middleware::global().stage(&specs).map_err(|refused| {
         crate::snapshot::ApplyError::invalid(format!(
             "a2a agent {:?}: middleware plugin could not be configured",
             refused.agent
@@ -273,44 +277,43 @@ pub fn precompile(targets: &targets::Targets) -> Result<(), crate::snapshot::App
     })
 }
 
+/// Makes a staged middleware set the one serving, once a version is accepted.
+pub fn publish(staged: a2a_middleware::Staged) {
+    a2a_middleware::global().publish(staged);
+}
+
 /// One usage event per A2A RPC (plan P10, D16). `method` is the v1.0 method
-/// name; `requested` is empty for non-LLM traffic and `target` is the agent.
+/// name; the request names no model or tokens. The shared `record_traffic`
+/// path fixes the `endpoint` label (`a2a`), bounds the labels and drops events
+/// for anonymous callers or standalone mode; a stream reports itself when it
+/// ends (`TrafficRecorder`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_usage(
     runtime: &Runtime,
     routing_table: &RoutingTable,
     request: &RequestCtx,
-    key: &crate::router::KeyContext,
+    caller: &auth::Caller,
     agent: &str,
     method: &str,
     status: u16,
     stream: bool,
     outcome: lumewarp_proto::usage::v1::RequestOutcome,
 ) {
-    if !runtime.usage.enabled() {
-        return;
-    }
-    use lumewarp_proto::usage::v1::{TrafficKind, UsageEvent, UsageState};
-    let elapsed = request.started.elapsed();
-    runtime.usage.try_record(UsageEvent {
-        request_id: request.request_id.to_string(),
-        timestamp_unix_ms: request
-            .started_at_unix_ms
-            .saturating_add(i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)),
-        key_id: key.key_id.to_string(),
-        team_id: key.team_id.to_string(),
-        kind: TrafficKind::A2a as i32,
-        target: agent.to_owned(),
-        method: method.to_owned(),
-        status: status.into(),
-        stream,
-        duration_ms: u32::try_from(elapsed.as_millis()).unwrap_or(u32::MAX),
-        config_version: routing_table.version,
-        usage_state: UsageState::Missing as i32,
-        outcome: outcome as i32,
-        started_at_unix_ms: request.started_at_unix_ms,
-        ..Default::default()
-    });
+    crate::usage::record_traffic(
+        runtime,
+        crate::usage::TrafficEvent {
+            kind: lumewarp_proto::usage::v1::TrafficKind::A2a,
+            request,
+            caller,
+            target: agent,
+            method,
+            tool: "",
+            status,
+            outcome,
+            stream,
+            config_version: routing_table.version,
+        },
+    );
 }
 
 #[cfg(test)]
