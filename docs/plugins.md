@@ -263,7 +263,7 @@ The pipeline for one request is fixed: authenticate the key, check the agent gra
 - adds or removes a task or context id field;
 - adds push-notification configuration;
 - is not a JSON-RPC message of the same shape; or
-- exceeds the L10 body bound (4 MiB for a request, 16 MiB for a non-streaming response, 1 MiB per SSE event).
+- exceeds the body bound (4 MiB for a request, 16 MiB for a non-streaming response, 1 MiB per SSE event).
 
 Hooks see upstream ids: the gateway unwraps ids before `on-request` and wraps them after `on-response` and `on-stream-event`, so a hook never sees an `lwt.` id. Id fields are the A2A `taskId`, `contextId`, `referenceTaskIds` and the `id` a task request names; the check does not rewrite arbitrary JSON values. On a response, the output's set of task and context ids must be a subset of the input's: removing an id is allowed, adding one is refused. Each SSE event is handled on its own.
 
