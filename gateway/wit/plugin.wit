@@ -1,0 +1,208 @@
+// Lumewarp gateway plugins (docs/plugins.md). One .wasm component implements
+// exactly one world below. The major version of this package is the plugin
+// ABI the gateway reports in Hello.plugin_abi.
+package lumewarp:plugin@1.0.0;
+
+interface types {
+  // Returned by `manifest`: a JSON object
+  //   {"abi": 1, "kind": "router-strategy" | "upstream-auth" | "a2a-middleware",
+  //    "name": "...", "title": "...", "description": "...",
+  //    "params_schema": {...},
+  //    "router": {"uses_weight": bool, "needs": ["latency", "vllm_load"],
+  //               "member_schema": {...}}}        // router strategies only
+  // The gateway calls it once at load; a manifest whose kind does not match
+  // the directory, or whose name is taken, stops the gateway from starting.
+  type manifest-json = string;
+
+  // Settings are JSON objects already checked against params_schema by the
+  // control plane, but `configure` is the final authority: standalone YAML
+  // reaches it unchecked. The error text is logged, never sent anywhere.
+  type config-error = string;
+
+  type header = tuple<string, list<u8>>;
+}
+
+// ---------------------------------------------------------------- routers
+
+interface router-strategy {
+  use types.{manifest-json, config-error};
+
+  manifest: func() -> manifest-json;
+
+  record member-info {
+    model: string,
+    weight: u32,
+    // Traffic split name, if the member belongs to one.
+    split: option<string>,
+    // RouterMember.params_json.
+    params-json: string,
+  }
+
+  record router-info {
+    name: string,
+    params-json: string,
+    // Every member through all splits in order; `member-index` indexes it.
+    members: list<member-info>,
+  }
+
+  record request-info {
+    // The name the client called.
+    requested: string,
+    team-id: string,
+    key-id: string,
+    estimated-input-tokens: option<u64>,
+    // Only the headers named in params.headers, lowercase names.
+    headers: list<tuple<string, list<u8>>>,
+  }
+
+  record load {
+    waiting: u64,
+    // KV cache usage in basis points (0..=10000).
+    kv-usage-bp: u32,
+    fresh: bool,
+  }
+
+  // Eligible models only. Signals are present when the manifest's `needs`
+  // asks for them.
+  record candidate {
+    // Position in the current pool; what `pick` returns.
+    index: u32,
+    // Position in router-info.members.
+    member-index: u32,
+    weight: u64,
+    in-flight: u32,
+    latency-ewma-us: option<u64>,
+    load: option<load>,
+  }
+
+  // One configured router. Created when a snapshot is applied, dropped when
+  // the router changes or disappears.
+  resource strategy {
+    configure: static func(info: router-info) -> result<strategy, config-error>;
+    // Request path: no I/O exists in this world. `seed` is fresh randomness
+    // per call. Return a candidate's `index`, or none for "no acceptable
+    // candidate" (the gateway's fall-through paths apply).
+    pick: func(request: request-info, candidates: list<candidate>, seed: u64) -> option<u32>;
+  }
+}
+
+world router {
+  export router-strategy;
+}
+
+// ------------------------------------------------------------ upstream auth
+
+// Provided by the gateway to upstream-auth plugins only.
+interface host {
+  use types.{header};
+
+  record http-request {
+    method: string,
+    // Must be under an origin listed in the plugin's params `allowed_origins`
+    // (absolute, no path); anything else fails without a connection.
+    url: string,
+    headers: list<header>,
+    body: list<u8>,
+  }
+
+  record http-response {
+    status: u16,
+    headers: list<header>,
+    // Truncated at 1 MiB.
+    body: list<u8>,
+  }
+
+  // Counts against the calling `authorize`'s deadline.
+  http-fetch: func(request: http-request) -> result<http-response, string>;
+
+  // Only environment variables named LUMEWARP_PLUGIN_SECRET_<NAME>; `name` is
+  // <NAME>. None when unset or not allowed.
+  secret: func(name: string) -> option<string>;
+
+  now-unix-ms: func() -> u64;
+}
+
+interface upstream-auth {
+  use types.{manifest-json, config-error, header};
+
+  manifest: func() -> manifest-json;
+
+  enum traffic {
+    mcp,
+    a2a,
+  }
+
+  record target-info {
+    traffic: traffic,
+    // McpServer.name or A2aAgent.name.
+    name: string,
+    url: string,
+    params-json: string,
+  }
+
+  // The request about to be sent upstream. Credentials from the client
+  // (authorization, x-lumewarp-key, cookie, proxy-authorization) are never
+  // included.
+  record outbound-request {
+    method: string,
+    url: string,
+    headers: list<header>,
+    body: list<u8>,
+  }
+
+  record auth-result {
+    // Added to the upstream request, replacing headers of the same name.
+    headers: list<header>,
+    // How long the gateway may reuse these headers for this target without
+    // calling `authorize` again. 0 = do not cache (required when the result
+    // depends on the request, e.g. a body signature).
+    cache-ms: u32,
+  }
+
+  resource authenticator {
+    configure: static func(target: target-info) -> result<authenticator, config-error>;
+    // Error = the client gets 502 and the call is counted as an auth failure.
+    authorize: func(request: outbound-request) -> result<auth-result, string>;
+  }
+}
+
+world auth {
+  import host;
+  export upstream-auth;
+}
+
+// ---------------------------------------------------------- A2A middleware
+
+interface a2a-middleware {
+  use types.{manifest-json, config-error};
+
+  manifest: func() -> manifest-json;
+
+  record agent-info {
+    name: string,
+    url: string,
+    params-json: string,
+  }
+
+  // Becomes a JSON-RPC error to the client. For a stream already under way it
+  // is sent as the last event.
+  record rpc-error {
+    code: s32,
+    message: string,
+  }
+
+  resource middleware {
+    configure: static func(agent: agent-info) -> result<middleware, config-error>;
+    // JSON-RPC request body before it goes upstream; return the body to send.
+    on-request: func(method: string, body: list<u8>) -> result<list<u8>, rpc-error>;
+    // Non-streaming JSON-RPC response body; return the body to send back.
+    on-response: func(method: string, body: list<u8>) -> result<list<u8>, rpc-error>;
+    // One SSE event's data (a JSON-RPC response object) of a streaming method;
+    // return the data to send, or none to drop the event.
+    on-stream-event: func(method: string, data: list<u8>) -> result<option<list<u8>>, rpc-error>;
+  }
+}
+
+world middleware {
+  export a2a-middleware;
+}

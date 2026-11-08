@@ -8,6 +8,13 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
+class PluginKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    PLUGIN_KIND_UNSPECIFIED: _ClassVar[PluginKind]
+    PLUGIN_KIND_ROUTER_STRATEGY: _ClassVar[PluginKind]
+    PLUGIN_KIND_UPSTREAM_AUTH: _ClassVar[PluginKind]
+    PLUGIN_KIND_A2A_MIDDLEWARE: _ClassVar[PluginKind]
+
 class NackCode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     NACK_CODE_UNSPECIFIED: _ClassVar[NackCode]
@@ -15,6 +22,10 @@ class NackCode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     NACK_CODE_INVALID_CONFIG: _ClassVar[NackCode]
     NACK_CODE_UNSUPPORTED_FEATURE: _ClassVar[NackCode]
     NACK_CODE_PERSIST_FAILED: _ClassVar[NackCode]
+PLUGIN_KIND_UNSPECIFIED: PluginKind
+PLUGIN_KIND_ROUTER_STRATEGY: PluginKind
+PLUGIN_KIND_UPSTREAM_AUTH: PluginKind
+PLUGIN_KIND_A2A_MIDDLEWARE: PluginKind
 NACK_CODE_UNSPECIFIED: NackCode
 NACK_CODE_BASE_MISMATCH: NackCode
 NACK_CODE_INVALID_CONFIG: NackCode
@@ -22,16 +33,18 @@ NACK_CODE_UNSUPPORTED_FEATURE: NackCode
 NACK_CODE_PERSIST_FAILED: NackCode
 
 class GatewayMessage(_message.Message):
-    __slots__ = ("hello", "ack", "nack", "health")
+    __slots__ = ("hello", "ack", "nack", "health", "catalog")
     HELLO_FIELD_NUMBER: _ClassVar[int]
     ACK_FIELD_NUMBER: _ClassVar[int]
     NACK_FIELD_NUMBER: _ClassVar[int]
     HEALTH_FIELD_NUMBER: _ClassVar[int]
+    CATALOG_FIELD_NUMBER: _ClassVar[int]
     hello: Hello
     ack: Ack
     nack: Nack
     health: HealthReport
-    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., ack: _Optional[_Union[Ack, _Mapping]] = ..., nack: _Optional[_Union[Nack, _Mapping]] = ..., health: _Optional[_Union[HealthReport, _Mapping]] = ...) -> None: ...
+    catalog: CatalogReport
+    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., ack: _Optional[_Union[Ack, _Mapping]] = ..., nack: _Optional[_Union[Nack, _Mapping]] = ..., health: _Optional[_Union[HealthReport, _Mapping]] = ..., catalog: _Optional[_Union[CatalogReport, _Mapping]] = ...) -> None: ...
 
 class HealthReport(_message.Message):
     __slots__ = ("upstreams", "models")
@@ -50,42 +63,94 @@ class TargetHealth(_message.Message):
     def __init__(self, name: _Optional[str] = ..., healthy: _Optional[bool] = ...) -> None: ...
 
 class Hello(_message.Message):
-    __slots__ = ("gateway_id", "have_version", "gateway_version", "supported_capabilities", "scope", "have_digest", "strategies")
+    __slots__ = ("gateway_id", "have_version", "gateway_version", "supported_capabilities", "scope", "have_digest", "plugins", "plugin_abi")
     GATEWAY_ID_FIELD_NUMBER: _ClassVar[int]
     HAVE_VERSION_FIELD_NUMBER: _ClassVar[int]
     GATEWAY_VERSION_FIELD_NUMBER: _ClassVar[int]
     SUPPORTED_CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
     SCOPE_FIELD_NUMBER: _ClassVar[int]
     HAVE_DIGEST_FIELD_NUMBER: _ClassVar[int]
-    STRATEGIES_FIELD_NUMBER: _ClassVar[int]
+    PLUGINS_FIELD_NUMBER: _ClassVar[int]
+    PLUGIN_ABI_FIELD_NUMBER: _ClassVar[int]
     gateway_id: str
     have_version: int
     gateway_version: str
     supported_capabilities: _containers.RepeatedScalarFieldContainer[str]
     scope: str
     have_digest: bytes
-    strategies: _containers.RepeatedCompositeFieldContainer[StrategyDescriptor]
-    def __init__(self, gateway_id: _Optional[str] = ..., have_version: _Optional[int] = ..., gateway_version: _Optional[str] = ..., supported_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ..., have_digest: _Optional[bytes] = ..., strategies: _Optional[_Iterable[_Union[StrategyDescriptor, _Mapping]]] = ...) -> None: ...
+    plugins: _containers.RepeatedCompositeFieldContainer[PluginDescriptor]
+    plugin_abi: int
+    def __init__(self, gateway_id: _Optional[str] = ..., have_version: _Optional[int] = ..., gateway_version: _Optional[str] = ..., supported_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ..., have_digest: _Optional[bytes] = ..., plugins: _Optional[_Iterable[_Union[PluginDescriptor, _Mapping]]] = ..., plugin_abi: _Optional[int] = ...) -> None: ...
 
-class StrategyDescriptor(_message.Message):
-    __slots__ = ("name", "title", "description", "uses_weight", "needs", "params_schema_json", "member_schema_json", "digest")
+class PluginDescriptor(_message.Message):
+    __slots__ = ("kind", "name", "title", "description", "builtin", "params_schema_json", "router", "wasm_sha256", "digest")
+    KIND_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     TITLE_FIELD_NUMBER: _ClassVar[int]
     DESCRIPTION_FIELD_NUMBER: _ClassVar[int]
-    USES_WEIGHT_FIELD_NUMBER: _ClassVar[int]
-    NEEDS_FIELD_NUMBER: _ClassVar[int]
+    BUILTIN_FIELD_NUMBER: _ClassVar[int]
     PARAMS_SCHEMA_JSON_FIELD_NUMBER: _ClassVar[int]
-    MEMBER_SCHEMA_JSON_FIELD_NUMBER: _ClassVar[int]
+    ROUTER_FIELD_NUMBER: _ClassVar[int]
+    WASM_SHA256_FIELD_NUMBER: _ClassVar[int]
     DIGEST_FIELD_NUMBER: _ClassVar[int]
+    kind: PluginKind
     name: str
     title: str
     description: str
+    builtin: bool
+    params_schema_json: str
+    router: RouterStrategyInfo
+    wasm_sha256: str
+    digest: str
+    def __init__(self, kind: _Optional[_Union[PluginKind, str]] = ..., name: _Optional[str] = ..., title: _Optional[str] = ..., description: _Optional[str] = ..., builtin: _Optional[bool] = ..., params_schema_json: _Optional[str] = ..., router: _Optional[_Union[RouterStrategyInfo, _Mapping]] = ..., wasm_sha256: _Optional[str] = ..., digest: _Optional[str] = ...) -> None: ...
+
+class RouterStrategyInfo(_message.Message):
+    __slots__ = ("uses_weight", "needs", "member_schema_json")
+    USES_WEIGHT_FIELD_NUMBER: _ClassVar[int]
+    NEEDS_FIELD_NUMBER: _ClassVar[int]
+    MEMBER_SCHEMA_JSON_FIELD_NUMBER: _ClassVar[int]
     uses_weight: bool
     needs: _containers.RepeatedScalarFieldContainer[str]
-    params_schema_json: str
     member_schema_json: str
-    digest: str
-    def __init__(self, name: _Optional[str] = ..., title: _Optional[str] = ..., description: _Optional[str] = ..., uses_weight: _Optional[bool] = ..., needs: _Optional[_Iterable[str]] = ..., params_schema_json: _Optional[str] = ..., member_schema_json: _Optional[str] = ..., digest: _Optional[str] = ...) -> None: ...
+    def __init__(self, uses_weight: _Optional[bool] = ..., needs: _Optional[_Iterable[str]] = ..., member_schema_json: _Optional[str] = ...) -> None: ...
+
+class CatalogReport(_message.Message):
+    __slots__ = ("definitions", "cards")
+    DEFINITIONS_FIELD_NUMBER: _ClassVar[int]
+    CARDS_FIELD_NUMBER: _ClassVar[int]
+    definitions: _containers.RepeatedCompositeFieldContainer[ObservedDefinition]
+    cards: _containers.RepeatedCompositeFieldContainer[AgentCardReport]
+    def __init__(self, definitions: _Optional[_Iterable[_Union[ObservedDefinition, _Mapping]]] = ..., cards: _Optional[_Iterable[_Union[AgentCardReport, _Mapping]]] = ...) -> None: ...
+
+class ObservedDefinition(_message.Message):
+    __slots__ = ("server", "kind", "name", "hash", "definition_json", "auto_approved", "observed_at_unix_ms")
+    SERVER_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    HASH_FIELD_NUMBER: _ClassVar[int]
+    DEFINITION_JSON_FIELD_NUMBER: _ClassVar[int]
+    AUTO_APPROVED_FIELD_NUMBER: _ClassVar[int]
+    OBSERVED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    server: str
+    kind: _snapshot_pb2.McpDefinitionKind
+    name: str
+    hash: bytes
+    definition_json: str
+    auto_approved: bool
+    observed_at_unix_ms: int
+    def __init__(self, server: _Optional[str] = ..., kind: _Optional[_Union[_snapshot_pb2.McpDefinitionKind, str]] = ..., name: _Optional[str] = ..., hash: _Optional[bytes] = ..., definition_json: _Optional[str] = ..., auto_approved: _Optional[bool] = ..., observed_at_unix_ms: _Optional[int] = ...) -> None: ...
+
+class AgentCardReport(_message.Message):
+    __slots__ = ("agent", "card_json", "error", "fetched_at_unix_ms")
+    AGENT_FIELD_NUMBER: _ClassVar[int]
+    CARD_JSON_FIELD_NUMBER: _ClassVar[int]
+    ERROR_FIELD_NUMBER: _ClassVar[int]
+    FETCHED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    agent: str
+    card_json: str
+    error: str
+    fetched_at_unix_ms: int
+    def __init__(self, agent: _Optional[str] = ..., card_json: _Optional[str] = ..., error: _Optional[str] = ..., fetched_at_unix_ms: _Optional[int] = ...) -> None: ...
 
 class Ack(_message.Message):
     __slots__ = ("version",)
@@ -116,7 +181,7 @@ class ConfigUpdate(_message.Message):
     def __init__(self, full: _Optional[_Union[_snapshot_pb2.Snapshot, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., target_digest: _Optional[bytes] = ...) -> None: ...
 
 class Delta(_message.Message):
-    __slots__ = ("base_version", "version", "upsert_upstreams", "remove_upstreams", "upsert_models", "remove_models", "upsert_routers", "remove_routers", "upsert_api_keys", "remove_api_keys", "upsert_teams", "remove_teams", "created_at_unix_ms", "required_capabilities", "upsert_aliases", "remove_aliases")
+    __slots__ = ("base_version", "version", "upsert_upstreams", "remove_upstreams", "upsert_models", "remove_models", "upsert_routers", "remove_routers", "upsert_api_keys", "remove_api_keys", "upsert_teams", "remove_teams", "created_at_unix_ms", "required_capabilities", "upsert_aliases", "remove_aliases", "upsert_mcp_servers", "remove_mcp_servers", "upsert_a2a_agents", "remove_a2a_agents")
     BASE_VERSION_FIELD_NUMBER: _ClassVar[int]
     VERSION_FIELD_NUMBER: _ClassVar[int]
     UPSERT_UPSTREAMS_FIELD_NUMBER: _ClassVar[int]
@@ -133,6 +198,10 @@ class Delta(_message.Message):
     REQUIRED_CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
     UPSERT_ALIASES_FIELD_NUMBER: _ClassVar[int]
     REMOVE_ALIASES_FIELD_NUMBER: _ClassVar[int]
+    UPSERT_MCP_SERVERS_FIELD_NUMBER: _ClassVar[int]
+    REMOVE_MCP_SERVERS_FIELD_NUMBER: _ClassVar[int]
+    UPSERT_A2A_AGENTS_FIELD_NUMBER: _ClassVar[int]
+    REMOVE_A2A_AGENTS_FIELD_NUMBER: _ClassVar[int]
     base_version: int
     version: int
     upsert_upstreams: _containers.RepeatedCompositeFieldContainer[_snapshot_pb2.Upstream]
@@ -149,4 +218,8 @@ class Delta(_message.Message):
     required_capabilities: _containers.RepeatedScalarFieldContainer[str]
     upsert_aliases: _containers.RepeatedCompositeFieldContainer[_snapshot_pb2.Alias]
     remove_aliases: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, base_version: _Optional[int] = ..., version: _Optional[int] = ..., upsert_upstreams: _Optional[_Iterable[_Union[_snapshot_pb2.Upstream, _Mapping]]] = ..., remove_upstreams: _Optional[_Iterable[str]] = ..., upsert_models: _Optional[_Iterable[_Union[_snapshot_pb2.Model, _Mapping]]] = ..., remove_models: _Optional[_Iterable[str]] = ..., upsert_routers: _Optional[_Iterable[_Union[_snapshot_pb2.Router, _Mapping]]] = ..., remove_routers: _Optional[_Iterable[str]] = ..., upsert_api_keys: _Optional[_Iterable[_Union[_snapshot_pb2.ApiKey, _Mapping]]] = ..., remove_api_keys: _Optional[_Iterable[str]] = ..., upsert_teams: _Optional[_Iterable[_Union[_snapshot_pb2.Team, _Mapping]]] = ..., remove_teams: _Optional[_Iterable[str]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ..., upsert_aliases: _Optional[_Iterable[_Union[_snapshot_pb2.Alias, _Mapping]]] = ..., remove_aliases: _Optional[_Iterable[str]] = ...) -> None: ...
+    upsert_mcp_servers: _containers.RepeatedCompositeFieldContainer[_snapshot_pb2.McpServer]
+    remove_mcp_servers: _containers.RepeatedScalarFieldContainer[str]
+    upsert_a2a_agents: _containers.RepeatedCompositeFieldContainer[_snapshot_pb2.A2aAgent]
+    remove_a2a_agents: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, base_version: _Optional[int] = ..., version: _Optional[int] = ..., upsert_upstreams: _Optional[_Iterable[_Union[_snapshot_pb2.Upstream, _Mapping]]] = ..., remove_upstreams: _Optional[_Iterable[str]] = ..., upsert_models: _Optional[_Iterable[_Union[_snapshot_pb2.Model, _Mapping]]] = ..., remove_models: _Optional[_Iterable[str]] = ..., upsert_routers: _Optional[_Iterable[_Union[_snapshot_pb2.Router, _Mapping]]] = ..., remove_routers: _Optional[_Iterable[str]] = ..., upsert_api_keys: _Optional[_Iterable[_Union[_snapshot_pb2.ApiKey, _Mapping]]] = ..., remove_api_keys: _Optional[_Iterable[str]] = ..., upsert_teams: _Optional[_Iterable[_Union[_snapshot_pb2.Team, _Mapping]]] = ..., remove_teams: _Optional[_Iterable[str]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ..., upsert_aliases: _Optional[_Iterable[_Union[_snapshot_pb2.Alias, _Mapping]]] = ..., remove_aliases: _Optional[_Iterable[str]] = ..., upsert_mcp_servers: _Optional[_Iterable[_Union[_snapshot_pb2.McpServer, _Mapping]]] = ..., remove_mcp_servers: _Optional[_Iterable[str]] = ..., upsert_a2a_agents: _Optional[_Iterable[_Union[_snapshot_pb2.A2aAgent, _Mapping]]] = ..., remove_a2a_agents: _Optional[_Iterable[str]] = ...) -> None: ...

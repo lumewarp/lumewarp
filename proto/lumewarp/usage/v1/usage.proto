@@ -75,6 +75,24 @@ message UsageEvent {
   bool fallback = 26;
   // Upstream attempts of this request, retries and fallbacks included.
   uint32 attempts = 27;
+  // LLM when unspecified. For MCP and A2A, `model`, `alias`, `router`,
+  // `upstream*`, tokens and cost are empty, and `requested` is empty.
+  TrafficKind kind = 28;
+  // McpServer.name or A2aAgent.name; empty when the request named none that
+  // the key may see.
+  string target = 29;
+  // JSON-RPC method, at most 128 bytes ("tools/call", "message/stream", ...).
+  string method = 30;
+  // MCP tools/call and prompts/get: the upstream tool or prompt name, at
+  // most 400 bytes.
+  string tool = 31;
+}
+
+enum TrafficKind {
+  TRAFFIC_KIND_UNSPECIFIED = 0;
+  TRAFFIC_KIND_LLM = 1;
+  TRAFFIC_KIND_MCP = 2;
+  TRAFFIC_KIND_A2A = 3;
 }
 
 enum UsageState {

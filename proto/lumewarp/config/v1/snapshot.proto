@@ -25,6 +25,10 @@ message Snapshot {
   string scope = 9;
   // Other callable names. Models, aliases and routers share one name space.
   repeated Alias aliases = 10;
+  // Upstream MCP servers. Capability "mcp".
+  repeated McpServer mcp_servers = 11;
+  // Upstream A2A agents. Capability "a2a".
+  repeated A2aAgent a2a_agents = 12;
 }
 
 // An OpenAI-compatible endpoint (vLLM, OpenAI, or anything speaking the API).
@@ -318,6 +322,112 @@ message EffectivePolicy {
   // End of the budget window that produced KEY_STATUS_BUDGET_EXCEEDED, for
   // diagnostics only; the gateway never unblocks a key on its own.
   int64 budget_window_end_unix_ms = 4;
+  // When true every MCP server and tool is allowed and mcp_grants is ignored.
+  bool allow_all_mcp = 5;
+  // MCP servers (and tools on them) this key may see and call, already
+  // intersected along org -> team -> owner -> key by the compiler. A server
+  // absent here is invisible. Empty with allow_all_mcp=false means deny-all.
+  repeated McpGrant mcp_grants = 6;
+  // When true every A2A agent is allowed and allowed_agents is ignored.
+  bool allow_all_agents = 7;
+  // Names of A2A agents this key may call. Empty with allow_all_agents=false
+  // means deny-all.
+  repeated string allowed_agents = 8;
+}
+
+message McpGrant {
+  // McpServer.name.
+  string server = 1;
+  // When true every approved tool of the server is allowed and tools is
+  // ignored. Prompts of a granted server are always allowed.
+  bool all_tools = 2;
+  // Upstream tool names (without the "<server>__" prefix).
+  repeated string tools = 3;
+}
+
+// A plugin chosen for one upstream, with its settings.
+message PluginRef {
+  // Built-in name or the name a loaded WASM plugin declares in its manifest.
+  string plugin = 1;
+  // Plugin settings: a JSON object, at most 16 KiB UTF-8. Empty means {}.
+  // Never contains secrets (see docs/plugins.md).
+  string params_json = 2;
+}
+
+// How the gateway authenticates to an MCP server or A2A agent. Required
+// capability "auth:<plugin>". Built-ins: "none", "static_bearer",
+// "passthrough" (forward the client's Authorization header unchanged).
+// Anything else is a WASM upstream-auth plugin.
+message UpstreamAuth {
+  PluginRef plugin = 1;
+  // static_bearer only: env var holding the token. At most one of this and
+  // secret_ciphertext is set.
+  string secret_ref = 2;
+  // static_bearer only: token sealed like Upstream.api_key_ciphertext, HKDF
+  // info "lumewarp/upstream-auth-secret/v1". Opened when the snapshot is
+  // applied, never per request.
+  bytes secret_ciphertext = 3;
+}
+
+enum McpReviewMode {
+  MCP_REVIEW_MODE_UNSPECIFIED = 0;
+  // A tool or prompt name seen for the first time is approved automatically
+  // (and reported); a changed definition of a known name is withheld until
+  // approved.
+  MCP_REVIEW_MODE_TOFU = 1;
+  // Every definition not in `approved` is withheld until approved.
+  MCP_REVIEW_MODE_MANUAL = 2;
+  // Definitions are not checked.
+  MCP_REVIEW_MODE_OFF = 3;
+}
+
+enum McpDefinitionKind {
+  MCP_DEFINITION_KIND_UNSPECIFIED = 0;
+  MCP_DEFINITION_KIND_TOOL = 1;
+  MCP_DEFINITION_KIND_PROMPT = 2;
+}
+
+// One approved definition. The gateway filters upstream list responses by
+// these hashes; it never serves a definition from the snapshot.
+message McpDefinition {
+  McpDefinitionKind kind = 1;
+  // Upstream name, without prefix.
+  string name = 2;
+  // sha256 of the canonical definition, 32 bytes (docs/plugins.md, "Definition
+  // hash").
+  bytes hash = 3;
+}
+
+message McpServer {
+  // Stable id; usage and reports carry the name.
+  string id = 1;
+  // ^[a-z][a-z0-9_-]{0,62}$ and unique among MCP servers. Prefixes tool names
+  // on the aggregated endpoint as "<name>__<tool>".
+  string name = 2;
+  // Streamable HTTP endpoint, absolute http(s) URL without userinfo.
+  string url = 3;
+  UpstreamAuth auth = 4;
+  // Per upstream request; 0 = gateway default.
+  uint32 timeout_ms = 5;
+  McpReviewMode review_mode = 6;
+  repeated McpDefinition approved = 7;
+}
+
+message A2aAgent {
+  string id = 1;
+  // ^[a-z][a-z0-9_-]{0,62}$ and unique among A2A agents.
+  string name = 2;
+  // JSON-RPC endpoint of the upstream agent, absolute http(s) URL.
+  string url = 3;
+  // Agent Card URL. Empty = origin of `url` + "/.well-known/agent-card.json".
+  string card_url = 4;
+  UpstreamAuth auth = 5;
+  // Optional, at most one. Required capability "a2a_middleware:<plugin>".
+  PluginRef middleware = 6;
+  uint32 timeout_ms = 7;
+  // Card served when the gateway has not fetched one itself (an
+  // administrator pasted it, or the last one reported). JSON, at most 64 KiB.
+  string card_json = 8;
 }
 
 message RateLimitScope {

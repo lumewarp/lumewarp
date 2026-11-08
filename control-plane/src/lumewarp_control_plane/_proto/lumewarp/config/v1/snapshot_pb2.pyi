@@ -41,6 +41,19 @@ class KeyStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     KEY_STATUS_REVOKED: _ClassVar[KeyStatus]
     KEY_STATUS_BUDGET_EXCEEDED: _ClassVar[KeyStatus]
     KEY_STATUS_SUSPENDED: _ClassVar[KeyStatus]
+
+class McpReviewMode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    MCP_REVIEW_MODE_UNSPECIFIED: _ClassVar[McpReviewMode]
+    MCP_REVIEW_MODE_TOFU: _ClassVar[McpReviewMode]
+    MCP_REVIEW_MODE_MANUAL: _ClassVar[McpReviewMode]
+    MCP_REVIEW_MODE_OFF: _ClassVar[McpReviewMode]
+
+class McpDefinitionKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    MCP_DEFINITION_KIND_UNSPECIFIED: _ClassVar[McpDefinitionKind]
+    MCP_DEFINITION_KIND_TOOL: _ClassVar[McpDefinitionKind]
+    MCP_DEFINITION_KIND_PROMPT: _ClassVar[McpDefinitionKind]
 STREAM_USAGE_MODE_UNSPECIFIED: StreamUsageMode
 STREAM_USAGE_MODE_INCLUDE_USAGE: StreamUsageMode
 STREAM_USAGE_MODE_PASSTHROUGH: StreamUsageMode
@@ -61,9 +74,16 @@ KEY_STATUS_ACTIVE: KeyStatus
 KEY_STATUS_REVOKED: KeyStatus
 KEY_STATUS_BUDGET_EXCEEDED: KeyStatus
 KEY_STATUS_SUSPENDED: KeyStatus
+MCP_REVIEW_MODE_UNSPECIFIED: McpReviewMode
+MCP_REVIEW_MODE_TOFU: McpReviewMode
+MCP_REVIEW_MODE_MANUAL: McpReviewMode
+MCP_REVIEW_MODE_OFF: McpReviewMode
+MCP_DEFINITION_KIND_UNSPECIFIED: McpDefinitionKind
+MCP_DEFINITION_KIND_TOOL: McpDefinitionKind
+MCP_DEFINITION_KIND_PROMPT: McpDefinitionKind
 
 class Snapshot(_message.Message):
-    __slots__ = ("version", "upstreams", "models", "routers", "api_keys", "teams", "created_at_unix_ms", "required_capabilities", "scope", "aliases")
+    __slots__ = ("version", "upstreams", "models", "routers", "api_keys", "teams", "created_at_unix_ms", "required_capabilities", "scope", "aliases", "mcp_servers", "a2a_agents")
     VERSION_FIELD_NUMBER: _ClassVar[int]
     UPSTREAMS_FIELD_NUMBER: _ClassVar[int]
     MODELS_FIELD_NUMBER: _ClassVar[int]
@@ -74,6 +94,8 @@ class Snapshot(_message.Message):
     REQUIRED_CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
     SCOPE_FIELD_NUMBER: _ClassVar[int]
     ALIASES_FIELD_NUMBER: _ClassVar[int]
+    MCP_SERVERS_FIELD_NUMBER: _ClassVar[int]
+    A2A_AGENTS_FIELD_NUMBER: _ClassVar[int]
     version: int
     upstreams: _containers.RepeatedCompositeFieldContainer[Upstream]
     models: _containers.RepeatedCompositeFieldContainer[Model]
@@ -84,7 +106,9 @@ class Snapshot(_message.Message):
     required_capabilities: _containers.RepeatedScalarFieldContainer[str]
     scope: str
     aliases: _containers.RepeatedCompositeFieldContainer[Alias]
-    def __init__(self, version: _Optional[int] = ..., upstreams: _Optional[_Iterable[_Union[Upstream, _Mapping]]] = ..., models: _Optional[_Iterable[_Union[Model, _Mapping]]] = ..., routers: _Optional[_Iterable[_Union[Router, _Mapping]]] = ..., api_keys: _Optional[_Iterable[_Union[ApiKey, _Mapping]]] = ..., teams: _Optional[_Iterable[_Union[Team, _Mapping]]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ..., aliases: _Optional[_Iterable[_Union[Alias, _Mapping]]] = ...) -> None: ...
+    mcp_servers: _containers.RepeatedCompositeFieldContainer[McpServer]
+    a2a_agents: _containers.RepeatedCompositeFieldContainer[A2aAgent]
+    def __init__(self, version: _Optional[int] = ..., upstreams: _Optional[_Iterable[_Union[Upstream, _Mapping]]] = ..., models: _Optional[_Iterable[_Union[Model, _Mapping]]] = ..., routers: _Optional[_Iterable[_Union[Router, _Mapping]]] = ..., api_keys: _Optional[_Iterable[_Union[ApiKey, _Mapping]]] = ..., teams: _Optional[_Iterable[_Union[Team, _Mapping]]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ..., aliases: _Optional[_Iterable[_Union[Alias, _Mapping]]] = ..., mcp_servers: _Optional[_Iterable[_Union[McpServer, _Mapping]]] = ..., a2a_agents: _Optional[_Iterable[_Union[A2aAgent, _Mapping]]] = ...) -> None: ...
 
 class Upstream(_message.Message):
     __slots__ = ("name", "kind", "base_url", "api_key_ref", "timeout_ms", "stream_usage_mode", "health_check", "circuit_breaker", "metrics_url", "api_key_ciphertext")
@@ -278,16 +302,100 @@ class ApiKey(_message.Message):
     def __init__(self, key_id: _Optional[str] = ..., key_hash: _Optional[bytes] = ..., team_id: _Optional[str] = ..., status: _Optional[_Union[KeyStatus, str]] = ..., expires_at_unix_ms: _Optional[int] = ..., policy: _Optional[_Union[EffectivePolicy, _Mapping]] = ..., previous_key_hash: _Optional[bytes] = ..., previous_key_expires_at_unix_ms: _Optional[int] = ...) -> None: ...
 
 class EffectivePolicy(_message.Message):
-    __slots__ = ("allow_all_models", "allowed_models", "rate_limit_scopes", "budget_window_end_unix_ms")
+    __slots__ = ("allow_all_models", "allowed_models", "rate_limit_scopes", "budget_window_end_unix_ms", "allow_all_mcp", "mcp_grants", "allow_all_agents", "allowed_agents")
     ALLOW_ALL_MODELS_FIELD_NUMBER: _ClassVar[int]
     ALLOWED_MODELS_FIELD_NUMBER: _ClassVar[int]
     RATE_LIMIT_SCOPES_FIELD_NUMBER: _ClassVar[int]
     BUDGET_WINDOW_END_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    ALLOW_ALL_MCP_FIELD_NUMBER: _ClassVar[int]
+    MCP_GRANTS_FIELD_NUMBER: _ClassVar[int]
+    ALLOW_ALL_AGENTS_FIELD_NUMBER: _ClassVar[int]
+    ALLOWED_AGENTS_FIELD_NUMBER: _ClassVar[int]
     allow_all_models: bool
     allowed_models: _containers.RepeatedScalarFieldContainer[str]
     rate_limit_scopes: _containers.RepeatedCompositeFieldContainer[RateLimitScope]
     budget_window_end_unix_ms: int
-    def __init__(self, allow_all_models: _Optional[bool] = ..., allowed_models: _Optional[_Iterable[str]] = ..., rate_limit_scopes: _Optional[_Iterable[_Union[RateLimitScope, _Mapping]]] = ..., budget_window_end_unix_ms: _Optional[int] = ...) -> None: ...
+    allow_all_mcp: bool
+    mcp_grants: _containers.RepeatedCompositeFieldContainer[McpGrant]
+    allow_all_agents: bool
+    allowed_agents: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, allow_all_models: _Optional[bool] = ..., allowed_models: _Optional[_Iterable[str]] = ..., rate_limit_scopes: _Optional[_Iterable[_Union[RateLimitScope, _Mapping]]] = ..., budget_window_end_unix_ms: _Optional[int] = ..., allow_all_mcp: _Optional[bool] = ..., mcp_grants: _Optional[_Iterable[_Union[McpGrant, _Mapping]]] = ..., allow_all_agents: _Optional[bool] = ..., allowed_agents: _Optional[_Iterable[str]] = ...) -> None: ...
+
+class McpGrant(_message.Message):
+    __slots__ = ("server", "all_tools", "tools")
+    SERVER_FIELD_NUMBER: _ClassVar[int]
+    ALL_TOOLS_FIELD_NUMBER: _ClassVar[int]
+    TOOLS_FIELD_NUMBER: _ClassVar[int]
+    server: str
+    all_tools: bool
+    tools: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, server: _Optional[str] = ..., all_tools: _Optional[bool] = ..., tools: _Optional[_Iterable[str]] = ...) -> None: ...
+
+class PluginRef(_message.Message):
+    __slots__ = ("plugin", "params_json")
+    PLUGIN_FIELD_NUMBER: _ClassVar[int]
+    PARAMS_JSON_FIELD_NUMBER: _ClassVar[int]
+    plugin: str
+    params_json: str
+    def __init__(self, plugin: _Optional[str] = ..., params_json: _Optional[str] = ...) -> None: ...
+
+class UpstreamAuth(_message.Message):
+    __slots__ = ("plugin", "secret_ref", "secret_ciphertext")
+    PLUGIN_FIELD_NUMBER: _ClassVar[int]
+    SECRET_REF_FIELD_NUMBER: _ClassVar[int]
+    SECRET_CIPHERTEXT_FIELD_NUMBER: _ClassVar[int]
+    plugin: PluginRef
+    secret_ref: str
+    secret_ciphertext: bytes
+    def __init__(self, plugin: _Optional[_Union[PluginRef, _Mapping]] = ..., secret_ref: _Optional[str] = ..., secret_ciphertext: _Optional[bytes] = ...) -> None: ...
+
+class McpDefinition(_message.Message):
+    __slots__ = ("kind", "name", "hash")
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    HASH_FIELD_NUMBER: _ClassVar[int]
+    kind: McpDefinitionKind
+    name: str
+    hash: bytes
+    def __init__(self, kind: _Optional[_Union[McpDefinitionKind, str]] = ..., name: _Optional[str] = ..., hash: _Optional[bytes] = ...) -> None: ...
+
+class McpServer(_message.Message):
+    __slots__ = ("id", "name", "url", "auth", "timeout_ms", "review_mode", "approved")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    URL_FIELD_NUMBER: _ClassVar[int]
+    AUTH_FIELD_NUMBER: _ClassVar[int]
+    TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
+    REVIEW_MODE_FIELD_NUMBER: _ClassVar[int]
+    APPROVED_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    name: str
+    url: str
+    auth: UpstreamAuth
+    timeout_ms: int
+    review_mode: McpReviewMode
+    approved: _containers.RepeatedCompositeFieldContainer[McpDefinition]
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., url: _Optional[str] = ..., auth: _Optional[_Union[UpstreamAuth, _Mapping]] = ..., timeout_ms: _Optional[int] = ..., review_mode: _Optional[_Union[McpReviewMode, str]] = ..., approved: _Optional[_Iterable[_Union[McpDefinition, _Mapping]]] = ...) -> None: ...
+
+class A2aAgent(_message.Message):
+    __slots__ = ("id", "name", "url", "card_url", "auth", "middleware", "timeout_ms", "card_json")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    URL_FIELD_NUMBER: _ClassVar[int]
+    CARD_URL_FIELD_NUMBER: _ClassVar[int]
+    AUTH_FIELD_NUMBER: _ClassVar[int]
+    MIDDLEWARE_FIELD_NUMBER: _ClassVar[int]
+    TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
+    CARD_JSON_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    name: str
+    url: str
+    card_url: str
+    auth: UpstreamAuth
+    middleware: PluginRef
+    timeout_ms: int
+    card_json: str
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., url: _Optional[str] = ..., card_url: _Optional[str] = ..., auth: _Optional[_Union[UpstreamAuth, _Mapping]] = ..., middleware: _Optional[_Union[PluginRef, _Mapping]] = ..., timeout_ms: _Optional[int] = ..., card_json: _Optional[str] = ...) -> None: ...
 
 class RateLimitScope(_message.Message):
     __slots__ = ("id", "limit")
