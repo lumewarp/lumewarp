@@ -1,3 +1,4 @@
+import { Trash2Icon, UserCheckIcon, UserXIcon } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, type Schemas, type User } from "../api";
@@ -7,7 +8,7 @@ import { FormDialog, required, TextField, useForm } from "../components/Form";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
-import { CreateButton } from "../components/RowActions";
+import { CreateButton, IconAction } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { useMe, useMut } from "../hooks";
 
@@ -88,24 +89,22 @@ export function Users() {
             cell: (user) => {
               const isSelf = user.id === me.data?.user_id;
               return (
-                <div className="flex justify-end gap-1.5 whitespace-nowrap">
-                  <Button
-                    variant="outline"
-                    size="sm"
+                <div className="flex justify-end gap-1 whitespace-nowrap">
+                  <IconAction
+                    label={user.is_active ? "Deactivate" : "Reactivate"}
+                    icon={user.is_active ? UserXIcon : UserCheckIcon}
                     disabled={isSelf && user.is_active}
+                    reason="You can't deactivate your own account"
                     onClick={() => setConfirming({ user, kind: user.is_active ? "deactivate" : "activate" })}
-                  >
-                    {user.is_active ? "Deactivate" : "Reactivate"}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
+                  />
+                  <IconAction
+                    label="Delete"
+                    icon={Trash2Icon}
                     className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                     disabled={isSelf}
+                    reason="You can't delete your own account"
                     onClick={() => setConfirming({ user, kind: "delete" })}
-                  >
-                    Delete
-                  </Button>
+                  />
                 </div>
               );
             },

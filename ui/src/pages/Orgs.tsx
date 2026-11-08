@@ -132,6 +132,7 @@ function AssignAdminDialog({ org, onClose }: { org: Org; onClose: () => void }) 
 
 export function Orgs() {
   const perms = useCan();
+  const navigate = useNavigate();
   const teams = useTeams();
   const orgs = useOrgs(perms.isOrgAdmin);
   const [editing, setEditing] = useState<Org | "new" | null>(null);
@@ -190,7 +191,7 @@ export function Orgs() {
                         ? "Loading the org's teams…"
                         : `This org still has ${live} live ${live === 1 ? "team" : "teams"}; archive them first`
                   }
-                  onEdit={() => setEditing(org)}
+                  onEdit={() => void navigate({ to: "/orgs/$orgId", params: { orgId: org.id } })}
                   onDelete={() => setDeleting(org)}
                 />
               );

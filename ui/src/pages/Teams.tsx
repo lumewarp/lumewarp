@@ -1,10 +1,10 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { api, hasPolicy, type TeamAny } from "../api";
 import { PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
-import { blankPolicy, Budget, PolicyFields, policyBody, policyFrom, PolicySummary, POLICY_ALIAS, type PolicyValues } from "../components/Policy";
+import { blankPolicy, Budget, PolicyFields, policyBody, PolicySummary, POLICY_ALIAS, type PolicyValues } from "../components/Policy";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { useCan, useMut, useNames, useOrgs, useTeams } from "../hooks";
@@ -14,6 +14,7 @@ const blank: Values = { name: "", org_id: "", ...blankPolicy(true) };
 
 export function Teams() {
   const perms = useCan();
+  const navigate = useNavigate();
   const teams = useTeams();
   // Team creation is org level. With exactly one org the dialog picks it; several orgs
   // need an explicit choice. The org layer (the column) is hidden for a single-org
@@ -21,7 +22,8 @@ export function Teams() {
   const orgs = useOrgs(perms.canCreateTeam);
   const showOrg = perms.isOrgAdmin && (orgs.data?.length ?? 0) > 1;
   const orgName = useNames(orgs.data);
-  const [editing, setEditing] = useState<TeamAny | "new" | null>(null);
+  // The list only creates teams; a team is edited on its own page.
+  const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<TeamAny | null>(null);
   const form = useForm<Values>(blank, { name: required("Name") });
   const create = useMut(
@@ -29,29 +31,19 @@ export function Teams() {
       api.createTeam({ org_id: v.org_id || orgs.data?.[0]?.id || "", name: v.name, ...policyBody(v) }),
     "Team created",
   );
-  // A team admin may rename a team; its quota stays with the team's org admins.
-  const update = useMut(
-    ({ id, v }: { id: string; v: Values }) =>
-      api.updateTeam(id, perms.canSetTeamQuota(id) ? { name: v.name, ...policyBody(v) } : { name: v.name }),
-    "Team saved",
-  );
   const remove = useMut((id: string) => api.deleteTeam(id), "Team archived");
 
-  const open = (team: TeamAny | "new") => {
-    form.reset(
-      team === "new"
-        ? { ...blank, org_id: orgs.data?.[0]?.id ?? "" }
-        : { name: team.name, org_id: team.org_id, ...(hasPolicy(team) ? policyFrom(team, true) : blankPolicy(true)) },
-    );
-    setEditing(team);
+  const open = () => {
+    form.reset({ ...blank, org_id: orgs.data?.[0]?.id ?? "" });
+    setCreating(true);
   };
   // With no org yet there is nothing to create a team in; with one it is picked for the
   // caller. Keep Create disabled until the org list answers so the body never carries "".
-  const orgReady = editing !== "new" || !!form.values.org_id || !!orgs.data?.[0];
+  const orgReady = !!form.values.org_id || !!orgs.data?.[0];
   const submit = async () => {
     if (!form.validate()) return false;
     return form.run(
-      () => (editing === "new" ? create.mutateAsync(form.values) : update.mutateAsync({ id: (editing as TeamAny).id, v: form.values })),
+      () => create.mutateAsync(form.values),
       POLICY_ALIAS,
     );
   };
@@ -60,7 +52,7 @@ export function Teams() {
     <>
       <PageHeader
         title="Teams"
-        actions={<CreateButton can={perms.canCreateTeam} onClick={() => open("new")}>New team</CreateButton>}
+        actions={<CreateButton can={perms.canCreateTeam} onClick={open}>New team</CreateButton>}
       />
       <DataTable
         rows={teams.data}
@@ -88,7 +80,7 @@ export function Teams() {
                 canDelete={perms.canDeleteTeam(row.id)}
                 deleteLabel="Archive"
                 deleteReason="Only an org admin or an installation admin can archive a team"
-                onEdit={() => open(row)}
+                onEdit={() => void navigate({ to: "/teams/$teamId", params: { teamId: row.id } })}
                 onDelete={() => setDeleting(row)}
               />
             ),
@@ -96,15 +88,15 @@ export function Teams() {
         ]}
       />
       <FormDialog
-        open={!!editing}
-        title={editing === "new" ? "New team" : "Edit team"}
-        submitLabel={editing === "new" ? "Create" : "Save"}
+        open={creating}
+        title="New team"
+        submitLabel="Create"
         submitDisabled={!orgReady}
-        onClose={() => setEditing(null)}
+        onClose={() => setCreating(false)}
         onSubmit={submit}
       >
         <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
-        {editing === "new" && (orgs.data?.length ?? 0) > 1 && (
+        {(orgs.data?.length ?? 0) > 1 && (
           <SelectField
             label="Org"
             value={form.values.org_id}
@@ -112,15 +104,15 @@ export function Teams() {
             options={(orgs.data ?? []).map((org) => ({ value: org.id, label: org.name }))}
           />
         )}
-        {editing === "new" && orgs.data?.length === 1 && (
+        {orgs.data?.length === 1 && (
           <p className="m-0 text-sm text-muted-foreground">Created in {orgs.data[0].name}.</p>
         )}
-        {editing === "new" && orgs.data?.length === 0 && (
+        {orgs.data?.length === 0 && (
           <p className="m-0 text-sm text-muted-foreground">
             There is no org yet. An installation admin can create one, then a team belongs to it.
           </p>
         )}
-        {(editing === "new" ? perms.canCreateTeam : editing ? perms.canSetTeamQuota(editing.id) : false) && (
+        {perms.canCreateTeam && (
           <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam />
         )}
       </FormDialog>
