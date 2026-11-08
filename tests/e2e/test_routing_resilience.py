@@ -25,7 +25,7 @@ def test_unregistered_custom_strategy_nacks_and_keeps_last_snapshot(stack):
             what="initial snapshot ACK",
         )
         previous = stack.gateway_status()["acked_version"]
-        # Built-ins are advertised too; a strategy that is not compiled in is not.
+        # Built-ins are advertised too; a strategy that is not loaded is not.
         strategies = {
             c.removeprefix("strategy:")
             for c in stack.gateway_status()["capabilities"]
@@ -49,7 +49,8 @@ def test_unregistered_custom_strategy_nacks_and_keeps_last_snapshot(stack):
         refused = stack.api("POST", "/routers", json=body)
         assert refused.status_code == 422, refused.text
         assert "no gateway reports" in refused.text
-        # Another gateway has it, offline: this connected one lacks it and needs force.
+        # Another gateway reported it before going offline: this connected one lacks it
+        # and needs force.
         _offline_gateway_with(stack, "header_pin")
         refused = stack.api("POST", "/routers", json=body)
         assert refused.status_code == 422, refused.text
@@ -119,12 +120,25 @@ def _offline_gateway_with(stack, strategy: str) -> None:
     )
     pg(
         stack.dsn,
-        "INSERT INTO gateway_strategies"
-        " (scope, gateway_id, name, digest, descriptor, token_id, seen_at)"
-        " VALUES ('e2e', $1, $2, 'aa', $3, $4::uuid, now())",
+        "INSERT INTO gateway_plugins"
+        " (scope, gateway_id, kind, name, digest, descriptor, token_id, seen_at)"
+        " VALUES ('e2e', $1, 'router-strategy', $2, 'aa', $3::jsonb, $4::uuid, now())",
         gateway,
         strategy,
-        json.dumps({"name": strategy, "params_schema": None, "member_schema": None}),
+        json.dumps(
+            {
+                "kind": "router-strategy",
+                "name": strategy,
+                "title": strategy,
+                "description": "",
+                "params_schema": None,
+                "member_schema": None,
+                "uses_weight": False,
+                "needs": [],
+                "wasm_sha256": "",
+                "schema_problems": [],
+            }
+        ),
         token,
     )
 
@@ -339,7 +353,7 @@ def test_uri_contract_snapshot_is_accepted_by_gateway(stack):
                 "metrics_url": url + "/metrics",
             },
         )
-    for field in ("base_url", "metrics_url"):
+    for field in ("base_url", "metrics_url", "health_url"):
         for i, url in enumerate(
             (
                 "http://exam%2fple.com/v1",
@@ -366,11 +380,11 @@ def test_uri_contract_snapshot_is_accepted_by_gateway(stack):
             "PATCH",
             f"/upstreams/{upstream}",
             json={
+                "health_url": f"{base}/a%20b;v=1",
                 "health_check": {
-                    "url": f"{base}/a%20b;v=1",
                     "interval_ms": 1000,
                     "timeout_ms": 100,
-                }
+                },
             },
         )
         revision = pg(

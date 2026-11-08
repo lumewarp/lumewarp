@@ -185,7 +185,7 @@ async fn a_failed_configure_while_pre_warming_is_counted_not_hidden() {
         PoolConfig {
             target: 1,
             prewarm: 1,
-            memory: None,
+            permits: None,
             budget: Some(Arc::clone(&probe)),
             configure_timeout: lumewarp_plugin_host::CONFIGURE_TIMEOUT,
         },
@@ -207,7 +207,7 @@ async fn a_failed_configure_while_pre_warming_is_counted_not_hidden() {
         PoolConfig {
             target: 4,
             prewarm: 4,
-            memory: None,
+            permits: None,
             budget: Some(tight),
             configure_timeout: lumewarp_plugin_host::CONFIGURE_TIMEOUT,
         },
@@ -269,7 +269,7 @@ fn pool_config() -> PoolConfig {
     PoolConfig {
         target: 1,
         prewarm: 1,
-        memory: None,
+        permits: None,
         budget: None,
         configure_timeout: lumewarp_plugin_host::CONFIGURE_TIMEOUT,
     }
@@ -329,11 +329,11 @@ async fn an_ineligible_pick_answer_is_a_trap_and_no_answer() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_stuck_plugin_does_not_starve_another_plugin() {
     let Some(registry) = load() else { return };
-    let memory = Arc::new(tokio::sync::Semaphore::new(2));
+    let memory = limits::Permits::new(2);
     // Both pools share the same two-permit gate, so a queueing call that took a
     // permit would starve the other plugin.
     let gate = || PoolConfig {
-        memory: Some(Arc::clone(&memory)),
+        permits: Some(Arc::clone(&memory)),
         ..pool_config()
     };
     let stuck = router_with(
@@ -375,7 +375,7 @@ async fn a_stuck_plugin_does_not_starve_another_plugin() {
     // Let the running pick enter the guest and the other two queue for its pool.
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(
-        memory.available_permits(),
+        memory.semaphore().available_permits(),
         1,
         "only the running call holds a permit"
     );
@@ -385,6 +385,82 @@ async fn a_stuck_plugin_does_not_starve_another_plugin() {
     )
     .await
     .expect("a stuck plugin must not block another plugin");
+    assert_eq!(answer, Some(0));
+    for task in tasks {
+        task.abort();
+    }
+}
+
+/// One pool cannot take the whole permit gate (M2 tail): a pool is capped at a
+/// quarter of the permits, so many stuck calls to one strategy leave the rest of
+/// the gate to every other plugin (D21: a slow plugin delays only its callers).
+#[tokio::test(flavor = "current_thread")]
+async fn one_pool_cannot_take_every_permit() {
+    let Some(registry) = load() else { return };
+    // Four permits. Without the share a pool configured for four instances (the
+    // CPU count on a four-core host) would hold all of them.
+    let memory = limits::Permits::new(4);
+    let gate = || PoolConfig {
+        target: 4,
+        prewarm: 0,
+        permits: Some(Arc::clone(&memory)),
+        ..pool_config()
+    };
+    let stuck = router_with(
+        registry.get(1, "loop_test").unwrap().clone(),
+        "hog",
+        serde_json::json!({}),
+        bare_members(),
+        gate(),
+    );
+    let healthy = router_with(
+        registry.get(1, "cheapest_first").unwrap().clone(),
+        "healthy",
+        serde_json::json!({}),
+        priced_members(),
+        gate(),
+    );
+    let request = types::RequestInfo {
+        requested: "r".into(),
+        team_id: String::new(),
+        key_id: String::new(),
+        estimated_input_tokens: None,
+        headers: Vec::new(),
+    };
+    let eligible = candidates();
+    let mut tasks = Vec::new();
+    for _ in 0..(memory.total() * 2) {
+        let instance = Arc::clone(&stuck);
+        let request = request.clone();
+        let eligible = eligible.clone();
+        tasks.push(tokio::spawn(async move {
+            instance
+                .pick(&request, &eligible, 1, Duration::from_secs(3600))
+                .await
+        }));
+    }
+    // Let one running pick enter the guest; the rest queue inside the pool. The
+    // loop waits for it (an instance is created and then acquires its permit)
+    // instead of assuming how long that takes on a loaded machine.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let available = memory.semaphore().available_permits();
+        if stuck.pool().live() == 1 && available == memory.total() - 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "one stuck call should hold one permit: live={} available={available}",
+            stuck.pool().live()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let answer = tokio::time::timeout(
+        Duration::from_secs(20),
+        healthy.pick(&request, &eligible, 1, TIMEOUT),
+    )
+    .await
+    .expect("a stuck plugin must never take the whole permit gate");
     assert_eq!(answer, Some(0));
     for task in tasks {
         task.abort();
@@ -447,7 +523,7 @@ fn loop_router(plugin: Arc<lumewarp_plugin_host::Plugin>, name: &str) -> Arc<Rou
             PoolConfig {
                 target: 1,
                 prewarm: 1,
-                memory: None,
+                permits: None,
                 budget: None,
                 configure_timeout: lumewarp_plugin_host::CONFIGURE_TIMEOUT,
             },
@@ -580,7 +656,7 @@ async fn a_pool_miss_awaits_a_new_instance() {
         PoolConfig {
             target: 1,
             prewarm: 0,
-            memory: None,
+            permits: None,
             budget: None,
             configure_timeout: lumewarp_plugin_host::CONFIGURE_TIMEOUT,
         },
@@ -621,7 +697,7 @@ async fn concurrent_calls_share_the_pool() {
             PoolConfig {
                 target: 2,
                 prewarm: 0,
-                memory: None,
+                permits: None,
                 budget: None,
                 configure_timeout: lumewarp_plugin_host::CONFIGURE_TIMEOUT,
             },

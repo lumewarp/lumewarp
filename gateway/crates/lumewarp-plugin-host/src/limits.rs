@@ -8,9 +8,11 @@
 //! - [`Budget`] caps the linear memory of *all* Stores in the process, which is
 //!   what grows with the number of routers, of pooled instances and of snapshot
 //!   generations alive at once. Default 1 GiB, `LUMEWARP_PLUGIN_MEMORY_LIMIT_BYTES`.
-//! - [`memory_permits`] is the async admission gate for plugin calls: one permit
-//!   per [`MEMORY_PER_STORE`] the budget allows. A call that cannot get one
-//!   waits (bounded by its own timeout) instead of failing.
+//! - [`Permits`] is the async admission gate for plugin calls: one permit per
+//!   [`MEMORY_PER_STORE`] the budget allows. A call that cannot get one waits
+//!   (bounded by its own timeout) instead of failing, and one pool never owns
+//!   more than its [share](Permits::pool_share) of them, so a stuck plugin
+//!   delays only the requests that call it (M2, D21).
 //! - [`IdleBudget`] caps how many instances the pools may own (idle + checked
 //!   out), so a snapshot with many routers cannot pin unbounded Stores.
 //!
@@ -65,16 +67,50 @@ pub fn store_limits() -> StoreLimits {
         .build()
 }
 
-/// One permit per [`MEMORY_PER_STORE`] the process budget allows: the number of
-/// plugin calls that may run at the same time.
-pub fn memory_permits(limit: usize) -> Arc<Semaphore> {
-    Arc::new(Semaphore::new((limit / MEMORY_PER_STORE).max(1)))
+/// One permit per [`MEMORY_PER_STORE`] the budget allows.
+pub fn memory_permits(limit: usize) -> Arc<Permits> {
+    Permits::new((limit / MEMORY_PER_STORE).max(1))
 }
 
-/// The process semaphore from the process budget.
-pub fn memory_semaphore() -> &'static Arc<Semaphore> {
-    static PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+/// The process-wide call permits, from the process budget.
+pub fn memory_permits_gate() -> &'static Arc<Permits> {
+    static PERMITS: OnceLock<Arc<Permits>> = OnceLock::new();
     PERMITS.get_or_init(|| memory_permits(memory_budget().limit()))
+}
+
+/// The admission gate for plugin calls: a semaphore with one permit per
+/// [`MEMORY_PER_STORE`] the budget allows, plus how many permits that is (tokio
+/// cannot report a semaphore's total, and a pool has to bound itself by it).
+#[derive(Debug)]
+pub struct Permits {
+    semaphore: Arc<Semaphore>,
+    total: usize,
+}
+
+impl Permits {
+    pub fn new(total: usize) -> Arc<Self> {
+        Arc::new(Self {
+            semaphore: Arc::new(Semaphore::new(total)),
+            total,
+        })
+    }
+
+    /// The semaphore every call takes one permit from.
+    pub fn semaphore(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.semaphore)
+    }
+
+    pub fn total(&self) -> usize {
+        self.total
+    }
+
+    /// How many instances one pool may own: at most a quarter of the permits and
+    /// at least one. Every running call holds one permit, so this bounds how much
+    /// of the gate one pool can take; the rest stays available to other plugins
+    /// even when this one is stuck (M2, D21).
+    pub fn pool_share(&self) -> usize {
+        (self.total / 4).max(1)
+    }
 }
 
 /// A permit that counts towards one plugin call's timeout while it waits.
@@ -185,42 +221,51 @@ fn limit_from_env() -> usize {
 }
 
 /// Counts the instances the pools own. Nothing is created past the cap; a pool
-/// that cannot get a slot waits for a returned instance instead.
+/// that cannot get a slot waits for one to be freed instead.
+///
+/// The cap is a [`Semaphore`] rather than a counter so that dropping an
+/// [`IdleSlot`] hands the permit to the next waiting pool: a slot freed by one
+/// pool wakes a pool waiting on the cap (m2).
 #[derive(Debug)]
 pub struct IdleBudget {
     limit: usize,
-    used: AtomicUsize,
+    slots: Arc<Semaphore>,
 }
 
 impl IdleBudget {
     pub fn new(limit: usize) -> Arc<Self> {
         Arc::new(Self {
             limit,
-            used: AtomicUsize::new(0),
+            slots: Arc::new(Semaphore::new(limit)),
         })
     }
 
     /// Claims one instance slot, or `None` when the cap is reached.
     pub fn acquire(self: &Arc<Self>) -> Option<IdleSlot> {
-        let mut used = self.used.load(Ordering::Relaxed);
-        loop {
-            if used >= self.limit {
-                return None;
-            }
-            match self.used.compare_exchange_weak(
-                used,
-                used + 1,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return Some(IdleSlot(Arc::clone(self))),
-                Err(current) => used = current,
-            }
-        }
+        self.slots
+            .clone()
+            .try_acquire_owned()
+            .ok()
+            .map(|permit| IdleSlot { _permit: permit })
+    }
+
+    /// Waits until a slot is freed, by any pool, and claims it.
+    ///
+    /// `None` only when the budget was closed, which nothing does. The caller
+    /// owns the returned slot, so a pool that wakes for a freed slot is the one
+    /// that gets it; if it cannot use it, dropping the slot hands it to the next
+    /// waiter (m2).
+    pub async fn wait(self: &Arc<Self>) -> Option<IdleSlot> {
+        self.slots
+            .clone()
+            .acquire_owned()
+            .await
+            .ok()
+            .map(|permit| IdleSlot { _permit: permit })
     }
 
     pub fn used(&self) -> usize {
-        self.used.load(Ordering::Relaxed)
+        self.limit - self.slots.available_permits()
     }
 
     pub fn limit(&self) -> usize {
@@ -228,25 +273,12 @@ impl IdleBudget {
     }
 }
 
-/// One instance's claim on the [`IdleBudget`]; released when the instance dies.
+/// One instance's claim on the [`IdleBudget`]; released when the instance dies,
+/// which hands the slot to a pool waiting on the cap (m2). Owned, so a pool can
+/// claim it in an async wait.
 #[derive(Debug)]
-pub struct IdleSlot(Arc<IdleBudget>);
-
-impl Drop for IdleSlot {
-    fn drop(&mut self) {
-        let mut used = self.0.used.load(Ordering::Relaxed);
-        loop {
-            let next = used.saturating_sub(1);
-            match self
-                .0
-                .used
-                .compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Relaxed)
-            {
-                Ok(_) => return,
-                Err(current) => used = current,
-            }
-        }
-    }
+pub struct IdleSlot {
+    _permit: OwnedSemaphorePermit,
 }
 
 pub fn idle_budget() -> &'static Arc<IdleBudget> {
@@ -303,6 +335,43 @@ mod tests {
         assert_eq!(budget.used(), 1);
         assert!(budget.acquire().is_some());
         drop(second);
+    }
+
+    /// A freed instance slot is handed to a waiter instead of being missed (m2).
+    #[tokio::test]
+    async fn a_freed_idle_slot_wakes_a_waiter() {
+        let budget = IdleBudget::new(1);
+        let held = budget.acquire().unwrap();
+        let waiting = {
+            let budget = Arc::clone(&budget);
+            tokio::spawn(async move { budget.wait().await.is_some() })
+        };
+        let mut waiting = waiting;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut waiting)
+                .await
+                .is_err(),
+            "the cap is full, so the waiter blocks"
+        );
+        drop(held);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(500), waiting)
+                .await
+                .expect("a freed slot wakes the waiter")
+                .unwrap(),
+            "the waiter owns the slot"
+        );
+    }
+
+    /// One pool may own a quarter of the call permits, and never zero (M2).
+    #[test]
+    fn a_pool_takes_a_quarter_of_the_permits() {
+        assert_eq!(Permits::new(32).pool_share(), 8);
+        assert_eq!(Permits::new(8).pool_share(), 2);
+        assert_eq!(Permits::new(5).pool_share(), 1);
+        assert_eq!(Permits::new(1).pool_share(), 1);
+        assert_eq!(Permits::new(0).pool_share(), 1, "never zero");
+        assert_eq!(Permits::new(7).total(), 7);
     }
 
     #[test]

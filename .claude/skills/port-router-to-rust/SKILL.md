@@ -265,7 +265,7 @@ crate's own tests can call the same factory path the gateway uses
    to the factory and assert that `configure` rejects it too. Also test a list
    of boundary payloads through both the control plane and standalone YAML, as
    `priority-failover/testdata/boundaries.json` and
-   `tests/e2e/test_strategy_crate.py` do.
+   `tests/e2e/test_strategy_plugin.py` do.
 
 3. **Split/member-index behaviour.** Put the same model in two splits with
    different member params and assert the pick uses the right entry, in both
@@ -277,15 +277,16 @@ crate's own tests can call the same factory path the gateway uses
 
 5. **End to end through a snapshot.** Add
    `tests/e2e/test_strategy_<name>.py` modelled on
-   `tests/e2e/test_strategy_cheapest_first.py`: build the components with
-   `bash gateway/plugins/build.sh`, start a gateway with
-   `LUMEWARP_ROUTER_PLUGIN_DIR` set, save a router using the strategy through
-   the admin API, call it, and assert the usage row's `model` is the member the
-   policy should have chosen. Also assert that `GET /plugins?kind=router-strategy`
-   shows the descriptor and that the control plane enforces its schema (422 on
-   bad member params). `tests/e2e/test_strategy_crate.py` is the variant that
-   reuses the gateway binary and plugin directory from `scripts/e2e-core.sh`
-   via `E2E_STRATEGY_GATEWAY_BIN`.
+   `tests/e2e/test_strategy_cheapest_first.py`: the script builds the components
+   with `bash gateway/plugins/build.sh`, the test starts a gateway with
+   `LUMEWARP_ROUTER_PLUGIN_DIR` set through `stack.start_gateway(extra_env=...)`,
+   saves a router using the strategy through the admin API, calls it, and asserts
+   the usage row's `model` is the member the policy should have chosen. Also
+   assert that `GET /plugins?kind=router-strategy` shows the descriptor and that
+   the control plane enforces its schema (422 on bad member params).
+   `tests/e2e/test_strategy_plugin.py` is the generic variant for
+   `priority_failover`, with the same boundary payloads through the API and
+   standalone YAML.
 
 Run:
 

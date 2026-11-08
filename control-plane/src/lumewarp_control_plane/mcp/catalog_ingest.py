@@ -66,6 +66,10 @@ MAX_DEFINITION_BYTES = 64 * 1024
 # it would fail to compile, so ingest never lets a server get there.
 MAX_DEFINITIONS_PER_SERVER = 10_000
 MAX_CARD_BYTES = 64 * 1024
+# `ObservedDefinition.config_version` / `AgentCardReport.config_version` are uint64 on the
+# wire, but `config_versions.version` is a PostgreSQL bigint: anything outside this range
+# cannot even be a query parameter, so it is dropped per item before the batch lookup (N2).
+MAX_CONFIG_VERSION = 2**63 - 1
 # One report, bounded per item and in total. An over-limit item is dropped and counted;
 # nothing here aborts a gateway's config stream (a hostile or broken upstream must not cost
 # a gateway its other, unrelated reports).
@@ -138,10 +142,10 @@ async def _version_revisions(
     """The source revision each named config version was compiled from.
 
     Compaction keeps the metadata, so a retained older version can still be checked. A
-    version 0 or one this scope never published has no entry: it cannot be proven and the
-    item that claims it is discarded.
+    version 0, one this scope never published, or one a bigint cannot hold has no entry: it
+    cannot be proven and the item that claims it is discarded.
     """
-    wanted = sorted({version for version in versions if version > 0})
+    wanted = sorted({version for version in versions if 1 <= version <= MAX_CONFIG_VERSION})
     if not wanted:
         return {}
     rows = await session.execute(
@@ -160,6 +164,21 @@ MAX_FETCH_SKEW_MS = 60_000
 def _text_ok(*values: str) -> bool:
     """Whether Postgres can store each value as text (it cannot hold U+0000)."""
     return not any("\x00" in value for value in values)
+
+
+def _observation_problem(observation: Observation) -> bool:
+    """Whether a definition cannot be stored at all (the boundary both ingest paths share).
+
+    A gateway report and Discover now build the exact same `Observation`, so the DB-safe
+    bounds live here rather than in the report parser: Postgres text cannot hold U+0000
+    (M3), and the stored JSON/name must satisfy the plan's per-definition bounds whatever
+    path produced it (N3, which also closes the size bound for Discover).
+    """
+    return (
+        not _text_ok(observation.name, observation.canonical_json)
+        or not 0 < len(observation.name.encode("utf-8")) <= MAX_NAME_BYTES
+        or not 0 < len(observation.canonical_json.encode("utf-8")) <= MAX_DEFINITION_BYTES
+    )
 
 
 def _card_time(fetched_at_unix_ms: int, now: datetime) -> datetime | None:
@@ -186,11 +205,6 @@ def observe(
     """The definition as the control plane can trust it, or None (counting the reason)."""
     definition_kind = DEFINITION_KIND.get(kind)
     if definition_kind is None:
-        result.discarded["invalid"] += 1
-        return None
-    # An untrusted upstream can put U+0000 anywhere; Postgres text cannot hold it, and a
-    # failed INSERT would abort the transaction of the whole report (M3).
-    if not _text_ok(item.name, item.definition_json):
         result.discarded["invalid"] += 1
         return None
     if not 0 < len(item.definition_json.encode("utf-8")) <= MAX_DEFINITION_BYTES:
@@ -244,6 +258,11 @@ async def record_observations(
     now = now or datetime.now(UTC)
     pending, total = await _counts(session, server.id)
     for observation in observations:
+        # The one place a definition is checked against what the database can hold, before
+        # its name/hash even becomes a query parameter (N3).
+        if _observation_problem(observation):
+            result.discarded["invalid"] += 1
+            continue
         known = await session.scalar(
             select(McpDefinition.id)
             .where(
@@ -329,15 +348,23 @@ async def ingest_report(
     result = IngestResult()
     if not await lock_scope(session, scope):
         return result
+    # Apply the per-report caps before anything reaches SQL: an excess item (and a version a
+    # bigint cannot hold) is dropped by itself, instead of widening the batch queries and
+    # failing the transaction of every other item in the report (N2).
+    definitions = report.definitions[:MAX_DEFINITIONS_PER_REPORT]
+    cards = report.cards[:MAX_CARDS_PER_REPORT]
+    excess = (len(report.definitions) - len(definitions)) + (len(report.cards) - len(cards))
+    if excess:
+        result.discarded["report_limit"] += excess
     revisions = await _version_revisions(
         session,
         scope,
         (
-            *(item.config_version for item in report.definitions),
-            *(card.config_version for card in report.cards),
+            *(item.config_version for item in definitions),
+            *(card.config_version for card in cards),
         ),
     )
-    names = sorted({item.server for item in report.definitions if _text_ok(item.server)})
+    names = sorted({item.server for item in definitions if _text_ok(item.server)})
     servers: dict[str, McpServer] = {}
     if names:
         rows = await session.scalars(
@@ -349,10 +376,7 @@ async def ingest_report(
         servers = {server.name: server for server in rows}
     grouped: dict[uuid.UUID, tuple[McpServer, list[Observation]]] = {}
     seen_bytes = 0
-    for index, item in enumerate(report.definitions):
-        if index >= MAX_DEFINITIONS_PER_REPORT:
-            result.discarded["report_limit"] += 1
-            continue
+    for item in definitions:
         seen_bytes += len(item.definition_json.encode("utf-8")) + len(item.name.encode("utf-8"))
         if seen_bytes > MAX_REPORT_BYTES:
             result.discarded["report_limit"] += 1
@@ -382,12 +406,9 @@ async def ingest_report(
     for server, observations in grouped.values():
         result.merge(await record_observations(session, server, observations, now=now))
 
-    agents = await _lock_agents(session, report)
+    agents = await _lock_agents(session, cards)
     seen_bytes = 0
-    for index, card in enumerate(report.cards):
-        if index >= MAX_CARDS_PER_REPORT:
-            result.discarded["report_limit"] += 1
-            continue
+    for card in cards:
         seen_bytes += len(card.card_json.encode("utf-8")) + len(card.error.encode("utf-8"))
         if seen_bytes > MAX_REPORT_BYTES:
             result.discarded["report_limit"] += 1
@@ -439,9 +460,11 @@ async def ingest_report(
     return result
 
 
-async def _lock_agents(session: AsyncSession, report: cpb.CatalogReport) -> dict[str, A2aAgent]:
+async def _lock_agents(
+    session: AsyncSession, cards: Sequence[cpb.AgentCardReport]
+) -> dict[str, A2aAgent]:
     """The live agents the report names, row-locked for the card update."""
-    names = sorted({card.agent for card in report.cards if _text_ok(card.agent)})
+    names = sorted({card.agent for card in cards if _text_ok(card.agent)})
     if not names:
         return {}
     rows = await session.scalars(

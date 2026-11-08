@@ -7,10 +7,11 @@
 //! the async instantiation itself: a checkout that finds the pool empty awaits a
 //! new instance or a returned one, bounded by the call's own timeout.
 //!
-//! Each call takes one permit from the process memory semaphore
-//! ([`crate::limits::memory_permits`]): a burst larger than the budget waits for
-//! a permit instead of failing. A call that ends by timeout, trap or error drops
-//! its Store, which gives the reserved memory back.
+//! Each call takes one permit from the process memory gate
+//! ([`crate::limits::Permits`]): a burst larger than the budget waits for a
+//! permit instead of failing. A pool never owns more than its share of them, so
+//! a stuck plugin delays only the requests that call it. A call that ends by
+//! timeout, trap or error drops its Store, which gives the reserved memory back.
 
 use std::{
     collections::HashMap,
@@ -35,11 +36,12 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct PoolConfig {
     /// Instances the pool may own (idle or in use), and its pre-warm target.
+    /// Capped at the pool's share of the call permits (M2).
     pub target: usize,
     /// Instances created at configure time. Defaults to `target`.
     pub prewarm: usize,
-    /// Memory admission gate; `None` uses the process semaphore.
-    pub memory: Option<Arc<Semaphore>>,
+    /// Call-permit gate; `None` uses the process gate.
+    pub permits: Option<Arc<limits::Permits>>,
     /// Wasm memory budget the pool's Stores count against; `None` uses the
     /// process budget (`LUMEWARP_PLUGIN_MEMORY_LIMIT_BYTES`).
     pub budget: Option<Arc<limits::Budget>>,
@@ -57,7 +59,7 @@ impl Default for PoolConfig {
             // after an apply then never pays for instantiation. The memory
             // budget stops the pre-warm when a deployment cannot afford it.
             prewarm: target,
-            memory: None,
+            permits: None,
             budget: None,
             configure_timeout: crate::CONFIGURE_TIMEOUT,
         }
@@ -65,10 +67,10 @@ impl Default for PoolConfig {
 }
 
 impl PoolConfig {
-    fn memory(&self) -> Arc<Semaphore> {
-        self.memory
+    fn permits(&self) -> Arc<limits::Permits> {
+        self.permits
             .clone()
-            .unwrap_or_else(|| Arc::clone(limits::memory_semaphore()))
+            .unwrap_or_else(|| Arc::clone(limits::memory_permits_gate()))
     }
 }
 
@@ -92,6 +94,15 @@ impl Drop for LiveGuard {
 pub(crate) struct Slot {
     _live: LiveGuard,
     _idle: limits::IdleSlot,
+}
+
+/// What a failed [`InstancePool::reserve`] is waiting for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Blocked {
+    /// Every instance this pool may own is in use: wait for one to come back.
+    Pool,
+    /// The process-wide instance cap is full: wait for any pool to free one.
+    Budget,
 }
 
 /// The parts of a pool every adapter shares: idle instances, the live cap and a
@@ -139,17 +150,30 @@ impl<I> InstancePool<I> {
         // Else: dropped here, outside the lock, which frees its Store.
     }
 
-    /// Claims one live slot and one process-wide instance slot, or `None` when
-    /// either is exhausted (the caller then waits for an instance to come back).
+    /// Claims one live slot and one process-wide instance slot, or says what the
+    /// pool is waiting for when either is exhausted.
     ///
-    /// The process-wide slot is claimed **first**: taking a live slot and then
-    /// dropping it would notify the waiters and spin them (m2).
-    pub(crate) fn reserve(&self) -> Option<Slot> {
-        let idle = self.budget.acquire()?;
+    /// The target check comes **first**: a cap slot this pool cannot use is
+    /// never taken, so another pool's `reserve` cannot fail against a
+    /// reservation that is about to be dropped (m2). Returning here never
+    /// notifies, so a waiter is never handed a slot it cannot have.
+    pub(crate) fn reserve(&self) -> Result<Slot, Blocked> {
+        if self.live.live.load(Ordering::Acquire) >= self.target {
+            return Err(Blocked::Pool);
+        }
+        let Some(idle) = self.budget.acquire() else {
+            return Err(Blocked::Budget);
+        };
+        self.claim(idle).ok_or(Blocked::Pool)
+    }
+
+    /// Claims the live slot with `idle` (a process-wide instance slot) in hand.
+    /// `None` when the target filled up meanwhile; `idle` is then dropped, which
+    /// hands the cap slot to the next waiting pool.
+    fn claim(&self, idle: limits::IdleSlot) -> Option<Slot> {
         let mut live = self.live.live.load(Ordering::Acquire);
         loop {
             if live >= self.target {
-                // Releasing `idle` here does not notify: no live slot changed.
                 return None;
             }
             match self.live.live.compare_exchange_weak(
@@ -169,9 +193,23 @@ impl<I> InstancePool<I> {
         }
     }
 
-    /// Waits until an instance is returned or a slot is freed.
-    pub(crate) async fn wait(&self) {
-        self.live.notify.notified().await;
+    /// Waits for whatever [`Self::reserve`] said is missing. A slot freed in the
+    /// process-wide cap is **claimed here**, so the pool that woke for it is the
+    /// one that gets it, and one that cannot use it drops it for the next waiter
+    /// (m2). `Ok(None)` means an instance came back: try again.
+    pub(crate) async fn wait(&self, blocked: Blocked) -> Result<Option<Slot>, Error> {
+        match blocked {
+            Blocked::Pool => {
+                self.live.notify.notified().await;
+                Ok(None)
+            }
+            Blocked::Budget => {
+                let idle = self.budget.wait().await.ok_or_else(|| {
+                    Error::Instantiate("the instance budget was closed".to_owned())
+                })?;
+                Ok(self.claim(idle))
+            }
+        }
     }
 
     pub(crate) fn live(&self) -> usize {
@@ -234,16 +272,20 @@ pub struct RouterPool {
 
 impl RouterPool {
     fn new(plugin: Arc<Plugin>, info: types::RouterInfo, config: PoolConfig) -> Self {
+        let permits = config.permits();
+        // A quarter of the call permits at most, so a stuck strategy holds only
+        // its own requests' permits and every other plugin still runs (M2).
+        let target = config.target.min(permits.pool_share()).max(1);
         Self {
             plugin,
             info,
-            pool: InstancePool::new(config.target),
-            memory: config.memory(),
+            pool: InstancePool::new(target),
+            memory: permits.semaphore(),
             budget: config
                 .budget
                 .clone()
                 .unwrap_or_else(|| Arc::clone(limits::memory_budget())),
-            prewarm: config.prewarm.min(config.target),
+            prewarm: config.prewarm.min(target),
             configure_timeout: config.configure_timeout,
         }
     }
@@ -351,23 +393,28 @@ impl RouterPool {
             if let Some(instance) = self.pool.pop() {
                 return Ok(instance);
             }
-            if let Some(slot) = self.pool.reserve() {
-                // The memory permit covers instantiation and the call only; a
-                // request queueing for this pool never holds one, so a stuck
-                // plugin cannot starve the others (M2).
-                match self.create_waiting(slot, None).await {
-                    Ok(instance) => return Ok(instance),
-                    // Out of budget: give this pool's own idle instances back
-                    // and try once more before failing the call.
-                    Err(_) if !retried && self.pool.idle_len() > 0 => {
-                        retried = true;
-                        self.pool.shrink(0);
-                        continue;
-                    }
-                    Err(error) => return Err(error),
+            let slot = match self.pool.reserve() {
+                Ok(slot) => slot,
+                Err(blocked) => match self.pool.wait(blocked).await? {
+                    Some(slot) => slot,
+                    // An instance came back; take it if it is still there.
+                    None => continue,
+                },
+            };
+            // The memory permit covers instantiation and the call only; a
+            // request queueing for this pool never holds one, so a stuck
+            // plugin cannot starve the others (M2).
+            match self.create_waiting(slot, None).await {
+                Ok(instance) => return Ok(instance),
+                // Out of budget: give this pool's own idle instances back
+                // and try once more before failing the call.
+                Err(_) if !retried && self.pool.idle_len() > 0 => {
+                    retried = true;
+                    self.pool.shrink(0);
+                    continue;
                 }
+                Err(error) => return Err(error),
             }
-            self.pool.wait().await;
         }
     }
 
@@ -380,7 +427,7 @@ impl RouterPool {
         if self.prewarm == 0 {
             return Ok(());
         }
-        let Some(slot) = self.pool.reserve() else {
+        let Some(slot) = self.pool.reserve().ok() else {
             return Ok(());
         };
         let first = crate::block_on_timeout(
@@ -390,7 +437,7 @@ impl RouterPool {
         .ok_or(Error::ConfigureTimeout)??;
         self.pool.push(first);
         for _ in 1..self.prewarm {
-            let Some(slot) = self.pool.reserve() else {
+            let Ok(slot) = self.pool.reserve() else {
                 break;
             };
             match crate::block_on_timeout(
@@ -699,13 +746,56 @@ mod tests {
     #[tokio::test]
     async fn a_full_instance_budget_waits_instead_of_spinning() {
         let pool: InstancePool<()> = InstancePool::with_budget(1, limits::IdleBudget::new(0));
-        assert!(pool.reserve().is_none(), "the process-wide cap is full");
+        assert_eq!(
+            pool.reserve().err(),
+            Some(Blocked::Budget),
+            "the process-wide cap is full"
+        );
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), pool.wait())
+            tokio::time::timeout(Duration::from_millis(50), pool.wait(Blocked::Budget))
                 .await
                 .is_err(),
             "wait() returned although nothing was returned or freed"
         );
+    }
+
+    /// A slot freed in the process-wide cap wakes a pool waiting on it, and the
+    /// waking pool claims the slot instead of racing for it (m2).
+    #[tokio::test]
+    async fn a_freed_process_slot_wakes_a_waiting_pool() {
+        let budget = limits::IdleBudget::new(1);
+        let holder: InstancePool<()> = InstancePool::with_budget(1, Arc::clone(&budget));
+        let waiting: InstancePool<()> = InstancePool::with_budget(1, Arc::clone(&budget));
+        let held = holder.reserve().expect("the holder takes the only slot");
+        assert_eq!(waiting.reserve().err(), Some(Blocked::Budget));
+        let mut wait = Box::pin(waiting.wait(Blocked::Budget));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut wait)
+                .await
+                .is_err(),
+            "nothing was freed yet"
+        );
+        drop(held);
+        let slot = tokio::time::timeout(Duration::from_millis(500), wait)
+            .await
+            .expect("a slot freed in the process-wide cap wakes the waiter")
+            .expect("the budget is never closed");
+        assert!(slot.is_some(), "the waking pool claims the freed slot");
+    }
+
+    /// A pool whose own target is full reports that and touches nothing: the
+    /// process-wide cap slot it would have taken is never held, so another
+    /// pool's reservation cannot fail against it (m2).
+    #[test]
+    fn a_full_pool_does_not_take_a_cap_slot() {
+        let budget = limits::IdleBudget::new(2);
+        let pool: InstancePool<()> = InstancePool::with_budget(1, Arc::clone(&budget));
+        let held = pool.reserve().expect("one instance fits the target");
+        assert_eq!(budget.used(), 1);
+        assert_eq!(pool.reserve().err(), Some(Blocked::Pool));
+        assert_eq!(budget.used(), 1, "no cap slot was taken and released");
+        drop(held);
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]

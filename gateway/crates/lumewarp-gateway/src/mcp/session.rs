@@ -9,6 +9,12 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub const MAX_TOKEN: usize = 8192;
 pub const TTL: u64 = 86400;
+/// Different gateways and small wall-clock corrections need not agree exactly.
+/// This bounds future issuance only; the 24-hour expiry is never extended.
+pub const ISSUED_CLOCK_SKEW: u64 = 60;
+pub fn valid_at(issued: u64, now: u64) -> bool {
+    issued <= now.saturating_add(ISSUED_CLOCK_SKEW) && now.saturating_sub(issued) < TTL
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Leg {
     pub name: String,
@@ -93,6 +99,16 @@ pub const CURSOR: &[u8] = b"lumewarp/mcp/cursor/v1";
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn issuance_tolerates_clock_corrections_but_expiry_remains_exact() {
+        let issued = 1_000;
+        assert!(valid_at(issued, issued - 1));
+        assert!(valid_at(issued, issued - ISSUED_CLOCK_SKEW));
+        assert!(!valid_at(issued, issued - ISSUED_CLOCK_SKEW - 1));
+        assert!(valid_at(issued, issued + TTL - 1));
+        assert!(!valid_at(issued, issued + TTL));
+        assert!(!valid_at(issued, issued + TTL + 1));
+    }
     #[test]
     fn cross_process_domains_and_tampering() {
         let a = IdKey::from_secret(vec![42; 32]).unwrap();

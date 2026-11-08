@@ -860,3 +860,77 @@ async def test_discover_respects_manual_review(client, committed, fake) -> None:
     # MANUAL withholds every name the control plane has not approved, first sight included.
     assert {item["state"] for item in result["tools"]} == {"pending"}
     assert {item["state"] for item in result["prompts"]} == {"pending"}
+
+
+def unsafe_definition_server() -> httpx.MockTransport:
+    """An upstream whose names/definitions cannot all be stored (N3)."""
+    tools = [
+        {"name": "bad\x00tool", "description": "nul", "inputSchema": {"type": "object"}},
+        {
+            "name": "huge",
+            "description": "a" * (64 * 1024 + 1),
+            "inputSchema": {"type": "object"},
+        },
+        {"name": "echo", "description": "fine", "inputSchema": {"type": "object"}},
+    ]
+    prompts = [{"name": "bad\x00prompt", "description": "nul"}]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        method = payload.get("method")
+        if method == "initialize":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": payload["id"],
+                    "result": {
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {"tools": {}, "prompts": {}},
+                        "serverInfo": {"name": "unsafe"},
+                    },
+                },
+            )
+        if method == "notifications/initialized":
+            return httpx.Response(202)
+        result = {"tools": tools} if method == "tools/list" else {"prompts": prompts}
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": payload["id"], "result": result})
+
+    return httpx.MockTransport(handler)
+
+
+async def test_discover_marks_an_unstorable_definition_unrecorded(
+    client, committed, monkeypatch
+) -> None:
+    """N3: a saved-server Discover meets the same DB-safe boundary as a gateway report.
+
+    A NUL name or an over-bound definition is dropped by itself (state `unrecorded`), the
+    rest is recorded, and the route answers 200 rather than failing on the first query.
+    """
+    created = _create(client)
+    assert created.status_code == 201, created.text
+    body = created.json()
+    monkeypatch.setattr(discover, "transport", unsafe_definition_server())
+    response = client.post(
+        "/api/v1/mcp-servers/discover",
+        json={"url": body["url"], "server_id": body["id"]},
+        headers=H,
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["recorded"] is True
+    assert {item["name"]: item["state"] for item in result["tools"]} == {
+        "bad\x00tool": "unrecorded",
+        "huge": "unrecorded",
+        "echo": "approved",
+    }
+    assert {item["name"]: item["state"] for item in result["prompts"]} == {
+        "bad\x00prompt": "unrecorded"
+    }
+    committed.expire_all()
+    stored = (
+        await committed.scalars(
+            select(McpDefinition).where(McpDefinition.server_id == uuid.UUID(body["id"]))
+        )
+    ).all()
+    assert [(row.kind, row.name) for row in stored] == [(McpDefinitionKind.TOOL, "echo")]

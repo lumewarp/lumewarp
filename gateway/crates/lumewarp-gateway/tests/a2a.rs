@@ -186,6 +186,9 @@ fn config(
         ("bad_add_id", misbehave("add_id")),
         ("bad_push", misbehave("push")),
         ("bad_drop", misbehave("drop_status")),
+        ("bad_snake_id", misbehave("add_snake_id")),
+        ("bad_snake_response", misbehave("add_snake_response")),
+        ("bad_snake_stream", misbehave("add_snake_stream")),
         ("slow", misbehave("slow")),
     ] {
         yaml.push_str(&agent(name, helper, &middleware));
@@ -207,7 +210,7 @@ fn config(
     ));
     yaml.push_str("keys:\n");
     yaml.push_str(&format!(
-        "  - key_id: key-a\n    key_sha256: '{}'\n    allow_all_models: true\n    allowed_agents: [helper, pt, bad_method, bad_add_id, bad_push, bad_drop, slow, slow_auth, error_auth, sse-agent]\n",
+        "  - key_id: key-a\n    key_sha256: '{}'\n    allow_all_models: true\n    allowed_agents: [helper, pt, bad_method, bad_add_id, bad_push, bad_drop, bad_snake_id, bad_snake_response, bad_snake_stream, slow, slow_auth, error_auth, sse-agent]\n",
         hex::encode(Sha256::digest(SECRET_A.as_bytes())),
     ));
     yaml.push_str(&format!(
@@ -670,6 +673,69 @@ async fn a2a_proxy_end_to_end() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response["error"]["code"], -32602, "{response}");
+
+    // N2: a ProtoJSON snake_case alias of an id or push-bearing field would
+    // bypass unwrapping/the D12 refusal, so it is -32602 before any upstream
+    // call. Arbitrary metadata keys are not typed fields and stay allowed.
+    for params in [
+        json!({"message": {"messageId": "m", "role": "ROLE_USER",
+                           "parts": [{"text": "x"}], "task_id": "raw"}}),
+        json!({"message": message("x"),
+               "configuration": {"task_push_notification_config": {"url": "https://x"}}}),
+    ] {
+        let (status, response) = post(
+            &client,
+            &gateway,
+            "helper",
+            SECRET_A,
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": params}),
+            Some("1.0"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["error"]["code"], -32602, "{params}: {response}");
+    }
+    let (status, response) = post(
+        &client,
+        &gateway,
+        "helper",
+        SECRET_A,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {
+            "message": {"messageId": "m", "role": "ROLE_USER",
+                        "parts": [{"text": "x"}],
+                        "metadata": {"task_id": "business data"}}
+        }}),
+        Some("1.0"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(response["result"]["task"].is_object(), "{response}");
+
+    // N2 on hook output: a request hook, a response hook and a stream hook that
+    // add a snake_case alias are refused with -32602.
+    for agent in ["bad_snake_id", "bad_snake_response"] {
+        let (status, response) = post(
+            &client,
+            &gateway,
+            agent,
+            SECRET_A,
+            &rpc_body("SendMessage", json!({"message": message("x")})),
+            Some("1.0"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{agent}: {response}");
+        assert_eq!(response["error"]["code"], -32602, "{agent}: {response}");
+    }
+    let (status, events) = stream(&client, &gateway, "bad_snake_stream", SECRET_A, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        events.last().unwrap()["error"]["code"],
+        -32602,
+        "{events:?}"
+    );
 
     // m5: a non-streaming method that answers SSE must be refused, not relayed
     // (the extended card rewrite and the response hook live on the non-stream path).

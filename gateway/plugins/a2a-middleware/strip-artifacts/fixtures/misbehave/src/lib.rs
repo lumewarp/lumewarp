@@ -12,6 +12,9 @@
 //! | `push` | adds `configuration.taskPushNotificationConfig` |
 //! | `drop_status` | drops a `statusUpdate` stream event |
 //! | `slow` | spins `spin` iterations in `on-request`, then passes through |
+//! | `add_snake_id` | adds the ProtoJSON alias `task_id` to the request message |
+//! | `add_snake_response` | adds `context_id` to `result.task` |
+//! | `add_snake_stream` | adds `context_id` to a stream event's result object |
 //! | `refuse` | answers a deliberate JSON-RPC error (`rpc-error`) |
 //! | `stuck_configure` | never returns from `configure` (the apply-time budget must cut it) |
 
@@ -25,7 +28,7 @@ use serde_json::Value;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Params {
-    /// pass | method | add_id | push | drop_status | slow
+    /// pass | method | add_id | push | drop_status | slow | add_snake_* | refuse | stuck_configure
     #[schemars(title = "Mode")]
     pub mode: String,
     /// `slow` only: the number of busy-loop iterations.
@@ -49,6 +52,9 @@ impl ConfigureMiddleware<Params> for Misbehave {
                 | "push"
                 | "drop_status"
                 | "slow"
+                | "add_snake_id"
+                | "add_snake_response"
+                | "add_snake_stream"
                 | "refuse"
                 | "stuck_configure"
         ) {
@@ -105,6 +111,17 @@ impl Middleware for Misbehave {
                 }
                 Ok(serde_json::to_vec(&value).unwrap_or(body))
             }
+            "add_snake_id" => {
+                let mut value = parse(&body)?;
+                if let Some(message) = value
+                    .get_mut("params")
+                    .and_then(|params| params.get_mut("message"))
+                    .and_then(Value::as_object_mut)
+                {
+                    message.insert("task_id".into(), Value::String("raw-task".into()));
+                }
+                Ok(serde_json::to_vec(&value).unwrap_or(body))
+            }
             "refuse" => {
                 return Err(middleware_types::RpcError {
                     code: -32001,
@@ -124,7 +141,18 @@ impl Middleware for Misbehave {
     }
 
     fn on_response(&self, _: String, body: Vec<u8>) -> Result<Vec<u8>, middleware_types::RpcError> {
-        Ok(body)
+        if self.mode != "add_snake_response" {
+            return Ok(body);
+        }
+        let mut value = parse(&body)?;
+        if let Some(task) = value
+            .get_mut("result")
+            .and_then(|result| result.get_mut("task"))
+            .and_then(Value::as_object_mut)
+        {
+            task.insert("context_id".into(), Value::String("raw-context".into()));
+        }
+        Ok(serde_json::to_vec(&value).unwrap_or(body))
     }
 
     fn on_stream_event(
@@ -141,6 +169,20 @@ impl Middleware for Misbehave {
             {
                 return Ok(None);
             }
+        }
+        if self.mode == "add_snake_stream" {
+            let mut value = parse(&data)?;
+            if let Some(result) = value.get_mut("result").and_then(Value::as_object_mut) {
+                let target = if result.contains_key("statusUpdate") {
+                    result.get_mut("statusUpdate")
+                } else {
+                    result.get_mut("artifactUpdate")
+                };
+                if let Some(target) = target.and_then(Value::as_object_mut) {
+                    target.insert("context_id".into(), Value::String("raw-context".into()));
+                }
+            }
+            return Ok(Some(serde_json::to_vec(&value).unwrap_or(data)));
         }
         Ok(Some(data))
     }

@@ -9,12 +9,11 @@ control-plane mode. No separate project: the tests run in the control-plane's uv
     scripts/check-all.sh         # every check, then the e2e gate
 
 Environment: `E2E_PG_URL` (server DSN, default dev Postgres 127.0.0.1:55432), `E2E_PROFILE`
-(`debug`|`release` gateway), `E2E_GATEWAY_BIN`, `E2E_MOCK_BIN`, `E2E_STRATEGY_GATEWAY_BIN` (a gateway
-built with `--features strategy-priority-failover`; `scripts/e2e-core.sh` builds and sets it, and
-`test_strategy_crate.py` skips its crate test without it). `test_strategy_cheapest_first.py` builds
-its own binary with `--features strategy-cheapest-first` into
-`gateway/target/e2e-cheapest-first`, so it runs under either script without replacing the default
-binary. Failing tests print every process log.
+(`debug`|`release` gateway), `E2E_GATEWAY_BIN`, `E2E_MOCK_BIN`. `scripts/e2e-core.sh` builds the
+WASM router plugins with `gateway/plugins/build.sh` into `gateway/target/plugins/router`; the
+strategy tests (`test_strategy_plugin.py`, `test_strategy_cheapest_first.py`) start their own
+gateway with `LUMEWARP_ROUTER_PLUGIN_DIR` pointing there, so no special gateway build is needed.
+Failing tests print every process log.
 
 `test_routing_resilience.py` (collected by `scripts/e2e-core.sh` and `scripts/e2e-identity.sh`; no IdP) configures
 routing resilience over the admin API against a second mock started with `--fail-every 1` (always 503)

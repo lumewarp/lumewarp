@@ -7,10 +7,16 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 import secret_scan_session  # noqa: E402
-from stack import GATEWAY_BIN, MOCK_BIN, Stack  # noqa: E402
+from stack import GATEWAY_BIN, MOCK_BIN, ROOT, Stack  # noqa: E402
 
 LIVE_IDP_TESTS = ["test_identity_gate.py", "test_self_service.py"]
 collect_ignore = [] if os.environ.get("E2E_IDENTITY") == "1" else LIVE_IDP_TESTS
+
+# scripts/e2e-core.sh builds these with gateway/plugins/build.sh. Each strategy test starts
+# its own gateway with LUMEWARP_ROUTER_PLUGIN_DIR pointing here; the default gateway has no
+# plugin directory, so the other tests see only the built-in strategies.
+ROUTER_PLUGIN_DIR = ROOT / "gateway/target/plugins/router"
+ROUTER_PLUGINS = ("priority-failover.wasm", "cheapest-first.wasm")
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
@@ -31,6 +37,19 @@ def binaries() -> None:
     for binary in (GATEWAY_BIN, MOCK_BIN):
         if not binary.exists():
             pytest.exit(f"missing {binary}; build it first (scripts/e2e-core.sh does)", returncode=2)
+
+
+@pytest.fixture(scope="session")
+def router_plugin_dir() -> Path:
+    """The WASM router plugins scripts/e2e-core.sh builds, before any test starts a gateway."""
+    missing = [name for name in ROUTER_PLUGINS if not (ROUTER_PLUGIN_DIR / name).exists()]
+    if missing:
+        pytest.exit(
+            f"missing {', '.join(missing)} in {ROUTER_PLUGIN_DIR}; "
+            "build them with bash gateway/plugins/build.sh (scripts/e2e-core.sh does)",
+            returncode=2,
+        )
+    return ROUTER_PLUGIN_DIR
 
 
 @pytest.fixture

@@ -1828,7 +1828,8 @@ class McpDiscoveredOut(ApiModel):
     state: Literal["approved", "pending", "rejected", "unrecorded"] = Field(
         description=(
             "The state after recording; 'unrecorded' when nothing was recorded (no server_id,"
-            " a URL other than the saved one, or a configuration that changed meanwhile)."
+            " a URL other than the saved one, a configuration that changed meanwhile, or an"
+            " item the database cannot store)."
         )
     )
 

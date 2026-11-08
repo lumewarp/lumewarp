@@ -175,6 +175,21 @@ async def _restore_targets(session: AsyncSession, rows: dict[str, list[dict[str,
                 await session.execute(insert(table).values(**row))
 
 
+async def set_target_revision(session: AsyncSession, revision: int) -> None:
+    """Stamp every live target with the config revision that serves it now.
+
+    A rollback restores the historical columns, including each target's `config_revision`,
+    but the rollback version is also a new configuration: leaving the old watermark would
+    re-accept a report from the configuration this rollback just replaced (a gateway still
+    on the previous version could auto-approve an old upstream's definitions). The caller
+    holds the scope lock and has already restored the rows.
+    """
+    for table in TARGET_TABLES:
+        await session.execute(
+            update(table).where(table.c.deleted_at.is_(None)).values(config_revision=revision)
+        )
+
+
 async def restore_catalog_state(session: AsyncSession, state: dict[str, Any]) -> None:
     """Restore the catalog by ID, keeping identities across renames and recreating deletions.
 

@@ -367,6 +367,21 @@ async fn run(
             );
         }
     }
+    // N2: ProtoJSON parsers accept the original snake_case field names as
+    // aliases of the lowerCamelCase JSON names. The gateway only knows the
+    // canonical names, so an alias would bypass id unwrapping, the D12 refusal
+    // and the response wrapping; refuse it as invalid params.
+    if ids::request_snake_alias(&request).is_some() {
+        return Reply::protocol_error(
+            id.as_ref(),
+            -32602,
+            "Invalid parameters: ProtoJSON snake_case aliases are not supported",
+            "INVALID_PARAMS",
+            label,
+            rpc_method,
+            RequestOutcome::Rejected,
+        );
+    }
     // D12: push notifications are not supported, in any entry point.
     if ids::push_config_present(&rpc_method, request.get("params")) {
         return Reply::protocol_error(
@@ -884,6 +899,18 @@ impl Failure {
         }
     }
 
+    /// A hook returned a ProtoJSON snake_case alias: a client-visible invalid
+    /// parameters error (N2), not a host failure.
+    fn invalid_params() -> Self {
+        Self {
+            status: StatusCode::OK,
+            code: -32602,
+            message: "Invalid parameters: ProtoJSON snake_case aliases are not supported"
+                .to_owned(),
+            reason: "INVALID_PARAMS",
+        }
+    }
+
     fn from_hook(error: hook::Error) -> Self {
         match error {
             // A deliberate guest `rpc-error` is a client-facing JSON-RPC error
@@ -981,6 +1008,9 @@ impl<'a> Processor<'a> {
         {
             return Err(Failure::refused("Middleware changed the request method"));
         }
+        if ids::request_snake_alias(&after).is_some() {
+            return Err(Failure::invalid_params());
+        }
         let mut after_fields = ids::request_fields(self.method, &after);
         after_fields.sort();
         if after_fields != before {
@@ -1024,6 +1054,9 @@ impl<'a> Processor<'a> {
             return Err(Failure::refused(
                 "Middleware returned a non-object response",
             ));
+        }
+        if ids::response_snake_alias(&after).is_some() {
+            return Err(Failure::invalid_params());
         }
         check_response_unchanged(&before, &after)?;
         *value = after;
@@ -1332,6 +1365,12 @@ async fn handle_event(state: &StreamState, event: SseEvent) -> EventResult {
         }
         match serde_json::from_slice::<Value>(&output) {
             Ok(after) if after.is_object() => {
+                if ids::response_snake_alias(&after).is_some() {
+                    return EventResult::Fatal(
+                        -32602,
+                        "ProtoJSON snake_case aliases are not supported".into(),
+                    );
+                }
                 if let Err(failure) = check_response_unchanged(&before, &after) {
                     return EventResult::Fatal(failure.code, failure.message);
                 }

@@ -1581,6 +1581,12 @@ async def test_a_catalog_report_reaches_the_ingest_stub(
         cpb.CatalogReport(cards=[cpb.AgentCardReport(agent="a1", card_json="x" * (64 * 1024 + 1))]),
         cpb.CatalogReport(cards=[cpb.AgentCardReport(agent="")]),
         cpb.CatalogReport(cards=[cpb.AgentCardReport(agent="a1", error="e" * 501)]),
+        # N2: uint64 on the wire, but a bigint in the database: the item must be dropped, not
+        # become a query parameter that fails the whole report.
+        cpb.CatalogReport(
+            definitions=[cpb.ObservedDefinition(server="s1", name="t", config_version=2**64 - 1)]
+        ),
+        cpb.CatalogReport(cards=[cpb.AgentCardReport(agent="a1", config_version=2**64 - 1)]),
     ],
     ids=[
         "definition-too-large",
@@ -1589,6 +1595,8 @@ async def test_a_catalog_report_reaches_the_ingest_stub(
         "card-too-large",
         "agent-empty",
         "card-error-too-long",
+        "definition-version-beyond-bigint",
+        "card-version-beyond-bigint",
     ],
 )
 @pytest.mark.asyncio

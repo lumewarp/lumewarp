@@ -8,7 +8,10 @@ use std::{
     path::PathBuf,
     pin::Pin,
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -49,6 +52,39 @@ pub fn client() -> TestClient {
     let mut connector = HttpConnector::new();
     connector.set_nodelay(true);
     Client::builder(TokioExecutor::new()).build(connector)
+}
+
+/// A server that counts the HTTP requests it receives and answers `200`.
+///
+/// An auth plugin that `http-fetch`es at `configure` time (the fixture's
+/// `configure_fetch` mode) makes "was this target configured again?" observable
+/// from outside the gateway process (N1).
+pub async fn counter() -> (SocketAddr, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&hits);
+    tokio::spawn(async move {
+        loop {
+            let Ok((socket, _)) = listener.accept().await else {
+                return;
+            };
+            let hits = Arc::clone(&counted);
+            tokio::spawn(async move {
+                let service = service_fn(move |_request: Request<Incoming>| {
+                    let hits = Arc::clone(&hits);
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::new())))
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(socket), service)
+                    .await;
+            });
+        }
+    });
+    (addr, hits)
 }
 
 pub async fn bytes(response: Response<Incoming>) -> Bytes {

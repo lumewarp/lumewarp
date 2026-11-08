@@ -5,16 +5,13 @@
 using it is saved, compiled into the snapshot and served, and the prices in its
 member params decide which model answers.
 
-The component is built separately and loaded from LUMEWARP_ROUTER_PLUGIN_DIR.
-Set E2E_CHEAPEST_FIRST_GATEWAY_BIN to use a gateway binary built elsewhere.
+scripts/e2e-core.sh builds the component with gateway/plugins/build.sh; the test
+starts a gateway with LUMEWARP_ROUTER_PLUGIN_DIR pointing at that directory.
 """
 
-import os
 import subprocess
 from pathlib import Path
 
-import pytest
-import stack as stack_module
 from stack import wait_for
 from test_routing_resilience import _model, _upstream_id
 
@@ -23,10 +20,11 @@ TITLE = "Cheapest first"
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_nothing_outside_the_crate_names_the_strategy():
+def test_nothing_outside_the_plugin_names_the_strategy():
     found = subprocess.run(
         ["git", "grep", "-l", STRATEGY, "--", "proto", "control-plane/src", "ui/src"],
         cwd=ROOT,
+        check=False,
         capture_output=True,
         text=True,
     )
@@ -38,30 +36,8 @@ def _strategy(stack) -> dict | None:
     return next((item for item in items if item["name"] == STRATEGY), None)
 
 
-@pytest.fixture(scope="module")
-def strategy_gateway() -> Path:
-    """Build a component separately from the native gateway binary."""
-    result = subprocess.run(["bash", "gateway/plugins/build.sh"], cwd=ROOT, capture_output=True, text=True, timeout=900)
-    assert result.returncode == 0, result.stderr[-4000:]
-    if binary := os.environ.get("E2E_CHEAPEST_FIRST_GATEWAY_BIN"):
-        return Path(binary)
-    target_dir = ROOT / "gateway/target/e2e-cheapest-first"
-    result = subprocess.run(
-        ["cargo", "build", "-p", "lumewarp-gateway"],
-        cwd=ROOT / "gateway",
-        env={**os.environ, "CARGO_TARGET_DIR": str(target_dir)},
-        capture_output=True,
-        text=True,
-        timeout=900,
-    )
-    assert result.returncode == 0, result.stderr[-4000:]
-    binary = target_dir / "debug/lumewarp"
-    assert binary.exists(), f"cargo build did not produce {binary}"
-    return binary
-
-
-def test_the_snapshot_carries_the_crate_and_the_cheapest_member_serves(
-    stack, monkeypatch, strategy_gateway
+def test_the_snapshot_carries_the_plugin_and_the_cheapest_member_serves(
+    stack, router_plugin_dir
 ):
     seeded = stack.seed()
     upstream = _upstream_id(stack, "mock")
@@ -85,12 +61,15 @@ def test_the_snapshot_carries_the_crate_and_the_cheapest_member_serves(
     assert _strategy(stack) is None
     assert "no gateway reports" in stack.api("POST", "/routers", json=body).text
 
-    monkeypatch.setattr(stack_module, "GATEWAY_BIN", strategy_gateway)
-    monkeypatch.setenv("LUMEWARP_ROUTER_PLUGIN_DIR", str(ROOT / "gateway/target/plugins/router"))
-    gw = stack.start_gateway()
-    assert f"strategy:{STRATEGY}" in stack.gateway_status()["capabilities"]
+    plugin_env = {"LUMEWARP_ROUTER_PLUGIN_DIR": str(router_plugin_dir)}
+    gw = stack.start_gateway(extra_env=plugin_env)
+    wait_for(
+        lambda: f"strategy:{STRATEGY}" in stack.gateway_status()["capabilities"],
+        15,
+        "strategy capability in Hello",
+    )
 
-    item = _strategy(stack)
+    item = wait_for(lambda: _strategy(stack), 15, "strategy reported")
     assert item["title"] == TITLE
     assert item["description"].startswith("Use the eligible member")
     assert item["uses_weight"] is False
@@ -106,7 +85,7 @@ def test_the_snapshot_carries_the_crate_and_the_cheapest_member_serves(
     assert [g["connected"] for g in item["gateways"]] == [True]
     assert item["gateways"][0]["digest"]
 
-    # The schema the crate derives is what the API enforces, for member params
+    # The schema the component derives is what the API enforces, for member params
     # and for params (annotations alone create no runtime check).
     bad_member = {
         **body,

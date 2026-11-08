@@ -24,6 +24,7 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 from lumewarp_control_plane.compiler.catalog_state import (
     capture_catalog_state,
     restore_catalog_state,
+    set_target_revision,
 )
 from lumewarp_control_plane.compiler.compile import CompileError, compile_scope
 from lumewarp_control_plane.compiler.plugins import check_stored_routers, check_stored_targets
@@ -327,6 +328,11 @@ async def rollback_routing(
     await check_stored_routers(session, scope, force=force, principal=principal, now=now)
     await check_stored_targets(session, scope, force=force, principal=principal, now=now)
     revision = await outbox.enqueue_recompile(session, scope, f"rollback to {to_version}")
+    # The restored rows are what this rollback version publishes: their provenance is this
+    # revision, not the historical one the sidecar carried (N1). Without this, a report from
+    # the configuration being replaced (same id, older version) would pass the revision check
+    # and could auto-approve the old upstream's definitions under the restored target.
+    await set_target_revision(session, revision)
     compiled = await compile_scope(
         session,
         scope,

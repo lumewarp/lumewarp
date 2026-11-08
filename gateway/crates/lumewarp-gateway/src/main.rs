@@ -150,6 +150,19 @@ fn list_strategies(json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Activates a compiled table that is about to serve: starts its health probes
+/// and publishes the plugin sets [`router::RoutingTable::compile`] staged, so the
+/// first request after a boot reuses the plugins configured at boot instead of
+/// configuring them again (N1). Every boot path — the standalone YAML and the
+/// cached snapshot — goes through here.
+fn activated(
+    table: Result<router::RoutingTable, snapshot::ApplyError>,
+) -> Result<router::RoutingTable, snapshot::ApplyError> {
+    let mut table = table?;
+    table.activate();
+    Ok(table)
+}
+
 /// Standalone mode: the YAML is the whole configuration.
 fn standalone(
     path: &std::path::Path,
@@ -158,9 +171,12 @@ fn standalone(
         std::fs::read_to_string(path).with_context(|| format!("loading {}", path.display()))?;
     let (settings, snapshot) = Config::parse(&yaml)?;
     let runtime = runtime::Runtime::from_env();
-    let routing_table =
-        router::RoutingTable::compile(&snapshot, AuthMode::standalone(&snapshot), &runtime)
-            .context("compiling routing table snapshot")?;
+    let routing_table = activated(router::RoutingTable::compile(
+        &snapshot,
+        AuthMode::standalone(&snapshot),
+        &runtime,
+    ))
+    .context("compiling routing table snapshot")?;
     runtime
         .metrics
         .set_yaml_hash(&hex::encode(Sha256::digest(yaml.as_bytes()))[..12]);
@@ -168,7 +184,6 @@ fn standalone(
     runtime
         .observed
         .retain_servers(routing_table.targets.servers().map(|s| s.name.as_ref()));
-    routing_table.activate_health();
     Ok((
         settings,
         Arc::new(ArcSwapOption::from_pointee(routing_table)),
@@ -238,14 +253,13 @@ async fn main() -> anyhow::Result<()> {
             let mut has_base = false;
             match snapshot::load_with_digest(&state_dir, &scope) {
                 Ok(Some((cached, cached_digest))) => {
-                    match config_stream::compile(&cached, &runtime) {
+                    match activated(config_stream::compile(&cached, &runtime)) {
                         Ok(routing_table) => {
                             tracing::info!(
                                 version = cached.version,
                                 "booting from cached snapshot"
                             );
                             runtime.metrics.config_applied(cached.version);
-                            routing_table.activate_health();
                             slot.store(Some(Arc::new(routing_table)));
                             current = cached;
                             digest = cached_digest;

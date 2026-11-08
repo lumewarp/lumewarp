@@ -290,6 +290,103 @@ async fn aggregate_skips_failed_discovery_legs_and_advances_cursor() {
 }
 
 #[tokio::test]
+async fn failing_last_server_ends_an_already_successful_page_walk() {
+    for mode in [Mode::Invalid, Mode::SlowHeaders, Mode::RpcError] {
+        let first = Upstream::start(Mode::Healthy).await;
+        let last = Upstream::start(mode).await;
+        let gw = Gw::start(&[("aaa", first.addr), ("zzz", last.addr)], 0).await;
+        let session = gw.initialize("/mcp", "secret").await;
+        let (status, page) = gw
+            .rpc(
+                "/mcp",
+                Some(&session),
+                "secret",
+                json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            )
+            .await;
+        assert_eq!(status, 200, "{page}");
+        assert_eq!(page["result"]["tools"][0]["name"], "aaa__echo");
+        let cursor = page["result"]["nextCursor"]
+            .as_str()
+            .expect("cursor to LAST server");
+        let (status, tail) = gw
+            .rpc(
+                "/mcp",
+                Some(&session),
+                "secret",
+                json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"cursor":cursor}}),
+            )
+            .await;
+        assert_eq!(status, 200, "{tail}");
+        assert_eq!(tail["result"]["tools"], json!([]));
+        assert!(tail["result"].get("nextCursor").is_none(), "{tail}");
+        // Session expiry remains a reinitialize signal even on a continuation.
+        last.set(Mode::NotFound);
+        assert_eq!(
+            gw.rpc(
+                "/mcp",
+                Some(&session),
+                "secret",
+                json!({"jsonrpc":"2.0","id":4,"method":"tools/list","params":{"cursor":cursor}})
+            )
+            .await
+            .0,
+            404
+        );
+        // With no successful prior page, all-failed discovery is still an error.
+        first.set(mode);
+        last.set(mode);
+        let expected = if matches!(mode, Mode::SlowHeaders) {
+            504
+        } else {
+            502
+        };
+        assert_eq!(
+            gw.rpc(
+                "/mcp",
+                Some(&session),
+                "secret",
+                json!({"jsonrpc":"2.0","id":5,"method":"tools/list"})
+            )
+            .await
+            .0,
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn session_clock_skew_is_bounded_and_does_not_extend_expiry() {
+    use super::{a2a_ids::IdKey, sealed_session, KEY};
+    let upstream = Upstream::start(Mode::Healthy).await;
+    let gw = Gw::start(&[("s1", upstream.addr)], 0).await;
+    let key = IdKey::from_base64(KEY).unwrap();
+    let original = super::test_session(upstream.addr, "s1", "none", None);
+    let mut session: sealed_session::Session =
+        sealed_session::open(&key, sealed_session::SESSION, &original).unwrap();
+    for (issued, expected) in [
+        (sealed_session::now() + 2, 200),
+        (
+            sealed_session::now() + sealed_session::ISSUED_CLOCK_SKEW + 120,
+            404,
+        ),
+        (sealed_session::now() - sealed_session::TTL - 1, 404),
+    ] {
+        session.issued = issued;
+        let token = sealed_session::seal(&key, sealed_session::SESSION, &session).unwrap();
+        let (status, response) = gw
+            .rpc(
+                "/mcp/servers/s1",
+                Some(&token),
+                "secret",
+                json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            )
+            .await;
+        assert_eq!(status, expected, "{response}");
+    }
+}
+
+#[tokio::test]
 async fn direct_non_streaming_body_deadline_is_enforced() {
     let upstream = Upstream::start(Mode::Drip).await;
     let gw = Gw::start(&[("s1", upstream.addr)], 0).await;

@@ -308,6 +308,95 @@ pub fn wrap_response(method: &str, body: &mut Value, ctx: &Context<'_>) -> Resul
     Ok(())
 }
 
+/// ProtoJSON accepts the original proto field names as aliases for the
+/// lowerCamelCase JSON names. The gateway's id and push handling only knows the
+/// canonical names, so an alias would bypass unwrapping (raw ids reach the
+/// agent and the response is wrapped as the caller's), the D12 refusal, and the
+/// response-time wrapping. These are the aliases of every id- or push-bearing
+/// field this module handles; `task_push_notification_config` is D12's field.
+pub const SNAKE_ALIASES: [&str; 4] = [
+    "task_id",
+    "context_id",
+    "reference_task_ids",
+    "task_push_notification_config",
+];
+
+fn is_snake_alias(key: &str) -> bool {
+    SNAKE_ALIASES.contains(&key)
+}
+
+/// The first snake_case alias in `value`, with its JSON path. `metadata` is a
+/// `google.protobuf.Struct` (arbitrary data), so keys there are not typed
+/// fields and are skipped; [`response_snake_alias`] checks the camelCase-id
+/// positions inside `error.data[].metadata` separately.
+pub fn snake_alias(value: &Value) -> Option<String> {
+    fn walk(value: &Value, path: &str, in_metadata: bool) -> Option<String> {
+        match value {
+            Value::Object(object) => {
+                for (key, child) in object {
+                    let child_path = format!("{path}.{key}");
+                    if !in_metadata && is_snake_alias(key) {
+                        return Some(child_path);
+                    }
+                    if let Some(found) = walk(child, &child_path, in_metadata || key == "metadata")
+                    {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    if let Some(found) = walk(item, &format!("{path}[{index}]"), in_metadata) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+    walk(value, "$", false)
+}
+
+/// The snake_case aliases of the id fields a request's `params` may carry. The
+/// request hook's output is checked with this too.
+pub fn request_snake_alias(body: &Value) -> Option<String> {
+    body.get("params")
+        .and_then(snake_alias)
+        .map(|path| format!("params{}", path.trim_start_matches('$')))
+}
+
+/// The snake_case aliases of the id fields a response may carry: the result
+/// (a `Task`, message, status/artifact event or `ListTasks` page) and the
+/// typed `error.data[].metadata` positions that `wrap_error_data` would wrap.
+/// Used before wrapping and on response/stream hook output.
+pub fn response_snake_alias(body: &Value) -> Option<String> {
+    if let Some(result) = body.get("result") {
+        if let Some(found) = snake_alias(result) {
+            return Some(format!("result{}", found.trim_start_matches('$')));
+        }
+    }
+    if let Some(error) = body.get("error") {
+        if let Some(items) = error.get("data").and_then(Value::as_array) {
+            for (index, item) in items.iter().enumerate() {
+                let Some(metadata) = item.get("metadata").and_then(Value::as_object) else {
+                    continue;
+                };
+                for field in ["task_id", "context_id"] {
+                    if metadata.contains_key(field) {
+                        return Some(format!("error.data[{index}].metadata.{field}"));
+                    }
+                }
+            }
+        }
+        if let Some(found) = snake_alias(error) {
+            return Some(format!("error{}", found.trim_start_matches('$')));
+        }
+    }
+    None
+}
+
 fn add_path(out: &mut Vec<(String, String)>, path: String, value: &Value) {
     if let Some(text) = value.as_str() {
         out.push((path, text.to_owned()));
@@ -666,6 +755,65 @@ mod tests {
         assert!(!is_artifact_update(
             &json!({"result": {"statusUpdate": {}}})
         ));
+    }
+
+    #[test]
+    fn snake_case_protojson_aliases_are_found_in_requests_but_not_in_metadata() {
+        for params in [
+            json!({"message": {"task_id": "raw"}}),
+            json!({"message": {"context_id": "raw"}}),
+            json!({"message": {"reference_task_ids": ["raw"]}}),
+            json!({"context_id": "raw"}),
+            json!({"configuration": {"task_push_notification_config": {"url": "https://x"}}}),
+        ] {
+            assert!(
+                request_snake_alias(&json!({"params": params})).is_some(),
+                "{params}"
+            );
+        }
+        // `metadata` is a google.protobuf.Struct: those keys are not typed fields.
+        assert!(request_snake_alias(&json!({
+            "params": {"message": {"metadata": {"task_id": "business data"}}}
+        }))
+        .is_none());
+        // The canonical names are what the gateway handles.
+        assert!(request_snake_alias(&json!({
+            "params": {"message": {"taskId": "x", "contextId": "y"}}
+        }))
+        .is_none());
+    }
+
+    #[test]
+    fn snake_case_protojson_aliases_are_found_in_responses_and_error_metadata() {
+        let task = json!({"jsonrpc": "2.0", "id": 1, "result": {"task": {
+            "id": "t", "context_id": "c", "status": {"state": "TASK_STATE_WORKING"}
+        }}});
+        assert_eq!(
+            response_snake_alias(&task).as_deref(),
+            Some("result.task.context_id")
+        );
+        let event = json!({"jsonrpc": "2.0", "id": 1, "result": {"statusUpdate": {
+            "task_id": "t", "contextId": "c", "status": {"state": "TASK_STATE_WORKING"}
+        }}});
+        assert!(response_snake_alias(&event).is_some());
+        let error = json!({"jsonrpc": "2.0", "id": 1, "error": {
+            "code": -32001, "message": "x",
+            "data": [{"metadata": {"task_id": "raw"}}]
+        }});
+        assert_eq!(
+            response_snake_alias(&error).as_deref(),
+            Some("error.data[0].metadata.task_id")
+        );
+        // Arbitrary result metadata is left alone.
+        let with_metadata = json!({"jsonrpc": "2.0", "id": 1, "result": {"task": {
+            "id": "t", "metadata": {"task_id": "business data"}
+        }}});
+        assert!(response_snake_alias(&with_metadata).is_none());
+        // Canonical ids do not trigger it.
+        let canonical = json!({"jsonrpc": "2.0", "id": 1, "result": {"task": {
+            "id": "t", "contextId": "c"
+        }}});
+        assert!(response_snake_alias(&canonical).is_none());
     }
 
     #[test]

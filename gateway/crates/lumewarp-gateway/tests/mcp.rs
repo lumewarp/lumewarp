@@ -82,8 +82,43 @@ impl Gw {
         Self::start_auth(servers, rpm, "{plugin: none}").await
     }
     async fn start_auth(servers: &[(&str, SocketAddr)], rpm: u64, auth: &str) -> Self {
-        let addr = address();
-        let admin = address();
+        Self::start_auth_with_first_admin(servers, rpm, auth, None).await
+    }
+    async fn start_auth_with_first_admin(
+        servers: &[(&str, SocketAddr)],
+        rpm: u64,
+        auth: &str,
+        first_admin: Option<SocketAddr>,
+    ) -> Self {
+        let mut conflict = String::new();
+        for attempt in 0..5 {
+            match Self::try_start_auth(
+                servers,
+                rpm,
+                auth,
+                if attempt == 0 { first_admin } else { None },
+            )
+            .await
+            {
+                Ok(gw) => return gw,
+                Err(error) => conflict = error,
+            }
+        }
+        panic!("gateway listener ports repeatedly claimed before child bind: {conflict}");
+    }
+    async fn try_start_auth(
+        servers: &[(&str, SocketAddr)],
+        rpm: u64,
+        auth: &str,
+        forced_admin: Option<SocketAddr>,
+    ) -> Result<Self, String> {
+        // Reserve both ports together through config preparation. A concurrent
+        // process may still claim one after release while WASM prewarms, so
+        // only an explicit EADDRINUSE startup failure is retryable.
+        let listen = TcpListener::bind("127.0.0.1:0").unwrap();
+        let admin_listen = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listen.local_addr().unwrap();
+        let admin = forced_admin.unwrap_or_else(|| admin_listen.local_addr().unwrap());
         let dir = tempfile::tempdir().unwrap();
         let servers = servers
             .iter()
@@ -106,6 +141,9 @@ impl Gw {
                 "Build auth fixtures: bash gateway/plugins/build.sh --tests"
             );
         }
+        let log = dir.path().join("gateway.log");
+        let stderr = std::fs::File::create(&log).unwrap();
+        drop((listen, admin_listen));
         let child = Command::new(env!("CARGO_BIN_EXE_lumewarp"))
             .arg("--config")
             .arg(path)
@@ -118,18 +156,41 @@ impl Gw {
             .env("LUMEWARP_PLUGIN_SECRET_MCP_TEST", "mock-hmac-secret")
             .env_remove("LUMEWARP_A2A_MIDDLEWARE_DIR")
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::from(stderr))
             .spawn()
             .unwrap();
-        let gw = Self {
+        let mut gw = Self {
             _process: Process(child),
             _dir: dir,
             addr,
             admin,
             http: client(),
         };
-        ready(addr).await;
-        gw
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while tokio::time::Instant::now() < deadline {
+            if let Some(status) = gw._process.0.try_wait().unwrap() {
+                let text = std::fs::read_to_string(&log).unwrap();
+                if text.contains("Address already in use") && text.contains("binding") {
+                    return Err(text);
+                }
+                panic!("gateway exited during startup ({status}): {text}");
+            }
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                let request = Request::get(format!("http://{admin}/healthz"))
+                    .body(Full::new(Bytes::new()))
+                    .unwrap();
+                if matches!(tokio::time::timeout(Duration::from_millis(250), gw.http.request(request)).await,
+                    Ok(Ok(response)) if response.status() == 200)
+                {
+                    return Ok(gw);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!(
+            "gateway not ready: {}",
+            std::fs::read_to_string(log).unwrap()
+        );
     }
     async fn metrics(&self) -> String {
         let request = Request::get(format!("http://{}/metrics", self.admin))
@@ -472,6 +533,60 @@ fn test_session(addr: SocketAddr, route: &str, plugin: &str, params: Option<Valu
 fn initialize_request() -> Value {
     json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"timeout-test","version":"1"}}})
 }
+
+/// A `snapshot.pb` the gateway boots from, laid out like
+/// `snapshot::store_with_digest`: `LWSNAP02 || payload || digest ||
+/// len(digest) u32 BE || sha256(everything before)`.
+fn cached_snapshot(probe: SocketAddr) -> Vec<u8> {
+    use lumewarp_proto::config::v1 as pb;
+    use prost::Message;
+    let snapshot = pb::Snapshot {
+        version: 5,
+        scope: "scope-a".into(),
+        required_capabilities: vec!["mcp".into(), "auth:auth_fixture".into()],
+        api_keys: vec![pb::ApiKey {
+            key_id: "one".into(),
+            key_hash: Sha256::digest(b"secret").to_vec(),
+            status: pb::KeyStatus::Active as i32,
+            policy: Some(pb::EffectivePolicy {
+                allow_all_mcp: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        mcp_servers: vec![pb::McpServer {
+            id: "mcp-1".into(),
+            name: "s1".into(),
+            // Nothing listens there: a request must reach the auth plugin first.
+            url: "http://127.0.0.1:1/mcp".into(),
+            timeout_ms: 1000,
+            auth: Some(pb::UpstreamAuth {
+                plugin: Some(pb::PluginRef {
+                    plugin: "auth_fixture".into(),
+                    params_json: json!({
+                        "mode": "configure_fetch",
+                        "url": format!("http://{probe}/configure"),
+                        "allowed_origins": [format!("http://{probe}")],
+                    })
+                    .to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        created_at_unix_ms: 1,
+        ..Default::default()
+    };
+    let mut file = b"LWSNAP02".to_vec();
+    file.extend_from_slice(&snapshot.encode_to_vec());
+    let digest = b"n1-digest";
+    file.extend_from_slice(digest);
+    file.extend_from_slice(&(digest.len() as u32).to_be_bytes());
+    let checksum = Sha256::digest(&file);
+    file.extend_from_slice(&checksum);
+    file
+}
 #[tokio::test]
 async fn auth_timeout_is_504_and_counted_without_breaking_aggregate_initialization() {
     let mock = Mock::start(0).await;
@@ -595,6 +710,165 @@ async fn other_auth_failures_remain_502() {
         502
     );
 }
+/// N1 (review-w2-gw): booting from the standalone YAML must publish the plugin
+/// sets the apply staged, or every plugin is configured again cold on the first
+/// request. The fixture's `configure_fetch` mode fetches once per configured
+/// instance, so a request that configures again is visible as one more fetch.
+#[tokio::test]
+async fn a_boot_publishes_the_staged_plugins_and_the_first_request_reuses_them() {
+    use std::sync::atomic::Ordering;
+    let mock = Mock::start(0).await;
+    // Counts the `configure`-time fetches of the auth fixture below.
+    let (probe, configures) = common::counter().await;
+    let gw = Gw::start_auth(
+        &[("s1", mock.addr)],
+        0,
+        &format!(
+            "{{plugin: auth_fixture, params: {{mode: configure_fetch, url: 'http://{probe}/configure', allowed_origins: ['http://{probe}'], headers: ['authorization: Bearer boot-probe']}}}}"
+        ),
+    )
+    .await;
+    let booted = configures.load(Ordering::SeqCst);
+    assert!(
+        booted > 0,
+        "the apply-time configure configured the plugin while booting"
+    );
+    let session = gw.initialize("/mcp/servers/s1", "secret").await;
+    let (status, response) = gw
+        .rpc(
+            "/mcp/servers/s1",
+            Some(&session),
+            "secret",
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"whoami"}}),
+        )
+        .await;
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["authorization"],
+        json!("Bearer boot-probe"),
+        "the request ran with the credentials of the published authenticator"
+    );
+    assert_eq!(
+        configures.load(Ordering::SeqCst),
+        booted,
+        "the first request configured the plugin again (N1)"
+    );
+}
+
+/// N1 (review-w2-gw): the cached-snapshot boot publishes the staged plugin sets
+/// too. The cache file is written here, so the boot needs no control plane; the
+/// fixture's `configure_fetch` mode counts its configure-time fetches.
+#[tokio::test]
+async fn a_cached_boot_publishes_the_staged_plugins_too() {
+    use std::sync::atomic::Ordering;
+    let plugins = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/plugins-test/auth");
+    assert!(
+        plugins.join("fixture.wasm").exists(),
+        "Build auth fixtures: bash gateway/plugins/build.sh --tests"
+    );
+    let (probe, configures) = common::counter().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("snapshot.pb"), cached_snapshot(probe)).unwrap();
+    let local = dir.path().join("local.yaml");
+    // The child compiles the wasm fixtures before it binds, so a port reserved
+    // here can be claimed by a parallel test meanwhile: a startup exit is
+    // retried with fresh ports instead of failing for a lost race.
+    let mut running = None;
+    let (mut listen, mut admin) = (address(), address());
+    for attempt in 0..5 {
+        std::fs::write(
+            &local,
+            format!("server: {{listen: '{listen}', admin_listen: '{admin}'}}\n"),
+        )
+        .unwrap();
+        let mut child = Process(
+            Command::new(env!("CARGO_BIN_EXE_lumewarp"))
+                .args(["--control-plane", &format!("http://{}", address())])
+                .args(["--gateway-token-env", "LUMEWARP_N1_TOKEN"])
+                .arg("--state-dir")
+                .arg(&state)
+                .args(["--scope", "scope-a", "--gateway-id", "gw-cached"])
+                .arg("--local-config")
+                .arg(&local)
+                .env("LUMEWARP_N1_TOKEN", "gw-token")
+                .env("LUMEWARP_AUTH_PLUGIN_DIR", &plugins)
+                .env("LUMEWARP_GATEWAY_ID_KEY", KEY)
+                .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if child.0.try_wait().unwrap().is_some() {
+                break;
+            }
+            if tokio::net::TcpStream::connect(listen).await.is_ok() {
+                running = Some(child);
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the gateway did not start"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if running.is_some() {
+            break;
+        }
+        assert!(attempt < 4, "the gateway never bound a free port");
+        (listen, admin) = (address(), address());
+    }
+    let _process = running.expect("the gateway is running");
+    let booted = configures.load(Ordering::SeqCst);
+    assert!(
+        booted > 0,
+        "booting from the cached snapshot configured the plugin"
+    );
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("http://{listen}/mcp/servers/s1"))
+        .header("x-lumewarp-key", "secret")
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .body(Full::new(Bytes::from(initialize_request().to_string())))
+        .unwrap();
+    let response = bounded(client().request(request)).await.unwrap();
+    assert_eq!(
+        response.status(),
+        502,
+        "the request passed the plugin auth and reached the dead upstream"
+    );
+    assert_eq!(
+        configures.load(Ordering::SeqCst),
+        booted,
+        "the first request after a cached boot configured the plugin again (N1)"
+    );
+}
+
+#[tokio::test]
+async fn gateway_startup_retries_an_actual_listener_bind_conflict() {
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = occupied.local_addr().unwrap();
+    // The first child must fail to bind this held socket; the normal startup
+    // path then allocates fresh ports instead of waiting on a dead process.
+    let gw = Gw::start_auth_with_first_admin(&[("s1", address())], 0, "{plugin: none}", Some(port))
+        .await;
+    assert_ne!(gw.admin, port);
+    let response = gw
+        .http
+        .request(
+            Request::get(format!("http://{}/healthz", gw.admin))
+                .body(Full::new(Bytes::new()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+}
 #[tokio::test]
 async fn upstream_timeout_is_504_on_initialize_and_forward() {
     use hyper::service::service_fn;
@@ -634,16 +908,26 @@ async fn upstream_timeout_is_504_on_initialize_and_forward() {
         .0,
         504
     );
-    assert_eq!(
-        gw.rpc(
+    let (status, response) = gw
+        .rpc(
             "/mcp/servers/s1",
             Some(&session),
             "secret",
-            json!({"jsonrpc":"2.0","id":3,"method":"tools/list"})
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
         )
-        .await
-        .0,
-        504
+        .await;
+    let decoded: sealed_session::Session = sealed_session::open(
+        &a2a_ids::IdKey::from_base64(KEY).unwrap(),
+        sealed_session::SESSION,
+        &session,
+    )
+    .unwrap();
+    assert_eq!(
+        status,
+        504,
+        "{response}; issued={}, test_now={}",
+        decoded.issued,
+        sealed_session::now()
     );
     server.abort();
 }

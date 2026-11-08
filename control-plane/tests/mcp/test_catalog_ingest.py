@@ -21,7 +21,7 @@ from sqlalchemy import func, select
 from lumewarp_control_plane import outbox
 from lumewarp_control_plane._proto.lumewarp.config.v1 import config_service_pb2 as cpb
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
-from lumewarp_control_plane.compiler import publish_pending
+from lumewarp_control_plane.compiler import publish_pending, rollback_routing
 from lumewarp_control_plane.mcp import catalog_ingest, hashing
 from lumewarp_control_plane.models import (
     A2aAgent,
@@ -624,3 +624,79 @@ async def test_a_card_report_from_another_version_is_discarded(factory) -> None:
     assert result.discarded["stale_version"] == 1
     result = await ingest(cpb.CatalogReport(cards=[card(agent, config_version=2)]), factory=factory)
     assert result.cards == 1
+
+
+@pytest.mark.parametrize("version", [2**63, 2**64 - 1])
+async def test_a_version_a_bigint_cannot_hold_is_stale_not_fatal(factory, version) -> None:
+    """N2: `config_version` is uint64 on the wire but bigint in the DB.
+
+    The bad version must drop its own item; it may not become a query parameter that fails
+    for the whole report (the valid items before and after it still land).
+    """
+    await seed_scope(factory)
+    server = await add_server(factory)
+    result = await ingest(
+        cpb.CatalogReport(
+            definitions=[
+                definition(server, observe("echo")),
+                definition(server, observe("bad"), config_version=version),
+                definition(server, observe("add")),
+            ]
+        ),
+        factory=factory,
+    )
+    assert result.discarded["stale_version"] == 1
+    assert result.approved == 2
+    assert result.stored == 2
+    assert sorted(row.name for row in await rows(factory)) == ["add", "echo"]
+
+
+async def test_a_rollback_is_a_new_configuration_change(factory) -> None:
+    """N1: a rollback restores v1's rows, but it is also a new configuration.
+
+    A gateway still serving v2 (the replaced configuration) reports against v2; the
+    restored target must refuse it rather than auto-approve the old upstream's definitions.
+    """
+    await seed_scope(factory)
+    server = await add_server(factory, publish_now=False)
+    agent = await add_agent(factory, publish_now=False)
+    assert await publish(factory) == 1
+    # v2: both targets move to another upstream (URL B).
+    async with factory() as s, s.begin():
+        srv = await s.get(McpServer, server.id)
+        srv.url = "http://s1.test/mcp-b"
+        srv.config_revision = await outbox.enqueue_recompile(s, SCOPE, "test.edit_server")
+        ag = await s.get(A2aAgent, agent.id)
+        ag.url = "http://a1.test/a2a-b"
+        ag.config_revision = await outbox.enqueue_recompile(s, SCOPE, "test.edit_agent")
+    assert await publish(factory) == 2
+    # Roll back to v1: URL A is served again, as a new version (3) and revision (5).
+    async with factory() as s, s.begin():
+        assert await rollback_routing(s, SCOPE, 1, require_local_membership=True) == 3
+    async with factory() as s:
+        srv = await s.get(McpServer, server.id)
+        ag = await s.get(A2aAgent, agent.id)
+        assert srv.url == "http://s1.test/mcp"
+        assert ag.url == "http://a1.test/a2a"
+        assert srv.config_revision == 5 and ag.config_revision == 5
+
+    # A v2 report (URL B) is refused for both definition and card.
+    result = await ingest(
+        cpb.CatalogReport(
+            definitions=[definition(server, observe("echo"), config_version=2)],
+            cards=[card(agent, config_version=2)],
+        ),
+        factory=factory,
+    )
+    assert result.discarded["stale_version"] == 2
+    assert result.approved == 0 and result.cards == 0
+    assert await rows(factory) == []
+    # The rollback version itself is accepted, for definitions and cards.
+    result = await ingest(
+        cpb.CatalogReport(
+            definitions=[definition(server, observe("echo"), config_version=3)],
+            cards=[card(agent, config_version=3)],
+        ),
+        factory=factory,
+    )
+    assert result.approved == 1 and result.cards == 1

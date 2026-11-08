@@ -227,6 +227,9 @@ pub fn cached(agent: &str, id: &str) -> Option<Arc<str>> {
 /// it never keeps fetching from the old destination or with an old credential.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Signature {
+    /// A recreated agent (same name, new id) is a different target even when
+    /// its URL and auth are unchanged.
+    id: String,
     url: String,
     card_url: String,
     auth: String,
@@ -247,6 +250,7 @@ fn signature(target: &A2aTarget) -> Signature {
         }
     };
     Signature {
+        id: target.id.to_string(),
         url: target.url.to_string(),
         card_url: target.card_url.to_string(),
         auth,
@@ -320,12 +324,21 @@ fn reconcile(runtime: &Arc<Runtime>, snapshot: &crate::server::Snapshot, tasks: 
     });
 }
 
-/// The version of the snapshot the process is serving right now. A card task
-/// lives across snapshots, so every report must carry the current version, not
-/// the one it was spawned with (M7); the control plane discards a card whose
-/// version is older than the target's last edit.
-fn snapshot_version(snapshot: &crate::server::Snapshot) -> u64 {
-    snapshot.load().as_ref().map_or(0, |table| table.version)
+/// The current snapshot's version, but only when that same snapshot still
+/// carries this exact target (N3). A fetch task lives across snapshots: an
+/// agent edited while a fetch of the old URL is in flight would otherwise be
+/// reported with the new version and accepted by the control plane. The version
+/// and the target check come from one [`load`](arc_swap::ArcSwapOption::load)
+/// so they describe the same table (M7).
+fn current_report_version(
+    snapshot: &crate::server::Snapshot,
+    target: &A2aTarget,
+    expected: &Signature,
+) -> Option<u64> {
+    let guard = snapshot.load();
+    let table = guard.as_ref()?;
+    let agent = table.targets.agent(&target.name)?;
+    (signature(agent) == *expected).then_some(table.version)
 }
 
 async fn fetch_loop(
@@ -333,6 +346,9 @@ async fn fetch_loop(
     target: Arc<A2aTarget>,
     snapshot: crate::server::Snapshot,
 ) {
+    // The task's own configuration; a report is valid only while the current
+    // snapshot still carries it.
+    let expected = signature(&target);
     // Spread the herd: a snapshot reaches every replica at once.
     tokio::time::sleep(Duration::from_millis(fastrand::u64(0..2_000))).await;
     loop {
@@ -343,8 +359,13 @@ async fn fetch_loop(
             .metrics
             .a2a_upstream_duration(&target.name)
             .observe(started.elapsed().as_secs_f64());
+        let Some(version) = current_report_version(&snapshot, &target, &expected) else {
+            // Removed or edited since this task started; the reconciler will
+            // start the task for the new target. Never attribute an observation
+            // of the old target to the new version.
+            return;
+        };
         let public_url = runtime.public_url.as_deref();
-        let version = snapshot_version(&snapshot);
         match result {
             Ok(card) => report_success(&runtime.catalog, &target, card, public_url, version),
             Err(error) => report_error(&runtime.catalog, &target, &error, public_url, version),
@@ -778,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn a_card_report_reads_the_current_snapshot_version() {
+    fn a_card_report_uses_the_current_version_only_while_its_target_matches() {
         use crate::router::RoutingTable;
         use arc_swap::ArcSwapOption;
         let runtime = Runtime::new();
@@ -791,10 +812,27 @@ mod tests {
             &runtime,
         )
         .unwrap();
+        let target = Arc::clone(table.targets.agent("versioned").unwrap());
+        let expected = signature(&target);
         let slot: crate::server::Snapshot = Arc::new(ArcSwapOption::from_pointee(table));
-        assert_eq!(snapshot_version(&slot), 7);
+        assert_eq!(
+            current_report_version(&slot, &target, &expected),
+            Some(7),
+            "the current version and the matching target"
+        );
+        // An edited target (a different timeout) must not accept the old card.
+        let mut edited = card_target(
+            "http://127.0.0.1:1/a2a",
+            "http://127.0.0.1:1/.well-known/agent-card.json",
+            crate::targets::Auth::None,
+        );
+        edited.timeout = Duration::from_secs(1);
+        assert_eq!(
+            current_report_version(&slot, &edited, &signature(&edited)),
+            None
+        );
         let empty: crate::server::Snapshot = Arc::new(ArcSwapOption::empty());
-        assert_eq!(snapshot_version(&empty), 0);
+        assert_eq!(current_report_version(&empty, &target, &expected), None);
     }
 
     #[test]
@@ -808,6 +846,8 @@ mod tests {
         let mut other_card_url = target("sig", "sig", "http://127.0.0.1:1/a2a");
         other_card_url.card_url = "http://127.0.0.1:1/other.json".parse().unwrap();
         assert_ne!(signature(&base), signature(&other_card_url));
+        let other_id = target("sig", "other-id", "http://127.0.0.1:1/a2a");
+        assert_ne!(signature(&base), signature(&other_id));
         let mut bearer = target("sig", "sig", "http://127.0.0.1:1/a2a");
         bearer.auth = crate::targets::Auth::StaticBearer {
             authorization: hyper::header::HeaderValue::from_static("Bearer a"),

@@ -270,8 +270,7 @@ impl Context<'_> {
         if s.owner != self.owner()
             || s.credential != credential(self.headers)
             || s.route != self.route_name()
-            || s.issued > session::now()
-            || session::now().saturating_sub(s.issued) >= session::TTL
+            || !session::valid_at(s.issued, session::now())
         {
             return Err(fail(
                 StatusCode::NOT_FOUND,
@@ -755,6 +754,9 @@ impl Context<'_> {
             "prompts"
         };
         let aggregate = self.route == Route::Aggregate;
+        // A validated continuation proves an earlier page already answered.
+        // Failure of the remaining tail must terminate that walk, not discard it.
+        let continuation = aggregate && value.pointer("/params/cursor").is_some();
         let mut cursor = Cursor {
             session: s.nonce.clone(),
             method: method.clone(),
@@ -954,8 +956,8 @@ impl Context<'_> {
             return transport::reply(StatusCode::OK, result);
         }
         match last_failure {
-            Some(status) => fail(status, "No MCP discovery leg could answer"),
-            None => ok(id, json!({field:[]})),
+            Some(status) if !continuation => fail(status, "No MCP discovery leg could answer"),
+            _ => ok(id, json!({field:[]})),
         }
     }
 }

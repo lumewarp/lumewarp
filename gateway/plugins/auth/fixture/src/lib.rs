@@ -7,6 +7,7 @@
 //! | --- | --- |
 //! | `fixed` | Waits `delay_ms`, then returns `headers` (each `"name: value"`) plus an `x-calls` counter for this instance, and `cache_ms`. |
 //! | `fetch` | `http-fetch`es `url` and returns its status and body as headers, `cache_ms` from settings. |
+//! | `configure_fetch` | `http-fetch`es `url` once per instance **at configure time**, then behaves like `fixed`: a server that counts its requests can prove a target was configured (N1). |
 //! | `echo` | Returns `x-echo: <value of echo_header>`, or `absent`. |
 //! | `secret` | Returns what `secret(secret_name)` gave, or `none`. |
 //! | `error` | Returns `Err("fixture error")`. |
@@ -27,7 +28,7 @@ use serde::Deserialize;
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Params {
-    /// `fixed`, `fetch`, `echo`, `secret`, `error` or `loop`.
+    /// `fixed`, `fetch`, `configure_fetch`, `echo`, `secret`, `error` or `loop`.
     pub mode: String,
     /// Headers to return in `fixed` mode, each written `"name: value"`.
     #[serde(default)]
@@ -39,7 +40,7 @@ pub struct Params {
     /// really overlap.
     #[serde(default)]
     pub delay_ms: u64,
-    /// `fetch` mode: the URL to fetch.
+    /// `fetch` and `configure_fetch` mode: the URL to fetch.
     #[serde(default)]
     pub url: String,
     /// `secret` mode: the name passed to `secret()`.
@@ -58,17 +59,28 @@ pub struct Fixture {
 impl ConfigureAuth<Params> for Fixture {
     fn configure(_: &auth_types::TargetInfo, params: Params) -> Result<Self, ConfigError> {
         match params.mode.as_str() {
-            "fixed" | "fetch" | "echo" | "secret" | "error" | "loop" => {}
+            "fixed" | "fetch" | "configure_fetch" | "echo" | "secret" | "error" | "loop" => {}
             "stuck_configure" => loop {
                 std::hint::spin_loop();
             },
             other => return Err(ConfigError(format!("unknown mode {other:?}"))),
         }
-        if params.mode == "fetch" && params.url.is_empty() {
-            return Err(ConfigError("fetch mode needs url".into()));
+        if matches!(params.mode.as_str(), "fetch" | "configure_fetch") && params.url.is_empty() {
+            return Err(ConfigError(format!("{} mode needs url", params.mode)));
         }
         for header in &params.headers {
             parse_header(header).map_err(|error| ConfigError(error.to_string()))?;
+        }
+        if params.mode == "configure_fetch" {
+            // One fetch per configured instance: a test counts them to prove a
+            // target was configured once, at apply time (N1).
+            host::http_fetch(&host::HttpRequest {
+                method: "POST".to_owned(),
+                url: params.url.clone(),
+                headers: vec![("content-type".to_owned(), b"application/json".to_vec())],
+                body: b"{}".to_vec(),
+            })
+            .map_err(ConfigError)?;
         }
         Ok(Self {
             params,
@@ -98,7 +110,7 @@ impl Authenticator for Fixture {
             cache_ms: self.params.cache_ms,
         };
         match self.params.mode.as_str() {
-            "fixed" => {
+            "fixed" | "configure_fetch" => {
                 let until = host::now_unix_ms() + self.params.delay_ms;
                 while host::now_unix_ms() < until {
                     std::hint::spin_loop();

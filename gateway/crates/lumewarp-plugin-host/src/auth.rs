@@ -284,9 +284,13 @@ impl Authenticator {
             url: spec.url.clone(),
             params_json: serde_json::Value::Object(params).to_string(),
         };
+        let permits = limits::memory_permits_gate();
+        // A quarter of the call permits at most, so a stuck auth plugin holds
+        // only its own requests' permits (M2).
         let target_pool = std::thread::available_parallelism()
             .map_or(1, usize::from)
-            .min(4);
+            .min(4)
+            .min(permits.pool_share());
         let authenticator = Self {
             plugin,
             spec,
@@ -296,7 +300,7 @@ impl Authenticator {
                 secrets: Mutex::new(HashMap::new()),
             }),
             pool: InstancePool::new(target_pool),
-            memory: Arc::clone(limits::memory_semaphore()),
+            memory: permits.semaphore(),
             prewarm: target_pool,
             cached: Mutex::new(None),
             flight: tokio::sync::Mutex::new(()),
@@ -313,14 +317,14 @@ impl Authenticator {
         if self.prewarm == 0 {
             return Ok(());
         }
-        let Some(slot) = self.pool.reserve() else {
+        let Some(slot) = self.pool.reserve().ok() else {
             return Ok(());
         };
         let first = crate::block_on_timeout(self.create_waiting(slot, Some(timeout)), timeout)
             .ok_or(Error::ConfigureTimeout)??;
         self.pool.push(first);
         for _ in 1..self.prewarm {
-            let Some(slot) = self.pool.reserve() else {
+            let Ok(slot) = self.pool.reserve() else {
                 break;
             };
             match crate::block_on_timeout(self.create_now(slot, Some(timeout)), timeout) {
@@ -468,22 +472,29 @@ impl Authenticator {
             if let Some(instance) = self.pool.pop() {
                 return Ok(instance);
             }
-            if let Some(slot) = self.pool.reserve() {
-                // The permit covers instantiation only; queueing for this
-                // pool never holds one (M2).
-                match self.create_waiting(slot, None).await {
-                    Ok(instance) => return Ok(instance),
-                    // Out of budget: give the pool's idle instances back and
-                    // try once more before failing the call.
-                    Err(_) if !retried && self.pool.idle_len() > 0 => {
-                        retried = true;
-                        self.pool.shrink(0);
-                        continue;
-                    }
-                    Err(error) => return Err(error),
+            let slot = match self.pool.reserve() {
+                Ok(slot) => slot,
+                Err(blocked) => match self.pool.wait(blocked).await {
+                    Ok(Some(slot)) => slot,
+                    // An instance came back; take it if it is still there.
+                    Ok(None) => continue,
+                    // Only a closed budget gets here, which nothing does.
+                    Err(_) => return Err(Error::Canceled),
+                },
+            };
+            // The permit covers instantiation only; queueing for this pool
+            // never holds one (M2).
+            match self.create_waiting(slot, None).await {
+                Ok(instance) => return Ok(instance),
+                // Out of budget: give the pool's idle instances back and
+                // try once more before failing the call.
+                Err(_) if !retried && self.pool.idle_len() > 0 => {
+                    retried = true;
+                    self.pool.shrink(0);
+                    continue;
                 }
+                Err(error) => return Err(error),
             }
-            self.pool.wait().await;
         }
     }
 
