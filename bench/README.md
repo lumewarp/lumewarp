@@ -78,6 +78,54 @@ event, matching vLLM/OpenAI prefill-after-headers behavior. This is useful when
 validating gateway TTFT/overhead metrics; it does not affect non-stream or
 embedding responses. Default off.
 
+## Routing policy: cheapest-first, plugin vs LiteLLM custom strategy
+
+`BENCH_POLICY=cheapest-first` makes both gateways run **the same routing policy**
+over **the same five deployments**: one router (called `mock`) over five members
+pointing at the same mock upstream model, priced 1..5 nano-USD per million input
+tokens. The cheapest member (`m0`) therefore serves every request on both sides,
+so the run compares the gateways, not the policies.
+
+| | Lumewarp | LiteLLM 1.106.2 |
+| --- | --- | --- |
+| router | `gateway/plugins/router/cheapest-first` (WASM), loaded from `LUMEWARP_ROUTER_PLUGIN_DIR` | `CustomRoutingStrategyBase.async_get_available_deployment` in `bench/litellm/cheapest_first_strategy.py` |
+| config | `bench/lumewarp/config-cheapest-first.yaml` (`strategy: cheapest_first`, per-member `input_price_nano_usd_per_mtok`) | `bench/litellm/config-cheapest-first.yaml` (five deployments, `model_info.input_cost_per_token`) |
+| healthy set | the gateway's eligible members (all healthy here) | `router.async_get_healthy_deployments` (the set its own strategies use) |
+| tie-break | price, then in-flight, then declaration order | price, then deployment id (`m0`..`m4`, declared in order) |
+
+The bench uses distinct prices, so the tie-break never decides a request.
+
+LiteLLM's config schema only accepts its built-in strategy names, so the proxy
+cannot be told about a custom class in `config.yaml`. The strategy is installed
+through a supported extension point instead: `run.sh` starts the proxy with
+`LITELLM_WORKER_STARTUP_HOOKS=cheapest_first_strategy:install` and
+`PYTHONPATH=bench/litellm`, and `install()` wraps `Router.routing_strategy_init`,
+the one place LiteLLM builds a strategy, so every worker's router gets it right
+after its built-in setup. No LiteLLM source is patched and no database is used.
+
+Before any load, the driver sends one request to each gateway and fails the run
+(exit 2) unless LiteLLM's strategy recorded that it ran and picked `m0`
+(`logs/litellm-policy-used.txt`); Lumewarp would not have started at all if the
+plugin had not loaded, because the router names it as a capability. `meta.json`
+records `config.policy`.
+
+```sh
+MOCK_PORT=9100 LUMEWARP_PORT=4100 LITELLM_PORT=4101 \
+  BENCH_POLICY=cheapest-first bench/scripts/run.sh --full
+# A native strategy on the same branch (no plugin, no policy):
+BENCH_LITELLM=0 bench/scripts/run.sh --quick
+```
+
+Self-test of the LiteLLM side (no proxy, no network):
+
+```sh
+uvx --from 'litellm[proxy]==1.106.2' python -I \
+  bench/litellm/cheapest_first_strategy.py --selftest
+```
+
+Overhead is computed as in every other mode: latency through the gateway minus
+latency direct to the mock upstream, same offered load, same run.
+
 ## Response rewrite and large responses
 
 The default targets call `mock`, whose `upstream_model` is also `mock`: the fast
@@ -158,6 +206,10 @@ already listens on 9000 (MinIO does, on some dev machines):
 ```sh
 MOCK_PORT=9100 LUMEWARP_PORT=4100 LITELLM_PORT=4101 bench/scripts/run.sh --quick
 ```
+
+`BENCH_POLICY=cheapest-first` runs the same routing policy on both gateways (see
+"Routing policy" above); it builds the router plugin components and needs
+`LUMEWARP_ROUTER_PLUGIN_DIR` (default `gateway/target/plugins/router`).
 
 Other useful overrides: `MOCK_LATENCY_MS` (default 50), `MOCK_STREAM_CHUNKS`,
 `MOCK_CHUNK_INTERVAL_MS`, `MOCK_HEADERS_FIRST` (see below), `BENCH_AUTH`

@@ -124,6 +124,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--stream-concurrencies", required=True)
     parser.add_argument("--connections", required=True, help="rate:conns,rate:conns")
     parser.add_argument("--rewrite", type=int, default=0)
+    parser.add_argument(
+        "--policy",
+        default="off",
+        choices=("off", "cheapest-first"),
+        help="router policy both gateways ran (cheapest-first: same policy on both)",
+    )
     parser.add_argument("--embed-bytes", type=int, default=0)
     parser.add_argument("--embed-rates", default="")
     parser.add_argument("--request-body", required=True)
@@ -175,6 +181,7 @@ def main(argv: list[str]) -> int:
             "stream_concurrencies": _parse_list(args.stream_concurrencies),
             "connections": _parse_pairs(args.connections),
             "rewrite": bool(args.rewrite),
+            "policy": args.policy,
             "embed_bytes": args.embed_bytes,
             "embed_rates": _parse_list(args.embed_rates) if args.embed_bytes else [],
         },

@@ -66,6 +66,14 @@ Environment overrides (defaults):
                               and the lumewarp targets only
   EMBED_RATES="50"            offered RPS of the embeddings scenario
   BENCH_LITELLM=1             0 skips LiteLLM (no A6 ratio; for rewrite-only runs)
+  BENCH_POLICY=off            cheapest-first: both gateways route one router over
+                              five priced deployments with the same cheapest-first
+                              policy (Lumewarp: the WASM plugin from
+                              LUMEWARP_ROUTER_PLUGIN_DIR; LiteLLM: the custom
+                              strategy in bench/litellm/cheapest_first_strategy.py)
+  BENCH_POLICY_RUN=           (internal) set by the driver; off/cheapest-first
+  LUMEWARP_ROUTER_PLUGIN_DIR=  plugin directory used with BENCH_POLICY=cheapest-first
+                              (default gateway/target/plugins/router)
   LITELLM_VERSION=1.106.2     litellm[proxy] pin (must match bench/litellm/config.yaml)
   LITELLM_WORKERS=$(nproc)    LiteLLM --num_workers
   DURATION_SECS               measured duration per scenario (profile default)
@@ -123,6 +131,8 @@ BENCH_REWRITE="${BENCH_REWRITE:-0}"
 BENCH_EMBED_BYTES="${BENCH_EMBED_BYTES:-0}"
 EMBED_RATES="${EMBED_RATES:-50}"
 BENCH_LITELLM="${BENCH_LITELLM:-1}"
+BENCH_POLICY="${BENCH_POLICY:-off}"
+LUMEWARP_ROUTER_PLUGIN_DIR="${LUMEWARP_ROUTER_PLUGIN_DIR:-$REPO_ROOT/gateway/target/plugins/router}"
 LITELLM_VERSION="${LITELLM_VERSION:-1.106.2}"
 LITELLM_WORKERS="${LITELLM_WORKERS:-$(nproc)}"
 HEALTH_TIMEOUT_SECS="${HEALTH_TIMEOUT_SECS:-180}"
@@ -181,6 +191,10 @@ esac
 case "$BENCH_LITELLM" in
   0|1) ;;
   *) die "BENCH_LITELLM must be 0 or 1 (got: $BENCH_LITELLM)" ;;
+esac
+case "$BENCH_POLICY" in
+  off | cheapest-first) ;;
+  *) die "BENCH_POLICY must be off or cheapest-first (got: $BENCH_POLICY)" ;;
 esac
 [[ "$BENCH_EMBED_BYTES" =~ ^[0-9]+$ ]] || die "BENCH_EMBED_BYTES must be a byte count"
 read -r -a EMBED_RATE_LIST <<< "$EMBED_RATES"
@@ -265,6 +279,14 @@ if (( BUILD )); then
   log "building lumewarp (release)"
   (cd "$REPO_ROOT/gateway" && cargo build --release)
 fi
+if [[ "$BENCH_POLICY" == "cheapest-first" ]]; then
+  if (( BUILD )); then
+    log "building the router plugin components"
+    bash "$REPO_ROOT/gateway/plugins/build.sh"
+  fi
+  [[ -f "$LUMEWARP_ROUTER_PLUGIN_DIR/cheapest-first.wasm" ]] ||
+    die "cheapest-first.wasm not found in $LUMEWARP_ROUTER_PLUGIN_DIR (build it with bash gateway/plugins/build.sh, or set LUMEWARP_ROUTER_PLUGIN_DIR)"
+fi
 
 [[ -x "$MOCK_BIN" ]] || die "mock-upstream binary not found: $MOCK_BIN"
 [[ -x "$SSE_BENCH_BIN" ]] || die "sse-bench binary not found: $SSE_BENCH_BIN"
@@ -313,7 +335,7 @@ mkdir -p "$RUN_DIR/logs" "$RUN_DIR/configs" "$RUN_DIR/nonstream" "$RUN_DIR/strea
 : > "$RUN_DIR/scenarios.jsonl"
 
 log "run directory: $RUN_DIR"
-log "profile: $PROFILE, auth: $AUTH_MODE, rewrite: $BENCH_REWRITE, embeddings bytes: $BENCH_EMBED_BYTES, litellm: $BENCH_LITELLM, repetitions: $REPEAT"
+log "profile: $PROFILE, auth: $AUTH_MODE, rewrite: $BENCH_REWRITE, embeddings bytes: $BENCH_EMBED_BYTES, litellm: $BENCH_LITELLM, policy: $BENCH_POLICY, repetitions: $REPEAT"
 
 # --------------------------------------------------------------------------- #
 # Cleanup
@@ -430,7 +452,11 @@ if (( AUTH )); then
     -e "s|api_keys: \[\] # __BENCH_API_KEYS__|api_keys: [\"${BENCH_API_KEY_SHA256}\"] # __BENCH_API_KEYS__|"
   )
 fi
-sed "${LUMEWARP_SED[@]}" "$BENCH_DIR/lumewarp/config.yaml" >"$LUMEWARP_CONFIG"
+LUMEWARP_CONFIG_SRC="$BENCH_DIR/lumewarp/config.yaml"
+if [[ "$BENCH_POLICY" == "cheapest-first" ]]; then
+  LUMEWARP_CONFIG_SRC="$BENCH_DIR/lumewarp/config-cheapest-first.yaml"
+fi
+sed "${LUMEWARP_SED[@]}" "$LUMEWARP_CONFIG_SRC" >"$LUMEWARP_CONFIG"
 grep -q "127.0.0.1:${MOCK_PORT}/v1" "$LUMEWARP_CONFIG" ||
   die "failed to template mock port into $LUMEWARP_CONFIG"
 grep -q "listen: 127.0.0.1:${LUMEWARP_PORT}" "$LUMEWARP_CONFIG" ||
@@ -478,7 +504,14 @@ http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Sink).serve_for
 fi
 
 log "starting lumewarp on 127.0.0.1:$LUMEWARP_PORT"
+LUMEWARP_PLUGIN_ENV=()
+if [[ "$BENCH_POLICY" == "cheapest-first" ]]; then
+  # The router names the WASM strategy; the gateway refuses the config (and
+  # exits) when the plugin is not loaded, so a successful startup proves it.
+  LUMEWARP_PLUGIN_ENV=("LUMEWARP_ROUTER_PLUGIN_DIR=$LUMEWARP_ROUTER_PLUGIN_DIR")
+fi
 env ${LUMEWARP_OTEL_ENV[@]+"${LUMEWARP_OTEL_ENV[@]}"} \
+  ${LUMEWARP_PLUGIN_ENV[@]+"${LUMEWARP_PLUGIN_ENV[@]}"} \
   "$LUMEWARP_BIN" --config "$LUMEWARP_CONFIG" >"$RUN_DIR/logs/lumewarp.log" 2>&1 &
 LUMEWARP_PID=$!
 SERVER_PIDS+=("$LUMEWARP_PID")
@@ -488,6 +521,10 @@ wait_for_http "lumewarp" "http://127.0.0.1:$LUMEWARP_PORT/healthz" "$HEALTH_TIME
 LITELLM_PID=""
 if (( BENCH_LITELLM )); then
   LITELLM_CONFIG="$RUN_DIR/configs/litellm.yaml"
+  LITELLM_CONFIG_SRC="$BENCH_DIR/litellm/config.yaml"
+  if [[ "$BENCH_POLICY" == "cheapest-first" ]]; then
+    LITELLM_CONFIG_SRC="$BENCH_DIR/litellm/config-cheapest-first.yaml"
+  fi
   LITELLM_SED=(
     -e "s|127\.0\.0\.1:9000/v1|127.0.0.1:${MOCK_PORT}/v1|g"
   )
@@ -497,7 +534,7 @@ if (( BENCH_LITELLM )); then
       -e "s|^  dangerously_permit_weak_or_unset_master_key: true$|  # BENCH_AUTH=1: master_key is set, so the weak-key escape hatch is removed.|"
     )
   fi
-  sed "${LITELLM_SED[@]}" "$BENCH_DIR/litellm/config.yaml" >"$LITELLM_CONFIG"
+  sed "${LITELLM_SED[@]}" "$LITELLM_CONFIG_SRC" >"$LITELLM_CONFIG"
   grep -q "127.0.0.1:${MOCK_PORT}/v1" "$LITELLM_CONFIG" ||
     die "failed to template mock port into $LITELLM_CONFIG"
   if (( AUTH )); then
@@ -512,8 +549,22 @@ if (( BENCH_LITELLM )); then
     fi
   fi
 
+  LITELLM_POLICY_ENV=()
+  if [[ "$BENCH_POLICY" == "cheapest-first" ]]; then
+    # LiteLLM 1.106.2's config schema only accepts its built-in strategy names,
+    # so the proxy is given the custom strategy through a worker startup hook:
+    # install() wraps Router.routing_strategy_init, and the strategy appends to
+    # the marker file the first time it runs (checked below).
+    LITELLM_POLICY_MARKER="$RUN_DIR/logs/litellm-policy-used.txt"
+    LITELLM_POLICY_ENV=(
+      "LITELLM_WORKER_STARTUP_HOOKS=cheapest_first_strategy:install"
+      "PYTHONPATH=$BENCH_DIR/litellm"
+      "LW_BENCH_POLICY_MARKER=$LITELLM_POLICY_MARKER"
+    )
+  fi
   log "starting LiteLLM ${LITELLM_VERSION} on 127.0.0.1:$LITELLM_PORT with ${LITELLM_WORKERS} workers (first run downloads packages)"
   env \
+    ${LITELLM_POLICY_ENV[@]+"${LITELLM_POLICY_ENV[@]}"} \
     LITELLM_LOG=ERROR \
     LITELLM_DONT_SHOW_FEEDBACK_BOX=True \
     LITELLM_LOCAL_MODEL_COST_MAP=True \
@@ -538,6 +589,32 @@ fi
 # ready) and let the whole machine settle before the direct baseline.
 log "settling for ${SETTLE_SECS}s"
 sleep "$SETTLE_SECS"
+
+# With a policy, prove it is in effect before measuring anything: Lumewarp
+# would not have started without the plugin, and LiteLLM's strategy writes a
+# marker on its first routing decision.
+if [[ "$BENCH_POLICY" == "cheapest-first" ]]; then
+  LITELLM_POLICY_ARGS=()
+  if (( AUTH )); then
+    LITELLM_POLICY_ARGS+=(-H "Authorization: Bearer ${BENCH_API_KEY}")
+  fi
+  curl -fsS -m 30 -o /dev/null -H 'content-type: application/json' \
+    ${LITELLM_POLICY_ARGS[@]+"${LITELLM_POLICY_ARGS[@]}"} \
+    -d "$REQUEST_BODY" "http://127.0.0.1:$LUMEWARP_PORT/v1/chat/completions" ||
+    die "lumewarp did not answer with the cheapest-first router"
+  if (( BENCH_LITELLM )); then
+    curl -fsS -m 30 -o /dev/null -H 'content-type: application/json' \
+      ${LITELLM_POLICY_ARGS[@]+"${LITELLM_POLICY_ARGS[@]}"} \
+      -d "$REQUEST_BODY" "http://127.0.0.1:$LITELLM_PORT/v1/chat/completions" ||
+      die "litellm did not answer with the cheapest-first router"
+    [[ -s "$LITELLM_POLICY_MARKER" ]] ||
+      die "litellm answered without running the cheapest-first strategy (no $LITELLM_POLICY_MARKER): the worker startup hook did not install"
+    # The strategy records what it chose; m0 is the cheapest of the five.
+    grep -q "deployment=m0" "$LITELLM_POLICY_MARKER" ||
+      die "litellm's cheapest-first strategy did not pick m0: $(tr '\n' ' ' <"$LITELLM_POLICY_MARKER")"
+    log "verified the cheapest-first policy on both gateways (litellm picked m0)"
+  fi
+fi
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -890,6 +967,7 @@ python3 -I "$SCRIPT_DIR/write_meta.py" \
   --stream-concurrencies "${STREAM_CONCURRENCY_LIST[*]}" \
   --connections "$CONNECTIONS_ARG" \
   --rewrite "$BENCH_REWRITE" \
+  --policy "$BENCH_POLICY" \
   --embed-bytes "$BENCH_EMBED_BYTES" \
   --embed-rates "${EMBED_RATE_LIST[*]}" \
   --request-body "$REQUEST_BODY" \

@@ -325,10 +325,10 @@ fn is_snake_alias(key: &str) -> bool {
     SNAKE_ALIASES.contains(&key)
 }
 
-/// The first snake_case alias in `value`, with its JSON path. `metadata` is a
-/// `google.protobuf.Struct` (arbitrary data), so keys there are not typed
-/// fields and are skipped; [`response_snake_alias`] checks the camelCase-id
-/// positions inside `error.data[].metadata` separately.
+/// The first snake_case alias in `value`, with its JSON path. `metadata` and
+/// `Part.data` hold arbitrary JSON, so keys there are not typed fields and are
+/// skipped; [`response_snake_alias`] checks the camelCase-id positions inside
+/// `error.data[].metadata` separately.
 pub fn snake_alias(value: &Value) -> Option<String> {
     fn walk(value: &Value, path: &str, in_metadata: bool) -> Option<String> {
         match value {
@@ -338,8 +338,8 @@ pub fn snake_alias(value: &Value) -> Option<String> {
                     if !in_metadata && is_snake_alias(key) {
                         return Some(child_path);
                     }
-                    if let Some(found) = walk(child, &child_path, in_metadata || key == "metadata")
-                    {
+                    let opaque = in_metadata || key == "metadata" || key == "data";
+                    if let Some(found) = walk(child, &child_path, opaque) {
                         return Some(found);
                     }
                 }
@@ -772,6 +772,10 @@ mod tests {
             );
         }
         // `metadata` is a google.protobuf.Struct: those keys are not typed fields.
+        assert!(request_snake_alias(&json!({
+            "params": {"message": {"parts": [{"data": {"task_id": "T-42"}}]}}
+        }))
+        .is_none());
         assert!(request_snake_alias(&json!({
             "params": {"message": {"metadata": {"task_id": "business data"}}}
         }))

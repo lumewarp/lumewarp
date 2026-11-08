@@ -1,0 +1,42 @@
+# Standalone Lumewarp config for `bench/scripts/run.sh --policy cheapest-first`.
+#
+# Same shape as `config.yaml`, with one router over five deployments of the mock
+# upstream, priced 1..5 nano-USD per million input tokens, routed by the WASM
+# strategy `gateway/plugins/router/cheapest-first` (loaded from
+# `LUMEWARP_ROUTER_PLUGIN_DIR`). `bench/litellm/config-cheapest-first.yaml`
+# describes the same five deployments with the same prices for LiteLLM, and
+# `bench/litellm/cheapest_first_strategy.py` runs the same policy there.
+#
+# The cheapest member (m0) therefore serves every request on both gateways: the
+# comparison isolates the gateway, not the policy.
+#
+# run.sh rewrites the ports below if MOCK_PORT / LUMEWARP_PORT are overridden,
+# and templates `server.api_keys` when BENCH_AUTH=1.
+server:
+  listen: 127.0.0.1:4000
+  api_keys: [] # __BENCH_API_KEYS__
+
+upstreams:
+  - name: mock
+    kind: openai_compatible
+    base_url: http://127.0.0.1:9000/v1
+
+models:
+  - {name: mock-m0, upstream: mock, upstream_model: mock}
+  - {name: mock-m1, upstream: mock, upstream_model: mock}
+  - {name: mock-m2, upstream: mock, upstream_model: mock}
+  - {name: mock-m3, upstream: mock, upstream_model: mock}
+  - {name: mock-m4, upstream: mock, upstream_model: mock}
+
+routers:
+  # The called name stays `mock`, so the load generators are identical to the
+  # default bench.
+  - name: mock
+    strategy: cheapest_first
+    params: {}
+    members:
+      - {model: mock-m0, params: {input_price_nano_usd_per_mtok: 1}}
+      - {model: mock-m1, params: {input_price_nano_usd_per_mtok: 2}}
+      - {model: mock-m2, params: {input_price_nano_usd_per_mtok: 3}}
+      - {model: mock-m3, params: {input_price_nano_usd_per_mtok: 4}}
+      - {model: mock-m4, params: {input_price_nano_usd_per_mtok: 5}}

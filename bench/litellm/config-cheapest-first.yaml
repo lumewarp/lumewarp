@@ -1,0 +1,73 @@
+# LiteLLM proxy config for `bench/scripts/run.sh --policy cheapest-first`.
+#
+# The five deployments of `bench/lumewarp/config-cheapest-first.yaml` with the
+# same prices (nano-USD per million input tokens there, USD per input token
+# here: 1 nano-USD/Mtok = 1e-15 USD/token). All are the mock upstream's fast-path
+# model `mock`, so LiteLLM's request is identical to Lumewarp's.
+#
+# The deployment order and ids (`m0`..`m4`) are the tie-break the strategy uses;
+# the prices are distinct, so the cheapest (`m0`) always wins.
+#
+# The router itself is LiteLLM's own; `bench/litellm/cheapest_first_strategy.py`
+# wraps `Router.routing_strategy_init` from `LITELLM_WORKER_STARTUP_HOOKS`, which
+# run.sh sets in this mode (1.106.2's config schema has no custom-strategy key).
+#
+# Quiet + fair run, as in `config.yaml`: no database, no spend/error logging, no
+# background health checks, no retries, no message logging.
+model_list:
+  - model_name: mock
+    litellm_params:
+      model: openai/mock
+      api_base: http://127.0.0.1:9000/v1
+      api_key: sk-mock
+    model_info:
+      id: m0
+      input_cost_per_token: 1.0e-15
+  - model_name: mock
+    litellm_params:
+      model: openai/mock
+      api_base: http://127.0.0.1:9000/v1
+      api_key: sk-mock
+    model_info:
+      id: m1
+      input_cost_per_token: 2.0e-15
+  - model_name: mock
+    litellm_params:
+      model: openai/mock
+      api_base: http://127.0.0.1:9000/v1
+      api_key: sk-mock
+    model_info:
+      id: m2
+      input_cost_per_token: 3.0e-15
+  - model_name: mock
+    litellm_params:
+      model: openai/mock
+      api_base: http://127.0.0.1:9000/v1
+      api_key: sk-mock
+    model_info:
+      id: m3
+      input_cost_per_token: 4.0e-15
+  - model_name: mock
+    litellm_params:
+      model: openai/mock
+      api_base: http://127.0.0.1:9000/v1
+      api_key: sk-mock
+    model_info:
+      id: m4
+      input_cost_per_token: 5.0e-15
+
+litellm_settings:
+  num_retries: 0
+  request_timeout: 600
+  turn_off_message_logging: true
+
+general_settings:
+  disable_spend_logs: true
+  disable_error_logs: true
+  store_model_in_db: false
+  background_health_checks: false
+  health_check_interval: 0
+  # BENCH_AUTH=1 turns the commented line below into a real per-run key and
+  # comments out the weak-key escape hatch underneath it (run.sh does both).
+  # master_key: __BENCH_MASTER_KEY__
+  dangerously_permit_weak_or_unset_master_key: true
