@@ -9,6 +9,11 @@ JSON-RPC method and the MCP tool or prompt. An installation admin's single `team
 over whole UTC months is served from the pre-aggregated `usage_totals` table, which holds LLM
 requests only: every other shape is aggregated from `usage_events`, limited to the caller's
 readable teams.
+
+Every row carries `error_count` (requests whose outcome is `upstream_error` or `rejected`, or
+whose status is 4xx/5xx without being a client cancellation) and `total_duration_ms` (summed, so
+the mean is the sum over the requests) beside the LLM amounts: the MCP and A2A tabs read them
+instead of tokens and cost. The `usage_totals` fast path is LLM-only and reports both as 0.
 """
 
 from __future__ import annotations
@@ -43,6 +48,7 @@ from lumewarp_control_plane.models import (
     CatalogKind,
     CatalogName,
     KeyOwnerKind,
+    RequestOutcome,
     ScopeType,
     Team,
     TrafficKind,
@@ -208,6 +214,8 @@ async def _totals_page(
     next_cursor = str(rows[limit - 1][0]) if len(rows) > limit else None
     items = [
         UsageRowOut(
+            # The totals table holds LLM requests only (usage.ingest), so a row from it is one.
+            kind=TrafficKind.LLM,
             team_id=row[0],
             requests=int(row[1]),
             prompt_tokens=int(row[2]),
@@ -215,13 +223,24 @@ async def _totals_page(
             total_tokens=int(row[2]) + int(row[3]),
             cost_nano_usd=int(row[4]),
             unknown_cost_count=int(row[5]),
+            # Not aggregated into the totals: nothing reads it from this shape.
+            error_count=0,
+            total_duration_ms=0,
         )
         for row in rows[:limit]
     ]
     return Page[UsageRowOut](items=items, next_cursor=next_cursor)
 
 
-_AMOUNTS = ("requests", "prompt_tokens", "completion_tokens", "cost_nano_usd", "unknown_cost_count")
+_AMOUNTS = (
+    "requests",
+    "prompt_tokens",
+    "completion_tokens",
+    "cost_nano_usd",
+    "unknown_cost_count",
+    "error_count",
+    "total_duration_ms",
+)
 
 
 def _events_query(
@@ -267,6 +286,21 @@ def _events_query(
     if upstream and "upstream_model" not in raw_names:
         raw_names.append("upstream_model")
     columns = [fields[name].label(name) for name in raw_names]
+    # An error is an error outcome (the gateway reports one for a JSON-RPC error in a 200 too),
+    # or a 4xx/5xx status that is not a client cancellation (499).
+    failed = case(
+        (
+            or_(
+                UsageEvent.outcome.in_([RequestOutcome.UPSTREAM_ERROR, RequestOutcome.REJECTED]),
+                and_(
+                    UsageEvent.status >= 400,
+                    UsageEvent.outcome != RequestOutcome.CLIENT_CANCELLED,
+                ),
+            ),
+            1,
+        ),
+        else_=0,
+    )
     amounts = [
         func.count().label("requests"),
         func.coalesce(func.sum(UsageEvent.prompt_tokens), 0).label("prompt_tokens"),
@@ -275,6 +309,8 @@ def _events_query(
         func.coalesce(func.sum(case((UsageEvent.cost_known.is_(False), 1), else_=0)), 0).label(
             "unknown_cost_count"
         ),
+        func.coalesce(func.sum(failed), 0).label("error_count"),
+        func.coalesce(func.sum(UsageEvent.duration_ms), 0).label("total_duration_ms"),
     ]
     raw = select(*columns, *amounts).where(UsageEvent.ts >= from_, UsageEvent.ts < to_, *filters)
     if readable is not None:
@@ -480,10 +516,11 @@ async def get_usage(
         is_admin
         and groups == ["team"]
         and requested is None
+        # The totals table counts LLM requests only, so both of these ask the same question.
+        and kind in (None, TrafficKind.LLM)
         and all(
             value is None
             for value in (
-                kind,
                 target,
                 method,
                 tool,

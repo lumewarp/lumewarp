@@ -205,13 +205,6 @@ class _PendingUpdate:
 _MAX_HEALTH_ENTRIES = 10_000
 _MAX_UPSTREAM_NAME = 200
 _MAX_MODEL_NAME = 400
-# CatalogReport bounds (docs/plugins.md): a definition or a card is at most 64 KiB and a
-# gateway holds at most 200 unreported definitions per server.
-_MAX_CATALOG_DEFINITIONS = 2_000
-_MAX_CATALOG_CARDS = 500
-_MAX_CATALOG_TARGET_NAME = 200
-_MAX_CATALOG_JSON = 64 * 1024
-_MAX_CATALOG_ERROR = 500
 
 
 @dataclass
@@ -771,7 +764,7 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
                 await self.registry._mirror(state)
             return
         if kind == "catalog":
-            await self._ingest_catalog(state, incoming.catalog, context)
+            await self._ingest_catalog(state, incoming.catalog)
             return
         if kind == "hello":
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Hello may only be sent once")
@@ -827,31 +820,21 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
             pending.retry_delay = min(pending.retry_delay * 2, _RETRY_MAX_SECONDS)
         await self.registry._mirror(state)
 
-    async def _ingest_catalog(self, state: _StreamState, report, context) -> None:
+    async def _ingest_catalog(self, state: _StreamState, report) -> None:
         """What the gateway observed at an MCP server or A2A agent. Unlike a HealthReport a
-        report adds to earlier ones, and it is never a reply to an update. Every bound is
-        checked before the report is read, so a hostile one is cheap to reject."""
-        definitions, cards = report.definitions, report.cards
-        if (
-            len(definitions) > _MAX_CATALOG_DEFINITIONS
-            or len(cards) > _MAX_CATALOG_CARDS
-            or any(
-                not 0 < len(item.server) <= _MAX_CATALOG_TARGET_NAME
-                or not 0 < len(item.name) <= _MAX_MODEL_NAME
-                or len(item.definition_json.encode("utf-8")) > _MAX_CATALOG_JSON
-                or (item.hash and len(item.hash) != 32)
-                for item in definitions
-            )
-            or any(
-                not 0 < len(card.agent) <= _MAX_CATALOG_TARGET_NAME
-                or len(card.card_json.encode("utf-8")) > _MAX_CATALOG_JSON
-                or len(card.error.encode("utf-8")) > _MAX_CATALOG_ERROR
-                for card in cards
-            )
-        ):
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "invalid catalog report")
+        report adds to earlier ones, and it is never a reply to an update.
+
+        Every bound is applied per item by `catalog_ingest`: an oversized or malformed
+        definition, or a card error longer than the 500-byte contract, is dropped and
+        counted. A report is never a reason to abort the stream — one broken upstream must
+        not cost a gateway its other reports (or its snapshot).
+        """
         async with self.session_factory() as session, session.begin():
-            await catalog_ingest.ingest_report(session, state.gateway_id, report)
+            result = await catalog_ingest.ingest_report(session, state.gateway_id, report)
+        # After the commit, so the counters never run ahead of the rows.
+        self.registry.metrics.record_catalog(result.counts(), result.discarded)
+        if result.cards:
+            self.registry.metrics.agent_cards.labels("stored").inc(result.cards)
 
 
 class _UsageService(usage_pb2_grpc.UsageServiceServicer):

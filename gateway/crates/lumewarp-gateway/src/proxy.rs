@@ -418,8 +418,9 @@ pub async fn forward(
         routing_table.runtime.retry_budget.request();
     }
     let mut skipped = Skipped::default();
-    let Some((mut guard, initial_fallback, split)) =
-        routing_table.acquire_initial(called, endpoint, &caller, &parts.headers, &mut skipped)
+    let Some((mut guard, initial_fallback, split)) = routing_table
+        .acquire_initial(called, endpoint, &caller, &parts.headers, &mut skipped)
+        .await
     else {
         let handles = routing_table.rejected_model(&caller, &model, endpoint);
         observation.routed(handles.clone(), stream);
@@ -669,15 +670,18 @@ pub async fn forward(
             && deadline.is_none_or(|end| tokio::time::Instant::now() < end)
         {
             let headers = &replay.as_ref().expect("retries keep a template").headers;
-            if let Some((next, fallback)) = routing_table.retry(
-                called,
-                endpoint,
-                &caller,
-                headers,
-                &tried[..attempt],
-                split,
-                &mut skipped,
-            ) {
+            if let Some((next, fallback)) = routing_table
+                .retry(
+                    called,
+                    endpoint,
+                    &caller,
+                    headers,
+                    &tried[..attempt],
+                    split,
+                    &mut skipped,
+                )
+                .await
+            {
                 if routing_table.runtime.retry_budget.take() {
                     if let Some(counter) = fallback {
                         if !current_fallback.is_some_and(|previous| std::ptr::eq(previous, counter))

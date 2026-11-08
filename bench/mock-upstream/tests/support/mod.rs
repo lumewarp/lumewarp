@@ -149,10 +149,7 @@ pub fn signed_headers(
     let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(canonical.as_bytes());
     let signature = mock_upstream::util::hex_encode(&mac.finalize().into_bytes());
-    vec![(
-        "x-lumewarp-signature",
-        format!("t={timestamp},v1={signature}"),
-    )]
+    vec![("x-hmac-signature", format!("t={timestamp},v1={signature}"))]
 }
 
 /// A non-loopback IPv4 address of this host, if it has one. UDP `connect` only

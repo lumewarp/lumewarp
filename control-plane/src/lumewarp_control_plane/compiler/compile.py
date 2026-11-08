@@ -23,12 +23,18 @@ from lumewarp_control_plane.compiler.validate import (
     validate_snapshot,
 )
 from lumewarp_control_plane.models import (
+    A2aAgent,
     Alias,
     ApiKey,
     CatalogName,
     GatewaySession,
     KeyLifecycle,
     KeyOwnerKind,
+    McpDefinition,
+    McpDefinitionKind,
+    McpDefinitionState,
+    McpReviewMode,
+    McpServer,
     MemberPolicy,
     Model,
     ModelAccess,
@@ -77,6 +83,20 @@ STICKY_BY = {
     StickyBy.HEADER: pb.STICKY_BY_HEADER,
     StickyBy.TEAM: pb.STICKY_BY_TEAM,
     StickyBy.KEY: pb.STICKY_BY_KEY,
+}
+REVIEW_MODE = {
+    McpReviewMode.TOFU: pb.MCP_REVIEW_MODE_TOFU,
+    McpReviewMode.MANUAL: pb.MCP_REVIEW_MODE_MANUAL,
+    McpReviewMode.OFF: pb.MCP_REVIEW_MODE_OFF,
+}
+DEFINITION_KIND = {
+    McpDefinitionKind.TOOL: pb.MCP_DEFINITION_KIND_TOOL,
+    McpDefinitionKind.PROMPT: pb.MCP_DEFINITION_KIND_PROMPT,
+}
+DEFINITION_STATE = {
+    McpDefinitionState.APPROVED: pb.MCP_DEFINITION_STATE_APPROVED,
+    McpDefinitionState.PENDING: pb.MCP_DEFINITION_STATE_PENDING,
+    McpDefinitionState.REJECTED: pb.MCP_DEFINITION_STATE_REJECTED,
 }
 
 
@@ -158,6 +178,26 @@ def _owner_scope_limits(
 def _params_json(params: dict) -> str:
     """Wire form of a params object: empty means {}."""
     return params_json(params) if params else ""
+
+
+def _wire_auth(
+    plugin: str,
+    params: dict,
+    secret_ref: str | None,
+    sealed: bytes | None,
+    timeout_ms: int = 0,
+):
+    """`UpstreamAuth`: the plugin and its settings, plus the static_bearer credential source.
+
+    The plugin is always present (the gateway rejects an auth without one): "none" for no
+    auth. `params_json` is empty for a built-in, which takes none. `timeout_ms` bounds one
+    WASM call (0 = the gateway's 60 s default) and is ignored for a built-in.
+    """
+    return pb.UpstreamAuth(
+        plugin=pb.PluginRef(plugin=plugin, params_json=_params_json(params), timeout_ms=timeout_ms),
+        secret_ref=secret_ref or "",
+        secret_ciphertext=sealed or b"",
+    )
 
 
 def _wire_members(rows: Sequence[RouterMember | RouterSplitMember], names) -> list[pb.RouterMember]:
@@ -259,6 +299,10 @@ async def compile_scope(
       (the gateway answers 401 for them either way), so revocation is a key removal in
       deltas. Expiry is passed through as
       `expires_at_unix_ms` and enforced by the gateway.
+    - MCP servers and A2A agents are emitted as source state (archived ones left out),
+      with every reviewed definition state; a key's effective `mcp_grants` and
+      `allowed_agents` are intersected along org -> team -> owner like its model set, and
+      grants naming an archived target are dropped.
     - The catalog is emitted as it is: `Model`, `Alias` (its target's current name) and
       `Router` (members with their weights and params, or splits with theirs). The gateway
       compiles the three kinds into one name lookup. `allowed_models` holds current names,
@@ -434,6 +478,8 @@ async def compile_scope(
             strategy=r.strategy,
             # A strategy plugin always gets an object; a built-in takes no params.
             params_json=_params_json(r.params) if builtin else params_json(r.params),
+            # 0 = the gateway's 60 s default; meaningful only for a WASM strategy.
+            plugin_timeout_ms=r.plugin_timeout_ms,
         )
         capability = f"strategy:{r.strategy}"
         if not builtin and capability not in advertised:
@@ -503,10 +549,90 @@ async def compile_scope(
         else:
             snap.aliases.append(pb.Alias(name=a.name, target=target))
 
+    # MCP servers and A2A agents. Archived rows (`deleted_at`) stay for history and are left
+    # out, exactly like an archived team. Every definition state is emitted (L2): a known
+    # name must stop being "first sight" on a new pod, or a pending/rejected definition
+    # would be served there. States are never rolled back (catalog_state excludes the
+    # definition table), so a rejected definition cannot come back.
+    mcp_servers = (
+        await session.scalars(
+            select(McpServer).where(McpServer.deleted_at.is_(None)).order_by(McpServer.name)
+        )
+    ).all()
+    definitions: dict[uuid.UUID, list[McpDefinition]] = {}
+    if mcp_servers:
+        for definition in await session.scalars(
+            select(McpDefinition)
+            .where(McpDefinition.server_id.in_([s.id for s in mcp_servers]))
+            .order_by(
+                McpDefinition.server_id, McpDefinition.kind, McpDefinition.name, McpDefinition.hash
+            )
+        ):
+            definitions.setdefault(definition.server_id, []).append(definition)
+    for server in mcp_servers:
+        out = pb.McpServer(
+            id=str(server.id),
+            name=server.name,
+            url=server.url,
+            auth=_wire_auth(
+                server.auth_plugin,
+                server.auth_params,
+                server.secret_ref,
+                server.secret_ciphertext,
+                server.auth_timeout_ms,
+            ),
+            timeout_ms=server.timeout_ms,
+            review_mode=REVIEW_MODE[server.review_mode],
+        )
+        out.definitions.extend(
+            pb.McpDefinition(
+                kind=DEFINITION_KIND[definition.kind],
+                name=definition.name,
+                hash=definition.hash,
+                state=DEFINITION_STATE[definition.state],
+            )
+            for definition in definitions.get(server.id, [])
+        )
+        snap.mcp_servers.append(out)
+    agents = (
+        await session.scalars(
+            select(A2aAgent).where(A2aAgent.deleted_at.is_(None)).order_by(A2aAgent.name)
+        )
+    ).all()
+    for agent in agents:
+        out = pb.A2aAgent(
+            id=str(agent.id),
+            name=agent.name,
+            url=agent.url,
+            card_url=agent.card_url,
+            auth=_wire_auth(
+                agent.auth_plugin,
+                agent.auth_params,
+                agent.secret_ref,
+                agent.secret_ciphertext,
+                agent.auth_timeout_ms,
+            ),
+            timeout_ms=agent.timeout_ms,
+            card_json=agent.card_json,
+        )
+        if agent.middleware_plugin:
+            out.middleware.CopyFrom(
+                pb.PluginRef(
+                    plugin=agent.middleware_plugin,
+                    params_json=_params_json(agent.middleware_params),
+                    timeout_ms=agent.middleware_timeout_ms,
+                )
+            )
+        snap.a2a_agents.append(out)
+    mcp_server_names = {server.name for server in mcp_servers}
+    agent_names = {agent.name for agent in agents}
+
     # Python's order, not the database collation: same source state, same bytes.
     snap.models.sort(key=lambda m: m.name)
     snap.aliases.sort(key=lambda a: a.name)
     snap.routers.sort(key=lambda r: r.name)
+    snap.mcp_servers.sort(key=lambda s: s.name)
+    snap.a2a_agents.sort(key=lambda a: a.name)
 
     # Orgs, teams, key owners and keys: four levels of quotas. Archived teams keep their
     # rows for history but contribute nothing to the snapshot; they still count toward the
@@ -627,6 +753,22 @@ async def compile_scope(
         key_policy = pb.EffectivePolicy(
             allow_all_models=owner_eff.models is None,
             allowed_models=sorted(owner_eff.models or ()),
+            # MCP and A2A mirror the model set: universal (`None`) means every server with
+            # every approved tool / every agent. Grants naming a server or agent the
+            # snapshot left out (an archived target) are dropped, so the gateway never
+            # receives a reference it cannot resolve.
+            allow_all_mcp=owner_eff.mcp is None,
+            mcp_grants=[
+                pb.McpGrant(
+                    server=server,
+                    all_tools=tools is None,
+                    tools=[] if tools is None else sorted(tools),
+                )
+                for server, tools in sorted((owner_eff.mcp or {}).items())
+                if server in mcp_server_names
+            ],
+            allow_all_agents=owner_eff.agents is None,
+            allowed_agents=sorted(name for name in (owner_eff.agents or ()) if name in agent_names),
         )
         scopes: list[pb.RateLimitScope] = []
         if (rl := rate_limit_scope("org", org.id, org)) is not None:

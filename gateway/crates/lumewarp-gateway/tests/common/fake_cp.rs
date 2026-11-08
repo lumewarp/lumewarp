@@ -12,7 +12,7 @@ use std::{
 };
 
 use lumewarp_proto::config::v1::{
-    gateway_message::Msg, ConfigUpdate, GatewayMessage, HealthReport,
+    gateway_message::Msg, CatalogReport, ConfigUpdate, GatewayMessage, HealthReport,
 };
 use tokio::{
     net::TcpListener,
@@ -34,6 +34,8 @@ pub struct Conn {
     pub outbound: mpsc::UnboundedSender<Result<ConfigUpdate, Status>>,
     /// Health reports `recv` skipped, oldest first.
     pub health: Vec<HealthReport>,
+    /// Catalog reports `recv` skipped, oldest first.
+    pub catalog: Vec<CatalogReport>,
 }
 
 impl Conn {
@@ -43,7 +45,7 @@ impl Conn {
             .expect("gateway stream closed");
     }
 
-    /// The next Hello, ACK or NACK; health reports are kept in `health`.
+    /// The next Hello, ACK or NACK; health and catalog reports are kept.
     pub async fn recv(&mut self) -> GatewayMessage {
         loop {
             let message = super::bounded(self.inbound.recv())
@@ -51,7 +53,23 @@ impl Conn {
                 .expect("gateway closed the stream");
             match message.msg {
                 Some(Msg::Health(report)) => self.health.push(report),
+                Some(Msg::Catalog(report)) => self.catalog.push(report),
                 _ => return message,
+            }
+        }
+    }
+
+    /// The next catalog report, including one `recv` already skipped.
+    pub async fn recv_catalog(&mut self) -> CatalogReport {
+        loop {
+            if !self.catalog.is_empty() {
+                return self.catalog.remove(0);
+            }
+            let message = super::bounded(self.inbound.recv())
+                .await
+                .expect("gateway closed the stream");
+            if let Some(Msg::Catalog(report)) = message.msg {
+                return report;
             }
         }
     }
@@ -118,6 +136,7 @@ impl tonic::server::StreamingService<GatewayMessage> for StreamImpl {
                 inbound: in_rx,
                 outbound: out_tx,
                 health: Vec::new(),
+                catalog: Vec::new(),
             });
             Ok(Response::new(Updates(out_rx)))
         })
@@ -188,6 +207,15 @@ impl FakeCp {
     pub async fn accept(&mut self) -> Conn {
         super::bounded(self.conns.recv())
             .await
+            .expect("fake control plane stopped")
+    }
+
+    /// [`Self::accept`] with its own deadline: a debug build compiles the WASM
+    /// plugins at startup, which takes longer than the shared 5 s bound.
+    pub async fn accept_within(&mut self, timeout: std::time::Duration) -> Conn {
+        tokio::time::timeout(timeout, self.conns.recv())
+            .await
+            .expect("the gateway did not open its config stream")
             .expect("fake control plane stopped")
     }
 

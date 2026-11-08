@@ -183,6 +183,34 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column(
+            "mcp_access",
+            sa.Enum(
+                "inherit",
+                "all",
+                "list",
+                name="mcp_access",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            server_default="all",
+            nullable=False,
+        ),
+        sa.Column(
+            "a2a_access",
+            sa.Enum(
+                "inherit",
+                "all",
+                "list",
+                name="a2a_access",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            server_default="all",
+            nullable=False,
+        ),
+        sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             server_default=sa.text("now()"),
@@ -194,7 +222,10 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
-        sa.CheckConstraint("model_access <> 'inherit'", name=op.f("ck_orgs_no_inherit")),
+        sa.CheckConstraint(
+            "model_access <> 'inherit' AND mcp_access <> 'inherit' AND a2a_access <> 'inherit'",
+            name=op.f("ck_orgs_no_inherit"),
+        ),
         sa.CheckConstraint(
             "budget_nano_usd IS NULL OR budget_nano_usd >= 0", name=op.f("ck_orgs_budget_nonneg")
         ),
@@ -914,6 +945,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("sticky_header", sa.String(length=200), nullable=True),
+        sa.Column("plugin_timeout_ms", sa.Integer(), server_default="0", nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -930,6 +962,7 @@ def upgrade() -> None:
             "(sticky = 'header') = (sticky_header IS NOT NULL)",
             name=op.f("ck_routers_sticky_header_iff"),
         ),
+        sa.CheckConstraint("plugin_timeout_ms >= 0", name=op.f("ck_routers_plugin_timeout_nonneg")),
         sa.CheckConstraint(
             "jsonb_typeof(params) = 'object'", name=op.f("ck_routers_params_object")
         ),
@@ -990,6 +1023,34 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column(
+            "mcp_access",
+            sa.Enum(
+                "inherit",
+                "all",
+                "list",
+                name="mcp_access",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            server_default="all",
+            nullable=False,
+        ),
+        sa.Column(
+            "a2a_access",
+            sa.Enum(
+                "inherit",
+                "all",
+                "list",
+                name="a2a_access",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            server_default="all",
+            nullable=False,
+        ),
+        sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             server_default=sa.text("now()"),
@@ -1001,7 +1062,10 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
-        sa.CheckConstraint("model_access <> 'inherit'", name=op.f("ck_teams_no_inherit")),
+        sa.CheckConstraint(
+            "model_access <> 'inherit' AND mcp_access <> 'inherit' AND a2a_access <> 'inherit'",
+            name=op.f("ck_teams_no_inherit"),
+        ),
         sa.CheckConstraint(
             "budget_nano_usd IS NULL OR budget_nano_usd >= 0", name=op.f("ck_teams_budget_nonneg")
         ),
@@ -1194,6 +1258,34 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column(
+            "mcp_access",
+            sa.Enum(
+                "inherit",
+                "all",
+                "list",
+                name="mcp_access",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            server_default="inherit",
+            nullable=False,
+        ),
+        sa.Column(
+            "a2a_access",
+            sa.Enum(
+                "inherit",
+                "all",
+                "list",
+                name="a2a_access",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            server_default="inherit",
+            nullable=False,
+        ),
+        sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             server_default=sa.text("now()"),
@@ -1339,6 +1431,34 @@ def upgrade() -> None:
                 "all",
                 "list",
                 name="model_access",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            server_default="inherit",
+            nullable=False,
+        ),
+        sa.Column(
+            "mcp_access",
+            sa.Enum(
+                "inherit",
+                "all",
+                "list",
+                name="mcp_access",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            server_default="inherit",
+            nullable=False,
+        ),
+        sa.Column(
+            "a2a_access",
+            sa.Enum(
+                "inherit",
+                "all",
+                "list",
+                name="a2a_access",
                 native_enum=False,
                 create_constraint=True,
                 length=32,
@@ -1699,6 +1819,372 @@ def upgrade() -> None:
     op.create_index(
         op.f("ix_router_split_members_model_id"), "router_split_members", ["model_id"], unique=False
     )
+    op.create_table(
+        "mcp_servers",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("name", sa.String(length=63), nullable=False),
+        sa.Column("url", sa.Text(), nullable=False),
+        sa.Column("auth_plugin", sa.String(length=63), server_default="none", nullable=False),
+        sa.Column(
+            "auth_params",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default=sa.text("'{}'::jsonb"),
+            nullable=False,
+        ),
+        sa.Column("secret_ref", sa.String(length=200), nullable=True),
+        sa.Column("secret_ciphertext", sa.LargeBinary(), nullable=True),
+        sa.Column("auth_timeout_ms", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("timeout_ms", sa.Integer(), server_default="0", nullable=False),
+        sa.Column(
+            "review_mode",
+            sa.Enum(
+                "tofu",
+                "manual",
+                "off",
+                name="mcp_review_mode",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            server_default="tofu",
+            nullable=False,
+        ),
+        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "name ~ '^[a-z][a-z0-9_-]{0,62}$'", name=op.f("ck_mcp_servers_name_charset")
+        ),
+        sa.CheckConstraint(
+            "position('__' in name) = 0", name=op.f("ck_mcp_servers_name_no_separator")
+        ),
+        sa.CheckConstraint(
+            "secret_ref IS NULL OR secret_ref ~ '^[A-Za-z_][A-Za-z0-9_]*$'",
+            name=op.f("ck_mcp_servers_secret_ref_env_name"),
+        ),
+        sa.CheckConstraint(
+            "secret_ref IS NULL OR secret_ciphertext IS NULL",
+            name=op.f("ck_mcp_servers_one_secret_source"),
+        ),
+        sa.CheckConstraint("auth_timeout_ms >= 0", name=op.f("ck_mcp_servers_auth_timeout_nonneg")),
+        sa.CheckConstraint("timeout_ms >= 0", name=op.f("ck_mcp_servers_timeout_nonneg")),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_mcp_servers")),
+    )
+    op.create_index(
+        "uq_mcp_servers_name",
+        "mcp_servers",
+        ["name"],
+        unique=True,
+        postgresql_where=sa.text("deleted_at IS NULL"),
+    )
+    op.create_table(
+        "a2a_agents",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("name", sa.String(length=63), nullable=False),
+        sa.Column("url", sa.Text(), nullable=False),
+        sa.Column("card_url", sa.Text(), server_default="", nullable=False),
+        sa.Column("auth_plugin", sa.String(length=63), server_default="none", nullable=False),
+        sa.Column(
+            "auth_params",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default=sa.text("'{}'::jsonb"),
+            nullable=False,
+        ),
+        sa.Column("secret_ref", sa.String(length=200), nullable=True),
+        sa.Column("secret_ciphertext", sa.LargeBinary(), nullable=True),
+        sa.Column("auth_timeout_ms", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("middleware_plugin", sa.String(length=63), server_default="", nullable=False),
+        sa.Column(
+            "middleware_params",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default=sa.text("'{}'::jsonb"),
+            nullable=False,
+        ),
+        sa.Column("middleware_timeout_ms", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("timeout_ms", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("card_json", sa.Text(), server_default="", nullable=False),
+        sa.Column("last_card_json", sa.Text(), server_default="", nullable=False),
+        sa.Column("last_card_error", sa.String(length=1000), server_default="", nullable=False),
+        sa.Column("last_card_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "name ~ '^[a-z][a-z0-9_-]{0,62}$'", name=op.f("ck_a2a_agents_name_charset")
+        ),
+        sa.CheckConstraint(
+            "position('__' in name) = 0", name=op.f("ck_a2a_agents_name_no_separator")
+        ),
+        sa.CheckConstraint(
+            "secret_ref IS NULL OR secret_ref ~ '^[A-Za-z_][A-Za-z0-9_]*$'",
+            name=op.f("ck_a2a_agents_secret_ref_env_name"),
+        ),
+        sa.CheckConstraint(
+            "secret_ref IS NULL OR secret_ciphertext IS NULL",
+            name=op.f("ck_a2a_agents_one_secret_source"),
+        ),
+        sa.CheckConstraint("auth_timeout_ms >= 0", name=op.f("ck_a2a_agents_auth_timeout_nonneg")),
+        sa.CheckConstraint(
+            "middleware_timeout_ms >= 0",
+            name=op.f("ck_a2a_agents_middleware_timeout_nonneg"),
+        ),
+        sa.CheckConstraint("timeout_ms >= 0", name=op.f("ck_a2a_agents_timeout_nonneg")),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_a2a_agents")),
+    )
+    op.create_index(
+        "uq_a2a_agents_name",
+        "a2a_agents",
+        ["name"],
+        unique=True,
+        postgresql_where=sa.text("deleted_at IS NULL"),
+    )
+    op.create_table(
+        "mcp_definitions",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("server_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "kind",
+            sa.Enum(
+                "tool",
+                "prompt",
+                name="mcp_definition_kind",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            nullable=False,
+        ),
+        sa.Column("name", sa.String(length=256), nullable=False),
+        sa.Column("hash", sa.LargeBinary(), nullable=False),
+        sa.Column("definition_json", sa.Text(), nullable=False),
+        sa.Column(
+            "state",
+            sa.Enum(
+                "approved",
+                "pending",
+                "rejected",
+                name="mcp_definition_state",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            nullable=False,
+        ),
+        sa.Column(
+            "first_seen_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "last_seen_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column("decided_by_user_id", sa.Uuid(), nullable=True),
+        sa.Column("decided_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint("octet_length(hash) = 32", name=op.f("ck_mcp_definitions_hash_len")),
+        sa.ForeignKeyConstraint(
+            ["decided_by_user_id"],
+            ["users.id"],
+            name=op.f("fk_mcp_definitions_decided_by_user_id_users"),
+            ondelete="SET NULL",
+        ),
+        sa.ForeignKeyConstraint(
+            ["server_id"],
+            ["mcp_servers.id"],
+            name=op.f("fk_mcp_definitions_server_id_mcp_servers"),
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_mcp_definitions")),
+        sa.UniqueConstraint(
+            "server_id",
+            "kind",
+            "name",
+            "hash",
+            name=op.f("uq_mcp_definitions_server_id_kind_name_hash"),
+        ),
+    )
+    op.create_index(
+        op.f("ix_mcp_definitions_server_id"),
+        "mcp_definitions",
+        ["server_id", "kind", "name"],
+        unique=False,
+    )
+    op.create_table(
+        "mcp_server_grants",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("server_id", sa.Uuid(), nullable=False),
+        sa.Column("org_id", sa.Uuid(), nullable=True),
+        sa.Column("team_id", sa.Uuid(), nullable=True),
+        sa.Column("user_id", sa.Uuid(), nullable=True),
+        sa.Column("service_account_id", sa.Uuid(), nullable=True),
+        sa.Column("all_tools", sa.Boolean(), server_default=sa.text("false"), nullable=False),
+        sa.Column(
+            "tools",
+            postgresql.ARRAY(sa.Text()),
+            server_default=sa.text("'{}'::text[]"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "(org_id IS NOT NULL AND team_id IS NULL AND user_id IS NULL"
+            " AND service_account_id IS NULL) OR (org_id IS NULL AND team_id IS NOT NULL"
+            " AND NOT (user_id IS NOT NULL AND service_account_id IS NOT NULL))",
+            name=op.f("ck_mcp_server_grants_owner_shape"),
+        ),
+        sa.ForeignKeyConstraint(
+            ["server_id"],
+            ["mcp_servers.id"],
+            name=op.f("fk_mcp_server_grants_server_id_mcp_servers"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["org_id"],
+            ["orgs.id"],
+            name=op.f("fk_mcp_server_grants_org_id_orgs"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["team_id"],
+            ["teams.id"],
+            name=op.f("fk_mcp_server_grants_team_id_teams"),
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_mcp_server_grants")),
+    )
+    op.create_index(
+        op.f("ix_mcp_server_grants_server_id"), "mcp_server_grants", ["server_id"], unique=False
+    )
+    op.create_index(
+        "uq_mcp_server_grants_member",
+        "mcp_server_grants",
+        ["team_id", "user_id", "server_id"],
+        unique=True,
+        postgresql_where=sa.text("user_id IS NOT NULL"),
+    )
+    op.create_index(
+        "uq_mcp_server_grants_org",
+        "mcp_server_grants",
+        ["org_id", "server_id"],
+        unique=True,
+        postgresql_where=sa.text("org_id IS NOT NULL"),
+    )
+    op.create_index(
+        "uq_mcp_server_grants_service_account",
+        "mcp_server_grants",
+        ["service_account_id", "server_id"],
+        unique=True,
+        postgresql_where=sa.text("service_account_id IS NOT NULL"),
+    )
+    op.create_index(
+        "uq_mcp_server_grants_team",
+        "mcp_server_grants",
+        ["team_id", "server_id"],
+        unique=True,
+        postgresql_where=sa.text(
+            "user_id IS NULL AND service_account_id IS NULL AND org_id IS NULL"
+        ),
+    )
+    op.create_table(
+        "a2a_agent_grants",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("agent_id", sa.Uuid(), nullable=False),
+        sa.Column("org_id", sa.Uuid(), nullable=True),
+        sa.Column("team_id", sa.Uuid(), nullable=True),
+        sa.Column("user_id", sa.Uuid(), nullable=True),
+        sa.Column("service_account_id", sa.Uuid(), nullable=True),
+        sa.CheckConstraint(
+            "(org_id IS NOT NULL AND team_id IS NULL AND user_id IS NULL"
+            " AND service_account_id IS NULL) OR (org_id IS NULL AND team_id IS NOT NULL"
+            " AND NOT (user_id IS NOT NULL AND service_account_id IS NOT NULL))",
+            name=op.f("ck_a2a_agent_grants_owner_shape"),
+        ),
+        sa.ForeignKeyConstraint(
+            ["agent_id"],
+            ["a2a_agents.id"],
+            name=op.f("fk_a2a_agent_grants_agent_id_a2a_agents"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["org_id"],
+            ["orgs.id"],
+            name=op.f("fk_a2a_agent_grants_org_id_orgs"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["team_id"],
+            ["teams.id"],
+            name=op.f("fk_a2a_agent_grants_team_id_teams"),
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_a2a_agent_grants")),
+    )
+    op.create_index(
+        op.f("ix_a2a_agent_grants_agent_id"), "a2a_agent_grants", ["agent_id"], unique=False
+    )
+    op.create_index(
+        "uq_a2a_agent_grants_member",
+        "a2a_agent_grants",
+        ["team_id", "user_id", "agent_id"],
+        unique=True,
+        postgresql_where=sa.text("user_id IS NOT NULL"),
+    )
+    op.create_index(
+        "uq_a2a_agent_grants_org",
+        "a2a_agent_grants",
+        ["org_id", "agent_id"],
+        unique=True,
+        postgresql_where=sa.text("org_id IS NOT NULL"),
+    )
+    op.create_index(
+        "uq_a2a_agent_grants_service_account",
+        "a2a_agent_grants",
+        ["service_account_id", "agent_id"],
+        unique=True,
+        postgresql_where=sa.text("service_account_id IS NOT NULL"),
+    )
+    op.create_index(
+        "uq_a2a_agent_grants_team",
+        "a2a_agent_grants",
+        ["team_id", "agent_id"],
+        unique=True,
+        postgresql_where=sa.text(
+            "user_id IS NULL AND service_account_id IS NULL AND org_id IS NULL"
+        ),
+    )
     op.execute(CONFIG_VERSIONS_IMMUTABLE)
     op.execute(
         "CREATE TRIGGER config_versions_immutable BEFORE UPDATE ON config_versions"
@@ -1708,6 +2194,32 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("DROP TRIGGER IF EXISTS config_versions_immutable ON config_versions")
+    op.drop_index("uq_a2a_agent_grants_team", table_name="a2a_agent_grants")
+    op.drop_index("uq_a2a_agent_grants_service_account", table_name="a2a_agent_grants")
+    op.drop_index("uq_a2a_agent_grants_org", table_name="a2a_agent_grants")
+    op.drop_index("uq_a2a_agent_grants_member", table_name="a2a_agent_grants")
+    op.drop_index(op.f("ix_a2a_agent_grants_agent_id"), table_name="a2a_agent_grants")
+    op.drop_table("a2a_agent_grants")
+    op.drop_index("uq_mcp_server_grants_team", table_name="mcp_server_grants")
+    op.drop_index("uq_mcp_server_grants_service_account", table_name="mcp_server_grants")
+    op.drop_index("uq_mcp_server_grants_org", table_name="mcp_server_grants")
+    op.drop_index("uq_mcp_server_grants_member", table_name="mcp_server_grants")
+    op.drop_index(op.f("ix_mcp_server_grants_server_id"), table_name="mcp_server_grants")
+    op.drop_table("mcp_server_grants")
+    op.drop_index(op.f("ix_mcp_definitions_server_id"), table_name="mcp_definitions")
+    op.drop_table("mcp_definitions")
+    op.drop_index(
+        "uq_a2a_agents_name",
+        table_name="a2a_agents",
+        postgresql_where=sa.text("deleted_at IS NULL"),
+    )
+    op.drop_table("a2a_agents")
+    op.drop_index(
+        "uq_mcp_servers_name",
+        table_name="mcp_servers",
+        postgresql_where=sa.text("deleted_at IS NULL"),
+    )
+    op.drop_table("mcp_servers")
     op.execute("DROP FUNCTION IF EXISTS lumewarp_config_versions_immutable()")
     op.drop_index(op.f("ix_router_split_members_model_id"), table_name="router_split_members")
     op.drop_table("router_split_members")

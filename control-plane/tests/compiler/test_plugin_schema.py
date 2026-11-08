@@ -10,6 +10,7 @@ import pytest
 from lumewarp_control_plane.compiler.plugins import (
     BUILTIN_PLUGINS,
     MAX_SCHEMA_BYTES,
+    params_problem,
     parse_untrusted_schema,
     schema_errors,
     schema_subset_problem,
@@ -149,7 +150,15 @@ def test_a_ref_past_the_subset_check_never_fetches():
 
 
 @pytest.mark.parametrize(
-    "header", ["authorization", "Cookie", "SET-COOKIE", "proxy-authorization", "x-api-key"]
+    "header",
+    [
+        "authorization",
+        "Cookie",
+        "SET-COOKIE",
+        "proxy-authorization",
+        "x-api-key",
+        "x-lumewarp-key",
+    ],
 )
 def test_header_list_widget_blocks_credentials_whatever_the_schema(header):
     descriptor = {"params_schema": SCHEMA, "member_schema": SCHEMA}
@@ -163,9 +172,82 @@ def test_header_list_widget_blocks_credentials_whatever_the_schema(header):
     assert not settings_errors([descriptor], {"n": 1, "pass": ["x-session"]}, [])
 
 
-def test_headers_are_reserved_and_not_subject_to_the_schema():
+def test_headers_are_reserved_only_for_router_strategies():
     descriptor = {"params_schema": SCHEMA, "member_schema": None}
-    assert not settings_errors([descriptor], {"n": 1, "headers": ["x-pin"]}, [])
+    # A router strategy's `headers` is the platform's: removed before the schema sees it.
+    assert not settings_errors(
+        [descriptor], {"n": 1, "headers": ["x-pin"]}, [], PluginKind.ROUTER_STRATEGY
+    )
+    # Every other kind validates it like any other setting: this schema does not declare it.
+    problems = settings_errors(
+        [descriptor], {"n": 1, "headers": ["x-pin"]}, [], PluginKind.UPSTREAM_AUTH
+    )
+    assert any("headers" in problem and "unexpected" in problem for problem in problems)
+    problems = settings_errors(
+        [descriptor], {"n": 1, "headers": ["x-pin"]}, [], PluginKind.A2A_MIDDLEWARE
+    )
+    assert problems
+
+
+def test_allowed_origins_is_reserved_for_upstream_auth():
+    schema = {
+        "type": "object",
+        "properties": {"audience": {"type": "string"}},
+        "required": ["audience"],
+        "additionalProperties": False,
+    }
+    descriptor = {"params_schema": schema, "member_schema": None}
+    params = {"audience": "lumewarp", "allowed_origins": ["https://idp.example"]}
+    assert not settings_errors([descriptor], params, [], PluginKind.UPSTREAM_AUTH)
+    # Another kind's reserved key does not exist here, so it must be declared to be allowed.
+    for kind in (PluginKind.ROUTER_STRATEGY, PluginKind.A2A_MIDDLEWARE):
+        problems = settings_errors([descriptor], params, [], kind)
+        assert any("allowed_origins" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "origins",
+    [
+        [],
+        ["https://idp.example"],
+        ["https://idp.example:8443/"],
+        ["http://127.0.0.1:8080"],
+        ["https://idp.example", "http://other.example"],
+        [f"https://h{i}.example" for i in range(32)],
+    ],
+)
+def test_valid_allowed_origins(origins):
+    assert params_problem({"allowed_origins": origins}, kind=PluginKind.UPSTREAM_AUTH) is None
+
+
+@pytest.mark.parametrize(
+    "origins",
+    [
+        "https://idp.example",
+        ["https://idp.example/token"],
+        ["https://idp.example?x=1"],
+        ["https://idp.example#f"],
+        ["https://user:pw@idp.example"],
+        ["ftp://idp.example"],
+        [7],
+        ["idp.example"],
+        [f"https://h{i}.example" for i in range(33)],
+    ],
+)
+def test_invalid_allowed_origins(origins):
+    assert params_problem({"allowed_origins": origins}, kind=PluginKind.UPSTREAM_AUTH) is not None
+
+
+def test_the_reserved_key_rules_belong_to_their_kind():
+    # `headers` on an auth plugin is an ordinary setting: no header-name rule applies.
+    assert params_problem({"headers": {"x": 1}}, kind=PluginKind.UPSTREAM_AUTH) is None
+    assert params_problem({"headers": ["authorization"]}, kind=PluginKind.ROUTER_STRATEGY)
+    # ... and `allowed_origins` on a router is an ordinary setting too (its schema decides).
+    assert (
+        params_problem({"allowed_origins": ["https://a.example"]}, kind=PluginKind.ROUTER_STRATEGY)
+        is None
+    )
+    assert params_problem({"headers": ["x-ok"]}, kind=PluginKind.A2A_MIDDLEWARE) is None
 
 
 def test_unusable_schemas_mean_cannot_validate():

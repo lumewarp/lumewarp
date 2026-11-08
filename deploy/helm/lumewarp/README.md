@@ -139,6 +139,89 @@ It is separate from `LUMEWARP_SECRET_KEY` (OIDC login cookie, control plane only
 Changing it makes the stored keys unreadable: gateways NACK the next snapshot until every
 stored key is entered again.
 
+## Gateway plugins (WASM)
+
+The gateway loads WASM components from three directories at startup and never reads them
+again. They are not in the gateway image: a plugin is one `.wasm` file in its kind's
+directory, so installing or replacing one is a file write plus a pod restart. The chart
+mounts one volume and gives each kind a subdirectory:
+
+| Subdirectory | Variable | Advertised capability |
+| --- | --- | --- |
+| `router` | `LUMEWARP_ROUTER_PLUGIN_DIR` | `strategy:<name>` |
+| `auth` | `LUMEWARP_AUTH_PLUGIN_DIR` | `auth:<name>` |
+| `a2a-middleware` | `LUMEWARP_A2A_MIDDLEWARE_DIR` | `a2a_middleware:<name>` |
+
+Build the example components with `bash gateway/plugins/build.sh` (see
+[`docs/plugins.md`](../../../docs/plugins.md) for the manifest, the sandbox and the
+build of a new crate) and put the files on a volume:
+
+```yaml
+gateway:
+  plugins:
+    volume:
+      persistentVolumeClaim:
+        claimName: gateway-plugins   # holds router/, auth/ and a2a-middleware/
+    memoryLimitBytes: "536870912"   # optional; the gateway default is 1 GiB
+    secretEnvs:
+      - gateway-plugin-secrets      # every key named LUMEWARP_PLUGIN_SECRET_<NAME>
+```
+
+A ConfigMap works when its keys are placed into the three directories:
+
+```yaml
+gateway:
+  plugins:
+    volume:
+      configMap:
+        name: gateway-plugins
+        items:
+          - {key: cheapest-first.wasm, path: router/cheapest-first.wasm}
+          - {key: hmac-signature.wasm, path: auth/hmac-signature.wasm}
+```
+
+The default `volume: {}` mounts nothing and sets no directory variable, which is valid:
+built-in strategies and built-in auth are native code. A directory that the variable
+names but that does not exist refuses to start the gateway, so create all three
+subdirectories on the volume even when one stays empty.
+
+`memoryLimitBytes` caps all plugin instances together; each instance is capped at 32 MiB
+on its own. Every key of every Secret in `secretEnvs` becomes an environment variable, so
+name them `LUMEWARP_PLUGIN_SECRET_<NAME>`: an `upstream-auth` component reads them through
+`secret()`, and the host exposes no variable without that prefix. The host does not scope
+them per plugin, so put the plugin name in the key. No credential belongs in plugin
+settings: those are stored in the snapshot and the audit trail.
+
+Deploy the component to every gateway before a router, MCP server or A2A agent names it. A
+gateway without it NACKs every version that references it — key revocations included —
+until it is restarted with the file present.
+
+### MCP and A2A endpoints
+
+The MCP and A2A endpoints need two more settings; LLM traffic reads neither.
+
+```yaml
+gateway:
+  publicUrl: https://gateway.example.com  # LUMEWARP_GATEWAY_PUBLIC_URL
+  idKey:
+    secretName: lumewarp-gateway-id       # LUMEWARP_GATEWAY_ID_KEY from this Secret
+    key: gateway-id-key
+```
+
+```sh
+kubectl -n lumewarp create secret generic lumewarp-gateway-id \
+  --from-literal=gateway-id-key="$(openssl rand -base64 48)"
+```
+
+`publicUrl` is the external base URL an agent card points at (the Host header is never
+trusted) and must be an absolute http(s) URL without a query. The id key (base64, at least
+32 bytes) MACs A2A task and context ids and seals MCP sessions, so it must be identical on
+every gateway that serves the same installation; the chart takes it only from a Secret.
+When either is unset the MCP and A2A endpoints answer 503 and nothing else is affected.
+
+Both are read at startup: changing `publicUrl` or rotating the id key is a rollout, and a
+rotation invalidates MCP sessions and the A2A task ids already handed out.
+
 ## SSO and authorization backend
 
 The control plane reads every setting from `LUMEWARP_*` environment variables (see the
@@ -211,6 +294,11 @@ administration is inherited from `team.org_id` by the control plane.
 - **Budgets are eventual.** A key can exceed its budget briefly while usage batches are in
   flight; in-flight streams are not cut. Usage events are dropped when the gateway's
   bounded queue is full.
+- **A plugin change is a restart.** The gateway reads the plugin directories once at
+  startup and a call never reads a file, so replacing a component needs a new pod
+  (recreate the Secret/ConfigMap or write the PVC, then `kubectl rollout restart`).
+  Sessions and A2A task ids survive the restart because they are sealed under
+  `gateway.idKey`, not held in memory.
 
 ## Values
 
@@ -242,6 +330,12 @@ Common values (see [`values.yaml`](values.yaml) for the complete list):
 | `gateway.stateDir.persistence.enabled` | `false` | Use a RWO PVC instead of `emptyDir`. |
 | `gateway.stateDir.persistence.existingClaim` | empty | Use an existing RWO claim; it must be used by this single replica only. |
 | `gateway.server.*` | see values | `server:` block of the gateway's local YAML (listeners/timeouts). `adminListen` must be reachable by probes. |
+| `gateway.plugins.volume` | `{}` | Existing volume with the WASM components, as a Kubernetes volume source; empty loads no plugins and sets no directory variable. |
+| `gateway.plugins.mountPath` / `.dirs` | `/etc/lumewarp/plugins` / `router`, `auth`, `a2a-middleware` | Mount point and the subdirectory each kind reads. |
+| `gateway.plugins.memoryLimitBytes` | `""` | `LUMEWARP_PLUGIN_MEMORY_LIMIT_BYTES`; empty = the gateway default, 1 GiB. |
+| `gateway.plugins.secretEnvs` | `[]` | Existing Secrets whose keys become `LUMEWARP_PLUGIN_SECRET_<NAME>` for `secret()`. |
+| `gateway.publicUrl` | `""` | `LUMEWARP_GATEWAY_PUBLIC_URL`: external base URL for agent cards; empty answers 503 on A2A. |
+| `gateway.idKey.secretName` / `.key` | unset / `gateway-id-key` | Existing Secret with `LUMEWARP_GATEWAY_ID_KEY` (base64, ≥32 bytes); shared by every gateway of the installation. |
 | `serviceMonitor.enabled` | `false` | Render ServiceMonitors for the gateway admin port and the control-plane metrics port (each only if that component and its metrics are enabled). |
 | `serviceMonitor.labels` | `{}` | Extra labels so your Prometheus selects the ServiceMonitor. |
 
@@ -266,10 +360,13 @@ helm template lumewarp deploy/helm/lumewarp -n lumewarp \
 `prometheusRule.enabled` defaults to `false` and requires Prometheus Operator
 CRDs. `prometheusRule.labels` must match your Prometheus `ruleSelector`.
 `grafanaDashboards.enabled` defaults to `false` and creates a ConfigMap containing
-four dashboards. The sidecar label defaults to `grafana_dashboard: "1"`; override
+five dashboards. The sidecar label defaults to `grafana_dashboard: "1"`; override
 `grafanaDashboards.sidecarLabel` / `sidecarLabelValue` to match your Grafana
 sidecar, which must watch the release namespace. Select a Prometheus datasource
-using the dashboard's `datasource` variable.
+using the dashboard's `datasource` variable. The `Lumewarp / MCP & A2A` dashboard
+reads gateway MCP/A2A, plugin and catalog metrics plus the control plane's
+`lumewarp_cp_mcp_*` counters, so its review panels need
+`controlPlane.metrics.enabled` and its traffic panels a gateway ServiceMonitor.
 
 The chart bundles `files/prometheus/rules.yaml` and `files/dashboards/*.json`.
 Their sources of truth are `deploy/prometheus/rules.yaml` and
@@ -280,8 +377,11 @@ checks byte equality and validates all dashboard expressions with promtool.
 Operational defaults and response steps are documented beside each alert in
 `rules.yaml`. The defaults include 5% 5xx at >=1 request/s, overhead p99 >10 ms
 for 10 minutes, TTFT p99 >5 s for 10 minutes, and queue >80,000 of the fixed
-100,000-event capacity. Tune TTFT, vLLM queue depth and backlog limits against
-production baselines. Overhead's alert threshold is not the benchmark target.
+100,000-event capacity. The MCP and A2A alerts cover plugin trap/timeout share,
+upstream 502/504 share per server and agent, MCP definitions stored as pending
+(the review backlog) and discarded catalog reports. Tune TTFT, vLLM queue depth and
+backlog limits against production baselines. Overhead's alert threshold is not the
+benchmark target.
 
 Preserve the `namespace`, `job` and `instance` scrape labels. Version comparison
 assumes one control-plane installation per namespace (no cross-installation joins).

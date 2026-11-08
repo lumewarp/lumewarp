@@ -9,12 +9,21 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane.ids import uuid7
+from lumewarp_control_plane.mcp import hashing
 from lumewarp_control_plane.models import (
+    A2aAgent,
+    A2aAgentGrant,
     Alias,
     ApiKey,
     CatalogKind,
     CatalogName,
     KeyOwnerKind,
+    McpDefinition,
+    McpDefinitionKind,
+    McpDefinitionState,
+    McpReviewMode,
+    McpServer,
+    McpServerGrant,
     MemberPolicy,
     Model,
     Org,
@@ -274,3 +283,113 @@ async def make_key(session: AsyncSession, team: Team, owner: User | ServiceAccou
     session.add(key)
     await session.flush()
     return key
+
+
+# --------------------------------------------------------------------------- mcp / a2a
+
+
+async def make_mcp_server(
+    session: AsyncSession,
+    name: str | None = None,
+    *,
+    definitions: list[McpDefinition] | None = None,
+    **kw,
+) -> McpServer:
+    server = McpServer(
+        name=name or _unique("server").replace("_", "-"),
+        url=kw.pop("url", f"http://{name or 'mcp'}.test/mcp"),
+        review_mode=kw.pop("review_mode", McpReviewMode.TOFU),
+        **kw,
+    )
+    session.add(server)
+    await session.flush()
+    for definition in definitions or ():
+        definition.server_id = server.id
+        session.add(definition)
+    await session.flush()
+    return server
+
+
+def tool_definition(
+    name: str = "echo",
+    *,
+    description: str = "Echoes text",
+    schema: dict | None = None,
+) -> tuple[McpDefinition, hashing.Observed]:
+    """An unsaved tool definition row and the observation it must hash to."""
+    observed = hashing.observe(
+        McpDefinitionKind.TOOL,
+        {"name": name, "description": description, "inputSchema": schema or {"type": "object"}},
+    )
+    assert observed is not None
+    return new_definition(McpDefinitionKind.TOOL, observed), observed
+
+
+def new_definition(
+    kind: McpDefinitionKind,
+    observed: hashing.Observed,
+    *,
+    state: McpDefinitionState = McpDefinitionState.APPROVED,
+    server_id=None,
+) -> McpDefinition:
+    return McpDefinition(
+        server_id=server_id,
+        kind=kind,
+        name=observed.name,
+        hash=observed.hash,
+        definition_json=observed.canonical_json,
+        state=state,
+    )
+
+
+async def make_agent(session: AsyncSession, name: str | None = None, **kw) -> A2aAgent:
+    agent = A2aAgent(
+        name=name or _unique("agent").replace("_", "-"),
+        url=kw.pop("url", f"http://{name or 'agent'}.test/a2a"),
+        **kw,
+    )
+    session.add(agent)
+    await session.flush()
+    return agent
+
+
+def _target_owner(owner: Org | Team | MemberPolicy | ServiceAccount) -> dict:
+    if isinstance(owner, Org):
+        return {"org_id": owner.id}
+    if isinstance(owner, Team):
+        return {"team_id": owner.id}
+    if isinstance(owner, MemberPolicy):
+        return {"team_id": owner.team_id, "user_id": owner.user_id}
+    return {"team_id": owner.team_id, "service_account_id": owner.id}
+
+
+async def mcp_grant(
+    session: AsyncSession,
+    owner: Org | Team | MemberPolicy | ServiceAccount,
+    server: McpServer | str,
+    *,
+    all_tools: bool = True,
+    tools: list[str] = (),
+) -> McpServerGrant:
+    """Grant a server to one policy owner; `server` may be a name for a new server."""
+    if isinstance(server, str):
+        server = await make_mcp_server(session, server)
+    row = McpServerGrant(
+        server_id=server.id, all_tools=all_tools, tools=list(tools), **_target_owner(owner)
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def agent_grant(
+    session: AsyncSession,
+    owner: Org | Team | MemberPolicy | ServiceAccount,
+    agent: A2aAgent | str,
+) -> A2aAgentGrant:
+    if isinstance(agent, str):
+        agent = await make_agent(session, agent)
+    row = A2aAgentGrant(agent_id=agent.id, **_target_owner(owner))
+    session.add(row)
+    await session.flush()
+    return row

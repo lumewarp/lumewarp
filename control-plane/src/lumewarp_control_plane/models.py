@@ -239,7 +239,45 @@ class TrafficKind(enum.StrEnum):
     A2A = "a2a"
 
 
+class McpReviewMode(enum.StrEnum):
+    """How a gateway treats a definition it observes upstream (proto McpReviewMode).
+
+    TOFU: a name seen for the first time is served and reported as auto-approved; a
+    different definition of a known name is withheld until an administrator approves the
+    hash. MANUAL: every definition not in the approved set is withheld. OFF: no check.
+    """
+
+    TOFU = "tofu"
+    MANUAL = "manual"
+    OFF = "off"
+
+
+class McpDefinitionKind(enum.StrEnum):
+    """Which kind of MCP definition a reviewed hash belongs to (proto McpDefinitionKind)."""
+
+    TOOL = "tool"
+    PROMPT = "prompt"
+
+
+class McpDefinitionState(enum.StrEnum):
+    """Where a reported definition stands. A definition the gateway serves is APPROVED;
+    PENDING and REJECTED are never served, and a name that has any row is no longer
+    "seen for the first time" (proto McpDefinitionState).
+    """
+
+    APPROVED = "approved"
+    PENDING = "pending"
+    REJECTED = "rejected"
+
+
 # --------------------------------------------------------------------------- policy
+
+
+def _access_default(cls: type) -> ModelAccess:
+    """The root and the team level default to ALL (no restriction); a key owner defaults
+    to INHERIT, exactly like `model_access`.
+    """
+    return ModelAccess.ALL if cls.__name__ in ("Org", "Team") else ModelAccess.INHERIT
 
 
 class PolicyMixin:
@@ -253,6 +291,9 @@ class PolicyMixin:
 
     - Model access: see `ModelAccess`. The list lives in `policy_grants` (by name id, so a
       rename keeps it); `allowed_models` is its read-only expansion to current names.
+    - MCP and A2A access mirror model access at the same four levels, with the same mode
+      enum and defaults: `mcp_server_grants` (one row per server, optionally narrowed to a
+      tool list) and `a2a_agent_grants` (one row per agent).
     - Rate limits: NULL = no limit at this level. Each set level becomes one shared
       `RateLimitScope` ("org:<id>", "team:<id>", "member:<scope id>", "sa:<id>",
       "key:<id>").
@@ -263,12 +304,38 @@ class PolicyMixin:
     @declared_attr
     @classmethod
     def model_access(cls) -> Mapped[ModelAccess]:
-        default = ModelAccess.ALL if cls.__name__ in ("Org", "Team") else ModelAccess.INHERIT
         return mapped_column(
             _enum(ModelAccess, "model_access"),
             nullable=False,
-            default=default,
-            server_default=default.value,
+            default=_access_default(cls),
+            server_default=_access_default(cls).value,
+        )
+
+    @declared_attr
+    @classmethod
+    def mcp_access(cls) -> Mapped[ModelAccess]:
+        """Model access's mirror for MCP servers and tools: ALL means every server with
+        every approved tool, LIST exactly this level's `mcp_server_grants` intersected
+        with the parent, INHERIT the parent's set unchanged.
+        """
+        return mapped_column(
+            _enum(ModelAccess, "mcp_access"),
+            nullable=False,
+            default=_access_default(cls),
+            server_default=_access_default(cls).value,
+        )
+
+    @declared_attr
+    @classmethod
+    def a2a_access(cls) -> Mapped[ModelAccess]:
+        """Model access's mirror for A2A agents: ALL/LIST/INHERIT over
+        `a2a_agent_grants`.
+        """
+        return mapped_column(
+            _enum(ModelAccess, "a2a_access"),
+            nullable=False,
+            default=_access_default(cls),
+            server_default=_access_default(cls).value,
         )
 
     rpm_limit: Mapped[int | None] = mapped_column(Integer)
@@ -450,7 +517,10 @@ class Org(PolicyMixin, TimestampMixin, Base):
     __tablename__ = "orgs"
     __table_args__ = (
         *PolicyMixin.policy_constraints(),
-        CheckConstraint("model_access <> 'inherit'", name="no_inherit"),
+        CheckConstraint(
+            "model_access <> 'inherit' AND mcp_access <> 'inherit' AND a2a_access <> 'inherit'",
+            name="no_inherit",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
@@ -487,7 +557,10 @@ class Team(PolicyMixin, TimestampMixin, Base):
     __tablename__ = "teams"
     __table_args__ = (
         *PolicyMixin.policy_constraints(),
-        CheckConstraint("model_access <> 'inherit'", name="no_inherit"),
+        CheckConstraint(
+            "model_access <> 'inherit' AND mcp_access <> 'inherit' AND a2a_access <> 'inherit'",
+            name="no_inherit",
+        ),
         CheckConstraint(
             "max_keys_per_member IS NULL OR max_keys_per_member > 0",
             name="max_keys_per_member_positive",
@@ -799,6 +872,304 @@ class Upstream(TimestampMixin, Base):
     metrics_url: Mapped[str | None] = mapped_column(Text)
 
 
+# --------------------------------------------------------------------------- mcp / a2a
+
+# `^[a-z][a-z0-9_-]{0,62}$`: the name of an MCP server or A2A agent (snapshot.proto). The
+# gateway splits aggregated tool names at the first "__", so a name may not contain it
+# (L4): the split must be unambiguous.
+TARGET_NAME_SQL = r"^[a-z][a-z0-9_-]{0,62}$"
+
+
+def target_name_constraints() -> tuple[CheckConstraint, ...]:
+    return (
+        CheckConstraint(f"name ~ '{TARGET_NAME_SQL}'", name="name_charset"),
+        CheckConstraint("position('__' in name) = 0", name="name_no_separator"),
+    )
+
+
+def _live_name_index(table: str) -> Index:
+    """Unique among live rows: archiving (`deleted_at`) frees the name for reuse."""
+    return Index(
+        f"uq_{table}_name", "name", unique=True, postgresql_where=text("deleted_at IS NULL")
+    )
+
+
+class McpServer(TimestampMixin, Base):
+    """An upstream MCP server (Streamable HTTP) whose tools and prompts the gateway proxies.
+
+    `auth_plugin`/`auth_params` name an upstream-auth plugin: the built-ins
+    `none`/`static_bearer`/`passthrough` or a WASM plugin a gateway reports. Only
+    `static_bearer` takes a credential, stored exactly like `Upstream`: the name of an env
+    var (`secret_ref`) or the token sealed with LUMEWARP_ENCRYPTION_KEY under HKDF info
+    `lumewarp/upstream-auth-secret/v1`. The value is never returned by the API.
+
+    `review_mode` decides how the gateway treats definitions it observes (McpReviewMode).
+    The definitions themselves live in `mcp_definitions`, one row per observed hash.
+    Deleting archives (`deleted_at`): the name becomes free, definitions and grants stay
+    for history, and the compiler leaves the server out.
+    """
+
+    __tablename__ = "mcp_servers"
+    __table_args__ = (
+        *target_name_constraints(),
+        CheckConstraint("timeout_ms >= 0", name="timeout_nonneg"),
+        CheckConstraint(
+            "secret_ref IS NULL OR secret_ref ~ '^[A-Za-z_][A-Za-z0-9_]*$'",
+            name="secret_ref_env_name",
+        ),
+        CheckConstraint(
+            "secret_ref IS NULL OR secret_ciphertext IS NULL", name="one_secret_source"
+        ),
+        CheckConstraint("auth_timeout_ms >= 0", name="auth_timeout_nonneg"),
+        _live_name_index("mcp_servers"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    name: Mapped[str] = mapped_column(String(63), nullable=False)
+    # The Streamable HTTP endpoint; absolute http(s) URL without userinfo (validated in
+    # compiler/validate.py, mirrored by the gateway).
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    # Built-in name or a WASM manifest name (PluginKind.UPSTREAM_AUTH).
+    auth_plugin: Mapped[str] = mapped_column(
+        String(63), nullable=False, default="none", server_default="none"
+    )
+    # Plugin settings: a JSON object, at most 16 KiB. Never a credential.
+    auth_params: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    # static_bearer only: name of the env var on the gateway holding the token; never the value.
+    secret_ref: Mapped[str | None] = mapped_column(String(200))
+    # static_bearer only: the token sealed with LUMEWARP_ENCRYPTION_KEY (sealing.py). At most
+    # one of this and secret_ref.
+    secret_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
+    # How long one call to a WASM auth plugin may run before the gateway cancels it
+    # (proto PluginRef.timeout_ms). 0 = 60 s.
+    auth_timeout_ms: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    # Per upstream request; 0 = the gateway default.
+    timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    review_mode: Mapped[McpReviewMode] = mapped_column(
+        _enum(McpReviewMode, "mcp_review_mode"),
+        nullable=False,
+        default=McpReviewMode.TOFU,
+        server_default=McpReviewMode.TOFU.value,
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class McpDefinition(TimestampMixin, Base):
+    """One definition hash observed at a server, with the review decision on it.
+
+    `(server_id, kind, name, hash)` is unique: a changed definition is a new row, and the
+    approved row it replaces stays until the administrator cleans it up. `definition_json`
+    is the canonical projection the hash was computed over (mcp/hashing.py), stored as
+    text because it is shown as text. A definition deleted with its server is gone
+    (CASCADE); archiving the server keeps the rows so a rejected definition never comes
+    back as "first sight".
+    """
+
+    __tablename__ = "mcp_definitions"
+    __table_args__ = (
+        UniqueConstraint("server_id", "kind", "name", "hash"),
+        CheckConstraint("octet_length(hash) = 32", name="hash_len"),
+        Index(None, "server_id", "kind", "name"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    server_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("mcp_servers.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[McpDefinitionKind] = mapped_column(
+        _enum(McpDefinitionKind, "mcp_definition_kind"), nullable=False
+    )
+    # Upstream name, without the `<server>__` prefix.
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # Canonical JSON of the projected definition (what `hash` covers).
+    definition_json: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[McpDefinitionState] = mapped_column(
+        _enum(McpDefinitionState, "mcp_definition_state"), nullable=False
+    )
+    first_seen_at: Mapped[datetime] = _now()
+    last_seen_at: Mapped[datetime] = _now()
+    # Who approved or rejected it; NULL while pending and for a TOFU approval.
+    decided_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class A2aAgent(TimestampMixin, Base):
+    """An upstream A2A agent (JSON-RPC binding) the gateway proxies.
+
+    Auth is `McpServer`'s (`auth_plugin`/`auth_params`/`secret_ref`/`secret_ciphertext`,
+    same sealing info). `middleware_plugin`/`middleware_params` name at most one
+    a2a-middleware plugin. `card_json` is the card an administrator pasted and that the
+    gateway serves until it fetched one itself; `last_card_json`/`last_card_error` are
+    what the newest gateway fetch reported (display only). Deleting archives, like a
+    server.
+    """
+
+    __tablename__ = "a2a_agents"
+    __table_args__ = (
+        *target_name_constraints(),
+        CheckConstraint("timeout_ms >= 0", name="timeout_nonneg"),
+        CheckConstraint(
+            "secret_ref IS NULL OR secret_ref ~ '^[A-Za-z_][A-Za-z0-9_]*$'",
+            name="secret_ref_env_name",
+        ),
+        CheckConstraint(
+            "secret_ref IS NULL OR secret_ciphertext IS NULL", name="one_secret_source"
+        ),
+        CheckConstraint("auth_timeout_ms >= 0", name="auth_timeout_nonneg"),
+        CheckConstraint("middleware_timeout_ms >= 0", name="middleware_timeout_nonneg"),
+        _live_name_index("a2a_agents"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    name: Mapped[str] = mapped_column(String(63), nullable=False)
+    # The agent's JSON-RPC endpoint; absolute http(s) URL without userinfo.
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    # Empty = the origin of `url` plus "/.well-known/agent-card.json" (the gateway derives it).
+    card_url: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    auth_plugin: Mapped[str] = mapped_column(
+        String(63), nullable=False, default="none", server_default="none"
+    )
+    auth_params: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    secret_ref: Mapped[str | None] = mapped_column(String(200))
+    secret_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
+    # At most one middleware; empty = none.
+    middleware_plugin: Mapped[str] = mapped_column(
+        String(63), nullable=False, default="", server_default=""
+    )
+    middleware_params: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    # WASM plugin timeouts (proto PluginRef.timeout_ms): 0 = 60 s. The auth one applies to
+    # the agent's outbound auth, the middleware one to each request/response hook call.
+    auth_timeout_ms: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    middleware_timeout_ms: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # Card an administrator pasted (JSON object, at most 64 KiB); served until the gateway
+    # has fetched one. Never trusted: shown as text and rewritten by the gateway.
+    card_json: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    last_card_json: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    last_card_error: Mapped[str] = mapped_column(
+        String(1000), nullable=False, default="", server_default=""
+    )
+    last_card_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+def _owner_shape() -> CheckConstraint:
+    """`PolicyGrant`'s four owner shapes, shared by the MCP and A2A grant tables."""
+    return CheckConstraint(
+        "(org_id IS NOT NULL AND team_id IS NULL AND user_id IS NULL"
+        " AND service_account_id IS NULL)"
+        " OR (org_id IS NULL AND team_id IS NOT NULL"
+        " AND NOT (user_id IS NOT NULL AND service_account_id IS NOT NULL))",
+        name="owner_shape",
+    )
+
+
+def _owner_indexes(table: str, target_column: str) -> tuple[Index, ...]:
+    """One row per owner and target, like `PolicyGrant`'s four partial unique indexes."""
+    return (
+        Index(
+            f"uq_{table}_org",
+            "org_id",
+            target_column,
+            unique=True,
+            postgresql_where=text("org_id IS NOT NULL"),
+        ),
+        Index(
+            f"uq_{table}_team",
+            "team_id",
+            target_column,
+            unique=True,
+            postgresql_where=text(
+                "user_id IS NULL AND service_account_id IS NULL AND org_id IS NULL"
+            ),
+        ),
+        Index(
+            f"uq_{table}_member",
+            "team_id",
+            "user_id",
+            target_column,
+            unique=True,
+            postgresql_where=text("user_id IS NOT NULL"),
+        ),
+        Index(
+            f"uq_{table}_service_account",
+            "service_account_id",
+            target_column,
+            unique=True,
+            postgresql_where=text("service_account_id IS NOT NULL"),
+        ),
+        Index(None, target_column),
+    )
+
+
+class McpServerGrant(Base):
+    """An org, team, member or service account's grant of one MCP server.
+
+    Stored exactly like `PolicyGrant` (one row per owner and target, four owner shapes).
+    `all_tools` grants every approved tool; otherwise `tools` names the allowed ones
+    (prompts follow the server). A level with `mcp_access=LIST` contributes exactly its
+    rows; the compiler intersects them along org -> team -> owner, and a key inherits its
+    owner's set unchanged (there is no key-level list, as for models).
+    """
+
+    __tablename__ = "mcp_server_grants"
+    __table_args__ = (
+        _owner_shape(),
+        *_owner_indexes("mcp_server_grants", "server_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    server_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("mcp_servers.id", ondelete="CASCADE"), nullable=False
+    )
+    org_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"))
+    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"))
+    user_id: Mapped[uuid.UUID | None] = mapped_column()
+    service_account_id: Mapped[uuid.UUID | None] = mapped_column()
+    # Every approved tool of the server (the wire McpGrant.all_tools).
+    all_tools: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # Upstream tool names (without the `<server>__` prefix); ignored when all_tools.
+    tools: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, default=list, server_default=text("'{}'::text[]")
+    )
+
+
+class A2aAgentGrant(Base):
+    """An org, team, member or service account's grant of one A2A agent."""
+
+    __tablename__ = "a2a_agent_grants"
+    __table_args__ = (
+        _owner_shape(),
+        *_owner_indexes("a2a_agent_grants", "agent_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("a2a_agents.id", ondelete="CASCADE"), nullable=False
+    )
+    org_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"))
+    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"))
+    user_id: Mapped[uuid.UUID | None] = mapped_column()
+    service_account_id: Mapped[uuid.UUID | None] = mapped_column()
+
+
 class CatalogName(Base):
     """A public name. Everything else refers to the id, so renaming touches only this row."""
 
@@ -976,6 +1347,7 @@ class Router(TimestampMixin, Base):
         CheckConstraint(
             "(sticky = 'header') = (sticky_header IS NOT NULL)", name="sticky_header_iff"
         ),
+        CheckConstraint("plugin_timeout_ms >= 0", name="plugin_timeout_nonneg"),
     )
 
     name_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
@@ -1010,6 +1382,11 @@ class Router(TimestampMixin, Base):
     )
     # Request header hashed when sticky = header (lower-case HTTP token).
     sticky_header: Mapped[str | None] = mapped_column(String(200))
+    # How long one strategy `pick` (a WASM plugin) may run before the gateway cancels it
+    # (proto Router.plugin_timeout_ms). 0 = the gateway default, 60 s.
+    plugin_timeout_ms: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
     id = synonym("name_id")
 
@@ -1222,6 +1599,107 @@ MemberPolicy.allowed_models = column_property(
 ServiceAccount.allowed_models = column_property(
     _granted_names(PolicyGrant.service_account_id == ServiceAccount.id)
 )
+
+
+def _granted_mcp_servers(*owner) -> Any:
+    """The owner's MCP grants as `[{server, all_tools, tools}]`, server-ordered.
+
+    Empty array, not NULL, when the level has none; an archived server is left out. This
+    is the read-only mirror of `allowed_models` for the policy responses.
+    """
+    return (
+        select(
+            func.coalesce(
+                func.jsonb_agg(
+                    aggregate_order_by(
+                        func.jsonb_build_object(
+                            "server",
+                            McpServer.name,
+                            "all_tools",
+                            McpServerGrant.all_tools,
+                            "tools",
+                            McpServerGrant.tools,
+                        ),
+                        McpServer.name,
+                    )
+                ),
+                cast(text("'[]'"), JSONB),
+            )
+        )
+        .select_from(McpServerGrant)
+        .join(McpServer, McpServer.id == McpServerGrant.server_id)
+        .where(*owner, McpServer.deleted_at.is_(None))
+        .correlate_except(McpServerGrant, McpServer)
+        .scalar_subquery()
+    )
+
+
+def _granted_agents(*owner) -> Any:
+    """The owner's A2A grants as current agent names, sorted (empty array when none)."""
+    return (
+        select(
+            func.coalesce(
+                func.array_agg(aggregate_order_by(cast(A2aAgent.name, Text), A2aAgent.name)),
+                cast(text("'{}'"), ARRAY(Text)),
+            )
+        )
+        .select_from(A2aAgentGrant)
+        .join(A2aAgent, A2aAgent.id == A2aAgentGrant.agent_id)
+        .where(*owner, A2aAgent.deleted_at.is_(None))
+        .correlate_except(A2aAgentGrant, A2aAgent)
+        .scalar_subquery()
+    )
+
+
+def _mcp_owner_columns(row: type) -> tuple:
+    """Owner predicates for a policy row, matching `PolicyGrant`'s four shapes."""
+    if row is Org:
+        return (McpServerGrant.org_id == Org.id,)
+    if row is Team:
+        return (
+            McpServerGrant.team_id == Team.id,
+            McpServerGrant.org_id.is_(None),
+            McpServerGrant.user_id.is_(None),
+            McpServerGrant.service_account_id.is_(None),
+        )
+    if row is MemberPolicy:
+        return (
+            McpServerGrant.team_id == MemberPolicy.team_id,
+            McpServerGrant.user_id == MemberPolicy.user_id,
+        )
+    return (
+        McpServerGrant.team_id == ServiceAccount.team_id,
+        McpServerGrant.service_account_id == ServiceAccount.id,
+    )
+
+
+def _agent_owner_columns(row: type) -> tuple:
+    """`_mcp_owner_columns` for the A2A grant table."""
+    if row is Org:
+        return (A2aAgentGrant.org_id == Org.id,)
+    if row is Team:
+        return (
+            A2aAgentGrant.team_id == Team.id,
+            A2aAgentGrant.org_id.is_(None),
+            A2aAgentGrant.user_id.is_(None),
+            A2aAgentGrant.service_account_id.is_(None),
+        )
+    if row is MemberPolicy:
+        return (
+            A2aAgentGrant.team_id == MemberPolicy.team_id,
+            A2aAgentGrant.user_id == MemberPolicy.user_id,
+        )
+    return (
+        A2aAgentGrant.team_id == ServiceAccount.team_id,
+        A2aAgentGrant.service_account_id == ServiceAccount.id,
+    )
+
+
+for _policy_row in (Org, Team, MemberPolicy, ServiceAccount):
+    _policy_row.mcp_servers = column_property(
+        _granted_mcp_servers(*_mcp_owner_columns(_policy_row))
+    )
+    _policy_row.a2a_agents = column_property(_granted_agents(*_agent_owner_columns(_policy_row)))
 
 
 # --------------------------------------------------------------------------- config stream

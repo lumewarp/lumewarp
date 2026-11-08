@@ -1375,7 +1375,12 @@ name = "lumewarp-plugin-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
  "lumewarp-plugin-schema",
  "lumewarp-proto",
  "lumewarp-router-api",
@@ -1384,7 +1389,10 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror",
+ "tokio",
  "tracing",
+ "wasm-encoder",
  "wasmtime",
 ]
 

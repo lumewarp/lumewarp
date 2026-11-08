@@ -19,7 +19,7 @@ pub enum AuthMode {
     /// Any non-empty `Authorization: Bearer <token>` (a passthrough user token).
     #[value(name = "any-bearer")]
     AnyBearer,
-    /// Verify `x-lumewarp-signature` as described in `HMAC.md`.
+    /// Verify `x-hmac-signature` as described in `HMAC.md`.
     Hmac,
 }
 
@@ -154,10 +154,10 @@ impl Auth {
     ) -> Result<(), AuthFailure> {
         let challenge = "HmacSignature realm=\"mock\"";
         let malformed = |detail: String| AuthFailure::new("malformed_signature", detail, challenge);
-        let Some(raw) = header(headers, "x-lumewarp-signature") else {
+        let Some(raw) = header(headers, "x-hmac-signature") else {
             return Err(AuthFailure::new(
                 "missing_signature",
-                "x-lumewarp-signature header is required".to_owned(),
+                "x-hmac-signature header is required".to_owned(),
                 challenge,
             ));
         };
@@ -306,7 +306,7 @@ mod tests {
             .check(
                 "POST",
                 "/mcp",
-                &headers(&[("x-lumewarp-signature", &good)]),
+                &headers(&[("x-hmac-signature", &good)]),
                 body
             )
             .is_ok());
@@ -315,7 +315,7 @@ mod tests {
             auth.check(
                 "POST",
                 "/mcp",
-                &headers(&[("x-lumewarp-signature", &bad)]),
+                &headers(&[("x-hmac-signature", &bad)]),
                 body
             )
             .unwrap_err()
@@ -327,7 +327,7 @@ mod tests {
             auth.check(
                 "POST",
                 "/mcp",
-                &headers(&[("x-lumewarp-signature", &stale)]),
+                &headers(&[("x-hmac-signature", &stale)]),
                 body
             )
             .unwrap_err()
@@ -339,7 +339,7 @@ mod tests {
             auth.check(
                 "POST",
                 "/mcp",
-                &headers(&[("x-lumewarp-signature", &malformed)]),
+                &headers(&[("x-hmac-signature", &malformed)]),
                 body
             )
             .unwrap_err()

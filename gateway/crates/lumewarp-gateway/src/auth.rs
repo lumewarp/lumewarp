@@ -112,6 +112,13 @@ impl From<AuthRejection> for Response<ProxyBody> {
     }
 }
 
+/// The only inbound credential the MCP and A2A endpoints accept (D5, L8).
+pub const MCP_KEY_HEADER: &str = "x-lumewarp-key";
+
+/// Playground delegation tokens are LLM-only (`audience`-free, five minutes,
+/// issued for the Playground); MCP and A2A never accept one.
+const PLAYGROUND_PREFIX: &str = "lwpg.";
+
 fn bearer(headers: &HeaderMap) -> Option<&str> {
     let mut values = headers.get_all(header::AUTHORIZATION).iter();
     let value = values.next()?;
@@ -187,6 +194,12 @@ fn authenticate_playground(table: &RoutingTable, token: &str) -> Result<Caller, 
 
 #[inline]
 fn authenticate_key(key: &Arc<KeyContext>) -> Result<Caller, AuthRejection> {
+    check_key(key, false)
+}
+
+/// Shared lifecycle check of a known key. `allow_budget_exceeded` is set only
+/// for the MCP/A2A entry: those requests are not billed (D16, L8).
+fn check_key(key: &Arc<KeyContext>, allow_budget_exceeded: bool) -> Result<Caller, AuthRejection> {
     let reject = |error| AuthRejection {
         error,
         key: Some(key.clone()),
@@ -197,11 +210,44 @@ fn authenticate_key(key: &Arc<KeyContext>) -> Result<Caller, AuthRejection> {
     }
     match key.status {
         KeyStatus::Active => Ok(Caller::Key(key.clone())),
+        KeyStatus::BudgetExceeded if allow_budget_exceeded => Ok(Caller::Key(key.clone())),
         KeyStatus::BudgetExceeded => Err(reject(AuthError::InsufficientQuota)),
         KeyStatus::Revoked | KeyStatus::Suspended | KeyStatus::Unspecified => {
             Err(reject(AuthError::InvalidApiKey))
         }
     }
+}
+
+/// Authentication of `/mcp` and `/a2a` requests (L8).
+///
+/// Differences from the LLM path on purpose:
+/// - exactly one `X-Lumewarp-Key` header; zero or several are 401;
+/// - no `Authorization` bearer and no `lwpg.` playground token;
+/// - a key is required even in standalone open mode (an MCP server or A2A
+///   agent is never anonymous), so `AuthMode::Open` does not skip this;
+/// - a key the control plane marked `BUDGET_EXCEEDED` is accepted: MCP/A2A
+///   traffic is not billed, and D20 limits only `tools/call` by the key's
+///   requests-per-minute scope (`ratelimit::Registry::charge_request`).
+///
+/// Everything else goes through the same key index: revocation, suspension and
+/// expiry reject, and a rotation-grace secret authenticates as the same key.
+pub fn authenticate_mcp(
+    routing_table: &RoutingTable,
+    headers: &HeaderMap,
+) -> Result<Caller, AuthRejection> {
+    let invalid = || AuthRejection::from(AuthError::InvalidApiKey);
+    let mut values = headers.get_all(MCP_KEY_HEADER).iter();
+    let value = values.next().ok_or_else(invalid)?;
+    if values.next().is_some() {
+        return Err(invalid());
+    }
+    let secret = value.to_str().map_err(|_| invalid())?;
+    if secret.is_empty() || secret.starts_with(PLAYGROUND_PREFIX) {
+        return Err(invalid());
+    }
+    let hash: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
+    let key = routing_table.keys.get(&hash).ok_or_else(invalid)?;
+    check_key(key, true)
 }
 
 /// Must run before a model is chosen. `allow_all_models=false` with an
@@ -232,6 +278,135 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, value.parse().unwrap());
         headers
+    }
+
+    fn mcp_headers(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(MCP_KEY_HEADER, value.parse().unwrap());
+        headers
+    }
+
+    /// The MCP/A2A entry needs exactly one `X-Lumewarp-Key`: no Authorization
+    /// bearer, no playground token, no request header at all.
+    #[test]
+    fn mcp_entry_takes_only_one_x_lumewarp_key() {
+        let table = playground_table();
+        assert!(matches!(
+            authenticate_mcp(&table, &mcp_headers("s1")),
+            Ok(Caller::Key(key)) if &*key.key_id == PLAYGROUND_ID
+        ));
+        // The LLM credential is not accepted on these endpoints.
+        for headers in [
+            HeaderMap::new(),
+            headers("Bearer s1"),
+            mcp_headers(""),
+            mcp_headers("Bearer s1"),
+            mcp_headers("nope"),
+        ] {
+            assert_eq!(
+                err(authenticate_mcp(&table, &headers)),
+                Some(AuthError::InvalidApiKey),
+                "{headers:?}"
+            );
+        }
+        // Two values of the header are ambiguous, so they are refused even
+        // when both name the same key.
+        let mut duplicate = mcp_headers("s1");
+        duplicate.append(MCP_KEY_HEADER, "s1".parse().unwrap());
+        let rejection = authenticate_mcp(&table, &duplicate).err().unwrap();
+        assert_eq!(rejection.error, AuthError::InvalidApiKey);
+        assert!(rejection.key.is_none(), "an ambiguous header names no key");
+        // A playground token is one bearer shape, not a key secret.
+        let now = clock::unix_ms();
+        let token = signed(PLAYGROUND_ID, now + 60_000);
+        let rejection = authenticate_mcp(&table, &mcp_headers(&token))
+            .err()
+            .unwrap();
+        assert_eq!(rejection.error, AuthError::InvalidApiKey);
+        assert!(rejection.key.is_none());
+        let encoded = table
+            .runtime
+            .metrics
+            .encode(&table.runtime.inflight)
+            .unwrap();
+        assert!(
+            encoded.contains("lumewarp_playground_requests_total{result=\"ok\"} 0")
+                && encoded.contains("lumewarp_playground_requests_total{result=\"rejected\"} 0"),
+            "the MCP entry never counts as a playground request: {encoded}"
+        );
+    }
+
+    /// D16/L8: MCP/A2A traffic is not billed, so a BUDGET_EXCEEDED key still
+    /// authenticates there while the LLM path answers 429.
+    #[test]
+    fn mcp_entry_accepts_a_budget_exceeded_key_the_llm_path_refuses() {
+        let mut s = base();
+        s.api_keys[0].status = KeyStatus::BudgetExceeded as i32;
+        let table = routing_table(&s, AuthMode::RequireKey);
+        let caller = authenticate_mcp(&table, &mcp_headers("s1")).unwrap();
+        assert!(matches!(caller, Caller::Key(key) if &*key.key_id == "k1"));
+        let rejection = authenticate(&table, &headers("Bearer s1")).err().unwrap();
+        assert_eq!(rejection.error, AuthError::InsufficientQuota);
+        assert_eq!(rejection.error.status(), StatusCode::TOO_MANY_REQUESTS);
+        // Lifecycle still wins over budget: a revoked or expired key is 401
+        // on both paths.
+        for (status, expiry) in [
+            (KeyStatus::Revoked, 0),
+            (KeyStatus::Suspended, 0),
+            (KeyStatus::BudgetExceeded, 1),
+        ] {
+            let mut s = base();
+            s.api_keys[0].status = status as i32;
+            s.api_keys[0].expires_at_unix_ms = expiry;
+            let table = routing_table(&s, AuthMode::RequireKey);
+            assert_eq!(
+                err(authenticate_mcp(&table, &mcp_headers("s1"))),
+                Some(AuthError::InvalidApiKey),
+                "{status:?} {expiry}"
+            );
+            assert_eq!(
+                err(authenticate(&table, &headers("Bearer s1"))),
+                Some(AuthError::InvalidApiKey),
+                "{status:?} {expiry}"
+            );
+        }
+    }
+
+    /// Standalone open mode makes LLM requests anonymous, but an MCP request
+    /// still needs a key; with no keys configured every one is refused.
+    #[test]
+    fn mcp_entry_requires_a_key_in_open_mode() {
+        let mut s = base();
+        s.api_keys.clear();
+        let open = routing_table(&s, AuthMode::Open);
+        assert!(matches!(
+            authenticate(&open, &HeaderMap::new()),
+            Ok(Caller::Anonymous)
+        ));
+        for h in [HeaderMap::new(), mcp_headers("s1"), headers("Bearer s1")] {
+            assert_eq!(
+                err(authenticate_mcp(&open, &h)),
+                Some(AuthError::InvalidApiKey)
+            );
+        }
+        // With a key configured, open mode still accepts it on /mcp.
+        let keep = routing_table(&base(), AuthMode::Open);
+        assert!(authenticate_mcp(&keep, &mcp_headers("s1")).is_ok());
+    }
+
+    #[test]
+    fn mcp_entry_accepts_a_rotation_grace_secret() {
+        let table = routing_table(&with_previous_hash(i64::MAX), AuthMode::RequireKey);
+        for secret in ["current", "previous"] {
+            let caller = authenticate_mcp(&table, &mcp_headers(secret)).unwrap();
+            assert!(
+                matches!(caller, Caller::Key(key) if &*key.key_id == "k1"),
+                "{secret}"
+            );
+        }
+        let expired = routing_table(&with_previous_hash(1), AuthMode::RequireKey);
+        assert!(authenticate_mcp(&expired, &mcp_headers("previous")).is_err());
+        assert!(authenticate_mcp(&expired, &mcp_headers("current")).is_ok());
     }
 
     fn routing_table(snapshot: &pb::Snapshot, mode: AuthMode) -> RoutingTable {

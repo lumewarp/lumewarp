@@ -128,10 +128,15 @@ message ObservedDefinition {
   bytes hash = 4;
   // The canonical definition JSON, at most 64 KiB.
   string definition_json = 5;
-  // True when the gateway already serves it (TOFU first sight); the control
-  // plane records it as approved. False: withheld, pending review.
+  // True when the gateway already serves it (TOFU first sight). The control
+  // plane approves it only if the name is new to it there too (the first report
+  // wins); otherwise it is pending. False: withheld, pending review.
   bool auto_approved = 6;
   int64 observed_at_unix_ms = 7;
+  // McpServer.id. A report whose id no longer matches `server` is discarded.
+  string server_id = 8;
+  // Snapshot version the gateway was serving when it observed this.
+  uint64 config_version = 9;
 }
 
 message AgentCardReport {
@@ -142,6 +147,10 @@ message AgentCardReport {
   // Sanitized fetch error, empty on success.
   string error = 3;
   int64 fetched_at_unix_ms = 4;
+  // A2aAgent.id. A report whose id no longer matches `agent` is discarded.
+  string agent_id = 5;
+  // Snapshot version the gateway was serving when it fetched this.
+  uint64 config_version = 6;
 }
 
 message Ack {

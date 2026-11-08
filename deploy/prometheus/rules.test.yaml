@@ -1179,6 +1179,343 @@
           "exp_alerts": []
         }
       ]
+    },
+    {
+      "name": "LumewarpPluginFailureRatioHigh fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_plugin_calls_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",kind=\"upstream-auth\",plugin=\"hmac_signature\",result=\"ok\"}",
+          "values": "0+60x40"
+        },
+        {
+          "series": "lumewarp_plugin_calls_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",kind=\"upstream-auth\",plugin=\"hmac_signature\",result=\"trap\"}",
+          "values": "0+6x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpPluginFailureRatioHigh",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpPluginFailureRatioHigh",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "kind": "upstream-auth",
+                "plugin": "hmac_signature",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "Plugin calls trap or time out",
+                "description": "upstream-auth plugin hmac_signature returns trap or timeout for more than 5% of calls at >=0.1 calls/s for 5 minutes.",
+                "runbook": "Compare plugin settings with the schema, check the configured plugin timeout and the settings volume for a truncated file, then replace the component and restart the gateway. Error results (the plugin answered with an error) are on the plugin panel of the MCP/A2A dashboard."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpPluginFailureRatioHigh stays quiet at low volume or on error results",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_plugin_calls_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",kind=\"router-strategy\",plugin=\"cheapest_first\",result=\"ok\"}",
+          "values": "0+60x40"
+        },
+        {
+          "series": "lumewarp_plugin_calls_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",kind=\"router-strategy\",plugin=\"cheapest_first\",result=\"trap\"}",
+          "values": "0+1x40"
+        },
+        {
+          "series": "lumewarp_plugin_calls_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",kind=\"router-strategy\",plugin=\"cheapest_first\",result=\"error\"}",
+          "values": "0+60x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpPluginFailureRatioHigh",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpMCPUpstreamErrors fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_mcp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",server=\"s1\",method=\"tools_call\",status=\"200\"}",
+          "values": "0+60x40"
+        },
+        {
+          "series": "lumewarp_mcp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",server=\"s1\",method=\"tools_call\",status=\"502\"}",
+          "values": "0+12x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpMCPUpstreamErrors",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpMCPUpstreamErrors",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "server": "s1",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "MCP upstream requests are failing",
+                "description": "MCP server s1 answers 502 or 504 for more than 10% of requests at >=0.05 requests/s for 5 minutes.",
+                "runbook": "Check the server URL, reachability and the auth plugin's cache lifetime (a stale cached token surfaces as 502); 504 also covers an upstream or plugin timeout. Test the server on its page in the Admin UI."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpMCPUpstreamErrors ignores authorization failures and low rates",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_mcp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",server=\"s2\",method=\"tools_list\",status=\"200\"}",
+          "values": "0+60x40"
+        },
+        {
+          "series": "lumewarp_mcp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",server=\"s2\",method=\"tools_list\",status=\"401\"}",
+          "values": "0+60x40"
+        },
+        {
+          "series": "lumewarp_mcp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",server=\"s2\",method=\"tools_list\",status=\"503\"}",
+          "values": "0+60x40"
+        },
+        {
+          "series": "lumewarp_mcp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",server=\"turbo\",method=\"tools_call\",status=\"200\"}",
+          "values": "0+600x40"
+        },
+        {
+          "series": "lumewarp_mcp_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",server=\"turbo\",method=\"tools_call\",status=\"504\"}",
+          "values": "0+12x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpMCPUpstreamErrors",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpA2AUpstreamErrors fires after hold",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_a2a_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",agent=\"helper\",method=\"message_stream\",status=\"200\"}",
+          "values": "0+60x40"
+        },
+        {
+          "series": "lumewarp_a2a_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",agent=\"helper\",method=\"message_stream\",status=\"504\"}",
+          "values": "0+12x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpA2AUpstreamErrors",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpA2AUpstreamErrors",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "agent": "helper",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "A2A upstream requests are failing",
+                "description": "A2A agent helper answers 502 or 504 for more than 10% of requests at >=0.05 requests/s for 5 minutes.",
+                "runbook": "Check the agent URL, reachability and outbound auth; 504 also covers the agent's auth or middleware plugin timing out. Run Test now on the agent page to fetch its card."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpA2AUpstreamErrors stays quiet on refusals",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_a2a_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",agent=\"helper\",method=\"tasks_get\",status=\"200\"}",
+          "values": "0+60x40"
+        },
+        {
+          "series": "lumewarp_a2a_requests_total{namespace=\"demo\",job=\"lumewarp-gateway\",instance=\"gw:9464\",agent=\"helper\",method=\"tasks_get\",status=\"403\"}",
+          "values": "0+60x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpA2AUpstreamErrors",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpMCPDefinitionPendingReview fires on stored pending definitions",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_cp_mcp_catalog_definitions_total{namespace=\"demo\",job=\"lumewarp-control-plane-metrics\",instance=\"cp:9465\",result=\"pending\"}",
+          "values": "0+1x40"
+        },
+        {
+          "series": "lumewarp_cp_mcp_catalog_definitions_total{namespace=\"demo\",job=\"lumewarp-control-plane-metrics\",instance=\"cp:9465\",result=\"approved\"}",
+          "values": "0+5x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpMCPDefinitionPendingReview",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpMCPDefinitionPendingReview",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "MCP definitions are waiting for review",
+                "description": "The control plane stored new pending MCP definitions in the last 15 minutes; gateways withhold them until an administrator decides.",
+                "runbook": "Review the pending tools and prompts on the MCP server page and approve or reject them; a definition that changed under a known name is the rug-pull case, not a new tool."
+              }
+            }
+          ]
+        },
+        {
+          "eval_time": "60m",
+          "alertname": "LumewarpMCPDefinitionPendingReview",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpMCPDefinitionPendingReview stays quiet when every definition is known",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_cp_mcp_catalog_definitions_total{namespace=\"demo\",job=\"lumewarp-control-plane-metrics\",instance=\"cp:9465\",result=\"approved\"}",
+          "values": "0+5x40"
+        },
+        {
+          "series": "lumewarp_cp_mcp_catalog_definitions_total{namespace=\"demo\",job=\"lumewarp-control-plane-metrics\",instance=\"cp:9465\",result=\"known\"}",
+          "values": "0+5x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpMCPDefinitionPendingReview",
+          "exp_alerts": []
+        }
+      ]
+    },
+    {
+      "name": "LumewarpMCPCatalogReportsDiscarded fires after hold, per reason",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_cp_mcp_catalog_discarded_total{namespace=\"demo\",job=\"lumewarp-control-plane-metrics\",instance=\"cp:9465\",reason=\"pending_limit\"}",
+          "values": "0+1x40"
+        },
+        {
+          "series": "lumewarp_cp_mcp_catalog_discarded_total{namespace=\"demo\",job=\"lumewarp-control-plane-metrics\",instance=\"cp:9465\",reason=\"hash_mismatch\"}",
+          "values": "0+1x40"
+        },
+        {
+          "series": "lumewarp_cp_mcp_catalog_discarded_total{namespace=\"demo\",job=\"lumewarp-control-plane-metrics\",instance=\"cp:9465\",reason=\"invalid\"}",
+          "values": "0+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "0m",
+          "alertname": "LumewarpMCPCatalogReportsDiscarded",
+          "exp_alerts": []
+        },
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpMCPCatalogReportsDiscarded",
+          "exp_alerts": [
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "reason": "hash_mismatch",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "MCP catalog reports are discarded",
+                "description": "The control plane discarded MCP definition reports for 5 minutes (reason hash_mismatch).",
+                "runbook": "pending_limit, definition_limit and report_limit mean a gateway reports more definitions than the limits keep (trim the server's tool list); stale_id, stale_version, unknown_target and hash_mismatch mean a report disagreed with the snapshot or the recomputed hash (check the server still exists and that every gateway serves one config version); invalid means the report itself was malformed."
+              }
+            },
+            {
+              "exp_labels": {
+                "namespace": "demo",
+                "reason": "pending_limit",
+                "severity": "warning"
+              },
+              "exp_annotations": {
+                "summary": "MCP catalog reports are discarded",
+                "description": "The control plane discarded MCP definition reports for 5 minutes (reason pending_limit).",
+                "runbook": "pending_limit, definition_limit and report_limit mean a gateway reports more definitions than the limits keep (trim the server's tool list); stale_id, stale_version, unknown_target and hash_mismatch mean a report disagreed with the snapshot or the recomputed hash (check the server still exists and that every gateway serves one config version); invalid means the report itself was malformed."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LumewarpMCPCatalogReportsDiscarded stays quiet when nothing is discarded",
+      "interval": "1m",
+      "input_series": [
+        {
+          "series": "lumewarp_cp_mcp_catalog_discarded_total{namespace=\"demo\",job=\"lumewarp-control-plane-metrics\",instance=\"cp:9465\",reason=\"hash_mismatch\"}",
+          "values": "0+0x40"
+        },
+        {
+          "series": "lumewarp_cp_mcp_catalog_discarded_total{namespace=\"demo\",job=\"lumewarp-control-plane-metrics\",instance=\"cp:9465\",reason=\"invalid\"}",
+          "values": "0+0x40"
+        }
+      ],
+      "alert_rule_test": [
+        {
+          "eval_time": "30m",
+          "alertname": "LumewarpMCPCatalogReportsDiscarded",
+          "exp_alerts": []
+        }
+      ]
     }
   ]
 }

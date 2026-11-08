@@ -69,6 +69,14 @@ pub async fn serve(
     let listen = listener.local_addr()?;
     let admin_listen = admin_listener.local_addr()?;
     tracing::info!(%listen, %admin_listen, "lumewarp gateway listening");
+    // Card fetching is owned by the process, not by a request: an agent's card
+    // exists (and reaches the control plane) before the first client asks for
+    // it, in both standalone and control-plane mode. The supervisor follows
+    // snapshot changes and reconciles one fetch task per agent.
+    let card_fetcher = tokio::spawn(crate::a2a::supervise_cards(
+        runtime.clone(),
+        snapshot.clone(),
+    ));
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     let (drain, _) = watch::channel(false);
@@ -123,6 +131,7 @@ pub async fn serve(
     }
     drop(listener);
     drop(admin_listener);
+    card_fetcher.abort();
     let _ = drain.send(true);
     if tokio::time::timeout(shutdown_grace, async {
         while let Some(result) = connections.join_next().await {
@@ -298,47 +307,168 @@ async fn dispatch(
     if admin {
         return admin_response(routing_table, runtime, &req);
     }
-    let path = req.uri().path();
-    if !path.starts_with("/v1/") {
-        return match (req.method(), path) {
-            (&Method::GET, "/healthz") => Response::builder()
-                .header(header::CONTENT_TYPE, "text/plain")
-                .body(full_body(Bytes::from_static(b"ok")))
-                .expect("static response parts are valid"),
-            _ => error::json(StatusCode::NOT_FOUND, "not_found", "Not found"),
-        };
-    }
+    // `/v1/` first: the LLM path matches its prefix before any other route is
+    // looked at, so the MCP/A2A routes below cost it nothing (no allocation,
+    // no name parsing).
+    let llm = req.uri().path().starts_with("/v1/");
     let request = RequestCtx::new(observation.started);
     // Version 0: nothing loaded yet.
     observation.identified(&request.request_id, routing_table.map_or(0, |t| t.version));
-    let mut response = match routing_table {
-        Some(routing_table) => {
-            serve_api(
-                routing_table,
-                runtime,
-                client,
-                req,
-                observation,
-                endpoint,
-                request,
-                body_read_timeout,
-            )
-            .await
+    let mut response = if llm {
+        match routing_table {
+            Some(routing_table) => {
+                serve_api(
+                    routing_table,
+                    runtime,
+                    client,
+                    req,
+                    observation,
+                    endpoint,
+                    request,
+                    body_read_timeout,
+                )
+                .await
+            }
+            // Checked before authentication: without a snapshot there are no keys,
+            // and serving anything would mean an open routing table. For the same
+            // reason there is no usage event: the key is unidentified.
+            None => error::json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "not_ready",
+                "Gateway has no config snapshot yet",
+            ),
         }
-        // Checked before authentication: without a snapshot there are no keys,
-        // and serving anything would mean an open routing table. For the same
-        // reason there is no usage event: the key is unidentified.
-        None => error::json(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "not_ready",
-            "Gateway has no config snapshot yet",
-        ),
+    } else {
+        non_llm(
+            routing_table,
+            runtime,
+            req,
+            observation,
+            &request,
+            body_read_timeout,
+        )
+        .await
     };
     // Replaces whatever an upstream may have sent under this name.
     response
         .headers_mut()
         .insert(REQUEST_ID_HEADER, request_id_header(&request));
     response
+}
+
+/// Everything that is not `/v1/*`: the health probe, the MCP endpoints and the
+/// A2A endpoints. Only MCP and A2A requests authenticate (with
+/// `X-Lumewarp-Key`, `auth::authenticate_mcp`).
+async fn non_llm(
+    routing_table: Option<&RoutingTable>,
+    runtime: &Runtime,
+    req: Request<Incoming>,
+    observation: &mut Observation,
+    request: &RequestCtx,
+    body_read_timeout: Duration,
+) -> Response<ProxyBody> {
+    if req.method() == Method::GET && req.uri().path() == "/healthz" {
+        return Response::builder()
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(full_body(Bytes::from_static(b"ok")))
+            .expect("static response parts are valid");
+    }
+    // One owned copy of the path so the route may borrow it while `req` is
+    // moved into the handler. Only non-`/v1/*` requests get here.
+    let path: String = req.uri().path().into();
+    let Some(route) = endpoint(&path) else {
+        return error::json(StatusCode::NOT_FOUND, "not_found", "Not found");
+    };
+    // Same rule as `/v1/*`: no snapshot, no keys, nothing served.
+    let Some(routing_table) = routing_table else {
+        return error::json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "not_ready",
+            "Gateway has no config snapshot yet",
+        );
+    };
+    let caller = match auth::authenticate_mcp(routing_table, req.headers()) {
+        Ok(caller) => caller,
+        Err(rejection) => {
+            if let Some(key) = &rejection.key {
+                observation.caller(&key.key_id, &key.team_id);
+            }
+            return rejection.into();
+        }
+    };
+    if let auth::Caller::Key(key) = &caller {
+        observation.caller(&key.key_id, &key.team_id);
+    }
+    let method = req.method().clone();
+    match route {
+        Endpoint::Mcp(mcp_route) => {
+            // MCP and A2A requests count under the generic request metrics as
+            // `endpoint="other"` until T4/T6 use T1b's `lumewarp_mcp_*` and
+            // `lumewarp_a2a_*` families.
+            crate::mcp::handle(crate::mcp::Call {
+                route: mcp_route,
+                method,
+                http: req,
+                caller: &caller,
+                routing_table,
+                targets: &routing_table.targets,
+                runtime,
+                request,
+                body_read_timeout,
+            })
+            .await
+        }
+        Endpoint::A2a(a2a_route) => {
+            crate::a2a::handle(crate::a2a::Call {
+                route: a2a_route,
+                method,
+                http: req,
+                caller: &caller,
+                routing_table,
+                targets: &routing_table.targets,
+                runtime,
+                request,
+                body_read_timeout,
+            })
+            .await
+        }
+    }
+}
+
+enum Endpoint<'a> {
+    Mcp(crate::mcp::Route<'a>),
+    A2a(crate::a2a::Route<'a>),
+}
+
+/// Matches the MCP and A2A paths. All methods are accepted: the proxies decide
+/// how a method is handled (MCP `GET` on a single server streams, A2A JSON-RPC
+/// is a `POST`), and a wrong one is their error to answer.
+fn endpoint(path: &str) -> Option<Endpoint<'_>> {
+    if path == "/mcp" {
+        return Some(Endpoint::Mcp(crate::mcp::Route::Aggregate));
+    }
+    if let Some(name) = path.strip_prefix("/mcp/servers/") {
+        // Exactly one non-empty segment: `/mcp/servers/a/b` is not a route.
+        if !name.is_empty() && !name.contains('/') {
+            return Some(Endpoint::Mcp(crate::mcp::Route::Server { name }));
+        }
+        return None;
+    }
+    if path == "/a2a" {
+        return Some(Endpoint::A2a(crate::a2a::Route::List));
+    }
+    if let Some(rest) = path.strip_prefix("/a2a/") {
+        if let Some(agent) = rest.strip_suffix("/.well-known/agent-card.json") {
+            if !agent.is_empty() && !agent.contains('/') {
+                return Some(Endpoint::A2a(crate::a2a::Route::Card { agent }));
+            }
+            return None;
+        }
+        if !rest.is_empty() && !rest.contains('/') {
+            return Some(Endpoint::A2a(crate::a2a::Route::Rpc { agent: rest }));
+        }
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -448,22 +578,40 @@ mod tests {
         }
 
         async fn get(&self, admin: bool, path: &str, auth: Option<&str>) -> (u16, Bytes) {
+            let headers: Vec<(&str, &str)> = match auth {
+                Some(auth) => vec![("authorization", auth)],
+                None => Vec::new(),
+            };
+            let (status, _, body) = self.request(admin, "GET", path, &headers).await;
+            (status, body)
+        }
+
+        async fn request(
+            &self,
+            admin: bool,
+            method: &str,
+            path: &str,
+            headers: &[(&str, &str)],
+        ) -> (u16, hyper::HeaderMap, Bytes) {
             let addr = if admin {
                 self.settings.admin_listen
             } else {
                 self.settings.listen
             };
-            let mut request = Request::builder().uri(format!("http://{addr}{path}"));
-            if let Some(auth) = auth {
-                request = request.header(header::AUTHORIZATION, auth);
+            let mut request = Request::builder()
+                .method(method)
+                .uri(format!("http://{addr}{path}"));
+            for (name, value) in headers {
+                request = request.header(*name, *value);
             }
             let request = request.body(Full::new(Bytes::new())).unwrap();
             for _ in 0..200 {
                 match self.client.request(request.clone()).await {
                     Ok(response) => {
                         let status = response.status().as_u16();
+                        let headers = response.headers().clone();
                         let body = response.into_body().collect().await.unwrap().to_bytes();
-                        return (status, body);
+                        return (status, headers, body);
                     }
                     Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
                 }
@@ -475,6 +623,44 @@ mod tests {
     impl Drop for TestServer {
         fn drop(&mut self) {
             self.task.abort();
+        }
+    }
+
+    #[test]
+    fn mcp_and_a2a_paths_match_whole_segments_only() {
+        use crate::a2a::Route as A2a;
+        use crate::mcp::Route as Mcp;
+        assert!(matches!(
+            endpoint("/mcp"),
+            Some(Endpoint::Mcp(Mcp::Aggregate))
+        ));
+        assert!(matches!(
+            endpoint("/mcp/servers/s1"),
+            Some(Endpoint::Mcp(Mcp::Server { name: "s1" }))
+        ));
+        assert!(matches!(endpoint("/a2a"), Some(Endpoint::A2a(A2a::List))));
+        assert!(matches!(
+            endpoint("/a2a/a1"),
+            Some(Endpoint::A2a(A2a::Rpc { agent: "a1" }))
+        ));
+        assert!(matches!(
+            endpoint("/a2a/a1/.well-known/agent-card.json"),
+            Some(Endpoint::A2a(A2a::Card { agent: "a1" }))
+        ));
+        for other in [
+            "/v1/models",
+            "/healthz",
+            "/mcp/",
+            "/mcp/other",
+            "/mcp/servers",
+            "/mcp/servers/",
+            "/mcp/servers/a/b",
+            "/a2a/",
+            "/a2a/a1/x",
+            "/a2a//x/agent-card.json",
+            "/a2a/a1/.well-known/agent-card.json/extra",
+        ] {
+            assert!(endpoint(other).is_none(), "{other}");
         }
     }
 
@@ -511,6 +697,187 @@ mod tests {
         assert_eq!(server.get(true, "/readyz", None).await.0, 200);
         assert_eq!(server.get(false, "/v1/models", None).await.0, 401);
         assert_eq!(server.get(false, "/v1/models", auth).await.0, 200);
+    }
+
+    /// The MCP and A2A routes take `X-Lumewarp-Key` only (L8), need a loaded
+    /// snapshot like `/v1/*`, and reach the proxies with a request id. What the
+    /// proxies answer is their own contract; this test is about routing and
+    /// authentication.
+    #[tokio::test]
+    async fn mcp_and_a2a_routes_authenticate_then_reach_the_proxies() {
+        let yaml = format!(
+            "server:\n  api_keys: ['{}']\nmcp_servers:\n  - {{name: s1, url: 'http://127.0.0.1:1/mcp'}}\na2a_agents:\n  - {{name: a1, url: 'http://127.0.0.1:1/rpc'}}\n",
+            sha256("secret")
+        );
+        let (_, snapshot) = lumewarp_config::Config::parse(&yaml).unwrap();
+        let runtime = Runtime::with_usage_and_env(
+            Arc::new(crate::metrics::Metrics::new()),
+            crate::usage::UsageSink::disabled(),
+            crate::runtime::EnvOptions {
+                id_key: Some(crate::a2a_ids::IdKey::from_secret(vec![7u8; 32]).unwrap()),
+                public_url: Some("https://gw.example.test".into()),
+            },
+        );
+        let slot: Snapshot = Arc::new(ArcSwapOption::empty());
+        let server = TestServer::start(slot.clone(), runtime.clone());
+        let key = ("x-lumewarp-key", "secret");
+        // Not ready before a snapshot, exactly like the LLM endpoints.
+        assert_eq!(server.request(false, "POST", "/mcp", &[key]).await.0, 503);
+        let routing_table = RoutingTable::compile(
+            &snapshot,
+            lumewarp_config::AuthMode::standalone(&snapshot),
+            &runtime,
+        )
+        .unwrap();
+        slot.store(Some(Arc::new(routing_table)));
+
+        // Authentication (L8): one X-Lumewarp-Key; the LLM bearer is not it.
+        for (method, path) in [
+            ("POST", "/mcp"),
+            ("POST", "/mcp/servers/s1"),
+            ("GET", "/a2a"),
+            ("GET", "/a2a/a1/.well-known/agent-card.json"),
+            ("POST", "/a2a/a1"),
+        ] {
+            assert_eq!(
+                server.request(false, method, path, &[]).await.0,
+                401,
+                "{method} {path} without a key"
+            );
+            assert_eq!(
+                server
+                    .request(false, method, path, &[("authorization", "Bearer secret")])
+                    .await
+                    .0,
+                401,
+                "{method} {path} with an LLM bearer"
+            );
+            let (status, headers, _) = server.request(false, method, path, &[key]).await;
+            assert_ne!(status, 401, "{method} {path} with a valid key");
+            assert!(
+                headers.contains_key("x-lumewarp-request-id"),
+                "{method} {path} has a request id"
+            );
+        }
+        // A bare `POST /mcp` reaches the proxy's own protocol checks: the MCP
+        // transport rejects a request that does not accept its response formats.
+        assert_eq!(
+            server.request(false, "POST", "/mcp", &[key]).await.0,
+            406,
+            "no Accept header"
+        );
+        // Unknown shapes are 404.
+        for path in [
+            "/mcp/other",
+            "/mcp/servers/",
+            "/mcp/servers/a/b",
+            "/a2a/",
+            "/a2a/a/b",
+        ] {
+            assert_eq!(
+                server.request(false, "GET", path, &[key]).await.0,
+                404,
+                "{path}"
+            );
+        }
+        // The LLM path is unchanged: an X-Lumewarp-Key alone does not
+        // authenticate it, and MCP names are not models.
+        assert_eq!(
+            server.request(false, "GET", "/v1/models", &[key]).await.0,
+            401
+        );
+        let (status, _, models) = server
+            .request(
+                false,
+                "GET",
+                "/v1/models",
+                &[("authorization", "Bearer secret")],
+            )
+            .await;
+        assert_eq!(status, 200);
+        assert!(!String::from_utf8_lossy(&models).contains("s1"));
+    }
+
+    /// F2 (P3): without the process settings the endpoints cannot work. With an
+    /// id key but no public URL only A2A is unavailable; the LLM path and MCP
+    /// keep working.
+    #[tokio::test]
+    async fn a2a_is_503_without_its_process_settings() {
+        let yaml = format!(
+            "server:\n  api_keys: ['{}']\nmcp_servers:\n  - {{name: s1, url: 'http://127.0.0.1:1/mcp'}}\na2a_agents:\n  - {{name: a1, url: 'http://127.0.0.1:1/rpc'}}\n",
+            sha256("secret")
+        );
+        let (_, snapshot) = lumewarp_config::Config::parse(&yaml).unwrap();
+        let runtime = Runtime::with_usage_and_env(
+            Arc::new(crate::metrics::Metrics::new()),
+            crate::usage::UsageSink::disabled(),
+            crate::runtime::EnvOptions {
+                id_key: Some(crate::a2a_ids::IdKey::from_secret(vec![7u8; 32]).unwrap()),
+                public_url: None,
+            },
+        );
+        let routing_table = RoutingTable::compile(
+            &snapshot,
+            lumewarp_config::AuthMode::standalone(&snapshot),
+            &runtime,
+        )
+        .unwrap();
+        let slot: Snapshot = Arc::new(ArcSwapOption::from_pointee(routing_table));
+        let server = TestServer::start(slot, runtime);
+        let key = ("x-lumewarp-key", "secret");
+        let a2a = server.request(false, "POST", "/a2a/a1", &[key]).await;
+        assert_eq!(a2a.0, 503);
+        assert!(String::from_utf8_lossy(&a2a.2).contains("a2a_not_configured"));
+        assert_eq!(server.request(false, "GET", "/a2a", &[key]).await.0, 503);
+        assert_eq!(
+            server
+                .request(false, "GET", "/a2a/a1/.well-known/agent-card.json", &[key])
+                .await
+                .0,
+            503
+        );
+        // MCP (it has the id key) and the LLM path are unaffected.
+        assert_ne!(server.request(false, "POST", "/mcp", &[key]).await.0, 503);
+        assert_eq!(
+            server
+                .request(
+                    false,
+                    "GET",
+                    "/v1/models",
+                    &[("authorization", "Bearer secret")]
+                )
+                .await
+                .0,
+            200
+        );
+
+        // With no id key at all, MCP cannot seal sessions either; only the LLM
+        // path is left.
+        let bare = Runtime::new();
+        let routing_table = RoutingTable::compile(
+            &snapshot,
+            lumewarp_config::AuthMode::standalone(&snapshot),
+            &bare,
+        )
+        .unwrap();
+        let slot: Snapshot = Arc::new(ArcSwapOption::from_pointee(routing_table));
+        let server = TestServer::start(slot, bare);
+        let mcp = server.request(false, "POST", "/mcp", &[key]).await;
+        assert_eq!(mcp.0, 503);
+        assert!(String::from_utf8_lossy(&mcp.2).contains("mcp_not_configured"));
+        assert_eq!(server.request(false, "GET", "/a2a", &[key]).await.0, 503);
+        assert_eq!(
+            server
+                .request(
+                    false,
+                    "GET",
+                    "/v1/models",
+                    &[("authorization", "Bearer secret")]
+                )
+                .await
+                .0,
+            200
+        );
     }
 
     #[tokio::test]

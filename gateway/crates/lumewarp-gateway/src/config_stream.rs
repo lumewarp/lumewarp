@@ -12,8 +12,8 @@ use std::{
 use lumewarp_config::AuthMode;
 use lumewarp_proto::config::v1::{
     config_service_client::ConfigServiceClient, config_update::Update, gateway_message::Msg, Ack,
-    ConfigUpdate, GatewayMessage, HealthReport, Hello, Nack, NackCode, PluginDescriptor, Snapshot,
-    TargetHealth,
+    CatalogReport, ConfigUpdate, GatewayMessage, HealthReport, Hello, Nack, NackCode,
+    PluginDescriptor, Snapshot, TargetHealth,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::ReceiverStream;
@@ -24,6 +24,7 @@ use tonic::{
 };
 
 use crate::{
+    catalog,
     router::RoutingTable,
     runtime::Runtime,
     server,
@@ -35,6 +36,10 @@ const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// Probe state changes are coalesced into at most one report per interval.
 const HEALTH_REPORT_INTERVAL: Duration = Duration::from_secs(1);
+/// Catalog observations are coalesced the same way; the registry already drops
+/// repeats within its own 10-minute window, so this only avoids one message per
+/// observed tool while `tools/list` answers.
+const CATALOG_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct StreamConfig {
     pub url: String,
@@ -181,9 +186,18 @@ impl Client {
         let mut received = false;
         // Report once right away: the state may come from the on-disk snapshot.
         let mut report_at = Some(tokio::time::Instant::now());
+        // Catalog observations wake the loop like probe changes do; a report is
+        // only sent when something was queued (`drain_report` is lossless).
+        let mut catalog_at: Option<tokio::time::Instant> = None;
         loop {
             let report_due = async {
                 match report_at {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            };
+            let catalog_due = async {
+                match catalog_at {
                     Some(at) => tokio::time::sleep_until(at).await,
                     None => std::future::pending().await,
                 }
@@ -199,15 +213,46 @@ impl Client {
                     }
                     if acked {
                         report_at.get_or_insert_with(tokio::time::Instant::now);
+                        // An apply can change what is reportable only through
+                        // the proxies, but a fresh ACK is a natural flush point.
+                        if catalog_at.is_none() && self.runtime.catalog.pending() > 0 {
+                            catalog_at = Some(tokio::time::Instant::now());
+                        }
                     }
                 }
                 () = self.runtime.health.changed(), if report_at.is_none() => {
                     report_at = Some(tokio::time::Instant::now() + HEALTH_REPORT_INTERVAL);
                 }
+                () = self.runtime.catalog.changed(), if catalog_at.is_none() => {
+                    catalog_at = Some(tokio::time::Instant::now() + CATALOG_REPORT_INTERVAL);
+                }
                 () = report_due => {
                     report_at = None;
                     if tx.send(self.health_report()).await.is_err() {
                         break;
+                    }
+                }
+                () = catalog_due => {
+                    catalog_at = None;
+                    if let Some(report) = self.catalog_report() {
+                        let message = GatewayMessage {
+                            msg: Some(Msg::Catalog(report)),
+                        };
+                        if let Err(error) = tx.send(message).await {
+                            // The message never left this gateway: put what it
+                            // carried back so the next session reports it
+                            // (M5). The queue is bounded, so this cannot grow
+                            // without limit.
+                            if let Some(Msg::Catalog(report)) = error.0.msg {
+                                self.runtime.catalog.restore(report);
+                            }
+                            break;
+                        }
+                        // A batch may have been size- or count-limited; drain
+                        // the rest right away instead of waiting a second.
+                        if self.runtime.catalog.pending() > 0 && catalog_at.is_none() {
+                            catalog_at = Some(tokio::time::Instant::now());
+                        }
                     }
                 }
             }
@@ -229,6 +274,20 @@ impl Client {
                 models: wire(models),
             })),
         }
+    }
+
+    /// The next queued catalog batch, or `None` when there is nothing to
+    /// report. Unlike `HealthReport`, a `CatalogReport` adds to what was
+    /// reported before (`config_service.proto`, "Each report adds to what was
+    /// reported before"), so only non-empty reports are sent. The batch is
+    /// bounded (`MAX_REPORT_ITEMS`, `MAX_REPORT_BYTES`); anything that did not
+    /// fit stays queued and is sent next (M5).
+    fn catalog_report(&self) -> Option<CatalogReport> {
+        let report = self
+            .runtime
+            .catalog
+            .drain_report(catalog::MAX_REPORT_ITEMS, catalog::MAX_REPORT_BYTES);
+        (!report.definitions.is_empty() || !report.cards.is_empty()).then_some(report)
     }
 
     /// Applies one update and returns the ACK or NACK to send.
@@ -258,6 +317,11 @@ impl Client {
         match applied {
             Ok((next, routing_table, digest)) => {
                 routing_table.activate_health();
+                // L1: observations of a server this snapshot no longer
+                // configures are dropped with it.
+                self.runtime
+                    .observed
+                    .retain_servers(routing_table.targets.servers().map(|s| s.name.as_ref()));
                 self.slot.store(Some(Arc::new(routing_table)));
                 self.runtime.metrics.config_applied(next.version);
                 tracing::info!(version = next.version, "config applied");
@@ -312,5 +376,231 @@ mod tests {
             assert!(backoff(attempt) <= BACKOFF_MAX);
         }
         assert!(backoff(0) <= BACKOFF_MIN);
+    }
+
+    /// The session loop against an in-process `ConfigService`: a queued
+    /// observation becomes one `CatalogReport` on the stream, and nothing is
+    /// reported while the registry is empty.
+    mod catalog {
+        use super::super::*;
+        use lumewarp_proto::config::v1::{config_update::Update, gateway_message::Msg};
+        use std::{
+            convert::Infallible,
+            net::SocketAddr,
+            pin::Pin,
+            task::{Context, Poll},
+        };
+        use tokio::sync::mpsc;
+        use tokio_stream::{wrappers::TcpListenerStream, Stream};
+        use tonic::{
+            codegen::{http, BoxFuture, Service},
+            server::NamedService,
+            Request, Response, Status, Streaming,
+        };
+
+        struct Conn {
+            inbound: mpsc::UnboundedReceiver<GatewayMessage>,
+            outbound: mpsc::UnboundedSender<Result<ConfigUpdate, Status>>,
+        }
+
+        impl Conn {
+            fn send(&self, update: ConfigUpdate) {
+                self.outbound
+                    .send(Ok(update))
+                    .expect("gateway stream closed");
+            }
+
+            /// The next Hello/ACK/NACK/Catalog; health reports are skipped.
+            async fn recv(&mut self) -> Msg {
+                loop {
+                    let message = tokio::time::timeout(Duration::from_secs(5), self.inbound.recv())
+                        .await
+                        .expect("gateway sent nothing")
+                        .expect("gateway closed the stream");
+                    match message.msg {
+                        Some(Msg::Health(_)) => continue,
+                        Some(msg) => return msg,
+                        None => continue,
+                    }
+                }
+            }
+        }
+
+        type Conns = mpsc::UnboundedSender<Conn>;
+
+        #[derive(Clone)]
+        struct Svc(Conns);
+
+        impl NamedService for Svc {
+            const NAME: &'static str = "lumewarp.config.v1.ConfigService";
+        }
+
+        struct Updates(mpsc::UnboundedReceiver<Result<ConfigUpdate, Status>>);
+        impl Stream for Updates {
+            type Item = Result<ConfigUpdate, Status>;
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                self.0.poll_recv(cx)
+            }
+        }
+
+        struct StreamImpl(Conns);
+        impl tonic::server::StreamingService<GatewayMessage> for StreamImpl {
+            type Response = ConfigUpdate;
+            type ResponseStream = Updates;
+            type Future = BoxFuture<Response<Updates>, Status>;
+
+            fn call(&mut self, request: Request<Streaming<GatewayMessage>>) -> Self::Future {
+                let conns = self.0.clone();
+                Box::pin(async move {
+                    let mut incoming = request.into_inner();
+                    let (in_tx, in_rx) = mpsc::unbounded_channel();
+                    let (out_tx, out_rx) = mpsc::unbounded_channel();
+                    tokio::spawn(async move {
+                        while let Ok(Some(message)) = incoming.message().await {
+                            if in_tx.send(message).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    let _ = conns.send(Conn {
+                        inbound: in_rx,
+                        outbound: out_tx,
+                    });
+                    Ok(Response::new(Updates(out_rx)))
+                })
+            }
+        }
+
+        impl Service<http::Request<tonic::body::Body>> for Svc {
+            type Response = http::Response<tonic::body::Body>;
+            type Error = Infallible;
+            type Future = BoxFuture<Self::Response, Self::Error>;
+
+            fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, req: http::Request<tonic::body::Body>) -> Self::Future {
+                let conns = self.0.clone();
+                Box::pin(async move {
+                    let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                    Ok(grpc.streaming(StreamImpl(conns), req).await)
+                })
+            }
+        }
+
+        async fn fake_cp() -> (SocketAddr, mpsc::UnboundedReceiver<Conn>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (tx, conns) = mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                // The test aborts nothing: the fake control plane lives until
+                // the process ends.
+                let _ = tonic::transport::Server::builder()
+                    .add_service(Svc(tx))
+                    .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
+                        std::future::pending::<()>().await
+                    })
+                    .await;
+            });
+            (addr, conns)
+        }
+
+        fn full(version: u64, scope: &str) -> ConfigUpdate {
+            ConfigUpdate {
+                target_digest: vec![version as u8],
+                update: Some(Update::Full(Snapshot {
+                    version,
+                    scope: scope.into(),
+                    ..Default::default()
+                })),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_queued_observation_is_sent_as_one_catalog_report() {
+            let (addr, mut conns) = fake_cp().await;
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = Runtime::new();
+            let slot: server::Snapshot = Arc::new(arc_swap::ArcSwapOption::empty());
+            let config = StreamConfig {
+                url: format!("http://{addr}"),
+                token: "gw-token".into(),
+                gateway_id: "gw-catalog".into(),
+                scope: "scope-a".into(),
+                state_dir: dir.path().to_owned(),
+            };
+            let handle = spawn(
+                config,
+                Snapshot {
+                    scope: "scope-a".into(),
+                    ..Default::default()
+                },
+                Vec::new(),
+                false,
+                slot,
+                runtime.clone(),
+            )
+            .unwrap();
+            let mut conn = tokio::time::timeout(Duration::from_secs(5), conns.recv())
+                .await
+                .unwrap()
+                .expect("fake control plane accepted no stream");
+            assert!(matches!(conn.recv().await, Msg::Hello(_)));
+            conn.send(full(1, "scope-a"));
+            match conn.recv().await {
+                Msg::Ack(ack) => assert_eq!(ack.version, 1),
+                other => panic!("expected Ack, got {other:?}"),
+            }
+
+            // Nothing is reported while nothing was observed.
+            let quiet = tokio::time::timeout(Duration::from_millis(300), conn.recv()).await;
+            assert!(quiet.is_err(), "an empty catalog report is not sent");
+
+            runtime.catalog.observe(&crate::catalog::Observation {
+                server: "s1",
+                server_id: "id-s1",
+                kind: lumewarp_proto::config::v1::McpDefinitionKind::Tool,
+                name: "echo",
+                canonical_json: r#"{"name":"echo"}"#,
+                hash: [7u8; 32],
+                auto_approved: true,
+                config_version: 1,
+            });
+            let report = match conn.recv().await {
+                Msg::Catalog(report) => report,
+                other => panic!("expected Catalog, got {other:?}"),
+            };
+            assert_eq!(report.definitions.len(), 1);
+            let definition = &report.definitions[0];
+            assert_eq!(definition.server, "s1");
+            assert_eq!(definition.server_id, "id-s1");
+            assert_eq!(definition.config_version, 1, "L3 provenance");
+            assert_eq!(definition.name, "echo");
+            assert_eq!(definition.hash, vec![7; 32]);
+            assert!(definition.auto_approved);
+            assert!(report.cards.is_empty());
+            assert_eq!(runtime.catalog.pending(), 0, "the report is drained");
+
+            // A card is reported the same way.
+            runtime.catalog.card(&crate::catalog::CardObservation {
+                agent: "a1",
+                agent_id: "id-a1",
+                card_json: r#"{"name":"a1"}"#,
+                error: "",
+                config_version: 1,
+            });
+            let report = match conn.recv().await {
+                Msg::Catalog(report) => report,
+                other => panic!("expected Catalog, got {other:?}"),
+            };
+            assert_eq!(report.cards.len(), 1);
+            assert_eq!(report.cards[0].agent_id, "id-a1");
+            assert_eq!(report.cards[0].config_version, 1);
+            handle.abort();
+        }
     }
 }

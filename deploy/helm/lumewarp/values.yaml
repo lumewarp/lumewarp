@@ -123,6 +123,50 @@ gateway:
     shutdownGraceMs: 25000
     headerReadTimeoutMs: 30000
     bodyReadTimeoutMs: 30000
+  # WASM plugins. Components are not in the gateway image: a plugin is one `.wasm` file
+  # in one of three directories, read once at startup, so replacing a file is a file
+  # write plus a pod restart (`kubectl rollout restart`). Built-in strategies and auth
+  # are native and never need a file.
+  plugins:
+    # Existing volume holding the components; a Kubernetes volume source rendered as is,
+    # for example
+    #   {persistentVolumeClaim: {claimName: gateway-plugins}}
+    #   {configMap: {name: gateway-plugins, items: [{key: cheapest-first.wasm, path: router/cheapest-first.wasm}]}}
+    # Empty = no plugin volume and no directory variables: nothing is loaded, which is
+    # valid for LLM, MCP and A2A traffic alike.
+    volume: {}
+    # Where the volume is mounted. Each kind reads one directory below it, defined by
+    # `dirs`; a directory that does not exist refuses to start the gateway, so create all
+    # three even when they stay empty.
+    mountPath: /etc/lumewarp/plugins
+    # Directory per kind, member of the gateway's capability set:
+    #   router        LUMEWARP_ROUTER_PLUGIN_DIR,     strategy:<name> per file
+    #   auth          LUMEWARP_AUTH_PLUGIN_DIR,       auth:<name> per file
+    #   a2aMiddleware LUMEWARP_A2A_MIDDLEWARE_DIR,    a2a_middleware:<name> per file
+    dirs:
+      router: router
+      auth: auth
+      a2aMiddleware: a2a-middleware
+    # Process-wide WASM memory budget in bytes; every plugin instance is additionally
+    # capped at 32 MiB. Empty = the gateway default, 1073741824 (1 GiB).
+    memoryLimitBytes: ""
+    # Existing Secrets whose keys become environment variables for the gateway. Name each
+    # key LUMEWARP_PLUGIN_SECRET_<NAME>: an `upstream-auth` plugin reads those through
+    # secret(), and the host exposes no variable without that prefix. The host does not
+    # scope them per plugin, so put the plugin name in the key.
+    secretEnvs: []
+    #  - gateway-plugin-secrets
+  # External base URL of the MCP and A2A endpoints, e.g. https://gateway.example.com
+  # (no query, no userinfo). Agent-card URLs are built from it, never from the Host
+  # header. Empty = the A2A endpoints answer 503; MCP and LLM traffic is unaffected.
+  publicUrl: ""
+  # Existing Secret holding LUMEWARP_GATEWAY_ID_KEY (base64, at least 32 bytes). It MACs
+  # A2A task and context ids and, through HKDF, seals MCP sessions, so every gateway of
+  # this installation must use the same value; it is never in a config snapshot. Empty =
+  # the MCP and A2A endpoints answer 503; LLM traffic is unaffected.
+  idKey:
+    secretName: ""
+    key: gateway-id-key
   stateDir:
     path: /var/lib/lumewarp
     # emptyDir is the default, so a pod without a cached snapshot cold-boots from the

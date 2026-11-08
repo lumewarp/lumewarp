@@ -40,6 +40,12 @@ pub const SEALED_INFO: &[u8] = b"lumewarp/upstream-auth-secret/v1";
 /// Timeout of one upstream request when `timeout_ms` is 0.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long one WASM plugin call may run when `PluginRef.timeout_ms` /
+/// `Router.plugin_timeout_ms` is 0 (the proto default). A plugin that exceeds
+/// it is cancelled and the request fails as the adapter documents; the
+/// built-in `auth` plugins do not use it.
+pub const DEFAULT_PLUGIN_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Largest `PluginRef.params_json` (proto: "at most 16 KiB UTF-8").
 pub const MAX_PARAMS_BYTES: usize = 16 * 1024;
 
@@ -59,7 +65,11 @@ pub const TOOL_SEPARATOR: &str = "__";
 /// Built-in upstream auth plugins (`docs/plugins.md`, "Kinds and capabilities").
 pub const BUILTIN_AUTH: [&str; 3] = ["none", "static_bearer", "passthrough"];
 
-/// `^[a-z][a-z0-9_-]{0,62}$`: MCP server and A2A agent names.
+/// `^[a-z][a-z0-9_-]{0,62}$` and no `__`: MCP server and A2A agent names.
+///
+/// `__` separates the server from the upstream name on the aggregated MCP
+/// endpoint (L4); a name containing it would make `<server>__<tool>"
+/// ambiguous, so both server and agent names refuse it.
 pub fn valid_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     (1..=63).contains(&bytes.len())
@@ -67,6 +77,7 @@ pub fn valid_name(name: &str) -> bool {
         && bytes
             .iter()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_' || *b == b'-')
+        && !name.contains(TOOL_SEPARATOR)
 }
 
 /// `^[a-z][a-z0-9_]{0,62}$`: plugin names (from a manifest, so no hyphen).
@@ -113,6 +124,9 @@ pub struct Plugin {
     /// sha256 of the canonical settings: the cache key for outbound auth
     /// (plan P9) and the identity of a middleware instance.
     pub digest: [u8; 32],
+    /// How long one call may run: `PluginRef.timeout_ms`, or
+    /// [`DEFAULT_PLUGIN_TIMEOUT`] when the snapshot left it 0.
+    pub timeout: Duration,
 }
 
 /// How the gateway authenticates to an MCP server or A2A agent.
@@ -148,7 +162,8 @@ impl Auth {
         }
     }
 
-    /// The WASM plugin, for the adapter. `None` for the built-ins.
+    /// The WASM plugin, for the adapter. `None` for the built-ins; the
+    /// adapter applies [`Plugin::timeout`] to one `authorize` call.
     pub fn plugin(&self) -> Option<&Plugin> {
         match self {
             Self::Plugin(plugin) => Some(plugin),
@@ -169,14 +184,24 @@ impl fmt::Debug for Auth {
     }
 }
 
-/// Approved definition hashes of one MCP server, keyed by upstream name.
+/// The reviewed definitions of one MCP server, keyed by upstream name (L2).
 ///
-/// A name can carry more than one hash while the control plane approves a
-/// replacement before the upstream switches: any approved hash is served.
+/// `McpServer.definitions` carries every definition the control plane has
+/// reviewed, in any state: `APPROVED` ones make up the hash set the gateway
+/// serves; `PENDING` and `REJECTED` ones only make the name *known*, so that
+/// TOFU does not treat a name it has already reviewed as a first sight.
+///
+/// A name can carry more than one approved hash while the control plane
+/// approves a replacement before the upstream switches: any approved hash is
+/// served.
 #[derive(Clone, Debug, Default)]
 pub struct Approved {
     tools: HashMap<Arc<str>, Vec<[u8; 32]>>,
     prompts: HashMap<Arc<str>, Vec<[u8; 32]>>,
+    /// Names with a definition of any state; TOFU's "has this server ever had
+    /// a definition by this name" (`pending`/`rejected` names included).
+    known_tools: HashSet<Arc<str>>,
+    known_prompts: HashSet<Arc<str>>,
     count: usize,
 }
 
@@ -189,6 +214,14 @@ impl Approved {
         }
     }
 
+    fn known(&self, kind: pb::McpDefinitionKind) -> Option<&HashSet<Arc<str>>> {
+        match kind {
+            pb::McpDefinitionKind::Tool => Some(&self.known_tools),
+            pb::McpDefinitionKind::Prompt => Some(&self.known_prompts),
+            pb::McpDefinitionKind::Unspecified => None,
+        }
+    }
+
     /// Whether this exact definition was approved.
     pub fn accepts(&self, kind: pb::McpDefinitionKind, name: &str, hash: &[u8; 32]) -> bool {
         self.map(kind)
@@ -196,13 +229,20 @@ impl Approved {
             .is_some_and(|hashes| hashes.contains(hash))
     }
 
-    /// Whether any definition of this name was approved: under TOFU a known
-    /// name is withheld when its hash changed, a new name is served.
-    pub fn has_name(&self, kind: pb::McpDefinitionKind, name: &str) -> bool {
+    /// Whether the snapshot has a definition of this name, whatever its state
+    /// (`APPROVED`, `PENDING`, `REJECTED`). TOFU's "first sight" is exactly
+    /// `!knows(kind, name)`.
+    pub fn knows(&self, kind: pb::McpDefinitionKind, name: &str) -> bool {
+        self.known(kind).is_some_and(|names| names.contains(name))
+    }
+
+    /// Whether at least one definition of this name is approved: under TOFU a
+    /// known name is withheld when its hash changed, a new name is served.
+    pub fn has_approved(&self, kind: pb::McpDefinitionKind, name: &str) -> bool {
         self.map(kind).is_some_and(|map| map.contains_key(name))
     }
 
-    /// Approved names of one kind, unsorted.
+    /// Names with at least one approved definition, unsorted.
     pub fn names(&self, kind: pb::McpDefinitionKind) -> impl Iterator<Item = &str> {
         self.map(kind)
             .into_iter()
@@ -218,13 +258,31 @@ impl Approved {
         self.count == 0
     }
 
-    fn insert(&mut self, kind: pb::McpDefinitionKind, name: &str, hash: [u8; 32]) {
+    /// Adds one reviewed definition. Only `APPROVED` contributes a servable
+    /// hash; every state makes the name known.
+    ///
+    /// `UNSPECIFIED` counts as pending, never as approved: the control plane
+    /// always sets a state, so an unset one is a definition nobody approved
+    /// and the gateway fails closed (an empty list used to mean "approved",
+    /// which `UNSPECIFIED` would otherwise silently reinstate).
+    fn insert(
+        &mut self,
+        kind: pb::McpDefinitionKind,
+        name: &str,
+        hash: [u8; 32],
+        state: pb::McpDefinitionState,
+    ) {
         let name: Arc<str> = name.into();
-        let map = match kind {
-            pb::McpDefinitionKind::Tool => &mut self.tools,
-            pb::McpDefinitionKind::Prompt => &mut self.prompts,
+        let approved = state == pb::McpDefinitionState::Approved;
+        let (map, known) = match kind {
+            pb::McpDefinitionKind::Tool => (&mut self.tools, &mut self.known_tools),
+            pb::McpDefinitionKind::Prompt => (&mut self.prompts, &mut self.known_prompts),
             pb::McpDefinitionKind::Unspecified => return,
         };
+        known.insert(name.clone());
+        if !approved {
+            return;
+        }
         let hashes = map.entry(name).or_default();
         if !hashes.contains(&hash) {
             hashes.push(hash);
@@ -272,7 +330,8 @@ pub struct A2aTarget {
     /// the well-known path).
     pub card_url: Uri,
     pub auth: Auth,
-    /// At most one middleware (plan D14).
+    /// At most one middleware (plan D14); its [`Plugin::timeout`] bounds one
+    /// `on-request`/`on-response`/`on-stream-event` call.
     pub middleware: Option<Plugin>,
     pub timeout: Duration,
     /// Card the control plane stored (pasted by an administrator or reported by
@@ -362,6 +421,13 @@ impl Targets {
         }
         targets.server_list.sort_by(|a, b| a.name.cmp(&b.name));
         targets.agent_list.sort_by(|a, b| a.name.cmp(&b.name));
+        // Configure the `upstream-auth` plugins and the A2A middleware of every
+        // target that names one, so a refused `configure` answers this version
+        // with a NACK instead of failing the first request to that target.
+        // Plugins this gateway did not load are skipped here; the capability
+        // check in `snapshot::validate` already NACKed such a snapshot.
+        crate::upstream_auth::precompile(&targets)?;
+        crate::a2a::precompile(&targets)?;
         Ok(targets)
     }
 
@@ -433,7 +499,7 @@ pub fn validate(snapshot: &Snapshot) -> Result<(), ApplyError> {
         let what = format!("mcp server {:?}", server.name);
         if !valid_name(&server.name) {
             return Err(invalid(format!(
-                "{what} name does not match ^[a-z][a-z0-9_-]{{0,62}}$"
+                "{what} name must match ^[a-z][a-z0-9_-]{{0,62}}$ and contain no \"__\""
             )));
         }
         if plain_http_uri(&server.url).is_none() {
@@ -454,7 +520,7 @@ pub fn validate(snapshot: &Snapshot) -> Result<(), ApplyError> {
         let what = format!("a2a agent {:?}", agent.name);
         if !valid_name(&agent.name) {
             return Err(invalid(format!(
-                "{what} name does not match ^[a-z][a-z0-9_-]{{0,62}}$"
+                "{what} name must match ^[a-z][a-z0-9_-]{{0,62}}$ and contain no \"__\""
             )));
         }
         let url = plain_http_uri(&agent.url).ok_or_else(|| {
@@ -559,7 +625,17 @@ fn compile_plugin(plugin: &pb::PluginRef, what: &str) -> Result<Plugin, ApplyErr
             Arc::from(plugin.params_json.as_str())
         },
         digest,
+        timeout: plugin_timeout(plugin.timeout_ms),
     })
+}
+
+/// `PluginRef.timeout_ms` / `Router.plugin_timeout_ms`: 0 means the default.
+pub fn plugin_timeout(timeout_ms: u32) -> Duration {
+    if timeout_ms == 0 {
+        DEFAULT_PLUGIN_TIMEOUT
+    } else {
+        Duration::from_millis(timeout_ms.into())
+    }
 }
 
 /// Checks `auth` and the built-in plugin's settings. Pure: it never reads the
@@ -696,36 +772,44 @@ pub enum SecretError {
 }
 
 fn compile_approved(server: &pb::McpServer, name: &str) -> Result<Approved, ApplyError> {
-    if server.approved.len() > MAX_APPROVED_DEFINITIONS {
+    if server.definitions.len() > MAX_APPROVED_DEFINITIONS {
         return Err(invalid(format!(
-            "mcp server {name:?} has more than {MAX_APPROVED_DEFINITIONS} approved definitions"
+            "mcp server {name:?} has more than {MAX_APPROVED_DEFINITIONS} definitions"
         )));
     }
     let mut approved = Approved::default();
-    for definition in &server.approved {
+    for definition in &server.definitions {
         let kind = pb::McpDefinitionKind::try_from(definition.kind).map_err(|_| {
             invalid(format!(
-                "mcp server {name:?} approved definition has unknown kind {}",
+                "mcp server {name:?} definition has unknown kind {}",
                 definition.kind
             ))
         })?;
         if kind == pb::McpDefinitionKind::Unspecified {
             return Err(invalid(format!(
-                "mcp server {name:?} approved definition has unspecified kind"
+                "mcp server {name:?} definition has unspecified kind"
             )));
         }
+        // UNSPECIFIED is the proto default of a definition that carries no
+        // state; it can only mean "approved" (the old schema's list).
+        let state = pb::McpDefinitionState::try_from(definition.state).map_err(|_| {
+            invalid(format!(
+                "mcp server {name:?} definition has unknown state {}",
+                definition.state
+            ))
+        })?;
         if definition.name.is_empty() || definition.name.len() > MAX_NAME_BYTES {
             return Err(invalid(format!(
-                "mcp server {name:?} approved definition has an invalid name"
+                "mcp server {name:?} definition has an invalid name"
             )));
         }
         let hash: [u8; 32] = definition.hash.as_slice().try_into().map_err(|_| {
             invalid(format!(
-                "mcp server {name:?} approved definition {:?} needs a 32-byte hash",
+                "mcp server {name:?} definition {:?} needs a 32-byte hash",
                 definition.name
             ))
         })?;
-        approved.insert(kind, &definition.name, hash);
+        approved.insert(kind, &definition.name, hash, state);
     }
     Ok(approved)
 }
@@ -773,7 +857,7 @@ mod tests {
             auth: None,
             timeout_ms: 0,
             review_mode: 0,
-            approved: Vec::new(),
+            definitions: Vec::new(),
         }
     }
 
@@ -803,10 +887,20 @@ mod tests {
     }
 
     fn approved(kind: McpDefinitionKind, name: &str, byte: u8) -> McpDefinition {
+        definition(kind, name, byte, pb::McpDefinitionState::Approved)
+    }
+
+    fn definition(
+        kind: McpDefinitionKind,
+        name: &str,
+        byte: u8,
+        state: pb::McpDefinitionState,
+    ) -> McpDefinition {
         McpDefinition {
             kind: kind as i32,
             name: name.into(),
             hash: hash(byte),
+            state: state as i32,
         }
     }
 
@@ -850,6 +944,19 @@ mod tests {
         assert_eq!(ReviewMode::from_pb(3), Some(ReviewMode::Off));
         assert_eq!(ReviewMode::from_pb(4), None);
         assert_eq!(ReviewMode::from_pb(-1), None);
+        // UNSPECIFIED compiles as TOFU, not as an error.
+        let targets = Targets::compile(
+            &snapshot(
+                vec![McpServer {
+                    review_mode: 0,
+                    ..server("s1", "https://x.test/mcp")
+                }],
+                vec![],
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(targets.server("s1").unwrap().review, ReviewMode::Tofu);
     }
 
     #[test]
@@ -876,7 +983,7 @@ mod tests {
 
     #[test]
     fn names_are_validated_and_unique() {
-        // Names: regex, duplicates, empty.
+        // Names: regex, duplicates, empty, and the `__` separator (L4).
         let too_long = "a".repeat(64);
         for bad in [
             "",
@@ -886,13 +993,16 @@ mod tests {
             "s.1",
             "s/1",
             "s1!",
+            "s__1",
+            "s1__",
+            "__s1",
             too_long.as_str(),
         ] {
             let mut s = server("s1", "https://x.test/mcp");
             s.name = bad.into();
             let error = validate(&snapshot(vec![s], vec![])).unwrap_err();
             assert!(
-                error.reason.contains("name does not match")
+                error.reason.contains("name must match")
                     || error.reason.contains("with empty name"),
                 "{bad:?}: {}",
                 error.reason
@@ -925,6 +1035,18 @@ mod tests {
             vec![agent("same", "https://y.test/rpc", "")],
         ))
         .is_ok());
+        // `__` is refused for agents too, and a single underscore is fine.
+        let error = validate(&snapshot(
+            vec![],
+            vec![agent("a__b", "https://y.test/rpc", "")],
+        ))
+        .unwrap_err();
+        assert!(error.reason.contains("no \"__\""), "{}", error.reason);
+        assert!(validate(&snapshot(
+            vec![server("a_b-c", "https://x.test/mcp")],
+            vec![agent("a_b-c", "https://y.test/rpc", "")],
+        ))
+        .is_ok());
     }
 
     #[test]
@@ -950,6 +1072,7 @@ mod tests {
             PluginRef {
                 plugin: "hmac".into(),
                 params_json: json.into(),
+                timeout_ms: 0,
             }
         };
         assert!(compile_plugin(&object(""), "test").is_ok());
@@ -988,6 +1111,7 @@ mod tests {
                     plugin: Some(PluginRef {
                         plugin: "Hmac".into(),
                         params_json: String::new(),
+                        timeout_ms: 0,
                     }),
                     secret_ref: String::new(),
                     secret_ciphertext: Vec::new(),
@@ -1012,6 +1136,7 @@ mod tests {
             plugin: Some(PluginRef {
                 plugin: "static_bearer".into(),
                 params_json: String::new(),
+                timeout_ms: 0,
             }),
             secret_ref: String::new(),
             secret_ciphertext: sealed.clone(),
@@ -1032,6 +1157,7 @@ mod tests {
             plugin: Some(PluginRef {
                 plugin: "static_bearer".into(),
                 params_json: String::new(),
+                timeout_ms: 0,
             }),
             secret_ref: String::new(),
             secret_ciphertext: sealed.clone(),
@@ -1048,6 +1174,7 @@ mod tests {
             plugin: Some(PluginRef {
                 plugin: "static_bearer".into(),
                 params_json: String::new(),
+                timeout_ms: 0,
             }),
             secret_ref: String::new(),
             secret_ciphertext: sealed,
@@ -1064,6 +1191,7 @@ mod tests {
             plugin: Some(PluginRef {
                 plugin: "static_bearer".into(),
                 params_json: String::new(),
+                timeout_ms: 0,
             }),
             secret_ref: "LUMEWARP_TEST_MCP_AUTH_TOKEN".into(),
             secret_ciphertext: Vec::new(),
@@ -1088,6 +1216,7 @@ mod tests {
             plugin: Some(PluginRef {
                 plugin: "static_bearer".into(),
                 params_json: String::new(),
+                timeout_ms: 0,
             }),
             secret_ref: "LUMEWARP_TEST_MCP_AUTH_TOKEN_MISSING".into(),
             secret_ciphertext: Vec::new(),
@@ -1109,6 +1238,7 @@ mod tests {
                         plugin: Some(PluginRef {
                             plugin: plugin.into(),
                             params_json: params.into(),
+                            timeout_ms: 0,
                         }),
                         secret_ref: secret_ref.into(),
                         secret_ciphertext: ciphertext,
@@ -1146,11 +1276,11 @@ mod tests {
     }
 
     #[test]
-    fn approved_definitions_need_known_kind_name_and_32_byte_hash() {
+    fn definitions_need_known_kind_name_state_and_32_byte_hash() {
         let with_approved = |approved: Vec<McpDefinition>| {
             snapshot(
                 vec![McpServer {
-                    approved,
+                    definitions: approved,
                     ..server("s1", "https://x.test/mcp")
                 }],
                 vec![],
@@ -1162,36 +1292,50 @@ mod tests {
             1
         )]))
         .is_ok());
+        for state in [
+            pb::McpDefinitionState::Pending,
+            pb::McpDefinitionState::Rejected,
+            pb::McpDefinitionState::Unspecified,
+        ] {
+            assert!(
+                validate(&with_approved(vec![definition(
+                    McpDefinitionKind::Tool,
+                    "echo",
+                    1,
+                    state
+                )]))
+                .is_ok(),
+                "{state:?}"
+            );
+        }
         for bad in [
             McpDefinition {
                 kind: 0,
-                name: "echo".into(),
-                hash: hash(1),
+                ..approved(McpDefinitionKind::Tool, "echo", 1)
             },
             McpDefinition {
                 kind: 9,
-                name: "echo".into(),
-                hash: hash(1),
+                ..approved(McpDefinitionKind::Tool, "echo", 1)
             },
             McpDefinition {
-                kind: McpDefinitionKind::Tool as i32,
+                state: 9,
+                ..approved(McpDefinitionKind::Tool, "echo", 1)
+            },
+            McpDefinition {
                 name: String::new(),
-                hash: hash(1),
+                ..approved(McpDefinitionKind::Tool, "echo", 1)
             },
             McpDefinition {
-                kind: McpDefinitionKind::Tool as i32,
                 name: "x".repeat(MAX_NAME_BYTES + 1),
-                hash: hash(1),
+                ..approved(McpDefinitionKind::Tool, "echo", 1)
             },
             McpDefinition {
-                kind: McpDefinitionKind::Tool as i32,
-                name: "echo".into(),
                 hash: vec![1; 31],
+                ..approved(McpDefinitionKind::Tool, "echo", 1)
             },
             McpDefinition {
-                kind: McpDefinitionKind::Tool as i32,
-                name: "echo".into(),
                 hash: Vec::new(),
+                ..approved(McpDefinitionKind::Tool, "echo", 1)
             },
         ] {
             assert!(
@@ -1215,11 +1359,23 @@ mod tests {
             approved(McpDefinitionKind::Tool, "echo", 2),
             approved(McpDefinitionKind::Tool, "add", 3),
             approved(McpDefinitionKind::Prompt, "greet", 4),
+            definition(
+                McpDefinitionKind::Tool,
+                "pending",
+                5,
+                pb::McpDefinitionState::Pending,
+            ),
+            definition(
+                McpDefinitionKind::Prompt,
+                "rejected",
+                6,
+                pb::McpDefinitionState::Rejected,
+            ),
         ];
         let targets = Targets::compile(
             &snapshot(
                 vec![McpServer {
-                    approved: definitions,
+                    definitions,
                     review_mode: McpReviewMode::Tofu as i32,
                     ..server("s1", "https://x.test/mcp")
                 }],
@@ -1229,24 +1385,32 @@ mod tests {
         )
         .unwrap();
         let set = targets.server("s1").unwrap().approved();
-        assert_eq!(set.len(), 4);
+        assert_eq!(set.len(), 4, "pending and rejected carry no approved hash");
         assert!(set.accepts(McpDefinitionKind::Tool, "echo", &[1u8; 32]));
         assert!(set.accepts(McpDefinitionKind::Tool, "echo", &[2u8; 32]));
         assert!(!set.accepts(McpDefinitionKind::Tool, "echo", &[3u8; 32]));
         // Kinds do not mix.
         assert!(!set.accepts(McpDefinitionKind::Prompt, "echo", &[1u8; 32]));
-        assert!(set.has_name(McpDefinitionKind::Tool, "echo"));
-        assert!(!set.has_name(McpDefinitionKind::Tool, "greet"));
+        assert!(set.has_approved(McpDefinitionKind::Tool, "echo"));
+        assert!(!set.has_approved(McpDefinitionKind::Tool, "greet"));
+        // A reviewed name is known whatever its state (L2): TOFU must not treat
+        // a pending or rejected name as a first sight.
+        assert!(set.knows(McpDefinitionKind::Tool, "echo"));
+        assert!(set.knows(McpDefinitionKind::Tool, "pending"));
+        assert!(set.knows(McpDefinitionKind::Prompt, "rejected"));
+        assert!(!set.knows(McpDefinitionKind::Tool, "greet"));
+        assert!(!set.knows(McpDefinitionKind::Prompt, "pending"));
+        assert!(!set.knows(McpDefinitionKind::Tool, "never-seen"));
         let mut tools: Vec<_> = set.names(McpDefinitionKind::Tool).collect();
         tools.sort();
-        assert_eq!(tools, ["add", "echo"]);
+        assert_eq!(tools, ["add", "echo"], "only approved names are listed");
         let prompts: Vec<_> = set.names(McpDefinitionKind::Prompt).collect();
         assert_eq!(prompts, ["greet"]);
         // Duplicates are counted once and keep both hashes.
         let dup = Targets::compile(
             &snapshot(
                 vec![McpServer {
-                    approved: vec![
+                    definitions: vec![
                         approved(McpDefinitionKind::Tool, "echo", 1),
                         approved(McpDefinitionKind::Tool, "echo", 1),
                     ],
@@ -1262,6 +1426,117 @@ mod tests {
     }
 
     #[test]
+    fn unspecified_state_is_pending_not_approved() {
+        let mut srv = server("s1", "https://x.test/mcp");
+        srv.definitions = vec![
+            definition(
+                McpDefinitionKind::Tool,
+                "unset",
+                1,
+                pb::McpDefinitionState::Unspecified,
+            ),
+            definition(
+                McpDefinitionKind::Tool,
+                "pending",
+                2,
+                pb::McpDefinitionState::Pending,
+            ),
+            definition(
+                McpDefinitionKind::Tool,
+                "approved",
+                3,
+                pb::McpDefinitionState::Approved,
+            ),
+        ];
+        let targets = Targets::compile(&snapshot(vec![srv], vec![]), None).unwrap();
+        let set = targets.server("s1").unwrap().approved();
+        // The control plane always sets a state; an unset one is a definition
+        // nobody approved, so it fails closed instead of being served.
+        assert_eq!(set.len(), 1, "only APPROVED contributes a hash");
+        for name in ["unset", "pending"] {
+            assert!(set.knows(McpDefinitionKind::Tool, name), "{name}");
+            assert!(!set.has_approved(McpDefinitionKind::Tool, name), "{name}");
+            assert!(
+                !set.accepts(McpDefinitionKind::Tool, name, &[1u8; 32]),
+                "{name}"
+            );
+        }
+        assert!(set.has_approved(McpDefinitionKind::Tool, "approved"));
+        let memory = crate::catalog::Observed::new();
+        for mode in [ReviewMode::Tofu, ReviewMode::Manual] {
+            // A known name without an approved hash is not a first sight and is
+            // not callable; `off` is the only mode that ignores review.
+            assert!(!memory.may_call(mode, "s1", set, McpDefinitionKind::Tool, "unset"));
+            assert!(memory.may_call(mode, "s1", set, McpDefinitionKind::Tool, "approved"));
+        }
+    }
+
+    #[test]
+    fn plugin_timeouts_default_to_sixty_seconds() {
+        assert_eq!(plugin_timeout(0), DEFAULT_PLUGIN_TIMEOUT);
+        assert_eq!(DEFAULT_PLUGIN_TIMEOUT, Duration::from_secs(60));
+        assert_eq!(plugin_timeout(2500), Duration::from_millis(2500));
+        let auth = |timeout_ms: u32| pb::UpstreamAuth {
+            plugin: Some(PluginRef {
+                plugin: "hmac_signature".into(),
+                params_json: String::new(),
+                timeout_ms,
+            }),
+            secret_ref: String::new(),
+            secret_ciphertext: Vec::new(),
+        };
+        let with = |timeout_ms: u32, middleware: u32| {
+            snapshot(
+                vec![McpServer {
+                    auth: Some(auth(timeout_ms)),
+                    ..server("s1", "https://x.test/mcp")
+                }],
+                vec![pb::A2aAgent {
+                    middleware: Some(pb::PluginRef {
+                        plugin: "strip_artifacts".into(),
+                        params_json: String::new(),
+                        timeout_ms: middleware,
+                    }),
+                    ..agent("a1", "https://y.test/rpc", "")
+                }],
+            )
+        };
+        let targets = Targets::compile(&with(0, 0), None).unwrap();
+        let server = targets.server("s1").unwrap();
+        assert_eq!(
+            server.auth.plugin().unwrap().timeout,
+            DEFAULT_PLUGIN_TIMEOUT,
+            "0 = 60 s for an auth plugin"
+        );
+        assert_eq!(
+            targets
+                .agent("a1")
+                .unwrap()
+                .middleware
+                .as_ref()
+                .unwrap()
+                .timeout,
+            DEFAULT_PLUGIN_TIMEOUT,
+            "0 = 60 s for a middleware"
+        );
+        let targets = Targets::compile(&with(2500, 1500), None).unwrap();
+        assert_eq!(
+            targets.server("s1").unwrap().auth.plugin().unwrap().timeout,
+            Duration::from_millis(2500)
+        );
+        assert_eq!(
+            targets
+                .agent("a1")
+                .unwrap()
+                .middleware
+                .as_ref()
+                .unwrap()
+                .timeout,
+            Duration::from_millis(1500)
+        );
+    }
+
+    #[test]
     fn middleware_is_optional_and_carries_its_plugin() {
         let with = |plugin: Option<PluginRef>| {
             snapshot(
@@ -1270,6 +1545,7 @@ mod tests {
                     middleware: plugin.map(|plugin| pb::PluginRef {
                         plugin: plugin.plugin,
                         params_json: plugin.params_json,
+                        timeout_ms: 0,
                     }),
                     ..agent("a1", "https://x.test/rpc", "")
                 }],
@@ -1281,6 +1557,7 @@ mod tests {
             &with(Some(PluginRef {
                 plugin: "strip_artifacts".into(),
                 params_json: r#"{"mime":["image/png"]}"#.into(),
+                timeout_ms: 0,
             })),
             None,
         )
@@ -1291,6 +1568,7 @@ mod tests {
         let error = validate(&with(Some(PluginRef {
             plugin: "strip-artifacts".into(),
             params_json: String::new(),
+            timeout_ms: 0,
         })))
         .unwrap_err();
         assert!(error.reason.contains("plugin name"));
@@ -1298,6 +1576,7 @@ mod tests {
         assert!(validate(&with(Some(PluginRef {
             plugin: String::new(),
             params_json: String::new(),
+            timeout_ms: 0,
         })))
         .is_ok());
     }
@@ -1332,6 +1611,7 @@ mod tests {
                 plugin: Some(PluginRef {
                     plugin: plugin.into(),
                     params_json: String::new(),
+                    timeout_ms: 0,
                 }),
                 secret_ref: String::new(),
                 secret_ciphertext: Vec::new(),
@@ -1365,6 +1645,7 @@ mod tests {
             &PluginRef {
                 plugin: "hmac_signature".into(),
                 params_json: String::new(),
+                timeout_ms: 0,
             },
             "test",
         )
@@ -1374,6 +1655,7 @@ mod tests {
             &PluginRef {
                 plugin: "hmac_signature".into(),
                 params_json: r#"{"skew":5,"key":"abc"}"#.into(),
+                timeout_ms: 0,
             },
             "test",
         )
@@ -1388,6 +1670,7 @@ mod tests {
             plugin: Some(PluginRef {
                 plugin: "hmac_signature".into(),
                 params_json: String::new(),
+                timeout_ms: 0,
             }),
             secret_ref: String::new(),
             secret_ciphertext: Vec::new(),
@@ -1397,6 +1680,7 @@ mod tests {
             plugin: Some(PluginRef {
                 plugin: "none".into(),
                 params_json: String::new(),
+                timeout_ms: 0,
             }),
             secret_ref: String::new(),
             secret_ciphertext: Vec::new(),
@@ -1404,6 +1688,7 @@ mod tests {
         agent.middleware = Some(PluginRef {
             plugin: "strip_artifacts".into(),
             params_json: String::new(),
+            timeout_ms: 0,
         });
         let caps = capabilities(&snapshot(vec![s], vec![agent]));
         assert_eq!(

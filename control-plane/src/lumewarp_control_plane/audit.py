@@ -29,9 +29,14 @@ _SENSITIVE = ("secret", "token", "password", "authorization", "api_key", "key_ha
 # only keys that may be stored, and a one-element list applies its schema to list items.
 type DetailSpec = dict[str, DetailSpec] | list[DetailSpec] | None
 
+_MCP_GRANT: dict[str, DetailSpec] = {"server": None, "all_tools": None, "tools": None}
 _POLICY: dict[str, DetailSpec] = {
     "model_access": None,
     "allowed_models": None,
+    "mcp_access": None,
+    "mcp_servers": [_MCP_GRANT],
+    "a2a_access": None,
+    "a2a_agents": None,
     "rpm_limit": None,
     "tpm_limit": None,
     "max_parallel": None,
@@ -64,6 +69,7 @@ _TRAFFIC_SPLIT: dict[str, DetailSpec] = {
 }
 _ROUTER_SETTINGS: dict[str, DetailSpec] = {
     "strategy": None,
+    "plugin_timeout_ms": None,
     "retry": _RETRY,
     "fallback_model_ids": None,
     "traffic_split": [_TRAFFIC_SPLIT],
@@ -85,6 +91,28 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
     },
     "budget.monthly_rollover": {"window_start": None},
     "config.rollback": {"to_version": None, "force": None},
+    "a2a_agent.create": {
+        "name": None,
+        "url": None,
+        "card_url": None,
+        "credential_stored": None,
+        "middleware": None,
+    },
+    "a2a_agent.delete": {"name": None},
+    "a2a_agent.force_save": {"name": None, "plugin": None, "missing_gateways": None},
+    "a2a_agent.update": {
+        "name": None,
+        "credential_changed": None,
+        "changes": {
+            "name": None,
+            "url": None,
+            "card_url": None,
+            "auth": {"plugin": None, "params": None, "timeout_ms": None},
+            "middleware": {"plugin": None, "params": None, "timeout_ms": None},
+            "timeout_ms": None,
+            "card_json": None,
+        },
+    },
     "gateway_token.create": {"gateway_id": None, "name": None},
     "gateway_token.revoke": {"gateway_id": None, "name": None},
     "installation_admin.assign": {"user_id": None, "role": None},
@@ -107,6 +135,40 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
     },
     "key.suspend": {"name": None, "user_id": None, "reason": None},
     "key.update": {"name": None, "changes": {"name": None, "expires_at": None, "lifecycle": None}},
+    "mcp_server.create": {
+        "name": None,
+        "url": None,
+        "review_mode": None,
+        "credential_stored": None,
+    },
+    "mcp_server.definition_approve": {
+        "server": None,
+        "kind": None,
+        "name": None,
+        "hash": None,
+        "superseded": None,
+    },
+    "mcp_server.definition_reject": {"server": None, "kind": None, "name": None, "hash": None},
+    "mcp_server.delete": {"name": None},
+    "mcp_server.discover": {
+        "server": None,
+        "credential": None,
+        "definitions": None,
+        "approved": None,
+        "pending": None,
+    },
+    "mcp_server.force_save": {"name": None, "plugin": None, "missing_gateways": None},
+    "mcp_server.update": {
+        "name": None,
+        "credential_changed": None,
+        "changes": {
+            "name": None,
+            "url": None,
+            "auth": {"plugin": None, "params": None, "timeout_ms": None},
+            "timeout_ms": None,
+            "review_mode": None,
+        },
+    },
     "member.add": {"user_id": None, "role": None},
     "member.remove": {"user_id": None, "suspended_keys": None},
     "member.update": {

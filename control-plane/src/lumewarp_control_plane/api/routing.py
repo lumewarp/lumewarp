@@ -252,6 +252,7 @@ class RouterSpec:
     traffic_split: list[TrafficSplitIn] = field(default_factory=list)
     sticky: StickyBy = StickyBy.NONE
     sticky_header: str | None = None
+    plugin_timeout_ms: int = 0
 
 
 async def _load_spec(session: AsyncSession, scope: str, row: Router) -> RouterSpec:
@@ -265,6 +266,7 @@ async def _load_spec(session: AsyncSession, scope: str, row: Router) -> RouterSp
         traffic_split=[TrafficSplitIn(**s.model_dump()) for s in out.traffic_split],
         sticky=row.sticky,
         sticky_header=row.sticky_header,
+        plugin_timeout_ms=row.plugin_timeout_ms,
     )
 
 
@@ -396,6 +398,7 @@ def _apply_scalars(row: Router, spec: RouterSpec) -> None:
     row.retry_total_timeout_ms = spec.retry.total_timeout_ms if spec.retry else 0
     row.sticky = spec.sticky
     row.sticky_header = spec.sticky_header
+    row.plugin_timeout_ms = spec.plugin_timeout_ms
 
 
 def _router_out_problems(
@@ -466,6 +469,7 @@ async def _routers_out(session: AsyncSession, scope: str, rows: list[Router]) ->
             traffic_split=splits[row.id],
             sticky=row.sticky,
             sticky_header=row.sticky_header,
+            plugin_timeout_ms=row.plugin_timeout_ms,
             config_invalid=bool(problems[row.id]),
             config_problems=problems[row.id],
             created_at=row.created_at,
@@ -1135,6 +1139,7 @@ async def create_router(
         traffic_split=list(body.traffic_split),
         sticky=body.sticky,
         sticky_header=body.sticky_header,
+        plugin_timeout_ms=body.plugin_timeout_ms,
     )
     async with mutation(session):
         await lock_scope(session, settings)

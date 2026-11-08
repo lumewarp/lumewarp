@@ -1,0 +1,599 @@
+//! Pools of configured plugin instances.
+//!
+//! A pool is created when a configuration is applied and reused across
+//! configurations whose router settings did not change, so warm instances (and
+//! whatever a guest kept between calls) survive a snapshot swap. Instances are
+//! never created while a request waits for a slot on the *event* thread beyond
+//! the async instantiation itself: a checkout that finds the pool empty awaits a
+//! new instance or a returned one, bounded by the call's own timeout.
+//!
+//! Each call takes one permit from the process memory semaphore
+//! ([`crate::limits::memory_permits`]): a burst larger than the budget waits for
+//! a permit instead of failing. A call that ends by timeout, trap or error drops
+//! its Store, which gives the reserved memory back.
+
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock, Weak,
+    },
+    time::{Duration, Instant},
+};
+
+use lumewarp_router_api::{CandidateSource, Candidates, RequestInfo};
+use sha2::{Digest, Sha256};
+use tokio::sync::{Notify, Semaphore};
+use wasmtime::{component::ResourceAny, Store};
+
+use crate::{
+    limits::{self, MemoryReservation},
+    router, types, Plugin, Prepared, State,
+};
+
+/// How one pool is sized and how its calls are admitted.
+#[derive(Clone, Debug)]
+pub struct PoolConfig {
+    /// Instances the pool may own (idle or in use), and its pre-warm target.
+    pub target: usize,
+    /// Instances created at configure time. Defaults to `target`.
+    pub prewarm: usize,
+    /// Memory admission gate; `None` uses the process semaphore.
+    pub memory: Option<Arc<Semaphore>>,
+    /// Wasm memory budget the pool's Stores count against; `None` uses the
+    /// process budget (`LUMEWARP_PLUGIN_MEMORY_LIMIT_BYTES`).
+    pub budget: Option<Arc<limits::Budget>>,
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        let target = std::thread::available_parallelism().map_or(1, usize::from);
+        Self {
+            target,
+            // One warm instance per possible concurrent pick: a burst right
+            // after an apply then never pays for instantiation. The memory
+            // budget stops the pre-warm when a deployment cannot afford it.
+            prewarm: target,
+            memory: None,
+            budget: None,
+        }
+    }
+}
+
+impl PoolConfig {
+    fn memory(&self) -> Arc<Semaphore> {
+        self.memory
+            .clone()
+            .unwrap_or_else(|| Arc::clone(limits::memory_semaphore()))
+    }
+}
+
+/// One live instance's claim on the pool's target and on the process-wide
+/// instance budget; released when the instance dies.
+struct LiveGuard(Arc<PoolLive>);
+
+struct PoolLive {
+    live: AtomicUsize,
+    notify: Notify,
+}
+
+impl Drop for LiveGuard {
+    fn drop(&mut self) {
+        self.0.live.fetch_sub(1, Ordering::AcqRel);
+        self.0.notify.notify_one();
+    }
+}
+
+/// The two reservations an instance needs before it may be created.
+pub(crate) struct Slot {
+    _live: LiveGuard,
+    _idle: limits::IdleSlot,
+}
+
+/// The parts of a pool every adapter shares: idle instances, the live cap and a
+/// wake-up for callers waiting for either.
+pub(crate) struct InstancePool<I> {
+    idle: Mutex<Vec<I>>,
+    live: Arc<PoolLive>,
+    target: usize,
+}
+
+impl<I> InstancePool<I> {
+    pub(crate) fn new(target: usize) -> Self {
+        Self {
+            idle: Mutex::new(Vec::new()),
+            live: Arc::new(PoolLive {
+                live: AtomicUsize::new(0),
+                notify: Notify::new(),
+            }),
+            target,
+        }
+    }
+
+    pub(crate) fn pop(&self) -> Option<I> {
+        self.idle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pop()
+    }
+
+    /// Returns an instance to the pool, or drops it when the pool is full.
+    pub(crate) fn push(&self, instance: I) {
+        let mut idle = self.idle.lock().unwrap_or_else(|error| error.into_inner());
+        if idle.len() < self.target {
+            idle.push(instance);
+            drop(idle);
+            self.live.notify.notify_one();
+        }
+        // Else: dropped here, outside the lock, which frees its Store.
+    }
+
+    /// Claims one live slot and one process-wide instance slot, or `None` when
+    /// either is exhausted (the caller then waits for an instance to come back).
+    pub(crate) fn reserve(&self) -> Option<Slot> {
+        let mut live = self.live.live.load(Ordering::Acquire);
+        loop {
+            if live >= self.target {
+                return None;
+            }
+            match self.live.live.compare_exchange_weak(
+                live,
+                live + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => live = current,
+            }
+        }
+        let live = LiveGuard(Arc::clone(&self.live));
+        limits::idle_budget().acquire().map(|idle| Slot {
+            _live: live,
+            _idle: idle,
+        })
+    }
+
+    /// Waits until an instance is returned or a slot is freed.
+    pub(crate) async fn wait(&self) {
+        self.live.notify.notified().await;
+    }
+
+    pub(crate) fn live(&self) -> usize {
+        self.live.live.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn idle_len(&self) -> usize {
+        self.idle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len()
+    }
+
+    /// Drops idle instances beyond `keep` (memory pressure, and tests).
+    pub(crate) fn shrink(&self, keep: usize) {
+        let mut dropped = Vec::new();
+        {
+            let mut idle = self.idle.lock().unwrap_or_else(|error| error.into_inner());
+            while idle.len() > keep {
+                if let Some(instance) = idle.pop() {
+                    dropped.push(instance);
+                }
+            }
+        }
+        drop(dropped);
+        self.live.notify.notify_one();
+    }
+}
+
+struct PooledInstance {
+    store: Store<State>,
+    binding: router::Router,
+    resource: ResourceAny,
+    _slot: Slot,
+}
+
+/// Why a pool could not produce an instance.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("instantiating the component failed: {0}")]
+    Instantiate(String),
+    #[error("configuring the strategy failed: {0}")]
+    Configure(String),
+}
+
+/// One router's configured strategy instances.
+pub struct RouterPool {
+    plugin: Arc<Plugin>,
+    info: types::RouterInfo,
+    pool: InstancePool<PooledInstance>,
+    memory: Arc<Semaphore>,
+    budget: Arc<limits::Budget>,
+    prewarm: usize,
+}
+
+impl RouterPool {
+    fn new(plugin: Arc<Plugin>, info: types::RouterInfo, config: PoolConfig) -> Self {
+        Self {
+            plugin,
+            info,
+            pool: InstancePool::new(config.target),
+            memory: config.memory(),
+            budget: config
+                .budget
+                .clone()
+                .unwrap_or_else(|| Arc::clone(limits::memory_budget())),
+            prewarm: config.prewarm.min(config.target),
+        }
+    }
+
+    /// The plugin this pool runs.
+    pub fn plugin(&self) -> &Arc<Plugin> {
+        &self.plugin
+    }
+
+    /// Idle instances right now (diagnostics and tests).
+    pub fn idle(&self) -> usize {
+        self.pool.idle_len()
+    }
+
+    /// Live instances (idle and in use).
+    pub fn live(&self) -> usize {
+        self.pool.live()
+    }
+
+    /// Drops idle instances beyond `keep`.
+    pub fn shrink(&self, keep: usize) {
+        self.pool.shrink(keep);
+    }
+
+    /// Creates one configured instance. Async: instantiation and `configure`
+    /// run on the caller's executor, never blocking a thread.
+    async fn create(&self, slot: Slot) -> Result<PooledInstance, Error> {
+        let mut store = crate::store_with_budget(self.plugin.engine(), Arc::clone(&self.budget));
+        let Prepared::Router(pre) = self.plugin.prepared() else {
+            return Err(Error::Instantiate(
+                "the component does not implement the router world".to_owned(),
+            ));
+        };
+        let binding = pre
+            .instantiate_async(&mut store)
+            .await
+            .map_err(|error| Error::Instantiate(format!("{error:#}")))?;
+        let resource = binding
+            .lumewarp_plugin_router_strategy()
+            .strategy()
+            .call_configure(&mut store, &self.info)
+            .await
+            .map_err(|error| Error::Instantiate(format!("{error:#}")))?
+            .map_err(Error::Configure)?;
+        Ok(PooledInstance {
+            store,
+            binding,
+            resource,
+            _slot: slot,
+        })
+    }
+
+    /// An instance from the pool, a new one, or one that becomes free — waiting
+    /// counts towards the caller's timeout.
+    async fn checkout(&self) -> Result<PooledInstance, Error> {
+        let mut retried = false;
+        loop {
+            if let Some(instance) = self.pool.pop() {
+                return Ok(instance);
+            }
+            if let Some(slot) = self.pool.reserve() {
+                match self.create(slot).await {
+                    Ok(instance) => return Ok(instance),
+                    // Out of budget: give this pool's own idle instances back
+                    // and try once more before failing the call.
+                    Err(_) if !retried && self.pool.idle_len() > 0 => {
+                        retried = true;
+                        self.pool.shrink(0);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            self.pool.wait().await;
+        }
+    }
+
+    /// Creates the configured instances. The first one is mandatory: its
+    /// `configure` error refuses the version. The rest are best effort, so a
+    /// tight memory budget leaves a smaller warm pool instead of failing.
+    fn prewarm(&self) -> Result<(), Error> {
+        if self.prewarm == 0 {
+            return Ok(());
+        }
+        let Some(slot) = self.pool.reserve() else {
+            return Ok(());
+        };
+        let first = crate::block_on(self.create(slot))?;
+        self.pool.push(first);
+        for _ in 1..self.prewarm {
+            let Some(slot) = self.pool.reserve() else {
+                break;
+            };
+            match crate::block_on(self.create(slot)) {
+                Ok(instance) => self.pool.push(instance),
+                Err(error) => {
+                    // m1: a configuration that fails while warming up is a
+                    // counted failure, not a silently smaller pool.
+                    tracing::warn!(%error, plugin = %self.plugin.descriptor.name, "pre-warming a router strategy instance failed");
+                    self.plugin.traps.fetch_add(1, Ordering::Relaxed);
+                    self.plugin.record_failure();
+                    crate::record(
+                        "router-strategy",
+                        &self.plugin.descriptor.name,
+                        "trap",
+                        Duration::ZERO,
+                    );
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One `pick`, cut short by `timeout`. A timeout drops the call's future and
+    /// with it the Store; the caller falls through as after a trap.
+    pub async fn pick(
+        self: &Arc<Self>,
+        request: types::RequestInfo,
+        candidates: Vec<types::Candidate>,
+        seed: u64,
+        timeout: Duration,
+    ) -> Option<u32> {
+        let name = self.plugin.descriptor.name.clone();
+        if self.plugin.paused() {
+            crate::record("router-strategy", &name, "error", Duration::ZERO);
+            return None;
+        }
+        let span = tracing::info_span!("plugin", kind = "router-strategy", plugin = %name);
+        match tokio::time::timeout(timeout, self.answer(request, candidates, seed)).await {
+            Ok(answer) => answer,
+            Err(_) => {
+                let _entered = span.enter();
+                self.plugin.timeouts.fetch_add(1, Ordering::Relaxed);
+                self.plugin.record_failure();
+                crate::record("router-strategy", &name, "timeout", timeout);
+                tracing::warn!(plugin = %name, "router strategy pick timed out");
+                None
+            }
+        }
+    }
+
+    async fn answer(
+        &self,
+        request: types::RequestInfo,
+        candidates: Vec<types::Candidate>,
+        seed: u64,
+    ) -> Option<u32> {
+        let name = self.plugin.descriptor.name.as_str();
+        let _permit = MemoryReservation::acquire(Arc::clone(&self.memory)).await?;
+        let started = Instant::now();
+        let mut instance = match self.checkout().await {
+            Ok(instance) => instance,
+            Err(error) => {
+                tracing::warn!(%error, plugin = %name, "router strategy instance failed");
+                self.plugin.traps.fetch_add(1, Ordering::Relaxed);
+                self.plugin.record_failure();
+                crate::record("router-strategy", name, "trap", started.elapsed());
+                return None;
+            }
+        };
+        let result = instance
+            .binding
+            .lumewarp_plugin_router_strategy()
+            .strategy()
+            .call_pick(
+                &mut instance.store,
+                instance.resource,
+                &request,
+                &candidates,
+                seed,
+            )
+            .await;
+        let elapsed = started.elapsed();
+        match result {
+            Ok(answer) => {
+                self.plugin.record_success();
+                crate::record("router-strategy", name, "ok", elapsed);
+                self.pool.push(instance);
+                answer
+            }
+            Err(error) => {
+                // A trapped Store is dropped, never pooled.
+                tracing::warn!(plugin = %name, error = %error, "router strategy trapped");
+                self.plugin.traps.fetch_add(1, Ordering::Relaxed);
+                self.plugin.record_failure();
+                crate::record("router-strategy", name, "trap", elapsed);
+                None
+            }
+        }
+    }
+}
+
+/// The strategy of one router, as the gateway holds it.
+pub struct RouterInstance {
+    pool: Arc<RouterPool>,
+}
+
+impl RouterInstance {
+    /// Configures a router with the default pool sizing.
+    pub fn configure(plugin: Arc<Plugin>, info: types::RouterInfo) -> Result<Self, Error> {
+        Self::configure_with(plugin, info, PoolConfig::default())
+    }
+
+    /// Configures a router, reusing the pool of an unchanged configuration (same
+    /// plugin binary, same router name, settings and members).
+    pub fn configure_with(
+        plugin: Arc<Plugin>,
+        info: types::RouterInfo,
+        config: PoolConfig,
+    ) -> Result<Self, Error> {
+        let key = (
+            plugin.descriptor.name.clone(),
+            plugin.descriptor.wasm_sha256.clone(),
+            router_info_digest(&info),
+        );
+        let mut pools = shared_pools()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        pools.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(pool) = pools.get(&key).and_then(Weak::upgrade) {
+            return Ok(Self { pool });
+        }
+        let pool = Arc::new(RouterPool::new(plugin, info, config));
+        // Pre-warm before publishing: a concurrent apply then finds a warm pool.
+        pool.prewarm()?;
+        pools.insert(key, Arc::downgrade(&pool));
+        Ok(Self { pool })
+    }
+
+    /// Runs one `pick` with wire-level inputs.
+    pub async fn pick(
+        &self,
+        request: &types::RequestInfo,
+        candidates: &[types::Candidate],
+        seed: u64,
+        timeout: Duration,
+    ) -> Option<u32> {
+        self.pool
+            .pick(request.clone(), candidates.to_vec(), seed, timeout)
+            .await
+    }
+
+    /// The shared pool, for diagnostics and tests.
+    pub fn pool(&self) -> &Arc<RouterPool> {
+        &self.pool
+    }
+
+    /// Runs one `pick` as an owned, `Send` future so the gateway can await it
+    /// without holding a non-`Send` borrow of the request across the await.
+    pub fn pick_task<S, E>(
+        &self,
+        req: &RequestInfo<'_>,
+        candidates: &Candidates<'_, S, E>,
+        seed: u64,
+        timeout: Duration,
+    ) -> limits::BoxFuture<'static, Option<usize>>
+    where
+        S: CandidateSource + ?Sized,
+        E: Fn(usize) -> bool + ?Sized,
+    {
+        let signals = &self
+            .pool
+            .plugin
+            .descriptor
+            .router
+            .as_ref()
+            .expect("a loaded router plugin always has router metadata; checked when it is loaded")
+            .needs;
+        let latency = signals.iter().any(|need| need == "latency");
+        let load = signals.iter().any(|need| need == "vllm_load");
+        let request = types::RequestInfo {
+            requested: req.requested.into(),
+            team_id: req.team_id.into(),
+            key_id: req.key_id.into(),
+            estimated_input_tokens: req.estimated_input_tokens,
+            headers: req
+                .headers()
+                .map(|(name, value)| (name.into(), value.to_vec()))
+                .collect(),
+        };
+        let candidates: Vec<_> = candidates
+            .iter()
+            .map(|candidate| types::Candidate {
+                index: candidate.index as u32,
+                member_index: candidate.member_index() as u32,
+                weight: candidate.weight(),
+                in_flight: candidate.in_flight().min(u32::MAX as usize) as u32,
+                latency_ewma_us: if latency {
+                    candidate.latency_ewma_us()
+                } else {
+                    None
+                },
+                load: load.then(|| {
+                    let load = candidate.load();
+                    types::Load {
+                        waiting: load.waiting,
+                        kv_usage_bp: load.kv_usage_bp,
+                        fresh: load.fresh,
+                    }
+                }),
+            })
+            .collect();
+        let pool = Arc::clone(&self.pool);
+        Box::pin(async move {
+            pool.pick(request, candidates, seed, timeout)
+                .await
+                .map(|index| index as usize)
+        })
+    }
+}
+
+/// Pools by (plugin name, plugin binary digest, router settings digest).
+type PoolKey = (String, String, [u8; 32]);
+
+struct SharedPools {
+    pools: Mutex<HashMap<PoolKey, Weak<RouterPool>>>,
+}
+
+fn shared_pools() -> &'static Mutex<HashMap<PoolKey, Weak<RouterPool>>> {
+    static POOLS: OnceLock<SharedPools> = OnceLock::new();
+    &POOLS
+        .get_or_init(|| SharedPools {
+            pools: Mutex::new(HashMap::new()),
+        })
+        .pools
+}
+
+/// The identity of a router's settings: everything `configure` was given.
+fn router_info_digest(info: &types::RouterInfo) -> [u8; 32] {
+    fn field(hasher: &mut Sha256, bytes: &[u8]) {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    let mut hasher = Sha256::new();
+    field(&mut hasher, info.name.as_bytes());
+    field(&mut hasher, info.params_json.as_bytes());
+    for member in &info.members {
+        field(&mut hasher, member.model.as_bytes());
+        hasher.update(member.weight.to_le_bytes());
+        match member.split.as_deref() {
+            Some(split) => {
+                hasher.update([1]);
+                field(&mut hasher, split.as_bytes());
+            }
+            None => hasher.update([0]),
+        }
+        field(&mut hasher, member.params_json.as_bytes());
+    }
+    hasher.finalize().into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_router_digest_sees_every_setting() {
+        let info = |name: &str, params: &str, model: &str| types::RouterInfo {
+            name: name.into(),
+            params_json: params.into(),
+            members: vec![types::MemberInfo {
+                model: model.into(),
+                weight: 1,
+                split: None,
+                params_json: "{}".into(),
+            }],
+        };
+        let base = router_info_digest(&info("r", "{}", "a"));
+        assert_eq!(base, router_info_digest(&info("r", "{}", "a")));
+        assert_ne!(base, router_info_digest(&info("r2", "{}", "a")));
+        assert_ne!(base, router_info_digest(&info("r", "{\"x\":1}", "a")));
+        assert_ne!(base, router_info_digest(&info("r", "{}", "b")));
+    }
+}

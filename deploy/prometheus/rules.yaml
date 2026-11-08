@@ -224,3 +224,59 @@ groups:
           summary: "Gateway scrape target is down"
           description: "Gateway {{ $labels.instance }} cannot be scraped for 2 minutes."
           runbook: "Check pod readiness, admin listener, ServiceMonitor selection and network policy; distinguish scrape failure from serving failure."
+      # A trap or a timeout means the plugin call produced nothing: a router strategy falls
+      # through to the gateway's own paths, an auth or middleware call fails the request
+      # (502/504). 5% at >=0.1 calls/s keeps one bad call per minute from paging.
+      - alert: LumewarpPluginFailureRatioHigh
+        expr: "sum by (namespace, kind, plugin) (rate(lumewarp_plugin_calls_total{result=~\"trap|timeout\"}[5m])) / sum by (namespace, kind, plugin) (rate(lumewarp_plugin_calls_total[5m])) > 0.05 and on (namespace, kind, plugin) sum by (namespace, kind, plugin) (rate(lumewarp_plugin_calls_total[5m])) >= 0.1"
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Plugin calls trap or time out"
+          description: "{{ $labels.kind }} plugin {{ $labels.plugin }} returns trap or timeout for more than 5% of calls at >=0.1 calls/s for 5 minutes."
+          runbook: "Compare plugin settings with the schema, check the configured plugin timeout and the settings volume for a truncated file, then replace the component and restart the gateway. Error results (the plugin answered with an error) are on the plugin panel of the MCP/A2A dashboard."
+      # 502 (upstream or protocol failure) and 504 (upstream or plugin timeout) only: 401/403
+      # are authorization and 503 is the gateway's own endpoint, not an upstream failure.
+      - alert: LumewarpMCPUpstreamErrors
+        expr: "sum by (namespace, server) (rate(lumewarp_mcp_requests_total{status=~\"502|504\"}[5m])) / sum by (namespace, server) (rate(lumewarp_mcp_requests_total[5m])) > 0.1 and on (namespace, server) sum by (namespace, server) (rate(lumewarp_mcp_requests_total[5m])) >= 0.05"
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MCP upstream requests are failing"
+          description: "MCP server {{ $labels.server }} answers 502 or 504 for more than 10% of requests at >=0.05 requests/s for 5 minutes."
+          runbook: "Check the server URL, reachability and the auth plugin's cache lifetime (a stale cached token surfaces as 502); 504 also covers an upstream or plugin timeout. Test the server on its page in the Admin UI."
+      # Same thresholds as MCP: an agent is one upstream and one middleware plugin.
+      - alert: LumewarpA2AUpstreamErrors
+        expr: "sum by (namespace, agent) (rate(lumewarp_a2a_requests_total{status=~\"502|504\"}[5m])) / sum by (namespace, agent) (rate(lumewarp_a2a_requests_total[5m])) > 0.1 and on (namespace, agent) sum by (namespace, agent) (rate(lumewarp_a2a_requests_total[5m])) >= 0.05"
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A2A upstream requests are failing"
+          description: "A2A agent {{ $labels.agent }} answers 502 or 504 for more than 10% of requests at >=0.05 requests/s for 5 minutes."
+          runbook: "Check the agent URL, reachability and outbound auth; 504 also covers the agent's auth or middleware plugin timing out. Run Test now on the agent page to fetch its card."
+      # A definition that arrives under a known name with a new hash is the rug-pull case:
+      # the gateway withholds it and reports it, and it stays pending until reviewed, so
+      # the counter's increase is the review backlog. No gauge exists for what is pending.
+      - alert: LumewarpMCPDefinitionPendingReview
+        expr: "sum by (namespace) (increase(lumewarp_cp_mcp_catalog_definitions_total{result=\"pending\"}[15m])) > 0"
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MCP definitions are waiting for review"
+          description: "The control plane stored new pending MCP definitions in the last 15 minutes; gateways withhold them until an administrator decides."
+          runbook: "Review the pending tools and prompts on the MCP server page and approve or reject them; a definition that changed under a known name is the rug-pull case, not a new tool."
+      # A discarded report never reaches review: the name stays withheld and no grant can be
+      # written against it, because the control plane never saw the definition.
+      - alert: LumewarpMCPCatalogReportsDiscarded
+        expr: "sum by (namespace, reason) (increase(lumewarp_cp_mcp_catalog_discarded_total[5m])) > 0"
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MCP catalog reports are discarded"
+          description: "The control plane discarded MCP definition reports for 5 minutes (reason {{ $labels.reason }})."
+          runbook: "pending_limit, definition_limit and report_limit mean a gateway reports more definitions than the limits keep (trim the server's tool list); stale_id, stale_version, unknown_target and hash_mismatch mean a report disagreed with the snapshot or the recomputed hash (check the server still exists and that every gateway serves one config version); invalid means the report itself was malformed."

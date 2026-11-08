@@ -26,7 +26,7 @@ from lumewarp_control_plane.compiler.catalog_state import (
     restore_catalog_state,
 )
 from lumewarp_control_plane.compiler.compile import CompileError, compile_scope
-from lumewarp_control_plane.compiler.plugins import check_stored_routers
+from lumewarp_control_plane.compiler.plugins import check_stored_routers, check_stored_targets
 from lumewarp_control_plane.compiler.validate import SnapshotInvalid, validate_snapshot
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.metrics import DISCARD, Metrics
@@ -293,9 +293,10 @@ async def rollback_routing(
     force: bool = False,
     principal: Principal | None = None,
 ) -> int:
-    """Publish a new version whose routing content (upstreams, models, aliases, routers)
-    comes from `to_version` while keys, teams, policies and statuses come from current source
-    state, so a revoked key is never revived. Returns the new version number.
+    """Publish a new version whose routing content (upstreams, models, aliases, routers,
+    MCP servers, A2A agents) comes from `to_version` while keys, teams, policies and
+    statuses come from current source state, so a revoked key is never revived. Returns the
+    new version number.
 
     Runs in the caller's transaction (the caller writes the audit row and commits). The
     catalog source tables are restored by id from the version's `catalog_state`, so later
@@ -304,7 +305,8 @@ async def rollback_routing(
     Gateways may have changed since `to_version`, so its routers meet the same rule as a
     router write (`force` included, audited as `principal`).
     Raises LookupError if `to_version` is unknown or compacted, CompileError if the
-    resulting snapshot is invalid, PluginRejected if a router's strategy cannot be saved.
+    resulting snapshot is invalid, PluginRejected if a router's strategy, an MCP server's
+    auth plugin or an A2A agent's auth/middleware plugin cannot be saved.
     """
     # Lock order: advisory lock, then the scope row lock, before any source read or write.
     # Catalog writers take only the scope row lock, so this serializes with them and no
@@ -323,6 +325,7 @@ async def rollback_routing(
         raise CompileError(str(exc)) from exc
     # Under the locks above. The registry read takes none, so the order stays as documented.
     await check_stored_routers(session, scope, force=force, principal=principal, now=now)
+    await check_stored_targets(session, scope, force=force, principal=principal, now=now)
     revision = await outbox.enqueue_recompile(session, scope, f"rollback to {to_version}")
     compiled = await compile_scope(
         session,
@@ -331,9 +334,19 @@ async def rollback_routing(
         require_local_membership=require_local_membership,
     )
     snap = compiled.snapshot
-    for field in ("upstreams", "models", "aliases", "routers"):
+    # Definition reviews are current state, never versioned: keep what the compile of the
+    # restored source just produced for each server, and put it back after the old
+    # snapshot's entities replace the current ones (a rejected hash must not come back).
+    definitions = {server.id: server.definitions for server in snap.mcp_servers}
+    # MCP servers and agents are routing content too, restored from the old snapshot.
+    for field in ("upstreams", "models", "aliases", "routers", "mcp_servers", "a2a_agents"):
         del getattr(snap, field)[:]
         getattr(snap, field).extend(getattr(old, field))
+    for server in snap.mcp_servers:
+        current = definitions.get(server.id)
+        if current is not None:
+            del server.definitions[:]
+            server.definitions.extend(current)
 
     latest = await _latest(session, scope)
     version = (latest[0] if latest else 0) + 1

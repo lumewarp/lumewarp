@@ -38,8 +38,27 @@ MODEL_UNIVERSAL: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
+class McpGrant:
+    """One level's grant of an MCP server: every approved tool, or exactly `tools`."""
+
+    server: str
+    all_tools: bool
+    tools: tuple[str, ...] = ()
+
+
+# server -> allowed tools (None = every approved tool), or None for every server.
+McpSet = dict[str, frozenset[str] | None] | None
+AGENT_UNIVERSAL: frozenset[str] | None = None
+
+
+@dataclass(frozen=True)
 class Policy:
-    """The stored policy of one level, before inheritance is resolved."""
+    """The stored policy of one level, before inheritance is resolved.
+
+    `mcp_access`/`mcp_grants` and `a2a_access`/`a2a_agents` mirror
+    `model_access`/`allowed_models` exactly, one level lower on the wire: an MCP grant
+    carries its server and, optionally, the tools it is narrowed to.
+    """
 
     model_access: ModelAccess
     allowed_models: tuple[str, ...]
@@ -47,6 +66,10 @@ class Policy:
     tpm_limit: int | None = None
     max_parallel: int | None = None
     budget_nano_usd: int | None = None
+    mcp_access: ModelAccess = ModelAccess.INHERIT
+    mcp_grants: tuple[McpGrant, ...] = ()
+    a2a_access: ModelAccess = ModelAccess.INHERIT
+    a2a_agents: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -54,7 +77,9 @@ class Effective:
     """Resolved policy from the root down to one level.
 
     `models is None` means the universal set (every model). Otherwise it is exactly the
-    names still allowed at this level (possibly the empty deny-all set).
+    names still allowed at this level (possibly the empty deny-all set). `mcp is None`
+    means every MCP server with every approved tool; otherwise it maps each server still
+    allowed to its allowed tools (None = all of them). `agents is None` is every agent.
     """
 
     models: frozenset[str] | None
@@ -62,6 +87,8 @@ class Effective:
     tpm_limit: int | None = None
     max_parallel: int | None = None
     budget_nano_usd: int | None = None
+    mcp: McpSet = None
+    agents: frozenset[str] | None = None
 
 
 PolicyRow = Org | Team | MemberPolicy | ServiceAccount
@@ -76,16 +103,71 @@ def policy_of(row: PolicyRow) -> Policy:
         tpm_limit=row.tpm_limit,
         max_parallel=row.max_parallel,
         budget_nano_usd=row.budget_nano_usd,
+        mcp_access=row.mcp_access,
+        mcp_grants=tuple(
+            McpGrant(
+                server=grant["server"],
+                all_tools=bool(grant["all_tools"]),
+                tools=tuple(grant.get("tools") or ()),
+            )
+            for grant in (row.mcp_servers or ())
+        ),
+        a2a_access=row.a2a_access,
+        a2a_agents=tuple(row.a2a_agents or ()),
     )
 
 
 def apply_policy(row: PolicyRow, policy: Policy) -> None:
-    """Scalar policy columns; `save_grants` writes the list once the row has its id."""
+    """Scalar policy columns; `save_grants` writes the lists once the row has its id."""
     row.model_access = policy.model_access
     row.rpm_limit = policy.rpm_limit
     row.tpm_limit = policy.tpm_limit
     row.max_parallel = policy.max_parallel
     row.budget_nano_usd = policy.budget_nano_usd
+    row.mcp_access = policy.mcp_access
+    row.a2a_access = policy.a2a_access
+
+
+def mcp_set(policy: Policy) -> McpSet:
+    """The level's own MCP set: `{server: tools or None}` (None = all tools).
+
+    A repeated server merges like the gateway's grants: `all_tools` ORs and the named
+    tools union. Empty names are ignored.
+    """
+    if policy.mcp_access is not ModelAccess.LIST:
+        return None
+    merged: dict[str, frozenset[str] | None] = {}
+    for grant in policy.mcp_grants:
+        server = grant.server
+        if not server:
+            continue
+        if grant.all_tools or merged.get(server, frozenset()) is None:
+            merged[server] = None
+        else:
+            merged[server] = merged.get(server, frozenset()) | frozenset(
+                tool for tool in grant.tools if tool
+            )
+    return merged
+
+
+def _mcp_narrow(parent: McpSet, own: McpSet) -> McpSet:
+    """One level of MCP inheritance: INHERIT/ALL keep the parent, LIST intersects."""
+    if parent is None:
+        return own
+    if own is None:
+        return parent
+    narrowed: dict[str, frozenset[str] | None] = {}
+    for server, parent_tools in parent.items():
+        if server not in own:
+            continue
+        own_tools = own[server]
+        if parent_tools is None:
+            narrowed[server] = own_tools
+        elif own_tools is None:
+            narrowed[server] = parent_tools
+        else:
+            narrowed[server] = parent_tools & own_tools
+    return narrowed
 
 
 def _limit(parent: int | None, own: int | None) -> int | None:
@@ -110,6 +192,15 @@ def effective(parent: Effective | None, policy: Policy) -> Effective:
         models = own if parent is None or parent.models is None else parent.models & own
     else:
         models = parent.models if parent is not None else MODEL_UNIVERSAL
+    own_mcp = mcp_set(policy)
+    mcp = own_mcp if parent is None else _mcp_narrow(parent.mcp, own_mcp)
+    if policy.a2a_access is ModelAccess.LIST:
+        own_agents = frozenset(policy.a2a_agents)
+        agents = (
+            own_agents if parent is None or parent.agents is None else parent.agents & own_agents
+        )
+    else:
+        agents = parent.agents if parent is not None else AGENT_UNIVERSAL
     if parent is None:
         return Effective(
             models=models,
@@ -117,6 +208,8 @@ def effective(parent: Effective | None, policy: Policy) -> Effective:
             tpm_limit=policy.tpm_limit,
             max_parallel=policy.max_parallel,
             budget_nano_usd=policy.budget_nano_usd,
+            mcp=mcp,
+            agents=agents,
         )
     return Effective(
         models=models,
@@ -124,6 +217,8 @@ def effective(parent: Effective | None, policy: Policy) -> Effective:
         tpm_limit=_limit(parent.tpm_limit, policy.tpm_limit),
         max_parallel=_limit(parent.max_parallel, policy.max_parallel),
         budget_nano_usd=_limit(parent.budget_nano_usd, policy.budget_nano_usd),
+        mcp=mcp,
+        agents=agents,
     )
 
 
@@ -180,6 +275,9 @@ def owner_effective(
             resolved.max_parallel if own.max_parallel is not None else default.max_parallel,
         ),
         budget_nano_usd=resolved.budget_nano_usd,
+        # The member defaults carry no MCP or A2A policy: those come from the level only.
+        mcp=resolved.mcp,
+        agents=resolved.agents,
     )
 
 
@@ -191,6 +289,8 @@ def key_effective(owner_effective_policy: Effective, key: ApiKey) -> Effective:
         tpm_limit=_limit(owner_effective_policy.tpm_limit, key.tpm_limit),
         max_parallel=_limit(owner_effective_policy.max_parallel, key.max_parallel),
         budget_nano_usd=owner_effective_policy.budget_nano_usd,
+        mcp=owner_effective_policy.mcp,
+        agents=owner_effective_policy.agents,
     )
 
 

@@ -27,6 +27,7 @@ from lumewarp_control_plane.api.schemas import (
     MeBudgetOut,
     MeKeyLimitsOut,
     MeLimitsOut,
+    MeMcpGrantOut,
     MeOrgOut,
     MeOut,
     MeTeamOut,
@@ -41,11 +42,13 @@ from lumewarp_control_plane.api.schemas import (
 from lumewarp_control_plane.authz import Action, Authz, AuthzUnavailable, Relation, RequestAuthz
 from lumewarp_control_plane.errors import ApiError, forbidden, not_found
 from lumewarp_control_plane.models import (
+    A2aAgent,
     ApiKey,
     CatalogName,
     InstallationRole,
     KeyLifecycle,
     KeyOwnerKind,
+    McpServer,
     MemberPolicy,
     Org,
     PersonalAccessToken,
@@ -175,6 +178,13 @@ async def _team_details(
     team_ids = [team.id for team, _, _ in rows]
     org_ids = {team.org_id for team, _, _ in rows}
     orgs = {org.id: org for org in await session.scalars(select(Org).where(Org.id.in_(org_ids)))}
+    # MCP and A2A access resolve to the live targets, like `models` resolves to the catalog.
+    mcp_targets = sorted(
+        (await session.scalars(select(McpServer.name).where(McpServer.deleted_at.is_(None)))).all()
+    )
+    agent_targets = sorted(
+        (await session.scalars(select(A2aAgent.name).where(A2aAgent.deleted_at.is_(None)))).all()
+    )
     # Every team of these orgs, so the org spend is derived from its whole subtree.
     org_team_ids = {
         team_id: org_id
@@ -275,6 +285,24 @@ async def _team_details(
                 if effective_limits.models is None
                 else sorted(effective_limits.models),
                 all_models=effective_limits.models is None,
+                mcp_servers=(
+                    [MeMcpGrantOut(server=name, all_tools=True, tools=[]) for name in mcp_targets]
+                    if effective_limits.mcp is None
+                    else [
+                        MeMcpGrantOut(
+                            server=server,
+                            all_tools=tools is None,
+                            tools=[] if tools is None else sorted(tools),
+                        )
+                        for server, tools in sorted(effective_limits.mcp.items())
+                        if server in mcp_targets
+                    ]
+                ),
+                all_mcp=effective_limits.mcp is None,
+                agents=agent_targets
+                if effective_limits.agents is None
+                else sorted(name for name in effective_limits.agents if name in agent_targets),
+                all_agents=effective_limits.agents is None,
                 limits=MeLimitsOut(
                     rpm_limit=effective_limits.rpm_limit,
                     tpm_limit=effective_limits.tpm_limit,

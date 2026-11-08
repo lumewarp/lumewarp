@@ -16,6 +16,17 @@ lumewarp-router-api = { path = "../lumewarp-router-api" }
 lumewarp-proto.workspace = true
 prost.workspace = true
 tracing.workspace = true
+thiserror.workspace = true
+# The auth adapter's http-fetch transport; the gateway's own client lives in
+# lumewarp-gateway, which cannot be a dependency of this crate.
+bytes.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+hyper-rustls.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Building the tiny core modules the resource-limit tests need.
+wasm-encoder = "0.239"

@@ -1,3 +1,4 @@
+mod a2a;
 mod a2a_ids;
 mod auth;
 mod balance;
@@ -6,6 +7,7 @@ mod config_stream;
 mod error;
 mod grants;
 mod health;
+mod mcp;
 mod mcp_hash;
 mod metrics;
 mod proxy;
@@ -19,6 +21,7 @@ mod snapshot;
 mod targets;
 mod telemetry;
 mod transform;
+mod upstream_auth;
 mod usage;
 
 /// Per-thread allocation counter for allocation regression tests.
@@ -154,7 +157,7 @@ fn standalone(
     let yaml =
         std::fs::read_to_string(path).with_context(|| format!("loading {}", path.display()))?;
     let (settings, snapshot) = Config::parse(&yaml)?;
-    let runtime = runtime::Runtime::new();
+    let runtime = runtime::Runtime::from_env();
     let routing_table =
         router::RoutingTable::compile(&snapshot, AuthMode::standalone(&snapshot), &runtime)
             .context("compiling routing table snapshot")?;
@@ -162,6 +165,9 @@ fn standalone(
         .metrics
         .set_yaml_hash(&hex::encode(Sha256::digest(yaml.as_bytes()))[..12]);
     runtime.metrics.config_applied(routing_table.version);
+    runtime
+        .observed
+        .retain_servers(routing_table.targets.servers().map(|s| s.name.as_ref()));
     routing_table.activate_health();
     Ok((
         settings,
@@ -215,7 +221,11 @@ async fn main() -> anyhow::Result<()> {
                 metrics.clone(),
             );
             reporter = Some(handle);
-            let runtime = runtime::Runtime::with_usage(metrics, sink);
+            let runtime = runtime::Runtime::with_usage_and_env(
+                metrics,
+                sink,
+                runtime::EnvOptions::from_env(),
+            );
 
             // Serve a valid cached snapshot immediately; otherwise stay
             // not-ready (never an open routing table) until the first full arrives.

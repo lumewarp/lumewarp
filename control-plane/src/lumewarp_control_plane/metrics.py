@@ -45,6 +45,19 @@ DB_GAUGE_INTERVAL_SECONDS = 5.0
 COMPILE_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
 # Every `suspended_reason` a key can get when it leaves the active state.
 KEY_SUSPEND_REASONS = ("owner_removed", "owner_deactivated", "admin", "owner")
+# Why a reported MCP definition was not stored (a bounded label set, never the data).
+CATALOG_DISCARD_REASONS = (
+    "unknown_target",
+    "stale_id",
+    "stale_version",
+    "hash_mismatch",
+    "invalid",
+    "pending_limit",
+    "definition_limit",
+    "report_limit",
+)
+# What a stored definition became; "known" means the exact hash was already there.
+CATALOG_DEFINITION_RESULTS = ("approved", "pending", "known")
 # `session.info` key for key suspensions made in a transaction, counted on commit.
 _SUSPENDED_INFO_KEY = "lumewarp.keys_suspended"
 
@@ -99,6 +112,36 @@ class Metrics:
             ["kind"],
             registry=r,
         )
+        self.catalog_definitions = Counter(
+            "lumewarp_cp_mcp_catalog_definitions",
+            "MCP definitions stored from catalog reports and discovery, by outcome.",
+            ["result"],
+            registry=r,
+        )
+        self.catalog_discarded = Counter(
+            "lumewarp_cp_mcp_catalog_discarded",
+            "MCP definition reports discarded, by reason.",
+            ["reason"],
+            registry=r,
+        )
+        self.agent_cards = Counter(
+            "lumewarp_cp_a2a_agent_cards",
+            "A2A agent cards recorded from gateway reports.",
+            ["result"],
+            registry=r,
+        )
+        self.definition_reviews = Counter(
+            "lumewarp_cp_mcp_definition_reviews",
+            "MCP definition review decisions made by administrators.",
+            ["action"],
+            registry=r,
+        )
+        self.mcp_discover = Counter(
+            "lumewarp_cp_mcp_discover_requests",
+            "Discover-now calls against an MCP server, by outcome.",
+            ["result"],
+            registry=r,
+        )
         self.usage_ingested = Counter(
             "lumewarp_cp_usage_events_ingested",
             "Usage events accepted (committed) from gateway reports.",
@@ -140,6 +183,16 @@ class Metrics:
         for operation in ("create", "rotate"):
             for result in ("success", "rate_limited"):
                 self.key_writes.labels(operation, result)
+        for result in CATALOG_DEFINITION_RESULTS:
+            self.catalog_definitions.labels(result)
+        for reason in CATALOG_DISCARD_REASONS:
+            self.catalog_discarded.labels(reason)
+        for result in ("stored", "discarded"):
+            self.agent_cards.labels(result)
+        for action in ("approve", "reject"):
+            self.definition_reviews.labels(action)
+        for result in ("ok", "failed"):
+            self.mcp_discover.labels(result)
 
     def init_authz_backend(self, backend: str) -> None:
         """Export zero series for a backend so rate() works from the first check."""
@@ -157,6 +210,15 @@ class Metrics:
         for reason, n in skipped.items():
             if n:
                 self.usage_skipped.labels(reason).inc(n)
+
+    def record_catalog(self, results: Mapping[str, int], discarded: Mapping[str, int]) -> None:
+        """Count stored definitions by outcome and discarded reports by reason."""
+        for result, n in results.items():
+            if n:
+                self.catalog_definitions.labels(result).inc(n)
+        for reason, n in discarded.items():
+            if n:
+                self.catalog_discarded.labels(reason).inc(n)
 
     def record_suspended(self, reason: str, n: int = 1) -> None:
         if n:

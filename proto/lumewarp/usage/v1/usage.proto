@@ -81,7 +81,7 @@ message UsageEvent {
   // McpServer.name or A2aAgent.name; empty when the request named none that
   // the key may see.
   string target = 29;
-  // JSON-RPC method, at most 128 bytes ("tools/call", "message/stream", ...).
+  // JSON-RPC method, at most 128 bytes ("tools/call", "SendStreamingMessage", ...).
   string method = 30;
   // MCP tools/call and prompts/get: the upstream tool or prompt name, at
   // most 400 bytes.

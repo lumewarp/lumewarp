@@ -10,6 +10,10 @@ ENTITIES = (
     ("routers", "upsert_routers", "remove_routers", "name"),
     ("api_keys", "upsert_api_keys", "remove_api_keys", "key_id"),
     ("teams", "upsert_teams", "remove_teams", "id"),
+    # MCP servers are keyed by name (their id is in the entity; a rename changes the name,
+    # so the old name is removed and the new one upserted, exactly like an upstream).
+    ("mcp_servers", "upsert_mcp_servers", "remove_mcp_servers", "name"),
+    ("a2a_agents", "upsert_a2a_agents", "remove_a2a_agents", "name"),
 )
 
 

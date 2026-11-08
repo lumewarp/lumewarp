@@ -880,8 +880,8 @@
     },
     {
       "id": 13,
-      "title": "Hello strategies ignored / second",
-      "description": "Strategies and capabilities a gateway reported past the per-gateway limit or with an invalid name.",
+      "title": "Hello plugins ignored / second",
+      "description": "Plugin descriptors and capabilities a gateway reported past the per-gateway limit or with an invalid name, by kind.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -936,12 +936,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(lumewarp_cp_gateway_strategies_ignored_total{namespace=~\"${namespace:regex}\"}[$__rate_interval]))",
+          "expr": "sum by (kind) (rate(lumewarp_cp_gateway_plugins_ignored_total{namespace=~\"${namespace:regex}\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "ignored",
+          "legendFormat": "{{kind}}",
           "range": true
         }
       ]

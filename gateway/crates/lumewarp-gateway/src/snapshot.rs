@@ -34,6 +34,8 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     "strategy:least_in_flight",
     "strategy:lowest_latency",
     "strategy:vllm_load",
+    "mcp",
+    "a2a",
 ];
 
 /// The strategy of a pool that came from a `Model`, not a `Router`.
@@ -109,9 +111,17 @@ pub fn strategy_headers(r: &pb::Router) -> Result<Vec<String>, ApplyError> {
             let name = hyper::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
                 ApplyError::invalid("params.headers contains an invalid header name")
             })?;
+            // Credentials a client may send to this gateway, including the
+            // MCP/A2A key (D5, m8): a router strategy must never read them out
+            // of `params.headers` and act on them.
             if matches!(
                 name.as_str(),
-                "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key"
+                "authorization"
+                    | "proxy-authorization"
+                    | "cookie"
+                    | "set-cookie"
+                    | "x-api-key"
+                    | "x-lumewarp-key"
             ) {
                 return Err(ApplyError::invalid(
                     "params.headers must not expose credential headers",
@@ -345,6 +355,14 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
         if r.traffic_split.is_empty() {
             validate_members(&r.name, "", &r.members, &models)?;
         }
+    }
+    // MCP servers and A2A agents: names, URLs, auth plugins, reviewed
+    // definitions and cards (`targets::validate`). Everything they use needs a
+    // declared capability: "mcp", "a2a", "auth:<plugin>",
+    // "a2a_middleware:<plugin>".
+    crate::targets::validate(snapshot)?;
+    for cap in crate::targets::capabilities(snapshot) {
+        require(true, &cap)?;
     }
     unique(snapshot.teams.iter().map(|t| t.id.as_str()), "team")?;
     let teams: HashMap<&str, &pb::Team> =
@@ -687,6 +705,23 @@ pub fn apply(base: &Snapshot, update: ConfigUpdate) -> Result<Snapshot, ApplyErr
                 |t| &t.id,
                 "team",
             )?;
+            // MCP servers and A2A agents are keyed by name: `McpServer.id` /
+            // `A2aAgent.id` is the stable identity usage and reports carry, but
+            // a rename is an upsert under the new name plus a removal.
+            merge(
+                &mut next.mcp_servers,
+                delta.upsert_mcp_servers,
+                &delta.remove_mcp_servers,
+                |s| &s.name,
+                "mcp server",
+            )?;
+            merge(
+                &mut next.a2a_agents,
+                delta.upsert_a2a_agents,
+                &delta.remove_a2a_agents,
+                |a| &a.name,
+                "a2a agent",
+            )?;
             next.version = delta.version;
             next.created_at_unix_ms = delta.created_at_unix_ms;
             next.required_capabilities = delta.required_capabilities;
@@ -820,6 +855,8 @@ pub(crate) mod tests {
             "Cookie",
             "set-cookie",
             "X-API-Key",
+            "x-lumewarp-key",
+            "X-Lumewarp-Key",
         ] {
             let router = pb::Router {
                 params_json: serde_json::json!({"headers": [header]}).to_string(),
@@ -991,6 +1028,22 @@ pub(crate) mod tests {
                 }
                 "reasoning_effort" => {
                     s.models[0].reasoning_effort = Some(pb::ReasoningEffort::default())
+                }
+                "mcp" => {
+                    s.mcp_servers = vec![pb::McpServer {
+                        id: "s1-id".into(),
+                        name: "s1".into(),
+                        url: "https://mcp.example.test/mcp".into(),
+                        ..Default::default()
+                    }]
+                }
+                "a2a" => {
+                    s.a2a_agents = vec![pb::A2aAgent {
+                        id: "a1-id".into(),
+                        name: "a1".into(),
+                        url: "https://agent.example.test/rpc".into(),
+                        ..Default::default()
+                    }]
                 }
                 "strategy:least_in_flight" | "rotation_grace" => continue,
                 strategy => {
@@ -1370,6 +1423,148 @@ pub(crate) mod tests {
         assert_code(
             validate(&next, SUPPORTED_CAPABILITIES),
             NackCode::InvalidConfig,
+        );
+    }
+
+    #[test]
+    fn mcp_servers_and_agents_apply_in_deltas_by_name() {
+        let server = |name: &str, url: &str| pb::McpServer {
+            id: format!("id-{name}"),
+            name: name.into(),
+            url: url.into(),
+            ..Default::default()
+        };
+        let agent = |name: &str| pb::A2aAgent {
+            id: format!("id-{name}"),
+            name: name.into(),
+            url: format!("https://{name}.example.test/rpc"),
+            ..Default::default()
+        };
+        let mut d = delta(2);
+        d.upsert_mcp_servers = vec![server("s1", "https://a.example.test/mcp")];
+        d.upsert_a2a_agents = vec![agent("a1")];
+        d.required_capabilities = vec!["strategy:weighted".into(), "mcp".into(), "a2a".into()];
+        let next = apply_delta(d).unwrap();
+        assert_eq!(next.mcp_servers.len(), 1);
+        assert_eq!(next.mcp_servers[0].id, "id-s1");
+        assert_eq!(next.a2a_agents[0].name, "a1");
+        validate(&next, SUPPORTED_CAPABILITIES).unwrap();
+
+        // An upsert of the same name replaces it in place (ids may change on a
+        // control-plane re-create; the name is the key of the delta).
+        let mut d = delta(3);
+        d.base_version = 2;
+        let mut recreated = server("s1", "https://b.example.test/mcp");
+        recreated.id = "recreated".into();
+        d.upsert_mcp_servers = vec![recreated];
+        d.required_capabilities = vec!["strategy:weighted".into(), "mcp".into(), "a2a".into()];
+        let next = apply(
+            &next,
+            ConfigUpdate {
+                update: Some(Update::Delta(d)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(next.mcp_servers.len(), 1);
+        assert_eq!(next.mcp_servers[0].id, "recreated");
+        assert_eq!(next.mcp_servers[0].url, "https://b.example.test/mcp");
+
+        // A removal drops the whole entity; the capability can go too.
+        let mut d = delta(4);
+        d.base_version = 3;
+        d.remove_mcp_servers = vec!["s1".into()];
+        d.remove_a2a_agents = vec!["a1".into()];
+        d.required_capabilities = vec!["strategy:weighted".into()];
+        let next = apply(
+            &next,
+            ConfigUpdate {
+                update: Some(Update::Delta(d)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(next.mcp_servers.is_empty());
+        assert!(next.a2a_agents.is_empty());
+        validate(&next, SUPPORTED_CAPABILITIES).unwrap();
+
+        // Duplicate upserts and upsert-plus-remove are refused like every other
+        // entity, keyed by name (not id).
+        let mut d = delta(2);
+        d.upsert_mcp_servers = vec![
+            server("s1", "https://a.example.test/mcp"),
+            server("s1", "https://b.example.test/mcp"),
+        ];
+        assert_code(apply_delta(d), NackCode::InvalidConfig);
+        let mut d = delta(2);
+        d.upsert_a2a_agents = vec![agent("a1")];
+        d.remove_a2a_agents = vec!["a1".into()];
+        assert_code(apply_delta(d), NackCode::InvalidConfig);
+    }
+
+    #[test]
+    fn mcp_and_a2a_entities_need_their_capabilities() {
+        // A snapshot carrying them without the capability is a broken compiler
+        // output (INVALID_CONFIG), not an unsupported feature.
+        let error = invalid(|s| {
+            s.mcp_servers = vec![pb::McpServer {
+                id: "id-s1".into(),
+                name: "s1".into(),
+                url: "https://mcp.example.test/mcp".into(),
+                ..Default::default()
+            }]
+        });
+        assert!(
+            error.reason.contains("capability \"mcp\""),
+            "{}",
+            error.reason
+        );
+        let error = invalid(|s| {
+            s.a2a_agents = vec![pb::A2aAgent {
+                id: "id-a1".into(),
+                name: "a1".into(),
+                url: "https://agent.example.test/rpc".into(),
+                ..Default::default()
+            }]
+        });
+        assert!(
+            error.reason.contains("capability \"a2a\""),
+            "{}",
+            error.reason
+        );
+        // Target validation itself runs inside `validate`.
+        let error = invalid(|s| {
+            s.required_capabilities.push("mcp".into());
+            s.mcp_servers = vec![pb::McpServer {
+                id: "id-s1".into(),
+                name: "s__1".into(),
+                url: "https://mcp.example.test/mcp".into(),
+                ..Default::default()
+            }]
+        });
+        assert!(error.reason.contains("no \"__\""), "{}", error.reason);
+        // The plugin capabilities come from the entities, not from the list.
+        let error = invalid(|s| {
+            s.required_capabilities.push("mcp".into());
+            s.mcp_servers = vec![pb::McpServer {
+                id: "id-s1".into(),
+                name: "s1".into(),
+                url: "https://mcp.example.test/mcp".into(),
+                auth: Some(pb::UpstreamAuth {
+                    plugin: Some(pb::PluginRef {
+                        plugin: "hmac_signature".into(),
+                        params_json: String::new(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]
+        });
+        assert!(
+            error.reason.contains("capability \"auth:hmac_signature\""),
+            "{}",
+            error.reason
         );
     }
 

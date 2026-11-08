@@ -22,7 +22,7 @@ async fn looping_plugin_times_out_and_request_is_served_by_fallback() {
     let admin_addr = admin.local_addr().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.yaml");
-    std::fs::write(&path, format!("server: {{listen: '{addr}', admin_listen: '{admin_addr}'}}\nupstreams: [{{name: u, kind: vllm, base_url: 'http://{}/prefix/v1'}}]\nmodels: [{{name: m, upstream: u, upstream_model: actual}}]\nrouters: [{{name: public, strategy: loop_test, members: [{{model: m}}], fallbacks: [m], retry: {{max_attempts: 2}}}}]\n", upstream.addr)).unwrap();
+    std::fs::write(&path, format!("server: {{listen: '{addr}', admin_listen: '{admin_addr}'}}\nupstreams: [{{name: u, kind: vllm, base_url: 'http://{}/prefix/v1'}}]\nmodels: [{{name: m, upstream: u, upstream_model: actual}}]\nrouters: [{{name: public, strategy: loop_test, plugin_timeout_ms: 500, members: [{{model: m}}], fallbacks: [m], retry: {{max_attempts: 2}}}}]\n", upstream.addr)).unwrap();
     drop(listen);
     drop(admin);
     struct Child(std::process::Child);

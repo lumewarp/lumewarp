@@ -164,3 +164,32 @@ def test_unique_names_conflict(client) -> None:
     assert first.status_code == 201
     second = _upstream(client, name=name)
     assert second.status_code == 409
+
+
+def test_the_router_plugin_timeout_round_trips(client) -> None:
+    """A WASM strategy call's timeout; 0 means the gateway default (60 s)."""
+    up = _upstream(client)
+    model = _model(client, up.json()["id"])
+    router = client.post(
+        "/api/v1/routers",
+        json={
+            "name": f"alias-{suffix()}",
+            "members": [{"model_id": model.json()["id"]}],
+            "plugin_timeout_ms": 2500,
+        },
+        headers=ADMIN_AUTH,
+    )
+    assert router.status_code == 201, router.text
+    assert router.json()["plugin_timeout_ms"] == 2500
+    router_id = router.json()["id"]
+    changed = client.patch(
+        f"/api/v1/routers/{router_id}", json={"plugin_timeout_ms": 0}, headers=ADMIN_AUTH
+    )
+    assert changed.status_code == 200 and changed.json()["plugin_timeout_ms"] == 0
+    for bad in (-1, 2**31):
+        response = client.patch(
+            f"/api/v1/routers/{router_id}",
+            json={"plugin_timeout_ms": bad},
+            headers=ADMIN_AUTH,
+        )
+        assert response.status_code == 422, bad

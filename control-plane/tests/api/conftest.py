@@ -12,13 +12,21 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from lumewarp_control_plane.app import create_app
 from lumewarp_control_plane.auth.break_glass import fingerprint
 from lumewarp_control_plane.auth.sessions import csrf_token
-from lumewarp_control_plane.models import Scope, UserSession
+from lumewarp_control_plane.models import (
+    A2aAgent,
+    A2aAgentGrant,
+    McpDefinition,
+    McpServer,
+    McpServerGrant,
+    Scope,
+    UserSession,
+)
 from lumewarp_control_plane.security import PrincipalKind, hash_secret
 from lumewarp_control_plane.settings import Settings
 from tests.conftest import migrated_database
@@ -91,6 +99,23 @@ async def committed(api_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     """A session whose commits are visible to the HTTP app."""
     async with AsyncSession(api_engine, expire_on_commit=False) as session:
         yield session
+
+
+@pytest.fixture(autouse=True)
+async def clean_mcp_targets(api_engine: AsyncEngine) -> AsyncIterator[None]:
+    """MCP servers and A2A agents compile into capabilities on every later snapshot.
+
+    The API tests share one committed database, and other files assert exact capability
+    lists, so a test that creates a target must not leave it behind (the gateway fixtures
+    clean up their own sessions the same way).
+    """
+    yield
+    async with AsyncSession(api_engine) as session, session.begin():
+        await session.execute(delete(McpDefinition))
+        await session.execute(delete(McpServerGrant))
+        await session.execute(delete(A2aAgentGrant))
+        await session.execute(delete(McpServer))
+        await session.execute(delete(A2aAgent))
 
 
 @pytest.fixture

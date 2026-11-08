@@ -32,7 +32,7 @@ jobs:
           source = Path("deploy/prometheus/rules.yaml")
           assert source.read_bytes() == (chart / "prometheus/rules.yaml").read_bytes()
           dashboards = sorted(Path("deploy/grafana/dashboards").glob("*.json"))
-          assert len(dashboards) == 4
+          assert len(dashboards) == 5
           assert {p.name for p in dashboards} == {p.name for p in (chart / "dashboards").glob("*.json")}
           rules = []
           for path in dashboards:

@@ -225,6 +225,9 @@ message Router {
   StickyBy sticky = 7;
   // Request header hashed when sticky = STICKY_BY_HEADER.
   string sticky_header = 8;
+  // WASM strategies only: how long one `pick` may run before the gateway
+  // cancels it. 0 = 60 s.
+  uint32 plugin_timeout_ms = 14;
 }
 
 // Retries happen only before any response byte is sent to the client: on
@@ -352,6 +355,9 @@ message PluginRef {
   // Plugin settings: a JSON object, at most 16 KiB UTF-8. Empty means {}.
   // Never contains secrets (see docs/plugins.md).
   string params_json = 2;
+  // WASM plugins only: how long one call may run before the gateway cancels
+  // it, for one request. 0 = 60 s.
+  uint32 timeout_ms = 3;
 }
 
 // How the gateway authenticates to an MCP server or A2A agent. Required
@@ -371,9 +377,9 @@ message UpstreamAuth {
 
 enum McpReviewMode {
   MCP_REVIEW_MODE_UNSPECIFIED = 0;
-  // A tool or prompt name seen for the first time is approved automatically
-  // (and reported); a changed definition of a known name is withheld until
-  // approved.
+  // A name absent from McpServer.definitions is served at first sight (and
+  // reported); a different definition of a known name is withheld until
+  // approved. UNSPECIFIED means the same as this.
   MCP_REVIEW_MODE_TOFU = 1;
   // Every definition not in `approved` is withheld until approved.
   MCP_REVIEW_MODE_MANUAL = 2;
@@ -387,7 +393,15 @@ enum McpDefinitionKind {
   MCP_DEFINITION_KIND_PROMPT = 2;
 }
 
-// One approved definition. The gateway filters upstream list responses by
+enum McpDefinitionState {
+  MCP_DEFINITION_STATE_UNSPECIFIED = 0;
+  MCP_DEFINITION_STATE_APPROVED = 1;
+  // Known and not approved: never served, and its name is never "first sight".
+  MCP_DEFINITION_STATE_PENDING = 2;
+  MCP_DEFINITION_STATE_REJECTED = 3;
+}
+
+// One reviewed definition. The gateway filters upstream list responses by
 // these hashes; it never serves a definition from the snapshot.
 message McpDefinition {
   McpDefinitionKind kind = 1;
@@ -396,13 +410,15 @@ message McpDefinition {
   // sha256 of the canonical definition, 32 bytes (docs/plugins.md, "Definition
   // hash").
   bytes hash = 3;
+  McpDefinitionState state = 4;
 }
 
 message McpServer {
   // Stable id; usage and reports carry the name.
   string id = 1;
-  // ^[a-z][a-z0-9_-]{0,62}$ and unique among MCP servers. Prefixes tool names
-  // on the aggregated endpoint as "<name>__<tool>".
+  // ^[a-z][a-z0-9_-]{0,62}$ without "__", unique among MCP servers. Prefixes
+  // tool and prompt names on the aggregated endpoint as "<name>__<upstream
+  // name>", split at the first "__".
   string name = 2;
   // Streamable HTTP endpoint, absolute http(s) URL without userinfo.
   string url = 3;
@@ -410,12 +426,12 @@ message McpServer {
   // Per upstream request; 0 = gateway default.
   uint32 timeout_ms = 5;
   McpReviewMode review_mode = 6;
-  repeated McpDefinition approved = 7;
+  repeated McpDefinition definitions = 7;
 }
 
 message A2aAgent {
   string id = 1;
-  // ^[a-z][a-z0-9_-]{0,62}$ and unique among A2A agents.
+  // ^[a-z][a-z0-9_-]{0,62}$ without "__", unique among A2A agents.
   string name = 2;
   // JSON-RPC endpoint of the upstream agent, absolute http(s) URL.
   string url = 3;

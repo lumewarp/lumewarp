@@ -1507,8 +1507,8 @@ async def test_health_report_is_mirrored_any_time(session_factory: SessionFactor
 async def test_a_catalog_report_reaches_the_ingest_stub(
     session_factory: SessionFactory, monkeypatch
 ):
-    """The report is handed to the MCP module, which owns what is stored (W2); the stream
-    keeps working, and a catalog report is never mistaken for an ACK/NACK."""
+    """The report is handed to the MCP module, which owns what is stored; the stream keeps
+    working, and a catalog report is never mistaken for an ACK/NACK."""
     import lumewarp_control_plane.grpc as module
 
     seen = []
@@ -1521,6 +1521,7 @@ async def test_a_catalog_report_reaches_the_ingest_stub(
                 [(c.agent, c.card_json, c.error) for c in report.cards],
             )
         )
+        return module.catalog_ingest.IngestResult()
 
     monkeypatch.setattr(module.catalog_ingest, "ingest_report", capture)
     definition = cpb.ObservedDefinition(
@@ -1579,6 +1580,7 @@ async def test_a_catalog_report_reaches_the_ingest_stub(
         cpb.CatalogReport(definitions=[cpb.ObservedDefinition(server="", name="t")]),
         cpb.CatalogReport(cards=[cpb.AgentCardReport(agent="a1", card_json="x" * (64 * 1024 + 1))]),
         cpb.CatalogReport(cards=[cpb.AgentCardReport(agent="")]),
+        cpb.CatalogReport(cards=[cpb.AgentCardReport(agent="a1", error="e" * 501)]),
     ],
     ids=[
         "definition-too-large",
@@ -1586,23 +1588,37 @@ async def test_a_catalog_report_reaches_the_ingest_stub(
         "server-empty",
         "card-too-large",
         "agent-empty",
+        "card-error-too-long",
     ],
 )
 @pytest.mark.asyncio
-async def test_an_invalid_catalog_report_closes_the_stream(
+async def test_a_bad_catalog_item_never_closes_the_stream(
     session_factory: SessionFactory, report: cpb.CatalogReport
 ):
+    """A per-item problem is dropped and counted; the gateway keeps its stream (and its
+    other, unrelated reports). See review-w1 M4."""
     scope, tokens = await _seed(session_factory, versions=(1,))
     server, channel, stub = await _start(session_factory, scope)
     call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
     try:
         await call.read()
         await call.write(cpb.GatewayMessage(catalog=report))
-        with pytest.raises(grpc.aio.AioRpcError) as err:
-            await asyncio.wait_for(call.read(), 2)
-        assert err.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+        # The stream is still alive: a health report after it still lands.
+        await call.write(
+            cpb.GatewayMessage(
+                health=cpb.HealthReport(upstreams=[cpb.TargetHealth(name="vllm", healthy=True)])
+            )
+        )
+        await call.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
+        for _ in range(100):
+            status = await _status(session_factory, scope, "gateway-a")
+            if status.acked_version == 1 and status.upstream_health:
+                break
+            await asyncio.sleep(0.02)
+        assert status.acked_version == 1
+        assert status.upstream_health == {"vllm": True}
     finally:
-        call.cancel()
+        await _close(call)
         await channel.close()
         await server.stop(0)
 

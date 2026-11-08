@@ -1,10 +1,19 @@
-//! Startup-only component loading. No WASI imports are linked.
+//! Startup-only component loading, the router strategy adapter and the
+//! upstream-auth request adapter. No WASI imports are linked.
+//!
+//! Guests run as wasmtime *async* components: a call is a future that yields to
+//! its executor at every epoch tick (`epoch_deadline_async_yield_and_update`),
+//! so a long-running plugin never pins a tokio worker. The epoch is a fairness
+//! mechanism only — it never traps. A call ends when it returns, when it traps,
+//! or when the caller drops it (its own timeout, or the client going away); a
+//! dropped call's Store is discarded rather than pooled.
+
 use anyhow::{bail, Context, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -19,27 +28,64 @@ pub fn install_metrics(metrics: Arc<dyn Metrics>) -> Result<()> {
         .set(metrics)
         .map_err(|_| anyhow::anyhow!("plugin metrics already installed"))
 }
+/// Records one call: `ok`, `error`, `timeout` or `trap`.
+pub(crate) fn record(kind: &str, plugin: &str, result: &str, elapsed: Duration) {
+    if let Some(metrics) = METRICS.get() {
+        metrics.record(kind, plugin, result, elapsed.as_secs_f64());
+    }
+}
 
 use lumewarp_proto::config::v1::{PluginDescriptor, RouterStrategyInfo};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use wasmtime::{
-    component::{Component, Linker, ResourceAny},
-    Config, Engine, Store, StoreLimits, StoreLimitsBuilder,
+    component::{Component, Linker},
+    Config, Engine, ResourceLimiter, Store, StoreLimits,
 };
 
+pub mod limits;
+
+mod pool;
+
 pub mod router {
-    wasmtime::component::bindgen!({ path: "../../wit", world: "router" });
+    wasmtime::component::bindgen!({ path: "../../wit", world: "router", exports: { default: async } });
 }
 pub mod auth {
-    wasmtime::component::bindgen!({ path: "../../wit", world: "auth" });
+    // Both directions are async: `http-fetch` awaits inside the guest's call, so
+    // the executor is free while the identity provider answers.
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "auth",
+        imports: { default: async },
+        exports: { default: async },
+    });
 }
 pub mod middleware {
-    wasmtime::component::bindgen!({ path: "../../wit", world: "middleware" });
+    wasmtime::component::bindgen!({ path: "../../wit", world: "middleware", exports: { default: async } });
 }
+#[path = "middleware.rs"]
+pub mod a2a_middleware;
+#[path = "auth.rs"]
+pub mod authenticator;
+pub mod fetch;
 pub use router::exports::lumewarp::plugin::router_strategy as types;
 pub const ABI: u32 = 1;
+
+/// One epoch tick. A guest yields to its executor at most this often.
+pub const EPOCH_TICK: Duration = Duration::from_micros(500);
+
+/// Longest manifest `title` accepted (the control plane's limit).
+pub const MAX_TITLE_CHARS: usize = 200;
+
+/// Longest manifest `description` accepted (the control plane's limit).
+pub const MAX_DESCRIPTION_CHARS: usize = 2000;
+
+/// Consecutive traps/errors/timeouts that pause one plugin.
+pub const BREAKER_FAILURES: u32 = 5;
+
+/// How long a tripped breaker pauses its plugin.
+pub const BREAKER_PAUSE: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -60,109 +106,295 @@ struct RouterManifest {
     member_schema: Value,
 }
 
-/// Request adapters provide scoped origin/secret access for auth stores only.
+/// The `host` interface of the auth world, as the adapter provides it.
+///
+/// `http-fetch` is async: the guest's call suspends and the request future runs
+/// on the executor, so a slow identity provider never blocks a thread.
 pub trait AuthHost: Send + Sync {
-    fn http_fetch(
-        &self,
+    fn http_fetch<'a>(
+        &'a self,
         request: auth::lumewarp::plugin::host::HttpRequest,
-    ) -> Result<auth::lumewarp::plugin::host::HttpResponse, String>;
+    ) -> limits::BoxFuture<'a, Result<auth::lumewarp::plugin::host::HttpResponse, String>>;
     fn secret(&self, name: &str) -> Option<String>;
     fn now_unix_ms(&self) -> u64;
 }
+
+/// Per-Store state: the static limits, the process memory budget and the host
+/// adapter of the call currently running.
 pub struct State {
     limits: StoreLimits,
+    budget: Arc<limits::Budget>,
+    reserved: usize,
+    pending: usize,
     pub auth_host: Option<Arc<dyn AuthHost>>,
 }
-impl Default for State {
-    fn default() -> Self {
+
+impl State {
+    pub fn new(budget: Arc<limits::Budget>) -> Self {
         Self {
+            limits: limits::store_limits(),
+            budget,
+            reserved: 0,
+            pending: 0,
             auth_host: None,
-            limits: StoreLimitsBuilder::new()
-                .memory_size(32 * 1024 * 1024)
-                .memories(1)
-                .build(),
         }
     }
 }
+
+impl Default for State {
+    fn default() -> Self {
+        Self::new(Arc::clone(limits::memory_budget()))
+    }
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        // Wasm memory never shrinks: the reservation lasts as long as the Store.
+        self.budget.release(self.reserved);
+    }
+}
+
+impl ResourceLimiter for State {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> Result<bool> {
+        if !self.limits.memory_growing(current, desired, maximum)? {
+            return Ok(false);
+        }
+        let delta = desired.saturating_sub(current);
+        if !self.budget.try_reserve(delta) {
+            return Ok(false);
+        }
+        self.reserved += delta;
+        self.pending = delta;
+        Ok(true)
+    }
+
+    fn memory_grow_failed(&mut self, error: anyhow::Error) -> Result<()> {
+        // Growth may still fail after the limiter allowed it (OS out of memory).
+        if self.pending > 0 {
+            self.budget.release(self.pending);
+            self.reserved = self.reserved.saturating_sub(self.pending);
+            self.pending = 0;
+        }
+        self.limits.memory_grow_failed(error)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> Result<bool> {
+        self.limits.table_growing(current, desired, maximum)
+    }
+
+    fn table_grow_failed(&mut self, error: anyhow::Error) -> Result<()> {
+        self.limits.table_grow_failed(error)
+    }
+
+    fn instances(&self) -> usize {
+        self.limits.instances()
+    }
+
+    fn tables(&self) -> usize {
+        self.limits.tables()
+    }
+
+    fn memories(&self) -> usize {
+        self.limits.memories()
+    }
+}
+
 impl auth::lumewarp::plugin::types::Host for State {}
 impl auth::lumewarp::plugin::host::Host for State {
-    fn http_fetch(
+    async fn http_fetch(
         &mut self,
         request: auth::lumewarp::plugin::host::HttpRequest,
     ) -> Result<auth::lumewarp::plugin::host::HttpResponse, String> {
-        self.auth_host
-            .as_ref()
-            .ok_or_else(|| "host HTTP adapter is not installed".to_string())?
-            .http_fetch(request)
+        let host = self
+            .auth_host
+            .clone()
+            .ok_or_else(|| "host HTTP adapter is not installed".to_string())?;
+        host.http_fetch(request).await
     }
-    fn secret(&mut self, name: String) -> Option<String> {
-        self.auth_host.as_ref()?.secret(&name)
+
+    async fn secret(&mut self, name: String) -> Option<String> {
+        self.auth_host.as_ref().and_then(|host| host.secret(&name))
     }
-    fn now_unix_ms(&mut self) -> u64 {
+
+    async fn now_unix_ms(&mut self) -> u64 {
         self.auth_host.as_ref().map_or(0, |host| host.now_unix_ms())
     }
 }
-fn linker(engine: &Engine, component: &Component) -> Result<Linker<State>> {
+
+/// The one engine every plugin shares: compiled components, the epoch ticker and
+/// the wasmtime code registry are process-wide.
+pub fn engine() -> &'static Engine {
+    static ENGINE: OnceLock<Engine> = OnceLock::new();
+    ENGINE.get_or_init(|| {
+        let mut config = Config::new();
+        config
+            .wasm_component_model(true)
+            .async_support(true)
+            .epoch_interruption(true);
+        let engine = Engine::new(&config).expect("wasmtime engine");
+        let weak = engine.weak();
+        std::thread::Builder::new()
+            .name("plugin-epoch".to_owned())
+            .spawn(move || loop {
+                std::thread::sleep(EPOCH_TICK);
+                // Stop when the engine is gone (the process is exiting).
+                let Some(engine) = weak.upgrade() else { break };
+                engine.increment_epoch();
+            })
+            .expect("epoch ticker thread");
+        engine
+    })
+}
+
+/// A Store with the host limits and the fairness epoch (never a trap).
+pub fn store(engine: &Engine) -> Store<State> {
+    store_with_budget(engine, Arc::clone(limits::memory_budget()))
+}
+
+/// A Store whose wasm memory counts against `budget` instead of the process
+/// budget (tests, and a deployment that wants one budget per plugin set).
+pub fn store_with_budget(engine: &Engine, budget: Arc<limits::Budget>) -> Store<State> {
+    let mut store = Store::new(engine, State::new(budget));
+    // `State` is the limiter: the static per-Store limits and the process
+    // memory budget are enforced by one `ResourceLimiter` impl.
+    store.limiter(|state| state);
+    // Yield to the executor at every tick and keep running: never interrupt.
+    store.epoch_deadline_async_yield_and_update(1);
+    store.set_epoch_deadline(1);
+    store
+}
+
+/// Drives a future to completion for apply-time work (`configure`, pre-warming).
+///
+/// Never call this on a request: it runs on its own thread and runtime so it
+/// works from a tokio worker, a blocking task or a plain thread alike.
+pub(crate) fn block_on<F>(future: F) -> F::Output
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    fn runtime() -> &'static tokio::runtime::Runtime {
+        static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .thread_name("plugin-apply")
+                .build()
+                .expect("plugin apply runtime")
+        })
+    }
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || runtime().block_on(future))
+            .join()
+            .expect("plugin apply thread panicked")
+    })
+}
+
+/// The component worlds a plugin can implement, prepared once at load.
+pub enum Prepared {
+    Router(router::RouterPre<State>),
+    Auth(auth::AuthPre<State>),
+    Middleware(middleware::MiddlewarePre<State>),
+}
+
+fn build_linker(engine: &Engine, component: &Component, kind: i32) -> Result<Linker<State>> {
     let mut linker = Linker::new(engine);
     // Rust's wasm32-wasip2 std retains WASI imports for panic paths. These
     // interfaces have no implementation: every imported function traps.
     // Unknown non-WASI imports must still fail instantiation.
     for (name, _) in component.component_type().imports(engine) {
-        if !name.starts_with("wasi:") && name != "lumewarp:plugin/types@1.0.0" {
+        if !name.starts_with("wasi:")
+            && name != "lumewarp:plugin/types@1.0.0"
+            && !(kind == 2 && name == "lumewarp:plugin/host@1.0.0")
+        {
             bail!("unsupported component import {name}");
         }
     }
     linker.define_unknown_imports_as_traps(component)?;
-    Ok(linker)
-}
-/// Reset a call's epoch budget. A 500 us ticker gives a 1 ms call at
-/// least half its budget even when it begins immediately before a tick.
-pub fn set_deadline(store: &mut Store<State>, duration: Duration) {
-    store.set_epoch_deadline(
-        u64::try_from(duration.as_micros().div_ceil(500))
-            .unwrap_or(u64::MAX)
-            .max(1),
-    );
-}
-fn store(engine: &Engine, deadline: Duration) -> Store<State> {
-    let mut store = Store::new(engine, State::default());
-    store.limiter(|s| &mut s.limits);
-    set_deadline(&mut store, deadline);
-    store
-}
-
-pub struct Plugin {
-    engine: Engine,
-    component: Component,
-    pub descriptor: PluginDescriptor,
-    pub timeouts: AtomicU64,
-    pub traps: AtomicU64,
-}
-impl Plugin {
-    pub fn engine(&self) -> &Engine {
-        &self.engine
-    }
-    pub fn component(&self) -> &Component {
-        &self.component
-    }
-    /// The adapter resets this deadline before each request-path call.
-    pub fn store(&self, deadline: Duration) -> Store<State> {
-        store(&self.engine, deadline)
-    }
-    pub fn linker(&self) -> Result<Linker<State>> {
-        if self.descriptor.kind != 2 {
-            return linker(&self.engine, &self.component);
-        }
-        let mut linker = Linker::new(&self.engine);
-        linker.define_unknown_imports_as_traps(&self.component)?;
+    if kind == 2 {
         linker.allow_shadowing(true);
         auth::Auth::add_to_linker::<State, wasmtime::component::HasSelf<State>>(
             &mut linker,
             |state| state,
         )?;
-        Ok(linker)
+    }
+    Ok(linker)
+}
+
+pub struct Plugin {
+    component: Component,
+    prepared: Prepared,
+    pub descriptor: PluginDescriptor,
+    /// Calls cut short by their configured timeout.
+    pub timeouts: AtomicU64,
+    /// Calls that trapped or could not get an instance.
+    pub traps: AtomicU64,
+    /// Consecutive failures, for the breaker.
+    failures: std::sync::atomic::AtomicU32,
+    /// Process-relative ms before which the breaker keeps the plugin paused.
+    paused_until: AtomicU64,
+}
+
+impl Plugin {
+    /// The shared engine.
+    pub fn engine(&self) -> &'static Engine {
+        engine()
+    }
+
+    pub fn component(&self) -> &Component {
+        &self.component
+    }
+
+    /// The world bindings, pre-linked once per component.
+    pub fn prepared(&self) -> &Prepared {
+        &self.prepared
+    }
+
+    /// A new Store for this plugin. The adapter instantiates and configures it.
+    pub fn store(&self) -> Store<State> {
+        store(self.engine())
+    }
+
+    /// A linker for this component, for an adapter that builds its own bindings.
+    pub fn linker(&self) -> Result<Linker<State>> {
+        build_linker(self.engine(), &self.component, self.descriptor.kind)
+    }
+
+    /// Whether the breaker is holding this plugin back.
+    pub fn paused(&self) -> bool {
+        limits::mono_ms() < self.paused_until.load(Ordering::Relaxed)
+    }
+
+    /// One trap, error or timeout: enough in a row pause the plugin.
+    pub fn record_failure(&self) {
+        let failures = self.failures.fetch_add(1, Ordering::Relaxed) + 1;
+        if failures >= BREAKER_FAILURES {
+            self.failures.store(0, Ordering::Relaxed);
+            self.paused_until.store(
+                limits::mono_ms().saturating_add(BREAKER_PAUSE.as_millis() as u64),
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    /// A call that answered: the breaker starts over.
+    pub fn record_success(&self) {
+        self.failures.store(0, Ordering::Relaxed);
     }
 }
+
 #[derive(Default)]
 pub struct Registry {
     plugins: HashMap<(i32, String), Arc<Plugin>>,
@@ -172,7 +404,11 @@ pub fn global() -> &'static Registry {
     REGISTRY.get_or_init(Registry::default)
 }
 pub fn initialize() -> Result<()> {
-    let registry = Registry::from_env()?;
+    install(Registry::from_env()?)
+}
+
+/// Installs a registry built by a test or a CLI without the environment.
+pub fn install(registry: Registry) -> Result<()> {
     REGISTRY
         .set(registry)
         .map_err(|_| anyhow::anyhow!("plugins already initialized"))
@@ -207,21 +443,12 @@ impl Registry {
         Ok(())
     }
     fn load_file(&mut self, file: &Path, kind: i32) -> Result<()> {
-        let mut config = Config::new();
-        config.wasm_component_model(true).epoch_interruption(true);
-        let engine = Engine::new(&config)?;
-        // A dedicated ticker per engine makes deadlines independent of tokio scheduling.
-        let weak = engine.weak();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_micros(500));
-            let Some(engine) = weak.upgrade() else { break };
-            engine.increment_epoch();
-        });
+        let engine = engine();
         let bytes = std::fs::read(file)?;
-        let component = Component::new(&engine, &bytes)?;
+        let component = Component::new(engine, &bytes)?;
         let worlds = component
             .component_type()
-            .exports(&engine)
+            .exports(engine)
             .filter(|(name, _)| {
                 [
                     "lumewarp:plugin/router-strategy@1.0.0",
@@ -241,12 +468,12 @@ impl Registry {
         };
         if !component
             .component_type()
-            .exports(&engine)
+            .exports(engine)
             .any(|(name, _)| name == interface)
         {
             bail!("expected {world} world: kind mismatch");
         }
-        for (name, _) in component.component_type().imports(&engine) {
+        for (name, _) in component.component_type().imports(engine) {
             if !name.starts_with("wasi:")
                 && name != "lumewarp:plugin/types@1.0.0"
                 && !(kind == 2 && name == "lumewarp:plugin/host@1.0.0")
@@ -254,46 +481,39 @@ impl Registry {
                 bail!("unsupported component import {name}");
             }
         }
-        let mut store = store(&engine, Duration::from_secs(2));
-        let text = match kind {
-            1 => {
-                let binding = router::Router::instantiate(
-                    &mut store,
-                    &component,
-                    &linker(&engine, &component)?,
-                )
-                .context("expected router world")?;
-                binding
-                    .lumewarp_plugin_router_strategy()
-                    .call_manifest(&mut store)?
-            }
-            2 => {
-                let mut linker = Linker::new(&engine);
-                linker.define_unknown_imports_as_traps(&component)?;
-                linker.allow_shadowing(true);
-                auth::Auth::add_to_linker::<State, wasmtime::component::HasSelf<State>>(
-                    &mut linker,
-                    |s| s,
-                )?;
-                let binding = auth::Auth::instantiate(&mut store, &component, &linker)
-                    .context("expected auth world")?;
-                binding
-                    .lumewarp_plugin_upstream_auth()
-                    .call_manifest(&mut store)?
-            }
-            3 => {
-                let binding = middleware::Middleware::instantiate(
-                    &mut store,
-                    &component,
-                    &linker(&engine, &component)?,
-                )
-                .context("expected middleware world")?;
-                binding
-                    .lumewarp_plugin_a2a_middleware()
-                    .call_manifest(&mut store)?
-            }
-            _ => bail!("unknown plugin kind"),
+        let linker = build_linker(engine, &component, kind)?;
+        let instance_pre = linker.instantiate_pre(&component)?;
+        let prepared = match kind {
+            1 => Prepared::Router(router::RouterPre::new(instance_pre)?),
+            2 => Prepared::Auth(auth::AuthPre::new(instance_pre)?),
+            _ => Prepared::Middleware(middleware::MiddlewarePre::new(instance_pre)?),
         };
+        let text = block_on(async {
+            let mut store = store(engine);
+            match &prepared {
+                Prepared::Router(pre) => {
+                    pre.instantiate_async(&mut store)
+                        .await?
+                        .lumewarp_plugin_router_strategy()
+                        .call_manifest(&mut store)
+                        .await
+                }
+                Prepared::Auth(pre) => {
+                    pre.instantiate_async(&mut store)
+                        .await?
+                        .lumewarp_plugin_upstream_auth()
+                        .call_manifest(&mut store)
+                        .await
+                }
+                Prepared::Middleware(pre) => {
+                    pre.instantiate_async(&mut store)
+                        .await?
+                        .lumewarp_plugin_a2a_middleware()
+                        .call_manifest(&mut store)
+                        .await
+                }
+            }
+        })?;
         let manifest: Manifest = serde_json::from_str(&text).context("invalid manifest")?;
         let expected = match kind {
             1 => "router-strategy",
@@ -322,6 +542,8 @@ impl Registry {
         {
             bail!("duplicate plugin name {}", manifest.name)
         }
+        check_manifest_text("title", &manifest.title, MAX_TITLE_CHARS)?;
+        check_manifest_text("description", &manifest.description, MAX_DESCRIPTION_CHARS)?;
         check_schema(&manifest.params_schema)?;
         let router = match (kind, manifest.router) {
             (1, Some(r)) => {
@@ -354,11 +576,13 @@ impl Registry {
         self.plugins.insert(
             (kind, descriptor.name.clone()),
             Arc::new(Plugin {
-                engine,
                 component,
+                prepared,
                 descriptor,
                 timeouts: AtomicU64::new(0),
                 traps: AtomicU64::new(0),
+                failures: std::sync::atomic::AtomicU32::new(0),
+                paused_until: AtomicU64::new(0),
             }),
         );
         Ok(())
@@ -389,6 +613,19 @@ impl Registry {
             .collect()
     }
 }
+
+/// The control plane's limits on the two free-text manifest fields: they end up
+/// in `Hello`, whose message size is bounded.
+fn check_manifest_text(field: &str, text: &str, max: usize) -> Result<()> {
+    if text.chars().count() > max {
+        bail!("{field} exceeds {max} characters")
+    }
+    if text.chars().any(char::is_control) {
+        bail!("{field} contains control characters")
+    }
+    Ok(())
+}
+
 fn check_schema(schema: &Value) -> Result<()> {
     if schema.to_string().len() > 16384 {
         bail!("schema exceeds 16 KiB")
@@ -437,144 +674,63 @@ pub fn builtins() -> Vec<PluginDescriptor> {
     all
 }
 
-impl lumewarp_router_api::Strategy for RouterInstance {
-    fn pick(
-        &self,
-        req: &lumewarp_router_api::RequestInfo<'_>,
-        candidates: &lumewarp_router_api::Candidates<'_>,
-        rng: &mut dyn lumewarp_router_api::RngCore,
-    ) -> Option<usize> {
-        let signals = &self.plugin.descriptor.router.as_ref()?.needs;
-        let latency = signals.iter().any(|n| n == "latency");
-        let load = signals.iter().any(|n| n == "vllm_load");
-        let request = types::RequestInfo {
-            requested: req.requested.into(),
-            team_id: req.team_id.into(),
-            key_id: req.key_id.into(),
-            estimated_input_tokens: req.estimated_input_tokens,
-            headers: req.headers().map(|(n, v)| (n.into(), v.to_vec())).collect(),
-        };
-        let candidates: Vec<_> = candidates
-            .iter()
-            .map(|c| types::Candidate {
-                index: c.index as u32,
-                member_index: c.member_index() as u32,
-                weight: c.weight(),
-                in_flight: c.in_flight().min(u32::MAX as usize) as u32,
-                latency_ewma_us: if latency { c.latency_ewma_us() } else { None },
-                load: load.then(|| {
-                    let l = c.load();
-                    types::Load {
-                        waiting: l.waiting,
-                        kv_usage_bp: l.kv_usage_bp,
-                        fresh: l.fresh,
-                    }
-                }),
-            })
-            .collect();
-        self.pick(&request, &candidates, rng.u64(0..u64::MAX))
-            .map(|i| i as usize)
-    }
-}
+pub use pool::{PoolConfig, RouterInstance, RouterPool};
 
-struct Instance {
-    store: Store<State>,
-    binding: router::Router,
-    resource: ResourceAny,
-}
-/// Idle instances are protected only while checking out/returning, never while
-/// executing guest code. Concurrent misses create independent stores.
-pub struct RouterInstance {
-    plugin: Arc<Plugin>,
-    info: types::RouterInfo,
-    idle: Mutex<Vec<Instance>>,
-    max_idle: usize,
-}
-impl RouterInstance {
-    pub fn configure(plugin: Arc<Plugin>, info: types::RouterInfo) -> Result<Self> {
-        let configured = Self {
-            plugin,
-            info,
-            idle: Mutex::new(Vec::new()),
-            max_idle: std::thread::available_parallelism().map_or(1, usize::from),
-        };
-        let instance = configured.instantiate()?;
-        configured.idle.lock().unwrap().push(instance);
-        Ok(configured)
-    }
-    fn instantiate(&self) -> Result<Instance> {
-        let mut store = store(&self.plugin.engine, Duration::from_secs(2));
-        let binding = router::Router::instantiate(
-            &mut store,
-            &self.plugin.component,
-            &linker(&self.plugin.engine, &self.plugin.component)?,
-        )?;
-        let resource = binding
-            .lumewarp_plugin_router_strategy()
-            .strategy()
-            .call_configure(&mut store, &self.info)?
-            .map_err(|_| anyhow::anyhow!("plugin configure failed"))?;
-        Ok(Instance {
-            store,
-            binding,
-            resource,
-        })
-    }
-    pub fn pick(
-        &self,
-        request: &types::RequestInfo,
-        candidates: &[types::Candidate],
-        seed: u64,
-    ) -> Option<u32> {
-        let idle = { self.idle.lock().unwrap().pop() };
-        let mut instance = idle.map(Ok).unwrap_or_else(|| self.instantiate()).ok()?;
-        set_deadline(&mut instance.store, Duration::from_millis(1));
-        let started = std::time::Instant::now();
-        let span = tracing::info_span!(
-            "plugin",
-            kind = "router-strategy",
-            plugin = self.plugin.descriptor.name
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_text_is_bounded_and_has_no_control_characters() {
+        assert!(check_manifest_text("title", "Priority failover", MAX_TITLE_CHARS).is_ok());
+        assert!(
+            check_manifest_text("title", &"t".repeat(MAX_TITLE_CHARS), MAX_TITLE_CHARS).is_ok()
         );
-        let _entered = span.enter();
-        let result = instance
-            .binding
-            .lumewarp_plugin_router_strategy()
-            .strategy()
-            .call_pick(
-                &mut instance.store,
-                instance.resource,
-                request,
-                candidates,
-                seed,
-            );
-        let outcome = match &result {
-            Ok(_) => "ok",
-            Err(error)
-                if error.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::Interrupt) =>
-            {
-                self.plugin.timeouts.fetch_add(1, Ordering::Relaxed);
-                "timeout"
-            }
-            Err(_) => {
-                self.plugin.traps.fetch_add(1, Ordering::Relaxed);
-                "trap"
-            }
-        };
-        if let Some(metrics) = METRICS.get() {
-            metrics.record(
-                "router-strategy",
-                &self.plugin.descriptor.name,
-                outcome,
-                started.elapsed().as_secs_f64(),
+        assert!(
+            check_manifest_text("title", &"t".repeat(MAX_TITLE_CHARS + 1), MAX_TITLE_CHARS)
+                .is_err()
+        );
+        assert!(check_manifest_text(
+            "description",
+            &"d".repeat(MAX_DESCRIPTION_CHARS),
+            MAX_DESCRIPTION_CHARS
+        )
+        .is_ok());
+        assert!(check_manifest_text(
+            "description",
+            &"d".repeat(MAX_DESCRIPTION_CHARS + 1),
+            MAX_DESCRIPTION_CHARS
+        )
+        .is_err());
+        for bad in ["a\nb", "a\tb", "nul\0", "esc\u{1b}"] {
+            assert!(
+                check_manifest_text("description", bad, MAX_DESCRIPTION_CHARS).is_err(),
+                "{bad:?}"
             );
         }
-        // A trapped instance is poisoned and is never returned to the pool.
-        if result.is_ok() {
-            let mut idle = self.idle.lock().unwrap();
-            if idle.len() < self.max_idle {
-                idle.push(instance);
-            }
+        // Multi-byte text counts characters, not bytes.
+        assert!(
+            check_manifest_text("title", &"字".repeat(MAX_TITLE_CHARS), MAX_TITLE_CHARS).is_ok()
+        );
+    }
+
+    #[test]
+    fn one_engine_and_one_ticker_serve_every_plugin() {
+        // A second call hands out the same engine, never a new ticker thread.
+        let first = engine() as *const Engine;
+        let second = engine() as *const Engine;
+        assert!(std::ptr::eq(first, second));
+        #[cfg(target_os = "linux")]
+        {
+            let tickers = std::fs::read_dir("/proc/self/task")
+                .expect("task directory")
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| {
+                    std::fs::read_to_string(entry.path().join("comm"))
+                        .is_ok_and(|name| name.trim() == "plugin-epoch")
+                })
+                .count();
+            assert_eq!(tickers, 1, "one epoch ticker for the whole process");
         }
-        result.ok().flatten()
     }
 }

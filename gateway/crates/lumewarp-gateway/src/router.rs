@@ -17,9 +17,11 @@ use lumewarp_proto::config::v1::{
     self as pb, CircuitBreaker, HealthCheck, KeyStatus, Price, RateLimit, RetryPolicy,
     RouterMember, Snapshot, StickyBy, StreamUsageMode,
 };
+#[cfg(test)]
+use lumewarp_router_api::Strategy;
 use lumewarp_router_api::{
-    Builtin, CandidateSource, Candidates, Load, MemberInfo, Needs, RequestInfo, RouterInfo,
-    Strategy, ThreadRng,
+    Builtin, CandidateSource, Candidates, Load, MemberInfo, Needs, RequestInfo, RngCore,
+    RouterInfo, ThreadRng,
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 
@@ -88,6 +90,8 @@ pub struct KeyContext {
     pub scopes: Vec<(Arc<str>, RateLimit)>,
     /// Interned `team_id` for metric handle lookups (0 = no team).
     pub team_label: LabelId,
+    /// MCP server/tool/prompt and A2A agent grants (`EffectivePolicy`).
+    pub grants: crate::grants::Grants,
 }
 
 /// The models of one traffic split (or of the whole router without one).
@@ -143,7 +147,7 @@ impl CandidateSource for PoolSource<'_> {
 
 enum CompiledStrategy {
     Builtin(Builtin),
-    Wasm(lumewarp_plugin_host::RouterInstance, Needs),
+    Wasm(lumewarp_plugin_host::RouterInstance, Needs, Duration),
     #[cfg(test)]
     Custom(Box<dyn Strategy>, Needs),
 }
@@ -175,11 +179,14 @@ impl CompiledStrategy {
                 latency: signals.iter().any(|n| n == "latency"),
                 vllm_load: signals.iter().any(|n| n == "vllm_load"),
             };
+            let timeout = crate::targets::plugin_timeout(r.plugin_timeout_ms);
             let instance = lumewarp_plugin_host::RouterInstance::configure(plugin.clone(), info)
-                .map_err(|_| {
+                .map_err(|error| {
+                    // The plugin's own error text stays in the gateway log.
+                    tracing::warn!(router = %r.name, %error, "router strategy configuration failed");
                     invalid(format!("router {:?} strategy configuration failed", r.name))
                 })?;
-            return Ok(Self::Wasm(instance, needs));
+            return Ok(Self::Wasm(instance, needs, timeout));
         }
         let factory = lumewarp_router_api::lookup(&r.strategy)
             .map_err(|_| invalid("duplicate strategy registration".into()))?
@@ -213,31 +220,40 @@ impl CompiledStrategy {
     fn needs(&self) -> Needs {
         match self {
             Self::Builtin(s) => s.needs(),
-            Self::Wasm(_, needs) => *needs,
+            Self::Wasm(_, needs, _) => *needs,
             #[cfg(test)]
             Self::Custom(_, needs) => *needs,
         }
     }
 
-    fn pick<S: CandidateSource, E: Fn(usize) -> bool>(
+    /// The native strategies answer here; a WASM strategy hands back an owned
+    /// future the caller awaits (the request is not `Send`, the future is).
+    fn pick_step<S: CandidateSource, E: Fn(usize) -> bool>(
         &self,
         req: &RequestInfo<'_>,
         c: &Candidates<'_, S, E>,
         rng: &mut ThreadRng,
-    ) -> Option<usize> {
+    ) -> PickStep {
         match self {
-            Self::Builtin(s) => s.pick_from(c, rng),
-            Self::Wasm(s, _) => {
-                let picked = Strategy::pick(s, req, &c.erased(), rng)?;
-                c.get(picked).map(|d| d.index)
+            Self::Builtin(s) => PickStep::Answer(s.pick_from(c, rng)),
+            Self::Wasm(s, _, timeout) => {
+                PickStep::Ask(s.pick_task(req, c, rng.u64(0..u64::MAX), *timeout))
             }
             #[cfg(test)]
-            Self::Custom(s, _) => {
-                let picked = s.pick(req, &c.erased(), rng)?;
-                c.get(picked).map(|d| d.index)
-            }
+            Self::Custom(s, _) => match s.pick(req, &c.erased(), rng) {
+                Some(picked) => PickStep::Answer(c.get(picked).map(|d| d.index)),
+                None => PickStep::Answer(None),
+            },
         }
     }
+}
+
+/// What one pool's strategy answered: a native model index, or a WASM call to
+/// await. The future owns everything it needs, so awaiting it never holds a
+/// borrow of the request or the candidate list.
+enum PickStep {
+    Answer(Option<usize>),
+    Ask(lumewarp_plugin_host::limits::BoxFuture<'static, Option<usize>>),
 }
 
 /// A pool of models with a strategy: a `Router` of the snapshot, or the
@@ -392,14 +408,14 @@ impl Router {
 }
 
 impl Pool {
-    fn pick(
+    fn pick_step(
         &self,
         strategy: &CompiledStrategy,
         req: &RequestInfo<'_>,
         excluded: Option<&[LabelId]>,
         now: u64,
         strict: bool,
-    ) -> Option<usize> {
+    ) -> PickStep {
         let eligible = |i: usize| {
             let d = &self.models[i];
             !excluded.is_some_and(|tried| tried.contains(&d.label))
@@ -416,7 +432,7 @@ impl Pool {
         };
         let source = PoolSource { pool: self, now };
         let candidates = Candidates::new(&source, &eligible);
-        strategy.pick(req, &candidates, &mut ThreadRng)
+        strategy.pick_step(req, &candidates, &mut ThreadRng)
     }
 
     fn weighted_index(&self, draw: u64) -> usize {
@@ -462,6 +478,9 @@ pub struct RoutingTable {
     pub models_json: Bytes,
     pub auth_mode: AuthMode,
     pub runtime: Arc<Runtime>,
+    /// MCP servers and A2A agents of this snapshot (`docs/plugins.md`). Empty
+    /// when none is configured; the LLM request path never reads it.
+    pub targets: Arc<crate::targets::Targets>,
     /// Pre-routing rejections and local endpoints (model "", team "").
     pub rejected: [Arc<RequestMetrics>; API_ENDPOINTS.len()],
     /// Every callable name, sorted, for filtered `/v1/models`.
@@ -496,6 +515,12 @@ impl RoutingTable {
         }
         let encryption_secret = sealed::env_secret();
         let playground_key = encryption_secret.as_deref().map(sealed::playground_key);
+        // Apply-time only: MCP/A2A endpoints, outbound auth (secrets opened
+        // here) and reviewed definitions. Nothing below reads it per LLM request.
+        let mcp_targets = Arc::new(crate::targets::Targets::compile(
+            snapshot,
+            encryption_secret.as_deref(),
+        )?);
         let mut upstreams = HashMap::new();
         let mut probes = Vec::new();
         let mut unprobed = Vec::new();
@@ -896,6 +921,7 @@ impl RoutingTable {
                         .map(|s| (intern(&s.id), s.limit.expect("validated limit")))
                         .collect(),
                     team_label,
+                    grants: crate::grants::Grants::compile(policy),
                 })
             };
             let current = context(key.expires_at_unix_ms);
@@ -932,6 +958,7 @@ impl RoutingTable {
             auth_mode,
             rejected: std::array::from_fn(|endpoint| metrics.handles("", "", endpoint, "")),
             runtime: runtime.clone(),
+            targets: mcp_targets,
             listed,
             unknown_label: metrics.label_id("unknown"),
             probes,
@@ -1003,13 +1030,13 @@ impl RoutingTable {
     /// Picks a model and reserves an in-flight slot on it.
     #[cfg(test)]
     pub fn acquire(&self, called: &Callable, endpoint: usize, caller: &Caller) -> InFlight {
-        self.acquire_initial(
+        block_on(self.acquire_initial(
             called,
             endpoint,
             caller,
             &HeaderMap::new(),
             &mut Skipped::default(),
-        )
+        ))
         .expect("test router has an available model")
         .0
     }
@@ -1017,7 +1044,7 @@ impl RoutingTable {
     /// Chooses the request's split (counted once), then its own split, the
     /// other splits, the fallbacks, and finally fails open on its own router.
     /// Returns the guard, the fallback counter if one was used, and the split.
-    pub fn acquire_initial<'a>(
+    pub async fn acquire_initial<'a>(
         &self,
         called: &'a Callable,
         endpoint: usize,
@@ -1030,21 +1057,28 @@ impl RoutingTable {
         if let Some(counter) = router.split_requests.get(split) {
             counter.inc();
         }
-        if let Some(guard) = self.acquire_from(
-            called, router, split, endpoint, caller, headers, None, false, skipped,
-        ) {
+        if let Some(guard) = self
+            .acquire_from(
+                called, router, split, endpoint, caller, headers, None, false, skipped,
+            )
+            .await
+        {
             return Some((guard, None, split));
         }
         for (fallback, counter) in &router.fallbacks {
-            if let Some(guard) = self.acquire_from(
-                called, fallback, 0, endpoint, caller, headers, None, false, skipped,
-            ) {
+            if let Some(guard) = self
+                .acquire_from(
+                    called, fallback, 0, endpoint, caller, headers, None, false, skipped,
+                )
+                .await
+            {
                 return Some((guard, Some(counter), split));
             }
         }
         self.acquire_from(
             called, router, split, endpoint, caller, headers, None, true, skipped,
         )
+        .await
         .map(|guard| (guard, None, split))
     }
 
@@ -1052,7 +1086,7 @@ impl RoutingTable {
     /// splits), then fallbacks in declaration order. Only when every eligible
     /// candidate is unhealthy/open do we fail open.
     #[allow(clippy::too_many_arguments)]
-    pub fn retry<'a>(
+    pub async fn retry<'a>(
         &self,
         called: &'a Callable,
         endpoint: usize,
@@ -1065,31 +1099,37 @@ impl RoutingTable {
         let router = &*called.target;
         for strict in [true, false] {
             for excluded in [tried, &[][..]] {
-                if let Some(guard) = self.acquire_from(
-                    called,
-                    router,
-                    split,
-                    endpoint,
-                    caller,
-                    headers,
-                    Some(excluded),
-                    !strict,
-                    skipped,
-                ) {
-                    return Some((guard, None));
-                }
-                for (fallback, counter) in &router.fallbacks {
-                    if let Some(guard) = self.acquire_from(
+                if let Some(guard) = self
+                    .acquire_from(
                         called,
-                        fallback,
-                        0,
+                        router,
+                        split,
                         endpoint,
                         caller,
                         headers,
                         Some(excluded),
                         !strict,
                         skipped,
-                    ) {
+                    )
+                    .await
+                {
+                    return Some((guard, None));
+                }
+                for (fallback, counter) in &router.fallbacks {
+                    if let Some(guard) = self
+                        .acquire_from(
+                            called,
+                            fallback,
+                            0,
+                            endpoint,
+                            caller,
+                            headers,
+                            Some(excluded),
+                            !strict,
+                            skipped,
+                        )
+                        .await
+                    {
                         return Some((guard, Some(counter)));
                     }
                 }
@@ -1099,7 +1139,7 @@ impl RoutingTable {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn acquire_from(
+    async fn acquire_from(
         &self,
         root: &Callable,
         router: &Router,
@@ -1123,24 +1163,21 @@ impl RoutingTable {
             Caller::Key(key) => (key.team_id.as_ref(), key.key_id.as_ref()),
             _ => ("", ""),
         };
-        let lookup = |name: &str| headers.get(name).map(HeaderValue::as_bytes);
-        let req = RequestInfo::new(
-            &root.name,
-            team_id,
-            key_id,
-            None,
-            &router.strategy_headers,
-            &lookup,
-        );
-        let pick = |strict: bool| {
-            router.pool_order(split).find_map(|pool| {
-                pool.pick(&router.strategy, &req, excluded, now, strict)
-                    .map(|i| &pool.models[i])
-            })
-        };
-        let model = pick(true)
-            .or_else(|| fail_open.then(|| pick(false)).flatten())?
-            .clone();
+        // `RequestInfo` borrows a local closure and is not `Send`, so each
+        // pool's pick is prepared inside a sync block and awaited afterwards.
+        let mut model = self
+            .pick_model(
+                root, router, split, team_id, key_id, headers, excluded, now, true,
+            )
+            .await;
+        if model.is_none() && fail_open {
+            model = self
+                .pick_model(
+                    root, router, split, team_id, key_id, headers, excluded, now, false,
+                )
+                .await;
+        }
+        let model = model?.clone();
         let trial = if model.circuit.is_some() {
             match model.breaker.reserve(now) {
                 Some(trial) => trial,
@@ -1163,6 +1200,46 @@ impl RoutingTable {
             trial,
             finished: false,
         })
+    }
+
+    /// The first pool of the chosen split whose strategy names an eligible
+    /// model. A WASM strategy's call is awaited between pools, never inside the
+    /// sync leaf that prepares it.
+    #[allow(clippy::too_many_arguments)]
+    async fn pick_model<'a>(
+        &self,
+        root: &'a Callable,
+        router: &'a Router,
+        split: usize,
+        team_id: &str,
+        key_id: &str,
+        headers: &HeaderMap,
+        excluded: Option<&[LabelId]>,
+        now: u64,
+        strict: bool,
+    ) -> Option<&'a Arc<Model>> {
+        for pool in router.pool_order(split) {
+            let step = {
+                let lookup = |name: &str| headers.get(name).map(HeaderValue::as_bytes);
+                let req = RequestInfo::new(
+                    &root.name,
+                    team_id,
+                    key_id,
+                    None,
+                    &router.strategy_headers,
+                    &lookup,
+                );
+                pool.pick_step(&router.strategy, &req, excluded, now, strict)
+            };
+            let picked = match step {
+                PickStep::Answer(answer) => answer,
+                PickStep::Ask(task) => task.await,
+            };
+            if let Some(index) = picked {
+                return pool.models.get(index);
+            }
+        }
+        None
     }
 
     /// Returns how many probe and scrape tasks were (re)started.
@@ -1331,6 +1408,36 @@ fn models_json<'a>(models: impl Iterator<Item = &'a Box<str>>) -> Bytes {
     )
 }
 
+/// Native-only pick for the tests below (a WASM strategy needs the async path).
+#[cfg(test)]
+fn pick_model(
+    pool: &Pool,
+    strategy: &CompiledStrategy,
+    req: &RequestInfo<'_>,
+    excluded: Option<&[LabelId]>,
+    now: u64,
+    strict: bool,
+) -> Option<usize> {
+    match pool.pick_step(strategy, req, excluded, now, strict) {
+        PickStep::Answer(answer) => answer,
+        PickStep::Ask(_) => panic!("a WASM strategy needs the timeout-carrying async path"),
+    }
+}
+
+#[cfg(test)]
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    loop {
+        if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut context) {
+            return value;
+        }
+        // The native path returns `Ready` on the first poll; only a WASM
+        // strategy yields, and those tests drive tokio instead.
+        std::thread::yield_now();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1339,6 +1446,51 @@ mod tests {
 
     fn empty_request() -> RequestInfo<'static> {
         RequestInfo::new("public", "", "", None, &[], &|_| None)
+    }
+
+    /// MCP servers, A2A agents and the per-key grants are compiled onto the
+    /// table without entering the LLM callable name space.
+    #[test]
+    fn targets_and_grants_are_compiled_into_the_table() {
+        let mut s = base();
+        s.required_capabilities = vec!["strategy:weighted".into(), "mcp".into(), "a2a".into()];
+        s.mcp_servers = vec![pb::McpServer {
+            id: "id-s1".into(),
+            name: "s1".into(),
+            url: "https://mcp.example.test/mcp".into(),
+            ..Default::default()
+        }];
+        s.a2a_agents = vec![pb::A2aAgent {
+            id: "id-a1".into(),
+            name: "a1".into(),
+            url: "https://agent.example.test/rpc".into(),
+            ..Default::default()
+        }];
+        s.api_keys[0].policy.as_mut().unwrap().mcp_grants = vec![pb::McpGrant {
+            server: "s1".into(),
+            all_tools: false,
+            tools: vec!["echo".into()],
+        }];
+        s.api_keys[0].policy.as_mut().unwrap().allowed_agents = vec!["a1".into()];
+        let table = RoutingTable::compile(&s, AuthMode::RequireKey, &Runtime::new()).unwrap();
+        assert_eq!(table.targets.server("s1").unwrap().id.as_ref(), "id-s1");
+        assert_eq!(table.targets.agent("a1").unwrap().id.as_ref(), "id-a1");
+        assert!(!table.targets.is_empty());
+        // The key carries its resolved grants; the second key (deny-all policy)
+        // carries none.
+        let k1 = table.keys_by_id.get("k1").unwrap();
+        assert!(k1.grants.may_call_tool("s1", "echo"));
+        assert!(!k1.grants.may_call_tool("s1", "add"));
+        assert!(k1.grants.may_call_agent("a1"));
+        assert!(!k1.grants.may_call_agent("a2"));
+        let k2 = table.keys_by_id.get("k2").unwrap();
+        assert!(!k2.grants.may_see_server("s1"));
+        assert!(!k2.grants.may_call_agent("a1"));
+        // MCP servers and A2A agents are not LLM-callable names, and `/v1/models`
+        // does not list them.
+        assert!(table.lookup("s1").is_none());
+        assert!(table.lookup("a1").is_none());
+        assert!(!String::from_utf8_lossy(&table.models_json).contains("s1"));
     }
 
     /// Declared in their own modules: one `register!` per module.
@@ -1481,9 +1633,8 @@ mod tests {
         assert_eq!(offsets, [0, 2]);
         let req = empty_request();
         for (pool, want) in router.pools.iter().zip([&first, &second]) {
-            let picked = pool
-                .pick(&router.strategy, &req, None, clock::mono_ms(), true)
-                .unwrap();
+            let picked =
+                pick_model(pool, &router.strategy, &req, None, clock::mono_ms(), true).unwrap();
             assert_eq!(&pool.models[picked].name, want);
         }
 
@@ -1569,16 +1720,15 @@ mod tests {
         headers.insert("x-pin", HeaderValue::from_static("b"));
         headers.insert("authorization", HeaderValue::from_static("secret"));
         let pick = || {
-            routing_table
-                .acquire_initial(
-                    router,
-                    0,
-                    &Caller::Anonymous,
-                    &headers,
-                    &mut Skipped::default(),
-                )
-                .unwrap()
-                .0
+            block_on(routing_table.acquire_initial(
+                router,
+                0,
+                &Caller::Anonymous,
+                &headers,
+                &mut Skipped::default(),
+            ))
+            .unwrap()
+            .0
         };
         drop(pick()); // warm metric handles
         let (allocations, guard) = crate::test_alloc::count(pick);
@@ -1677,7 +1827,8 @@ mod tests {
                     .healthy
                     .store(step % 13 != 0, Ordering::Release);
                 let excluded = [pool.models[1].label];
-                let picked = pool.pick(
+                let picked = pick_model(
+                    pool,
                     &routing_table.names["public"].strategy,
                     &empty_request(),
                     (step % 17 == 0).then_some(excluded.as_slice()),
@@ -1710,7 +1861,8 @@ mod tests {
             fastrand::seed(42);
             let start = std::time::Instant::now();
             for _ in 0..1_000_000 {
-                std::hint::black_box(pool.pick(
+                std::hint::black_box(pick_model(
+                    pool,
                     &routing_table.names["public"].strategy,
                     &empty_request(),
                     None,
@@ -1857,15 +2009,14 @@ mod tests {
         next.names["public"].pools[0].models[0]
             .healthy
             .store(false, Ordering::Release);
-        assert!(next
-            .acquire_initial(
-                &next.names["public"],
-                0,
-                &Caller::Anonymous,
-                &HeaderMap::new(),
-                &mut Skipped::default()
-            )
-            .is_some());
+        assert!(block_on(next.acquire_initial(
+            &next.names["public"],
+            0,
+            &Caller::Anonymous,
+            &HeaderMap::new(),
+            &mut Skipped::default()
+        ))
+        .is_some());
     }
 
     #[test]
@@ -2100,15 +2251,14 @@ mod tests {
         let router = &routing_table.names["public"];
         let mut canary = 0;
         for _ in 0..10_000 {
-            let (guard, _, split) = routing_table
-                .acquire_initial(
-                    router,
-                    0,
-                    &Caller::Anonymous,
-                    &HeaderMap::new(),
-                    &mut Skipped::default(),
-                )
-                .unwrap();
+            let (guard, _, split) = block_on(routing_table.acquire_initial(
+                router,
+                0,
+                &Caller::Anonymous,
+                &HeaderMap::new(),
+                &mut Skipped::default(),
+            ))
+            .unwrap();
             assert_eq!(split == 1, guard.model.name != "a");
             canary += usize::from(split == 1);
         }
@@ -2185,32 +2335,21 @@ mod tests {
             .map(|i| headers(&format!("u{i}")))
             .find(|h| router.split_for(h, &anonymous) == 1)
             .unwrap();
-        let (first, _, split) = routing_table
-            .acquire_initial(router, 0, &anonymous, &h, &mut Skipped::default())
-            .unwrap();
+        let (first, _, split) = block_on(routing_table.acquire_initial(
+            router,
+            0,
+            &anonymous,
+            &h,
+            &mut Skipped::default(),
+        ))
+        .unwrap();
         assert_eq!(split, 1);
         let label = |name: &str| routing_table.runtime.metrics.label_id(name);
         let other = if first.model.name == "b" { "c" } else { "b" };
         assert_ne!(first.model.name, "a");
         let tried = [first.model.label];
         for _ in 0..50 {
-            let (next, fallback) = routing_table
-                .retry(
-                    router,
-                    0,
-                    &anonymous,
-                    &h,
-                    &tried,
-                    split,
-                    &mut Skipped::default(),
-                )
-                .unwrap();
-            assert!(fallback.is_none());
-            assert_eq!(next.model.name, other, "stays inside the canary split");
-        }
-        let tried = [label("b"), label("c")];
-        let (next, _) = routing_table
-            .retry(
+            let (next, fallback) = block_on(routing_table.retry(
                 router,
                 0,
                 &anonymous,
@@ -2218,8 +2357,22 @@ mod tests {
                 &tried,
                 split,
                 &mut Skipped::default(),
-            )
+            ))
             .unwrap();
+            assert!(fallback.is_none());
+            assert_eq!(next.model.name, other, "stays inside the canary split");
+        }
+        let tried = [label("b"), label("c")];
+        let (next, _) = block_on(routing_table.retry(
+            router,
+            0,
+            &anonymous,
+            &h,
+            &tried,
+            split,
+            &mut Skipped::default(),
+        ))
+        .unwrap();
         assert_eq!(next.model.name, "a", "then the other split");
     }
 
@@ -2488,29 +2641,29 @@ mod tests {
             }
             // Warm every handle the picks below can reach.
             for _ in 0..200 {
-                drop(routing_table.acquire_initial(
+                drop(block_on(routing_table.acquire_initial(
                     router,
                     0,
                     &Caller::Anonymous,
                     &h,
                     &mut Skipped::default(),
-                ));
+                )));
                 drop(routing_table.acquire(router, 0, &Caller::Anonymous));
             }
             let (warm, guard) = count(|| {
-                routing_table.acquire_initial(
+                block_on(routing_table.acquire_initial(
                     router,
                     0,
                     &Caller::Anonymous,
                     &h,
                     &mut Skipped::default(),
-                )
+                ))
             });
             drop(guard);
             assert_eq!(warm, (0, 0), "{sticky:?} {strategy:?}");
             let tried = [router.pools[1].models[0].label];
             let (retry, guard) = count(|| {
-                routing_table.retry(
+                block_on(routing_table.retry(
                     router,
                     0,
                     &Caller::Anonymous,
@@ -2518,7 +2671,7 @@ mod tests {
                     &tried,
                     1,
                     &mut Skipped::default(),
-                )
+                ))
             });
             drop(guard);
             assert_eq!(retry, (0, 0), "retry {sticky:?} {strategy:?}");
@@ -2551,15 +2704,14 @@ mod tests {
         // b: freshly open. Neither is eligible for strict selection.
         open(b, clock::mono_ms());
         for _ in 0..200 {
-            let (guard, fallback, _) = routing_table
-                .acquire_initial(
-                    router,
-                    0,
-                    &Caller::Anonymous,
-                    &HeaderMap::new(),
-                    &mut Skipped::default(),
-                )
-                .expect("fails open onto the model without a running trial");
+            let (guard, fallback, _) = block_on(routing_table.acquire_initial(
+                router,
+                0,
+                &Caller::Anonymous,
+                &HeaderMap::new(),
+                &mut Skipped::default(),
+            ))
+            .expect("fails open onto the model without a running trial");
             assert!(fallback.is_none());
             assert_eq!(guard.model.name, "b");
         }
@@ -2595,12 +2747,20 @@ mod tests {
             let mut skipped = Skipped::default();
             // Strict selection fails everywhere (fallback included), then
             // fails open; retries consider the same open candidates again.
-            let (guard, _, split) = routing_table
-                .acquire_initial(router, 0, &anonymous, &h, &mut skipped)
-                .unwrap();
+            let (guard, _, split) =
+                block_on(routing_table.acquire_initial(router, 0, &anonymous, &h, &mut skipped))
+                    .unwrap();
             let tried = [guard.model.label];
             for _ in 0..3 {
-                drop(routing_table.retry(router, 0, &anonymous, &h, &tried, split, &mut skipped));
+                drop(block_on(routing_table.retry(
+                    router,
+                    0,
+                    &anonymous,
+                    &h,
+                    &tried,
+                    split,
+                    &mut skipped,
+                )));
             }
             drop(guard);
             assert_eq!(count("public", "a"), request);
@@ -2813,17 +2973,16 @@ mod tests {
         ));
         // A retry of a direct call has nowhere else to go but the same model.
         let tried = [direct.pools[0].models[0].label];
-        let (again, fallback) = table
-            .retry(
-                direct,
-                0,
-                &Caller::Anonymous,
-                &HeaderMap::new(),
-                &tried,
-                0,
-                &mut Skipped::default(),
-            )
-            .unwrap();
+        let (again, fallback) = block_on(table.retry(
+            direct,
+            0,
+            &Caller::Anonymous,
+            &HeaderMap::new(),
+            &tried,
+            0,
+            &mut Skipped::default(),
+        ))
+        .unwrap();
         assert_eq!(again.model.name, "a");
         assert!(fallback.is_none());
     }
@@ -2841,15 +3000,14 @@ mod tests {
         }];
         let table = RoutingTable::compile(&s, AuthMode::Open, &runtime).unwrap();
         open(&table.names["public"].pools[0].models[0], clock::mono_ms());
-        let (guard, counter, _) = table
-            .acquire_initial(
-                &table.names["nick"],
-                0,
-                &Caller::Anonymous,
-                &HeaderMap::new(),
-                &mut Skipped::default(),
-            )
-            .unwrap();
+        let (guard, counter, _) = block_on(table.acquire_initial(
+            &table.names["nick"],
+            0,
+            &Caller::Anonymous,
+            &HeaderMap::new(),
+            &mut Skipped::default(),
+        ))
+        .unwrap();
         assert_eq!(guard.model.name, "b");
         assert_eq!(guard.metrics.requested, "nick");
         counter.unwrap().inc();

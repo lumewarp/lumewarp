@@ -35,6 +35,25 @@ class ColumnClass(StrEnum):
 # One entry per Text, String or JSONB column. SQLAlchemy Enums are fixed-choice VARCHARs and
 # are skipped by the scan (their allowed values are in models.py).
 CLASSIFIED: dict[tuple[str, str], ColumnClass] = {
+    ("a2a_agents", "auth_params"): ColumnClass.CONFIG,
+    ("a2a_agents", "auth_plugin"): ColumnClass.PUBLIC,
+    # Pasted by an administrator or reported by a gateway: shown as text, never a credential.
+    ("a2a_agents", "card_json"): ColumnClass.CONFIG,
+    ("a2a_agents", "card_url"): ColumnClass.PUBLIC,
+    ("a2a_agents", "last_card_error"): ColumnClass.CONFIG,
+    ("a2a_agents", "last_card_json"): ColumnClass.CONFIG,
+    ("a2a_agents", "middleware_params"): ColumnClass.CONFIG,
+    ("a2a_agents", "middleware_plugin"): ColumnClass.PUBLIC,
+    ("a2a_agents", "name"): ColumnClass.PUBLIC,
+    ("a2a_agents", "secret_ref"): ColumnClass.ENV_REF,
+    ("a2a_agents", "url"): ColumnClass.PUBLIC,
+    ("mcp_definitions", "definition_json"): ColumnClass.PROTOCOL,
+    ("mcp_definitions", "name"): ColumnClass.PUBLIC,
+    ("mcp_servers", "auth_params"): ColumnClass.CONFIG,
+    ("mcp_servers", "auth_plugin"): ColumnClass.PUBLIC,
+    ("mcp_servers", "name"): ColumnClass.PUBLIC,
+    ("mcp_servers", "secret_ref"): ColumnClass.ENV_REF,
+    ("mcp_servers", "url"): ColumnClass.PUBLIC,
     ("aliases", "kind"): ColumnClass.PUBLIC,
     ("aliases", "target_kind"): ColumnClass.PUBLIC,
     ("api_keys", "display_prefix"): ColumnClass.PUBLIC,

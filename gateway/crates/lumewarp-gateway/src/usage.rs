@@ -19,10 +19,10 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use lumewarp_proto::config::v1::Price;
-pub use lumewarp_proto::usage::v1::UsageEvent;
 use lumewarp_proto::usage::v1::{
     usage_service_client::UsageServiceClient, ReportRequest, RequestOutcome, UsageState,
 };
+pub use lumewarp_proto::usage::v1::{TrafficKind, UsageEvent};
 use memchr::memmem;
 use serde::{de::IgnoredAny, Deserialize};
 use tokio::{
@@ -36,7 +36,7 @@ use tonic::{
 use tracing::Instrument;
 
 use crate::{
-    auth::Caller,
+    auth::{self, Caller},
     metrics::{Metrics, RequestMetrics, API_ENDPOINTS},
     router::Model,
     runtime::Runtime,
@@ -51,12 +51,19 @@ pub const MAX_JSON_CAPTURE: usize = 4 * 1024 * 1024;
 
 /// Longest `requested` reported; the control plane refuses longer ones.
 const MAX_REQUESTED: usize = 400;
+/// Longest `target` (MCP server or A2A agent name) an MCP/A2A event reports;
+/// the control plane refuses longer ones.
+const MAX_TARGET: usize = 200;
+/// Longest `method` (usage.proto: "at most 128 bytes").
+const MAX_METHOD: usize = 128;
+/// Longest `tool` (usage.proto: "at most 400 bytes").
+const MAX_TOOL: usize = 400;
 
-/// A called name as reported in usage and spans. A name that does not exist is
-/// client input: cut to the limit on a character boundary and without NUL,
-/// which Postgres text cannot hold. Allocates only for such a name.
-pub fn bounded_requested(name: &str) -> Cow<'_, str> {
-    let mut end = name.len().min(MAX_REQUESTED);
+/// A value as reported in usage and spans. Anything a client or an upstream
+/// chose is untrusted: cut to the limit on a character boundary and without
+/// NUL, which Postgres text cannot hold. Allocates only when it changes.
+fn bounded(name: &str, limit: usize) -> Cow<'_, str> {
+    let mut end = name.len().min(limit);
     while !name.is_char_boundary(end) {
         end -= 1;
     }
@@ -66,6 +73,11 @@ pub fn bounded_requested(name: &str) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(cut)
     }
+}
+
+/// A called name as reported in usage and spans.
+pub fn bounded_requested(name: &str) -> Cow<'_, str> {
+    bounded(name, MAX_REQUESTED)
 }
 
 /// Created once per `/v1/*` request at entry in `server.rs`, never from client
@@ -92,6 +104,195 @@ impl RequestCtx {
             started_at_unix_ms: now.as_millis() as i64,
             started,
         }
+    }
+}
+
+/// One MCP or A2A request to report (D16/P10). The proxies build it once the
+/// request is answered: `kind` says which endpoint, `target`/`method`/`tool`
+/// what it named, `status`/`outcome`/`stream` how it ended. Never the body.
+pub struct TrafficEvent<'a> {
+    pub kind: TrafficKind,
+    pub request: &'a RequestCtx,
+    pub caller: &'a auth::Caller,
+    pub target: &'a str,
+    pub method: &'a str,
+    pub tool: &'a str,
+    pub status: u16,
+    pub outcome: RequestOutcome,
+    pub stream: bool,
+    pub config_version: u64,
+}
+
+/// The `endpoint` label of a traffic event: the MCP and A2A endpoints are the
+/// gateway's own, not one of `metrics::API_ENDPOINTS` (the control plane stores
+/// it as free text). `None` for a kind this function does not report.
+fn traffic_endpoint(kind: TrafficKind) -> Option<(&'static str, TrafficKind)> {
+    match kind {
+        TrafficKind::Mcp => Some(("mcp", TrafficKind::Mcp)),
+        TrafficKind::A2a => Some(("a2a", TrafficKind::A2a)),
+        TrafficKind::Llm | TrafficKind::Unspecified => None,
+    }
+}
+
+fn duration_ms(elapsed: std::time::Duration) -> u32 {
+    u32::try_from(elapsed.as_millis())
+        .unwrap_or(u32::MAX)
+        .min(i32::MAX as u32)
+}
+
+/// One traffic event's fixed part, owned: everything a [`UsageEvent`] needs
+/// except the outcome and the status, so it can outlive the request's borrows
+/// (which is what a streaming response needs).
+struct OwnedTraffic {
+    sink: UsageSink,
+    request_id: uuid::Uuid,
+    started_at_unix_ms: i64,
+    started: Instant,
+    key_id: String,
+    team_id: String,
+    endpoint: &'static str,
+    kind: TrafficKind,
+    config_version: u64,
+    target: String,
+    method: String,
+    tool: String,
+    stream: bool,
+    status: u16,
+}
+
+impl OwnedTraffic {
+    /// `None` when there is nothing to report: usage disabled (standalone
+    /// mode), an anonymous caller (MCP/A2A requests are always keyed), or a
+    /// kind the LLM path owns.
+    fn new(runtime: &Runtime, event: &TrafficEvent<'_>) -> Option<Self> {
+        if !runtime.usage.enabled() {
+            return None;
+        }
+        let Caller::Key(key) = event.caller else {
+            return None;
+        };
+        let (endpoint, kind) = traffic_endpoint(event.kind)?;
+        Some(Self {
+            sink: runtime.usage.clone(),
+            request_id: event.request.request_id,
+            started_at_unix_ms: event.request.started_at_unix_ms,
+            started: event.request.started,
+            key_id: key.key_id.to_string(),
+            team_id: key.team_id.to_string(),
+            endpoint,
+            kind,
+            config_version: event.config_version,
+            target: bounded(event.target, MAX_TARGET).into_owned(),
+            method: bounded(event.method, MAX_METHOD).into_owned(),
+            tool: bounded(event.tool, MAX_TOOL).into_owned(),
+            stream: event.stream,
+            status: event.status,
+        })
+    }
+
+    /// Emits the event. Never blocks: a full queue drops it and counts it
+    /// (`lumewarp_usage_events_dropped_total`), exactly like an LLM event.
+    fn record(self, outcome: RequestOutcome, status: u16) {
+        let elapsed = self.started.elapsed();
+        let duration_ms = duration_ms(elapsed);
+        self.sink.try_record(UsageEvent {
+            request_id: self.request_id.to_string(),
+            timestamp_unix_ms: self
+                .started_at_unix_ms
+                .saturating_add(i64::from(duration_ms)),
+            key_id: self.key_id,
+            team_id: self.team_id,
+            endpoint: self.endpoint.into(),
+            status: u32::from(status),
+            stream: self.stream,
+            duration_ms,
+            config_version: self.config_version,
+            usage_state: UsageState::Missing as i32,
+            outcome: outcome as i32,
+            started_at_unix_ms: self.started_at_unix_ms,
+            kind: self.kind as i32,
+            target: self.target,
+            method: self.method,
+            tool: self.tool,
+            ..Default::default()
+        });
+    }
+}
+
+/// Records one MCP or A2A request in usage, at the moment its response is
+/// ready. Never blocks and never fails the request.
+///
+/// Bounds (usage.proto and the control plane's validation): `target` is cut to
+/// 200 bytes, `method` to 128, `tool` to 400, each on a character boundary and
+/// without NUL; `duration_ms` is capped at `i32::MAX`. The event names no
+/// model, alias, router, upstream, tokens or cost, and reports usage MISSING —
+/// MCP/A2A requests are not billed (D16).
+///
+/// An LLM request is reported by `UsageCapture::finalize`, an anonymous caller
+/// has no id to attribute, and a streaming response must use
+/// [`TrafficRecorder`] instead (its outcome is only known when the stream
+/// ends), so all three are ignored here.
+pub fn record_traffic(runtime: &Runtime, event: TrafficEvent<'_>) {
+    let Some(owned) = OwnedTraffic::new(runtime, &event) else {
+        return;
+    };
+    owned.record(event.outcome, event.status);
+}
+
+/// Records the usage of one MCP or A2A response that is a stream, when the
+/// stream ends.
+///
+/// The handoff status and outcome are not the request's: an SSE stream can fail
+/// after the headers went out (`UpstreamError`) and the client can disappear
+/// mid-stream. Both SSE pumps therefore hold a recorder from the moment the
+/// stream starts: it owns everything the event needs, so it can outlive the
+/// request and the runtime borrow, is finished **exactly once** with the real
+/// duration and outcome, and finishes itself on `Drop` as a client disconnect —
+/// the record the LLM path writes for the same case (`CLIENT_CANCELLED`, status
+/// 499, `PendingCapture`).
+///
+/// Nothing here touches the LLM request path: only the MCP and A2A proxies
+/// construct one.
+pub struct TrafficRecorder {
+    /// `None` when usage is disabled, the caller is anonymous, or the stream
+    /// was already recorded.
+    pending: Option<OwnedTraffic>,
+}
+
+impl TrafficRecorder {
+    /// `event` supplies the identity (kind, target, method, tool, status, the
+    /// request); its `outcome` is ignored — pass the real one to [`Self::finish`].
+    pub fn new(runtime: &Runtime, event: &TrafficEvent<'_>) -> Self {
+        let mut pending = OwnedTraffic::new(runtime, event);
+        if let Some(owned) = pending.as_mut() {
+            // This recorder only ever reports a stream.
+            owned.stream = true;
+        }
+        Self { pending }
+    }
+
+    /// Records the stream's outcome and duration. Idempotent: a second call (or
+    /// the `Drop` after it) does nothing.
+    pub fn finish(&mut self, outcome: RequestOutcome) {
+        let Some(owned) = self.pending.take() else {
+            return;
+        };
+        // The LLM path reports a cancelled request with the synthetic 499, not
+        // with the 200 the headers already carried.
+        let status = if outcome == RequestOutcome::ClientCancelled {
+            499
+        } else {
+            owned.status
+        };
+        owned.record(outcome, status);
+    }
+}
+
+impl Drop for TrafficRecorder {
+    /// The stream ended without [`Self::finish`]: the client is gone (a pump
+    /// stops sending when the response body's receiver is dropped).
+    fn drop(&mut self) {
+        self.finish(RequestOutcome::ClientCancelled);
     }
 }
 
@@ -1036,7 +1237,9 @@ impl Reporter {
     }
 }
 
-/// Non-blocking producer handle; cheap to call on any path.
+/// Non-blocking producer handle; cheap to call on any path. Cloneable so a
+/// stream's [`TrafficRecorder`] can outlive the request that started it.
+#[derive(Clone)]
 pub struct UsageSink {
     tx: Option<mpsc::Sender<UsageEvent>>,
     /// Counts drops; `None` for sinks without a registry (tests).
@@ -1329,6 +1532,292 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
             ..Default::default()
         });
         assert_eq!(rx.try_recv().unwrap().key_id, "k");
+    }
+
+    /// A key context for traffic events; only the id and team are read.
+    fn traffic_key(id: &str, team: &str) -> Arc<crate::router::KeyContext> {
+        Arc::new(crate::router::KeyContext {
+            key_id: id.into(),
+            team_id: team.into(),
+            status: lumewarp_proto::config::v1::KeyStatus::Active,
+            expires_at_ms: 0,
+            allow_all_models: true,
+            allowed_models: std::collections::HashSet::new(),
+            scopes: Vec::new(),
+            team_label: 0,
+            grants: crate::grants::Grants::none(),
+        })
+    }
+
+    /// F2: one MCP/A2A request becomes one usage event, and nothing an upstream
+    /// or a client chose can violate the control plane's field bounds.
+    #[test]
+    fn a_traffic_event_reports_kind_target_method_and_tool_within_bounds() {
+        let (sink, mut rx) = UsageSink::for_test();
+        let runtime = Runtime::with_usage(Arc::new(Metrics::new()), sink);
+        let request = RequestCtx::new(Instant::now());
+        let caller = Caller::Key(traffic_key("key-1", "team-1"));
+        let long = "錯".repeat(1000); // 3000 bytes, over every bound, no NUL
+        record_traffic(
+            &runtime,
+            TrafficEvent {
+                kind: TrafficKind::Mcp,
+                request: &request,
+                caller: &caller,
+                target: "s1",
+                method: &long,
+                tool: &long,
+                status: 200,
+                outcome: RequestOutcome::Completed,
+                stream: true,
+                config_version: 7,
+            },
+        );
+        let event = rx.try_recv().expect("one event");
+        assert!(rx.try_recv().is_err(), "one event per request");
+        assert_eq!(event.kind, TrafficKind::Mcp as i32);
+        assert_eq!(event.endpoint, "mcp");
+        assert_eq!(event.target, "s1");
+        assert_eq!(event.method.len(), 126, "cut to 128 bytes on a boundary");
+        assert_eq!(event.tool.len(), 399, "cut to 400 bytes on a boundary");
+        assert!(event.method.is_char_boundary(event.method.len()));
+        assert!(event.tool.is_char_boundary(event.tool.len()));
+        assert_eq!(event.key_id, "key-1");
+        assert_eq!(event.team_id, "team-1");
+        assert_eq!((event.status, event.stream), (200, true));
+        assert_eq!(event.config_version, 7);
+        assert_eq!(event.outcome, RequestOutcome::Completed as i32);
+        assert_eq!(event.usage_state, UsageState::Missing as i32);
+        assert_eq!(event.request_id, request.request_id.to_string());
+        assert_eq!(event.started_at_unix_ms, request.started_at_unix_ms);
+        assert!(event.timestamp_unix_ms >= event.started_at_unix_ms);
+        assert!(event.duration_ms <= i32::MAX as u32);
+        // An MCP/A2A event names no model and carries no tokens or cost.
+        assert_eq!(
+            (
+                event.requested.as_str(),
+                event.model.as_str(),
+                event.alias.as_str(),
+                event.router.as_str(),
+                event.upstream.as_str(),
+                event.upstream_model.as_str()
+            ),
+            ("", "", "", "", "", "")
+        );
+        assert_eq!(
+            (
+                event.prompt_tokens,
+                event.completion_tokens,
+                event.cost_nano_usd,
+                event.cost_known
+            ),
+            (0, 0, 0, false)
+        );
+        assert!((event.attempts, event.fallback) == (0, false));
+
+        // A2A reports its own endpoint, and a NUL never reaches the database.
+        record_traffic(
+            &runtime,
+            TrafficEvent {
+                kind: TrafficKind::A2a,
+                request: &request,
+                caller: &caller,
+                target: "a\0gent",
+                method: "SendStreamingMessage",
+                tool: "",
+                status: 502,
+                outcome: RequestOutcome::UpstreamError,
+                stream: false,
+                config_version: 7,
+            },
+        );
+        let event = rx.try_recv().expect("second event");
+        assert_eq!(event.kind, TrafficKind::A2a as i32);
+        assert_eq!(event.endpoint, "a2a");
+        assert_eq!(event.target, "a\u{fffd}gent");
+        assert_eq!(event.method, "SendStreamingMessage");
+        assert_eq!(event.tool, "");
+        assert_eq!(event.status, 502);
+    }
+
+    /// I2: a stream's event is final — one per RPC, emitted when the stream
+    /// ends, with the real outcome and duration.
+    #[test]
+    fn a_stream_recorder_reports_the_outcome_and_duration_when_the_stream_ends() {
+        fn assert_send<T: Send>() {}
+        assert_send::<TrafficRecorder>();
+
+        let (sink, mut rx) = UsageSink::for_test();
+        let runtime = Runtime::with_usage(Arc::new(Metrics::new()), sink);
+        let request = RequestCtx::new(Instant::now());
+        let caller = Caller::Key(traffic_key("key-1", "team-1"));
+        let long = "錯".repeat(1000);
+        fn event<'a>(
+            request: &'a RequestCtx,
+            caller: &'a Caller,
+            status: u16,
+            tool: &'a str,
+        ) -> TrafficEvent<'a> {
+            TrafficEvent {
+                kind: TrafficKind::Mcp,
+                request,
+                caller,
+                target: "s1",
+                method: "tools/call",
+                tool,
+                status,
+                outcome: RequestOutcome::Completed,
+                stream: false,
+                config_version: 3,
+            }
+        }
+
+        // The upstream ended its stream: one event, marked as a stream, with
+        // the handoff status and the final outcome.
+        let mut recorder = TrafficRecorder::new(&runtime, &event(&request, &caller, 200, "echo"));
+        recorder.finish(RequestOutcome::Completed);
+        let recorded = rx.try_recv().expect("one event");
+        assert!(recorded.stream, "the recorder always reports a stream");
+        assert_eq!(recorded.status, 200);
+        assert_eq!(recorded.outcome, RequestOutcome::Completed as i32);
+        assert_eq!(recorded.kind, TrafficKind::Mcp as i32);
+        assert_eq!(recorded.endpoint, "mcp");
+        assert_eq!(recorded.target, "s1");
+        assert_eq!(recorded.method, "tools/call");
+        assert_eq!(recorded.tool, "echo");
+        assert_eq!(recorded.config_version, 3);
+        assert_eq!(recorded.key_id, "key-1");
+        assert_eq!(recorded.team_id, "team-1");
+        assert!(recorded.duration_ms <= i32::MAX as u32);
+        assert_eq!(recorded.request_id, request.request_id.to_string());
+        // Finishing twice records once.
+        recorder.finish(RequestOutcome::UpstreamError);
+        assert!(rx.try_recv().is_err(), "exactly one event per RPC");
+
+        // An upstream that broke mid-stream: still the 200 the client saw, but
+        // the outcome says it failed.
+        let mut recorder = TrafficRecorder::new(&runtime, &event(&request, &caller, 200, "slow"));
+        recorder.finish(RequestOutcome::UpstreamError);
+        let recorded = rx.try_recv().expect("one event");
+        assert_eq!(
+            (recorded.status, recorded.outcome),
+            (200, RequestOutcome::UpstreamError as i32)
+        );
+
+        // Never finished: the client is gone. That is the LLM path's record for
+        // the same case (CLIENT_CANCELLED with the synthetic 499).
+        drop(TrafficRecorder::new(
+            &runtime,
+            &event(&request, &caller, 200, "echo"),
+        ));
+        let recorded = rx.try_recv().expect("one event");
+        assert!(recorded.stream);
+        assert_eq!(
+            (recorded.status, recorded.outcome),
+            (499, RequestOutcome::ClientCancelled as i32)
+        );
+
+        // The recorder shares the handoff event's bounds.
+        let mut recorder = TrafficRecorder::new(&runtime, &event(&request, &caller, 200, &long));
+        recorder.finish(RequestOutcome::Completed);
+        let recorded = rx.try_recv().expect("one event");
+        assert_eq!(recorded.tool.len(), 399);
+        assert!(recorded.tool.is_char_boundary(recorded.tool.len()));
+
+        // Standalone mode and an anonymous caller produce nothing, and the
+        // `Drop` of such a recorder is silent.
+        drop(TrafficRecorder::new(
+            &Runtime::new(),
+            &event(&request, &caller, 200, "echo"),
+        ));
+        let anonymous = Caller::Anonymous;
+        let mut recorder = TrafficRecorder::new(
+            &runtime,
+            &TrafficEvent {
+                kind: TrafficKind::A2a,
+                request: &request,
+                caller: &anonymous,
+                target: "a1",
+                method: "SendStreamingMessage",
+                tool: "",
+                status: 200,
+                outcome: RequestOutcome::Completed,
+                stream: true,
+                config_version: 3,
+            },
+        );
+        recorder.finish(RequestOutcome::Completed);
+        // The LLM path owns its own records.
+        let mut recorder = TrafficRecorder::new(
+            &runtime,
+            &TrafficEvent {
+                kind: TrafficKind::Llm,
+                ..event(&request, &caller, 200, "echo")
+            },
+        );
+        recorder.finish(RequestOutcome::Completed);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_traffic_event_ignores_anonymous_callers_llm_kinds_and_a_disabled_sink() {
+        let (sink, mut rx) = UsageSink::for_test();
+        let runtime = Runtime::with_usage(Arc::new(Metrics::new()), sink);
+        let request = RequestCtx::new(Instant::now());
+        let key = Caller::Key(traffic_key("k", "t"));
+        // MCP/A2A requests are authenticated, but an anonymous caller has no id
+        // to attribute, so no event is built for it.
+        record_traffic(
+            &runtime,
+            TrafficEvent {
+                kind: TrafficKind::Mcp,
+                request: &request,
+                caller: &Caller::Anonymous,
+                target: "s1",
+                method: "tools/call",
+                tool: "echo",
+                status: 200,
+                outcome: RequestOutcome::Completed,
+                stream: false,
+                config_version: 1,
+            },
+        );
+        assert!(rx.try_recv().is_err());
+        // The LLM path reports through `UsageCapture`, not here.
+        record_traffic(
+            &runtime,
+            TrafficEvent {
+                kind: TrafficKind::Llm,
+                request: &request,
+                caller: &key,
+                target: "s1",
+                method: "tools/call",
+                tool: "echo",
+                status: 200,
+                outcome: RequestOutcome::Completed,
+                stream: false,
+                config_version: 1,
+            },
+        );
+        assert!(rx.try_recv().is_err());
+        // Standalone mode has no sink; recording stays a no-op.
+        let standalone = Runtime::new();
+        record_traffic(
+            &standalone,
+            TrafficEvent {
+                kind: TrafficKind::Mcp,
+                request: &request,
+                caller: &key,
+                target: "s1",
+                method: "tools/call",
+                tool: "echo",
+                status: 200,
+                outcome: RequestOutcome::Completed,
+                stream: false,
+                config_version: 1,
+            },
+        );
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

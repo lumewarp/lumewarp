@@ -6,6 +6,7 @@ never contain hashes or raw secrets.
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from datetime import UTC, datetime
@@ -25,9 +26,11 @@ from pydantic import (
 from lumewarp_control_plane.compiler.validate import (
     DEFAULT_BODY_RESERVED_KEYS,
     body_object_problem,
+    card_url_problem,
     health_url_problem,
     metrics_url_problem,
     reasoning_problem,
+    target_url_problem,
     upstream_url_problem,
 )
 from lumewarp_control_plane.models import (
@@ -35,6 +38,9 @@ from lumewarp_control_plane.models import (
     InstallationRole,
     KeyLifecycle,
     KeyOwnerKind,
+    McpDefinitionKind,
+    McpDefinitionState,
+    McpReviewMode,
     ModelAccess,
     PluginKind,
     RequestOutcome,
@@ -111,15 +117,61 @@ class Page[T](ReadModel):
 # --------------------------------------------------------------------------- policy
 
 
+# `^[a-z][a-z0-9_-]{0,62}$`: MCP server and A2A agent names (snapshot.proto, L4).
+_TARGET_NAME = re.compile(r"[a-z][a-z0-9_-]{0,62}")
+
+
+def _target_name(value: str) -> str:
+    """A server or agent name: the gateway's own rule, so a grant always resolves."""
+    if not _TARGET_NAME.fullmatch(value):
+        raise ValueError("must match ^[a-z][a-z0-9_-]{0,62}$")
+    if "__" in value:
+        raise ValueError("must not contain '__' (the tool name separator)")
+    return value
+
+
+def _tool_name(value: str) -> str:
+    """An upstream tool name, exactly as reported: no control characters, 1..=256 bytes."""
+    if not value or value != value.strip():
+        raise ValueError("tool names must be non-empty and contain no surrounding whitespace")
+    if any(char < " " or char == "\x7f" for char in value):
+        raise ValueError("tool names must contain no control characters")
+    if len(value.encode("utf-8")) > 256:
+        raise ValueError("tool names are at most 256 bytes")
+    return value
+
+
+class McpGrantIn(ApiModel):
+    """One MCP server grant: every approved tool, or exactly `tools`."""
+
+    server: Annotated[str, AfterValidator(_target_name)]
+    all_tools: bool = False
+    # Ignored when all_tools; upstream tool names, without the `<server>__` prefix.
+    tools: list[Annotated[str, AfterValidator(_tool_name)]] = Field(default_factory=list)
+
+
+class McpGrantOut(ReadModel):
+    server: str
+    all_tools: bool
+    tools: list[str]
+
+
 class PolicyFields(ApiModel):
     """Writable policy columns shared by teams, team members and service accounts.
 
-    `model_access`/`allowed_models` cannot be null; limits and budgets can be set to null
-    to clear them. On update, omitted fields keep their current value.
+    `model_access`/`allowed_models`, `mcp_access`/`mcp_servers` and
+    `a2a_access`/`a2a_agents` cannot be null; limits and budgets can be set to null to
+    clear them. On update, omitted fields keep their current value. MCP and A2A access
+    mirror model access: `inherit` keeps the parent's set, `all` grants everything the
+    parent allows, `list` grants exactly these rows (empty = deny all).
     """
 
     model_access: ModelAccess | None = None
     allowed_models: list[str] | None = None
+    mcp_access: ModelAccess | None = None
+    mcp_servers: list[McpGrantIn] | None = None
+    a2a_access: ModelAccess | None = None
+    a2a_agents: list[Annotated[str, AfterValidator(_target_name)]] | None = None
     rpm_limit: int | None = Field(default=None, gt=0)
     tpm_limit: int | None = Field(default=None, gt=0)
     max_parallel: int | None = Field(default=None, gt=0)
@@ -137,18 +189,46 @@ class PolicyFields(ApiModel):
                 cleaned.append(name)
         return cleaned
 
+    @field_validator("mcp_servers")
+    @classmethod
+    def _merge_servers(cls, value: list[McpGrantIn] | None) -> list[McpGrantIn] | None:
+        """A repeated server merges (`all_tools` ORs, tools union), as the gateway reads it."""
+        if value is None:
+            return None
+        merged: dict[str, McpGrantIn] = {}
+        for grant in value:
+            current = merged.get(grant.server)
+            if current is None:
+                merged[grant.server] = grant
+                continue
+            current.all_tools = current.all_tools or grant.all_tools
+            if not current.all_tools:
+                current.tools = list(dict.fromkeys([*current.tools, *grant.tools]))
+        return list(merged.values())
+
+    @field_validator("a2a_agents")
+    @classmethod
+    def _clean_agents(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else list(dict.fromkeys(value))
+
     @model_validator(mode="after")
     def _non_nullable_fields(self) -> PolicyFields:
-        if "model_access" in self.model_fields_set and self.model_access is None:
-            raise ValueError("model_access cannot be null")
-        if "allowed_models" in self.model_fields_set and self.allowed_models is None:
-            raise ValueError("allowed_models cannot be null; send [] to deny all")
+        for name in ("model_access", "mcp_access", "a2a_access"):
+            if name in self.model_fields_set and getattr(self, name) is None:
+                raise ValueError(f"{name} cannot be null")
+        for name in ("allowed_models", "mcp_servers", "a2a_agents"):
+            if name in self.model_fields_set and getattr(self, name) is None:
+                raise ValueError(f"{name} cannot be null; send [] to deny all")
         return self
 
 
 class PolicyOut(ReadModel):
     model_access: ModelAccess
     allowed_models: list[str]
+    mcp_access: ModelAccess
+    mcp_servers: list[McpGrantOut]
+    a2a_access: ModelAccess
+    a2a_agents: list[str]
     rpm_limit: int | None
     tpm_limit: int | None
     max_parallel: int | None
@@ -992,6 +1072,8 @@ class RouterCreate(ApiModel):
     traffic_split: Splits = Field(default_factory=list)
     sticky: StickyBy = StickyBy.NONE
     sticky_header: StickyHeader | None = None
+    # WASM strategy only: how long one `pick` may run; 0 = the gateway default (60 s).
+    plugin_timeout_ms: int = Field(default=0, ge=0, le=INT32_MAX)
     force: bool = _force_field()
 
     @field_validator("sticky_header")
@@ -1014,6 +1096,7 @@ class RouterUpdate(ApiModel):
     traffic_split: Splits | None = None
     sticky: StickyBy | None = None
     sticky_header: StickyHeader | None = None
+    plugin_timeout_ms: int | None = Field(default=None, ge=0, le=INT32_MAX)
     force: bool = _force_field()
 
     @field_validator("sticky_header")
@@ -1033,6 +1116,9 @@ class RouterOut(ReadModel):
     traffic_split: list[TrafficSplitOut]
     sticky: StickyBy
     sticky_header: str | None
+    plugin_timeout_ms: int = Field(
+        description="One strategy call's timeout in ms; 0 = the gateway's 60 s default."
+    )
     config_invalid: bool = Field(
         description="Stored settings fail the strategy's current schema, or nothing reports it."
     )
@@ -1186,6 +1272,16 @@ class MeBudgetOut(ApiModel):
     window_end: datetime
 
 
+class MeMcpGrantOut(ApiModel):
+    """One MCP server the caller's key in this team could reach, and the tools on it."""
+
+    server: str
+    all_tools: bool
+    tools: list[str] = Field(
+        description="Upstream tool names (without the prefix); empty when all_tools."
+    )
+
+
 class MeTeamOut(ApiModel):
     team_id: uuid.UUID
     team_name: str
@@ -1195,6 +1291,12 @@ class MeTeamOut(ApiModel):
     # later. Never the team's full list when the member is narrower.
     models: list[str]
     all_models: bool
+    # MCP and A2A access, resolved by the same one resolver as `models`: universal means
+    # every live server/agent and is also true for ones added later.
+    mcp_servers: list[MeMcpGrantOut]
+    all_mcp: bool
+    agents: list[str]
+    all_agents: bool
     limits: MeLimitsOut
     key_limits: MeKeyLimitsOut
     budget: MeBudgetOut
@@ -1273,6 +1375,12 @@ class UsageRowOut(ApiModel):
     mixed/not collected. Lists omit empty values. Model grouping collects all refs;
     alias/router grouping collects its refs and Served by; upstream-model grouping
     collects Served by. Default/scope-only grouping does not collect catalog refs.
+
+    `error_count` and `total_duration_ms` describe how the group's requests ended
+    (an error outcome, or a 4xx/5xx status that is not a client cancellation;
+    summed duration, so the mean is the sum over `requests`). The LLM tabs ignore them; the MCP and A2A tabs read them in
+    place of tokens and cost. The monthly totals fast path (LLM requests only)
+    reports both as 0.
     """
 
     date: date_type | None = None
@@ -1302,6 +1410,8 @@ class UsageRowOut(ApiModel):
     total_tokens: int
     cost_nano_usd: int
     unknown_cost_count: int
+    error_count: int = 0
+    total_duration_ms: int = 0
 
 
 class UsageEventOut(ReadModel):
@@ -1511,3 +1621,280 @@ class UpstreamTestOut(ReadModel):
         )
     )
     probe: ProbeOut
+
+
+# --------------------------------------------------------------------------- mcp / a2a
+
+
+def _no_separator(value: str) -> str:
+    """L4: the aggregated endpoint splits a tool name at the first "__", so a server or
+    agent name may not contain one (the database enforces the same rule).
+    """
+    if "__" in value:
+        raise ValueError('must not contain "__" (the tool name separator)')
+    return value
+
+
+# `^[a-z][a-z0-9_-]{0,62}$` without "__": the gateway's rule for a server or agent name.
+TargetName = Annotated[
+    str, Field(pattern=r"^[a-z][a-z0-9_-]{0,62}$"), AfterValidator(_no_separator)
+]
+AuthPluginName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")]
+MAX_CARD_BYTES = 64 * 1024
+MAX_TIMEOUT_MS = 10 * 60 * 1000
+
+
+def _target_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    if problem := target_url_problem(value):
+        raise ValueError(f"url {problem}")
+    return value
+
+
+def _card_url(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    value = value.strip()
+    if problem := card_url_problem(value):
+        raise ValueError(f"card_url {problem}")
+    return value
+
+
+def _card_json(value: str | None) -> str | None:
+    """A pasted Agent Card: a JSON object of at most 64 KiB, stored as text."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return ""
+    if len(value.encode("utf-8")) > MAX_CARD_BYTES:
+        raise ValueError("card_json exceeds 64 KiB")
+    try:
+        card = json.loads(value)
+    except (ValueError, RecursionError) as exc:
+        raise ValueError("card_json must be a JSON object") from exc
+    if not isinstance(card, dict):
+        raise ValueError("card_json must be a JSON object")
+    return value
+
+
+_SECRET_DOC = (
+    "Bearer token for static_bearer, stored sealed with LUMEWARP_ENCRYPTION_KEY under the"
+    " upstream-auth info and never returned. Mutually exclusive with secret_ref."
+)
+
+
+class TargetAuthIn(ApiModel):
+    """The outbound auth of an MCP server or A2A agent (proto `UpstreamAuth`).
+
+    `plugin` is a built-in (`none`, `static_bearer`, `passthrough`) or a WASM upstream-auth
+    plugin a gateway reports, with its `params`. Only `static_bearer` carries a credential:
+    the name of an env var on the gateway (`secret_ref`) or a token sealed here (`secret`).
+    A WASM plugin reads its own secrets from the gateway environment, so it takes neither.
+    """
+
+    plugin: AuthPluginName = "none"
+    params: Params = Field(default_factory=dict)
+    secret_ref: str | None = Field(default=None, max_length=200)
+    secret: SecretStr | None = Field(default=None, min_length=1, max_length=4096)
+    # WASM plugin only: how long one call may run; 0 = the gateway default (60 s).
+    timeout_ms: int = Field(default=0, ge=0, le=INT32_MAX)
+
+    _check_secret_ref = field_validator("secret_ref")(_env_name)
+    _check_secret = field_validator("secret")(_api_key)
+
+    @model_validator(mode="after")
+    def _credential_source(self) -> TargetAuthIn:
+        if self.plugin == "static_bearer":
+            if (self.secret_ref is None) == (self.secret is None):
+                raise ValueError("static_bearer needs exactly one of secret_ref or secret")
+        elif self.secret_ref is not None or self.secret is not None:
+            raise ValueError(f"{self.plugin} takes no credential; only static_bearer does")
+        return self
+
+
+class PluginRefIn(ApiModel):
+    plugin: AuthPluginName
+    params: Params = Field(default_factory=dict)
+    # WASM plugin only: how long one call may run; 0 = the gateway default (60 s).
+    timeout_ms: int = Field(default=0, ge=0, le=INT32_MAX)
+
+
+class PluginRefOut(ReadModel):
+    plugin: str
+    params: dict[str, Any]
+    timeout_ms: int = Field(
+        description="One plugin call's timeout in ms; 0 = the gateway's 60 s default."
+    )
+
+
+class McpServerCreate(ApiModel):
+    name: TargetName
+    url: str = Field(min_length=1, max_length=2000)
+    auth: TargetAuthIn = Field(default_factory=TargetAuthIn)
+    # Per upstream request; 0 = the gateway default (30 s).
+    timeout_ms: int = Field(default=0, ge=0, le=INT32_MAX)
+    review_mode: McpReviewMode = McpReviewMode.TOFU
+    force: bool = _force_field()
+
+    _check_url = field_validator("url")(_target_url)
+
+
+class McpServerUpdate(ApiModel):
+    """PATCH: omitted fields are unchanged. `auth` replaces the whole outbound auth."""
+
+    name: TargetName | None = None
+    url: str | None = Field(default=None, min_length=1, max_length=2000)
+    auth: TargetAuthIn | None = None
+    timeout_ms: int | None = Field(default=None, ge=0, le=INT32_MAX)
+    review_mode: McpReviewMode | None = None
+    force: bool = _force_field()
+
+    _check_url = field_validator("url")(_target_url)
+
+
+class McpServerOut(ReadModel):
+    id: uuid.UUID
+    name: str
+    url: str
+    auth: PluginRefOut
+    secret_ref: str | None = Field(
+        description="Name of the gateway's env var holding the token; never the value."
+    )
+    secret_set: bool = Field(description="A sealed token is stored (its value is never returned).")
+    timeout_ms: int
+    review_mode: McpReviewMode
+    definitions: dict[str, int] = Field(
+        description="Definition counts by review state: approved, pending, rejected."
+    )
+    config_invalid: bool = Field(
+        description="The auth plugin or its settings cannot be served by the gateways today."
+    )
+    config_problems: list[str]
+    created_at: datetime
+    updated_at: datetime
+
+
+class McpDefinitionOut(ApiModel):
+    id: uuid.UUID
+    server_id: uuid.UUID
+    kind: McpDefinitionKind
+    name: str
+    hash: str = Field(description="sha256 of the canonical definition, hex.")
+    definition_json: str = Field(description="Canonical projection the hash covers; plain text.")
+    state: McpDefinitionState
+    first_seen_at: datetime
+    last_seen_at: datetime
+    decided_by_user_id: uuid.UUID | None
+    decided_at: datetime | None
+
+
+class McpDiscoverIn(ApiModel):
+    """One `tools/list`/`prompts/list` from the control plane, with a token used once.
+
+    Give `server_id` to record the result as observed definitions of that server (the same
+    rules as a gateway report). Without it nothing is stored. A server whose auth is a WASM
+    plugin cannot be discovered here.
+    """
+
+    url: str = Field(min_length=1, max_length=2000)
+    server_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Record the result against this saved server; its stored credential is used when"
+            " no token is given."
+        ),
+    )
+    token: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4096,
+        description="A token typed in the form: used once, never stored, never audited.",
+    )
+    timeout_ms: int = Field(default=10000, ge=1000, le=120_000)
+
+    _check_url = field_validator("url")(_target_url)
+    _check_token = field_validator("token")(_api_key)
+
+
+class McpDiscoveredOut(ApiModel):
+    kind: McpDefinitionKind
+    name: str
+    hash: str
+    definition_json: str
+    state: Literal["approved", "pending", "rejected", "unrecorded"] = Field(
+        description="The state after recording; 'unrecorded' when no server_id was given."
+    )
+
+
+class McpDiscoverOut(ApiModel):
+    credential: Literal["entered", "stored", "env", "env_unset", "none"] = Field(
+        description=(
+            "Where the token came from: typed in the form, the saved server's sealed token,"
+            " the control plane's own env var, that env var missing here, or none."
+        )
+    )
+    server_id: uuid.UUID | None
+    server: str | None
+    protocol_version: str
+    tools: list[McpDiscoveredOut]
+    prompts: list[McpDiscoveredOut]
+    truncated: bool = Field(description="The plan's per-server bound stopped the listing.")
+    recorded: bool
+
+
+class A2aAgentCreate(ApiModel):
+    name: TargetName
+    url: str = Field(min_length=1, max_length=2000)
+    card_url: str | None = Field(default=None, max_length=2000)
+    auth: TargetAuthIn = Field(default_factory=TargetAuthIn)
+    middleware: PluginRefIn | None = None
+    timeout_ms: int = Field(default=0, ge=0, le=INT32_MAX)
+    card_json: str | None = Field(
+        default=None, description="A pasted Agent Card (JSON object, at most 64 KiB)."
+    )
+    force: bool = _force_field()
+
+    _check_url = field_validator("url")(_target_url)
+    _check_card_url = field_validator("card_url")(_card_url)
+    _check_card_json = field_validator("card_json")(_card_json)
+
+
+class A2aAgentUpdate(ApiModel):
+    """PATCH: omitted fields are unchanged; null clears `card_url`, `middleware` or the
+    pasted `card_json`. `auth` replaces the whole outbound auth."""
+
+    name: TargetName | None = None
+    url: str | None = Field(default=None, min_length=1, max_length=2000)
+    card_url: str | None = Field(default=None, max_length=2000)
+    auth: TargetAuthIn | None = None
+    middleware: PluginRefIn | None = None
+    timeout_ms: int | None = Field(default=None, ge=0, le=INT32_MAX)
+    card_json: str | None = Field(default=None)
+    force: bool = _force_field()
+
+    _check_url = field_validator("url")(_target_url)
+    _check_card_url = field_validator("card_url")(_card_url)
+    _check_card_json = field_validator("card_json")(_card_json)
+
+
+class A2aAgentOut(ReadModel):
+    id: uuid.UUID
+    name: str
+    url: str
+    card_url: str = Field(description="Empty = the gateway derives it from `url`.")
+    auth: PluginRefOut
+    secret_ref: str | None
+    secret_set: bool
+    middleware: PluginRefOut | None
+    timeout_ms: int
+    card_json: str = Field(description="Pasted card served until the gateway fetched one.")
+    last_card_json: str = Field(description="Newest card a gateway fetched, as text.")
+    last_card_error: str = Field(description="Newest fetch error, empty on success.")
+    last_card_at: datetime | None
+    config_invalid: bool
+    config_problems: list[str]
+    created_at: datetime
+    updated_at: datetime

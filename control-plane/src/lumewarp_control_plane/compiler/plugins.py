@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from jsonschema import Draft202012Validator, validators
 from referencing import Registry
@@ -35,10 +36,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumewarp_control_plane import audit
 from lumewarp_control_plane._proto.lumewarp.config.v1 import config_service_pb2 as cpb
 from lumewarp_control_plane.models import (
+    A2aAgent,
     ActorType,
     GatewayPlugin,
     GatewaySession,
     GatewayToken,
+    McpServer,
     PluginKind,
     Router,
     RouterMember,
@@ -78,9 +81,29 @@ _MAX_CAPABILITY_LENGTH = 128
 GATEWAY_RETENTION = timedelta(days=30)
 PLUGIN_NAME = re.compile(r"[a-z][a-z0-9_]{0,62}")
 HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+# Request headers a plugin must never see or set through params. `x-lumewarp-key` is the
+# inbound client key (D5): a plugin that could read it would learn a credential.
 CREDENTIAL_HEADERS = frozenset(
-    {"authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key"}
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "x-lumewarp-key",
+    }
 )
+# Params keys the platform owns, per kind. The gateway removes the key before `configure`
+# (so a plugin's struct does not declare it and `deny_unknown_fields` never sees it) and
+# validates it itself; the control plane does the same, or a schema with
+# `additionalProperties: false` would reject every write that uses it.
+RESERVED_PARAMS: dict[PluginKind, str] = {
+    PluginKind.ROUTER_STRATEGY: "headers",
+    PluginKind.UPSTREAM_AUTH: "allowed_origins",
+    PluginKind.A2A_MIDDLEWARE: "",
+}
+MAX_ALLOWED_ORIGINS = 32
+_ORIGIN_SCHEMES = ("http", "https")
 HEADER_LIST_WIDGET = "header-list"
 _DIGEST = re.compile(r"[0-9a-f]{1,128}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -108,8 +131,51 @@ def _header_problem(headers: Any) -> bool:
     )
 
 
-def params_problem(params: dict[str, Any], field: str = "params") -> str | None:
-    """Limits every params object must meet, and the platform's `headers` rule."""
+def _origin_problem(origin: object) -> str | None:
+    """One reserved `allowed_origins` entry: an absolute http(s) origin without a path.
+
+    The gateway's `fetch::Origin::parse` applies the same rule (a bare "/" is accepted, a
+    query, a fragment, a userinfo or any other path is not), so a set of origins the API
+    accepts is one `http-fetch` can use.
+    """
+    if not isinstance(origin, str) or not origin or any(c <= " " or c == "\x7f" for c in origin):
+        return "entries must be non-empty absolute origins"
+    try:
+        parts = urlsplit(origin)
+    except ValueError:
+        return "entries must be absolute origins"
+    if parts.scheme not in _ORIGIN_SCHEMES or not parts.netloc:
+        return "entries must be http(s) origins"
+    if "@" in parts.netloc:
+        return "entries must not contain userinfo"
+    if parts.path not in ("", "/"):
+        return "entries must not have a path"
+    if parts.query:
+        return "entries must not have a query"
+    if parts.fragment or "#" in origin:
+        return "entries must not have a fragment"
+    return None
+
+
+def _origins_problem(origins: Any) -> str | None:
+    if not isinstance(origins, list):
+        return "must be an array of origins"
+    if len(origins) > MAX_ALLOWED_ORIGINS:
+        return f"has more than {MAX_ALLOWED_ORIGINS} entries"
+    for origin in origins:
+        if problem := _origin_problem(origin):
+            return problem
+    return None
+
+
+def params_problem(
+    params: dict[str, Any], field: str = "params", kind: PluginKind | None = None
+) -> str | None:
+    """Limits every params object must meet, and the platform's reserved key for `kind`.
+
+    `kind` is None for params that are not a plugin's own settings (a router member's), so
+    no reserved key is checked there.
+    """
     # serde_json's default recursion budget accepts at most 127 nested containers.
     pending = [(params, 1)]
     while pending:
@@ -125,8 +191,13 @@ def params_problem(params: dict[str, Any], field: str = "params") -> str | None:
         return f"{field} must be a JSON object with finite values"
     if size > MAX_PARAMS_BYTES:
         return f"{field} exceeds 16 KiB"
-    if "headers" in params and _header_problem(params["headers"]):
-        return f"{field}.headers must be an array of HTTP header names"
+    if kind is not None:
+        reserved = RESERVED_PARAMS[kind]
+        if reserved == "headers" and "headers" in params and _header_problem(params["headers"]):
+            return f"{field}.headers must be an array of permitted HTTP header names"
+        if reserved == "allowed_origins" and "allowed_origins" in params:
+            if problem := _origins_problem(params["allowed_origins"]):
+                return f"{field}.allowed_origins {problem}"
     return None
 
 
@@ -141,7 +212,7 @@ def shape_problem(
         return field, f"{field} must match ^[a-z][a-z0-9_]{{0,62}}$"
     if name in BUILTIN_PLUGINS[kind] and params:
         return "params", f"built-in {field} {name!r} takes no params"
-    if problem := params_problem(params):
+    if problem := params_problem(params, kind=kind):
         return "params", problem
     return None
 
@@ -330,12 +401,16 @@ def settings_errors(
     descriptors: Iterable[dict[str, Any]],
     params: dict[str, Any],
     members: list[tuple[str, dict[str, Any]]],
+    kind: PluginKind | None = None,
 ) -> list[str]:
     """Settings must pass every descriptor. `members` pairs a display path with its params.
 
-    `headers` is reserved: the gateway removes it before `configure` and it has its own rule.
+    The kind's reserved params key (`RESERVED_PARAMS`) is removed first: the gateway removes
+    it before `configure` and applies its own rule, so a schema that does not declare it
+    must not reject it. No other key gets that treatment for this kind.
     """
-    settings = {key: value for key, value in params.items() if key != "headers"}
+    reserved = RESERVED_PARAMS[kind] if kind is not None else ""
+    settings = {key: value for key, value in params.items() if key != reserved}
     problems: list[str] = []
     seen: set[str] = set()
     for descriptor in descriptors:
@@ -691,7 +766,7 @@ class PluginRegistry:
         """Why stored settings are invalid today. Never changes them."""
         if not self.known(kind, name):
             return [f"no gateway reports {FIELD_NAME[kind]} {name!r}"]
-        return settings_errors(self.validating(kind, name), params, members or [])
+        return settings_errors(self.validating(kind, name), params, members or [], kind)
 
     def router_problems(
         self, name: str, params: dict[str, Any], members: list[tuple[str, dict[str, Any]]]
@@ -870,6 +945,31 @@ def audit_forced(
     )
 
 
+def audit_target_forced(
+    session: AsyncSession,
+    *,
+    kind: str,
+    resource_id: uuid.UUID,
+    name: str,
+    plugin: str,
+    missing: list[str],
+    principal: Principal | None,
+) -> None:
+    """Record a forced save of an MCP server or A2A agent's plugin, audited like a router's."""
+    if not missing:
+        return
+    audit.record(
+        session,
+        action=("mcp_server.force_save" if kind == "mcp_server" else "a2a_agent.force_save"),
+        resource_type=kind,
+        resource_id=resource_id,
+        principal=principal,
+        actor_type=None if principal else ActorType.SYSTEM,
+        actor_id=None if principal else "rollback",
+        details={"name": name, "plugin": plugin, "missing_gateways": missing},
+    )
+
+
 @dataclass(frozen=True)
 class _SplitMembers:
     members: list[Any]
@@ -921,6 +1021,80 @@ async def check_stored_routers(
             router_id=router.id,
             name=router.name,
             strategy=router.strategy,
+            missing=missing,
+            principal=principal,
+        )
+
+
+async def check_stored_targets(
+    session: AsyncSession,
+    scope: str,
+    *,
+    force: bool,
+    principal: Principal | None,
+    now: datetime | None,
+) -> None:
+    """`check_plugin` on every live MCP server and A2A agent, for a rollback that has just
+    restored them in this transaction: a rejection aborts it all, exactly like a router.
+    """
+    registry = await load_plugins(session, scope, now=now)
+    servers = await session.scalars(
+        select(McpServer)
+        .where(McpServer.deleted_at.is_(None))
+        .order_by(McpServer.name)
+        .execution_options(populate_existing=True)
+    )
+    for server in servers:
+        try:
+            missing = check_plugin(
+                registry,
+                PluginKind.UPSTREAM_AUTH,
+                server.auth_plugin,
+                server.auth_params,
+                force=force,
+            )
+        except PluginRejected as exc:
+            raise PluginRejected(exc.field, f"mcp server {server.name!r}: {exc.message}") from exc
+        audit_target_forced(
+            session,
+            kind="mcp_server",
+            resource_id=server.id,
+            name=server.name,
+            plugin=server.auth_plugin,
+            missing=missing,
+            principal=principal,
+        )
+    agents = await session.scalars(
+        select(A2aAgent)
+        .where(A2aAgent.deleted_at.is_(None))
+        .order_by(A2aAgent.name)
+        .execution_options(populate_existing=True)
+    )
+    for agent in agents:
+        try:
+            missing = check_plugin(
+                registry,
+                PluginKind.UPSTREAM_AUTH,
+                agent.auth_plugin,
+                agent.auth_params,
+                force=force,
+            )
+            if agent.middleware_plugin:
+                missing += check_plugin(
+                    registry,
+                    PluginKind.A2A_MIDDLEWARE,
+                    agent.middleware_plugin,
+                    agent.middleware_params,
+                    force=force,
+                )
+        except PluginRejected as exc:
+            raise PluginRejected(exc.field, f"a2a agent {agent.name!r}: {exc.message}") from exc
+        audit_target_forced(
+            session,
+            kind="a2a_agent",
+            resource_id=agent.id,
+            name=agent.name,
+            plugin=agent.middleware_plugin or agent.auth_plugin,
             missing=missing,
             principal=principal,
         )

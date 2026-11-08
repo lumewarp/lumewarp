@@ -80,6 +80,8 @@ def test_supported_capabilities_match_gateway() -> None:
         "default_body",
         "reasoning_effort",
         "model_chat_check",
+        "mcp",
+        "a2a",
         "strategy:weighted",
         "strategy:least_in_flight",
         "strategy:lowest_latency",
@@ -312,7 +314,15 @@ async def test_all_capabilities_together(factory) -> None:
         a.chat_check_timeout_ms = 5000
     snap = (await compile_(factory)).snapshot
     assert list(snap.required_capabilities) == sorted(
-        SUPPORTED_CAPABILITIES - {"strategy:weighted", "strategy:least_in_flight", "rotation_grace"}
+        SUPPORTED_CAPABILITIES
+        - {
+            "strategy:weighted",
+            "strategy:least_in_flight",
+            "rotation_grace",
+            # MCP/A2A capabilities appear only when a server or agent exists.
+            "mcp",
+            "a2a",
+        }
     )
 
 
@@ -472,7 +482,13 @@ def test_validate_accepts_full_routing_snapshot() -> None:
     _check(snap)
     assert list(snap.required_capabilities) == sorted(
         SUPPORTED_CAPABILITIES
-        - {"strategy:least_in_flight", "strategy:lowest_latency", "rotation_grace"}
+        - {
+            "strategy:least_in_flight",
+            "strategy:lowest_latency",
+            "rotation_grace",
+            "mcp",
+            "a2a",
+        }
     )
 
 

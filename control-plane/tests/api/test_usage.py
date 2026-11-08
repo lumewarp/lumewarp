@@ -5,7 +5,13 @@ from datetime import UTC, datetime
 
 import pytest
 
-from lumewarp_control_plane.models import CatalogName, ScopeType, TeamRole, TrafficKind
+from lumewarp_control_plane.models import (
+    CatalogName,
+    RequestOutcome,
+    ScopeType,
+    TeamRole,
+    TrafficKind,
+)
 from lumewarp_control_plane.usage import ingest
 from tests.api.helpers import ADMIN_AUTH, auth, usage_event, usage_total, user_with_token
 from tests.factories import (
@@ -400,11 +406,67 @@ async def test_mcp_and_a2a_events_are_filtered_and_grouped_by_kind(client, commi
     assert [(row["kind"], row["requests"]) for row in only_echo.json()["items"]] == [("mcp", 1)]
     # The team totals fast path holds LLM requests only: four events, one aggregated request.
     totals = query(client, group_by="team", team_id=str(team.id))
-    assert [row["requests"] for row in totals.json()["items"]] == [1]
-    # A kind filter cannot be served from it, so the same question reads raw events.
+    assert [(row["kind"], row["requests"]) for row in totals.json()["items"]] == [("llm", 1)]
+    # Asking for LLM explicitly is the same question, so it is served from the same place.
+    llm_totals = query(client, group_by="team", team_id=str(team.id), kind="llm")
+    assert [row["requests"] for row in llm_totals.json()["items"]] == [1]
+    # Any other kind cannot be served from it, so the same question reads raw events.
     mcp_requests = query(client, group_by="team", team_id=str(team.id), kind="mcp")
     assert [row["requests"] for row in mcp_requests.json()["items"]] == [2]
     assert query(client, team_id=str(team.id), kind="shim").status_code == 422
+
+
+async def test_errors_and_duration_are_aggregated_per_group(client, committed) -> None:
+    """The MCP and A2A tabs read errors and duration instead of tokens: both are per group."""
+    team = await make_team(committed)
+    key = await make_key(committed, team, await make_service_account(committed, team))
+    ok = usage_event(
+        key, ts=TS, kind=TrafficKind.MCP, target="s1", method="tools/call", tool="echo"
+    )
+    ok.duration_ms = 5
+    upstream_failed = usage_event(
+        key, ts=TS, kind=TrafficKind.MCP, target="s1", method="tools/call", tool="echo"
+    )
+    upstream_failed.duration_ms = 25
+    upstream_failed.status = 502
+    upstream_failed.outcome = RequestOutcome.UPSTREAM_ERROR
+    # A2A errors are JSON-RPC errors in a 200: the outcome, not the status, says it failed.
+    protocol_failed = usage_event(
+        key, ts=TS, kind=TrafficKind.A2A, target="agent", method="SendMessage"
+    )
+    protocol_failed.duration_ms = 70
+    protocol_failed.outcome = RequestOutcome.UPSTREAM_ERROR
+    # A client that hung up is neither a success nor an error.
+    cancelled = usage_event(key, ts=TS, kind=TrafficKind.MCP, target="s1", method="tools/list")
+    cancelled.duration_ms = 100
+    cancelled.status = 499
+    cancelled.outcome = RequestOutcome.CLIENT_CANCELLED
+    committed.add_all([ok, upstream_failed, protocol_failed, cancelled])
+    await committed.commit()
+
+    def amounts(response):
+        assert response.status_code == 200, response.text
+        return {
+            (row["target"], row["method"], row["tool"]): (
+                row["requests"],
+                row["error_count"],
+                row["total_duration_ms"],
+            )
+            for row in response.json()["items"]
+        }
+
+    mcp = amounts(query(client, group_by="target,method,tool", team_id=str(team.id), kind="mcp"))
+    assert mcp == {
+        ("s1", "tools/call", "echo"): (2, 1, 30),
+        ("s1", "tools/list", ""): (1, 0, 100),
+    }
+    a2a = amounts(query(client, group_by="target,method", team_id=str(team.id), kind="a2a"))
+    assert a2a == {("agent", "SendMessage", None): (1, 1, 70)}
+    # An LLM row still reports the LLM amounts; the two counters start at zero.
+    committed.add(usage_event(key, ts=TS, requested="chat"))
+    await committed.commit()
+    llm = query(client, group_by="kind", team_id=str(team.id), kind="llm").json()["items"]
+    assert [(row["kind"], row["requests"], row["error_count"]) for row in llm] == [("llm", 1, 0)]
 
 
 @pytest.mark.parametrize(

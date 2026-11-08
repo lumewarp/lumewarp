@@ -1,0 +1,975 @@
+{
+  "uid": "lumewarp-mcp-a2a",
+  "title": "Lumewarp / MCP & A2A",
+  "description": "MCP and A2A traffic through the gateway: requests, errors, upstream latency, plugin calls and the MCP definition review loop. Requests, errors and latency are per server or agent; plugin panels cover every kind. Definitions and reviews come from the control plane.",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "tags": [
+    "lumewarp",
+    "mcp",
+    "a2a"
+  ],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "graphTooltip": 1,
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "refresh": 1
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values({__name__=~\"lumewarp_(cp_)?config_version\"}, namespace)",
+          "refId": "namespace"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "server",
+        "label": "MCP server",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(lumewarp_mcp_requests_total{namespace=~\"${namespace:regex}\"}, server)",
+          "refId": "server"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "agent",
+        "label": "A2A agent",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(lumewarp_a2a_requests_total{namespace=~\"${namespace:regex}\"}, agent)",
+          "refId": "agent"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "MCP requests / second",
+      "description": "What the gateway forwards per MCP server and method; `other` is a method the gateway does not name.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (server, method) (rate(lumewarp_mcp_requests_total{namespace=~\"${namespace:regex}\",server=~\"${server:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{server}} {{method}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "MCP 5xx ratio",
+      "description": "502 is an upstream or protocol failure, 504 an upstream or plugin timeout. 401/403 are authorization, 429 rate limiting and 503 the endpoint not being configured.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (server) (rate(lumewarp_mcp_requests_total{namespace=~\"${namespace:regex}\",server=~\"${server:regex}\",status=~\"5..\"}[$__rate_interval])) / sum by (server) (rate(lumewarp_mcp_requests_total{namespace=~\"${namespace:regex}\",server=~\"${server:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{server}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "MCP upstream latency",
+      "description": "Time to the upstream response headers, per server: queueing at the server, not the model's generation.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (server, le) (rate(lumewarp_mcp_upstream_duration_seconds_bucket{namespace=~\"${namespace:regex}\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{server}} p50",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (server, le) (rate(lumewarp_mcp_upstream_duration_seconds_bucket{namespace=~\"${namespace:regex}\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{server}} p95",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (server, le) (rate(lumewarp_mcp_upstream_duration_seconds_bucket{namespace=~\"${namespace:regex}\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{server}} p99",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "MCP tool calls / second",
+      "description": "Per server and tool; tools without an approved definition are counted as `_unapproved`, so the label never grows with upstream names.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (server, tool) (rate(lumewarp_mcp_tool_calls_total{namespace=~\"${namespace:regex}\",server=~\"${server:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{server}} {{tool}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "A2A requests / second",
+      "description": "A2A v1.0 JSON-RPC methods per agent, plus `agent_card` for the card endpoint.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (agent, method) (rate(lumewarp_a2a_requests_total{namespace=~\"${namespace:regex}\",agent=~\"${agent:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{agent}} {{method}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "A2A 5xx ratio",
+      "description": "502 is an upstream, auth or middleware failure, 504 a timeout of any of them.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (agent) (rate(lumewarp_a2a_requests_total{namespace=~\"${namespace:regex}\",agent=~\"${agent:regex}\",status=~\"5..\"}[$__rate_interval])) / sum by (agent) (rate(lumewarp_a2a_requests_total{namespace=~\"${namespace:regex}\",agent=~\"${agent:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{agent}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "A2A upstream latency",
+      "description": "Time to the upstream response headers per agent; a streaming response is measured to its headers, not its last event.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (agent, le) (rate(lumewarp_a2a_upstream_duration_seconds_bucket{namespace=~\"${namespace:regex}\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{agent}} p50",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (agent, le) (rate(lumewarp_a2a_upstream_duration_seconds_bucket{namespace=~\"${namespace:regex}\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{agent}} p95",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (agent, le) (rate(lumewarp_a2a_upstream_duration_seconds_bucket{namespace=~\"${namespace:regex}\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{agent}} p99",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Plugin calls / second by result",
+      "description": "Request-path calls only: `ok`, `error` (the plugin returned an error), `trap` and `timeout`. Built-in strategies and auth run inline and are not counted.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 16,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind, plugin, result) (rate(lumewarp_plugin_calls_total{namespace=~\"${namespace:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{kind}} {{plugin}} {{result}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Plugin call duration",
+      "description": "p50, p95 and p99 of the same calls. A slow plugin delays only the request that called it.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 16,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (kind, plugin, le) (rate(lumewarp_plugin_duration_seconds_bucket{namespace=~\"${namespace:regex}\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{kind}} {{plugin}} p50",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (kind, plugin, le) (rate(lumewarp_plugin_duration_seconds_bucket{namespace=~\"${namespace:regex}\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{kind}} {{plugin}} p95",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (kind, plugin, le) (rate(lumewarp_plugin_duration_seconds_bucket{namespace=~\"${namespace:regex}\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{kind}} {{plugin}} p99",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Catalog reports dropped / second",
+      "description": "Observations a gateway dropped before reporting them: oversized definitions, the per-server pending limit, or an invalid definition.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (rate(lumewarp_mcp_catalog_reports_dropped_total{namespace=~\"${namespace:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{reason}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Definitions stored / second by result",
+      "description": "How many reported or discovered MCP definitions the control plane stored: `approved`, `pending` (waiting for review, withheld by every gateway) or `known` (the hash was already there).",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 24,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(lumewarp_cp_mcp_catalog_definitions_total{namespace=~\"${namespace:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{result}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Definition reviews / second",
+      "description": "Administrator decisions on pending MCP definitions.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 24,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (action) (rate(lumewarp_cp_mcp_definition_reviews_total{namespace=~\"${namespace:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{action}}",
+          "range": true
+        }
+      ]
+    }
+  ]
+}

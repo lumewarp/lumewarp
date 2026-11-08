@@ -103,7 +103,7 @@ base URL the card advertises.
 | `--auth none` | Default; nothing is checked. |
 | `--auth bearer --bearer TOKEN` | Requires exactly `Authorization: Bearer TOKEN`. |
 | `--auth any-bearer` | Requires any non-empty `Authorization: Bearer <token>` (a passthrough user token). |
-| `--auth hmac --hmac-secret SECRET` | Verifies `x-lumewarp-signature`; see [HMAC.md](HMAC.md). `--hmac-skew-ms` defaults to 300000. |
+| `--auth hmac --hmac-secret SECRET` | Verifies `x-hmac-signature`; see [HMAC.md](HMAC.md). `--hmac-skew-ms` defaults to 300000. |
 
 A `401` carries a `WWW-Authenticate` challenge. The agent card and `GET /health` stay
 public; the control endpoints below are loopback-only and unauthenticated.

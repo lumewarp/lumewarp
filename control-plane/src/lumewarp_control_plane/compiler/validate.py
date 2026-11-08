@@ -25,7 +25,9 @@ from lumewarp_control_plane.compiler.plugins import (
 from lumewarp_control_plane.models import PluginKind
 
 # Capabilities every gateway supports (snapshot.rs SUPPORTED_CAPABILITIES). Router strategies
-# are `strategy:<name>`; a WASM one is supported where a gateway loaded it.
+# are `strategy:<name>`, MCP auth `auth:<name>` and A2A middleware `a2a_middleware:<name>`;
+# a WASM one is supported where a gateway loaded it (see `_plugin_capability`). `mcp` and
+# `a2a` cover the two proxied protocols.
 SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
     {
         "retry",
@@ -40,9 +42,53 @@ SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
         "default_body",
         "reasoning_effort",
         "model_chat_check",
+        "mcp",
+        "a2a",
         *(f"strategy:{name}" for name in BUILTIN_PLUGINS[PluginKind.ROUTER_STRATEGY]),
     }
 )
+# A capability whose suffix is a plugin name: any well-formed name is accepted here, because
+# whether a gateway loaded it is a deployment fact the control plane cannot check.
+PLUGIN_CAPABILITY_PREFIXES = ("strategy:", "auth:", "a2a_middleware:")
+# The gateway's bounds for MCP servers and A2A agents (targets.rs).
+TARGET_NAME = re.compile(r"[a-z][a-z0-9_-]{0,62}")
+BUILTIN_AUTH = frozenset({"none", "static_bearer", "passthrough"})
+MAX_TARGET_DEFINITIONS = 10_000
+MAX_DEFINITION_NAME = 256
+MAX_CARD_BYTES = 64 * 1024
+MAX_TARGET_TIMEOUT_MS = 0xFFFFFFFF
+
+
+def _plugin_capability(cap: str) -> bool:
+    """A `strategy:`/`auth:`/`a2a_middleware:` capability naming a well-formed plugin."""
+    for prefix in PLUGIN_CAPABILITY_PREFIXES:
+        if cap.startswith(prefix) and PLUGIN_NAME.fullmatch(cap[len(prefix) :]):
+            return True
+    return False
+
+
+def target_url_problem(url: str) -> str | None:
+    """An MCP server or A2A agent URL: `router::plain_http_uri`, absolute http(s) without
+    userinfo. Unlike a routing base URL it may carry a path and a query (an MCP endpoint
+    often does), but no fragment.
+    """
+    return _http_url_problem(url)
+
+
+def target_name_problem(name: str) -> str | None:
+    """`targets::valid_name` plus L4: a name may not contain the `__` tool separator."""
+    if not TARGET_NAME.fullmatch(name):
+        return "must match ^[a-z][a-z0-9_-]{0,62}$"
+    if "__" in name:
+        return 'must not contain "__" (the tool name separator)'
+    return None
+
+
+def card_url_problem(url: str) -> str | None:
+    """`A2aAgent.card_url`: the URL rule, and no derived-path reservation."""
+    return target_url_problem(url)
+
+
 MAX_SPLITS = 16
 MAX_SPLIT_NAME = 32
 MAX_RETRY_ATTEMPTS = 5
@@ -210,7 +256,141 @@ def capabilities_used(snap: pb.Snapshot) -> list[str]:
         used.add(f"strategy:{r.strategy}")
     if any(k.previous_key_hash for k in snap.api_keys):
         used.add("rotation_grace")
+    if snap.mcp_servers:
+        used.add("mcp")
+    for server in snap.mcp_servers:
+        if server.HasField("auth") and server.auth.HasField("plugin"):
+            used.add(f"auth:{server.auth.plugin.plugin}")
+    if snap.a2a_agents:
+        used.add("a2a")
+    for agent in snap.a2a_agents:
+        if agent.HasField("auth") and agent.auth.HasField("plugin"):
+            used.add(f"auth:{agent.auth.plugin.plugin}")
+        if agent.HasField("middleware") and agent.middleware.plugin:
+            used.add(f"a2a_middleware:{agent.middleware.plugin}")
     return sorted(used)
+
+
+def target_plugin_problem(kind: PluginKind, name: str, params: dict) -> str | None:
+    """`check_auth`/`compile_plugin`'s shape rule for one plugin reference."""
+    if not PLUGIN_NAME.fullmatch(name):
+        return f"plugin name {name!r} must match ^[a-z][a-z0-9_]{{0,62}}$"
+    if name in BUILTIN_PLUGINS[kind] and params:
+        return f"built-in plugin {name!r} takes no params"
+    return params_problem(params, kind=kind)
+
+
+def _auth_problem(auth: pb.UpstreamAuth, what: str) -> str | None:
+    """`targets.rs::check_auth`, spelled out: the built-ins' rules and the plugin shape.
+
+    A WASM plugin's settings are validated against the schema a gateway reported by the
+    write path; here only the always-checkable shape (name, size, `headers`) is repeated,
+    because a rollback restores settings without asking a gateway.
+    """
+    if not auth.HasField("plugin"):
+        return f"{what} auth has no plugin"
+    plugin = auth.plugin
+    params = _params_object(plugin.params_json, f"{what} auth params")
+    if problem := target_plugin_problem(PluginKind.UPSTREAM_AUTH, plugin.plugin, params):
+        return f"{what} auth {problem}"
+    if auth.secret_ref and auth.secret_ciphertext:
+        return f"{what} sets both secret_ref and secret_ciphertext"
+    if plugin.plugin == "static_bearer":
+        if not auth.secret_ref and not auth.secret_ciphertext:
+            return f"{what} static_bearer needs secret_ref or secret_ciphertext"
+    elif auth.secret_ref or auth.secret_ciphertext:
+        return f"{what} auth {plugin.plugin!r} takes no secret"
+    return None
+
+
+def _definitions_problem(server: pb.McpServer) -> str | None:
+    """`targets.rs::compile_approved`: kind, state, name and hash of every definition."""
+    what = f"mcp server {server.name!r}"
+    if len(server.definitions) > MAX_TARGET_DEFINITIONS:
+        return f"{what} has more than {MAX_TARGET_DEFINITIONS} definitions"
+    seen: set[tuple[int, str, bytes]] = set()
+    for definition in server.definitions:
+        if definition.kind not in (pb.MCP_DEFINITION_KIND_TOOL, pb.MCP_DEFINITION_KIND_PROMPT):
+            return f"{what} definition has an unknown kind {definition.kind}"
+        if definition.state not in (
+            pb.MCP_DEFINITION_STATE_UNSPECIFIED,
+            pb.MCP_DEFINITION_STATE_APPROVED,
+            pb.MCP_DEFINITION_STATE_PENDING,
+            pb.MCP_DEFINITION_STATE_REJECTED,
+        ):
+            return f"{what} definition has an unknown state {definition.state}"
+        name = definition.name
+        if not name or len(name.encode()) > MAX_DEFINITION_NAME:
+            return f"{what} definition has an invalid name"
+        if len(definition.hash) != DIGEST_LEN:
+            return f"{what} definition {name!r} needs a 32-byte hash"
+        key = (definition.kind, name, definition.hash)
+        if key in seen:
+            return f"{what} repeats the definition {name!r}"
+        seen.add(key)
+    return None
+
+
+def validate_targets(snap: pb.Snapshot) -> None:
+    """`targets.rs::validate`: MCP servers and A2A agents the gateway would accept."""
+    _unique([s.name for s in snap.mcp_servers], "mcp server")
+    _unique([a.name for a in snap.a2a_agents], "a2a agent")
+    for server in snap.mcp_servers:
+        what = f"mcp server {server.name!r}"
+        if problem := target_name_problem(server.name):
+            raise SnapshotInvalid(f"{what} name {problem}")
+        if problem := target_url_problem(server.url):
+            raise SnapshotInvalid(f"{what} url {problem}")
+        if server.review_mode not in (
+            pb.MCP_REVIEW_MODE_UNSPECIFIED,
+            pb.MCP_REVIEW_MODE_TOFU,
+            pb.MCP_REVIEW_MODE_MANUAL,
+            pb.MCP_REVIEW_MODE_OFF,
+        ):
+            raise SnapshotInvalid(f"{what} has an unknown review_mode {server.review_mode}")
+        if server.timeout_ms > MAX_TARGET_TIMEOUT_MS:
+            raise SnapshotInvalid(f"{what} timeout_ms is too large")
+        if server.HasField("auth") and server.auth.plugin.timeout_ms > MAX_TARGET_TIMEOUT_MS:
+            raise SnapshotInvalid(f"{what} auth plugin_timeout_ms is too large")
+        if not server.id:
+            raise SnapshotInvalid(f"{what} has no id")
+        if problem := _auth_problem(server.auth, what):
+            raise SnapshotInvalid(problem)
+        if problem := _definitions_problem(server):
+            raise SnapshotInvalid(problem)
+    for agent in snap.a2a_agents:
+        what = f"a2a agent {agent.name!r}"
+        if problem := target_name_problem(agent.name):
+            raise SnapshotInvalid(f"{what} name {problem}")
+        if problem := target_url_problem(agent.url):
+            raise SnapshotInvalid(f"{what} url {problem}")
+        if agent.card_url and (problem := card_url_problem(agent.card_url)):
+            raise SnapshotInvalid(f"{what} card_url {problem}")
+        if agent.timeout_ms > MAX_TARGET_TIMEOUT_MS:
+            raise SnapshotInvalid(f"{what} timeout_ms is too large")
+        if agent.HasField("auth") and agent.auth.plugin.timeout_ms > MAX_TARGET_TIMEOUT_MS:
+            raise SnapshotInvalid(f"{what} auth plugin_timeout_ms is too large")
+        if agent.HasField("middleware") and agent.middleware.timeout_ms > MAX_TARGET_TIMEOUT_MS:
+            raise SnapshotInvalid(f"{what} middleware plugin_timeout_ms is too large")
+        if not agent.id:
+            raise SnapshotInvalid(f"{what} has no id")
+        if problem := _auth_problem(agent.auth, what):
+            raise SnapshotInvalid(problem)
+        if agent.HasField("middleware") and agent.middleware.plugin:
+            params = _params_object(agent.middleware.params_json, f"{what} middleware params")
+            if problem := target_plugin_problem(
+                PluginKind.A2A_MIDDLEWARE, agent.middleware.plugin, params
+            ):
+                raise SnapshotInvalid(f"{what} middleware {problem}")
+        if agent.card_json:
+            if len(agent.card_json.encode()) > MAX_CARD_BYTES:
+                raise SnapshotInvalid(f"{what} card_json exceeds 64 KiB")
+            try:
+                card = json.loads(agent.card_json)
+            except (ValueError, RecursionError):
+                raise SnapshotInvalid(f"{what} card_json must be a JSON object") from None
+            if not isinstance(card, dict):
+                raise SnapshotInvalid(f"{what} card_json must be a JSON object")
 
 
 def _params_object(text: str, field: str) -> dict:
@@ -286,7 +466,7 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
     unsupported = {
         cap
         for cap in set(snap.required_capabilities) - SUPPORTED_CAPABILITIES
-        if not (cap.startswith("strategy:") and PLUGIN_NAME.fullmatch(cap[9:]))
+        if not _plugin_capability(cap)
     }
     if unsupported:
         raise SnapshotInvalid(f"unsupported capabilities {sorted(unsupported)}")
@@ -372,10 +552,14 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
         params = _params_object(r.params_json, f"router {r.name!r} params")
         if r.strategy in BUILTIN_PLUGINS[PluginKind.ROUTER_STRATEGY] and params:
             raise SnapshotInvalid(f"router {r.name!r}: built-in {r.strategy!r} takes no params")
-        if problem := params_problem(params, f"router {r.name!r} params"):
+        if problem := params_problem(
+            params, f"router {r.name!r} params", PluginKind.ROUTER_STRATEGY
+        ):
             raise SnapshotInvalid(problem)
         if r.sticky not in STICKY_BY:
             raise SnapshotInvalid(f"router {r.name!r} has sticky {r.sticky}")
+        if r.plugin_timeout_ms > MAX_TARGET_TIMEOUT_MS:
+            raise SnapshotInvalid(f"router {r.name!r} plugin_timeout_ms is too large")
         if r.HasField("retry") and (
             r.retry.max_attempts > MAX_RETRY_ATTEMPTS
             or any(not 400 <= code <= 599 for code in r.retry.retry_on_status)
@@ -391,6 +575,8 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
         # With traffic_split the router's own member list is ignored.
         if not r.traffic_split:
             _validate_members(r, "", r.members, models)
+
+    validate_targets(snap)
 
     _unique([t.id for t in snap.teams], "team")
     teams = {t.id for t in snap.teams}
@@ -423,6 +609,31 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
             raise SnapshotInvalid(f"key {k.key_id!r} has no policy")
         if any(not m for m in k.policy.allowed_models):
             raise SnapshotInvalid(f"key {k.key_id!r} allows an empty model name")
+        servers = {s.name for s in snap.mcp_servers}
+        granted: set[str] = set()
+        for grant in k.policy.mcp_grants:
+            if not grant.server:
+                raise SnapshotInvalid(f"key {k.key_id!r} grants an empty MCP server name")
+            if grant.server not in servers:
+                raise SnapshotInvalid(
+                    f"key {k.key_id!r} grants unknown MCP server {grant.server!r}"
+                )
+            if grant.server in granted:
+                raise SnapshotInvalid(f"key {k.key_id!r} repeats the MCP server {grant.server!r}")
+            granted.add(grant.server)
+            if grant.all_tools and grant.tools:
+                raise SnapshotInvalid(
+                    f"key {k.key_id!r}: server {grant.server!r} grants all tools and a list"
+                )
+            if any(not tool for tool in grant.tools):
+                raise SnapshotInvalid(f"key {k.key_id!r} grants an empty tool name")
+        agents = {a.name for a in snap.a2a_agents}
+        if any(not name for name in k.policy.allowed_agents):
+            raise SnapshotInvalid(f"key {k.key_id!r} allows an empty agent name")
+        if len(set(k.policy.allowed_agents)) != len(k.policy.allowed_agents):
+            raise SnapshotInvalid(f"key {k.key_id!r} repeats an A2A agent")
+        if unknown := set(k.policy.allowed_agents) - agents:
+            raise SnapshotInvalid(f"key {k.key_id!r} allows unknown A2A agents {sorted(unknown)}")
         if len(k.policy.rate_limit_scopes) > MAX_RATE_LIMIT_SCOPES:
             raise SnapshotInvalid(
                 f"key {k.key_id!r} has {len(k.policy.rate_limit_scopes)} rate limit scopes,"

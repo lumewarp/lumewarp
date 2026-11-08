@@ -54,6 +54,13 @@ class McpDefinitionKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     MCP_DEFINITION_KIND_UNSPECIFIED: _ClassVar[McpDefinitionKind]
     MCP_DEFINITION_KIND_TOOL: _ClassVar[McpDefinitionKind]
     MCP_DEFINITION_KIND_PROMPT: _ClassVar[McpDefinitionKind]
+
+class McpDefinitionState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    MCP_DEFINITION_STATE_UNSPECIFIED: _ClassVar[McpDefinitionState]
+    MCP_DEFINITION_STATE_APPROVED: _ClassVar[McpDefinitionState]
+    MCP_DEFINITION_STATE_PENDING: _ClassVar[McpDefinitionState]
+    MCP_DEFINITION_STATE_REJECTED: _ClassVar[McpDefinitionState]
 STREAM_USAGE_MODE_UNSPECIFIED: StreamUsageMode
 STREAM_USAGE_MODE_INCLUDE_USAGE: StreamUsageMode
 STREAM_USAGE_MODE_PASSTHROUGH: StreamUsageMode
@@ -81,6 +88,10 @@ MCP_REVIEW_MODE_OFF: McpReviewMode
 MCP_DEFINITION_KIND_UNSPECIFIED: McpDefinitionKind
 MCP_DEFINITION_KIND_TOOL: McpDefinitionKind
 MCP_DEFINITION_KIND_PROMPT: McpDefinitionKind
+MCP_DEFINITION_STATE_UNSPECIFIED: McpDefinitionState
+MCP_DEFINITION_STATE_APPROVED: McpDefinitionState
+MCP_DEFINITION_STATE_PENDING: McpDefinitionState
+MCP_DEFINITION_STATE_REJECTED: McpDefinitionState
 
 class Snapshot(_message.Message):
     __slots__ = ("version", "upstreams", "models", "routers", "api_keys", "teams", "created_at_unix_ms", "required_capabilities", "scope", "aliases", "mcp_servers", "a2a_agents")
@@ -232,7 +243,7 @@ class RouterMember(_message.Message):
     def __init__(self, model: _Optional[str] = ..., weight: _Optional[int] = ..., params_json: _Optional[str] = ...) -> None: ...
 
 class Router(_message.Message):
-    __slots__ = ("name", "members", "strategy", "params_json", "retry", "fallbacks", "traffic_split", "sticky", "sticky_header")
+    __slots__ = ("name", "members", "strategy", "params_json", "retry", "fallbacks", "traffic_split", "sticky", "sticky_header", "plugin_timeout_ms")
     NAME_FIELD_NUMBER: _ClassVar[int]
     MEMBERS_FIELD_NUMBER: _ClassVar[int]
     STRATEGY_FIELD_NUMBER: _ClassVar[int]
@@ -242,6 +253,7 @@ class Router(_message.Message):
     TRAFFIC_SPLIT_FIELD_NUMBER: _ClassVar[int]
     STICKY_FIELD_NUMBER: _ClassVar[int]
     STICKY_HEADER_FIELD_NUMBER: _ClassVar[int]
+    PLUGIN_TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
     name: str
     members: _containers.RepeatedCompositeFieldContainer[RouterMember]
     strategy: str
@@ -251,7 +263,8 @@ class Router(_message.Message):
     traffic_split: _containers.RepeatedCompositeFieldContainer[TrafficSplit]
     sticky: StickyBy
     sticky_header: str
-    def __init__(self, name: _Optional[str] = ..., members: _Optional[_Iterable[_Union[RouterMember, _Mapping]]] = ..., strategy: _Optional[str] = ..., params_json: _Optional[str] = ..., retry: _Optional[_Union[RetryPolicy, _Mapping]] = ..., fallbacks: _Optional[_Iterable[str]] = ..., traffic_split: _Optional[_Iterable[_Union[TrafficSplit, _Mapping]]] = ..., sticky: _Optional[_Union[StickyBy, str]] = ..., sticky_header: _Optional[str] = ...) -> None: ...
+    plugin_timeout_ms: int
+    def __init__(self, name: _Optional[str] = ..., members: _Optional[_Iterable[_Union[RouterMember, _Mapping]]] = ..., strategy: _Optional[str] = ..., params_json: _Optional[str] = ..., retry: _Optional[_Union[RetryPolicy, _Mapping]] = ..., fallbacks: _Optional[_Iterable[str]] = ..., traffic_split: _Optional[_Iterable[_Union[TrafficSplit, _Mapping]]] = ..., sticky: _Optional[_Union[StickyBy, str]] = ..., sticky_header: _Optional[str] = ..., plugin_timeout_ms: _Optional[int] = ...) -> None: ...
 
 class RetryPolicy(_message.Message):
     __slots__ = ("max_attempts", "retry_on_status", "total_timeout_ms")
@@ -332,12 +345,14 @@ class McpGrant(_message.Message):
     def __init__(self, server: _Optional[str] = ..., all_tools: _Optional[bool] = ..., tools: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class PluginRef(_message.Message):
-    __slots__ = ("plugin", "params_json")
+    __slots__ = ("plugin", "params_json", "timeout_ms")
     PLUGIN_FIELD_NUMBER: _ClassVar[int]
     PARAMS_JSON_FIELD_NUMBER: _ClassVar[int]
+    TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
     plugin: str
     params_json: str
-    def __init__(self, plugin: _Optional[str] = ..., params_json: _Optional[str] = ...) -> None: ...
+    timeout_ms: int
+    def __init__(self, plugin: _Optional[str] = ..., params_json: _Optional[str] = ..., timeout_ms: _Optional[int] = ...) -> None: ...
 
 class UpstreamAuth(_message.Message):
     __slots__ = ("plugin", "secret_ref", "secret_ciphertext")
@@ -350,32 +365,34 @@ class UpstreamAuth(_message.Message):
     def __init__(self, plugin: _Optional[_Union[PluginRef, _Mapping]] = ..., secret_ref: _Optional[str] = ..., secret_ciphertext: _Optional[bytes] = ...) -> None: ...
 
 class McpDefinition(_message.Message):
-    __slots__ = ("kind", "name", "hash")
+    __slots__ = ("kind", "name", "hash", "state")
     KIND_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     HASH_FIELD_NUMBER: _ClassVar[int]
+    STATE_FIELD_NUMBER: _ClassVar[int]
     kind: McpDefinitionKind
     name: str
     hash: bytes
-    def __init__(self, kind: _Optional[_Union[McpDefinitionKind, str]] = ..., name: _Optional[str] = ..., hash: _Optional[bytes] = ...) -> None: ...
+    state: McpDefinitionState
+    def __init__(self, kind: _Optional[_Union[McpDefinitionKind, str]] = ..., name: _Optional[str] = ..., hash: _Optional[bytes] = ..., state: _Optional[_Union[McpDefinitionState, str]] = ...) -> None: ...
 
 class McpServer(_message.Message):
-    __slots__ = ("id", "name", "url", "auth", "timeout_ms", "review_mode", "approved")
+    __slots__ = ("id", "name", "url", "auth", "timeout_ms", "review_mode", "definitions")
     ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     URL_FIELD_NUMBER: _ClassVar[int]
     AUTH_FIELD_NUMBER: _ClassVar[int]
     TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
     REVIEW_MODE_FIELD_NUMBER: _ClassVar[int]
-    APPROVED_FIELD_NUMBER: _ClassVar[int]
+    DEFINITIONS_FIELD_NUMBER: _ClassVar[int]
     id: str
     name: str
     url: str
     auth: UpstreamAuth
     timeout_ms: int
     review_mode: McpReviewMode
-    approved: _containers.RepeatedCompositeFieldContainer[McpDefinition]
-    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., url: _Optional[str] = ..., auth: _Optional[_Union[UpstreamAuth, _Mapping]] = ..., timeout_ms: _Optional[int] = ..., review_mode: _Optional[_Union[McpReviewMode, str]] = ..., approved: _Optional[_Iterable[_Union[McpDefinition, _Mapping]]] = ...) -> None: ...
+    definitions: _containers.RepeatedCompositeFieldContainer[McpDefinition]
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., url: _Optional[str] = ..., auth: _Optional[_Union[UpstreamAuth, _Mapping]] = ..., timeout_ms: _Optional[int] = ..., review_mode: _Optional[_Union[McpReviewMode, str]] = ..., definitions: _Optional[_Iterable[_Union[McpDefinition, _Mapping]]] = ...) -> None: ...
 
 class A2aAgent(_message.Message):
     __slots__ = ("id", "name", "url", "card_url", "auth", "middleware", "timeout_ms", "card_json")

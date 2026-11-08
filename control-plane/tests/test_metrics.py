@@ -34,6 +34,11 @@ CONTRACT = {
     "lumewarp_cp_keys_suspended": ("counter", {"reason"}),
     "lumewarp_cp_key_reconcile_last_success_timestamp_seconds": ("gauge", set()),
     "lumewarp_cp_key_writes": ("counter", {"operation", "result"}),
+    "lumewarp_cp_mcp_catalog_definitions": ("counter", {"result"}),
+    "lumewarp_cp_mcp_catalog_discarded": ("counter", {"reason"}),
+    "lumewarp_cp_a2a_agent_cards": ("counter", {"result"}),
+    "lumewarp_cp_mcp_definition_reviews": ("counter", {"action"}),
+    "lumewarp_cp_mcp_discover_requests": ("counter", {"result"}),
 }
 
 

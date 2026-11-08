@@ -75,6 +75,12 @@ pub struct Config {
     pub teams: Vec<Team>,
     #[serde(default)]
     pub keys: Vec<Key>,
+    /// Upstream MCP servers (`Snapshot.mcp_servers`).
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServer>,
+    /// Upstream A2A agents (`Snapshot.a2a_agents`).
+    #[serde(default)]
+    pub a2a_agents: Vec<A2aAgent>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -307,6 +313,9 @@ pub struct Router {
     pub sticky: StickyBy,
     #[serde(default)]
     pub sticky_header: String,
+    /// WASM strategies: how long one `pick` may run; 0 = 60 s.
+    #[serde(default)]
+    pub plugin_timeout_ms: u32,
 }
 
 fn default_strategy() -> String {
@@ -434,9 +443,269 @@ pub struct Key {
     /// validates the cap). A scope with an empty id is rejected by snapshot validation.
     #[serde(default)]
     pub scopes: Option<Vec<KeyScope>>,
+    /// Every MCP server and tool (fail-closed default: false).
+    #[serde(default)]
+    pub allow_all_mcp: bool,
+    /// Per-server MCP grants, without `allow_all_mcp`.
+    #[serde(default)]
+    pub mcp_grants: Vec<McpGrant>,
+    /// Every A2A agent (fail-closed default: false).
+    #[serde(default)]
+    pub allow_all_agents: bool,
+    /// A2A agent names, without `allow_all_agents`.
+    #[serde(default)]
+    pub allowed_agents: Vec<String>,
 }
 
-/// Parses `"12.345"` USD into nano-USD without going through floating point.
+/// How the gateway authenticates to an MCP server or A2A agent
+/// (`UpstreamAuth`): `none`, `static_bearer`, `passthrough` or the name of a
+/// loaded `upstream-auth` plugin.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamAuth {
+    #[serde(default = "default_auth_plugin")]
+    pub plugin: String,
+    #[serde(default)]
+    pub params: serde_json::Map<String, serde_json::Value>,
+    /// `static_bearer`: name of the env var holding the token (never the token
+    /// itself). Sealed ciphertexts are a control-plane thing; a standalone file
+    /// refers to the environment.
+    #[serde(default)]
+    pub secret_env: Option<String>,
+    /// WASM auth plugins: how long one call may run; 0 = 60 s.
+    #[serde(default)]
+    pub timeout_ms: u32,
+}
+
+fn default_auth_plugin() -> String {
+    "none".into()
+}
+
+/// `McpServer.review_mode`; `tofu` when absent, like UNSPECIFIED.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpReviewMode {
+    #[default]
+    Tofu,
+    Manual,
+    Off,
+}
+
+/// `McpDefinitionKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpDefinitionKind {
+    Tool,
+    Prompt,
+}
+
+/// `McpDefinitionState`; `approved` when absent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpDefinitionState {
+    #[default]
+    Approved,
+    Pending,
+    Rejected,
+}
+
+/// One reviewed tool or prompt of an MCP server. The gateway never serves the
+/// definition itself, only the tools/prompts whose hash matches it
+/// (`docs/plugins.md`, "Review modes").
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpDefinition {
+    pub kind: McpDefinitionKind,
+    /// Upstream name, without the `<server>__` prefix.
+    pub name: String,
+    /// Lowercase sha256 hex of the canonical definition.
+    pub hash: String,
+    #[serde(default)]
+    pub state: McpDefinitionState,
+}
+
+/// One MCP server (`McpServer`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServer {
+    /// Stable id; defaults to `name`.
+    #[serde(default)]
+    pub id: String,
+    /// `^[a-z][a-z0-9_-]{0,62}$` without `__`, unique among MCP servers.
+    pub name: String,
+    /// Streamable HTTP endpoint, absolute http(s) URL.
+    pub url: String,
+    #[serde(default)]
+    pub auth: Option<UpstreamAuth>,
+    /// Per upstream request; 0 = gateway default (30 s).
+    #[serde(default)]
+    pub timeout_ms: u32,
+    #[serde(default)]
+    pub review_mode: McpReviewMode,
+    #[serde(default)]
+    pub definitions: Vec<McpDefinition>,
+}
+
+/// One A2A agent (`A2aAgent`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct A2aAgent {
+    /// Stable id; defaults to `name`.
+    #[serde(default)]
+    pub id: String,
+    pub name: String,
+    /// JSON-RPC endpoint, absolute http(s) URL.
+    pub url: String,
+    /// Agent Card URL; empty = origin of `url` + `/.well-known/agent-card.json`.
+    #[serde(default)]
+    pub card_url: String,
+    #[serde(default)]
+    pub auth: Option<UpstreamAuth>,
+    /// Optional, at most one `a2a-middleware` plugin.
+    #[serde(default)]
+    pub middleware: Option<PluginRef>,
+    #[serde(default)]
+    pub timeout_ms: u32,
+    /// Card served until the gateway fetches one itself: JSON text.
+    #[serde(default)]
+    pub card_json: String,
+}
+
+/// A plugin and its settings, for a middleware.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginRef {
+    pub plugin: String,
+    #[serde(default)]
+    pub params: serde_json::Map<String, serde_json::Value>,
+    /// How long one call may run; 0 = 60 s.
+    #[serde(default)]
+    pub timeout_ms: u32,
+}
+
+/// One MCP server grant of a key (`McpGrant`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpGrant {
+    pub server: String,
+    /// True: every approved tool of the server; `tools` is ignored.
+    #[serde(default)]
+    pub all_tools: bool,
+    /// Upstream tool names, without the `<server>__` prefix.
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
+/// Parses a lowercase sha256 hex string into 32 bytes.
+fn parse_digest(hex: &str, field: &str) -> Result<Vec<u8>, ConfigError> {
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    {
+        return Err(ConfigError::Invalid(format!(
+            "{field} must be a 64-character lowercase sha256 hex string"
+        )));
+    }
+    Ok((0..32)
+        .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).expect("validated hex"))
+        .collect())
+}
+
+fn wire_auth(auth: &Option<UpstreamAuth>) -> Option<pb::UpstreamAuth> {
+    auth.as_ref().map(|auth| pb::UpstreamAuth {
+        plugin: Some(pb::PluginRef {
+            plugin: auth.plugin.clone(),
+            params_json: params_json(&auth.params),
+            timeout_ms: auth.timeout_ms,
+        }),
+        secret_ref: auth.secret_env.clone().unwrap_or_default(),
+        secret_ciphertext: Vec::new(),
+    })
+}
+
+fn wire_plugin(plugin: &PluginRef) -> pb::PluginRef {
+    pb::PluginRef {
+        plugin: plugin.plugin.clone(),
+        params_json: params_json(&plugin.params),
+        timeout_ms: plugin.timeout_ms,
+    }
+}
+
+/// Plugin names a config names for `auth:`/`middleware:`; the capability list
+/// must mention each of them.
+fn wire_mcp_servers(config: &Config) -> Result<Vec<pb::McpServer>, ConfigError> {
+    config
+        .mcp_servers
+        .iter()
+        .map(|server| {
+            let definitions = server
+                .definitions
+                .iter()
+                .map(|definition| {
+                    Ok(pb::McpDefinition {
+                        kind: match definition.kind {
+                            McpDefinitionKind::Tool => pb::McpDefinitionKind::Tool,
+                            McpDefinitionKind::Prompt => pb::McpDefinitionKind::Prompt,
+                        } as i32,
+                        name: definition.name.clone(),
+                        hash: parse_digest(
+                            &definition.hash,
+                            &format!(
+                                "mcp_servers[{}].definitions[{}].hash",
+                                server.name, definition.name
+                            ),
+                        )?,
+                        state: match definition.state {
+                            McpDefinitionState::Approved => pb::McpDefinitionState::Approved,
+                            McpDefinitionState::Pending => pb::McpDefinitionState::Pending,
+                            McpDefinitionState::Rejected => pb::McpDefinitionState::Rejected,
+                        } as i32,
+                    })
+                })
+                .collect::<Result<Vec<_>, ConfigError>>()?;
+            Ok(pb::McpServer {
+                id: if server.id.is_empty() {
+                    server.name.clone()
+                } else {
+                    server.id.clone()
+                },
+                name: server.name.clone(),
+                url: server.url.clone(),
+                auth: wire_auth(&server.auth),
+                timeout_ms: server.timeout_ms,
+                review_mode: match server.review_mode {
+                    McpReviewMode::Tofu => pb::McpReviewMode::Tofu,
+                    McpReviewMode::Manual => pb::McpReviewMode::Manual,
+                    McpReviewMode::Off => pb::McpReviewMode::Off,
+                } as i32,
+                definitions,
+            })
+        })
+        .collect()
+}
+
+fn wire_a2a_agents(config: &Config) -> Vec<pb::A2aAgent> {
+    config
+        .a2a_agents
+        .iter()
+        .map(|agent| pb::A2aAgent {
+            id: if agent.id.is_empty() {
+                agent.name.clone()
+            } else {
+                agent.id.clone()
+            },
+            name: agent.name.clone(),
+            url: agent.url.clone(),
+            card_url: agent.card_url.clone(),
+            auth: wire_auth(&agent.auth),
+            middleware: agent.middleware.as_ref().map(wire_plugin),
+            timeout_ms: agent.timeout_ms,
+            card_json: agent.card_json.clone(),
+        })
+        .collect()
+}
+
 pub fn parse_usd_nano(s: &str) -> Result<u64, String> {
     let err = || {
         format!("invalid USD amount {s:?}: expected a decimal string like \"0.15\" with at most 9 fractional digits")
@@ -664,6 +933,7 @@ impl Config {
                     StickyBy::Key => pb::StickyBy::Key,
                 } as i32,
                 sticky_header: r.sticky_header.clone(),
+                plugin_timeout_ms: r.plugin_timeout_ms,
             })
             .collect();
         let teams: Vec<pb::Team> = self
@@ -690,6 +960,10 @@ impl Config {
                 status: pb::KeyStatus::Active as i32,
                 policy: Some(pb::EffectivePolicy {
                     allow_all_models: true,
+                    // The shorthand means "may call every name", MCP and A2A
+                    // included; a `keys:` entry grants them explicitly.
+                    allow_all_mcp: true,
+                    allow_all_agents: true,
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -742,7 +1016,18 @@ impl Config {
                     allowed_models: key.allowed_models.clone(),
                     rate_limit_scopes: scopes,
                     budget_window_end_unix_ms: 0,
-                    ..Default::default()
+                    allow_all_mcp: key.allow_all_mcp,
+                    mcp_grants: key
+                        .mcp_grants
+                        .iter()
+                        .map(|grant| pb::McpGrant {
+                            server: grant.server.clone(),
+                            all_tools: grant.all_tools,
+                            tools: grant.tools.clone(),
+                        })
+                        .collect(),
+                    allow_all_agents: key.allow_all_agents,
+                    allowed_agents: key.allowed_agents.clone(),
                 }),
                 ..Default::default()
             });
@@ -755,6 +1040,8 @@ impl Config {
             routers,
             api_keys,
             teams,
+            mcp_servers: wire_mcp_servers(self)?,
+            a2a_agents: wire_a2a_agents(self),
             created_at_unix_ms: 0,
             required_capabilities: {
                 let mut caps = Vec::new();
@@ -813,10 +1100,36 @@ impl Config {
                         caps.push(cap);
                     }
                 }
+                // MCP servers and A2A agents report the capabilities they need,
+                // exactly as `targets::capabilities` derives them from a
+                // control-plane snapshot.
+                if !self.mcp_servers.is_empty() {
+                    caps.push("mcp".into());
+                }
+                if !self.a2a_agents.is_empty() {
+                    caps.push("a2a".into());
+                }
+                let mut plugins = Vec::new();
+                for auth in self
+                    .mcp_servers
+                    .iter()
+                    .map(|s| s.auth.as_ref())
+                    .chain(self.a2a_agents.iter().map(|a| a.auth.as_ref()))
+                    .flatten()
+                {
+                    plugins.push(format!("auth:{}", auth.plugin));
+                }
+                for middleware in self.a2a_agents.iter().filter_map(|a| a.middleware.as_ref()) {
+                    plugins.push(format!("a2a_middleware:{}", middleware.plugin));
+                }
+                for cap in plugins {
+                    if !caps.contains(&cap) {
+                        caps.push(cap);
+                    }
+                }
                 caps
             },
             scope: String::new(),
-            ..Default::default()
         })
     }
 }
@@ -992,6 +1305,225 @@ aliases:
             "routers: [{name: r, traffic_split: [{name: s, models: [d], weight: 1}]}]",
         ] {
             assert!(Config::parse(removed).is_err(), "{removed}");
+        }
+    }
+
+    #[test]
+    fn mcp_and_a2a_yaml_become_snapshot_entities() {
+        let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let key = "b".repeat(64);
+        let yaml = format!(
+            r#"
+server:
+  api_keys: ['{a}']
+mcp_servers:
+  - name: files
+    url: http://localhost:9110/mcp
+    auth: {{plugin: static_bearer, secret_env: MCP_FILES_TOKEN}}
+    review_mode: manual
+    timeout_ms: 2500
+    definitions:
+      - {{kind: tool, name: echo, hash: '{hash}'}}
+      - {{kind: prompt, name: greet, hash: '{hash}', state: pending}}
+a2a_agents:
+  - name: helper
+    url: http://localhost:9120/a2a
+    card_url: http://localhost:9120/card.json
+    middleware: {{plugin: strip_artifacts, params: {{mime: [image/png]}}}}
+    card_json: '{{"name":"helper"}}'
+keys:
+  - key_id: k1
+    key_sha256: '{key}'
+    allow_all_models: true
+    mcp_grants:
+      - {{server: files, all_tools: true}}
+      - {{server: other, tools: [echo, add]}}
+    allowed_agents: [helper]
+"#,
+            a = "a".repeat(64)
+        );
+        let (_, s) = Config::parse(&yaml).unwrap();
+        assert_eq!(s.mcp_servers.len(), 1);
+        let mcp = &s.mcp_servers[0];
+        assert_eq!(mcp.id, "files", "id defaults to the name");
+        assert_eq!(mcp.url, "http://localhost:9110/mcp");
+        assert_eq!(mcp.review_mode, pb::McpReviewMode::Manual as i32);
+        assert_eq!(mcp.timeout_ms, 2500);
+        let auth = mcp.auth.as_ref().unwrap();
+        assert_eq!(auth.secret_ref, "MCP_FILES_TOKEN");
+        let plugin = auth.plugin.as_ref().unwrap();
+        assert_eq!(plugin.plugin, "static_bearer");
+        assert_eq!(plugin.params_json, "");
+        assert!(auth.secret_ciphertext.is_empty());
+        assert_eq!(mcp.definitions.len(), 2);
+        assert_eq!(mcp.definitions[0].kind, pb::McpDefinitionKind::Tool as i32);
+        assert_eq!(
+            mcp.definitions[0].state,
+            pb::McpDefinitionState::Approved as i32
+        );
+        let expected: Vec<u8> = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef].repeat(4);
+        assert_eq!(mcp.definitions[0].hash, expected);
+        assert_eq!(
+            mcp.definitions[1].state,
+            pb::McpDefinitionState::Pending as i32
+        );
+
+        assert_eq!(s.a2a_agents.len(), 1);
+        let agent = &s.a2a_agents[0];
+        assert_eq!(agent.id, "helper");
+        assert_eq!(agent.url, "http://localhost:9120/a2a");
+        assert_eq!(agent.card_url, "http://localhost:9120/card.json");
+        assert_eq!(agent.card_json, r#"{"name":"helper"}"#);
+        assert!(agent.auth.is_none(), "no auth: means none");
+        let middleware = agent.middleware.as_ref().unwrap();
+        assert_eq!(middleware.plugin, "strip_artifacts");
+        assert_eq!(middleware.params_json, r#"{"mime":["image/png"]}"#);
+
+        // The shorthand key may reach every MCP server and agent.
+        let shorthand = s.api_keys[0].policy.as_ref().unwrap();
+        assert!(shorthand.allow_all_mcp && shorthand.allow_all_agents);
+        // The explicit key gets exactly its grants, fail-closed otherwise.
+        let policy = s.api_keys[1].policy.as_ref().unwrap();
+        assert!(!policy.allow_all_mcp && !policy.allow_all_agents);
+        assert_eq!(policy.mcp_grants.len(), 2);
+        assert_eq!(policy.mcp_grants[0].server, "files");
+        assert!(policy.mcp_grants[0].all_tools);
+        assert_eq!(policy.mcp_grants[1].tools, ["echo", "add"]);
+        assert_eq!(policy.allowed_agents, ["helper"]);
+
+        // Capabilities the entities need are declared, as from the control plane.
+        for cap in [
+            "mcp",
+            "a2a",
+            "auth:static_bearer",
+            "a2a_middleware:strip_artifacts",
+        ] {
+            assert!(
+                s.required_capabilities.iter().any(|c| c == cap),
+                "{cap} missing from {:?}",
+                s.required_capabilities
+            );
+        }
+        assert_eq!(
+            s.required_capabilities
+                .iter()
+                .filter(|c| *c == "mcp" || *c == "a2a")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn plugin_timeouts_default_to_sixty_seconds_and_are_configurable() {
+        let yaml = r#"
+mcp_servers:
+  - {name: files, url: 'http://x/mcp', auth: {plugin: static_bearer, secret_env: TOKEN}}
+a2a_agents:
+  - name: helper
+    url: 'http://y/rpc'
+    auth: {plugin: hmac_signature, params: {skew: 5}, timeout_ms: 2500}
+    middleware: {plugin: strip_artifacts, params: {mime: [image/png]}, timeout_ms: 1500}
+routers:
+  - {name: slow, members: [{model: d}], strategy: header_pin, plugin_timeout_ms: 3000}
+  - {name: default}
+"#;
+        let (_, s) = Config::parse(yaml).unwrap();
+        // A built-in auth plugin carries the timeout through too; the gateway
+        // ignores it for the built-ins and uses it for WASM ones.
+        assert_eq!(
+            s.mcp_servers[0]
+                .auth
+                .as_ref()
+                .unwrap()
+                .plugin
+                .as_ref()
+                .unwrap()
+                .timeout_ms,
+            0,
+            "0 = the gateway's 60 s default"
+        );
+        let agent = &s.a2a_agents[0];
+        assert_eq!(
+            agent
+                .auth
+                .as_ref()
+                .unwrap()
+                .plugin
+                .as_ref()
+                .unwrap()
+                .timeout_ms,
+            2500,
+            "auth timeout_ms is wired into PluginRef"
+        );
+        assert_eq!(
+            agent.middleware.as_ref().unwrap().timeout_ms,
+            1500,
+            "middleware timeout_ms is wired into PluginRef"
+        );
+        assert_eq!(s.routers[0].plugin_timeout_ms, 3000);
+        assert_eq!(s.routers[1].plugin_timeout_ms, 0, "0 = the 60 s default");
+        // The unknown-field check still applies to the new keys' neighbours.
+        assert!(Config::parse(
+            "mcp_servers:\n  - {name: s, url: 'http://x/mcp', auth: {plugin: none, timeout: 5}}\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn mcp_and_a2a_yaml_reject_bad_fields() {
+        let hash = "f".repeat(64);
+        let server = |definition: &str| {
+            format!(
+                "mcp_servers:\n  - name: files\n    url: http://localhost:9110/mcp\n    definitions:\n      - {definition}\n"
+            )
+        };
+        assert!(Config::parse(&server(&format!(
+            "{{kind: tool, name: echo, hash: '{hash}'}}"
+        )))
+        .is_ok());
+        // Hash, kind, state and unknown fields are checked while converting.
+        for bad in [
+            format!("{{kind: tool, name: echo, hash: '{}'}}", "g".repeat(64)),
+            format!("{{kind: tool, name: echo, hash: '{}'}}", "a".repeat(63)),
+            format!("{{kind: resource, name: echo, hash: '{hash}'}}"),
+            format!("{{kind: tool, name: echo, hash: '{hash}', state: deleted}}"),
+            format!("{{kind: tool, name: echo, hash: '{hash}', extra: 1}}"),
+        ] {
+            assert!(Config::parse(&server(&bad)).is_err(), "{bad}");
+        }
+        // Unknown auth plugins and middleware fields are the gateway's snapshot
+        // validation, not the loader's: they parse here (and are NACKed or
+        // refused at compile time).
+        assert!(Config::parse(
+            "mcp_servers:\n  - {name: files, url: 'http://x/mcp', auth: {plugin: hmac_signature, params: {skew: 5}}}\n"
+        )
+        .is_ok());
+        for bad in [
+            "a2a_agents:\n  - {name: helper}\n",
+            "mcp_servers:\n  - {name: files, url: 'http://x/mcp', bogus: 1}\n",
+            "a2a_agents:\n  - {name: helper, url: 'http://x/rpc', middleware: {params: {}}}\n",
+        ] {
+            assert!(Config::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_commented_mcp_example_in_the_file_is_valid() {
+        // The `# mcp_servers:` block in config.example.yaml must stay parseable
+        // when uncommented (the file is a test fixture).
+        let block: String = EXAMPLE
+            .lines()
+            .skip_while(|line| *line != "# mcp_servers:")
+            .take_while(|line| !line.is_empty())
+            .map(|line| format!("{}\n", line.strip_prefix("# ").unwrap_or(line)))
+            .collect();
+        let (_, s) = Config::parse(&block).unwrap();
+        assert_eq!(s.mcp_servers.len(), 1);
+        assert_eq!(s.a2a_agents.len(), 1);
+        assert_eq!(s.mcp_servers[0].name, "files");
+        assert_eq!(s.a2a_agents[0].name, "helper");
+        for cap in ["mcp", "a2a", "auth:static_bearer"] {
+            assert!(s.required_capabilities.iter().any(|c| c == cap), "{cap}");
         }
     }
 

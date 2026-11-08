@@ -123,7 +123,7 @@ class CatalogReport(_message.Message):
     def __init__(self, definitions: _Optional[_Iterable[_Union[ObservedDefinition, _Mapping]]] = ..., cards: _Optional[_Iterable[_Union[AgentCardReport, _Mapping]]] = ...) -> None: ...
 
 class ObservedDefinition(_message.Message):
-    __slots__ = ("server", "kind", "name", "hash", "definition_json", "auto_approved", "observed_at_unix_ms")
+    __slots__ = ("server", "kind", "name", "hash", "definition_json", "auto_approved", "observed_at_unix_ms", "server_id", "config_version")
     SERVER_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
@@ -131,6 +131,8 @@ class ObservedDefinition(_message.Message):
     DEFINITION_JSON_FIELD_NUMBER: _ClassVar[int]
     AUTO_APPROVED_FIELD_NUMBER: _ClassVar[int]
     OBSERVED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    SERVER_ID_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_VERSION_FIELD_NUMBER: _ClassVar[int]
     server: str
     kind: _snapshot_pb2.McpDefinitionKind
     name: str
@@ -138,19 +140,25 @@ class ObservedDefinition(_message.Message):
     definition_json: str
     auto_approved: bool
     observed_at_unix_ms: int
-    def __init__(self, server: _Optional[str] = ..., kind: _Optional[_Union[_snapshot_pb2.McpDefinitionKind, str]] = ..., name: _Optional[str] = ..., hash: _Optional[bytes] = ..., definition_json: _Optional[str] = ..., auto_approved: _Optional[bool] = ..., observed_at_unix_ms: _Optional[int] = ...) -> None: ...
+    server_id: str
+    config_version: int
+    def __init__(self, server: _Optional[str] = ..., kind: _Optional[_Union[_snapshot_pb2.McpDefinitionKind, str]] = ..., name: _Optional[str] = ..., hash: _Optional[bytes] = ..., definition_json: _Optional[str] = ..., auto_approved: _Optional[bool] = ..., observed_at_unix_ms: _Optional[int] = ..., server_id: _Optional[str] = ..., config_version: _Optional[int] = ...) -> None: ...
 
 class AgentCardReport(_message.Message):
-    __slots__ = ("agent", "card_json", "error", "fetched_at_unix_ms")
+    __slots__ = ("agent", "card_json", "error", "fetched_at_unix_ms", "agent_id", "config_version")
     AGENT_FIELD_NUMBER: _ClassVar[int]
     CARD_JSON_FIELD_NUMBER: _ClassVar[int]
     ERROR_FIELD_NUMBER: _ClassVar[int]
     FETCHED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    AGENT_ID_FIELD_NUMBER: _ClassVar[int]
+    CONFIG_VERSION_FIELD_NUMBER: _ClassVar[int]
     agent: str
     card_json: str
     error: str
     fetched_at_unix_ms: int
-    def __init__(self, agent: _Optional[str] = ..., card_json: _Optional[str] = ..., error: _Optional[str] = ..., fetched_at_unix_ms: _Optional[int] = ...) -> None: ...
+    agent_id: str
+    config_version: int
+    def __init__(self, agent: _Optional[str] = ..., card_json: _Optional[str] = ..., error: _Optional[str] = ..., fetched_at_unix_ms: _Optional[int] = ..., agent_id: _Optional[str] = ..., config_version: _Optional[int] = ...) -> None: ...
 
 class Ack(_message.Message):
     __slots__ = ("version",)

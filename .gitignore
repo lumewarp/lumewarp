@@ -4,3 +4,7 @@
 .env
 .omh/
 .dev/
+
+# Python bytecode (checked in by mistake once)
+__pycache__/
+*.pyc

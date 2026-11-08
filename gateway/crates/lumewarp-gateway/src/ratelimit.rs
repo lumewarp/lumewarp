@@ -377,6 +377,46 @@ impl Registry {
         }
     }
 
+    /// D20: charges one request against every scope's `requests_per_minute`
+    /// only, and reports whether it was allowed.
+    ///
+    /// The MCP proxy calls this for `tools/call` (D20 amended D16): an MCP call
+    /// is not billed, takes no parallel slot and consumes no tokens, but it
+    /// counts as a request against the scopes the key already has, so a team's
+    /// RPM limit covers tool calls too. A2A is not limited. Either every scope
+    /// accepts the request or none is charged. Nothing is held afterwards (an
+    /// MCP call may run long and never holds a parallel slot).
+    #[cfg_attr(not(test), allow(dead_code))] // T4 calls it from `tools/call`.
+    pub fn charge_request(&self, caller: &Caller) -> Result<(), RateLimited> {
+        let Caller::Key(key) = caller else {
+            return Ok(());
+        };
+        if key.scopes.is_empty() {
+            return Ok(());
+        }
+        let now_us = clock::mono_ms() * 1000;
+        let mut charged = Permit::empty();
+        for (id, limit) in &key.scopes {
+            let rpm = limit.requests_per_minute;
+            if rpm == 0 {
+                continue;
+            }
+            let state = self.state(id);
+            match state.take_rpm(rpm, now_us) {
+                Ok(rpm_us) => charged.push(Taken {
+                    state,
+                    rpm_us,
+                    parallel: false,
+                }),
+                Err(limited) => {
+                    charged.rollback();
+                    return Err(limited);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Drops entries that hold no state worth keeping: no live permits, a
     /// full rpm bucket and no tokens in the current tpm window. An entry
     /// referenced by a `Permit` (or an in-progress admit) is never removed.
@@ -419,6 +459,7 @@ mod tests {
             allowed_models: HashSet::new(),
             scopes: scopes.iter().map(|(id, l)| ((*id).into(), *l)).collect(),
             team_label: 0,
+            grants: crate::grants::Grants::none(),
         }))
     }
 
@@ -464,6 +505,47 @@ mod tests {
         }
         let limited = registry.admit(&key).err().unwrap();
         assert!((1..=12).contains(&limited.retry_after_secs));
+    }
+
+    /// D20: one MCP `tools/call` costs one request on every scope, and only
+    /// the requests-per-minute dimension applies (no parallel slot, no tokens).
+    #[test]
+    fn charge_request_counts_rpm_only() {
+        let registry = Registry::new();
+        let key = caller(&[("key:a", limit(3, 0, 0))]);
+        for _ in 0..3 {
+            registry.charge_request(&key).unwrap();
+        }
+        let limited = registry.charge_request(&key).err().unwrap();
+        assert!((1..=21).contains(&limited.retry_after_secs));
+        // Anonymous callers and keys without scopes are never limited.
+        assert!(registry.charge_request(&Caller::Anonymous).is_ok());
+        assert!(registry.charge_request(&caller(&[])).is_ok());
+
+        // tokens_per_minute and max_parallel_requests do not apply, and a
+        // charge leaves no parallel slot behind.
+        let other = caller(&[("key:b", limit(0, 1, 1))]);
+        for _ in 0..10 {
+            registry.charge_request(&other).unwrap();
+        }
+        let permit = registry.admit(&other).unwrap();
+        // The rpm token taken by charge_request on the earlier key does not
+        // affect admit on another scope.
+        drop(permit);
+    }
+
+    #[test]
+    fn charge_request_is_all_or_nothing_across_scopes() {
+        let registry = Registry::new();
+        let both = caller(&[("a", limit(3, 0, 0)), ("b", limit(2, 0, 0))]);
+        registry.charge_request(&both).unwrap();
+        registry.charge_request(&both).unwrap();
+        // The third call takes a's token, then b refuses: a's token must be
+        // given back, which the next caller (scope a only) proves.
+        assert!(registry.charge_request(&both).is_err());
+        let only_a = caller(&[("a", limit(3, 0, 0))]);
+        registry.charge_request(&only_a).unwrap();
+        assert!(registry.charge_request(&only_a).is_err());
     }
 
     #[test]

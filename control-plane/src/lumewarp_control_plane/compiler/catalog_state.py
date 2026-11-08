@@ -1,8 +1,9 @@
 """ID-preserving catalog source state for rollback.
 
-This deliberately excludes teams, keys, grants and all other policy state. The wire
-snapshot remains the authority for published routing; this sidecar preserves database
-identities and source-only fields that cannot be reconstructed from protobuf names.
+This deliberately excludes teams, keys, grants and all other policy state, and the MCP
+definition reviews (a rollback must not revive a rejected hash). The wire snapshot remains
+the authority for published routing; this sidecar preserves database identities and
+source-only fields that cannot be reconstructed from protobuf names.
 """
 
 import base64
@@ -11,14 +12,16 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, LargeBinary, Uuid, delete, insert, select, update
+from sqlalchemy import DateTime, LargeBinary, Uuid, delete, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import catalog
 from lumewarp_control_plane.models import (
+    A2aAgent,
     Alias,
     CatalogKind,
     CatalogName,
+    McpServer,
     Model,
     Router,
     RouterFallback,
@@ -30,11 +33,17 @@ from lumewarp_control_plane.models import (
 
 _ENTITY_TYPES = (Upstream, CatalogName, Model, Router)
 _EDGE_TYPES = (Alias, RouterMember, RouterFallback, RouterSplit, RouterSplitMember)
+# MCP servers and A2A agents are restored by id like routers, but are archived rather than
+# deleted when absent from the state: their definitions (a rejected hash must stay rejected)
+# and grants must survive. Reviewed definition states are deliberately *not* captured: a
+# rollback never re-decides a definition.
+_TARGET_TYPES = (McpServer, A2aAgent)
 # Parent-before-child insertion order; deletion runs in reverse. No policy tables.
 ENTITY_TABLES = tuple(cls.__table__ for cls in _ENTITY_TYPES)
 EDGE_TABLES = tuple(cls.__table__ for cls in _EDGE_TYPES)
-TABLES = (*ENTITY_TABLES, *EDGE_TABLES)
-FORMAT_VERSION = 2
+TARGET_TABLES = tuple(cls.__table__ for cls in _TARGET_TYPES)
+TABLES = (*ENTITY_TABLES, *EDGE_TABLES, *TARGET_TABLES)
+FORMAT_VERSION = 3
 
 
 def _encode(value: Any) -> Any:
@@ -129,6 +138,41 @@ async def _vacate_names(session: AsyncSession, table, rows: list[dict[str, Any]]
         await session.execute(update(table).where(table.c.id == identity).values(name=temporary))
 
 
+async def _restore_targets(session: AsyncSession, rows: dict[str, list[dict[str, Any]]]) -> None:
+    """Put `mcp_servers`/`a2a_agents` back by id.
+
+    A row absent from the state is archived (`deleted_at`), never deleted: its definitions
+    and grants stay, so no rejected definition turns into a "first sight" again. Names of
+    the rows that stay live are vacated first, because a rename may have swapped or reused
+    one; the temporary spelling still has to satisfy the name rule.
+    """
+    for table in TARGET_TABLES:
+        wanted = {row["id"]: row for row in rows[table.name]}
+        current = (await session.execute(select(table.c.id, table.c.name))).all()
+        absent = [identity for identity, _ in current if identity not in wanted]
+        if absent:
+            await session.execute(
+                update(table).where(table.c.id.in_(absent)).values(deleted_at=func.now())
+            )
+        live = [identity for identity, _ in current if identity in wanted]
+        occupied = set(await session.scalars(select(table.c.name)))
+        occupied.update(row["name"] for row in wanted.values())
+        for identity in live:
+            temporary = f"rollback-{uuid.uuid4().hex}"
+            while temporary in occupied:
+                temporary = f"rollback-{uuid.uuid4().hex}"
+            occupied.add(temporary)
+            await session.execute(
+                update(table).where(table.c.id == identity).values(name=temporary)
+            )
+        existing = set(await session.scalars(select(table.c.id)))
+        for row in wanted.values():
+            if row["id"] in existing:
+                await session.execute(update(table).where(table.c.id == row["id"]).values(**row))
+            else:
+                await session.execute(insert(table).values(**row))
+
+
 async def restore_catalog_state(session: AsyncSession, state: dict[str, Any]) -> None:
     """Restore the catalog by ID, keeping identities across renames and recreating deletions.
 
@@ -170,6 +214,7 @@ async def restore_catalog_state(session: AsyncSession, state: dict[str, Any]) ->
     for table in EDGE_TABLES:
         if rows[table.name]:
             await session.execute(insert(table), rows[table.name])
+    await _restore_targets(session, rows)
     await catalog.record_renames(
         session,
         [
@@ -181,5 +226,5 @@ async def restore_catalog_state(session: AsyncSession, state: dict[str, Any]) ->
     # Core writes bypass identity-map synchronization. Callers may already have loaded
     # catalog rows, so don't allow a later compiler read to reuse stale ORM attributes.
     for instance in list(session.identity_map.values()):
-        if isinstance(instance, (*_ENTITY_TYPES, *_EDGE_TYPES)):
+        if isinstance(instance, (*_ENTITY_TYPES, *_EDGE_TYPES, *_TARGET_TYPES)):
             session.expire(instance)

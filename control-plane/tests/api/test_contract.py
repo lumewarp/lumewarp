@@ -10,6 +10,20 @@ from lumewarp_control_plane.settings import Settings
 from tests.api.helpers import ADMIN_AUTH, create_org, suffix
 
 EXPECTED_OPERATION_IDS = {
+    "approveMcpDefinition",
+    "createA2aAgent",
+    "createMcpServer",
+    "deleteA2aAgent",
+    "deleteMcpServer",
+    "discoverMcp",
+    "getA2aAgent",
+    "getMcpServer",
+    "listA2aAgents",
+    "listMcpDefinitions",
+    "listMcpServers",
+    "rejectMcpDefinition",
+    "updateA2aAgent",
+    "updateMcpServer",
     "getPlayground",
     "playgroundChatCompletions",
     "createAlias",

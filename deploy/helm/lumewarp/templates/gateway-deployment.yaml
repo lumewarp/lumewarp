@@ -19,6 +19,32 @@
 {{- $controlPlaneUrl = printf "%s://%s:%v" $scheme (include "lumewarp.controlPlane.name" .) .Values.controlPlane.service.grpcPort }}
 {{- end }}
 {{- $scope := default .Values.controlPlane.scope .Values.gateway.scope }}
+{{- $plugins := .Values.gateway.plugins }}
+{{- $pluginMountPath := trimSuffix "/" $plugins.mountPath }}
+{{- $pluginDirs := list
+      (dict "var" "LUMEWARP_ROUTER_PLUGIN_DIR" "key" "router" "subPath" $plugins.dirs.router)
+      (dict "var" "LUMEWARP_AUTH_PLUGIN_DIR" "key" "auth" "subPath" $plugins.dirs.auth)
+      (dict "var" "LUMEWARP_A2A_MIDDLEWARE_DIR" "key" "a2aMiddleware" "subPath" $plugins.dirs.a2aMiddleware) }}
+{{- if $plugins.volume }}
+{{- if not (kindIs "map" $plugins.volume) }}
+{{- fail "gateway.plugins.volume must be a Kubernetes volume source map, for example {persistentVolumeClaim: {claimName: gateway-plugins}}, or empty for no plugins" }}
+{{- end }}
+{{- if not $pluginMountPath }}
+{{- fail "gateway.plugins.mountPath is required when gateway.plugins.volume is set" }}
+{{- end }}
+{{- range $pluginDirs }}
+{{- if not .subPath }}
+{{- fail (printf "gateway.plugins.dirs.%s is required when gateway.plugins.volume is set" .key) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $memoryLimit := "" }}
+{{- if not (and (kindIs "string" $plugins.memoryLimitBytes) (eq $plugins.memoryLimitBytes "")) }}
+{{- $memoryLimit = toString $plugins.memoryLimitBytes }}
+{{- if not (regexMatch "^[1-9][0-9]*$" $memoryLimit) }}
+{{- fail (printf "gateway.plugins.memoryLimitBytes must be a positive integer number of bytes, got %s" $memoryLimit) }}
+{{- end }}
+{{- end }}
 {{- /* A number from values.yaml, or a string from --set for a small decimal or scientific notation. Checked by value, since the spelling depends on how it got here. */}}
 {{- $samplingValue := .Values.gateway.otel.samplingRatio }}
 {{- $samplingRatio := toString $samplingValue }}
@@ -113,9 +139,38 @@ spec:
                   name: {{ .Values.encryptionKey.secretName }}
                   key: {{ .Values.encryptionKey.key }}
             {{- end }}
+            {{- if .Values.gateway.publicUrl }}
+            - name: LUMEWARP_GATEWAY_PUBLIC_URL
+              value: {{ .Values.gateway.publicUrl | quote }}
+            {{- end }}
+            {{- if .Values.gateway.idKey.secretName }}
+            - name: LUMEWARP_GATEWAY_ID_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.idKey.secretName }}
+                  key: {{ required "gateway.idKey.key is required when gateway.idKey.secretName is set" .Values.gateway.idKey.key }}
+            {{- end }}
+            {{- if $plugins.volume }}
+            {{- range $pluginDirs }}
+            - name: {{ .var }}
+              value: {{ printf "%s/%s" $pluginMountPath .subPath | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if $memoryLimit }}
+            - name: LUMEWARP_PLUGIN_MEMORY_LIMIT_BYTES
+              value: {{ $memoryLimit | quote }}
+            {{- end }}
             {{- with .Values.gateway.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- with $plugins.secretEnvs }}
+          # Every key becomes LUMEWARP_PLUGIN_SECRET_<NAME>; see gateway.plugins.secretEnvs.
+          envFrom:
+            {{- range . }}
+            - secretRef:
+                name: {{ . | quote }}
+            {{- end }}
+          {{- end }}
           # /readyz is 503 until a valid snapshot is loaded (cold boot with the control
           # plane unreachable) or after a rejected snapshot. Liveness stays 200 so the
           # pod is not restarted for being unready.
@@ -147,6 +202,14 @@ spec:
               readOnly: true
             - name: state
               mountPath: {{ .Values.gateway.stateDir.path }}
+            {{- if $plugins.volume }}
+            {{- range $pluginDirs }}
+            - name: plugins
+              mountPath: {{ printf "%s/%s" $pluginMountPath .subPath }}
+              subPath: {{ .subPath }}
+              readOnly: true
+            {{- end }}
+            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -158,6 +221,10 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- with $plugins.volume }}
+        - name: plugins
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
       {{- with .Values.gateway.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

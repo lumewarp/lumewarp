@@ -14,7 +14,7 @@ repository = "https://github.com/lumewarp/lumewarp"
 lumewarp-config = { path = "crates/lumewarp-config" }
 lumewarp-proto = { path = "crates/lumewarp-proto" }
 
-wasmtime = { version = "38", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
+wasmtime = { version = "38", default-features = false, features = ["async", "component-model", "cranelift", "runtime", "std"] }
 wit-bindgen = "0.46"
 
 anyhow = "1"

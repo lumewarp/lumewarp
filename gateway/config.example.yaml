@@ -47,6 +47,7 @@ routers:
   # Load-aware routing and a sticky 10% canary (needs a second vLLM model):
   # - name: llama-canary
   #   strategy: vllm_load          # or lowest_latency, weighted, least_in_flight
+#   plugin_timeout_ms: 3000      # WASM strategies: one pick may run this long; 0 = 60 s
   #   traffic_split:
   #     - {name: stable, members: [{model: llama-vllm}], weight: 90}
   #     - {name: canary, members: [{model: llama-vllm-next}], weight: 10}
@@ -58,6 +59,34 @@ routers:
 # call: being allowed a name does not allow its target or its members.
 aliases:
   - {name: default-llm, target: llama-3.1-8b}
+
+# MCP servers and A2A agents. A client reaches them with its `X-Lumewarp-Key` at
+# `/mcp` (aggregated, tools named `<server>__<tool>`), `/mcp/servers/<name>`,
+# `/a2a`, `/a2a/<agent>` and `/a2a/<agent>/.well-known/agent-card.json`. The
+# gateway authenticates upstream with `auth:` (`none`, `static_bearer` reading
+# an env var, `passthrough`, or a loaded upstream-auth plugin) and never sends
+# `X-Lumewarp-Key` upstream. What a key may reach is granted on the key below.
+# `review_mode` decides which upstream tool and prompt definitions are served:
+# `tofu` (default) serves a name it has never seen and withholds a changed
+# definition until the control plane approves it, `manual` serves approved
+# hashes only, `off` does not check. Each definition's `hash` is the sha256 of
+# the canonical definition; with the Admin UI, definitions arrive by themselves.
+# mcp_servers:
+#   - name: files
+#     url: http://localhost:9110/mcp
+#     auth: {plugin: static_bearer, secret_env: MCP_FILES_TOKEN}
+#     review_mode: tofu
+#     timeout_ms: 30000              # one upstream request
+#     # auth: {plugin: hmac_signature, params: {skew: 5}, timeout_ms: 2500}
+#     #   timeout_ms (WASM plugins) bounds one call; 0 = 60 s.
+#     definitions:
+#       - {kind: tool, name: echo, hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+# a2a_agents:
+#   - name: helper
+#     url: http://localhost:9120/a2a
+#     auth: {plugin: none}
+#     # One optional middleware, loaded from LUMEWARP_A2A_MIDDLEWARE_DIR.
+#     # middleware: {plugin: strip_artifacts, params: {media_types: [application/x-mock-secret]}, timeout_ms: 1500}
 
 # Teams are the bounded `team` metric label. Their rate limits are shared by
 # every key of the team (local to this gateway instance).
@@ -75,7 +104,13 @@ teams:
 #     expires_at_unix_ms: 0     # 0 = never
 #     allowed_models: [llama-3.1-8b]
 #     rate_limits: { requests_per_minute: 60 }
+#     # MCP tools/prompts and A2A agents are fail-closed like models:
+#     mcp_grants:
+#       - {server: files, all_tools: true}
+#     allowed_agents: [helper]
 #   - key_id: key-ops
 #     key_sha256: "f6f2a2b0a6f9a3e0f8b8d9c5f4a1e2d3c4b5a6978877665544332211aabbccdd"
 #     team_id: team-research
 #     allow_all_models: true
+#     allow_all_mcp: true
+#     allow_all_agents: true

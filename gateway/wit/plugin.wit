@@ -193,12 +193,17 @@ interface a2a-middleware {
 
   resource middleware {
     configure: static func(agent: agent-info) -> result<middleware, config-error>;
+    // The hooks see upstream ids: the gateway unwraps ids before on-request and
+    // wraps them after on-response and on-stream-event. It re-checks every
+    // result (docs/plugins.md, "A2A middleware") and answers with an error if a
+    // hook changed the method, added an id or added push configuration.
     // JSON-RPC request body before it goes upstream; return the body to send.
     on-request: func(method: string, body: list<u8>) -> result<list<u8>, rpc-error>;
     // Non-streaming JSON-RPC response body; return the body to send back.
     on-response: func(method: string, body: list<u8>) -> result<list<u8>, rpc-error>;
     // One SSE event's data (a JSON-RPC response object) of a streaming method;
-    // return the data to send, or none to drop the event.
+    // return the data to send, or none to drop the event. Only a
+    // TaskArtifactUpdateEvent may be dropped.
     on-stream-event: func(method: string, data: list<u8>) -> result<option<list<u8>>, rpc-error>;
   }
 }

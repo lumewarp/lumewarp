@@ -21,7 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane.errors import ApiError
 from lumewarp_control_plane.models import (
+    A2aAgent,
+    A2aAgentGrant,
     CatalogName,
+    McpDefinition,
+    McpDefinitionKind,
+    McpServer,
+    McpServerGrant,
     MemberPolicy,
     ModelAccess,
     Org,
@@ -31,6 +37,7 @@ from lumewarp_control_plane.models import (
 )
 from lumewarp_control_plane.quota import (
     Effective,
+    McpGrant,
     Policy,
     apply_policy,
     effective,
@@ -50,6 +57,7 @@ __all__ = [
     "effective",
     "ensure_unique_ids",
     "grant_ids",
+    "mcp_grant_ids",
     "org_effective",
     "owner_effective_of",
     "policy_from_fields",
@@ -76,6 +84,64 @@ async def grant_ids(session: AsyncSession, names: tuple[str, ...]) -> dict[str, 
     missing = sorted(set(names) - set(found))
     if missing:
         raise violation("allowed_models", f"unknown names: {', '.join(missing)}")
+    return found
+
+
+async def mcp_grant_ids(
+    session: AsyncSession, grants: tuple[McpGrant, ...]
+) -> dict[str, uuid.UUID]:
+    """Server name -> id for a proposed MCP grant list; 422 for unknown or archived servers.
+
+    Every named tool must be a known tool definition of its server (`mcp_definitions`), any
+    state: the control plane is the only place the tool list exists (`docs/plugins.md`,
+    "Catalog reports"), so a grant is always written against names it has seen. A tool
+    granted while pending becomes usable when it is approved, without rewriting the grant.
+    """
+    if not grants:
+        return {}
+    names = sorted({grant.server for grant in grants if grant.server})
+    rows = await session.execute(
+        select(McpServer.name, McpServer.id).where(
+            McpServer.name.in_(names), McpServer.deleted_at.is_(None)
+        )
+    )
+    found = {name: server_id for name, server_id in rows}
+    missing = sorted(set(names) - set(found))
+    if missing:
+        raise violation("mcp_servers", f"unknown servers: {', '.join(missing)}")
+    known: dict[uuid.UUID, set[str]] = {}
+    for server_id, tool in await session.execute(
+        select(McpDefinition.server_id, McpDefinition.name).where(
+            McpDefinition.server_id.in_(found.values()),
+            McpDefinition.kind == McpDefinitionKind.TOOL,
+        )
+    ):
+        known.setdefault(server_id, set()).add(tool)
+    unknown: list[str] = []
+    for grant in grants:
+        if grant.all_tools:
+            continue
+        for tool in grant.tools:
+            if tool not in known.get(found[grant.server], set()):
+                unknown.append(f"{grant.server}/{tool}")
+    if unknown:
+        raise violation("mcp_servers", f"unknown tools: {', '.join(sorted(unknown))}")
+    return found
+
+
+async def agent_grant_ids(session: AsyncSession, names: tuple[str, ...]) -> dict[str, uuid.UUID]:
+    """Agent name -> id; 422 listing the names that do not exist (or are archived)."""
+    if not names:
+        return {}
+    rows = await session.execute(
+        select(A2aAgent.name, A2aAgent.id).where(
+            A2aAgent.name.in_(names), A2aAgent.deleted_at.is_(None)
+        )
+    )
+    found = {name: agent_id for name, agent_id in rows}
+    missing = sorted(set(names) - set(found))
+    if missing:
+        raise violation("a2a_agents", f"unknown agents: {', '.join(missing)}")
     return found
 
 
@@ -119,7 +185,81 @@ async def save_grants(
         )
     )
     session.add_all(PolicyGrant(name_id=name_id, **owner) for name_id in ids.values())
+    await save_mcp_grants(session, row, policy)
+    await save_agent_grants(session, row, policy)
     await session.flush()
+
+
+async def _replace_target_grants(session, grant_model, owner: dict) -> None:
+    """Delete one owner's rows of a target grant table (`mcp_server_grants` or
+    `a2a_agent_grants`), matching exactly the four owner shapes `PolicyGrant` uses.
+    """
+    await session.execute(
+        delete(grant_model).where(
+            *(
+                column.is_(None) if value is None else column == value
+                for column, value in (
+                    (grant_model.org_id, owner["org_id"]),
+                    (grant_model.team_id, owner["team_id"]),
+                    (grant_model.user_id, owner["user_id"]),
+                    (grant_model.service_account_id, owner["service_account_id"]),
+                )
+            )
+        )
+    )
+
+
+async def save_mcp_grants(
+    session: AsyncSession, row: Org | Team | MemberPolicy | ServiceAccount, policy: Policy
+) -> None:
+    """Replace the row's MCP server grants (cleared when the level is not LIST)."""
+    owner = _owner(row)
+    await _replace_target_grants(session, McpServerGrant, owner)
+    if policy.mcp_access is not ModelAccess.LIST:
+        return
+    ids = await mcp_grant_ids(session, policy.mcp_grants)
+    for grant in policy.mcp_grants:
+        session.add(
+            McpServerGrant(
+                server_id=ids[grant.server],
+                all_tools=grant.all_tools,
+                tools=[] if grant.all_tools else sorted(grant.tools),
+                **owner,
+            )
+        )
+    await session.flush()
+
+
+async def save_agent_grants(
+    session: AsyncSession, row: Org | Team | MemberPolicy | ServiceAccount, policy: Policy
+) -> None:
+    """Replace the row's A2A agent grants (cleared when the level is not LIST)."""
+    owner = _owner(row)
+    await _replace_target_grants(session, A2aAgentGrant, owner)
+    if policy.a2a_access is not ModelAccess.LIST:
+        return
+    ids = await agent_grant_ids(session, policy.a2a_agents)
+    session.add_all(A2aAgentGrant(agent_id=agent_id, **owner) for agent_id in ids.values())
+    await session.flush()
+
+
+def _mcp_grants(fields: PolicyFields) -> tuple[McpGrant, ...]:
+    """The submitted MCP grants, server-ordered and tool-sorted (a level's own list)."""
+    return tuple(
+        McpGrant(
+            server=grant.server,
+            all_tools=grant.all_tools,
+            tools=() if grant.all_tools else tuple(sorted(set(grant.tools))),
+        )
+        for grant in sorted(fields.mcp_servers or (), key=lambda g: g.server)
+    )
+
+
+def _access(value: ModelAccess, name: str, default_mode: ModelAccess) -> ModelAccess:
+    mode = value
+    if mode is ModelAccess.INHERIT and default_mode is ModelAccess.ALL:
+        raise violation(name, "teams and orgs cannot inherit")
+    return mode
 
 
 def policy_from_fields(
@@ -130,15 +270,23 @@ def policy_from_fields(
     On create (`base is None`) omitted fields take `default_mode`/no limit. On update,
     omitted fields keep `base`; an explicit null clears a limit or budget. Teams and orgs
     pass `default_mode=ALL` and cannot inherit; members and service accounts pass INHERIT.
+    The MCP and A2A halves follow the model half exactly.
     """
     supplied = fields.model_fields_set
     if base is None:
         mode = fields.model_access if "model_access" in supplied else default_mode
-        if mode is ModelAccess.INHERIT and default_mode is ModelAccess.ALL:
-            raise violation("model_access", "teams and orgs cannot inherit")
+        mode = _access(mode, "model_access", default_mode)
         if fields.allowed_models and mode is not ModelAccess.LIST:
             raise violation("allowed_models", "only allowed when model_access is 'list'")
         allowed = tuple(sorted(fields.allowed_models or ())) if mode is ModelAccess.LIST else ()
+        mcp_access = fields.mcp_access if "mcp_access" in supplied else default_mode
+        mcp_access = _access(mcp_access, "mcp_access", default_mode)
+        if fields.mcp_servers and mcp_access is not ModelAccess.LIST:
+            raise violation("mcp_servers", "only allowed when mcp_access is 'list'")
+        a2a_access = fields.a2a_access if "a2a_access" in supplied else default_mode
+        a2a_access = _access(a2a_access, "a2a_access", default_mode)
+        if fields.a2a_agents and a2a_access is not ModelAccess.LIST:
+            raise violation("a2a_agents", "only allowed when a2a_access is 'list'")
         return Policy(
             model_access=mode,
             allowed_models=allowed,
@@ -146,11 +294,16 @@ def policy_from_fields(
             tpm_limit=fields.tpm_limit,
             max_parallel=fields.max_parallel,
             budget_nano_usd=fields.budget_nano_usd,
+            mcp_access=mcp_access,
+            mcp_grants=_mcp_grants(fields) if mcp_access is ModelAccess.LIST else (),
+            a2a_access=a2a_access,
+            a2a_agents=(
+                tuple(sorted(fields.a2a_agents or ())) if a2a_access is ModelAccess.LIST else ()
+            ),
         )
 
     mode = fields.model_access if "model_access" in supplied else base.model_access
-    if mode is ModelAccess.INHERIT and default_mode is ModelAccess.ALL:
-        raise violation("model_access", "teams and orgs cannot inherit")
+    mode = _access(mode, "model_access", default_mode)
     if "allowed_models" in supplied:
         if mode is not ModelAccess.LIST and fields.allowed_models:
             raise violation("allowed_models", "only allowed when model_access is 'list'")
@@ -159,6 +312,29 @@ def policy_from_fields(
         allowed = base.allowed_models if base.model_access is ModelAccess.LIST else ()
     else:
         allowed = ()
+
+    mcp_access = fields.mcp_access if "mcp_access" in supplied else base.mcp_access
+    mcp_access = _access(mcp_access, "mcp_access", default_mode)
+    if "mcp_servers" in supplied:
+        if mcp_access is not ModelAccess.LIST and fields.mcp_servers:
+            raise violation("mcp_servers", "only allowed when mcp_access is 'list'")
+        mcp_grants = _mcp_grants(fields) if mcp_access is ModelAccess.LIST else ()
+    elif mcp_access is ModelAccess.LIST:
+        mcp_grants = base.mcp_grants if base.mcp_access is ModelAccess.LIST else ()
+    else:
+        mcp_grants = ()
+
+    a2a_access = fields.a2a_access if "a2a_access" in supplied else base.a2a_access
+    a2a_access = _access(a2a_access, "a2a_access", default_mode)
+    if "a2a_agents" in supplied:
+        if a2a_access is not ModelAccess.LIST and fields.a2a_agents:
+            raise violation("a2a_agents", "only allowed when a2a_access is 'list'")
+        a2a_agents = tuple(sorted(fields.a2a_agents or ()))
+    elif a2a_access is ModelAccess.LIST:
+        a2a_agents = base.a2a_agents if base.a2a_access is ModelAccess.LIST else ()
+    else:
+        a2a_agents = ()
+
     return Policy(
         model_access=mode,
         allowed_models=allowed,
@@ -168,6 +344,10 @@ def policy_from_fields(
         budget_nano_usd=(
             fields.budget_nano_usd if "budget_nano_usd" in supplied else base.budget_nano_usd
         ),
+        mcp_access=mcp_access,
+        mcp_grants=mcp_grants,
+        a2a_access=a2a_access,
+        a2a_agents=a2a_agents,
     )
 
 
@@ -207,6 +387,43 @@ def check_narrowing(
                 raise violation(
                     field("allowed_models"),
                     f"models not allowed by parent: {', '.join(extra)}",
+                )
+    if changed("mcp_access") and policy.mcp_access is ModelAccess.ALL:
+        if parent.mcp is not None:
+            raise violation(field("mcp_access"), "cannot widen to all under a restricted parent")
+    if changed("mcp_access") or changed("mcp_grants"):
+        if policy.mcp_access is ModelAccess.LIST and parent.mcp is not None:
+            for grant in policy.mcp_grants:
+                if grant.server not in parent.mcp:
+                    raise violation(
+                        field("mcp_servers"),
+                        f"servers not allowed by parent: {grant.server}",
+                    )
+                parent_tools = parent.mcp[grant.server]
+                if parent_tools is None:
+                    continue
+                if grant.all_tools:
+                    raise violation(
+                        field("mcp_servers"),
+                        f"tools of {grant.server!r} are restricted by the parent; name them",
+                    )
+                extra = sorted(set(grant.tools) - parent_tools)
+                if extra:
+                    raise violation(
+                        field("mcp_servers"),
+                        f"tools of {grant.server!r} not allowed by parent: {', '.join(extra)}",
+                    )
+    if changed("a2a_access") and policy.a2a_access is ModelAccess.ALL:
+        if parent.agents is not None:
+            raise violation(field("a2a_access"), "cannot widen to all under a restricted parent")
+    if changed("a2a_access") or changed("a2a_agents"):
+        if policy.a2a_access is ModelAccess.LIST and parent.agents is not None:
+            own = set(policy.a2a_agents)
+            if not own <= set(parent.agents):
+                extra = sorted(own - set(parent.agents))
+                raise violation(
+                    field("a2a_agents"),
+                    f"agents not allowed by parent: {', '.join(extra)}",
                 )
     for name, parent_value, own_value in (
         ("rpm_limit", parent.rpm_limit, policy.rpm_limit),

@@ -33,7 +33,12 @@ ui/e2e
 ui/playwright.config.ts
 
 # Not needed by either image
-bench
+bench/*
+# ... except the crate the gateway's dev-dependencies name: cargo resolves its manifest
+# (and, for `cargo test`, builds it) while loading the workspace, so `docker build -f
+# gateway/Dockerfile` needs the sources but never its build output.
+!bench/mock-upstream
+bench/mock-upstream/target
 deploy
 docs
 tests

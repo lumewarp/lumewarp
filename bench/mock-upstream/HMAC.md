@@ -1,4 +1,4 @@
-# HMAC request signature (`x-lumewarp-signature`)
+# HMAC request signature (`x-hmac-signature`)
 
 The scheme the gateway's `hmac-signature` upstream-auth plugin will produce and the mock
 MCP server / A2A agent verify. It signs each HTTP request the gateway sends upstream with a
@@ -11,7 +11,7 @@ a wrong secret, a stale timestamp, a wrong path and a missing header.
 ## Header
 
 ```http
-x-lumewarp-signature: t=<unix-ms>,v1=<hex>
+x-hmac-signature: t=<unix-ms>,v1=<hex>
 ```
 
 | Part | Meaning |
@@ -87,7 +87,7 @@ v1              = b2f1c5fd7baf3e518a7ddcfaecda5e8fc402fe70c5e144464c6803bd8ce6d4
 ```
 
 ```http
-x-lumewarp-signature: t=1762500000000,v1=b2f1c5fd7baf3e518a7ddcfaecda5e8fc402fe70c5e144464c6803bd8ce6d47b
+x-hmac-signature: t=1762500000000,v1=b2f1c5fd7baf3e518a7ddcfaecda5e8fc402fe70c5e144464c6803bd8ce6d47b
 ```
 
 That timestamp is illustrative; a live request needs a `t` inside the skew window.
@@ -101,7 +101,7 @@ T=$(date +%s%3N)
 HASH=$(printf '%s' "$BODY" | sha256sum | cut -d' ' -f1)
 SIG=$(printf '%s.%s.%s.%s' "$T" POST /mcp "$HASH" | openssl dgst -sha256 -hmac "$SECRET" -r | cut -d' ' -f1)
 curl -sS -H "content-type: application/json" \
-  -H "x-lumewarp-signature: t=$T,v1=$SIG" \
+  -H "x-hmac-signature: t=$T,v1=$SIG" \
   --data-binary "$BODY" http://127.0.0.1:9110/mcp
 ```
 
