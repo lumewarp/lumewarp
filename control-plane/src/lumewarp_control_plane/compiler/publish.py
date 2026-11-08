@@ -26,7 +26,7 @@ from lumewarp_control_plane.compiler.catalog_state import (
     restore_catalog_state,
 )
 from lumewarp_control_plane.compiler.compile import CompileError, compile_scope
-from lumewarp_control_plane.compiler.strategy import check_stored_routers
+from lumewarp_control_plane.compiler.plugins import check_stored_routers
 from lumewarp_control_plane.compiler.validate import SnapshotInvalid, validate_snapshot
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.metrics import DISCARD, Metrics
@@ -304,7 +304,7 @@ async def rollback_routing(
     Gateways may have changed since `to_version`, so its routers meet the same rule as a
     router write (`force` included, audited as `principal`).
     Raises LookupError if `to_version` is unknown or compacted, CompileError if the
-    resulting snapshot is invalid, StrategyRejected if a router's strategy cannot be saved.
+    resulting snapshot is invalid, PluginRejected if a router's strategy cannot be saved.
     """
     # Lock order: advisory lock, then the scope row lock, before any source read or write.
     # Catalog writers take only the scope row lock, so this serializes with them and no

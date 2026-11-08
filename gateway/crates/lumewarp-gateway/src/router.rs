@@ -143,6 +143,8 @@ impl CandidateSource for PoolSource<'_> {
 
 enum CompiledStrategy {
     Builtin(Builtin),
+    Wasm(lumewarp_plugin_host::RouterInstance, Needs),
+    #[cfg(test)]
     Custom(Box<dyn Strategy>, Needs),
 }
 
@@ -150,6 +152,35 @@ impl CompiledStrategy {
     /// Every strategy, built-in or not, parses its settings here: a router the
     /// gateway cannot serve is refused at load (standalone) or NACKed.
     fn configure(r: &lumewarp_proto::config::v1::Router) -> Result<Self, ApplyError> {
+        if let Some(plugin) = lumewarp_plugin_host::global().get(1, &r.strategy) {
+            let (members, member_params) = router_members(r)?;
+            let mut params = snapshot::strategy_params(r)?;
+            params.as_object_mut().unwrap().remove("headers");
+            let info = lumewarp_plugin_host::types::RouterInfo {
+                name: r.name.clone(),
+                params_json: params.to_string(),
+                members: members
+                    .iter()
+                    .zip(member_params)
+                    .map(|(m, p)| lumewarp_plugin_host::types::MemberInfo {
+                        model: m.model.into(),
+                        weight: m.weight,
+                        split: m.split.map(Into::into),
+                        params_json: p.to_string(),
+                    })
+                    .collect(),
+            };
+            let signals = &plugin.descriptor.router.as_ref().unwrap().needs;
+            let needs = Needs {
+                latency: signals.iter().any(|n| n == "latency"),
+                vllm_load: signals.iter().any(|n| n == "vllm_load"),
+            };
+            let instance = lumewarp_plugin_host::RouterInstance::configure(plugin.clone(), info)
+                .map_err(|_| {
+                    invalid(format!("router {:?} strategy configuration failed", r.name))
+                })?;
+            return Ok(Self::Wasm(instance, needs));
+        }
         let factory = lumewarp_router_api::lookup(&r.strategy)
             .map_err(|_| invalid("duplicate strategy registration".into()))?
             .ok_or_else(|| ApplyError::unsupported("unregistered strategy"))?;
@@ -164,17 +195,26 @@ impl CompiledStrategy {
             params.remove("headers");
         }
         // Do not propagate plugin error text: params may contain private data.
-        let created = (factory.create)(&info, &params, &member_params)
+        let _created = (factory.create)(&info, &params, &member_params)
             .map_err(|_| invalid(format!("router {:?} strategy configuration failed", r.name)))?;
         Ok(match snapshot::builtin_strategy(&r.strategy) {
             Some(builtin) => Self::Builtin(builtin),
-            None => Self::Custom(created, (factory.needs)()),
+            #[cfg(test)]
+            None => Self::Custom(_created, (factory.needs)()),
+            #[cfg(not(test))]
+            None => {
+                return Err(ApplyError::unsupported(
+                    "custom strategies must be WASM plugins",
+                ))
+            }
         })
     }
 
     fn needs(&self) -> Needs {
         match self {
             Self::Builtin(s) => s.needs(),
+            Self::Wasm(_, needs) => *needs,
+            #[cfg(test)]
             Self::Custom(_, needs) => *needs,
         }
     }
@@ -187,6 +227,11 @@ impl CompiledStrategy {
     ) -> Option<usize> {
         match self {
             Self::Builtin(s) => s.pick_from(c, rng),
+            Self::Wasm(s, _) => {
+                let picked = Strategy::pick(s, req, &c.erased(), rng)?;
+                c.get(picked).map(|d| d.index)
+            }
+            #[cfg(test)]
             Self::Custom(s, _) => {
                 let picked = s.pick(req, &c.erased(), rng)?;
                 c.get(picked).map(|d| d.index)

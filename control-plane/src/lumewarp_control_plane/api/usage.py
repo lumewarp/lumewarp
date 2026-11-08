@@ -1,11 +1,14 @@
 """Usage aggregation: monthly `usage_totals` fast path plus recent `usage_events`.
 
 `from`/`to` are a half-open UTC range. `group_by` is a comma-separated subset of
-`day,requested,model,upstream_model,alias,router,team,owner,key`; the default is
-`day,requested`. `owner` groups by the key owner
-(`owner_kind`, `owner_id`: a user or a service account). An installation admin's single `team`
-dimension over whole UTC months is served from the pre-aggregated `usage_totals` table;
-everything else is aggregated from `usage_events`, limited to the caller's readable teams.
+`day,kind,target,method,tool,requested,model,upstream_model,alias,router,team,owner,key`;
+the default is `day,requested`. `owner` groups by the key owner
+(`owner_kind`, `owner_id`: a user or a service account). `kind` is the gateway protocol
+(`llm`, `mcp`, `a2a`); `target`, `method` and `tool` are an MCP server or A2A agent, its
+JSON-RPC method and the MCP tool or prompt. An installation admin's single `team` dimension
+over whole UTC months is served from the pre-aggregated `usage_totals` table, which holds LLM
+requests only: every other shape is aggregated from `usage_events`, limited to the caller's
+readable teams.
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ from lumewarp_control_plane.models import (
     KeyOwnerKind,
     ScopeType,
     Team,
+    TrafficKind,
     UsageEvent,
     UsageTotal,
 )
@@ -50,6 +54,10 @@ router = APIRouter(tags=["usage"])
 
 DIMENSIONS = (
     "day",
+    "kind",
+    "target",
+    "method",
+    "tool",
     "requested",
     "model",
     "upstream_model",
@@ -62,6 +70,10 @@ DIMENSIONS = (
 # Output columns behind each dimension, in cursor order.
 COLUMNS = {
     "day": ("day",),
+    "kind": ("kind",),
+    "target": ("target",),
+    "method": ("method",),
+    "tool": ("tool",),
     "requested": ("requested",),
     "model": ("model",),
     "upstream_model": ("upstream_model",),
@@ -72,6 +84,8 @@ COLUMNS = {
     "key": ("key",),
 }
 UUID_COLUMNS = {"team", "owner_id", "key"}
+# Dimensions that are plain columns of the event: no catalog name to resolve.
+PLAIN_DIMENSIONS = frozenset({"kind", "target", "method", "tool"})
 
 FromQuery = Annotated[datetime | None, Query(alias="from")]
 ToQuery = Annotated[datetime | None, Query(alias="to")]
@@ -234,6 +248,10 @@ def _events_query(
     upstream = "model" in groups or "upstream_model" in groups
     fields = {
         "day": func.date_trunc("day", func.timezone("UTC", UsageEvent.ts)),
+        "kind": UsageEvent.kind,
+        "target": UsageEvent.target,
+        "method": UsageEvent.method,
+        "tool": UsageEvent.tool,
         "requested": UsageEvent.requested,
         "team": UsageEvent.team_id,
         "owner_kind": UsageEvent.owner_kind,
@@ -345,9 +363,12 @@ async def _events_page(
             values = row["upstream_values"] or []
             provenance["upstream_model"] = values[0] if len(values) == 1 else None
             provenance["upstream_models"] = sorted(value for value in values if value)
+        # `kind`, `target`, `method` and `tool` are plain dimensions: no catalog refs.
+        plain = {name: row[name] for name in names if name in PLAIN_DIMENSIONS}
         items.append(
             UsageRowOut(
                 **provenance,
+                **plain,
                 date=row["day"].date() if "day" in row else None,
                 requested=row.get("requested"),
                 team_id=row.get("team"),
@@ -382,6 +403,10 @@ async def get_usage(
     user_id: uuid.UUID | None = None,
     service_account_id: uuid.UUID | None = None,
     key_id: uuid.UUID | None = None,
+    kind: TrafficKind | None = None,
+    target: str | None = None,
+    method: str | None = None,
+    tool: str | None = None,
     requested: str | None = None,
     model: str | None = None,
     upstream_model: str | None = None,
@@ -425,6 +450,9 @@ async def get_usage(
     that name/id; no orphan-only filter is provided. Catalog provenance refs
     are collected for catalog/upstream-model groupings, not scope-only/default
     day,requested loads. Empty upstream_model means unavailable; null means mixed.
+    `kind`, `target`, `method` and `tool` filter the gateway protocol and what an
+    MCP or A2A request named; the team totals fast path covers LLM requests only,
+    so any of them (and every non-LLM kind) reads raw events.
     """
     now = datetime.now(UTC)
     start = (aware(from_, "from") or month_start(now)).astimezone(UTC)
@@ -455,6 +483,10 @@ async def get_usage(
         and all(
             value is None
             for value in (
+                kind,
+                target,
+                method,
+                tool,
                 model,
                 upstream_model,
                 alias,
@@ -475,28 +507,38 @@ async def get_usage(
         return await _totals_page(session, start, end, team_id, limit, cursor)
     ensure_range(start, end)
     filters: list[Any] = []
-    for kind, name, name_id in (
+    for catalog_kind, name, name_id in (
         (CatalogKind.MODEL, model, model_id),
         (CatalogKind.ALIAS, alias, alias_id),
         (CatalogKind.ROUTER, router, router_id),
     ):
-        column = getattr(UsageEvent, kind.value)
-        id_column = getattr(UsageEvent, f"{kind.value}_id")
+        column = getattr(UsageEvent, catalog_kind.value)
+        id_column = getattr(UsageEvent, f"{catalog_kind.value}_id")
         if name_id is not None:
             filters.append(id_column == name_id)
         if name is not None:
             current_id = await session.scalar(
-                select(CatalogName.id).where(CatalogName.kind == kind, CatalogName.name == name)
+                select(CatalogName.id).where(
+                    CatalogName.kind == catalog_kind, CatalogName.name == name
+                )
             )
             if current_id is not None:
                 filters.append(id_column == current_id)
             else:
                 # Do not mix a renamed, still-live item into a deleted item's
                 # historical spelling. Clients select the live item by current name/id.
-                live_ids = select(CatalogName.id).where(CatalogName.kind == kind)
+                live_ids = select(CatalogName.id).where(CatalogName.kind == catalog_kind)
                 filters.append(
                     (column == name) & or_(id_column.is_(None), id_column.not_in(live_ids))
                 )
+    for column, value in (
+        (UsageEvent.kind, kind),
+        (UsageEvent.target, target),
+        (UsageEvent.method, method),
+        (UsageEvent.tool, tool),
+    ):
+        if value is not None:
+            filters.append(column == value)
     if upstream_model is not None:
         filters.append(UsageEvent.upstream_model == upstream_model)
     for name, missing in (("alias", alias_missing), ("router", router_missing)):

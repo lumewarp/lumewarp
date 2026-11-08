@@ -71,7 +71,7 @@ EXPECTED_OPERATION_IDS = {
     "listUpstreamModels",
     "testUpstream",
     "testModel",
-    "listStrategies",
+    "listPlugins",
     "listUsers",
     "logoutSession",
     "loginBreakGlass",

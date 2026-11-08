@@ -19,7 +19,7 @@ Read before writing code:
 - `docs/router-strategies.md` — the contract, the schema subset, the three
   validation layers.
 - `gateway/strategies/priority-failover/` — the smallest complete crate.
-- `gateway/strategies/cheapest-first/` — this skill's worked example, with its
+- `gateway/plugins/router/cheapest-first/` — this skill's worked example, with its
   Python input at `example/cheapest_first.py`.
 
 ## 1. Decide whether it can be a strategy
@@ -76,7 +76,7 @@ lets the gateway fall through.
     mkdir -p gateway/strategies/<name>/src gateway/strategies/<name>/testdata
 
 `gateway/Cargo.toml` already has `strategies/*` as workspace members, so it
-needs no edit. `Cargo.toml`, copying `gateway/strategies/cheapest-first`:
+needs no edit. `Cargo.toml`, copying `gateway/plugins/router/cheapest-first`:
 
 ```toml
 [package]
@@ -229,7 +229,7 @@ gateway takes (`create` deserializes the JSON the control plane stores). Cover:
 
        python3 .claude/skills/port-router-to-rust/example/gen_pick_table.py
 
-   The generator writes `gateway/strategies/cheapest-first/testdata/pick-table.json`;
+   The generator writes `gateway/plugins/router/cheapest-first/testdata/pick-table.json`;
    the test `pick_matches_the_python_policy` compares `pick` with it. Add a
    scenario for every tie-break, every cap, empty eligible sets, and every
    "unknown" case.
@@ -386,7 +386,7 @@ Input: `example/cheapest_first.py`. It chooses the healthy deployment with the
 lowest input price (nano-USD per Mtok from a code table), ties by fewer
 requests in flight then configuration order, puts unpriced deployments last,
 and supports a maximum input price. The port is
-`gateway/strategies/cheapest-first/`.
+`gateway/plugins/router/cheapest-first/`.
 
 | Python | Rust in the crate | Why |
 |---|---|---|

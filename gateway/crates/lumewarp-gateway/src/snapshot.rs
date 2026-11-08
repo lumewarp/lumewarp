@@ -56,6 +56,8 @@ pub fn supported_capabilities() -> Vec<String> {
         .iter()
         .map(|c| c.to_string())
         .collect();
+    caps.extend(lumewarp_plugin_host::global().capabilities());
+    #[cfg(test)]
     caps.extend(lumewarp_router_api::registered().map(|f| format!("strategy:{}", f.name)));
     caps.sort();
     caps.dedup();
@@ -455,6 +457,7 @@ fn validate_strategy(
     }
     let builtin = builtin_strategy(&r.strategy).is_some();
     if !builtin
+        && lumewarp_plugin_host::global().get(1, &r.strategy).is_none()
         && lumewarp_router_api::lookup(&r.strategy)
             .map_err(|_| ApplyError::invalid("duplicate strategy registration"))?
             .is_none()
@@ -910,6 +913,7 @@ pub(crate) mod tests {
             required_capabilities: vec!["strategy:weighted".into()],
             scope: "scope-a".into(),
             aliases: vec![],
+            ..Default::default()
         }
     }
 

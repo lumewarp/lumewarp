@@ -1,0 +1,13 @@
+[package]
+name = "lumewarp-plugin-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lumewarp-router-api = { path = "../lumewarp-router-api" }
+wit-bindgen.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+fastrand.workspace = true

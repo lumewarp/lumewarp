@@ -16,6 +16,7 @@ from lumewarp_control_plane.models import (
     PersonalAccessToken,
     RequestOutcome,
     ScopeType,
+    TrafficKind,
     UsageEvent,
     UsageState,
     UsageTotal,
@@ -93,8 +94,14 @@ def usage_event(
     completion_tokens: int = 5,
     cost_nano_usd: int = 1000,
     cost_known: bool = True,
+    kind: TrafficKind = TrafficKind.LLM,
+    target: str = "",
+    method: str = "",
+    tool: str = "",
 ) -> UsageEvent:
+    """A stored row. A non-LLM row names no model, tokens or cost (usage.proto)."""
     ts = ts or datetime.now(UTC)
+    llm = kind is TrafficKind.LLM
     return UsageEvent(
         request_id=uuid.uuid4(),
         gateway_id="gw-test",
@@ -103,15 +110,19 @@ def usage_event(
         team_id=key.team_id,
         owner_kind=key.owner_kind,
         owner_id=key.owner_id,
-        requested=requested,
-        model="dep",
+        kind=kind,
+        target=target,
+        method=method,
+        tool=tool,
+        requested=requested if llm else "",
+        model="dep" if llm else "",
         endpoint=requested,
         status=200,
         stream=False,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        cost_nano_usd=cost_nano_usd,
-        cost_known=cost_known,
+        prompt_tokens=prompt_tokens if llm else 0,
+        completion_tokens=completion_tokens if llm else 0,
+        cost_nano_usd=cost_nano_usd if llm else 0,
+        cost_known=cost_known if llm else False,
         duration_ms=10,
         config_version=1,
         usage_state=UsageState.REPORTED,
@@ -142,20 +153,23 @@ def usage_total(
     )
 
 
-async def report_strategies(
+async def report_plugins(
     session,
     scope: str,
     gateway_id: str,
-    strategies: dict[str, tuple[dict | str, dict | str]],
+    plugins: dict[tuple[str, str] | str, tuple[dict | str, dict | str]] | None = None,
     *,
     connected: bool = False,
     last_seen_at=None,
     revoked: bool = False,
     capabilities: list[str] | None = None,
 ) -> uuid.UUID:
-    """A gateway as Hello leaves it: a new token, the session and reports of its Hello. Returns
-    the token. A strategy maps to (params schema, member schema), each a dict or the raw text
-    a gateway sends.
+    """A gateway as Hello leaves it: a new token, the session and the reports of its Hello.
+    Returns the token.
+
+    A key names a router strategy by name, or any plugin by `(kind, name)`; the value is
+    (params schema, member schema), each a dict or the raw text a gateway sends, and the
+    member schema is a router strategy's.
     """
     import hashlib
     import json
@@ -164,17 +178,32 @@ async def report_strategies(
     from sqlalchemy.dialects.postgresql import insert
 
     from lumewarp_control_plane._proto.lumewarp.config.v1 import config_service_pb2 as cpb
-    from lumewarp_control_plane.compiler.strategy import (
-        BUILTIN_STRATEGIES,
+    from lumewarp_control_plane.compiler.plugins import (
+        BUILTIN_PLUGINS,
+        CAPABILITY_PREFIX,
         normalize_hello,
-        replace_gateway_strategies,
+        replace_gateway_plugins,
     )
     from lumewarp_control_plane.models import GatewaySession, GatewayToken
     from lumewarp_control_plane.security import SecretKind, generate_secret
 
+    proto_kind = {
+        "router-strategy": cpb.PLUGIN_KIND_ROUTER_STRATEGY,
+        "upstream-auth": cpb.PLUGIN_KIND_UPSTREAM_AUTH,
+        "a2a-middleware": cpb.PLUGIN_KIND_A2A_MIDDLEWARE,
+    }
+    named = {
+        ("router-strategy", name) if isinstance(name, str) else name: schemas
+        for name, schemas in (plugins or {}).items()
+    }
     now = datetime.now(UTC)
     if capabilities is None:
-        capabilities = [f"strategy:{name}" for name in (*BUILTIN_STRATEGIES, *strategies)]
+        capabilities = [
+            f"{CAPABILITY_PREFIX[kind]}:{name}"
+            for kind, builtin in BUILTIN_PLUGINS.items()
+            for name in builtin
+        ]
+        capabilities += [f"{CAPABILITY_PREFIX[kind]}:{name}" for kind, name in named]
     secret = generate_secret(SecretKind.GATEWAY_TOKEN)
     token = GatewayToken(
         scope=scope,
@@ -199,20 +228,25 @@ async def report_strategies(
         .on_conflict_do_update(index_elements=["scope", "gateway_id"], set_=values)
     )
     text = lambda schema: schema if isinstance(schema, str) else json.dumps(schema)  # noqa: E731
-    reported = [
-        cpb.StrategyDescriptor(
-            name=name,
-            title=name.title(),
-            description="Reported.",
-            params_schema_json=text(params),
-            member_schema_json=text(member),
-            digest=hashlib.sha256(text(params).encode() + text(member).encode()).hexdigest(),
+    reported = []
+    for (kind, name), (params, member) in named.items():
+        router = {"member_schema_json": text(member)} if member is not None else {}
+        reported.append(
+            cpb.PluginDescriptor(
+                kind=proto_kind[kind],
+                name=name,
+                title=name.title(),
+                description="Reported.",
+                builtin=True,
+                params_schema_json=text(params),
+                router=cpb.RouterStrategyInfo(**router),
+                wasm_sha256="",
+                digest=hashlib.sha256(
+                    text(params).encode() + text(member or "").encode()
+                ).hexdigest(),
+            )
         )
-        for name, (params, member) in strategies.items()
-    ]
-    normalized = normalize_hello(cpb.Hello(strategies=reported))
-    await replace_gateway_strategies(
-        session, scope, gateway_id, token.id, normalized.strategies, now
-    )
+    normalized = normalize_hello(cpb.Hello(plugins=reported))
+    await replace_gateway_plugins(session, scope, gateway_id, token.id, normalized.plugins, now)
     await session.commit()
     return token.id

@@ -1,4 +1,14 @@
 //! Fixed-latency OpenAI-compatible benchmark upstream; not for production use.
+//! Example MCP server and A2A agent live in the `mcp` and `a2a` modules; the
+//! `mcp-a2a-mock` binary is their CLI. The benchmark upstream below is not
+//! affected by them.
+
+pub mod a2a;
+pub mod auth;
+pub mod mcp;
+pub mod server;
+pub mod util;
+
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, StreamBody};

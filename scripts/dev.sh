@@ -5,7 +5,7 @@
 #   scripts/dev.sh tab        inside herdr: open a `lumewarp-dev` tab, one pane per service
 #   scripts/dev.sh all        everything in this terminal with prefixed logs; Ctrl+C stops it
 #   scripts/dev.sh stop       close the herdr tab (containers keep running)
-#   scripts/dev.sh run <svc>  run one service in the foreground (mock, cp, gw, ui)
+#   scripts/dev.sh run <svc>  run one service in the foreground (mock, mcp, a2a, cp, gw, ui)
 #
 # `make dev` picks `tab` inside herdr and `all` elsewhere.
 #
@@ -13,7 +13,7 @@
 #   LUMEWARP_BREAK_GLASS_PASSWORD  override the development emergency password
 #
 # Ports: UI 5173 (Vite, proxies /api to the CP), CP 8091 (+ gRPC 50051, metrics 9465),
-# gateway 4000 (+ admin 9464), mock upstream 9100.
+# gateway 4000 (+ admin 9464), mock upstream 9100, example MCP 9110, example A2A 9120.
 # An empty database gets a model `mock-local`, a router `demo` over it, an alias
 # `demo-latest` to the router, a team `demo` and one key; the key secret is kept in
 # .dev/demo-key. Each start issues a fresh gateway token (.dev/env).
@@ -49,7 +49,7 @@ dev_tab() { # prints the tab id of an open dev tab, if any
 
 # Containers, builds, migrations and a gateway token; writes .dev/env for `run`.
 prepare() {
-  for port in 4000 5173 8091 9100 9464 9465 50051; do
+  for port in 4000 5173 8091 9100 9110 9120 9464 9465 50051; do
     if ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then
       die "port $port is already in use; stop the other dev stack first"
     fi
@@ -74,8 +74,8 @@ prepare() {
     die "DEV_AUTHZ=$authz needs DEV_SSO=1"
   fi
 
-  log "building mock upstream and gateway"
-  cargo build --release -q --manifest-path "$root/bench/mock-upstream/Cargo.toml"
+  log "building mock upstream, example MCP/A2A servers and gateway"
+  cargo build --release -q --bins --manifest-path "$root/bench/mock-upstream/Cargo.toml"
   cargo build --release -q --manifest-path "$root/gateway/Cargo.toml"
 
   log "migrating the database"
@@ -103,11 +103,13 @@ prepare() {
   fi
 }
 
-run_service() { # mock | cp | gw | ui
+run_service() { # mock | mcp | a2a | cp | gw | ui
   # shellcheck source=/dev/null
   source "$state/env"
   case "$1" in
     mock) exec "$root/bench/mock-upstream/target/release/mock-upstream" --listen 127.0.0.1:9100 ;;
+    mcp) exec "$root/bench/mock-upstream/target/release/mcp-a2a-mock" mcp --listen 127.0.0.1:9110 ;;
+    a2a) exec "$root/bench/mock-upstream/target/release/mcp-a2a-mock" a2a --listen 127.0.0.1:9120 ;;
     cp) cd "$root/control-plane" && exec uv run lumewarp-control-plane serve ;;
     gw)
       wait_http "$cp_url/healthz" "control plane" # avoids connect-retry warnings at startup
@@ -151,12 +153,16 @@ seed() {
 summary() { # stop hint
   wait_http "http://127.0.0.1:9464/readyz" "gateway"
   wait_http "$ui_url" "UI"
+  wait_http "http://127.0.0.1:9110/_mock/headers" "example MCP server"
+  wait_http "http://127.0.0.1:9120/health" "example A2A agent"
   cat <<EOF
 
   UI        $ui_url   (SSO: alice/bob/carol; alice becomes proxy_admin on first login)
   Emergency login uses LUMEWARP_BREAK_GLASS_PASSWORD (development default configured).
   API       $cp_url/api/v1
   gateway   http://127.0.0.1:4000/v1   (names: mock-local, demo, demo-latest)
+  MCP       http://127.0.0.1:9110/mcp   (example upstream; control /_mock/)
+  A2A       http://127.0.0.1:9120/a2a   (agent card /.well-known/agent-card.json)
   metrics   http://127.0.0.1:9464/metrics (gateway), http://127.0.0.1:9465/metrics (CP)
   Demo API key is stored in .dev/demo-key (not printed).
   $1
@@ -166,12 +172,12 @@ EOF
 
 case "${1:-all}" in
   run)
-    run_service "${2:?usage: $0 run mock|cp|gw|ui}"
+    run_service "${2:?usage: $0 run mock|mcp|a2a|cp|gw|ui}"
     ;;
   all)
     prepare
     trap 'trap - EXIT INT TERM; log stopping; kill 0 2>/dev/null || true' EXIT INT TERM
-    for svc in mock cp gw ui; do
+    for svc in mock mcp a2a cp gw ui; do
       ("$self" run "$svc" 2>&1 | sed -u "s/^/[$svc] /") &
     done
     seed
@@ -208,7 +214,9 @@ case "${1:-all}" in
     cp_pane="$(split "$me" right cp)"
     split "$cp_pane" down gw >/dev/null
     mock_pane="$(split "$me" down mock)"
-    split "$mock_pane" right ui >/dev/null
+    ui_pane="$(split "$mock_pane" right ui)"
+    mcp_pane="$(split "$ui_pane" down mcp)"
+    split "$mcp_pane" down a2a >/dev/null
     seed
     summary "make dev-stop closes this tab (containers keep running: make dev-down)."
     ;;

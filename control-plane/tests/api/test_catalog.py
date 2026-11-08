@@ -155,7 +155,7 @@ async def test_catalog_reads_and_writes_need_their_actions(client, committed) ->
         f"{API}/models",
         f"{API}/routers",
         f"{API}/upstreams",
-        f"{API}/strategies",
+        f"{API}/plugins",
     ):
         response = client.get(path, headers=plain)
         assert response.status_code == 403, (path, response.text)

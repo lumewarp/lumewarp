@@ -1,9 +1,7 @@
-"""A new strategy needs only a Rust crate and a gateway rebuild.
+"""A router component is discovered through Hello and configured through the API.
 
-The gateway here is built with `gateway/strategies/priority-failover` (scripts/e2e-core.sh).
-The strategy reaches the control plane only through Hello: nothing in the proto, the control
-plane or the UI names it, its form comes from `GET /strategies`, and a router using it is
-created and called through the admin API.
+scripts/e2e-core.sh builds gateway/plugins/router/priority-failover separately from
+its native gateway. Only the tests using it set LUMEWARP_ROUTER_PLUGIN_DIR.
 """
 
 import json
@@ -22,7 +20,7 @@ STRATEGY = "priority_failover"
 ROOT = Path(__file__).resolve().parents[2]
 # Also run through the factory by the crate's own tests.
 BOUNDARIES = json.loads(
-    (ROOT / "gateway/strategies/priority-failover/testdata/boundaries.json").read_text()
+    (ROOT / "gateway/plugins/router/priority-failover/testdata/boundaries.json").read_text()
 )
 
 
@@ -37,7 +35,7 @@ def test_nothing_outside_the_crate_names_the_strategy():
 
 
 def _strategy(stack) -> dict | None:
-    items = stack.ok("GET", "/strategies")["items"]
+    items = stack.ok("GET", "/plugins?kind=router-strategy")["items"]
     return next((item for item in items if item["name"] == STRATEGY), None)
 
 
@@ -61,6 +59,7 @@ def test_crate_appears_through_hello_and_a_router_using_it_is_served(stack, monk
     assert "no gateway reports" in stack.api("POST", "/routers", json=body).text
 
     monkeypatch.setattr(stack_module, "GATEWAY_BIN", Path(binary))
+    monkeypatch.setenv("LUMEWARP_ROUTER_PLUGIN_DIR", str(ROOT / "gateway/target/plugins/router"))
     gw = stack.start_gateway()
 
     item = _strategy(stack)
@@ -148,6 +147,7 @@ def test_the_same_boundary_payloads_agree_in_control_plane_and_standalone(
     stack.seed()
     model = _model(stack, "boundary", _upstream_id(stack, "mock"))
     monkeypatch.setattr(stack_module, "GATEWAY_BIN", Path(binary))
+    monkeypatch.setenv("LUMEWARP_ROUTER_PLUGIN_DIR", str(ROOT / "gateway/target/plugins/router"))
     stack.start_gateway()
     wait_for(lambda: _strategy(stack), 15, "strategy reported")
     for i, case in enumerate(BOUNDARIES):

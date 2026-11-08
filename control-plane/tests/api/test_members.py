@@ -361,7 +361,7 @@ async def test_team_admin_picks_allowlist_names_from_the_catalog(client, committ
     catalog = client.get("/api/v1/catalog?limit=500", headers=headers)
     assert catalog.status_code == 200, catalog.text
     assert str(model.name_id) in {item["id"] for item in catalog.json()["items"]}
-    for path in ("/api/v1/models", "/api/v1/upstreams", "/api/v1/routers", "/api/v1/strategies"):
+    for path in ("/api/v1/models", "/api/v1/upstreams", "/api/v1/routers", "/api/v1/plugins"):
         assert client.get(path, headers=headers).status_code == 403, path
     created = client.post(
         f"/api/v1/teams/{team.id}/members",

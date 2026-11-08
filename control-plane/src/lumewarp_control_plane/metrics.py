@@ -93,9 +93,10 @@ class Metrics:
             ["result"],
             registry=r,
         )
-        self.gateway_strategies_ignored = Counter(
-            "lumewarp_cp_gateway_strategies_ignored",
-            "Strategies and capabilities in a Hello ignored: over the limit or invalid names.",
+        self.gateway_plugins_ignored = Counter(
+            "lumewarp_cp_gateway_plugins_ignored",
+            "Hello entries ignored, by plugin kind: over the per-kind limit or invalid names.",
+            ["kind"],
             registry=r,
         )
         self.usage_ingested = Counter(

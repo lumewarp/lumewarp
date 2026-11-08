@@ -586,6 +586,7 @@ fn api_key(id: &str, secret: &str, models: &[&str], rate_limits: Vec<RateLimitSc
             allowed_models: models.iter().map(|m| m.to_string()).collect(),
             rate_limit_scopes: rate_limits,
             budget_window_end_unix_ms: 0,
+            ..Default::default()
         }),
         ..Default::default()
     }
@@ -623,6 +624,8 @@ fn catalog(good: SocketAddr, held: SocketAddr, dead: SocketAddr) -> Snapshot {
         target: target.into(),
     };
     Snapshot {
+        mcp_servers: vec![],
+        a2a_agents: vec![],
         version: 7,
         upstreams: vec![
             upstream("good-up", good),

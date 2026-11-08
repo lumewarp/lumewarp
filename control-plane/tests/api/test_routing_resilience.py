@@ -19,7 +19,7 @@ from lumewarp_control_plane.authz import RequestAuthz
 from lumewarp_control_plane.errors import ApiError
 from lumewarp_control_plane.models import AuditLog, CatalogName, ConfigOutbox, Model
 from lumewarp_control_plane.security import Principal, PrincipalKind
-from tests.api.helpers import ADMIN_AUTH, auth, report_strategies, suffix, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, report_plugins, suffix, user_with_token
 
 H = ADMIN_AUTH
 
@@ -30,7 +30,7 @@ async def _reported_custom_strategies(committed: AsyncSession, api_scope: str) -
     routing does with a custom strategy, test_strategies.py what validates it.
     """
     anything = ({"type": "object"}, {"type": "object"})
-    await report_strategies(
+    await report_plugins(
         committed,
         api_scope,
         "offline-custom",

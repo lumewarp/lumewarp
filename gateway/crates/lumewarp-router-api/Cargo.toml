@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+lumewarp-plugin-schema = { path = "../lumewarp-plugin-sdk/schema" }
 fastrand.workspace = true
 hex.workspace = true
 schemars.workspace = true

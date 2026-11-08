@@ -1,8 +1,12 @@
+mod a2a_ids;
 mod auth;
 mod balance;
+mod catalog;
 mod config_stream;
 mod error;
+mod grants;
 mod health;
+mod mcp_hash;
 mod metrics;
 mod proxy;
 mod ratelimit;
@@ -12,6 +16,7 @@ mod runtime;
 mod sealed;
 mod server;
 mod snapshot;
+mod targets;
 mod telemetry;
 mod transform;
 mod usage;
@@ -67,12 +72,6 @@ pub(crate) mod test_alloc {
     }
 }
 
-// A strategy crate must be named to be linked; its `register!` does the rest.
-#[cfg(feature = "strategy-cheapest-first")]
-use lumewarp_strategy_cheapest_first as _;
-#[cfg(feature = "strategy-priority-failover")]
-use lumewarp_strategy_priority_failover as _;
-
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Context;
@@ -122,8 +121,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List the routing strategies compiled into this binary.
-    Strategies {
+    /// List built-in and startup-loaded plugins.
+    Plugins {
         /// Print the manifest as JSON.
         #[arg(long)]
         json: bool,
@@ -131,12 +130,18 @@ enum Command {
 }
 
 fn list_strategies(json: bool) -> anyhow::Result<()> {
-    let manifest = lumewarp_router_api::manifest()?;
+    let descriptors = lumewarp_plugin_host::global().descriptors();
+    let manifest = descriptors.iter().map(|d| serde_json::json!({
+        "kind": match d.kind { 1 => "router-strategy", 2 => "upstream-auth", _ => "a2a-middleware" }, "name": d.name, "title": d.title, "description": d.description,
+        "builtin": d.builtin, "params_schema_json": d.params_schema_json,
+        "router": d.router.as_ref().map(|r| serde_json::json!({"uses_weight": r.uses_weight, "needs": r.needs, "member_schema_json": r.member_schema_json})),
+        "wasm_sha256": d.wasm_sha256, "digest": d.digest,
+    })).collect::<Vec<_>>();
     if json {
         println!("{}", serde_json::to_string_pretty(&manifest)?);
     } else {
-        for d in lumewarp_router_api::descriptors() {
-            println!("{}\t{}\t{}", d.name, d.title, d.description);
+        for d in descriptors {
+            println!("{}\t{}\t{}", d.kind, d.name, d.title);
         }
     }
     Ok(())
@@ -168,7 +173,8 @@ fn standalone(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    if let Some(Command::Strategies { json }) = args.command {
+    lumewarp_plugin_host::initialize()?;
+    if let Some(Command::Plugins { json }) = args.command {
         return list_strategies(json);
     }
     let telemetry = tokio::task::spawn_blocking(telemetry::init).await??;

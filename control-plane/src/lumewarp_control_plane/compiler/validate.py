@@ -16,15 +16,16 @@ from ipaddress import IPv6Address
 from urllib.parse import urlsplit
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
-from lumewarp_control_plane.compiler.strategy import (
-    BUILTIN_STRATEGIES,
+from lumewarp_control_plane.compiler.plugins import (
+    BUILTIN_PLUGINS,
     MAX_PARAMS_BYTES,
-    STRATEGY_NAME,
+    PLUGIN_NAME,
     params_problem,
 )
+from lumewarp_control_plane.models import PluginKind
 
-# Capabilities every gateway supports (snapshot.rs SUPPORTED_CAPABILITIES). Strategies are
-# `strategy:<name>`; a custom one is supported where its crate is compiled in.
+# Capabilities every gateway supports (snapshot.rs SUPPORTED_CAPABILITIES). Router strategies
+# are `strategy:<name>`; a WASM one is supported where a gateway loaded it.
 SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
     {
         "retry",
@@ -39,7 +40,7 @@ SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
         "default_body",
         "reasoning_effort",
         "model_chat_check",
-        *(f"strategy:{name}" for name in BUILTIN_STRATEGIES),
+        *(f"strategy:{name}" for name in BUILTIN_PLUGINS[PluginKind.ROUTER_STRATEGY]),
     }
 )
 MAX_SPLITS = 16
@@ -285,7 +286,7 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
     unsupported = {
         cap
         for cap in set(snap.required_capabilities) - SUPPORTED_CAPABILITIES
-        if not (cap.startswith("strategy:") and STRATEGY_NAME.fullmatch(cap[9:]))
+        if not (cap.startswith("strategy:") and PLUGIN_NAME.fullmatch(cap[9:]))
     }
     if unsupported:
         raise SnapshotInvalid(f"unsupported capabilities {sorted(unsupported)}")
@@ -364,12 +365,12 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
         if a.target not in models and a.target not in routers:
             raise SnapshotInvalid(f"alias {a.name!r} targets {a.target!r}, not a model or router")
     for r in snap.routers:
-        if not STRATEGY_NAME.fullmatch(r.strategy):
+        if not PLUGIN_NAME.fullmatch(r.strategy):
             raise SnapshotInvalid(
                 f"router {r.name!r}: strategy must match ^[a-z][a-z0-9_]{{0,62}}$"
             )
         params = _params_object(r.params_json, f"router {r.name!r} params")
-        if r.strategy in BUILTIN_STRATEGIES and params:
+        if r.strategy in BUILTIN_PLUGINS[PluginKind.ROUTER_STRATEGY] and params:
             raise SnapshotInvalid(f"router {r.name!r}: built-in {r.strategy!r} takes no params")
         if problem := params_problem(params, f"router {r.name!r} params"):
             raise SnapshotInvalid(problem)

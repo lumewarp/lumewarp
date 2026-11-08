@@ -22,7 +22,7 @@ from lumewarp_control_plane.api.schemas import (
     RollbackOut,
 )
 from lumewarp_control_plane.authz import Action, Authz
-from lumewarp_control_plane.compiler.strategy import StrategyRejected
+from lumewarp_control_plane.compiler.plugins import PluginRejected
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import ConfigVersion
 
@@ -91,7 +91,7 @@ async def rollback_config(
                 force=body.force,
                 principal=authz.principal,
             )
-        except StrategyRejected as exc:
+        except PluginRejected as exc:
             raise validation_error(exc.field, exc.message) from exc
         except LookupError as exc:
             raise not_found("config version not found") from exc

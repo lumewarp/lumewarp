@@ -22,20 +22,21 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import (
     snapshot_pb2,
 )
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2, usage_pb2_grpc
-from lumewarp_control_plane.compiler.publish import compact_versions
-from lumewarp_control_plane.compiler.strategy import (
-    MAX_GATEWAY_STRATEGIES,
-    load_strategies,
+from lumewarp_control_plane.compiler.plugins import (
+    MAX_GATEWAY_PLUGINS,
+    load_plugins,
 )
+from lumewarp_control_plane.compiler.publish import compact_versions
 from lumewarp_control_plane.db import SessionFactory, create_session_factory
 from lumewarp_control_plane.grpc import bound_port, registry_for, serve
 from lumewarp_control_plane.ids import uuid7
 from lumewarp_control_plane.models import (
     ConfigVersion,
     ConfigVersionKind,
+    GatewayPlugin,
     GatewaySession,
-    GatewayStrategy,
     GatewayToken,
+    PluginKind,
     Scope,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
@@ -169,7 +170,7 @@ async def _open_stream(
     have_version: int = 0,
     scope: str = "",
     have_digest: bytes | None = None,
-    strategies: tuple[cpb.StrategyDescriptor, ...] = (),
+    plugins: tuple[cpb.PluginDescriptor, ...] = (),
     capabilities: tuple[str, ...] = (),
     gateway_version: str = "test-gateway",
 ):
@@ -185,7 +186,7 @@ async def _open_stream(
                 have_digest=have_digest,
                 gateway_version=gateway_version,
                 scope=scope,
-                strategies=strategies,
+                plugins=plugins,
                 supported_capabilities=capabilities,
             )
         )
@@ -875,26 +876,44 @@ async def test_session_and_ack_metrics(session_factory: SessionFactory):
 
 
 def _descriptor(
-    name: str, digest: str, params: str = '{"type":"object"}'
-) -> cpb.StrategyDescriptor:
-    return cpb.StrategyDescriptor(
+    name: str,
+    digest: str,
+    params: str = '{"type":"object"}',
+    *,
+    kind: int = cpb.PLUGIN_KIND_ROUTER_STRATEGY,
+    member: str = '{"type":"object"}',
+) -> cpb.PluginDescriptor:
+    router = (
+        cpb.RouterStrategyInfo(uses_weight=False, needs=["latency"], member_schema_json=member)
+        if kind == cpb.PLUGIN_KIND_ROUTER_STRATEGY
+        else cpb.RouterStrategyInfo()
+    )
+    return cpb.PluginDescriptor(
+        kind=kind,
         name=name,
         title=name.title(),
-        description="A strategy.",
-        needs=["latency"],
+        description="A plugin.",
         params_schema_json=params,
-        member_schema_json='{"type":"object"}',
+        router=router,
+        wasm_sha256="",
         digest=digest,
     )
 
 
-async def _stored(
-    factory: SessionFactory, scope: str, gateway_id: str
-) -> dict[str, GatewayStrategy]:
+def _descriptor_with_title(name: str, digest: str, title: str) -> cpb.PluginDescriptor:
+    descriptor = _descriptor(name, digest)
+    descriptor.title = title
+    return descriptor
+
+
+async def _stored(factory: SessionFactory, scope: str, gateway_id: str) -> dict[str, GatewayPlugin]:
+    """The gateway's reported router strategies, by name."""
     async with factory() as session:
         rows = await session.scalars(
-            select(GatewayStrategy).where(
-                GatewayStrategy.scope == scope, GatewayStrategy.gateway_id == gateway_id
+            select(GatewayPlugin).where(
+                GatewayPlugin.scope == scope,
+                GatewayPlugin.gateway_id == gateway_id,
+                GatewayPlugin.kind == PluginKind.ROUTER_STRATEGY,
             )
         )
         return {row.name: row for row in rows}
@@ -916,7 +935,7 @@ async def test_hello_descriptors_are_stored_and_replaced_on_reconnect(
             stub,
             tokens["gateway-a"],
             "gateway-a",
-            strategies=(_descriptor("one", "aa"), _descriptor("two", "bb")),
+            plugins=(_descriptor("one", "aa"), _descriptor("two", "bb")),
         )
         assert (await call.read()).WhichOneof("update") == "full"
         stored = await _stored(session_factory, scope, "gateway-a")
@@ -931,12 +950,68 @@ async def test_hello_descriptors_are_stored_and_replaced_on_reconnect(
             stub,
             tokens["gateway-a"],
             "gateway-a",
-            strategies=(_descriptor("one", "cc", changed), _descriptor("three", "dd")),
+            plugins=(_descriptor("one", "cc", changed), _descriptor("three", "dd")),
         )
         await call.read()
         stored = await _stored(session_factory, scope, "gateway-a")
         assert {name: row.digest for name, row in stored.items()} == {"one": "cc", "three": "dd"}
         assert "n" in stored["one"].descriptor["params_schema"]["properties"]
+        await _close(call)
+    finally:
+        await channel.close()
+        await server.stop(0)
+
+
+async def test_a_hello_stores_plugins_of_every_kind(session_factory: SessionFactory):
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    try:
+        call = await _open_stream(
+            stub,
+            tokens["gateway-a"],
+            "gateway-a",
+            plugins=(
+                _descriptor("strategy_one", "aa"),
+                _descriptor(
+                    "auth_one",
+                    "bb",
+                    '{"type":"object","properties":{"ttl_ms":{"type":"integer"}}}',
+                    kind=cpb.PLUGIN_KIND_UPSTREAM_AUTH,
+                ),
+                _descriptor("middleware_one", "cc", "{}", kind=cpb.PLUGIN_KIND_A2A_MIDDLEWARE),
+            ),
+        )
+        assert (await call.read()).WhichOneof("update") == "full"
+        async with session_factory() as session:
+            rows = {
+                (row.kind, row.name): row
+                for row in await session.scalars(
+                    select(GatewayPlugin).where(
+                        GatewayPlugin.scope == scope,
+                        GatewayPlugin.gateway_id == "gateway-a",
+                    )
+                )
+            }
+            registry = await load_plugins(session, scope)
+        assert set(rows) == {
+            (PluginKind.ROUTER_STRATEGY, "strategy_one"),
+            (PluginKind.UPSTREAM_AUTH, "auth_one"),
+            (PluginKind.A2A_MIDDLEWARE, "middleware_one"),
+        }
+        auth = rows[(PluginKind.UPSTREAM_AUTH, "auth_one")].descriptor
+        assert auth["params_schema"] == {
+            "type": "object",
+            "properties": {"ttl_ms": {"type": "integer"}},
+        }
+        # A member schema belongs to a router strategy only.
+        assert auth["member_schema"] is None
+        assert rows[(PluginKind.ROUTER_STRATEGY, "strategy_one")].descriptor["member_schema"] == {
+            "type": "object"
+        }
+        assert registry.known(PluginKind.UPSTREAM_AUTH, "auth_one")
+        assert registry.problems(PluginKind.UPSTREAM_AUTH, "auth_one", {"ttl_ms": "soon"}) == [
+            "params.ttl_ms: must be of type integer"
+        ]
         await _close(call)
     finally:
         await channel.close()
@@ -954,7 +1029,7 @@ async def test_hello_with_hostile_schemas_keeps_the_stream_working(
             stub,
             tokens["gateway-a"],
             "gateway-a",
-            strategies=(
+            plugins=(
                 _descriptor("oversized", "a1", oversized),
                 _descriptor("not_json", "a2", "{"),
                 _descriptor("remote_ref", "a3", '{"$ref":"http://169.254.169.254/x"}'),
@@ -962,7 +1037,7 @@ async def test_hello_with_hostile_schemas_keeps_the_stream_working(
                 _descriptor("nul", "a5", '{"type":"object","title":"a\\u0000b"}'),
                 _descriptor("bad_digest", "not hex!"),
                 _descriptor("Bad Name", "a7"),
-                cpb.StrategyDescriptor(name="nul_title", title="a\x00b", digest="a8"),
+                _descriptor_with_title("nul_title", "a8", "a\x00b"),
             ),
         )
         # The stream is unaffected: the snapshot arrives.
@@ -988,12 +1063,12 @@ async def test_failure_to_store_descriptors_does_not_break_the_stream(
     async def fail(*_args, **_kwargs):
         raise RuntimeError("database is unhappy")
 
-    monkeypatch.setattr(module, "replace_gateway_strategies", fail)
+    monkeypatch.setattr(module, "replace_gateway_plugins", fail)
     scope, tokens = await _seed(session_factory)
     server, channel, stub = await _start(session_factory, scope)
     try:
         call = await _open_stream(
-            stub, tokens["gateway-a"], "gateway-a", strategies=(_descriptor("one", "aa"),)
+            stub, tokens["gateway-a"], "gateway-a", plugins=(_descriptor("one", "aa"),)
         )
         assert (await call.read()).WhichOneof("update") == "full"
         await _close(call)
@@ -1044,7 +1119,7 @@ async def test_a_stale_hello_read_slowly_cannot_overwrite_a_newer_connection(
             stub,
             token,
             "gateway-a",
-            strategies=(_descriptor("loose", "aa", LOOSE), _descriptor("shared", "a1", LOOSE)),
+            plugins=(_descriptor("loose", "aa", LOOSE), _descriptor("shared", "a1", LOOSE)),
             capabilities=("strategy:loose", "strategy:shared"),
             gateway_version="old-build",
         )
@@ -1053,7 +1128,7 @@ async def test_a_stale_hello_read_slowly_cannot_overwrite_a_newer_connection(
             stub,
             token,
             "gateway-a",
-            strategies=(_descriptor("shared", "bb", STRICT),),
+            plugins=(_descriptor("shared", "bb", STRICT),),
             capabilities=("strategy:shared",),
             gateway_version="new-build",
         )
@@ -1070,8 +1145,8 @@ async def test_a_stale_hello_read_slowly_cannot_overwrite_a_newer_connection(
         assert row.gateway_version == "new-build"
         assert row.capabilities == ["strategy:shared"]
         async with session_factory() as session:
-            registry = await load_strategies(session, scope)
-        assert not registry.known("loose")
+            registry = await load_plugins(session, scope)
+        assert not registry.known(PluginKind.ROUTER_STRATEGY, "loose")
         assert registry.router_problems("shared", {"n": 50}, [])
         # And the live stream still is the new one.
         current = registry_for(server)._sessions[(scope, "gateway-a")]
@@ -1089,7 +1164,7 @@ async def test_hello_transaction_holds_the_row_lock_until_its_descriptors_are_wr
     """A sits inside its transaction with the row locked; B's Hello must queue behind it."""
     import lumewarp_control_plane.grpc as module
 
-    real = module.replace_gateway_strategies
+    real = module.replace_gateway_plugins
     entered, release = asyncio.Event(), asyncio.Event()
 
     async def pause_first(session, scope, gateway_id, token_id, reported, now):
@@ -1098,7 +1173,7 @@ async def test_hello_transaction_holds_the_row_lock_until_its_descriptors_are_wr
             entered.set()
             await asyncio.wait_for(release.wait(), 10)
 
-    monkeypatch.setattr(module, "replace_gateway_strategies", pause_first)
+    monkeypatch.setattr(module, "replace_gateway_plugins", pause_first)
     scope, tokens = await _seed(session_factory)
     server, channel, stub = await _start(session_factory, scope)
     token = tokens["gateway-a"]
@@ -1107,7 +1182,7 @@ async def test_hello_transaction_holds_the_row_lock_until_its_descriptors_are_wr
             stub,
             token,
             "gateway-a",
-            strategies=(_descriptor("loose", "aa", LOOSE),),
+            plugins=(_descriptor("loose", "aa", LOOSE),),
             gateway_version="old-build",
         )
         await asyncio.wait_for(entered.wait(), 10)
@@ -1115,7 +1190,7 @@ async def test_hello_transaction_holds_the_row_lock_until_its_descriptors_are_wr
             stub,
             token,
             "gateway-a",
-            strategies=(_descriptor("strict", "bb", STRICT),),
+            plugins=(_descriptor("strict", "bb", STRICT),),
             gateway_version="new-build",
         )
         first = asyncio.ensure_future(new.read())
@@ -1150,7 +1225,7 @@ async def test_router_validation_sees_one_hello_never_a_mix(
     """
     import lumewarp_control_plane.grpc as module
 
-    real = module.replace_gateway_strategies
+    real = module.replace_gateway_plugins
     entered, release = asyncio.Event(), asyncio.Event()
 
     async def pause_new_build(session, scope, gateway_id, token_id, reported, now):
@@ -1159,7 +1234,7 @@ async def test_router_validation_sees_one_hello_never_a_mix(
             entered.set()
             await asyncio.wait_for(release.wait(), 10)
 
-    monkeypatch.setattr(module, "replace_gateway_strategies", pause_new_build)
+    monkeypatch.setattr(module, "replace_gateway_plugins", pause_new_build)
     scope, tokens = await _seed(session_factory)
     server, channel, stub = await _start(session_factory, scope)
     token = tokens["gateway-a"]
@@ -1173,7 +1248,7 @@ async def test_router_validation_sees_one_hello_never_a_mix(
         event.listen(c4_engine.sync_engine, "before_cursor_execute", count)
         try:
             async with session_factory() as session:
-                registry = await load_strategies(session, scope)
+                registry = await load_plugins(session, scope)
         finally:
             event.remove(c4_engine.sync_engine, "before_cursor_execute", count)
         assert len(statements) == 1, statements
@@ -1184,7 +1259,7 @@ async def test_router_validation_sees_one_hello_never_a_mix(
             stub,
             token,
             "gateway-a",
-            strategies=(_descriptor("dropped", "a1"), _descriptor("kept", "a0", LOOSE)),
+            plugins=(_descriptor("dropped", "a1"), _descriptor("kept", "a0", LOOSE)),
             capabilities=("strategy:dropped", "strategy:kept"),
         )
         await first.read()
@@ -1194,19 +1269,19 @@ async def test_router_validation_sees_one_hello_never_a_mix(
             stub,
             token,
             "gateway-a",
-            strategies=(_descriptor("kept", "b0", STRICT),),
+            plugins=(_descriptor("kept", "b0", STRICT),),
             capabilities=("strategy:kept",),
         )
         await asyncio.wait_for(entered.wait(), 10)
         during = await read()
-        assert during.known("dropped")
-        assert during.support("kept")[0].digest == "a0"
+        assert during.known(PluginKind.ROUTER_STRATEGY, "dropped")
+        assert during.support(PluginKind.ROUTER_STRATEGY, "kept")[0].digest == "a0"
         assert during.router_problems("kept", {"n": 50}, []) == []
         release.set()
         assert (await asyncio.wait_for(second.read(), 5)).WhichOneof("update") == "full"
         after = await read()
-        assert not after.known("dropped")
-        assert after.support("kept")[0].digest == "b0"
+        assert not after.known(PluginKind.ROUTER_STRATEGY, "dropped")
+        assert after.support(PluginKind.ROUTER_STRATEGY, "kept")[0].digest == "b0"
         assert after.router_problems("kept", {"n": 50}, [])
         await _close(second)
     finally:
@@ -1229,22 +1304,76 @@ async def test_capability_flood_is_bounded_counted_and_keeps_the_stream(
     )
     channel = grpc.aio.insecure_channel(f"127.0.0.1:{bound_port(server)}")
     stub = cpb_grpc.ConfigServiceStub(channel)
-    names = [f"s_{i}" for i in range(MAX_GATEWAY_STRATEGIES + 1)]
+    names = [f"s_{i}" for i in range(MAX_GATEWAY_PLUGINS + 1)]
     illegal = ["", "Bad Name", "UPPER", "x" * 64, "a/b"]
     capabilities = tuple(f"strategy:{n}" for n in (*illegal, *names))
     try:
         call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", capabilities=capabilities)
         assert (await call.read()).WhichOneof("update") == "full"
         row = await _session_row(session_factory, scope, "gateway-a")
-        assert len(row.capabilities) == MAX_GATEWAY_STRATEGIES
+        assert len(row.capabilities) == MAX_GATEWAY_PLUGINS
         assert f"strategy:{names[-1]}" not in row.capabilities
         async with session_factory() as session:
-            registry = await load_strategies(session, scope)
-        assert set(names[:MAX_GATEWAY_STRATEGIES]) <= set(registry.names())
-        assert not set(illegal) & set(registry.names())
-        assert not registry.known(names[-1])
-        ignored = metrics.value("lumewarp_cp_gateway_strategies_ignored_total", {})
+            registry = await load_plugins(session, scope)
+        assert set(names[:MAX_GATEWAY_PLUGINS]) <= set(registry.names(PluginKind.ROUTER_STRATEGY))
+        assert not {f"strategy:{name}" for name in illegal} & set(row.capabilities)
+        assert not registry.known(PluginKind.ROUTER_STRATEGY, names[-1])
+        ignored = metrics.value(
+            "lumewarp_cp_gateway_plugins_ignored_total", {"kind": "router-strategy"}
+        )
         assert ignored == len(illegal) + 1
+        await _close(call)
+    finally:
+        await channel.close()
+        await server.stop(0)
+
+
+async def test_ignored_plugins_are_counted_per_kind(session_factory: SessionFactory):
+    """Each kind has its own limit and its own counter series; a descriptor whose kind is
+    unusable belongs to none of them."""
+    from lumewarp_control_plane.metrics import Metrics
+
+    metrics = Metrics()
+    scope, tokens = await _seed(session_factory)
+    server = await serve(
+        Settings(scope=scope, grpc_bind="127.0.0.1:0", background_enabled=False),
+        session_factory,
+        metrics,
+    )
+    channel = grpc.aio.insecure_channel(f"127.0.0.1:{bound_port(server)}")
+    stub = cpb_grpc.ConfigServiceStub(channel)
+    auth = [f"a_{i}" for i in range(MAX_GATEWAY_PLUGINS + 1)]
+    middleware = [f"m_{i}" for i in range(MAX_GATEWAY_PLUGINS + 1)]
+    capabilities = (
+        *(f"auth:{name}" for name in auth),
+        *(f"a2a_middleware:{name}" for name in middleware),
+        "strategy:Bad Name",
+        "retries",
+    )
+    try:
+        call = await _open_stream(
+            stub,
+            tokens["gateway-a"],
+            "gateway-a",
+            plugins=(_descriptor("no_kind", "a1", kind=cpb.PLUGIN_KIND_UNSPECIFIED),),
+            capabilities=capabilities,
+        )
+        assert (await call.read()).WhichOneof("update") == "full"
+        row = await _session_row(session_factory, scope, "gateway-a")
+        # Each kind keeps its own 128; the other capability survives.
+        assert row.capabilities.count("retries") == 1
+        assert len([c for c in row.capabilities if c.startswith("auth:")]) == (MAX_GATEWAY_PLUGINS)
+        assert len([c for c in row.capabilities if c.startswith("a2a_middleware:")]) == (
+            MAX_GATEWAY_PLUGINS
+        )
+        assert [c for c in row.capabilities if c.startswith("strategy:")] == []
+        ignored = lambda kind: metrics.value(  # noqa: E731
+            "lumewarp_cp_gateway_plugins_ignored_total", {"kind": kind}
+        )
+        assert ignored("router-strategy") == 1
+        assert ignored("upstream-auth") == 1
+        assert ignored("a2a-middleware") == 1
+        assert ignored("other") == 1
         await _close(call)
     finally:
         await channel.close()
@@ -1261,13 +1390,13 @@ async def test_descriptors_and_capabilities_share_one_limit(session_factory: Ses
             stub,
             tokens["gateway-a"],
             "gateway-a",
-            strategies=described,
+            plugins=described,
             capabilities=("retries", *capabilities),
         )
         assert (await call.read()).WhichOneof("update") == "full"
         row = await _session_row(session_factory, scope, "gateway-a")
         strategies = [c for c in row.capabilities if c.startswith("strategy:")]
-        assert len(strategies) == MAX_GATEWAY_STRATEGIES
+        assert len(strategies) == MAX_GATEWAY_PLUGINS
         assert {f"strategy:d_{i}" for i in range(100)} <= set(strategies)
         assert "retries" in row.capabilities
         assert len(await _stored(session_factory, scope, "gateway-a")) == 100
@@ -1289,7 +1418,7 @@ async def test_an_unreadable_hello_keeps_what_is_known_and_the_stream(
             stub,
             tokens["gateway-a"],
             "gateway-a",
-            strategies=(_descriptor("one", "aa"),),
+            plugins=(_descriptor("one", "aa"),),
             capabilities=("retries",),
         )
         await call.read()
@@ -1369,6 +1498,109 @@ async def test_health_report_is_mirrored_any_time(session_factory: SessionFactor
             await asyncio.sleep(0.02)
         assert status.upstream_health == {}
         assert status.model_health == {}
+    finally:
+        call.cancel()
+        await channel.close()
+        await server.stop(0)
+
+
+async def test_a_catalog_report_reaches_the_ingest_stub(
+    session_factory: SessionFactory, monkeypatch
+):
+    """The report is handed to the MCP module, which owns what is stored (W2); the stream
+    keeps working, and a catalog report is never mistaken for an ACK/NACK."""
+    import lumewarp_control_plane.grpc as module
+
+    seen = []
+
+    async def capture(session, gateway_id, report):
+        seen.append(
+            (
+                gateway_id,
+                [(d.server, d.kind, d.name, bytes(d.hash)) for d in report.definitions],
+                [(c.agent, c.card_json, c.error) for c in report.cards],
+            )
+        )
+
+    monkeypatch.setattr(module.catalog_ingest, "ingest_report", capture)
+    definition = cpb.ObservedDefinition(
+        server="s1",
+        kind=snapshot_pb2.MCP_DEFINITION_KIND_TOOL,
+        name="echo",
+        hash=hashlib.sha256(b'{"name":"echo"}').digest(),
+        definition_json='{"name":"echo"}',
+        auto_approved=False,
+        observed_at_unix_ms=1_700_000_000_000,
+    )
+    card = cpb.AgentCardReport(
+        agent="a1", card_json='{"name":"agent"}', error="", fetched_at_unix_ms=1_700_000_000_001
+    )
+    scope, tokens = await _seed(session_factory, versions=(1,))
+    server, channel, stub = await _start(session_factory, scope)
+    try:
+        call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+        await call.read()
+        await call.write(
+            cpb.GatewayMessage(catalog=cpb.CatalogReport(definitions=[definition], cards=[card]))
+        )
+        async with asyncio.timeout(5):
+            while not seen:
+                await asyncio.sleep(0.01)
+        assert seen == [
+            (
+                "gateway-a",
+                [("s1", snapshot_pb2.MCP_DEFINITION_KIND_TOOL, "echo", definition.hash)],
+                [("a1", '{"name":"agent"}', "")],
+            )
+        ]
+        await call.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
+        async with asyncio.timeout(5):
+            while (await _session_row(session_factory, scope, "gateway-a")).acked_version != 1:
+                await asyncio.sleep(0.01)
+        await _close(call)
+    finally:
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        cpb.CatalogReport(
+            definitions=[
+                cpb.ObservedDefinition(
+                    server="s1", name="too_big", definition_json="x" * (64 * 1024 + 1)
+                )
+            ]
+        ),
+        cpb.CatalogReport(
+            definitions=[cpb.ObservedDefinition(server="s1", name="t", hash=b"short")]
+        ),
+        cpb.CatalogReport(definitions=[cpb.ObservedDefinition(server="", name="t")]),
+        cpb.CatalogReport(cards=[cpb.AgentCardReport(agent="a1", card_json="x" * (64 * 1024 + 1))]),
+        cpb.CatalogReport(cards=[cpb.AgentCardReport(agent="")]),
+    ],
+    ids=[
+        "definition-too-large",
+        "hash-not-sha256",
+        "server-empty",
+        "card-too-large",
+        "agent-empty",
+    ],
+)
+@pytest.mark.asyncio
+async def test_an_invalid_catalog_report_closes_the_stream(
+    session_factory: SessionFactory, report: cpb.CatalogReport
+):
+    scope, tokens = await _seed(session_factory, versions=(1,))
+    server, channel, stub = await _start(session_factory, scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    try:
+        await call.read()
+        await call.write(cpb.GatewayMessage(catalog=report))
+        with pytest.raises(grpc.aio.AioRpcError) as err:
+            await asyncio.wait_for(call.read(), 2)
+        assert err.value.code() == grpc.StatusCode.INVALID_ARGUMENT
     finally:
         call.cancel()
         await channel.close()

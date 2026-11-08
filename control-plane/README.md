@@ -427,7 +427,7 @@ administers no team gets `403`, filtered or not. Audit also matches `org_id`, so
 reads its org's org-level events (org policy, org admins, org budget) and the rows of its
 archived teams; a team admin reads only rows attached to its teams.
 
-`ROUTING_READ` is installation-level (upstreams, models, aliases, routers and strategies,
+`ROUTING_READ` is installation-level (upstreams, models, aliases, routers and plugins,
 including their `GET`s). `CATALOG_READ` is the one routing read every authenticated caller
 needs: `GET /catalog` returns only names, ids and kinds, which is what the allowlist pickers use.
 
@@ -638,8 +638,10 @@ install -e ./your-plugin`) and restart `serve`:
 | `lumewarp.auth` | Map an external identity (OIDC, LDAP, ...) to a user's email and display name. | Called on a first SSO login; the first plugin (by entry-point name) wins. |
 | `lumewarp.authz` | Answer relation questions. | Named by `LUMEWARP_AUTHZ_BACKEND`, see [Authorization](#authorization), which has its own contract (no `api_version`). |
 
-Router policies are not Python plugins: a strategy is a Rust crate compiled into the
-gateway, see [router strategies](../docs/router-strategies.md).
+Router strategies and the two other kinds of gateway plugin are **not** Python: a gateway
+loads them as WASM components from its own directories at startup, so a Python plugin cannot
+decide a route. See [gateway plugins](../docs/plugins.md) and
+[router strategies](../docs/router-strategies.md).
 
 Every auth plugin declares `api_version = 1`; other versions are skipped with a warning, as
 are plugins that fail to import. Entry points may name an instance, a class or a zero-argument
@@ -667,11 +669,12 @@ unique across all three (`catalog_names`):
 | `/api/v1/models` | A name for one model of one upstream (`upstream_id`, `upstream_model`), with its price. One try per call. |
 | `/api/v1/aliases` | Another name for a model or a router (`target`, its id). One level only; not for another alias. Authorized on its own. |
 | `/api/v1/routers` | A name that spreads requests over models: `strategy`, `params`, `members [{model_id, weight, params}]`. Members and fallbacks are models only. |
-| `/api/v1/strategies` | Read-only: each strategy's descriptor, schema and the gateways that have it. |
+| `/api/v1/plugins?kind=` | Read-only, all three plugin kinds: each descriptor with its schemas and the gateways that report it. |
+| `/api/v1/strategies` | **Removed** (no alias): the plugins endpoint replaced it. |
 | `/api/v1/catalog` | Read-only: every name and its kind, for permission pickers. |
 
 `/catalog` is readable by any authenticated principal; the other reads (`/upstreams`, `/models`,
-`/aliases`, `/routers`, `/strategies`) need `ROUTING_READ`, which is installation-level. Writes
+`/aliases`, `/routers`, `/plugins`) need `ROUTING_READ`, which is installation-level. Writes
 need `ROUTING_MANAGE`. Every write is audited and enqueues a recompile. A name that a router, alias or fallback references cannot be
 deleted (409, listing who references it); deleting a name deletes the grants on it, with an
 audit row. See [the architecture notes](../docs/architecture.md#模型目錄已實作) for the reasoning.
@@ -697,7 +700,7 @@ Settings that compile 1:1 into the snapshot (`proto/lumewarp/config/v1/snapshot.
 | `health_check {path, interval_ms, timeout_ms, unhealthy_threshold, healthy_threshold}` | upstream | `Upstream.health_check`; `null` = no active probing; null path = `/models`, null thresholds = 3 / 1 |
 | `circuit_breaker {failure_threshold, open_ms}` | upstream | `Upstream.circuit_breaker`; `null` = never opens; `{}` = gateway defaults (5 failures, 30000 ms). Breaker state is per model |
 | `metrics_url` | upstream | `Upstream.metrics_url` for `vllm_load`; `null` = base URL minus `/v1` plus `/metrics` |
-| `strategy`, `params` | router | `Router.strategy`, a name: `weighted`, `least_in_flight`, `lowest_latency` (EWMA), `vllm_load`, or a strategy compiled into a gateway; `Router.params_json` |
+| `strategy`, `params` | router | `Router.strategy`, a name: `weighted`, `least_in_flight`, `lowest_latency` (EWMA), `vllm_load`, or a router-strategy plugin a gateway reports; `Router.params_json` |
 | `members [{model_id, weight, params}]` | router | `Router.members`. Weight is per router; only `weighted` reads it |
 | `retry {max_attempts, retry_on_status, total_timeout_ms}` | router | `Router.retry`; `null` = one attempt. `max_attempts: null` is emitted as 0, which the gateway reads as its default of 2 |
 | `fallback_model_ids` (ordered) | router | `Router.fallbacks` (model names). Needs `retry` with at least 2 attempts |
@@ -715,13 +718,16 @@ member weight per split (or over its members without a split). PATCH replaces li
 given and keeps omitted fields; `retry: null` removes the policy, and leaving `sticky=header`
 drops the header.
 
-**Strategies.** `params` and member `params` are validated against the schema the strategy
-declares, as reported by gateways in `Hello`, and against the committed built-in manifest
-`compiler/builtin_strategies.json`, so built-ins work with no gateway connected. An unreported
-strategy or a schema failure is 422. A connected gateway lacking the strategy is 422 unless the
-write has `force`, audited as `router.force_save`, because that gateway will NACK the version.
-Stored rows that no longer validate read `config_invalid: true` with `config_problems` and are
-not modified. Full rules: [router strategies](../docs/router-strategies.md).
+**Plugins.** A router's `params` and member `params` are validated against the schema the
+strategy declares, as reported by gateways in `Hello.plugins`, and against the committed
+built-in manifest `compiler/builtin_plugins.json`, so built-ins work with no gateway connected.
+An unreported strategy or a schema failure is 422. A connected gateway lacking the strategy is
+422 unless the write has `force`, audited as `router.force_save`, because that gateway will NACK
+the version. Stored rows that no longer validate read `config_invalid: true` with
+`config_problems` and are not modified. The same rule lives in
+`compiler.plugins.validate_plugin_params(session, kind, name, params, *, force)` and is what an
+MCP server's or A2A agent's auth plugin (kinds `upstream-auth` and `a2a-middleware`) uses. Full
+rules: [gateway plugins](../docs/plugins.md).
 
 The compiler lists a capability in `required_capabilities` exactly when a field needs it
 (the gateway's rule): `health_check`, `circuit_breaker`, `vllm_load` (a metrics URL), `retry`,
@@ -749,12 +755,13 @@ revoked. It goes through the same strategy checks as a router write.
   Rollback restores the catalog by id and republishes an older version's **routing** only; keys
   and policies always come from current source state. Full rules: [config protocol](../docs/config-protocol.md).
 - `UsageService.Report` validates per event (an invalid event is skipped and logged, the
-  rest of the batch is kept; `REJECTED` events may omit model/model) and is
-  idempotent by `request_id`; each new event
+  rest of the batch is kept; `REJECTED` events may omit model/model, and an MCP or A2A event
+  carries no model, tokens or cost) and is idempotent by `request_id`; each new LLM event
   adds cost once to the team total and once to the key owner's (member or service account)
   total for the UTC calendar month in the same transaction, then budget evaluation flips
   exhausted scopes to `BUDGET_EXCEEDED` and publishes a new version (eventual; in-flight
-  streams are not cut). Budget publishing targets the protocol's 5 s
+  streams are not cut). MCP and A2A events (`kind=mcp|a2a`, with `target`, `method` and
+  `tool`) are recorded and never aggregated: no budget, no limit, no cost. Budget publishing targets the protocol's 5 s
   eventual-enforcement window; it is not a configurable per-flip timeout. The unused
   `LUMEWARP_BUDGET_FLIP_DEADLINE_SECONDS` setting has been removed.
 - Usage is stored in Postgres; ClickHouse is later. While the control plane is down the
@@ -779,7 +786,7 @@ these names.
 | `lumewarp_cp_outbox_pending` | gauge | | Pending `config_outbox` rows of the scope; one `COUNT` every 5 s by a background task, never per scrape. |
 | `lumewarp_cp_gateway_sessions` | gauge | | Connected config-stream sessions in this process (`grpc/` session registry). |
 | `lumewarp_cp_gateway_acks_total` | counter | `result` = `ack` \| `nack` | Each valid ACK/NACK of a pending update. Protocol errors are not counted. |
-| `lumewarp_cp_gateway_strategies_ignored_total` | counter | | Strategies and capabilities of a Hello ignored: past the per-gateway limit of 128 strategies, or an invalid name. The stream stays up. |
+| `lumewarp_cp_gateway_plugins_ignored_total` | counter | `kind` = `router-strategy` \| `upstream-auth` \| `a2a-middleware` \| `other` | Entries of a `Hello` ignored: past the per-gateway limit of 128 per kind, an invalid name, or (for `other`) a descriptor whose kind is unusable or a non-plugin capability over its own limit of 64. The stream stays up. |
 | `lumewarp_cp_usage_events_ingested_total` | counter | | Events accepted by a committed `UsageService.Report` (an identical replay is accepted again but not re-costed). |
 | `lumewarp_cp_usage_events_skipped_total` | counter | `reason` = `invalid_event` \| `request_id_conflict` \| `key_mismatch` | Events skipped by per-event validation of a committed report: malformed fields; a request id reused with different data in the batch or vs. a stored event; unknown key or key not in the event's team. Batch-level rejections (`INVALID_ARGUMENT`) count nothing. |
 | `lumewarp_cp_authz_checks_total` | counter | `backend`, `decision` = `allow` \| `deny` \| `error` | Every `Authorizer.check` and every item of `Authorizer.batch_check` (native batch failures count one `error` per item). `backend` is `LUMEWARP_AUTHZ_BACKEND`. |
@@ -835,6 +842,6 @@ Generated modules are checked in under `src/lumewarp_control_plane/_proto/`. Aft
 | `metrics.py` | Prometheus registry, metrics listener, DB-backed gauge refresher |
 | `security.py`, `authz/`, `errors.py`, `audit.py`, `outbox.py` | auth, action matrix and authorization backends, error shape, audit, recompile outbox |
 | `api/` | REST under `/api/v1` |
-| `compiler/`, `plugins.py` | snapshots, versions, diff, rollback, plugin host |
-| `grpc/`, `usage/` | ConfigService/UsageService, budgets |
+| `compiler/` | snapshots, versions, diff, rollback, plugin descriptors (`compiler/plugins.py`) |
+| `grpc/`, `usage/`, `mcp/` | ConfigService/UsageService, budgets, catalog reports |
 | `app.py`, `__main__.py`, `static.py` | app factory, lifespan, CLI, Admin UI static serving |

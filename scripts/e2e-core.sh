@@ -88,9 +88,10 @@ if [[ "$E2E_PG_URL" == *"127.0.0.1:55432"* ]] && ! (exec 3<>/dev/tcp/127.0.0.1/5
   "$root/scripts/dev-db.sh" up
 fi
 
-echo "== build gateway with the reference strategy crate"
+echo "== build WASM router plugins and their test gateway"
 # Before the plain build, which then leaves the usual binary at the usual path.
-(cd "$root/gateway" && cargo build -p lumewarp-gateway --features strategy-priority-failover)
+bash "$root/gateway/plugins/build.sh"
+(cd "$root/gateway" && cargo build -p lumewarp-gateway)
 cp "$root/gateway/target/debug/lumewarp" "$run_dir/lumewarp-with-strategy"
 export E2E_STRATEGY_GATEWAY_BIN="$run_dir/lumewarp-with-strategy"
 

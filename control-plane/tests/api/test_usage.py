@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from lumewarp_control_plane.models import CatalogName, ScopeType, TeamRole
+from lumewarp_control_plane.models import CatalogName, ScopeType, TeamRole, TrafficKind
 from lumewarp_control_plane.usage import ingest
 from tests.api.helpers import ADMIN_AUTH, auth, usage_event, usage_total, user_with_token
 from tests.factories import (
@@ -350,6 +350,61 @@ async def test_new_dimensions_keep_permission_scope(client, committed, dimension
     assert hidden.json()["items"] == []
     forbidden = query(client, auth(token), group_by=dimension, team_id=str(foreign.team_id))
     assert forbidden.status_code == 404
+
+
+async def test_mcp_and_a2a_events_are_filtered_and_grouped_by_kind(client, committed) -> None:
+    team = await make_team(committed)
+    key = await make_key(committed, team, await make_service_account(committed, team))
+    committed.add(usage_event(key, ts=TS, requested="chat"))
+    committed.add(
+        usage_event(key, ts=TS, kind=TrafficKind.MCP, target="s1", method="tools/call", tool="echo")
+    )
+    committed.add(usage_event(key, ts=TS, kind=TrafficKind.MCP, target="s1", method="tools/list"))
+    committed.add(
+        usage_event(key, ts=TS, kind=TrafficKind.A2A, target="agent", method="message/send")
+    )
+    # The pre-aggregated total only ever counted the LLM request.
+    committed.add(
+        usage_total(
+            ScopeType.TEAM,
+            team.id,
+            window_start=START,
+            requests=1,
+            prompt_tokens=10,
+            completion_tokens=5,
+            cost_nano_usd=1000,
+        )
+    )
+    await committed.commit()
+
+    by_kind = query(client, group_by="kind", team_id=str(team.id))
+    assert by_kind.status_code == 200, by_kind.text
+    assert {row["kind"]: row["requests"] for row in by_kind.json()["items"]} == {
+        "llm": 1,
+        "mcp": 2,
+        "a2a": 1,
+    }
+    # Nothing an MCP row carries may leak into an LLM row's totals.
+    llm = next(row for row in by_kind.json()["items"] if row["kind"] == "llm")
+    assert (llm["prompt_tokens"], llm["cost_nano_usd"]) == (10, 1000)
+
+    mcp = query(client, group_by="method,tool", team_id=str(team.id), kind="mcp")
+    assert mcp.status_code == 200, mcp.text
+    assert {(row["method"], row["tool"], row["requests"]) for row in mcp.json()["items"]} == {
+        ("tools/call", "echo", 1),
+        ("tools/list", "", 1),
+    }
+    by_target = query(client, group_by="target", team_id=str(team.id), method="message/send")
+    assert [(row["target"], row["requests"]) for row in by_target.json()["items"]] == [("agent", 1)]
+    only_echo = query(client, group_by="kind,tool", team_id=str(team.id), tool="echo")
+    assert [(row["kind"], row["requests"]) for row in only_echo.json()["items"]] == [("mcp", 1)]
+    # The team totals fast path holds LLM requests only: four events, one aggregated request.
+    totals = query(client, group_by="team", team_id=str(team.id))
+    assert [row["requests"] for row in totals.json()["items"]] == [1]
+    # A kind filter cannot be served from it, so the same question reads raw events.
+    mcp_requests = query(client, group_by="team", team_id=str(team.id), kind="mcp")
+    assert [row["requests"] for row in mcp_requests.json()["items"]] == [2]
+    assert query(client, team_id=str(team.id), kind="shim").status_code == 422
 
 
 @pytest.mark.parametrize(

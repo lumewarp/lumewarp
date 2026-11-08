@@ -742,6 +742,7 @@ impl Config {
                     allowed_models: key.allowed_models.clone(),
                     rate_limit_scopes: scopes,
                     budget_window_end_unix_ms: 0,
+                    ..Default::default()
                 }),
                 ..Default::default()
             });
@@ -815,6 +816,7 @@ impl Config {
                 caps
             },
             scope: String::new(),
+            ..Default::default()
         })
     }
 }

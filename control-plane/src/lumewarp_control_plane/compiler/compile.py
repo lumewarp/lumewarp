@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
-from lumewarp_control_plane.compiler.strategy import BUILTIN_STRATEGIES, params_json
+from lumewarp_control_plane.compiler.plugins import BUILTIN_PLUGINS, params_json
 from lumewarp_control_plane.compiler.validate import (
     DEFAULT_BODY_RESERVED_KEYS,
     RESERVED_ALIASES,
@@ -33,6 +33,7 @@ from lumewarp_control_plane.models import (
     Model,
     ModelAccess,
     Org,
+    PluginKind,
     PolicyGrant,
     Router,
     RouterFallback,
@@ -427,7 +428,7 @@ async def compile_scope(
             warnings.append(f"router {r.name!r} left out: name is empty or reserved")
             continue
         weighted = r.strategy == "weighted"
-        builtin = r.strategy in BUILTIN_STRATEGIES
+        builtin = r.strategy in BUILTIN_PLUGINS[PluginKind.ROUTER_STRATEGY]
         router = pb.Router(
             name=r.name,
             strategy=r.strategy,

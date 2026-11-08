@@ -18,6 +18,132 @@ curl -N -H 'content-type: application/json' \
   http://127.0.0.1:9000/v1/chat/completions
 ```
 
+## Example MCP server and A2A agent
+
+`mcp-a2a-mock` (same Cargo project) serves an example MCP server and an example A2A
+agent for gateway development, e2e tests and local demos. The benchmark upstream above is
+unchanged; this is a separate binary with separate ports.
+
+```sh
+cd bench/mock-upstream
+cargo build --release --bins
+./target/release/mcp-a2a-mock mcp     # MCP   http://127.0.0.1:9110/mcp
+./target/release/mcp-a2a-mock a2a     # A2A   http://127.0.0.1:9120/a2a
+```
+
+Ports 9110 and 9120 are defaults (`--listen` changes them); do not use 9000, which the
+benchmark upstream (and MinIO on a dev machine) may hold. `scripts/dev.sh` starts both next
+to the benchmark mock and prints their URLs.
+
+### MCP server (revision `2025-11-25`, Streamable HTTP)
+
+The MCP endpoint is one path (`/mcp`) and supports `POST`, `GET` and `DELETE`:
+
+- `POST initialize` (no session) negotiates `2025-11-25` or `2025-06-18` and returns an
+  `Mcp-Session-Id`. Every later message must carry that header and, after initialization,
+  `MCP-Protocol-Version: <negotiated>`; an unknown session is `404`, a missing one `400`,
+  and an unsupported version header `400`.
+- `POST notifications/initialized` and other notifications answer `202` with no body.
+- `GET /mcp` with `Accept: text/event-stream` opens the server→client stream. Every control
+  call that changes the tool list (add, remove, description, reset) sends
+  `notifications/tools/list_changed` there. One GET stream per session is kept; a new GET
+  replaces the previous one (the spec forbids delivering the same message twice).
+- `DELETE /mcp` ends the session (`204`); afterwards its id is `404`.
+
+Tools (deterministic order, `--tools-page-size N` paginates every N with an opaque
+`nextCursor`):
+
+| Tool | Arguments | Behaviour |
+| --- | --- | --- |
+| `echo` | `message` | Returns the message as text. |
+| `add` | `a`, `b` | Sum as text plus `structuredContent.sum`. |
+| `slow` | `delay_ms`, `steps` | Sleeps per step; with `Accept: text/event-stream` it streams `notifications/progress` (when `_meta.progressToken` is set) and then the result. |
+| `ask` | `question` | Sends `elicitation/create` on this POST's SSE stream, waits for the client's JSON-RPC response POST and returns its answer. |
+| `whoami` | none | Returns the `Authorization`, whether `X-Lumewarp-Key` was present, the session id and all headers. |
+| `admin_only` | none | Present only when the role header (`x-mock-role`, configurable) equals `admin` (configurable). |
+
+`ask` needs the client to declare form-mode elicitation at initialize
+(`capabilities.elicitation: {}` or `{"form":{}}`) and to accept SSE; otherwise it returns
+`isError: true` instead of sending a request the client never agreed to receive. The mock
+waits `--elicitation-timeout-ms` (default 30000) for the response POST, then returns an
+`isError` result. The pending request is keyed by session and JSON-RPC id, so a response
+posted with another session's `Mcp-Session-Id` is rejected with `400` — exactly the
+request-id routing a proxy has to preserve.
+
+Prompt `greet` (`prompts/list`, `prompts/get` with `arguments.name`) is also served.
+Invalid tool arguments are `isError: true` results (SEP-1303); an unknown tool is `-32602`.
+A `tools/call` carrying `params.task` is refused with `-32601` because the mock does not
+advertise the `tasks` capability. Other flags: `--path` (default `/mcp`), `--role-header`
+and `--role-admin-value` (role-dependent `admin_only`), `--prompts-page-size`,
+`--allow-origin` (repeatable) and `--allow-any-origin`.
+
+### A2A agent (v1.0, JSON-RPC + SSE)
+
+The agent card is at `GET /.well-known/agent-card.json` (with `ETag` and
+`Cache-Control`); `supportedInterfaces[0]` points at the JSON-RPC URL. Methods are the
+v1.0 PascalCase names: `SendMessage`, `SendStreamingMessage`, `GetTask`, `ListTasks`,
+`CancelTask`, `SubscribeToTask`. Tasks are kept in memory; `returnImmediately` returns a
+working task that keeps producing updates in the background. The four push-configuration
+methods and `SendMessage` with an embedded push configuration answer
+`PushNotificationNotSupportedError` (`-32003`), and `GetExtendedAgentCard` is `-32004`.
+
+A message produces a text artifact and, unless `--no-secret-artifact` is given, an artifact
+whose part has `mediaType` from `--artifact-media-type` (default
+`application/x-mock-secret`) — use it to test the `strip-artifacts` middleware.
+`SendStreamingMessage` sends the `Task`, status updates, artifact updates and a terminal
+`TASK_STATE_COMPLETED` status, then closes. `--stream-step-ms` (default 50) controls the
+delay between updates; `--no-streaming` removes the streaming capability and methods;
+`--no-signature` omits the dummy `signatures` entry from the card; `--public-url` sets the
+base URL the card advertises.
+
+### Authentication (per server)
+
+| Flags | Behaviour |
+| --- | --- |
+| `--auth none` | Default; nothing is checked. |
+| `--auth bearer --bearer TOKEN` | Requires exactly `Authorization: Bearer TOKEN`. |
+| `--auth any-bearer` | Requires any non-empty `Authorization: Bearer <token>` (a passthrough user token). |
+| `--auth hmac --hmac-secret SECRET` | Verifies `x-lumewarp-signature`; see [HMAC.md](HMAC.md). `--hmac-skew-ms` defaults to 300000. |
+
+A `401` carries a `WWW-Authenticate` challenge. The agent card and `GET /health` stay
+public; the control endpoints below are loopback-only and unauthenticated.
+
+### Control endpoints (loopback only, path prefix `/_mock/`)
+
+A request from a non-loopback peer gets `403`, even when the server is bound to `0.0.0.0`.
+Header values are logged verbatim, secrets included; this is a test tool, not a service.
+
+| Request | Effect |
+| --- | --- |
+| `GET /_mock/headers?n=20` | The last N request header sets (`at_ms`, `peer`, `method`, `path`, headers). |
+| `GET /_mock/tools` (MCP) | Current tool definitions, including role-hidden ones. |
+| `POST /_mock/tool` (MCP) | Add or replace a tool definition (JSON body is the tool). |
+| `POST /_mock/tool/description` (MCP) | `{"name", "description"}` — the rug-pull test. |
+| `POST /_mock/tool/remove` (MCP) | `{"name"}`. |
+| `GET /_mock/tasks` (A2A) | In-memory tasks as rendered by `GetTask`. |
+| `POST /_mock/reset` | Restore the default tools, clear the header log and tasks. |
+
+Every MCP tool-list mutation also emits `notifications/tools/list_changed` on the active
+GET stream(s).
+
+### Registering them in the Admin UI
+
+The MCP and A2A pages are not built yet; when they are, register each as a regular
+upstream with these generic fields:
+
+- **MCP server**: name (e.g. `mock`), URL `http://127.0.0.1:9110/mcp`, auth plugin. Use
+  `none` for a public local mock, `static_bearer` with the same token as `--bearer`, or
+  `hmac-signature` with the shared secret as `LUMEWARP_PLUGIN_SECRET_HMAC_SIGNATURE_KEY`
+  in the gateway environment (never in the params). Review mode `off` or `tofu` is the
+  convenient choice for demos.
+- **A2A agent**: name (e.g. `mock-agent`), JSON-RPC URL `http://127.0.0.1:9120/a2a`,
+  card URL `http://127.0.0.1:9120/.well-known/agent-card.json` (or leave it empty so the
+  gateway derives it from the URL origin), same auth choices as MCP, no middleware unless
+  testing `strip-artifacts`.
+
+The gateway replaces the card's `supportedInterfaces[].url` with its own URL and drops the
+upstream `signatures`; point clients at the gateway, never at these ports directly.
+
 ## Mock options
 
 | Flag | Default | Meaning |
@@ -140,4 +266,9 @@ cargo test
 
 Tests bind ephemeral loopback ports and cover response shapes, event ordering,
 usage chunks, incremental delivery, raw echo preservation, embeddings, error
-responses and the load client's fragmented/malformed SSE handling.
+responses and the load client's fragmented/malformed SSE handling. `tests/mcp.rs`
+and `tests/a2a.rs` drive the example servers over HTTP: initialize/sessions,
+pagination, SSE progress, the `ask` elicitation round trip, GET notifications,
+HMAC/bearer auth, control endpoints (including their refusal of non-loopback
+peers), the agent card, streaming task updates, `ListTasks`, `CancelTask` and
+`-32003` for push configuration.

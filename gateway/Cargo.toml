@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/*", "strategies/*"]
+members = ["crates/*", "crates/lumewarp-plugin-sdk/schema"]
+exclude = ["plugins/router/cheapest-first", "plugins/router/priority-failover"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +13,9 @@ repository = "https://github.com/lumewarp/lumewarp"
 [workspace.dependencies]
 lumewarp-config = { path = "crates/lumewarp-config" }
 lumewarp-proto = { path = "crates/lumewarp-proto" }
+
+wasmtime = { version = "38", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
+wit-bindgen = "0.46"
 
 anyhow = "1"
 arc-swap = "1"

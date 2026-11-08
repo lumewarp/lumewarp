@@ -19,7 +19,7 @@ from lumewarp_control_plane.models import (
     UpstreamKind,
 )
 from tests import factories
-from tests.api.helpers import report_strategies
+from tests.api.helpers import report_plugins
 from tests.compiler.helpers import SCOPE, add_router, load_version, seed_scope, touch
 
 GROUPS = [
@@ -59,7 +59,7 @@ async def _seed(factory):
     # What the custom groups roll back to still has to exist on a gateway.
     async with factory() as session:
         any_settings = ({"type": "object"}, {"type": "object"})
-        await report_strategies(
+        await report_plugins(
             session, SCOPE, "g", {"first_healthy": any_settings, "header_pin": any_settings}
         )
 

@@ -78,12 +78,14 @@ jobs:
           workspaces: gateway
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
+      - name: Build the example and test WASM plugins
+        run: bash plugins/build.sh --tests
       - run: cargo test
-      - name: Built-in strategy manifest matches the control plane's copy
+      - name: Built-in plugin manifest matches the control plane's copy
         run: |
-          manifest=../control-plane/src/lumewarp_control_plane/compiler/builtin_strategies.json
-          if ! cargo run --locked -q -p lumewarp-gateway -- strategies --json | diff - "$manifest"; then
-            echo "::error::regenerate with: cd gateway && cargo run -p lumewarp-gateway -- strategies --json > $manifest"
+          manifest=../control-plane/src/lumewarp_control_plane/compiler/builtin_plugins.json
+          if ! cargo run --locked -q -p lumewarp-gateway -- plugins --json | diff - "$manifest"; then
+            echo "::error::regenerate with: cd gateway && cargo run -p lumewarp-gateway -- plugins --json > $manifest"
             exit 1
           fi
 

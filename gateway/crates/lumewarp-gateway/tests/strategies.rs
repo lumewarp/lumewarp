@@ -1,160 +1,184 @@
-//! `lumewarp strategies --json` is the manifest the control plane validates
-//! against. The committed copy holds the built-ins, so they validate without a
-//! gateway connected; a gateway built with a strategy feature reports that
-//! crate too. The built-ins are compared with the committed file and the custom
-//! entries with the features compiled into this test binary, so `cargo test`
-//! passes with none, one or every strategy feature enabled.
-
-use std::{collections::BTreeSet, path::Path, process::Command};
-
+//! Startup plugin descriptors and standalone validation.
 use serde_json::Value;
+use std::{path::PathBuf, process::Command};
+mod common;
 
-fn manifest() -> Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_lumewarp"))
-        .args(["strategies", "--json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
-        panic!(
-            "manifest is not JSON: {error}\n{}",
-            String::from_utf8_lossy(&output.stdout)
-        )
-    })
-}
-
-fn committed_manifest() -> Value {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../control-plane/src/lumewarp_control_plane/compiler/builtin_strategies.json");
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
-}
-
-fn strategy_names(manifest: &Value) -> BTreeSet<&str> {
-    manifest["strategies"]
-        .as_array()
-        .expect("strategies array")
-        .iter()
-        .map(|strategy| strategy["name"].as_str().expect("strategy name"))
-        .collect()
-}
-
-#[test]
-fn builtins_match_the_control_plane_copy() {
-    let manifest = manifest();
-    let committed = committed_manifest();
-    // Custom entries are not in the committed copy; the next test covers them.
-    let builtin_names = strategy_names(&committed);
-    let builtins: Vec<&Value> = manifest["strategies"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|strategy| builtin_names.contains(strategy["name"].as_str().unwrap()))
-        .collect();
-    assert_eq!(
-        manifest["api_version"], committed["api_version"],
-        "the binary and the committed manifest report different API versions"
-    );
-    assert_eq!(
-        Value::Array(builtins.into_iter().cloned().collect()),
-        committed["strategies"],
-        "built-in descriptors changed; regenerate with: cargo run -p lumewarp-gateway -- \
-         strategies --json > control-plane/src/lumewarp_control_plane/compiler/builtin_strategies.json"
-    );
-}
-
-/// One line per custom strategy feature in `crates/lumewarp-gateway/Cargo.toml`,
-/// in the manifest's order (sorted by name). Adding a strategy adds a line here.
-fn compiled_custom_strategies() -> Vec<&'static str> {
-    let mut names = Vec::new();
-    if cfg!(feature = "strategy-cheapest-first") {
-        names.push("cheapest_first");
+#[tokio::test]
+async fn looping_plugin_times_out_and_request_is_served_by_fallback() {
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper::Request;
+    use std::time::Duration;
+    let plugin_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/plugins-test/router");
+    if !plugin_dir.join("loop-test.wasm").exists() {
+        eprintln!("SKIP: build loop fixture with bash gateway/plugins/build.sh --tests");
+        return;
     }
-    if cfg!(feature = "strategy-priority-failover") {
-        names.push("priority_failover");
+    let upstream = common::Mock::start(common::Behavior::Json).await;
+    let listen = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listen.local_addr().unwrap();
+    let admin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let admin_addr = admin.local_addr().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.yaml");
+    std::fs::write(&path, format!("server: {{listen: '{addr}', admin_listen: '{admin_addr}'}}\nupstreams: [{{name: u, kind: vllm, base_url: 'http://{}/prefix/v1'}}]\nmodels: [{{name: m, upstream: u, upstream_model: actual}}]\nrouters: [{{name: public, strategy: loop_test, members: [{{model: m}}], fallbacks: [m], retry: {{max_attempts: 2}}}}]\n", upstream.addr)).unwrap();
+    drop(listen);
+    drop(admin);
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
     }
-    names
-}
-
-#[test]
-fn custom_strategies_are_exactly_the_compiled_features() {
-    let manifest = manifest();
-    let committed = committed_manifest();
-    let builtin_names = strategy_names(&committed);
-    let custom: Vec<&Value> = manifest["strategies"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|strategy| !builtin_names.contains(strategy["name"].as_str().unwrap()))
-        .collect();
-    let custom_names: Vec<&str> = custom
-        .iter()
-        .map(|strategy| strategy["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        custom_names,
-        compiled_custom_strategies(),
-        "a custom entry must come from a selected strategy feature, and every selected \
-         feature must add one"
-    );
-    for strategy in custom {
-        let name = strategy["name"].as_str().unwrap();
-        assert_eq!(
-            strategy["digest"].as_str().map(str::len),
-            Some(64),
-            "{name}: digest"
-        );
-        assert!(
-            strategy["params_schema"].is_object(),
-            "{name}: params_schema"
-        );
-        assert!(
-            strategy["member_schema"].is_object(),
-            "{name}: member_schema"
-        );
-    }
-}
-
-#[test]
-fn the_subcommand_needs_no_configuration() {
-    let output = Command::new(env!("CARGO_BIN_EXE_lumewarp"))
-        .arg("strategies")
-        .env_remove("LUMEWARP_CONFIG")
-        .env_remove("LUMEWARP_CONTROL_PLANE")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let listing = String::from_utf8(output.stdout).unwrap();
-    assert!(listing.contains("least_in_flight"), "{listing}");
-}
-
-/// Standalone mode has no control plane to validate first: `configure` refuses
-/// at load, built-ins included, and the process never starts serving.
-#[test]
-fn standalone_yaml_is_validated_by_configure_at_load() {
-    let run = |routers: &str| {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
-        let yaml = format!(
-            "upstreams: [{{name: u, kind: vllm, base_url: 'http://127.0.0.1:9/v1'}}]\n\
-             models: [{{name: m, upstream: u, upstream_model: x}}]\n\
-             routers: [{routers}]\n"
-        );
-        std::fs::write(&path, yaml).unwrap();
+    let mut process = Child(
         Command::new(env!("CARGO_BIN_EXE_lumewarp"))
             .arg("--config")
-            .arg(&path)
-            .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
-            .output()
-            .unwrap()
-    };
-    let refused = run("{name: r, strategy: weighted, members: [{model: m, params: {zone: a}}]}");
-    assert!(!refused.status.success());
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(stderr.contains("strategy configuration failed"), "{stderr}");
-    assert!(!stderr.contains("zone"), "{stderr}");
+            .arg(path)
+            .env("LUMEWARP_ROUTER_PLUGIN_DIR", plugin_dir)
+            .env_remove("LUMEWARP_AUTH_PLUGIN_DIR")
+            .env_remove("LUMEWARP_A2A_MIDDLEWARE_DIR")
+            .spawn()
+            .unwrap(),
+    );
+    let client = common::client();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            assert!(process.0.try_wait().unwrap().is_none(), "gateway exited");
+            let req = Request::builder()
+                .uri(format!("http://{admin_addr}/readyz"))
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+            if let Ok(response) = client.request(req).await {
+                if response.status() == 200 {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("http://{addr}/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from_static(
+            br#"{"model":"public","messages":[{"role":"user","content":"hello"}]}"#,
+        )))
+        .unwrap();
+    let response = client.request(request).await.unwrap();
+    assert_eq!(response.status(), 200);
+    response.into_body().collect().await.unwrap();
+    let request = Request::builder()
+        .uri(format!("http://{admin_addr}/metrics"))
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let metrics = client
+        .request(request)
+        .await
+        .unwrap()
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let metrics = String::from_utf8_lossy(&metrics);
+    assert!(metrics.contains("lumewarp_plugin_calls_total{kind=\"router-strategy\",plugin=\"loop_test\",result=\"timeout\"} 1"), "{metrics}");
+}
 
-    let refused = run("{name: r, strategy: not_compiled_in, members: [{model: m}]}");
-    assert!(!refused.status.success());
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(stderr.contains("not_compiled_in"), "{stderr}");
+fn command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lumewarp"));
+    for var in [
+        "LUMEWARP_ROUTER_PLUGIN_DIR",
+        "LUMEWARP_AUTH_PLUGIN_DIR",
+        "LUMEWARP_A2A_MIDDLEWARE_DIR",
+        "LUMEWARP_CONFIG",
+        "LUMEWARP_CONTROL_PLANE",
+    ] {
+        command.env_remove(var);
+    }
+    command.args(["plugins", "--json"]);
+    command
+}
+#[test]
+fn builtin_descriptors_need_no_configuration() {
+    let output = command().output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let descriptors: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(descriptors.len(), 7);
+    for name in [
+        "weighted",
+        "least_in_flight",
+        "lowest_latency",
+        "vllm_load",
+        "none",
+        "static_bearer",
+        "passthrough",
+    ] {
+        let d = descriptors.iter().find(|d| d["name"] == name).unwrap();
+        assert_eq!(d["builtin"], true);
+        assert_eq!(d["wasm_sha256"], "");
+        assert_eq!(d["digest"].as_str().unwrap().len(), 64);
+    }
+}
+fn fixture() -> Option<PathBuf> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/plugins/router/cheapest-first.wasm");
+    if !path.exists() {
+        eprintln!("SKIP: build fixtures with bash gateway/plugins/build.sh");
+        return None;
+    }
+    Some(path)
+}
+#[test]
+fn wrong_kind_and_duplicate_are_fatal() {
+    let Some(fixture) = fixture() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(&fixture, dir.path().join("a.wasm")).unwrap();
+    let wrong = command()
+        .env("LUMEWARP_AUTH_PLUGIN_DIR", dir.path())
+        .output()
+        .unwrap();
+    assert!(!wrong.status.success());
+    let error = String::from_utf8_lossy(&wrong.stderr);
+    assert!(
+        error.contains("a.wasm") && error.contains("expected auth world"),
+        "{error}"
+    );
+    std::fs::copy(fixture, dir.path().join("b.wasm")).unwrap();
+    let duplicate = command()
+        .env("LUMEWARP_ROUTER_PLUGIN_DIR", dir.path())
+        .output()
+        .unwrap();
+    assert!(!duplicate.status.success());
+    assert!(
+        String::from_utf8_lossy(&duplicate.stderr).contains("duplicate plugin name cheapest_first")
+    );
+}
+#[test]
+fn missing_directory_is_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!command()
+        .env("LUMEWARP_ROUTER_PLUGIN_DIR", dir.path().join("missing"))
+        .output()
+        .unwrap()
+        .status
+        .success());
+}
+#[test]
+fn builtin_member_params_fail_without_leaking_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.yaml");
+    std::fs::write(&path, "upstreams: [{name: u, kind: vllm, base_url: 'http://127.0.0.1:9/v1'}]\nmodels: [{name: m, upstream: u, upstream_model: x}]\nrouters: [{name: r, strategy: weighted, members: [{model: m, params: {zone: private}}]}]\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_lumewarp"))
+        .arg("--config")
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("strategy configuration failed"), "{stderr}");
+    assert!(!stderr.contains("private"));
 }

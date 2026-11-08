@@ -254,6 +254,7 @@ fn key(id: &str, secret: &str, models: &[&str], scopes: Vec<RateLimitScope>) -> 
             allowed_models: models.iter().map(|m| m.to_string()).collect(),
             rate_limit_scopes: scopes,
             budget_window_end_unix_ms: 0,
+            ..Default::default()
         }),
         ..Default::default()
     }
@@ -291,6 +292,8 @@ fn snapshot(upstream: SocketAddr) -> Snapshot {
         ..Default::default()
     };
     Snapshot {
+        mcp_servers: vec![],
+        a2a_agents: vec![],
         version: 7,
         upstreams: vec![
             config("u", upstream, StreamUsageMode::Unspecified),

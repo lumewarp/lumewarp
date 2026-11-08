@@ -343,6 +343,23 @@ def upgrade() -> None:
         sa.Column("upstream_model", sa.String(length=400), server_default="", nullable=False),
         sa.Column("fallback", sa.Boolean(), server_default="false", nullable=False),
         sa.Column("attempts", sa.BigInteger(), server_default="0", nullable=False),
+        sa.Column(
+            "kind",
+            sa.Enum(
+                "llm",
+                "mcp",
+                "a2a",
+                name="traffic_kind",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            server_default="llm",
+            nullable=False,
+        ),
+        sa.Column("target", sa.String(length=200), server_default="", nullable=False),
+        sa.Column("method", sa.String(length=128), server_default="", nullable=False),
+        sa.Column("tool", sa.String(length=400), server_default="", nullable=False),
         sa.Column("model_id", sa.Uuid(), nullable=True),
         sa.Column("alias_id", sa.Uuid(), nullable=True),
         sa.Column("router_id", sa.Uuid(), nullable=True),
@@ -401,6 +418,7 @@ def upgrade() -> None:
         postgresql_where=sa.text("alias_id IS NOT NULL"),
     )
     op.create_index("ix_usage_events_key_ts", "usage_events", ["key_id", "ts"], unique=False)
+    op.create_index("ix_usage_events_kind_ts", "usage_events", ["kind", "ts"], unique=False)
     op.create_index("ix_usage_events_model_id_ts", "usage_events", ["model_id", "ts"], unique=False)
     op.create_index("ix_usage_events_model_ts", "usage_events", ["model", "ts"], unique=False)
     op.create_index("ix_usage_events_owner_ts", "usage_events", ["owner_id", "ts"], unique=False)
@@ -1533,9 +1551,22 @@ def upgrade() -> None:
         postgresql_where=sa.text("previous_key_hash IS NOT NULL"),
     )
     op.create_table(
-        "gateway_strategies",
+        "gateway_plugins",
         sa.Column("scope", sa.String(length=128), nullable=False),
         sa.Column("gateway_id", sa.String(length=200), nullable=False),
+        sa.Column(
+            "kind",
+            sa.Enum(
+                "router-strategy",
+                "upstream-auth",
+                "a2a-middleware",
+                name="plugin_kind",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            nullable=False,
+        ),
         sa.Column("name", sa.String(length=63), nullable=False),
         sa.Column("digest", sa.String(length=128), nullable=False),
         sa.Column("descriptor", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
@@ -1544,16 +1575,18 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["scope", "gateway_id"],
             ["gateway_sessions.scope", "gateway_sessions.gateway_id"],
-            name=op.f("fk_gateway_strategies_scope_gateway_id_gateway_sessions"),
+            name=op.f("fk_gateway_plugins_scope_gateway_id_gateway_sessions"),
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
             ["token_id"],
             ["gateway_tokens.id"],
-            name=op.f("fk_gateway_strategies_token_id_gateway_tokens"),
+            name=op.f("fk_gateway_plugins_token_id_gateway_tokens"),
             ondelete="CASCADE",
         ),
-        sa.PrimaryKeyConstraint("scope", "gateway_id", "name", name=op.f("pk_gateway_strategies")),
+        sa.PrimaryKeyConstraint(
+            "scope", "gateway_id", "kind", "name", name=op.f("pk_gateway_plugins")
+        ),
     )
     op.create_table(
         "policy_grants",
@@ -1702,7 +1735,7 @@ def downgrade() -> None:
     )
     op.drop_index(op.f("ix_policy_grants_name_id"), table_name="policy_grants")
     op.drop_table("policy_grants")
-    op.drop_table("gateway_strategies")
+    op.drop_table("gateway_plugins")
     op.drop_index(
         "uq_api_keys_previous_key_hash",
         table_name="api_keys",

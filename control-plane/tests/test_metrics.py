@@ -24,7 +24,7 @@ CONTRACT = {
     "lumewarp_cp_compile_duration_seconds": ("histogram", set()),
     "lumewarp_cp_compile_failures": ("counter", set()),
     "lumewarp_cp_config_version": ("gauge", set()),
-    "lumewarp_cp_gateway_strategies_ignored": ("counter", set()),
+    "lumewarp_cp_gateway_plugins_ignored": ("counter", {"kind"}),
     "lumewarp_cp_outbox_pending": ("gauge", set()),
     "lumewarp_cp_gateway_sessions": ("gauge", set()),
     "lumewarp_cp_gateway_acks": ("counter", {"result"}),

@@ -1,23 +1,15 @@
-//! Version 2 of the compiled-in routing strategy API.
+//! Native, allocation-free candidate views and built-in router dispatch.
 //!
-//! `configure` runs once per router on snapshot application. `pick` must not do
-//! I/O, block, or allocate in the common case. Given the same candidate state,
-//! request and RNG stream it must be deterministic. Return `None` only when no
-//! candidate is acceptable; the gateway then tries its existing fall-through
-//! paths. Model eligibility, retries, splits and breakers belong to the
-//! gateway, not to a strategy. Candidates expose eligible models only.
+//! Custom policies are WASM components authored with `lumewarp-plugin-sdk`,
+//! never gateway feature flags or linked strategy crates. The SDK reuses these
+//! read-only policy views inside the guest. Registration remains an internal
+//! mechanism for built-in metadata and isolated policy tests; the production
+//! gateway accepts only built-ins and components from its startup registry.
 //!
-//! A strategy declares its settings as Rust types: [`register!`] derives the
-//! JSON Schema the control plane validates against and the UI renders from the
-//! same structs `configure` receives (`docs/router-strategies.md`).
-//!
-//! Request headers are readable only when named in `params.headers` (an array
-//! of HTTP header names). The gateway removes that reserved field before
-//! `configure`. There is deliberately no prompt or body interface.
-//! Strategies are linked at compile time with [`register!`]; inventory avoids
-//! requiring edits to the gateway's dispatcher when adding a strategy crate.
+//! Eligibility, retries, splits and breakers belong to the gateway. Headers
+//! are available only through the configured allowlist; bodies are not exposed.
 
-mod schema;
+use lumewarp_plugin_schema as schema;
 
 use std::ops::Range;
 
@@ -33,6 +25,12 @@ pub const API_VERSION: u32 = 2;
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct ConfigError(pub String);
+
+impl ConfigError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Needs {
@@ -120,6 +118,12 @@ impl<'a> RequestInfo<'a> {
             allowed_headers,
             lookup,
         }
+    }
+
+    pub fn headers(&self) -> impl Iterator<Item = (&str, &'a [u8])> {
+        self.allowed_headers
+            .iter()
+            .filter_map(|name| (self.lookup)(name).map(|value| (name.as_str(), value)))
     }
 
     pub fn header(&self, name: &str) -> Option<&'a [u8]> {

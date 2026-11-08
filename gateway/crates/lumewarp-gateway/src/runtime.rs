@@ -8,6 +8,15 @@ use std::{
 
 use crate::{balance, health, metrics::Metrics, proxy, ratelimit, usage::UsageSink};
 
+struct PluginMetrics(HashMap<String, HashMap<String, crate::metrics::PluginHandles>>);
+impl lumewarp_plugin_host::Metrics for PluginMetrics {
+    fn record(&self, kind: &str, plugin: &str, result: &str, seconds: f64) {
+        if let Some(handle) = self.0.get(kind).and_then(|plugins| plugins.get(plugin)) {
+            handle.record(result, std::time::Duration::from_secs_f64(seconds));
+        }
+    }
+}
+
 pub struct Runtime {
     /// Shared with the usage reporter, which exists before the runtime.
     pub metrics: Arc<Metrics>,
@@ -31,6 +40,25 @@ impl Runtime {
 
     /// Control plane: `metrics` is the `Arc` given to `spawn_reporter`.
     pub fn with_usage(metrics: Arc<Metrics>, usage: UsageSink) -> Arc<Self> {
+        let mut handles: HashMap<String, HashMap<String, crate::metrics::PluginHandles>> =
+            HashMap::new();
+        for descriptor in lumewarp_plugin_host::global()
+            .descriptors()
+            .into_iter()
+            .filter(|d| !d.builtin)
+        {
+            let kind = match descriptor.kind {
+                1 => "router-strategy",
+                2 => "upstream-auth",
+                _ => "a2a-middleware",
+            };
+            handles.entry(kind.into()).or_default().insert(
+                descriptor.name.clone(),
+                metrics.plugin_handles(kind, &descriptor.name),
+            );
+        }
+        // One runtime per serving process; tests may construct several native-only runtimes.
+        let _ = lumewarp_plugin_host::install_metrics(Arc::new(PluginMetrics(handles)));
         Arc::new(Self {
             metrics,
             inflight: InFlightRegistry::default(),

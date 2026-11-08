@@ -673,6 +673,8 @@ impl UsageCapture {
             started_at_unix_ms: self.request.started_at_unix_ms,
             cost_nano_usd: cost.unwrap_or(0),
             cost_known: cost.is_some(),
+            kind: lumewarp_proto::usage::v1::TrafficKind::Llm as i32,
+            ..Default::default()
         });
     }
 }

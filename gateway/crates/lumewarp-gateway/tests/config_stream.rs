@@ -20,8 +20,8 @@ use http_body_util::Full;
 use hyper::Request;
 use lumewarp_proto::config::v1::{
     config_update::Update, gateway_message::Msg, Alias, ApiKey, ConfigUpdate, Delta,
-    EffectivePolicy, KeyStatus, Model, NackCode, Router, RouterMember, Snapshot, Upstream,
-    UpstreamKind,
+    EffectivePolicy, KeyStatus, Model, NackCode, PluginKind, Router, RouterMember, Snapshot,
+    Upstream, UpstreamKind,
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -294,23 +294,29 @@ async fn full_then_delta_with_durable_acks() {
     // The binary links every strategy feature; this test only relies on the
     // built-ins. `tests/strategies.rs` covers the custom entries.
     let builtins = ["least_in_flight", "lowest_latency", "vllm_load", "weighted"];
-    let names: Vec<_> = hello
-        .strategies
+    let routers: Vec<_> = hello
+        .plugins
+        .iter()
+        .filter(|d| d.kind == PluginKind::RouterStrategy as i32)
+        .collect();
+    let names: Vec<_> = routers
         .iter()
         .map(|d| d.name.as_str())
         .filter(|name| builtins.contains(name))
         .collect();
     assert_eq!(names, builtins);
-    let vllm = hello
-        .strategies
+    let vllm = routers
         .iter()
         .find(|d| d.name == "vllm_load")
         .expect("vllm_load is built in");
-    assert_eq!(vllm.needs, ["vllm_load"]);
-    assert!(!vllm.uses_weight);
+    assert!(vllm.builtin);
+    let info = vllm.router.as_ref().expect("router metadata");
+    assert_eq!(info.needs, ["vllm_load"]);
+    assert!(!info.uses_weight);
+    assert_eq!(hello.plugin_abi, 1);
     assert_eq!(vllm.digest.len(), 64);
     assert_eq!(
-        vllm.member_schema_json,
+        info.member_schema_json,
         r#"{"additionalProperties":false,"type":"object"}"#
     );
     assert_eq!(gw.readyz().await, 503);

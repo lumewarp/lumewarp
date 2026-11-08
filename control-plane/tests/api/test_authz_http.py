@@ -339,7 +339,7 @@ async def test_a_pat_authorizes_exactly_like_a_session(client, committed, role) 
         ("GET", "/upstreams", None),
         ("GET", "/models", None),
         ("GET", "/routers", None),
-        ("GET", "/strategies", None),
+        ("GET", "/plugins", None),
         ("GET", "/catalog", None),
     ]
     for method, path, body in requests:

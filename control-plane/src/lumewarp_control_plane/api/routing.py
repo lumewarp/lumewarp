@@ -63,15 +63,15 @@ from lumewarp_control_plane.api.schemas import (
     UpstreamUpdate,
 )
 from lumewarp_control_plane.authz import Action, Authz
-from lumewarp_control_plane.compiler.strategy import (
-    StrategyRegistry,
-    StrategyRejected,
+from lumewarp_control_plane.compiler.plugins import (
+    PluginRegistry,
+    PluginRejected,
     audit_forced,
-    check_router_strategy,
-    load_strategies,
+    load_plugins,
     member_settings,
     params_problem,
-    strategy_problem,
+    router_problem,
+    validate_plugin_params,
 )
 from lumewarp_control_plane.errors import ApiError, not_found
 from lumewarp_control_plane.models import (
@@ -80,6 +80,7 @@ from lumewarp_control_plane.models import (
     CatalogName,
     GatewaySession,
     Model,
+    PluginKind,
     Router,
     RouterFallback,
     RouterMember,
@@ -275,7 +276,7 @@ def _members_problem(members: list[RouterMemberIn], field_name: str) -> None:
 
 async def _validate_spec(session: AsyncSession, spec: RouterSpec) -> None:
     """422 for anything the gateway would reject, and for members that are not models."""
-    if problem := strategy_problem(spec.strategy, spec.params):
+    if problem := router_problem(spec.strategy, spec.params):
         raise validation_error("strategy", problem)
     member_ids = [m.model_id for m in spec.members]
     ensure_unique_ids(member_ids, "members")
@@ -318,16 +319,17 @@ async def _validate_strategy(
     session: AsyncSession, settings: Any, spec: RouterSpec, *, force: bool
 ) -> list[str]:
     """One registry, read once. Returns the connected gateways `force` saved past."""
-    registry = await load_strategies(session, settings.scope)
     try:
-        return check_router_strategy(
-            registry,
+        return await validate_plugin_params(
+            session,
+            PluginKind.ROUTER_STRATEGY,
             spec.strategy,
             spec.params,
-            member_settings(spec.members, spec.traffic_split),
+            members=member_settings(spec.members, spec.traffic_split),
             force=force,
+            scope=settings.scope,
         )
-    except StrategyRejected as exc:
+    except PluginRejected as exc:
         raise validation_error(exc.field, exc.message) from exc
 
 
@@ -397,7 +399,7 @@ def _apply_scalars(row: Router, spec: RouterSpec) -> None:
 
 
 def _router_out_problems(
-    registry: StrategyRegistry,
+    registry: PluginRegistry,
     row: Router,
     members: list[RouterMemberOut],
     splits: list[TrafficSplitOut],
@@ -407,7 +409,7 @@ def _router_out_problems(
 
 async def _routers_out(session: AsyncSession, scope: str, rows: list[Router]) -> list[RouterOut]:
     ids = [row.id for row in rows]
-    registry = await load_strategies(session, scope)
+    registry = await load_plugins(session, scope)
     members: dict[uuid.UUID, list[RouterMemberOut]] = {i: [] for i in ids}
     fallbacks: dict[uuid.UUID, list[uuid.UUID]] = {i: [] for i in ids}
     splits: dict[uuid.UUID, list[TrafficSplitOut]] = {i: [] for i in ids}

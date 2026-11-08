@@ -29,14 +29,15 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import (
     snapshot_pb2,
 )
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2, usage_pb2_grpc
-from lumewarp_control_plane.compiler.strategy import (
+from lumewarp_control_plane.compiler.plugins import (
     NormalizedHello,
-    ReportedStrategy,
+    ReportedPlugin,
     normalize_hello,
-    replace_gateway_strategies,
+    replace_gateway_plugins,
 )
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.ids import uuid7
+from lumewarp_control_plane.mcp import catalog_ingest
 from lumewarp_control_plane.metrics import DISCARD, Metrics
 from lumewarp_control_plane.models import ConfigVersion, GatewaySession, GatewayToken
 from lumewarp_control_plane.security import SecretKind, hash_secret, parse_bearer, secret_kind
@@ -204,6 +205,13 @@ class _PendingUpdate:
 _MAX_HEALTH_ENTRIES = 10_000
 _MAX_UPSTREAM_NAME = 200
 _MAX_MODEL_NAME = 400
+# CatalogReport bounds (docs/plugins.md): a definition or a card is at most 64 KiB and a
+# gateway holds at most 200 unreported definitions per server.
+_MAX_CATALOG_DEFINITIONS = 2_000
+_MAX_CATALOG_CARDS = 500
+_MAX_CATALOG_TARGET_NAME = 200
+_MAX_CATALOG_JSON = 64 * 1024
+_MAX_CATALOG_ERROR = 500
 
 
 @dataclass
@@ -387,7 +395,7 @@ class SessionRegistry:
         state: _StreamState,
         *,
         disconnected: bool = False,
-        reported: list[ReportedStrategy] | None = None,
+        reported: list[ReportedPlugin] | None = None,
     ) -> None:
         """Upsert the status row unless a newer session owns it. With `reported`, also replace
         the gateway's descriptors in the same transaction, under the row lock the upsert took,
@@ -440,7 +448,7 @@ class SessionRegistry:
                 # Descriptors only inform the API: failing here must not cost the status row
                 # or the stream. A connected gateway's presence still comes from that row.
                 async with session.begin_nested():
-                    await replace_gateway_strategies(
+                    await replace_gateway_plugins(
                         session,
                         state.scope,
                         state.gateway_id,
@@ -450,7 +458,7 @@ class SessionRegistry:
                     )
             except Exception:
                 log.exception(
-                    "could not store the strategies of gateway %s/%s",
+                    "could not store the plugins of gateway %s/%s",
                     state.scope,
                     state.gateway_id,
                 )
@@ -464,14 +472,15 @@ class SessionRegistry:
         try:
             normalized = await asyncio.to_thread(normalize_hello, hello)
         except Exception:
-            log.exception("could not read a gateway Hello's strategies")
-            return NormalizedHello(capabilities=stored_capabilities, strategies=None)
-        if normalized.ignored:
-            self.metrics.gateway_strategies_ignored.inc(normalized.ignored)
+            log.exception("could not read a gateway Hello's plugins")
+            return NormalizedHello(capabilities=stored_capabilities, plugins=None)
+        for kind, count in normalized.ignored.items():
+            self.metrics.gateway_plugins_ignored.labels(kind).inc(count)
             log.warning(
-                "gateway %s: ignored %d strategies or capabilities of its Hello",
+                "gateway %s: ignored %d %s entries of its Hello",
                 hello.gateway_id[:200],
-                normalized.ignored,
+                count,
+                kind,
             )
         return normalized
 
@@ -538,7 +547,7 @@ class SessionRegistry:
                 self._sessions[key] = state
             self.metrics.gateway_sessions.set(len(self._sessions))
         try:
-            await self._mirror(state, reported=normalized.strategies)
+            await self._mirror(state, reported=normalized.plugins)
             yield state
         finally:
             async with self._lock:
@@ -761,6 +770,9 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
                 state.model_health = model_health
                 await self.registry._mirror(state)
             return
+        if kind == "catalog":
+            await self._ingest_catalog(state, incoming.catalog, context)
+            return
         if kind == "hello":
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Hello may only be sent once")
         pending = state.pending
@@ -814,6 +826,32 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
             pending.retry_at = time.monotonic() + pending.retry_delay
             pending.retry_delay = min(pending.retry_delay * 2, _RETRY_MAX_SECONDS)
         await self.registry._mirror(state)
+
+    async def _ingest_catalog(self, state: _StreamState, report, context) -> None:
+        """What the gateway observed at an MCP server or A2A agent. Unlike a HealthReport a
+        report adds to earlier ones, and it is never a reply to an update. Every bound is
+        checked before the report is read, so a hostile one is cheap to reject."""
+        definitions, cards = report.definitions, report.cards
+        if (
+            len(definitions) > _MAX_CATALOG_DEFINITIONS
+            or len(cards) > _MAX_CATALOG_CARDS
+            or any(
+                not 0 < len(item.server) <= _MAX_CATALOG_TARGET_NAME
+                or not 0 < len(item.name) <= _MAX_MODEL_NAME
+                or len(item.definition_json.encode("utf-8")) > _MAX_CATALOG_JSON
+                or (item.hash and len(item.hash) != 32)
+                for item in definitions
+            )
+            or any(
+                not 0 < len(card.agent) <= _MAX_CATALOG_TARGET_NAME
+                or len(card.card_json.encode("utf-8")) > _MAX_CATALOG_JSON
+                or len(card.error.encode("utf-8")) > _MAX_CATALOG_ERROR
+                for card in cards
+            )
+        ):
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "invalid catalog report")
+        async with self.session_factory() as session, session.begin():
+            await catalog_ingest.ingest_report(session, state.gateway_id, report)
 
 
 class _UsageService(usage_pb2_grpc.UsageServiceServicer):

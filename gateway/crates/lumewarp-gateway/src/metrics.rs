@@ -75,6 +75,124 @@ pub const ATTEMPT_OUTCOMES: [&str; 6] = [
     "non_retryable",
 ];
 
+/// `lumewarp_mcp_requests_total{method}`: what the gateway forwards, plus
+/// `other` for a method it does not name (a notification is a request too).
+#[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
+pub const MCP_METHODS: [&str; 8] = [
+    "initialize",
+    "tools_list",
+    "tools_call",
+    "prompts_list",
+    "prompts_get",
+    "ping",
+    "notification",
+    "other",
+];
+
+/// `lumewarp_a2a_requests_total{method}`: the A2A v1.0 JSON-RPC methods the
+/// gateway forwards (push notification methods are refused, plan D12), plus
+/// `agent_card` for the card endpoint and `other`.
+#[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
+pub const A2A_METHODS: [&str; 7] = [
+    "message_send",
+    "message_stream",
+    "tasks_get",
+    "tasks_cancel",
+    "tasks_resubscribe",
+    "agent_card",
+    "other",
+];
+
+/// The `tool` label of a tool call whose definition the gateway did not
+/// approve. An upstream must not be able to create label series, so this is the
+/// only alternative to an approved name (`tool_label`).
+#[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
+pub const UNAPPROVED_TOOL: &str = "_unapproved";
+
+/// Longest tool name used as a `tool` label (MCP says names SHOULD be 1..=128
+/// characters; `targets` refuses to approve anything longer than this).
+#[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
+pub const MAX_TOOL_LABEL: usize = 256;
+
+/// `lumewarp_plugin_calls_total{kind}`; `other` for a kind this gateway does
+/// not know keeps the label set bounded.
+#[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
+pub const PLUGIN_KINDS: [&str; 4] = [
+    "router-strategy",
+    "upstream-auth",
+    "a2a-middleware",
+    "other",
+];
+
+/// `lumewarp_plugin_calls_total{result}`.
+#[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
+pub const PLUGIN_RESULTS: [&str; 4] = ["ok", "error", "timeout", "trap"];
+
+/// `lumewarp_mcp_catalog_reports_dropped_total{reason}`.
+#[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
+pub const CATALOG_DROP_REASONS: [&str; 3] = ["oversized", "pending_limit", "invalid"];
+
+/// The `status` label for an HTTP status: a [`STATUSES`] entry, or `other`.
+#[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
+pub fn status_label(status: u16) -> &'static str {
+    match status {
+        200 => "200",
+        204 => "204",
+        400 => "400",
+        401 => "401",
+        403 => "403",
+        404 => "404",
+        408 => "408",
+        413 => "413",
+        429 => "429",
+        499 => "499",
+        500 => "500",
+        502 => "502",
+        503 => "503",
+        504 => "504",
+        _ => "other",
+    }
+}
+
+/// Position of a status in [`STATUSES`]: the index into the arrays of
+/// per-status handles below.
+#[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
+pub fn status_index(status: u16) -> usize {
+    STATUSES
+        .iter()
+        .position(|known| *known == status_label(status))
+        .unwrap_or(11)
+}
+
+/// The `tool` label of `lumewarp_mcp_tool_calls_total`: the upstream name only
+/// when its definition was approved, [`UNAPPROVED_TOOL`] otherwise (and for a
+/// name too long to be approved). Build the label only through this function.
+#[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
+pub fn tool_label(approved: bool, tool: &str) -> &str {
+    if approved && !tool.is_empty() && tool.len() <= MAX_TOOL_LABEL {
+        tool
+    } else {
+        UNAPPROVED_TOOL
+    }
+}
+
+/// A bounded `kind` label value for the three plugin kinds.
+#[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
+pub fn plugin_kind_label(kind: &str) -> &'static str {
+    match kind {
+        "router-strategy" => "router-strategy",
+        "upstream-auth" => "upstream-auth",
+        "a2a-middleware" => "a2a-middleware",
+        _ => "other",
+    }
+}
+
+/// Index of `result` in [`PLUGIN_RESULTS`]; unknown results are errors.
+#[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
+pub fn plugin_result_index(result: &str) -> Option<usize> {
+    PLUGIN_RESULTS.iter().position(|known| *known == result)
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct AttemptLabels {
     requested: String,
@@ -98,6 +216,69 @@ struct SplitLabels {
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct UpstreamLabels {
     upstream: String,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct McpRequestLabels {
+    server: String,
+    method: &'static str,
+    status: &'static str,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct McpToolLabels {
+    server: String,
+    tool: String,
+    team: String,
+    status: &'static str,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct A2aRequestLabels {
+    agent: String,
+    method: &'static str,
+    status: &'static str,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ServerLabels {
+    server: String,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct AgentLabels {
+    agent: String,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct CatalogDropLabels {
+    reason: &'static str,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct PluginLabels {
+    kind: &'static str,
+    plugin: String,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct PluginResultLabels {
+    kind: &'static str,
+    plugin: String,
+    result: &'static str,
+}
+
+/// `lumewarp_plugin_calls_total` and `lumewarp_plugin_duration_seconds` for one
+/// (kind, plugin): fetch once when the plugin is loaded, record per call.
+#[derive(Clone)]
+#[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
+pub struct PluginHandles {
+    /// One counter per [`PLUGIN_RESULTS`] entry.
+    pub calls: [Counter; PLUGIN_RESULTS.len()],
+    pub duration: Histogram,
+}
+
+#[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
+impl PluginHandles {
+    /// Records one call: `result` is one of [`PLUGIN_RESULTS`]; anything else is
+    /// counted as an error.
+    pub fn record(&self, result: &str, elapsed: Duration) {
+        let index = plugin_result_index(result).unwrap_or(1);
+        self.calls[index].inc();
+        self.duration.observe(elapsed.as_secs_f64());
+    }
 }
 
 pub enum UpstreamError {
@@ -299,6 +480,14 @@ pub struct Metrics {
     rewrite_compressed: Family<ModelLabels, Counter>,
     rejected: Family<RejectionLabels, Counter>,
     pub playground: [Counter; 2],
+    mcp_requests: Family<McpRequestLabels, Counter>,
+    mcp_tool_calls: Family<McpToolLabels, Counter>,
+    mcp_durations: Family<ServerLabels, Histogram>,
+    a2a_requests: Family<A2aRequestLabels, Counter>,
+    a2a_durations: Family<AgentLabels, Histogram>,
+    catalog_drops: Family<CatalogDropLabels, Counter>,
+    plugin_calls: Family<PluginResultLabels, Counter>,
+    plugin_durations: Family<PluginLabels, Histogram>,
 }
 
 impl Metrics {
@@ -501,6 +690,58 @@ impl Metrics {
             "Finalized requests by usage state (missing/partial/invalid = metering gaps)",
             usage_capture_family,
         );
+        let mcp_requests = Family::default();
+        registry.register(
+            "lumewarp_mcp_requests",
+            "MCP requests by server, method and HTTP status",
+            mcp_requests.clone(),
+        );
+        let mcp_tool_calls = Family::default();
+        registry.register(
+            "lumewarp_mcp_tool_calls",
+            "MCP tool calls by server, tool, team and status (tool is an approved name or _unapproved)",
+            mcp_tool_calls.clone(),
+        );
+        let mcp_durations = Family::new_with_constructor(duration_histogram as fn() -> Histogram);
+        registry.register(
+            "lumewarp_mcp_upstream_duration_seconds",
+            "Time to the upstream response headers of an MCP request",
+            mcp_durations.clone(),
+        );
+        let a2a_requests = Family::default();
+        registry.register(
+            "lumewarp_a2a_requests",
+            "A2A requests by agent, method and status",
+            a2a_requests.clone(),
+        );
+        let a2a_durations = Family::new_with_constructor(duration_histogram as fn() -> Histogram);
+        registry.register(
+            "lumewarp_a2a_upstream_duration_seconds",
+            "Time to the upstream response headers of an A2A request",
+            a2a_durations.clone(),
+        );
+        let catalog_drops = Family::default();
+        for reason in CATALOG_DROP_REASONS {
+            drop(catalog_drops.get_or_create(&CatalogDropLabels { reason }));
+        }
+        registry.register(
+            "lumewarp_mcp_catalog_reports_dropped",
+            "MCP catalog observations dropped before a report (reason: oversized, pending_limit, invalid)",
+            catalog_drops.clone(),
+        );
+        let plugin_calls = Family::default();
+        registry.register(
+            "lumewarp_plugin_calls",
+            "Plugin calls by kind, plugin and result (ok, error, timeout, trap)",
+            plugin_calls.clone(),
+        );
+        let plugin_durations =
+            Family::new_with_constructor(duration_histogram as fn() -> Histogram);
+        registry.register(
+            "lumewarp_plugin_duration_seconds",
+            "Plugin call duration by kind and plugin",
+            plugin_durations.clone(),
+        );
         registry.register(
             "lumewarp_tokens",
             "Upstream-reported tokens by requested name, team and direction",
@@ -548,6 +789,14 @@ impl Metrics {
             rewrite_compressed,
             rejected,
             playground,
+            mcp_requests,
+            mcp_tool_calls,
+            mcp_durations,
+            a2a_requests,
+            a2a_durations,
+            catalog_drops,
+            plugin_calls,
+            plugin_durations,
         }
     }
 
@@ -844,6 +1093,124 @@ impl Metrics {
         })
     }
 
+    /// One `lumewarp_mcp_requests_total` counter per [`STATUSES`] entry for
+    /// this (server, method). Fetch once while compiling the snapshot, then a
+    /// request only indexes the array with [`status_index`].
+    #[allow(dead_code)] // wired by the MCP proxy (W2)
+    pub fn mcp_request_handles(
+        &self,
+        server: &str,
+        method: &'static str,
+    ) -> [Counter; STATUSES.len()] {
+        std::array::from_fn(|i| {
+            self.mcp_requests
+                .get_or_create(&McpRequestLabels {
+                    server: server.into(),
+                    method,
+                    status: STATUSES[i],
+                })
+                .clone()
+        })
+    }
+
+    /// One `lumewarp_mcp_tool_calls_total` counter per [`STATUSES`] entry for
+    /// (server, tool, team). `approved` is the review decision for the tool:
+    /// only an approved name becomes a label, everything else is
+    /// [`UNAPPROVED_TOOL`].
+    #[allow(dead_code)] // wired by the MCP proxy (W2)
+    pub fn mcp_tool_call_handles(
+        &self,
+        server: &str,
+        tool: &str,
+        team: &str,
+        approved: bool,
+    ) -> [Counter; STATUSES.len()] {
+        let tool = tool_label(approved, tool);
+        std::array::from_fn(|i| {
+            self.mcp_tool_calls
+                .get_or_create(&McpToolLabels {
+                    server: server.into(),
+                    tool: tool.into(),
+                    team: team.into(),
+                    status: STATUSES[i],
+                })
+                .clone()
+        })
+    }
+
+    /// `lumewarp_mcp_upstream_duration_seconds{server}`.
+    #[allow(dead_code)] // wired by the MCP proxy (W2)
+    pub fn mcp_upstream_duration(&self, server: &str) -> Histogram {
+        self.mcp_durations
+            .get_or_create(&ServerLabels {
+                server: server.into(),
+            })
+            .clone()
+    }
+
+    /// One `lumewarp_a2a_requests_total` counter per [`STATUSES`] entry for
+    /// this (agent, method).
+    #[allow(dead_code)] // wired by the A2A proxy (W2)
+    pub fn a2a_request_handles(
+        &self,
+        agent: &str,
+        method: &'static str,
+    ) -> [Counter; STATUSES.len()] {
+        std::array::from_fn(|i| {
+            self.a2a_requests
+                .get_or_create(&A2aRequestLabels {
+                    agent: agent.into(),
+                    method,
+                    status: STATUSES[i],
+                })
+                .clone()
+        })
+    }
+
+    /// `lumewarp_a2a_upstream_duration_seconds{agent}`.
+    #[allow(dead_code)] // wired by the A2A proxy (W2)
+    pub fn a2a_upstream_duration(&self, agent: &str) -> Histogram {
+        self.a2a_durations
+            .get_or_create(&AgentLabels {
+                agent: agent.into(),
+            })
+            .clone()
+    }
+
+    /// `lumewarp_mcp_catalog_reports_dropped_total{reason}`.
+    #[allow(dead_code)] // wired by the catalog registry (W2)
+    pub fn catalog_report_dropped(&self, reason: &'static str) {
+        self.catalog_drops
+            .get_or_create(&CatalogDropLabels { reason })
+            .inc();
+    }
+
+    /// `lumewarp_plugin_calls_total` and `lumewarp_plugin_duration_seconds`
+    /// for one (kind, plugin). The plugin host fetches these once per loaded
+    /// plugin and calls [`PluginHandles::record`] per call.
+    #[allow(dead_code)] // wired by the plugin host adapter (T1/W2)
+    pub fn plugin_handles(&self, kind: &str, plugin: &str) -> PluginHandles {
+        let kind = plugin_kind_label(kind);
+        PluginHandles {
+            calls: PLUGIN_RESULTS.map(|result| {
+                self.plugin_calls
+                    .get_or_create(&PluginResultLabels {
+                        kind,
+                        plugin: plugin.into(),
+                        result,
+                    })
+                    .clone()
+            }),
+            duration: self
+                .plugin_durations
+                .get_or_create(&PluginLabels {
+                    kind,
+                    plugin: plugin.into(),
+                })
+                .clone(),
+        }
+    }
+
     pub fn encode(&self, in_flight: &InFlightRegistry) -> Result<String, std::fmt::Error> {
         for (model, count) in in_flight.counts() {
             self.gauges
@@ -855,6 +1222,13 @@ impl Metrics {
         let mut output = String::new();
         encode(&mut output, &self.registry)?;
         Ok(output)
+    }
+}
+
+#[allow(dead_code)] // wired by the catalog registry (W2)
+impl crate::catalog::Drops for Metrics {
+    fn catalog_dropped(&self, reason: &'static str) {
+        self.catalog_report_dropped(reason);
     }
 }
 
@@ -1338,5 +1712,117 @@ routers:
         ] {
             assert!(text.contains(line), "missing {line}:\n{text}");
         }
+    }
+
+    #[test]
+    fn status_labels_are_the_statuses_table() {
+        for status in [
+            200, 204, 400, 401, 403, 404, 408, 413, 429, 499, 500, 502, 503, 504,
+        ] {
+            let label = status_label(status);
+            assert!(STATUSES.contains(&label), "{status} -> {label}");
+            assert_eq!(STATUSES[status_index(status)], label);
+        }
+        for status in [0, 201, 301, 418, 599, 1000] {
+            assert_eq!(status_label(status), "other");
+            assert_eq!(STATUSES[status_index(status)], "other");
+        }
+        // The pre-routing rejection and cancellation statuses are their own
+        // series, not `other`.
+        assert_eq!(status_label(499), "499");
+        assert_eq!(status_label(403), "403");
+    }
+
+    #[test]
+    fn only_an_approved_tool_name_becomes_a_label() {
+        assert_eq!(tool_label(true, "echo"), "echo");
+        assert_eq!(tool_label(false, "echo"), UNAPPROVED_TOOL);
+        assert_eq!(tool_label(true, ""), UNAPPROVED_TOOL);
+        assert_eq!(
+            tool_label(true, &"t".repeat(MAX_TOOL_LABEL + 1)),
+            UNAPPROVED_TOOL
+        );
+        let longest = "t".repeat(MAX_TOOL_LABEL);
+        assert_eq!(tool_label(true, &longest), longest);
+        // A tool name with metrics-breaking characters stays a label value
+        // (the encoder escapes it), it is never parsed as extra labels.
+        assert_eq!(tool_label(true, "a{b=\"c\""), "a{b=\"c\"");
+    }
+
+    #[test]
+    fn plugin_labels_are_bounded() {
+        assert_eq!(plugin_kind_label("router-strategy"), "router-strategy");
+        assert_eq!(plugin_kind_label("upstream-auth"), "upstream-auth");
+        assert_eq!(plugin_kind_label("a2a-middleware"), "a2a-middleware");
+        assert_eq!(plugin_kind_label("something-new"), "other");
+        assert_eq!(plugin_kind_label(""), "other");
+        for (i, result) in PLUGIN_RESULTS.iter().enumerate() {
+            assert_eq!(plugin_result_index(result), Some(i));
+        }
+        assert_eq!(plugin_result_index("panicked"), None);
+        assert_eq!(PLUGIN_KINDS.len(), 4);
+    }
+
+    #[test]
+    fn mcp_and_a2a_families_are_exported_and_bounded() {
+        let metrics = Metrics::new();
+        let mcp = metrics.mcp_request_handles("s1", MCP_METHODS[2]);
+        mcp[status_index(200)].inc();
+        mcp[status_index(200)].inc();
+        mcp[status_index(502)].inc();
+        let tools = metrics.mcp_tool_call_handles("s1", "echo", "t1", true);
+        tools[status_index(200)].inc();
+        let hidden = metrics.mcp_tool_call_handles("s1", "shadow-tool", "t1", false);
+        hidden[status_index(200)].inc();
+        metrics
+            .mcp_upstream_duration("s1")
+            .observe(Duration::from_millis(25).as_secs_f64());
+        let a2a = metrics.a2a_request_handles("a1", A2A_METHODS[1]);
+        a2a[status_index(200)].inc();
+        metrics
+            .a2a_upstream_duration("a1")
+            .observe(Duration::from_millis(5).as_secs_f64());
+        metrics.catalog_report_dropped("oversized");
+        metrics.catalog_report_dropped("oversized");
+        metrics.catalog_report_dropped("pending_limit");
+        let plugins = metrics.plugin_handles("a2a-middleware", "strip_artifacts");
+        plugins.record("ok", Duration::from_micros(50));
+        plugins.record("timeout", Duration::from_millis(50));
+        plugins.record("panicked", Duration::from_millis(1));
+        let text = metrics.encode(&InFlightRegistry::default()).unwrap();
+        for line in [
+            "lumewarp_mcp_requests_total{server=\"s1\",method=\"tools_call\",status=\"200\"} 2",
+            "lumewarp_mcp_requests_total{server=\"s1\",method=\"tools_call\",status=\"502\"} 1",
+            "lumewarp_mcp_tool_calls_total{server=\"s1\",tool=\"echo\",team=\"t1\",status=\"200\"} 1",
+            "lumewarp_mcp_tool_calls_total{server=\"s1\",tool=\"_unapproved\",team=\"t1\",status=\"200\"} 1",
+            "lumewarp_mcp_upstream_duration_seconds_count{server=\"s1\"} 1",
+            "lumewarp_a2a_requests_total{agent=\"a1\",method=\"message_stream\",status=\"200\"} 1",
+            "lumewarp_a2a_upstream_duration_seconds_count{agent=\"a1\"} 1",
+            "lumewarp_mcp_catalog_reports_dropped_total{reason=\"oversized\"} 2",
+            "lumewarp_mcp_catalog_reports_dropped_total{reason=\"pending_limit\"} 1",
+            "lumewarp_mcp_catalog_reports_dropped_total{reason=\"invalid\"} 0",
+            "lumewarp_plugin_calls_total{kind=\"a2a-middleware\",plugin=\"strip_artifacts\",result=\"ok\"} 1",
+            "lumewarp_plugin_calls_total{kind=\"a2a-middleware\",plugin=\"strip_artifacts\",result=\"timeout\"} 1",
+            // An unknown result is counted as an error.
+            "lumewarp_plugin_calls_total{kind=\"a2a-middleware\",plugin=\"strip_artifacts\",result=\"error\"} 1",
+            "lumewarp_plugin_duration_seconds_count{kind=\"a2a-middleware\",plugin=\"strip_artifacts\"} 3",
+        ] {
+            assert!(text.contains(line), "missing {line}:\n{text}");
+        }
+        assert!(
+            !text.contains("shadow-tool"),
+            "unapproved names never label"
+        );
+    }
+
+    #[test]
+    fn catalog_drops_are_counted_through_the_trait() {
+        let metrics = Metrics::new();
+        // How `Runtime` builds its catalog registry: `Arc<Metrics>` coerces to
+        // the `Arc<dyn catalog::Drops>` the registry takes.
+        let _ = crate::catalog::Registry::with_drops(std::sync::Arc::new(Metrics::new()));
+        crate::catalog::Drops::catalog_dropped(&metrics, "invalid");
+        let text = metrics.encode(&InFlightRegistry::default()).unwrap();
+        assert!(text.contains("lumewarp_mcp_catalog_reports_dropped_total{reason=\"invalid\"} 1"));
     }
 }

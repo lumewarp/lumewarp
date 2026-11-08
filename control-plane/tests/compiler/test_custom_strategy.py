@@ -10,11 +10,11 @@ from lumewarp_control_plane.compiler import (
     publish_pending,
     rollback_routing,
 )
-from lumewarp_control_plane.compiler.strategy import strategy_problem
+from lumewarp_control_plane.compiler.plugins import router_problem
 from lumewarp_control_plane.compiler.validate import SnapshotInvalid, validate_snapshot
 from lumewarp_control_plane.models import CatalogKind, CatalogName, Router
 from tests import factories
-from tests.api.helpers import report_strategies
+from tests.api.helpers import report_plugins
 from tests.compiler.helpers import OCT, SCOPE, add_router, load_version, seed_scope, touch
 
 
@@ -38,7 +38,7 @@ async def test_custom_strategy_compile_capability_warning_and_rollback(factory):
     assert list(result.snapshot.required_capabilities) == ["strategy:header_pin"]
     assert len(result.warnings) == 1 and "not advertised" in result.warnings[0]
     async with factory() as s:
-        await report_strategies(
+        await report_plugins(
             s,
             SCOPE,
             "custom-gateway",
@@ -116,8 +116,8 @@ def test_params_nesting_matches_gateway_recursion_budget():
     params = {}
     for _ in range(126):
         params = {"x": params}
-    assert strategy_problem("ok", params) is None
-    assert "nesting" in strategy_problem("ok", {"x": params})
+    assert router_problem("ok", params) is None
+    assert "nesting" in router_problem("ok", {"x": params})
 
 
 @pytest.mark.parametrize(
@@ -128,8 +128,8 @@ def test_params_nesting_matches_gateway_recursion_budget():
         ("header_pin", {"headers": ["authorization"]}, "headers"),
     ],
 )
-def test_strategy_problem(strategy, params, needle):
-    assert needle in strategy_problem(strategy, params)
+def test_router_problem(strategy, params, needle):
+    assert needle in router_problem(strategy, params)
 
 
 @pytest.mark.parametrize(
@@ -137,4 +137,4 @@ def test_strategy_problem(strategy, params, needle):
     [("weighted", {}), ("vllm_load", {}), ("header_pin", {"headers": ["x-pin"]})],
 )
 def test_strategy_accepted(strategy, params):
-    assert strategy_problem(strategy, params) is None
+    assert router_problem(strategy, params) is None

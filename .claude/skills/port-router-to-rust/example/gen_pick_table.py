@@ -3,7 +3,7 @@
     python3 .claude/skills/port-router-to-rust/example/gen_pick_table.py [OUT]
 
 Run it from the repository root: OUT defaults to the worked example's
-`gateway/strategies/cheapest-first/testdata/pick-table.json`, resolved against
+`gateway/plugins/router/cheapest-first/testdata/pick-table.json`, resolved against
 the current directory. Pass a path when the skill is used from elsewhere.
 
 The Rust test `pick_matches_the_python_policy` reads the file and asserts that
@@ -19,7 +19,7 @@ from pathlib import Path
 
 from cheapest_first import CheapestFirstRouter, Deployment
 
-DEFAULT_OUT = Path("gateway/strategies/cheapest-first/testdata/pick-table.json")
+DEFAULT_OUT = Path("gateway/plugins/router/cheapest-first/testdata/pick-table.json")
 
 
 def case(

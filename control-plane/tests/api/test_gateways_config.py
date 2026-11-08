@@ -142,13 +142,13 @@ async def test_config_versions_and_rollback(client, committed, api_scope, monkey
 
 def test_rollback_rejected_by_strategy_rules_is_422_and_force_reaches_it(client, monkeypatch):
     from lumewarp_control_plane import compiler
-    from lumewarp_control_plane.compiler.strategy import StrategyRejected
+    from lumewarp_control_plane.compiler.plugins import PluginRejected
 
     seen = []
 
     async def refuse(session, scope, version, *, require_local_membership, force, principal):
         seen.append((force, principal is not None))
-        raise StrategyRejected("strategy", "router 'r': no gateway reports strategy 's'")
+        raise PluginRejected("strategy", "router 'r': no gateway reports strategy 's'")
 
     monkeypatch.setattr(compiler, "rollback_routing", refuse)
     for body, force in (({"version": 1}, False), ({"version": 1, "force": True}, True)):

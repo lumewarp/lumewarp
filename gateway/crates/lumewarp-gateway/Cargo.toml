@@ -11,14 +11,8 @@ repository.workspace = true
 name = "lumewarp"
 path = "src/main.rs"
 
-# A compiled-in strategy crate is selected with a feature (docs/router-strategies.md).
-[features]
-strategy-cheapest-first = ["dep:lumewarp-strategy-cheapest-first"]
-strategy-priority-failover = ["dep:lumewarp-strategy-priority-failover"]
-
 [dependencies]
-lumewarp-strategy-cheapest-first = { path = "../../strategies/cheapest-first", optional = true }
-lumewarp-strategy-priority-failover = { path = "../../strategies/priority-failover", optional = true }
+lumewarp-plugin-host = { path = "../lumewarp-plugin-host" }
 lumewarp-config.workspace = true
 lumewarp-proto.workspace = true
 lumewarp-router-api = { path = "../lumewarp-router-api" }
@@ -45,7 +39,9 @@ opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
 tracing-opentelemetry.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# T1b: RFC 8785 definition hashes must see the double a JSON number means.
+# serde_json rounds twice for 16-17 significant digits without this feature.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true

@@ -36,10 +36,12 @@ from lumewarp_control_plane.models import (
     KeyLifecycle,
     KeyOwnerKind,
     ModelAccess,
+    PluginKind,
     RequestOutcome,
     StickyBy,
     StreamUsageMode,
     TeamRole,
+    TrafficKind,
     UpstreamKind,
     UsageState,
 )
@@ -971,7 +973,7 @@ def _force_field() -> Any:
     # default_factory: an OpenAPI `default` would make it required in the generated UI client.
     return Field(
         default_factory=lambda: False,
-        description="Save although connected gateways lack the strategy; they will NACK.",
+        description="Save although connected gateways lack the plugin; they will NACK.",
     )
 
 
@@ -1039,19 +1041,25 @@ class RouterOut(ReadModel):
     updated_at: datetime
 
 
-class StrategyGatewayOut(ReadModel):
+class PluginGatewayOut(ReadModel):
     gateway_id: str
     connected: bool
     digest: str | None = Field(description="Null when known only from its capabilities.")
     seen_at: datetime | None
 
 
-class StrategyOut(ReadModel):
-    """Everything but `name` and `builtin` is data from a gateway: render it as plain text."""
+class PluginOut(ReadModel):
+    """A gateway plugin of any kind (docs/plugins.md).
 
+    Everything but `kind`, `name` and `builtin` is data from a gateway: render it as plain
+    text. `uses_weight`, `needs` and `member_schema` are for router strategies only.
+    """
+
+    kind: PluginKind
     name: str
     title: str
     description: str
+    builtin: bool
     uses_weight: bool
     needs: list[str]
     params_schema: dict[str, Any] | None = Field(
@@ -1059,8 +1067,8 @@ class StrategyOut(ReadModel):
     )
     member_schema: dict[str, Any] | None
     schema_problems: list[str] = Field(description="Why a schema reported is not usable.")
-    builtin: bool
-    gateways: list[StrategyGatewayOut] = Field(description="Gateways that have it, newest first.")
+    wasm_sha256: str = Field(description="Hex sha256 of the loaded file; empty for built-ins.")
+    gateways: list[PluginGatewayOut] = Field(description="Gateways that have it, newest first.")
     missing_gateways: list[str] = Field(description="Connected gateways that do not have it.")
 
 
@@ -1268,6 +1276,10 @@ class UsageRowOut(ApiModel):
     """
 
     date: date_type | None = None
+    kind: TrafficKind | None = None
+    target: str | None = None
+    method: str | None = None
+    tool: str | None = None
     requested: str | None = None
     model: str | None = None
     model_id: uuid.UUID | None = None

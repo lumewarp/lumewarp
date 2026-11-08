@@ -2,6 +2,8 @@
 
 A report is validated before any writes, then inserted idempotently with its aggregate
 updates, budget transitions, audit rows and outbox work in one caller-owned transaction.
+Only LLM events reach `usage_totals` and the budgets: an MCP or A2A request is recorded,
+never limited or priced, because those protocols have no budgets (models.TrafficKind).
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from lumewarp_control_plane.models import (
     ScopeType,
     ServiceAccount,
     Team,
+    TrafficKind,
     UsageEvent,
     UsageState,
     UsageTotal,
@@ -42,8 +45,8 @@ from lumewarp_control_plane.windows import month_window
 log = logging.getLogger(__name__)
 _MAX_BIGINT = 2**63 - 1
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-# asyncpg caps one statement at 32767 bind parameters; 30 columns per event row.
-_INSERT_CHUNK_EVENTS = 1000
+# asyncpg caps one statement at 32767 bind parameters; 34 columns per event row.
+_INSERT_CHUNK_EVENTS = 900
 # Fields taken from the wire; the key owner is added from api_keys after validation.
 _EVENT_FIELDS = (
     "request_id",
@@ -60,6 +63,10 @@ _EVENT_FIELDS = (
     "upstream_model",
     "fallback",
     "attempts",
+    "kind",
+    "target",
+    "method",
+    "tool",
     "endpoint",
     "status",
     "stream",
@@ -77,6 +84,13 @@ _USAGE_FIELDS = (*_EVENT_FIELDS, "owner_kind", "owner_id")
 _REUSED_IN_BATCH = "request_id reused with different event data"
 _CONFLICTS_STORED = "request_id conflicts with a different stored event"
 _KEY_MISMATCH = "usage key unknown or not in the event's team"
+# usage.proto: an unspecified kind is LLM, so events from an older gateway stay LLM requests.
+_KIND = {
+    usage_pb2.TRAFFIC_KIND_UNSPECIFIED: TrafficKind.LLM,
+    usage_pb2.TRAFFIC_KIND_LLM: TrafficKind.LLM,
+    usage_pb2.TRAFFIC_KIND_MCP: TrafficKind.MCP,
+    usage_pb2.TRAFFIC_KIND_A2A: TrafficKind.A2A,
+}
 # `lumewarp_cp_usage_events_skipped_total{reason}`: a bounded set. Every other message comes
 # from `_prepare_event` (malformed fields) and maps to "invalid_event".
 SKIP_REASONS = ("invalid_event", "request_id_conflict", "key_mismatch")
@@ -127,15 +141,29 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
     request_id = _uuid(event.request_id, "request_id")
     key_id = _uuid(event.key_id, "key_id")
     team_id = _uuid(event.team_id, "team_id")
+    try:
+        kind = _KIND[event.kind]
+    except KeyError as exc:
+        raise InvalidUsageBatch("invalid kind") from exc
     # A rejected request may never reach routing: authentication runs before the body is
     # read (no requested name) and policy rejections happen before a model is chosen. The
     # provenance fields are retained verbatim; ids are resolved in bulk after validation.
     rejected = event.outcome == usage_pb2.REQUEST_OUTCOME_REJECTED
-    # `requested` is client input on rejected requests; Postgres text cannot hold NUL.
-    if len(event.requested) > 400 or "\x00" in event.requested or not (event.requested or rejected):
+    # usage.proto: an MCP or A2A event has no model, alias, router, upstream, tokens or cost.
+    llm = kind is TrafficKind.LLM
+    # `requested` is client input on rejected requests; Postgres text cannot hold NUL. An LLM
+    # event names both unless it was rejected before a model was chosen; a non-LLM event names
+    # neither.
+    if len(event.requested) > 400 or "\x00" in event.requested:
         raise InvalidUsageBatch("invalid requested")
-    if len(event.model) > 400 or "\x00" in event.model or not (event.model or rejected):
+    if llm and not (event.requested or rejected):
+        raise InvalidUsageBatch("invalid requested")
+    if len(event.model) > 400 or "\x00" in event.model:
         raise InvalidUsageBatch("invalid model")
+    if llm and not (event.model or rejected):
+        raise InvalidUsageBatch("invalid model")
+    if not llm and (event.requested or event.model):
+        raise InvalidUsageBatch("an MCP or A2A event names no requested or model")
     for field, maximum in (
         ("alias", 400),
         ("router", 400),
@@ -143,7 +171,11 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
         ("upstream_model", 400),
     ):
         value = getattr(event, field)
-        if len(value) > maximum or "\x00" in value:
+        if len(value) > maximum or "\x00" in value or (value and not llm):
+            raise InvalidUsageBatch(f"invalid {field}")
+    for field, maximum in (("target", 200), ("method", 128), ("tool", 400)):
+        value = getattr(event, field)
+        if len(value) > maximum or "\x00" in value or (value and llm):
             raise InvalidUsageBatch(f"invalid {field}")
     if not event.endpoint or len(event.endpoint) > 64:
         raise InvalidUsageBatch("invalid endpoint")
@@ -175,6 +207,8 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
     prompt_tokens = _bounded_int(event.prompt_tokens, "prompt_tokens")
     completion_tokens = _bounded_int(event.completion_tokens, "completion_tokens")
     cost = _bounded_int(event.cost_nano_usd, "cost_nano_usd")
+    if not llm and (prompt_tokens or completion_tokens or cost or event.cost_known):
+        raise InvalidUsageBatch("an MCP or A2A event carries no tokens or cost")
     if event.cost_known and usage_state is not UsageState.REPORTED:
         raise InvalidUsageBatch("known cost requires reported usage")
     if not event.cost_known and cost != 0:
@@ -195,6 +229,10 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
         "upstream_model": event.upstream_model,
         "fallback": event.fallback,
         "attempts": event.attempts,
+        "kind": kind,
+        "target": event.target,
+        "method": event.method,
+        "tool": event.tool,
         "endpoint": event.endpoint,
         "status": event.status,
         "stream": event.stream,
@@ -207,6 +245,9 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
         "usage_state": usage_state,
         "outcome": outcome,
     }
+    if not llm:
+        # No names to resolve, but every row of a bulk insert carries the same keys.
+        values |= {"model_id": None, "alias_id": None, "router_id": None}
     return _PreparedEvent(request_id=request_id, values=values)
 
 
@@ -446,6 +487,9 @@ async def _persist_events(
     aggregates: dict[tuple[ScopeType, uuid.UUID, datetime], list[int]] = {}
     for request_id in inserted_ids:
         values = by_id[request_id].values
+        if values["kind"] is not TrafficKind.LLM:
+            # Recorded, never aggregated: MCP and A2A requests have no budget or limit.
+            continue
         _add_totals(aggregates, values, keys[values["key_id"]])  # type: ignore[index]
     if not aggregates:
         return accepted
@@ -533,7 +577,10 @@ async def ingest(
         # The savepoint keeps a failed persist from leaving partial usage writes if the
         # caller catches the exception and continues its outer transaction.
         async with session.begin_nested():
-            await resolve_catalog_ids(session, [item.values for item in by_id.values()])
+            await resolve_catalog_ids(
+                session,
+                [item.values for item in by_id.values() if item.values["kind"] is TrafficKind.LLM],
+            )
             return await _persist_events(
                 session,
                 gateway_id,

@@ -12,8 +12,8 @@ use std::{
 use lumewarp_config::AuthMode;
 use lumewarp_proto::config::v1::{
     config_service_client::ConfigServiceClient, config_update::Update, gateway_message::Msg, Ack,
-    ConfigUpdate, GatewayMessage, HealthReport, Hello, Nack, NackCode, Snapshot,
-    StrategyDescriptor, TargetHealth,
+    ConfigUpdate, GatewayMessage, HealthReport, Hello, Nack, NackCode, PluginDescriptor, Snapshot,
+    TargetHealth,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::ReceiverStream;
@@ -45,21 +45,9 @@ pub struct StreamConfig {
     pub state_dir: PathBuf,
 }
 
-/// The compiled-in strategies as Hello reports them.
-fn strategy_descriptors() -> Vec<StrategyDescriptor> {
-    lumewarp_router_api::descriptors()
-        .into_iter()
-        .map(|d| StrategyDescriptor {
-            name: d.name.into(),
-            title: d.title.into(),
-            description: d.description.into(),
-            uses_weight: d.uses_weight,
-            needs: d.needs.into_iter().map(Into::into).collect(),
-            params_schema_json: d.params_schema.to_string(),
-            member_schema_json: d.member_schema.to_string(),
-            digest: d.digest,
-        })
-        .collect()
+/// The immutable startup plugin set as Hello reports it.
+fn plugin_descriptors() -> Vec<PluginDescriptor> {
+    lumewarp_plugin_host::global().descriptors()
 }
 
 /// Compiles a snapshot loaded from disk for immediate serving.
@@ -102,7 +90,7 @@ pub fn spawn(
         has_base,
         slot,
         runtime,
-        strategies: strategy_descriptors(),
+        plugins: plugin_descriptors(),
     };
     Ok(tokio::spawn(client.run()))
 }
@@ -120,8 +108,8 @@ struct Client {
     has_base: bool,
     slot: server::Snapshot,
     runtime: Arc<Runtime>,
-    /// Sent in every Hello; fixed at build time.
-    strategies: Vec<StrategyDescriptor>,
+    /// Sent in every Hello; fixed at startup.
+    plugins: Vec<PluginDescriptor>,
 }
 
 /// Exponential backoff with full jitter.
@@ -177,7 +165,8 @@ impl Client {
                 } else {
                     String::new()
                 },
-                strategies: self.strategies.clone(),
+                plugins: self.plugins.clone(),
+                plugin_abi: lumewarp_plugin_host::ABI,
             })),
         })
         .await?;

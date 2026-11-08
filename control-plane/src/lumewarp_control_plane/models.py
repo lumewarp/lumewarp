@@ -219,6 +219,26 @@ class ActorType(enum.StrEnum):
     SYSTEM = "system"
 
 
+class PluginKind(enum.StrEnum):
+    """What a gateway plugin changes (proto PluginKind). The value is the manifest's `kind`,
+    and the capability it advertises is `<prefix>:<name>` (see compiler/plugins.py).
+    """
+
+    ROUTER_STRATEGY = "router-strategy"
+    UPSTREAM_AUTH = "upstream-auth"
+    A2A_MIDDLEWARE = "a2a-middleware"
+
+
+class TrafficKind(enum.StrEnum):
+    """Which gateway protocol a usage event belongs to (proto TrafficKind). Only `llm`
+    requests carry a model, tokens or cost: MCP and A2A have no budgets or limits.
+    """
+
+    LLM = "llm"
+    MCP = "mcp"
+    A2A = "a2a"
+
+
 # --------------------------------------------------------------------------- policy
 
 
@@ -962,7 +982,7 @@ class Router(TimestampMixin, Base):
     kind: Mapped[str] = mapped_column(
         String(32), nullable=False, default="router", server_default="router"
     )
-    # A built-in name or a compiled-in strategy's name (see compiler/strategy.py).
+    # A router-strategy plugin's name: a built-in or one a gateway reports (compiler/plugins.py).
     strategy: Mapped[str] = mapped_column(
         String(63), nullable=False, default="weighted", server_default="weighted"
     )
@@ -1348,14 +1368,14 @@ class GatewaySession(Base):
     )
 
 
-class GatewayStrategy(Base):
-    """A strategy a gateway reported in Hello. Untrusted data, kept so forms and validation
-    work while it is offline; `compiler.strategy.load_strategies` decides what still counts.
+class GatewayPlugin(Base):
+    """A plugin a gateway reported in Hello. Untrusted data, kept so forms and validation
+    work while it is offline; `compiler.plugins.load_plugins` decides what still counts.
     """
 
-    __tablename__ = "gateway_strategies"
+    __tablename__ = "gateway_plugins"
     __table_args__ = (
-        PrimaryKeyConstraint("scope", "gateway_id", "name"),
+        PrimaryKeyConstraint("scope", "gateway_id", "kind", "name"),
         ForeignKeyConstraint(
             ["scope", "gateway_id"],
             ["gateway_sessions.scope", "gateway_sessions.gateway_id"],
@@ -1365,6 +1385,7 @@ class GatewayStrategy(Base):
 
     scope: Mapped[str] = mapped_column(String(128), nullable=False)
     gateway_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    kind: Mapped[PluginKind] = mapped_column(_enum(PluginKind, "plugin_kind"), nullable=False)
     name: Mapped[str] = mapped_column(String(63), nullable=False)
     digest: Mapped[str] = mapped_column(String(128), nullable=False)
     descriptor: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
@@ -1380,7 +1401,8 @@ class GatewayStrategy(Base):
 
 class UsageEvent(Base):
     """One gateway request. Deduped on `request_id` (ON CONFLICT DO NOTHING); only newly
-    inserted events add to `usage_totals`. No FKs: a high-volume append-only log.
+    inserted LLM events add to `usage_totals` (MCP and A2A have no budgets). No FKs: a
+    high-volume append-only log.
     """
 
     __tablename__ = "usage_events"
@@ -1409,6 +1431,7 @@ class UsageEvent(Base):
         ),
         Index("ix_usage_events_model_ts", "model", "ts"),
         Index("ix_usage_events_upstream_model_ts", "upstream_model", "ts"),
+        Index("ix_usage_events_kind_ts", "kind", "ts"),
         CheckConstraint("attempts >= 0", name="attempts_nonneg"),
     )
 
@@ -1441,6 +1464,19 @@ class UsageEvent(Base):
         Boolean, nullable=False, default=False, server_default="false"
     )
     attempts: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    kind: Mapped[TrafficKind] = mapped_column(
+        _enum(TrafficKind, "traffic_kind"),
+        nullable=False,
+        default=TrafficKind.LLM,
+        server_default="llm",
+    )
+    # The McpServer or A2aAgent called; empty on an LLM request or one that named none the
+    # key may see.
+    target: Mapped[str] = mapped_column(String(200), nullable=False, default="", server_default="")
+    # The JSON-RPC method ("tools/call", "message/stream", ...); empty on an LLM request.
+    method: Mapped[str] = mapped_column(String(128), nullable=False, default="", server_default="")
+    # The MCP tool or prompt an MCP request named; empty otherwise.
+    tool: Mapped[str] = mapped_column(String(400), nullable=False, default="", server_default="")
     model_id: Mapped[uuid.UUID | None] = mapped_column()
     alias_id: Mapped[uuid.UUID | None] = mapped_column()
     router_id: Mapped[uuid.UUID | None] = mapped_column()

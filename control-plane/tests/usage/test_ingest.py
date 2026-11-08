@@ -19,6 +19,7 @@ from lumewarp_control_plane.models import (
     Scope,
     ScopeType,
     Team,
+    TrafficKind,
     UsageTotal,
 )
 from lumewarp_control_plane.models import (
@@ -359,6 +360,109 @@ async def test_rejected_events_may_omit_requested_and_model(session_factory: Ses
         uuid.UUID(unauthenticated.request_id): ("", ""),
         uuid.UUID(rate_limited.request_id): ("test-requested", ""),
     }
+
+
+def _mcp_event(key: ApiKey, **values) -> usage_pb2.UsageEvent:
+    """An MCP request: no model, requested, tokens or cost (usage.proto, TrafficKind)."""
+    event = _event(key, cost=0, requested="")
+    which = {
+        "model": "",
+        "alias": "",
+        "router": "",
+        "upstream": "",
+        "upstream_model": "",
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_known": False,
+        "kind": usage_pb2.TRAFFIC_KIND_MCP,
+        "target": "s1",
+        "method": "tools/call",
+        "tool": "echo",
+    }
+    which.update(values)
+    for field, value in which.items():
+        setattr(event, field, value)
+    return event
+
+
+@pytest.mark.asyncio
+async def test_an_mcp_event_is_stored_with_kind_target_method_and_tool(
+    session_factory: SessionFactory,
+):
+    scope_name, key = await _seed(session_factory)
+    event = _mcp_event(key)
+    llm = _event(key, cost=5)
+    async with session_factory() as session, session.begin():
+        assert await ingest(session, "gateway-a", [event, llm], scope_name=scope_name) == 2
+
+    async with session_factory() as session:
+        stored = {
+            row.request_id: row
+            for row in (
+                await session.execute(select(UsageEventRow).where(UsageEventRow.key_id == key.id))
+            ).scalars()
+        }
+        totals = await session.scalar(
+            select(UsageTotal).where(
+                UsageTotal.scope_type == ScopeType.TEAM, UsageTotal.scope_id == key.team_id
+            )
+        )
+    row = stored[uuid.UUID(event.request_id)]
+    assert (row.kind, row.target, row.method, row.tool) == (
+        TrafficKind.MCP,
+        "s1",
+        "tools/call",
+        "echo",
+    )
+    assert (row.model, row.requested, row.cost_nano_usd) == ("", "", 0)
+    assert stored[uuid.UUID(llm.request_id)].kind is TrafficKind.LLM
+    # MCP is recorded but never aggregated: no budget, no cost, not a request total.
+    assert totals is not None
+    assert (totals.request_count, totals.cost_nano_usd) == (1, 5)
+
+
+@pytest.mark.asyncio
+async def test_a_non_llm_event_may_not_carry_llm_fields(session_factory: SessionFactory):
+    scope_name, key = await _seed(session_factory)
+    carried = [
+        _mcp_event(key, model="gpt"),
+        _mcp_event(key, requested="gpt"),
+        _mcp_event(key, upstream="vllm"),
+        _mcp_event(key, prompt_tokens=10),
+        _mcp_event(key, cost_nano_usd=1, cost_known=True),
+        _mcp_event(key, method="x" * 129),
+        _mcp_event(key, tool="t" * 401),
+    ]
+    # An LLM event may not claim an MCP method, target or tool either.
+    llm = _event(key)
+    llm.method = "tools/call"
+    carried.append(llm)
+    async with session_factory() as session, session.begin():
+        assert await ingest(session, "gateway-a", carried, scope_name=scope_name) == 0
+    async with session_factory() as session:
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(UsageEventRow)
+                .where(UsageEventRow.key_id == key.id)
+            )
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_unspecified_kind_is_an_llm_event(session_factory: SessionFactory):
+    """An older gateway sends no kind at all: its events must stay LLM requests."""
+    scope_name, key = await _seed(session_factory)
+    event = _event(key)
+    assert event.kind == usage_pb2.TRAFFIC_KIND_UNSPECIFIED
+    async with session_factory() as session, session.begin():
+        assert await ingest(session, "gateway-a", [event], scope_name=scope_name) == 1
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(UsageEventRow).where(UsageEventRow.request_id == uuid.UUID(event.request_id))
+        )
+    assert row is not None and row.kind is TrafficKind.LLM
 
 
 @pytest.mark.asyncio

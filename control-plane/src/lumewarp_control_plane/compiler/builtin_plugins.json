@@ -1,0 +1,99 @@
+[
+  {
+    "builtin": true,
+    "description": "Use the member with the fewest requests in flight.",
+    "digest": "6b83a82d5ef5caea4c05b69c8471eb3c2413439c04bf1469a3c9f6c438a6c732",
+    "kind": "router-strategy",
+    "name": "least_in_flight",
+    "params_schema_json": "{\"additionalProperties\":false,\"type\":\"object\"}",
+    "router": {
+      "member_schema_json": "{\"additionalProperties\":false,\"type\":\"object\"}",
+      "needs": [],
+      "uses_weight": false
+    },
+    "title": "Least in flight",
+    "wasm_sha256": ""
+  },
+  {
+    "builtin": true,
+    "description": "Prefer the member with the lowest time to response headers under load.",
+    "digest": "cc9d536332d870dbbb69adccb54690d0d0c0f629a3b0f95fc367bfbb77b8e44c",
+    "kind": "router-strategy",
+    "name": "lowest_latency",
+    "params_schema_json": "{\"additionalProperties\":false,\"type\":\"object\"}",
+    "router": {
+      "member_schema_json": "{\"additionalProperties\":false,\"type\":\"object\"}",
+      "needs": [
+        "latency"
+      ],
+      "uses_weight": false
+    },
+    "title": "Lowest latency",
+    "wasm_sha256": ""
+  },
+  {
+    "builtin": true,
+    "description": "Prefer the member whose vLLM reports the shortest queue and the least KV cache usage.",
+    "digest": "0452025f2a75bd557e9bf5646976c7a9c65f6574454f2a59e54987e8400e795b",
+    "kind": "router-strategy",
+    "name": "vllm_load",
+    "params_schema_json": "{\"additionalProperties\":false,\"type\":\"object\"}",
+    "router": {
+      "member_schema_json": "{\"additionalProperties\":false,\"type\":\"object\"}",
+      "needs": [
+        "vllm_load"
+      ],
+      "uses_weight": false
+    },
+    "title": "vLLM load",
+    "wasm_sha256": ""
+  },
+  {
+    "builtin": true,
+    "description": "Split requests by member weight.",
+    "digest": "8cecf149930bfedad2f62fb9791ef86fda593e4dc95de3e2eff000dd119bca02",
+    "kind": "router-strategy",
+    "name": "weighted",
+    "params_schema_json": "{\"additionalProperties\":false,\"type\":\"object\"}",
+    "router": {
+      "member_schema_json": "{\"additionalProperties\":false,\"type\":\"object\"}",
+      "needs": [],
+      "uses_weight": true
+    },
+    "title": "Weighted",
+    "wasm_sha256": ""
+  },
+  {
+    "builtin": true,
+    "description": "",
+    "digest": "5c46f2f2bdbfcfae6a5fa34fdd358c9f6f4abc68bab1d804dd4b5db523a40dab",
+    "kind": "upstream-auth",
+    "name": "none",
+    "params_schema_json": "{\"additionalProperties\":false,\"type\":\"object\"}",
+    "router": null,
+    "title": "none",
+    "wasm_sha256": ""
+  },
+  {
+    "builtin": true,
+    "description": "",
+    "digest": "59c9fc8ae88007d8f31d69a831be4ede0883bcbbf239f32b8f41086e10d52253",
+    "kind": "upstream-auth",
+    "name": "passthrough",
+    "params_schema_json": "{\"additionalProperties\":false,\"type\":\"object\"}",
+    "router": null,
+    "title": "passthrough",
+    "wasm_sha256": ""
+  },
+  {
+    "builtin": true,
+    "description": "",
+    "digest": "60c94b867b4ea39733c187836bc2d5a424389679fb2e1725440a2eae706b8795",
+    "kind": "upstream-auth",
+    "name": "static_bearer",
+    "params_schema_json": "{\"additionalProperties\":false,\"type\":\"object\"}",
+    "router": null,
+    "title": "static_bearer",
+    "wasm_sha256": ""
+  }
+]
