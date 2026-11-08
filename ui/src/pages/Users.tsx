@@ -6,8 +6,6 @@ import { Badge, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, required, TextField, useForm } from "../components/Form";
 import { Alert, AlertDescription } from "../components/ui/alert";
-import { Button } from "../components/ui/button";
-import { Card } from "../components/ui/card";
 import { CreateButton, IconAction } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { useMe, useMut } from "../hooks";
@@ -77,7 +75,33 @@ export function Users() {
         error={users.error}
         onRetry={() => void users.refetch()}
         rowKey={(user) => user.id}
-        pageSize={PAGE_SIZE}
+        paging={{
+          summary: users.data?.items.length
+            ? `${previousCursors.length * PAGE_SIZE + 1}–${previousCursors.length * PAGE_SIZE + users.data.items.length}${next ? "" : ` of ${previousCursors.length * PAGE_SIZE + users.data.items.length}`}`
+            : "No users",
+          onFirst:
+            previousCursors.length > 0 && !users.isFetching
+              ? () => {
+                  setPreviousCursors([]);
+                  setCursor(undefined);
+                }
+              : undefined,
+          onPrevious:
+            previousCursors.length > 0 && !users.isFetching
+              ? () => {
+                  const previous = previousCursors.at(-1);
+                  setPreviousCursors((stack) => stack.slice(0, -1));
+                  setCursor(previous);
+                }
+              : undefined,
+          onNext:
+            next && !users.isFetching
+              ? () => {
+                  setPreviousCursors((stack) => [...stack, cursor]);
+                  setCursor(next);
+                }
+              : undefined,
+        }}
         empty="No users yet."
         columns={[
           { key: "email", header: "Email", sort: (a, b) => a.email.localeCompare(b.email), cell: (user) => <strong>{user.email}</strong> },
@@ -111,33 +135,6 @@ export function Users() {
           },
         ]}
       />
-      <Card className="flex-row flex-wrap items-center justify-end gap-2 px-3.5 py-2 text-sm text-muted-foreground shadow-none" aria-label="User pages">
-        <span>Showing {users.data?.items.length ?? 0} users · up to {PAGE_SIZE} per page</span>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={previousCursors.length === 0 || users.isFetching}
-          onClick={() => {
-            const previous = previousCursors.at(-1);
-            setPreviousCursors((stack) => stack.slice(0, -1));
-            setCursor(previous);
-          }}
-        >
-          Previous
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={!next || users.isFetching}
-          onClick={() => {
-            if (!next) return;
-            setPreviousCursors((stack) => [...stack, cursor]);
-            setCursor(next);
-          }}
-        >
-          Next
-        </Button>
-      </Card>
       <FormDialog
         open={creating}
         title="New user"

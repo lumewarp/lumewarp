@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronLeftIcon, ChevronRightIcon, ChevronsLeftIcon, ChevronsRightIcon } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 
 import { cn } from "../lib/utils";
@@ -31,9 +31,42 @@ interface Props<T> {
   onRetry?: () => void;
   empty?: ReactNode;
   pageSize?: number;
+  /** Server-side paging (a cursor API): replaces the client-side pages, and the footer always shows. */
+  paging?: Paging;
 }
 
-export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, empty = "Nothing here yet.", pageSize = 10 }: Props<T>) {
+export interface Paging {
+  /** What the footer says, for example the range shown. */
+  summary: ReactNode;
+  onPrevious?: () => void;
+  onNext?: () => void;
+  onFirst?: () => void;
+  onLast?: () => void;
+}
+
+/**
+ * The pager under a table: a summary, then icon buttons. An undefined handler disables its button; leaving
+ * `onFirst` or `onLast` out of the props hides it (a cursor API has no last page).
+ */
+export function TablePagination(props: Paging) {
+  const { summary, onFirst, onPrevious, onNext, onLast } = props;
+  const nav = (label: string, Icon: typeof ChevronLeftIcon, onClick: (() => void) | undefined) => (
+    <Button type="button" variant="outline" size="icon" className="size-8" aria-label={label} disabled={!onClick} onClick={onClick}>
+      <Icon aria-hidden="true" />
+    </Button>
+  );
+  return (
+    <div className="flex flex-wrap items-center justify-end gap-2 border-t px-3.5 py-2 text-sm text-muted-foreground" data-testid="table-pagination">
+      <span className="mr-2 tabular-nums">{summary}</span>
+      {"onFirst" in props && nav("First page", ChevronsLeftIcon, onFirst)}
+      {nav("Previous page", ChevronLeftIcon, onPrevious)}
+      {nav("Next page", ChevronRightIcon, onNext)}
+      {"onLast" in props && nav("Last page", ChevronsRightIcon, onLast)}
+    </div>
+  );
+}
+
+export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, empty = "Nothing here yet.", pageSize = 10, paging }: Props<T>) {
   const [sort, setSort] = useState<{ key: string; dir: 1 | -1 } | null>(null);
   const [page, setPage] = useState(0);
 
@@ -43,9 +76,9 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
     return [...rows].sort((a, b) => col.sort!(a, b) * sort.dir);
   }, [rows, columns, sort]);
 
-  const pages = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const pages = paging ? 1 : Math.max(1, Math.ceil(sorted.length / pageSize));
   const cur = Math.min(page, pages - 1);
-  const visible = sorted.slice(cur * pageSize, (cur + 1) * pageSize);
+  const visible = paging ? sorted : sorted.slice(cur * pageSize, (cur + 1) * pageSize);
 
   const toggle = (key: string) =>
     setSort((s) => (s?.key !== key ? { key, dir: 1 } : s.dir === 1 ? { key, dir: -1 } : null));
@@ -116,18 +149,19 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
           </TableBody>
         </Table>
       )}
-      {!body && pages > 1 && (
-        <div className="flex flex-wrap items-center justify-end gap-2 border-t px-3.5 py-2 text-sm text-muted-foreground">
-          <span>
-            {cur * pageSize + 1}–{Math.min((cur + 1) * pageSize, sorted.length)} of {sorted.length}
-          </span>
-          <Button variant="outline" size="sm" disabled={cur === 0} onClick={() => setPage(cur - 1)}>
-            Previous
-          </Button>
-          <Button variant="outline" size="sm" disabled={cur >= pages - 1} onClick={() => setPage(cur + 1)}>
-            Next
-          </Button>
-        </div>
+      {paging && !error ? (
+        <TablePagination {...paging} />
+      ) : (
+        !body &&
+        pages > 1 && (
+          <TablePagination
+            summary={`${cur * pageSize + 1}–${Math.min((cur + 1) * pageSize, sorted.length)} of ${sorted.length}`}
+            onFirst={cur > 0 ? () => setPage(0) : undefined}
+            onPrevious={cur > 0 ? () => setPage(cur - 1) : undefined}
+            onNext={cur < pages - 1 ? () => setPage(cur + 1) : undefined}
+            onLast={cur < pages - 1 ? () => setPage(pages - 1) : undefined}
+          />
+        )
       )}
     </Card>
   );

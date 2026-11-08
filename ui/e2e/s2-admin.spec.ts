@@ -67,8 +67,10 @@ test("settings and users: description list, buttons and pager render and work", 
   await expect(page.locator("html")).not.toHaveAttribute("data-theme", before ?? "");
   await page.goto("/users");
   await expect(page.getByRole("heading", { name: "Users" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Previous" })).toBeDisabled();
-  await expect(page.getByText(/Showing \d+ users/)).toBeVisible();
+  const pager = page.getByTestId("table-pagination");
+  await expect(pager.getByRole("button", { name: "Previous page" })).toBeDisabled();
+  await expect(pager.getByRole("button", { name: "First page" })).toBeDisabled();
+  await expect(pager).toContainText(/^1–\d+/);
 });
 
 test("screenshots: s2 pages, desktop and phone, light and dark", async ({ page, request }) => {
