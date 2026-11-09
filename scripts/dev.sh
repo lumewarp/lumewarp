@@ -12,13 +12,19 @@
 #   DEV_AUTHZ=openfga         authorization backend (default builtin)
 #   LUMEWARP_BREAK_GLASS_PASSWORD  override the development emergency password
 #   DEV_DATABASE=name         use this database in the dev Postgres, created if missing
+#   DEV_OPENWEBUI=0           do not start Open WebUI
 #
 # Ports: UI 5173 (Vite, proxies /api to the CP), CP 8091 (+ gRPC 50051, metrics 9465),
-# gateway 4000 (+ admin 9464), mock upstream 9100, example MCP 9110, example A2A 9120.
+# gateway 4000 (+ admin 9464), mock upstream 9100, example MCP 9110, example A2A 9120,
+# Open WebUI 3000.
 # An empty database gets a model `mock-local`, a router `demo` over it, an alias
 # `demo-latest` to the router, a team `demo` and one key; the key secret is kept in
 # .dev/demo-key. One with no MCP server or A2A agent gets `example` and `helper`,
 # the example servers above. Each start issues a fresh gateway token (.dev/env).
+# Open WebUI runs in a container (no login) with the demo key for both the gateway's
+# OpenAI API and its aggregate MCP endpoint; its chats live in a Docker volume. Its
+# connections come from the environment on every start, so settings changed in its
+# admin panel do not survive a restart.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,6 +38,10 @@ tab_label="lumewarp-dev"
 gateway_id="gw-dev"
 cp_url="http://127.0.0.1:8091"
 ui_url="http://127.0.0.1:5173"
+openwebui="${DEV_OPENWEBUI:-1}"
+openwebui_port=3000
+openwebui_image="ghcr.io/open-webui/open-webui:v0.12.5"
+openwebui_name="lumewarp-dev-openwebui"
 export PATH="$HOME/.cargo/bin:$PATH"
 
 log() { printf '\033[1m[dev]\033[0m %s\n' "$*"; }
@@ -51,7 +61,13 @@ dev_tab() { # prints the tab id of an open dev tab, if any
 
 # Containers, builds, migrations and a gateway token; writes .dev/env for `run`.
 prepare() {
-  for port in 4000 5173 8091 9100 9110 9120 9464 9465 50051; do
+  local ports=(4000 5173 8091 9100 9110 9120 9464 9465 50051)
+  if [[ $openwebui == 1 ]]; then
+    # A previous run's container is replaced below; drop it before checking the port.
+    docker rm -f "$openwebui_name" >/dev/null 2>&1 || true
+    ports+=("$openwebui_port")
+  fi
+  for port in "${ports[@]}"; do
     if ss -ltn "sport = :$port" 2>/dev/null | grep -q LISTEN; then
       die "port $port is already in use; stop the other dev stack first"
     fi
@@ -123,6 +139,49 @@ prepare() {
     log "installing UI dependencies"
     pnpm --dir "$root/ui" install --silent
   fi
+
+  if [[ $openwebui == 1 ]] && ! docker image inspect "$openwebui_image" >/dev/null 2>&1; then
+    log "pulling $openwebui_image (first run only, several GB)"
+    docker pull -q "$openwebui_image" >/dev/null
+  fi
+}
+
+# Open WebUI on the host network, bound to loopback, using the demo key. Runs after
+# `seed`, which writes the key on an empty database.
+openwebui_up() {
+  [[ $openwebui == 1 ]] || return 0
+  if [[ ! -s $state/demo-key ]]; then
+    log "skipping Open WebUI: .dev/demo-key is missing (seeded only on an empty database)"
+    return 0
+  fi
+  local key env="$state/openwebui.env"
+  key="$(<"$state/demo-key")"
+  : >"$env"
+  chmod 600 "$env"
+  # A Docker env file takes each value literally, so the JSON needs no quoting.
+  {
+    echo "PORT=$openwebui_port"
+    echo "HOST=127.0.0.1"
+    echo "WEBUI_AUTH=False"
+    echo "WEBUI_SECRET_KEY=dev-only-open-webui-secret"
+    echo "ENABLE_PERSISTENT_CONFIG=False"
+    echo "ENABLE_OLLAMA_API=False"
+    echo "OPENAI_API_BASE_URL=http://127.0.0.1:4000/v1"
+    echo "OPENAI_API_KEY=$key"
+    jq -nc --arg key "$key" '[{
+      type: "mcp", url: "http://127.0.0.1:4000/mcp", path: "", auth_type: "none", key: "",
+      headers: {"X-Lumewarp-Key": $key}, config: {enable: true},
+      info: {id: "lumewarp", name: "Lumewarp", description: "Lumewarp gateway, every MCP server the demo key may use"}
+    }]' | sed 's/^/TOOL_SERVER_CONNECTIONS=/'
+    echo "ENABLE_EVALUATION_ARENA_MODELS=False"
+    echo "OFFLINE_MODE=True"
+    echo "ANONYMIZED_TELEMETRY=False"
+    echo "DO_NOT_TRACK=True"
+    echo "SCARF_NO_ANALYTICS=True"
+  } >>"$env"
+  log "starting Open WebUI"
+  docker run -d --name "$openwebui_name" --network host --env-file "$env" \
+    -v lumewarp-dev-openwebui:/app/backend/data "$openwebui_image" >/dev/null
 }
 
 run_service() { # mock | mcp | a2a | cp | gw | ui
@@ -185,6 +244,17 @@ summary() { # stop hint
   wait_http "$ui_url" "UI"
   wait_http "http://127.0.0.1:9110/_mock/headers" "example MCP server"
   wait_http "http://127.0.0.1:9120/health" "example A2A agent"
+  local webui=""
+  if [[ $openwebui == 1 && -s $state/demo-key ]]; then
+    webui="  Open WebUI http://127.0.0.1:$openwebui_port   (demo key; MCP tools: Lumewarp in the chat's tool menu)"
+    # Its first start migrates its own database and can take minutes; never fail on it.
+    local up=0
+    for _ in $(seq 1 600); do
+      curl -fsS -o /dev/null "http://127.0.0.1:$openwebui_port/health" 2>/dev/null && { up=1; break; }
+      sleep 0.5
+    done
+    [[ $up == 1 ]] || webui="  Open WebUI not ready after 5 minutes: docker logs $openwebui_name"
+  fi
   cat <<EOF
 
   UI        $ui_url   (SSO: alice/bob/carol; alice becomes proxy_admin on first login)
@@ -195,6 +265,7 @@ summary() { # stop hint
   A2A       http://127.0.0.1:9120/a2a   (agent card /.well-known/agent-card.json)
   metrics   http://127.0.0.1:9464/metrics (gateway), http://127.0.0.1:9465/metrics (CP)
   Demo API key is stored in .dev/demo-key (not printed).
+$webui
   $1
 
 EOF
@@ -211,6 +282,7 @@ case "${1:-all}" in
       ("$self" run "$svc" 2>&1 | sed -u "s/^/[$svc] /") &
     done
     seed
+    openwebui_up
     summary "Ctrl+C stops everything (containers keep running: make dev-down)."
     wait
     ;;
@@ -225,7 +297,7 @@ case "${1:-all}" in
       fi
       herdr tab create --label "$tab_label" --cwd "$root" --env DEV_IN_TAB=1 \
         --env "DEV_AUTHZ=$authz" --env "LUMEWARP_BREAK_GLASS_PASSWORD=$break_glass_password" \
-        --env "DEV_DATABASE=${DEV_DATABASE:-}" \
+        --env "DEV_DATABASE=${DEV_DATABASE:-}" --env "DEV_OPENWEBUI=$openwebui" \
         --focus | jq -r '.result.root_pane.pane_id' | {
         read -r pane
         herdr pane run "$pane" "$self tab" >/dev/null
@@ -249,6 +321,7 @@ case "${1:-all}" in
     mcp_pane="$(split "$ui_pane" down mcp)"
     split "$mcp_pane" down a2a >/dev/null
     seed
+    openwebui_up
     summary "make dev-stop closes this tab (containers keep running: make dev-down)."
     ;;
   stop)

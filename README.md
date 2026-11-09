@@ -159,6 +159,7 @@ settings, SSO, authorization backends, the catalog, plugins and operations, and
 | SSO | <http://127.0.0.1:5173/> | `carol@example.com` | `lumewarp` | Plain user: no team and no grants until an admin adds them |
 | Emergency | <http://127.0.0.1:5173/> | none | `dev-break-glass` | Emergency admin session; `LUMEWARP_BREAK_GLASS_PASSWORD` overrides the password |
 | Keycloak console | <http://127.0.0.1:18080/> | `admin` | `lumewarp` | Administers the IdP, not Lumewarp |
+| Open WebUI | <http://127.0.0.1:3000/> | none | none | Chat client with the demo key: the gateway's models, and its MCP tools as the `Lumewarp` tool server; `DEV_OPENWEBUI=0` skips it |
 
 The seeded demo API key is in `.dev/demo-key`. Postgres is at `127.0.0.1:55432`, with
 database, user and password all `lumewarp`.

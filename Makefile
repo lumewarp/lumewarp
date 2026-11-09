@@ -17,7 +17,9 @@ dev-all:
 dev-stop:
 	@scripts/dev.sh stop
 
-# Stop the dev containers (Postgres keeps its volume; scripts/dev-db.sh reset wipes it).
+# Stop the dev containers (Postgres and Open WebUI keep their volumes; scripts/dev-db.sh
+# reset wipes Postgres).
 dev-down:
+	@docker rm -f lumewarp-dev-openwebui >/dev/null 2>&1 || true
 	@scripts/dev-idp.sh down
 	@scripts/dev-db.sh down
