@@ -766,11 +766,7 @@ as a router write.
   total for the UTC calendar month in the same transaction, then budget evaluation flips
   exhausted scopes to `BUDGET_EXCEEDED` and publishes a new version (eventual; in-flight
   streams are not cut). MCP and A2A events (`kind=mcp|a2a`, with `target`, `method` and
-  `tool`; MCP also `client_name`, `client_version`, `client_protocol` and
-  `upstream_protocol`) are recorded and never aggregated: no budget, no limit, no cost.
-  `GET /usage` groups and filters by those MCP dimensions (`client`, `client_version`,
-  `client_protocol`, `upstream_protocol`) and by `client_fallback`, derived per client
-  over the range and the caller's scope from its `server/discover` and `initialize` events. Budget publishing targets the protocol's 5 s
+  `tool`) are recorded and never aggregated: no budget, no limit, no cost. Budget publishing targets the protocol's 5 s
   eventual-enforcement window; it is not a configurable per-flip timeout. The unused
   `LUMEWARP_BUDGET_FLIP_DEADLINE_SECONDS` setting has been removed.
 - Usage is stored in Postgres; ClickHouse is later. While the control plane is down the

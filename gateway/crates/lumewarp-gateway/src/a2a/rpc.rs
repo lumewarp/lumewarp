@@ -1154,7 +1154,6 @@ fn start_stream(
             outcome: RequestOutcome::Completed,
             stream: true,
             config_version,
-            mcp: None,
         },
     );
     let state = StreamState {
@@ -1808,7 +1807,6 @@ mod tests {
                 outcome: RequestOutcome::Completed,
                 stream: true,
                 config_version: 0,
-                mcp: None,
             },
         );
         let state = StreamState {

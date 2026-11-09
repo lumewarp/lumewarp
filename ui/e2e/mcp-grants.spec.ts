@@ -243,18 +243,12 @@ test("usage: the MCP and A2A tabs group by server, method and tool with failures
     row({ kind: "mcp", target: "s1", method: "tools/list", tool: "", requests: 5, error_count: 0, total_duration_ms: 500 }),
   ];
   const a2a = [row({ kind: "a2a", target: "agent", method: "SendMessage", tool: "", requests: 4, error_count: 1, total_duration_ms: 12_000 })];
-  const protocols = [
-    row({ client_fallback: "falls_back", client_protocol: "2025-11-25", upstream_protocol: "2025-11-25", requests: 7, error_count: 0, total_duration_ms: 70 }),
-    row({ client_fallback: "no_probe", client_protocol: "2025-06-18", upstream_protocol: "2026-07-28", requests: 2, error_count: 2, total_duration_ms: 20 }),
-  ];
   const asked: { kind: string; group: string }[] = [];
   await page.route(/\/api\/v1\/usage\?/, async (route) => {
     const url = new URL(route.request().url());
     const kind = url.searchParams.get("kind") ?? "";
     asked.push({ kind, group: url.searchParams.get("group_by") ?? "" });
-    const group = url.searchParams.get("group_by") ?? "";
-    const items = kind === "mcp" ? (group.includes("client_fallback") ? protocols : mcp) : kind === "a2a" ? a2a : [];
-    await route.fulfill({ json: { items, next_cursor: null } });
+    await route.fulfill({ json: { items: kind === "mcp" ? mcp : kind === "a2a" ? a2a : [], next_cursor: null } });
   });
 
   await signInAsAdmin(page, request, "/usage");
@@ -287,19 +281,6 @@ test("usage: the MCP and A2A tabs group by server, method and tool with failures
   await expect.poll(() => asked.some((call2) => call2.kind === "mcp" && call2.group === "target")).toBe(true);
   await expect(table.getByRole("columnheader", { name: "Server" })).toBeVisible();
   await expect(table.getByRole("columnheader", { name: "Method" })).toHaveCount(0);
-
-  // The protocol analysis: how clients negotiate, against the revisions on both sides.
-  await pick(page, "Group by", "Fallback × client protocol × upstream protocol");
-  await expect
-    .poll(() => asked.some((call4) => call4.kind === "mcp" && call4.group === "client_fallback,client_protocol,upstream_protocol"))
-    .toBe(true);
-  for (const header of ["Fallback", "Client protocol", "Upstream protocol"]) {
-    await expect(table.getByRole("columnheader", { name: header })).toBeVisible();
-  }
-  await expect(table.getByRole("row").filter({ hasText: "Falls back" })).toContainText("2025-11-25");
-  const refused = table.getByRole("row").filter({ hasText: "Never probes" });
-  await expect(refused).toContainText("2026-07-28");
-  await expect(refused).toContainText("100%");
 
   await page.getByRole("tab", { name: "A2A", exact: true }).click();
   await expect.poll(() => asked.some((call3) => call3.kind === "a2a" && call3.group === "target,method")).toBe(true);

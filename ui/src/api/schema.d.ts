@@ -708,11 +708,8 @@ export interface paths {
          *
          *     The token is used once, never stored and never audited. With `server_id` the result is
          *     recorded as observed definitions of that server, under the same first-writer rules as a
-         *     gateway's `CatalogReport`; without it nothing is written. Nothing is recorded for a URL
-         *     other than the saved one, or when the server's configuration changed while the call was
-         *     in flight (`recorded` is false): a preview must not decide a review for a configuration
-         *     it did not observe. A server behind a WASM upstream-auth plugin cannot be discovered
-         *     here (the control plane does not run WASM).
+         *     gateway's `CatalogReport`; without it nothing is written. A server behind a WASM
+         *     upstream-auth plugin cannot be discovered here (the control plane does not run WASM).
          */
         post: operations["discoverMcp"];
         delete?: never;
@@ -980,10 +977,7 @@ export interface paths {
          *     day,requested loads. Empty upstream_model means unavailable; null means mixed.
          *     `kind`, `target`, `method` and `tool` filter the gateway protocol and what an
          *     MCP or A2A request named; the team totals fast path covers LLM requests only,
-         *     so any of them (and every non-LLM kind) reads raw events. `client`,
-         *     `client_version`, `client_protocol`, `upstream_protocol` and `client_fallback`
-         *     filter the MCP protocol dimensions; `client_fallback` is derived per client
-         *     over the range and the caller's scope (`_fallback_class`).
+         *     so any of them (and every non-LLM kind) reads raw events.
          */
         get: operations["getUsage"];
         put?: never;
@@ -1764,14 +1758,6 @@ export interface components {
             max_parallel?: number | null;
         };
         /**
-         * McpClientFallback
-         * @description How an MCP client (name and version) negotiates, derived per usage query from its
-         *     requests in the range: never stored. A 2026-07-28 client probes with `server/discover`;
-         *     the gateway answers with handshake revisions only.
-         * @enum {string}
-         */
-        McpClientFallback: "falls_back" | "no_fallback" | "no_probe" | "unknown";
-        /**
          * McpDefinitionKind
          * @description Which kind of MCP definition a reviewed hash belongs to (proto McpDefinitionKind).
          * @enum {string}
@@ -1831,9 +1817,8 @@ export interface components {
          * @description One `tools/list`/`prompts/list` from the control plane, with a token used once.
          *
          *     Give `server_id` to record the result as observed definitions of that server (the same
-         *     rules as a gateway report). Without it nothing is stored, and nothing is stored either
-         *     for a URL other than the saved one or when the server changed while the call ran. A
-         *     server whose auth is a WASM plugin cannot be discovered here.
+         *     rules as a gateway report). Without it nothing is stored. A server whose auth is a WASM
+         *     plugin cannot be discovered here.
          */
         McpDiscoverIn: {
             /** Url */
@@ -1877,10 +1862,7 @@ export interface components {
              * @description The plan's per-server bound stopped the listing.
              */
             truncated: boolean;
-            /**
-             * Recorded
-             * @description Whether the result was recorded against the saved server. False means the states above are 'unrecorded'.
-             */
+            /** Recorded */
             recorded: boolean;
         };
         /** McpDiscoveredOut */
@@ -1894,7 +1876,7 @@ export interface components {
             definition_json: string;
             /**
              * State
-             * @description The state after recording; 'unrecorded' when nothing was recorded (no server_id, a URL other than the saved one, a configuration that changed meanwhile, or an item the database cannot store).
+             * @description The state after recording; 'unrecorded' when no server_id was given.
              * @enum {string}
              */
             state: "approved" | "pending" | "rejected" | "unrecorded";
@@ -3805,9 +3787,9 @@ export interface components {
          *
          *     `error_count` and `total_duration_ms` describe how the group's requests ended
          *     (an error outcome, or a 4xx/5xx status that is not a client cancellation;
-         *     summed duration, so the mean is the sum over `requests`). The LLM tabs
-         *     ignore them; the MCP and A2A tabs read them in place of tokens and cost. The
-         *     monthly totals fast path (LLM requests only) reports both as 0.
+         *     summed duration, so the mean is the sum over `requests`). The LLM tabs ignore them; the MCP and A2A tabs read them in
+         *     place of tokens and cost. The monthly totals fast path (LLM requests only)
+         *     reports both as 0.
          */
         UsageRowOut: {
             /** Date */
@@ -3819,15 +3801,6 @@ export interface components {
             method?: string | null;
             /** Tool */
             tool?: string | null;
-            /** Client */
-            client?: string | null;
-            /** Client Version */
-            client_version?: string | null;
-            /** Client Protocol */
-            client_protocol?: string | null;
-            /** Upstream Protocol */
-            upstream_protocol?: string | null;
-            client_fallback?: components["schemas"]["McpClientFallback"] | null;
             /** Requested */
             requested?: string | null;
             /** Model */
@@ -9841,11 +9814,6 @@ export interface operations {
                 target?: string | null;
                 method?: string | null;
                 tool?: string | null;
-                client?: string | null;
-                client_version?: string | null;
-                client_protocol?: string | null;
-                upstream_protocol?: string | null;
-                client_fallback?: components["schemas"]["McpClientFallback"] | null;
                 requested?: string | null;
                 model?: string | null;
                 upstream_model?: string | null;

@@ -5,7 +5,6 @@ use super::{
 };
 use crate::{
     auth::Caller, catalog, error, mcp_hash, metrics, proxy::ProxyBody, targets::McpTarget,
-    usage::McpTags,
 };
 use bytes::Bytes;
 use hyper::{HeaderMap, Method, Response, StatusCode};
@@ -173,7 +172,6 @@ pub async fn handle(call: Call<'_>) -> Response<ProxyBody> {
                 status,
                 stream: false,
                 config_version: routing_table.version,
-                mcp: response.extensions().get::<McpTags>(),
                 outcome: if let Some(outcome) = response
                     .extensions()
                     .get::<lumewarp_proto::usage::v1::RequestOutcome>()
@@ -303,7 +301,7 @@ impl Context<'_> {
         }
         Ok(s)
     }
-    async fn dispatch(&self, method: &Method, value: Value) -> Response<ProxyBody> {
+    async fn dispatch(&self, method: &Method, mut value: Value) -> Response<ProxyBody> {
         let name = value
             .get("method")
             .and_then(Value::as_str)
@@ -318,11 +316,7 @@ impl Context<'_> {
             return fail(StatusCode::BAD_REQUEST, "An RPC request id is required");
         }
         if name == "server/discover" {
-            let mut response = self.discover(id);
-            response
-                .extensions_mut()
-                .insert(discover_tags(&value, self.headers));
-            return response;
+            return self.discover(id);
         }
         if name == "initialize" {
             if !value
@@ -340,51 +334,12 @@ impl Context<'_> {
             {
                 return rpc(id, -32602, "Invalid initialize parameters");
             }
-            let mut tags = initialize_tags(&value);
-            let (mut response, upstream) = self.initialize(value, &tags).await;
-            tags.upstream_protocol = upstream;
-            response.extensions_mut().insert(tags);
-            return response;
+            return self.initialize(value).await;
         }
         let s = match self.session() {
             Ok(s) => s,
             Err(r) => return r,
         };
-        let tags = self.session_tags(&s, &value);
-        let mut response = self.with_session(method, value, name, id, &s, &tags).await;
-        response.extensions_mut().insert(tags);
-        response
-    }
-    /// The usage dimensions of a request inside a session: the client and the
-    /// revision it asked for come from the session, the upstream revision from
-    /// the leg the request names (single-server route: its only leg).
-    fn session_tags(&self, s: &Session, value: &Value) -> McpTags {
-        let leg = match self.route {
-            Route::Server { .. } => s.legs.first(),
-            Route::Aggregate => {
-                let (target, _) = self.usage_identity(value);
-                s.legs
-                    .iter()
-                    .find(|leg| !target.is_empty() && leg.name == target)
-            }
-        };
-        McpTags {
-            client_name: s.client_name.clone(),
-            client_version: s.client_version.clone(),
-            client_protocol: s.client_protocol.clone(),
-            upstream_protocol: leg.map(|leg| leg.version.clone()).unwrap_or_default(),
-        }
-    }
-    #[allow(clippy::too_many_arguments)]
-    async fn with_session(
-        &self,
-        method: &Method,
-        mut value: Value,
-        name: String,
-        id: Value,
-        s: &Session,
-        tags: &McpTags,
-    ) -> Response<ProxyBody> {
         if *method == Method::GET && self.route == Route::Aggregate {
             return transport::empty(StatusCode::METHOD_NOT_ALLOWED);
         }
@@ -433,7 +388,7 @@ impl Context<'_> {
             return ok(id, json!({}));
         }
         if name == "tools/list" || name == "prompts/list" {
-            return self.list(s, value).await;
+            return self.list(&s, value).await;
         }
         let server = match self.route {
             Route::Server { name } => name.to_owned(),
@@ -597,7 +552,6 @@ impl Context<'_> {
                             outcome: lumewarp_proto::usage::v1::RequestOutcome::Completed,
                             stream: true,
                             config_version: self.routing_table.version,
-                            mcp: Some(tags),
                         },
                     )
                 });
@@ -638,11 +592,7 @@ impl Context<'_> {
             }),
         )
     }
-    /// Opens a session. Also returns the upstream revision for usage: on a
-    /// single-server route the leg's (or, when the upstream refused the
-    /// handshake era, the newest one it named); empty on the aggregate route,
-    /// whose legs differ.
-    async fn initialize(&self, value: Value, tags: &McpTags) -> (Response<ProxyBody>, String) {
+    async fn initialize(&self, value: Value) -> Response<ProxyBody> {
         let id = value["id"].clone();
         let requested = value
             .pointer("/params/protocolVersion")
@@ -661,9 +611,6 @@ impl Context<'_> {
             nonce: uuid::Uuid::now_v7().to_string(),
             version: version.into(),
             legs: vec![],
-            client_name: tags.client_name.clone(),
-            client_version: tags.client_version.clone(),
-            client_protocol: tags.client_protocol.clone(),
         };
         let selected: Vec<_> = self
             .targets
@@ -681,10 +628,7 @@ impl Context<'_> {
             &selected[..]
         };
         if self.route != Route::Aggregate && selected.is_empty() {
-            return (
-                fail(StatusCode::NOT_FOUND, "Unknown MCP server"),
-                String::new(),
-            );
+            return fail(StatusCode::NOT_FOUND, "Unknown MCP server");
         }
         // Poll borrowed legs concurrently, preserving deterministic server order.
         let mut futures: Vec<_> = selected
@@ -713,26 +657,13 @@ impl Context<'_> {
         })
         .await;
         let mut direct = None;
-        for (index, result) in results.into_iter().enumerate() {
-            let Some(result) = result else { continue };
+        for result in results.into_iter().flatten() {
             let (leg, result) = match result {
                 Ok(result) => result,
-                Err(LegError { error, refused }) => {
-                    if let Some(version) = &refused {
-                        tracing::warn!(
-                            server = %selected[index].name,
-                            upstream_protocol = %version,
-                            "MCP upstream refused the handshake era; it is left out of the session"
-                        );
-                    }
-                    if self.route != Route::Aggregate {
-                        return (
-                            fail(error.status(), "MCP initialization failed"),
-                            refused.unwrap_or_default(),
-                        );
-                    }
-                    continue;
+                Err(error) if self.route != Route::Aggregate => {
+                    return fail(error.status(), "MCP initialization failed");
                 }
+                Err(_) => continue,
             };
             session.legs.push(leg);
             if session::seal(
@@ -749,17 +680,11 @@ impl Context<'_> {
             direct = Some(result);
         }
         if self.route != Route::Aggregate && session.legs.is_empty() {
-            return (
-                fail(StatusCode::BAD_GATEWAY, "MCP initialization failed"),
-                String::new(),
-            );
+            return fail(StatusCode::BAD_GATEWAY, "MCP initialization failed");
         }
-        let upstream = if self.route != Route::Aggregate {
+        if self.route != Route::Aggregate {
             session.version = session.legs[0].version.clone();
-            session.version.clone()
-        } else {
-            String::new()
-        };
+        }
         let token = match session::seal(
             self.runtime.id_key.as_ref().unwrap(),
             session::SESSION,
@@ -767,12 +692,9 @@ impl Context<'_> {
         ) {
             Ok(t) => t,
             Err(()) => {
-                return (
-                    fail(
-                        StatusCode::BAD_GATEWAY,
-                        "MCP session exceeds header capacity",
-                    ),
-                    upstream,
+                return fail(
+                    StatusCode::BAD_GATEWAY,
+                    "MCP session exceeds header capacity",
                 )
             }
         };
@@ -787,13 +709,13 @@ impl Context<'_> {
         response
             .headers_mut()
             .insert("mcp-session-id", token.parse().unwrap());
-        (response, upstream)
+        response
     }
     async fn initialize_leg(
         &self,
         target: &McpTarget,
         mut value: Value,
-    ) -> Result<(Leg, Value), LegError> {
+    ) -> Result<(Leg, Value), transport::SendError> {
         if let Some(caps) = value
             .pointer_mut("/params/capabilities")
             .and_then(Value::as_object_mut)
@@ -815,47 +737,16 @@ impl Context<'_> {
             .map(|h| h.to_str().map(str::to_owned))
             .transpose()
             .map_err(|_| transport::SendError::Other)?;
-        // An upstream of the 2026-07-28 era answers the handshake with
-        // UnsupportedProtocolVersion (-32022), on HTTP with a 400 and a body.
-        if response.status() == StatusCode::BAD_REQUEST {
-            let body = tokio::time::timeout(
-                target.timeout,
-                transport::collect(response.into_body(), REFUSAL_LIMIT),
-            )
-            .await;
-            let refused = match body {
-                Ok(Ok(bytes)) => serde_json::from_slice::<Value>(&bytes)
-                    .ok()
-                    .and_then(|v| refused_version(&v)),
-                _ => None,
-            };
-            return Err(LegError {
-                error: transport::SendError::Other,
-                refused,
-            });
-        }
         let mut result = tokio::time::timeout(target.timeout, transport::json(response))
             .await
             .map_err(|_| transport::SendError::UpstreamTimeout)?
             .map_err(|_| transport::SendError::Other)?;
-        let Some(version) = result
+        let version = result
             .pointer("/result/protocolVersion")
             .and_then(Value::as_str)
             .filter(|v| supported(v))
-            .map(str::to_owned)
-        else {
-            // A JSON-RPC refusal in a 200, or a revision the gateway does not speak.
-            let refused = refused_version(&result).or_else(|| {
-                result
-                    .pointer("/result/protocolVersion")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            });
-            return Err(LegError {
-                error: transport::SendError::Other,
-                refused,
-            });
-        };
+            .ok_or(transport::SendError::Other)?
+            .to_owned();
         if let Some(caps) = result
             .pointer_mut("/result/capabilities")
             .and_then(Value::as_object_mut)
@@ -1165,63 +1056,6 @@ fn target_auth(target: &McpTarget) -> String {
 }
 fn supported(v: &str) -> bool {
     matches!(v, "2025-11-25" | "2025-06-18")
-}
-/// Most of an upstream's 400 to an initialize that is read for its refusal.
-const REFUSAL_LIMIT: usize = 64 * 1024;
-/// Why a leg did not open: the transport error, and the newest revision the
-/// upstream named when it refused the handshake era.
-struct LegError {
-    error: transport::SendError,
-    refused: Option<String>,
-}
-impl From<transport::SendError> for LegError {
-    fn from(error: transport::SendError) -> Self {
-        Self {
-            error,
-            refused: None,
-        }
-    }
-}
-/// The newest revision an UnsupportedProtocolVersion (-32022) error names.
-/// Revisions are dates, so the lexical maximum is the newest.
-fn refused_version(message: &Value) -> Option<String> {
-    if message.pointer("/error/code").and_then(Value::as_i64) != Some(-32022) {
-        return None;
-    }
-    message
-        .pointer("/error/data/supported")?
-        .as_array()?
-        .iter()
-        .filter_map(Value::as_str)
-        .max()
-        .map(|v| crate::usage::McpTags::client("", "", v).client_protocol)
-}
-fn str_at<'v>(value: &'v Value, pointer: &str) -> &'v str {
-    value.pointer(pointer).and_then(Value::as_str).unwrap_or("")
-}
-/// An initialize names its client and revision in `params`.
-fn initialize_tags(value: &Value) -> McpTags {
-    McpTags::client(
-        str_at(value, "/params/clientInfo/name"),
-        str_at(value, "/params/clientInfo/version"),
-        str_at(value, "/params/protocolVersion"),
-    )
-}
-/// A 2026-07-28 probe names them in `_meta` (the revision also in the header).
-fn discover_tags(value: &Value, headers: &HeaderMap) -> McpTags {
-    let meta = "/params/_meta/io.modelcontextprotocol~1";
-    let protocol = match str_at(value, &format!("{meta}protocolVersion")) {
-        "" => headers
-            .get("mcp-protocol-version")
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or(""),
-        protocol => protocol,
-    };
-    McpTags::client(
-        str_at(value, &format!("{meta}clientInfo/name")),
-        str_at(value, &format!("{meta}clientInfo/version")),
-        protocol,
-    )
 }
 fn decode_id(value: &Value) -> Option<(String, Value)> {
     let (server, raw) = value.as_str()?.strip_prefix("lw:")?.split_once(':')?;

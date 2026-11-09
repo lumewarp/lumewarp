@@ -33,15 +33,6 @@ pub struct Session {
     pub nonce: String,
     pub version: String,
     pub legs: Vec<Leg>,
-    /// The `clientInfo` the session was opened with, bounded, for usage only.
-    #[serde(default)]
-    pub client_name: String,
-    #[serde(default)]
-    pub client_version: String,
-    /// The `protocolVersion` the client's initialize asked for, as sent (bounded);
-    /// `version` is the one the session runs.
-    #[serde(default)]
-    pub client_protocol: String,
 }
 #[derive(Serialize, Deserialize)]
 pub struct Cursor {

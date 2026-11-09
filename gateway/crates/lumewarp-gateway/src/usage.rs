@@ -58,23 +58,6 @@ const MAX_TARGET: usize = 200;
 const MAX_METHOD: usize = 128;
 /// Longest `tool` (usage.proto: "at most 400 bytes").
 const MAX_TOOL: usize = 400;
-/// Longest MCP `client_name` / `client_version` / protocol revision reported.
-pub const MAX_CLIENT_NAME: usize = 128;
-pub const MAX_CLIENT_VERSION: usize = 64;
-pub const MAX_PROTOCOL: usize = 32;
-
-/// The MCP protocol dimensions of one request (usage.proto 32–35): who the
-/// client says it is, the revision it asked for or runs, and the revision of
-/// the upstream leg it reached. Every value is client- or upstream-chosen and
-/// bounded when recorded. Travels as a response extension from the MCP engine
-/// to the usage record.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct McpTags {
-    pub client_name: String,
-    pub client_version: String,
-    pub client_protocol: String,
-    pub upstream_protocol: String,
-}
 
 /// A value as reported in usage and spans. Anything a client or an upstream
 /// chose is untrusted: cut to the limit on a character boundary and without
@@ -95,19 +78,6 @@ fn bounded(name: &str, limit: usize) -> Cow<'_, str> {
 /// A called name as reported in usage and spans.
 pub fn bounded_requested(name: &str) -> Cow<'_, str> {
     bounded(name, MAX_REQUESTED)
-}
-
-impl McpTags {
-    /// Tags from client-chosen values, bounded so they can also ride in a
-    /// session token without growing it past a few hundred bytes.
-    pub fn client(name: &str, version: &str, protocol: &str) -> Self {
-        Self {
-            client_name: bounded(name, MAX_CLIENT_NAME).into_owned(),
-            client_version: bounded(version, MAX_CLIENT_VERSION).into_owned(),
-            client_protocol: bounded(protocol, MAX_PROTOCOL).into_owned(),
-            upstream_protocol: String::new(),
-        }
-    }
 }
 
 /// Created once per `/v1/*` request at entry in `server.rs`, never from client
@@ -151,9 +121,6 @@ pub struct TrafficEvent<'a> {
     pub outcome: RequestOutcome,
     pub stream: bool,
     pub config_version: u64,
-    /// MCP only; `None` for A2A and for an MCP request refused before its
-    /// client was known.
-    pub mcp: Option<&'a McpTags>,
 }
 
 /// The `endpoint` label of a traffic event: the MCP and A2A endpoints are the
@@ -189,7 +156,6 @@ struct OwnedTraffic {
     target: String,
     method: String,
     tool: String,
-    mcp: McpTags,
     stream: bool,
     status: u16,
 }
@@ -219,15 +185,6 @@ impl OwnedTraffic {
             target: bounded(event.target, MAX_TARGET).into_owned(),
             method: bounded(event.method, MAX_METHOD).into_owned(),
             tool: bounded(event.tool, MAX_TOOL).into_owned(),
-            mcp: match (kind, event.mcp) {
-                (TrafficKind::Mcp, Some(tags)) => McpTags {
-                    client_name: bounded(&tags.client_name, MAX_CLIENT_NAME).into_owned(),
-                    client_version: bounded(&tags.client_version, MAX_CLIENT_VERSION).into_owned(),
-                    client_protocol: bounded(&tags.client_protocol, MAX_PROTOCOL).into_owned(),
-                    upstream_protocol: bounded(&tags.upstream_protocol, MAX_PROTOCOL).into_owned(),
-                },
-                _ => McpTags::default(),
-            },
             stream: event.stream,
             status: event.status,
         })
@@ -257,10 +214,6 @@ impl OwnedTraffic {
             target: self.target,
             method: self.method,
             tool: self.tool,
-            client_name: self.mcp.client_name,
-            client_version: self.mcp.client_version,
-            client_protocol: self.mcp.client_protocol,
-            upstream_protocol: self.mcp.upstream_protocol,
             ..Default::default()
         });
     }
@@ -1618,7 +1571,6 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 outcome: RequestOutcome::Completed,
                 stream: true,
                 config_version: 7,
-                mcp: None,
             },
         );
         let event = rx.try_recv().expect("one event");
@@ -1677,7 +1629,6 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 outcome: RequestOutcome::UpstreamError,
                 stream: false,
                 config_version: 7,
-                mcp: None,
             },
         );
         let event = rx.try_recv().expect("second event");
@@ -1718,7 +1669,6 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 outcome: RequestOutcome::Completed,
                 stream: false,
                 config_version: 3,
-                mcp: None,
             }
         }
 
@@ -1794,7 +1744,6 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 outcome: RequestOutcome::Completed,
                 stream: true,
                 config_version: 3,
-                mcp: None,
             },
         );
         recorder.finish(RequestOutcome::Completed);
@@ -1831,7 +1780,6 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 outcome: RequestOutcome::Completed,
                 stream: false,
                 config_version: 1,
-                mcp: None,
             },
         );
         assert!(rx.try_recv().is_err());
@@ -1849,7 +1797,6 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 outcome: RequestOutcome::Completed,
                 stream: false,
                 config_version: 1,
-                mcp: None,
             },
         );
         assert!(rx.try_recv().is_err());
@@ -1868,7 +1815,6 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 outcome: RequestOutcome::Completed,
                 stream: false,
                 config_version: 1,
-                mcp: None,
             },
         );
         assert!(rx.try_recv().is_err());

@@ -385,9 +385,6 @@ async fn aggregate_sessions_grants_pagination_rug_pull_and_reverse_rpc() {
         route: "".into(),
         issued: sealed_session::now() - 86401,
         nonce: "expired".into(),
-        client_name: String::new(),
-        client_version: String::new(),
-        client_protocol: String::new(),
         version: "2025-11-25".into(),
         legs: vec![],
     };
@@ -541,9 +538,6 @@ fn test_session(addr: SocketAddr, route: &str, plugin: &str, params: Option<Valu
             route: route.into(),
             issued: sealed_session::now(),
             nonce: "timeout-test".into(),
-            client_name: String::new(),
-            client_version: String::new(),
-            client_protocol: String::new(),
             version: "2025-11-25".into(),
             legs: vec![sealed_session::Leg {
                 name: "s1".into(),

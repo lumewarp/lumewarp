@@ -158,7 +158,6 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 - **TOFU 是多 gateway 的本地決定：** 第一台看到新名稱的 gateway 立刻服務並回報，control plane 對該名稱以第一筆回報為準（first writer wins），之後不同的 hash 一律 pending；在回報與新快照抵達其他 gateway 之前，兩台可能短暫服務同一名稱的不同定義。這只偵測定義變更，不證明上游實際執行什麼。
 - **Discover now：** auth 是 `none`、`static_bearer` 或 `passthrough` 的 server，編輯頁可由 control plane 打一次 `tools/list` 與 `prompts/list`。`none` 不需要 token；`static_bearer` 用 server 已存的 secret（環境變數或封存密文）或管理員當次貼上的 token；`passthrough` 需要管理員貼上使用者自己的 token。貼上的 token 只用一次、不儲存、不稽核，錯誤訊息也不回上游內容。只有 URL 與已存設定在呼叫期間沒變時，結果才以同樣的 hash 記錄，否則只是預覽；WASM auth 的 server 只能從流量觀察。
 - **大小上限：** request body 4 MiB（413）、非串流回應 16 MiB、單一 SSE event 1 MiB（502）。
-- **協定維度：** 每筆 MCP usage 另記 client 自報的 `clientInfo` 名稱與版本（`initialize` 的 `params`、`server/discover` 的 `_meta`，之後由 session 帶著）、client 要求的協定版本，以及這筆請求所到上游 leg 的協定版本；上游以 `-32022` 拒絕舊握手時記它列出的最新版本（聚合端點會略過該上游，只留 warning log）。`GET /usage` 的 `group_by` 與篩選支援 `client`、`client_version`、`client_protocol`、`upstream_protocol` 與衍生的 `client_fallback`：同一 client 在查詢範圍與呼叫者可讀的範圍內送過 `server/discover` 也送過 `initialize` 是 `falls_back`，只探測是 `no_fallback`，只握手是 `no_probe`，沒有 `clientInfo` 是 `unknown`。其他篩選（例如 method）不影響這個判定。UI 的 Usage › MCP 有「Fallback × client protocol × upstream protocol」與「Client × version × fallback」兩種分組。
 
 ### A2A gateway
 

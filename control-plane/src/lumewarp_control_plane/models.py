@@ -239,18 +239,6 @@ class TrafficKind(enum.StrEnum):
     A2A = "a2a"
 
 
-class McpClientFallback(enum.StrEnum):
-    """How an MCP client (name and version) negotiates, derived per usage query from its
-    requests in the range: never stored. A 2026-07-28 client probes with `server/discover`;
-    the gateway answers with handshake revisions only.
-    """
-
-    FALLS_BACK = "falls_back"  # probed, then ran the initialize handshake
-    NO_FALLBACK = "no_fallback"  # probed and never initialized: likely 2026-07-28 only
-    NO_PROBE = "no_probe"  # initialized without probing: a handshake-era client
-    UNKNOWN = "unknown"  # no clientInfo, or neither request in the range
-
-
 class McpReviewMode(enum.StrEnum):
     """How a gateway treats a definition it observes upstream (proto McpReviewMode).
 
@@ -1980,21 +1968,6 @@ class UsageEvent(Base):
     method: Mapped[str] = mapped_column(String(128), nullable=False, default="", server_default="")
     # The MCP tool or prompt an MCP request named; empty otherwise.
     tool: Mapped[str] = mapped_column(String(400), nullable=False, default="", server_default="")
-    # MCP only, self-reported by the client (`clientInfo`): empty otherwise or when absent.
-    client_name: Mapped[str] = mapped_column(
-        String(128), nullable=False, default="", server_default=""
-    )
-    client_version: Mapped[str] = mapped_column(
-        String(64), nullable=False, default="", server_default=""
-    )
-    # MCP only: the protocol revision the client asked for, and the upstream leg's revision
-    # (a refusing upstream's newest named one). Empty otherwise.
-    client_protocol: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="", server_default=""
-    )
-    upstream_protocol: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="", server_default=""
-    )
     model_id: Mapped[uuid.UUID | None] = mapped_column()
     alias_id: Mapped[uuid.UUID | None] = mapped_column()
     router_id: Mapped[uuid.UUID | None] = mapped_column()
