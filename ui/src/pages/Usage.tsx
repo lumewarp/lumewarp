@@ -44,7 +44,17 @@ const MCP_GROUPS = [
   { value: "method", label: "Method" },
   { value: "tool", label: "Tool" },
   { value: "target", label: "Server" },
+  { value: "client_fallback,client_protocol,upstream_protocol", label: "Fallback × client protocol × upstream protocol" },
+  { value: "client,client_version,client_fallback", label: "Client × version × fallback" },
 ];
+
+/** How an MCP client negotiates, derived per client over the range by the API. */
+const FALLBACK_LABELS: Record<string, string> = {
+  falls_back: "Falls back",
+  no_fallback: "No fallback",
+  no_probe: "Never probes",
+  unknown: "Unknown",
+};
 
 /** A2A traffic read by agent and method; the first entry is the default. */
 const A2A_GROUPS = [
@@ -98,6 +108,16 @@ function fmtDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)} ms`;
   if (ms < 60_000) return `${(ms / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 })} s`;
   return `${(ms / 60_000).toLocaleString(undefined, { maximumFractionDigits: 1 })} min`;
+}
+
+/** A sortable column for a plain string dimension, showing a dash when the request had none. */
+function textColumn(key: string, header: string, value: (row: Row) => string | null | undefined): Column<Row> {
+  return {
+    key,
+    header,
+    sort: (a, b) => (value(a) ?? "").localeCompare(value(b) ?? ""),
+    cell: (row) => (value(row) ? <code className="[overflow-wrap:anywhere]">{value(row)}</code> : <span className="text-muted-foreground">—</span>),
+  };
 }
 
 /** Errors over requests, as a percentage; a group with no request shows none. */
@@ -446,13 +466,31 @@ function TrafficUsage({ kind, range }: { kind: "mcp" | "a2a"; range: RangeProps 
         cell: (row) => (row.tool ? <code className="[overflow-wrap:anywhere]">{row.tool}</code> : <span className="text-muted-foreground">—</span>),
       },
     ],
+    client: [textColumn("client", "Client", (row) => row.client)],
+    client_version: [textColumn("client_version", "Version", (row) => row.client_version)],
+    client_protocol: [textColumn("client_protocol", "Client protocol", (row) => row.client_protocol)],
+    upstream_protocol: [textColumn("upstream_protocol", "Upstream protocol", (row) => row.upstream_protocol)],
+    client_fallback: [
+      {
+        key: "client_fallback",
+        header: "Fallback",
+        sort: (a, b) => (a.client_fallback ?? "").localeCompare(b.client_fallback ?? ""),
+        cell: (row) => (row.client_fallback ? FALLBACK_LABELS[row.client_fallback] : <span className="text-muted-foreground">—</span>),
+      },
+    ],
   };
   const dims = groupBy.split(",");
   return (
     <>
       <Card className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3 p-4">
         <RangeFields range={range} teams={teams.data} />
-        <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={groups} />
+        <SelectField
+          label="Group by"
+          value={groupBy}
+          onChange={setGroupBy}
+          options={groups}
+          hint={kind === "mcp" ? "Fallback is judged per client over the whole range: one that sent server/discover and later initialize falls back, one that only probed does not." : undefined}
+        />
       </Card>
       <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
         <Stat label="Requests" value={n(total.requests)} />
@@ -468,7 +506,20 @@ function TrafficUsage({ kind, range }: { kind: "mcp" | "a2a"; range: RangeProps 
         loading={ranged && query.isPending}
         error={query.error ?? teams.error}
         onRetry={() => void query.refetch()}
-        rowKey={(row) => [row.kind, row.target, row.method, row.tool, row.team_id].join("|")}
+        rowKey={(row) =>
+          [
+            row.kind,
+            row.target,
+            row.method,
+            row.tool,
+            row.client,
+            row.client_version,
+            row.client_protocol,
+            row.upstream_protocol,
+            row.client_fallback,
+            row.team_id,
+          ].join("|")
+        }
         empty={ranged ? `No ${kind === "mcp" ? "MCP" : "A2A"} traffic in this range.` : "Choose a date range."}
         columns={[
           ...dims.flatMap((dimension) => dimCols[dimension] ?? []),

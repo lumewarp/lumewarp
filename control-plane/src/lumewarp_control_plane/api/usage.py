@@ -1,7 +1,9 @@
 """Usage aggregation: monthly `usage_totals` fast path plus recent `usage_events`.
 
 `from`/`to` are a half-open UTC range. `group_by` is a comma-separated subset of
-`day,kind,target,method,tool,requested,model,upstream_model,alias,router,team,owner,key`;
+`day,kind,target,method,tool,requested,model,upstream_model,alias,router,team,owner,key`
+and the MCP protocol dimensions `client,client_version,client_protocol,upstream_protocol,
+client_fallback`;
 the default is `day,requested`. `owner` groups by the key owner
 (`owner_kind`, `owner_id`: a user or a service account). `kind` is the gateway protocol
 (`llm`, `mcp`, `a2a`); `target`, `method` and `tool` are an MCP server or A2A agent, its
@@ -48,6 +50,7 @@ from lumewarp_control_plane.models import (
     CatalogKind,
     CatalogName,
     KeyOwnerKind,
+    McpClientFallback,
     RequestOutcome,
     ScopeType,
     Team,
@@ -72,6 +75,20 @@ DIMENSIONS = (
     "team",
     "owner",
     "key",
+    "client",
+    "client_version",
+    "client_protocol",
+    "upstream_protocol",
+    "client_fallback",
+)
+# The MCP protocol dimensions: plain columns of the event, except `client_fallback`, which
+# is derived per query (`_fallback_class`).
+MCP_PROTOCOL_DIMENSIONS = (
+    "client",
+    "client_version",
+    "client_protocol",
+    "upstream_protocol",
+    "client_fallback",
 )
 # Output columns behind each dimension, in cursor order.
 COLUMNS = {
@@ -80,6 +97,7 @@ COLUMNS = {
     "target": ("target",),
     "method": ("method",),
     "tool": ("tool",),
+    **{name: (name,) for name in MCP_PROTOCOL_DIMENSIONS},
     "requested": ("requested",),
     "model": ("model",),
     "upstream_model": ("upstream_model",),
@@ -90,8 +108,8 @@ COLUMNS = {
     "key": ("key",),
 }
 UUID_COLUMNS = {"team", "owner_id", "key"}
-# Dimensions that are plain columns of the event: no catalog name to resolve.
-PLAIN_DIMENSIONS = frozenset({"kind", "target", "method", "tool"})
+# Dimensions without a catalog name to resolve.
+PLAIN_DIMENSIONS = frozenset({"kind", "target", "method", "tool", *MCP_PROTOCOL_DIMENSIONS})
 
 FromQuery = Annotated[datetime | None, Query(alias="from")]
 ToQuery = Annotated[datetime | None, Query(alias="to")]
@@ -243,12 +261,67 @@ _AMOUNTS = (
 )
 
 
+def _fallback_class(
+    readable: set[uuid.UUID] | None,
+    from_: datetime,
+    to_: datetime,
+    scope: list[Any],
+) -> tuple[Any, Any]:
+    """`client_fallback` of each event and the join that provides it.
+
+    A client is its self-reported name and version. Over the MCP events of the range that
+    the caller may read (its scope only, never other filters: filtering on `tools/call`
+    must not hide the probes that classify the client), a client that sent both
+    `server/discover` and `initialize` falls back, one that only probed does not, and one
+    that only initialized never probes. Non-MCP events have none ("", read as null).
+    """
+    raw = select(
+        UsageEvent.client_name.label("name"),
+        UsageEvent.client_version.label("version"),
+        func.bool_or(UsageEvent.method == "server/discover").label("probed"),
+        func.bool_or(UsageEvent.method == "initialize").label("initialized"),
+    ).where(
+        UsageEvent.kind == TrafficKind.MCP,
+        UsageEvent.client_name != "",
+        UsageEvent.ts >= from_,
+        UsageEvent.ts < to_,
+        *scope,
+    )
+    if readable is not None:
+        raw = raw.where(UsageEvent.team_id.in_(readable))
+    clients = raw.group_by(UsageEvent.client_name, UsageEvent.client_version).subquery(
+        "mcp_clients"
+    )
+    value = case(
+        # Not None: a NULL would break keyset pagination over the group columns.
+        (UsageEvent.kind != TrafficKind.MCP, ""),
+        (
+            and_(clients.c.probed.is_(True), clients.c.initialized.is_(True)),
+            McpClientFallback.FALLS_BACK.value,
+        ),
+        (clients.c.probed.is_(True), McpClientFallback.NO_FALLBACK.value),
+        (clients.c.initialized.is_(True), McpClientFallback.NO_PROBE.value),
+        else_=McpClientFallback.UNKNOWN.value,
+    )
+    join = (
+        clients,
+        and_(
+            UsageEvent.kind == TrafficKind.MCP,
+            clients.c.name == UsageEvent.client_name,
+            clients.c.version == UsageEvent.client_version,
+        ),
+    )
+    return value, join
+
+
 def _events_query(
     groups: list[str],
     readable: set[uuid.UUID] | None,
     from_: datetime,
     to_: datetime,
     filters: list[Any],
+    scope: list[Any] | None = None,
+    client_fallback: McpClientFallback | None = None,
 ) -> tuple[Any, dict[str, Any], list[str], bool]:
     """Aggregate raw rows first; resolve names/collect UI refs only after reduction.
 
@@ -277,7 +350,18 @@ def _events_query(
         "owner_id": UsageEvent.owner_id,
         "key": UsageEvent.key_id,
         "upstream_model": UsageEvent.upstream_model,
+        "client": UsageEvent.client_name,
+        "client_version": UsageEvent.client_version,
+        "client_protocol": UsageEvent.client_protocol,
+        "upstream_protocol": UsageEvent.upstream_protocol,
     }
+    fallback_join = None
+    if "client_fallback" in groups or client_fallback is not None:
+        fields["client_fallback"], fallback_join = _fallback_class(
+            readable, from_, to_, scope or []
+        )
+        if client_fallback is not None:
+            filters = [*filters, fields["client_fallback"] == client_fallback.value]
     raw_names = [name for name in names if name not in {kind.value for kind in CatalogKind}]
     for kind in kinds:
         fields[kind] = getattr(UsageEvent, kind)
@@ -312,7 +396,10 @@ def _events_query(
         func.coalesce(func.sum(failed), 0).label("error_count"),
         func.coalesce(func.sum(UsageEvent.duration_ms), 0).label("total_duration_ms"),
     ]
-    raw = select(*columns, *amounts).where(UsageEvent.ts >= from_, UsageEvent.ts < to_, *filters)
+    raw = select(*columns, *amounts).select_from(UsageEvent)
+    if fallback_join is not None:
+        raw = raw.outerjoin(*fallback_join)
+    raw = raw.where(UsageEvent.ts >= from_, UsageEvent.ts < to_, *filters)
     if readable is not None:
         raw = raw.where(UsageEvent.team_id.in_(readable))
     if columns:
@@ -360,10 +447,14 @@ async def _events_page(
     filters: list[Any],
     limit: int,
     cursor: str | None,
+    scope: list[Any] | None = None,
+    client_fallback: McpClientFallback | None = None,
 ) -> Page[UsageRowOut]:
     if readable is not None and not readable:
         return Page[UsageRowOut](items=[], next_cursor=None)
-    stmt, fields, kinds, upstream = _events_query(groups, readable, from_, to_, filters)
+    stmt, fields, kinds, upstream = _events_query(
+        groups, readable, from_, to_, filters, scope, client_fallback
+    )
     names = list(fields)
     group_columns = list(fields.values())
     if names:
@@ -401,6 +492,8 @@ async def _events_page(
             provenance["upstream_models"] = sorted(value for value in values if value)
         # `kind`, `target`, `method` and `tool` are plain dimensions: no catalog refs.
         plain = {name: row[name] for name in names if name in PLAIN_DIMENSIONS}
+        if "client_fallback" in plain:
+            plain["client_fallback"] = plain["client_fallback"] or None
         items.append(
             UsageRowOut(
                 **provenance,
@@ -443,6 +536,11 @@ async def get_usage(
     target: str | None = None,
     method: str | None = None,
     tool: str | None = None,
+    client: str | None = None,
+    client_version: str | None = None,
+    client_protocol: str | None = None,
+    upstream_protocol: str | None = None,
+    client_fallback: McpClientFallback | None = None,
     requested: str | None = None,
     model: str | None = None,
     upstream_model: str | None = None,
@@ -488,7 +586,10 @@ async def get_usage(
     day,requested loads. Empty upstream_model means unavailable; null means mixed.
     `kind`, `target`, `method` and `tool` filter the gateway protocol and what an
     MCP or A2A request named; the team totals fast path covers LLM requests only,
-    so any of them (and every non-LLM kind) reads raw events.
+    so any of them (and every non-LLM kind) reads raw events. `client`,
+    `client_version`, `client_protocol`, `upstream_protocol` and `client_fallback`
+    filter the MCP protocol dimensions; `client_fallback` is derived per client
+    over the range and the caller's scope (`_fallback_class`).
     """
     now = datetime.now(UTC)
     start = (aware(from_, "from") or month_start(now)).astimezone(UTC)
@@ -524,6 +625,11 @@ async def get_usage(
                 target,
                 method,
                 tool,
+                client,
+                client_version,
+                client_protocol,
+                upstream_protocol,
+                client_fallback,
                 model,
                 upstream_model,
                 alias,
@@ -573,6 +679,10 @@ async def get_usage(
         (UsageEvent.target, target),
         (UsageEvent.method, method),
         (UsageEvent.tool, tool),
+        (UsageEvent.client_name, client),
+        (UsageEvent.client_version, client_version),
+        (UsageEvent.client_protocol, client_protocol),
+        (UsageEvent.upstream_protocol, upstream_protocol),
     ):
         if value is not None:
             filters.append(column == value)
@@ -584,20 +694,23 @@ async def get_usage(
             filters.append(column == "" if missing else column != "")
     if requested is not None:
         filters.append(UsageEvent.requested == requested)
+    # Who may be read, kept apart: `client_fallback` classifies clients over this scope
+    # without the dimension filters above.
+    scope: list[Any] = []
     if scoped_team is not None:
-        filters.append(UsageEvent.team_id == scoped_team)
+        scope.append(UsageEvent.team_id == scoped_team)
     if user_id is not None:
-        filters.append(UsageEvent.owner_kind == KeyOwnerKind.USER)
-        filters.append(UsageEvent.owner_id == user_id)
+        scope.append(UsageEvent.owner_kind == KeyOwnerKind.USER)
+        scope.append(UsageEvent.owner_id == user_id)
     if service_account_id is not None:
-        filters.append(UsageEvent.owner_kind == KeyOwnerKind.SERVICE_ACCOUNT)
-        filters.append(UsageEvent.owner_id == service_account_id)
+        scope.append(UsageEvent.owner_kind == KeyOwnerKind.SERVICE_ACCOUNT)
+        scope.append(UsageEvent.owner_id == service_account_id)
     if key_id is not None:
-        filters.append(UsageEvent.key_id == key_id)
+        scope.append(UsageEvent.key_id == key_id)
     if admin_teams is not None:
         # Per team: administered teams keep the whole view, every other team is narrowed
         # to the caller's own user-owned keys.
-        filters.append(
+        scope.append(
             or_(
                 UsageEvent.team_id.in_(admin_teams),
                 and_(
@@ -606,4 +719,15 @@ async def get_usage(
                 ),
             )
         )
-    return await _events_page(session, groups, readable, start, end, filters, limit, cursor)
+    return await _events_page(
+        session,
+        groups,
+        readable,
+        start,
+        end,
+        [*filters, *scope],
+        limit,
+        cursor,
+        scope,
+        client_fallback,
+    )

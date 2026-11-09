@@ -38,6 +38,7 @@ from lumewarp_control_plane.models import (
     InstallationRole,
     KeyLifecycle,
     KeyOwnerKind,
+    McpClientFallback,
     McpDefinitionKind,
     McpDefinitionState,
     McpReviewMode,
@@ -1388,6 +1389,13 @@ class UsageRowOut(ApiModel):
     target: str | None = None
     method: str | None = None
     tool: str | None = None
+    # MCP protocol dimensions: the client's self-reported name and version, the revision it
+    # asked for, the upstream leg's revision, and how the client negotiates (derived).
+    client: str | None = None
+    client_version: str | None = None
+    client_protocol: str | None = None
+    upstream_protocol: str | None = None
+    client_fallback: McpClientFallback | None = None
     requested: str | None = None
     model: str | None = None
     model_id: uuid.UUID | None = None

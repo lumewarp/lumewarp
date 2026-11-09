@@ -312,6 +312,7 @@ pub(crate) fn record_usage(
             outcome,
             stream,
             config_version: routing_table.version,
+            mcp: None,
         },
     );
 }

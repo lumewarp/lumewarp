@@ -378,6 +378,10 @@ def _mcp_event(key: ApiKey, **values) -> usage_pb2.UsageEvent:
         "target": "s1",
         "method": "tools/call",
         "tool": "echo",
+        "client_name": "sdk",
+        "client_version": "2.3",
+        "client_protocol": "2025-11-25",
+        "upstream_protocol": "2025-06-18",
     }
     which.update(values)
     for field, value in which.items():
@@ -414,6 +418,12 @@ async def test_an_mcp_event_is_stored_with_kind_target_method_and_tool(
         "tools/call",
         "echo",
     )
+    assert (row.client_name, row.client_version, row.client_protocol, row.upstream_protocol) == (
+        "sdk",
+        "2.3",
+        "2025-11-25",
+        "2025-06-18",
+    )
     assert (row.model, row.requested, row.cost_nano_usd) == ("", "", 0)
     assert stored[uuid.UUID(llm.request_id)].kind is TrafficKind.LLM
     # MCP is recorded but never aggregated: no budget, no cost, not a request total.
@@ -432,11 +442,20 @@ async def test_a_non_llm_event_may_not_carry_llm_fields(session_factory: Session
         _mcp_event(key, cost_nano_usd=1, cost_known=True),
         _mcp_event(key, method="x" * 129),
         _mcp_event(key, tool="t" * 401),
+        _mcp_event(key, client_name="c" * 129),
+        _mcp_event(key, client_version="v" * 65),
+        _mcp_event(key, client_protocol="p" * 33),
+        _mcp_event(key, upstream_protocol="2026\x00"),
+        # The MCP protocol dimensions are MCP only.
+        _mcp_event(key, kind=usage_pb2.TRAFFIC_KIND_A2A, method="SendMessage", tool=""),
     ]
-    # An LLM event may not claim an MCP method, target or tool either.
+    # An LLM event may not claim an MCP method, target, tool or client either.
     llm = _event(key)
     llm.method = "tools/call"
     carried.append(llm)
+    llm_client = _event(key)
+    llm_client.client_protocol = "2025-11-25"
+    carried.append(llm_client)
     async with session_factory() as session, session.begin():
         assert await ingest(session, "gateway-a", carried, scope_name=scope_name) == 0
     async with session_factory() as session:

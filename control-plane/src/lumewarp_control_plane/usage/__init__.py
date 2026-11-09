@@ -45,8 +45,8 @@ from lumewarp_control_plane.windows import month_window
 log = logging.getLogger(__name__)
 _MAX_BIGINT = 2**63 - 1
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-# asyncpg caps one statement at 32767 bind parameters; 34 columns per event row.
-_INSERT_CHUNK_EVENTS = 900
+# asyncpg caps one statement at 32767 bind parameters; 38 columns per event row.
+_INSERT_CHUNK_EVENTS = 800
 # Fields taken from the wire; the key owner is added from api_keys after validation.
 _EVENT_FIELDS = (
     "request_id",
@@ -67,6 +67,10 @@ _EVENT_FIELDS = (
     "target",
     "method",
     "tool",
+    "client_name",
+    "client_version",
+    "client_protocol",
+    "upstream_protocol",
     "endpoint",
     "status",
     "stream",
@@ -177,6 +181,16 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
         value = getattr(event, field)
         if len(value) > maximum or "\x00" in value or (value and llm):
             raise InvalidUsageBatch(f"invalid {field}")
+    # usage.proto 32-35: MCP only, client- or upstream-chosen and bounded by the gateway.
+    for field, maximum in (
+        ("client_name", 128),
+        ("client_version", 64),
+        ("client_protocol", 32),
+        ("upstream_protocol", 32),
+    ):
+        value = getattr(event, field)
+        if len(value) > maximum or "\x00" in value or (value and kind is not TrafficKind.MCP):
+            raise InvalidUsageBatch(f"invalid {field}")
     if not event.endpoint or len(event.endpoint) > 64:
         raise InvalidUsageBatch("invalid endpoint")
     if event.status > 599:
@@ -233,6 +247,10 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
         "target": event.target,
         "method": event.method,
         "tool": event.tool,
+        "client_name": event.client_name,
+        "client_version": event.client_version,
+        "client_protocol": event.client_protocol,
+        "upstream_protocol": event.upstream_protocol,
         "endpoint": event.endpoint,
         "status": event.status,
         "stream": event.stream,

@@ -30,8 +30,8 @@ END = datetime(2026, 4, 1, tzinfo=UTC)
 TS = datetime(2026, 3, 10, 23, 30, tzinfo=UTC)
 
 
-def query(client, headers=ADMIN_AUTH, **params):
-    return client.get(
+def query(http, headers=ADMIN_AUTH, /, **params):
+    return http.get(
         "/api/v1/usage",
         params={"from": START.isoformat(), "to": END.isoformat(), **params},
         headers=headers,
@@ -467,6 +467,105 @@ async def test_errors_and_duration_are_aggregated_per_group(client, committed) -
     await committed.commit()
     llm = query(client, group_by="kind", team_id=str(team.id), kind="llm").json()["items"]
     assert [(row["kind"], row["requests"], row["error_count"]) for row in llm] == [("llm", 1, 0)]
+
+
+def mcp_event(key, method, client="", version="", protocol="", upstream="", status=200):
+    event = usage_event(key, ts=TS, kind=TrafficKind.MCP, target="s1", method=method)
+    event.client_name, event.client_version = client, version
+    event.client_protocol, event.upstream_protocol = protocol, upstream
+    event.status = status
+    if status >= 400:
+        event.outcome = RequestOutcome.UPSTREAM_ERROR
+    return event
+
+
+async def test_mcp_protocol_dimensions_and_derived_client_fallback(client, committed) -> None:
+    team = await make_team(committed)
+    key = await make_key(committed, team, await make_service_account(committed, team))
+    other_team = await make_team(committed)
+    other = await make_key(committed, other_team, await make_service_account(committed, other_team))
+    committed.add_all(
+        [
+            # Probes, then falls back to the handshake and calls a tool.
+            mcp_event(key, "server/discover", "sdk", "2.3", "2026-07-28"),
+            mcp_event(key, "initialize", "sdk", "2.3", "2025-11-25"),
+            mcp_event(key, "tools/call", "sdk", "2.3", "2025-11-25", "2025-11-25"),
+            # Probes and never initializes.
+            mcp_event(key, "server/discover", "modern", "1", "2026-07-28"),
+            # Never probes; one upstream refused the handshake era.
+            mcp_event(key, "initialize", "legacy", "0.9", "2025-06-18", "2025-06-18"),
+            mcp_event(key, "initialize", "legacy", "0.9", "2025-06-18", "2026-07-28", 502),
+            # Sent no clientInfo.
+            mcp_event(key, "tools/list"),
+            usage_event(key, ts=TS, requested="chat"),
+            # Another team's `modern` initialized: the scoped query must not see it.
+            mcp_event(other, "initialize", "modern", "1", "2025-11-25"),
+        ]
+    )
+    await committed.commit()
+    scope = {"team_id": str(team.id)}
+
+    clients = query(client, group_by="client,client_version,client_fallback", kind="mcp", **scope)
+    assert clients.status_code == 200, clients.text
+    assert {
+        (row["client"], row["client_version"], row["client_fallback"], row["requests"])
+        for row in clients.json()["items"]
+    } == {
+        ("sdk", "2.3", "falls_back", 3),
+        ("modern", "1", "no_fallback", 1),
+        ("legacy", "0.9", "no_probe", 2),
+        ("", "", "unknown", 1),
+    }
+
+    matrix = query(
+        client,
+        group_by="client_fallback,client_protocol,upstream_protocol",
+        kind="mcp",
+        **scope,
+    )
+    assert {
+        (
+            row["client_fallback"],
+            row["client_protocol"],
+            row["upstream_protocol"],
+            row["requests"],
+            row["error_count"],
+        )
+        for row in matrix.json()["items"]
+    } == {
+        ("falls_back", "2026-07-28", "", 1, 0),
+        ("falls_back", "2025-11-25", "", 1, 0),
+        ("falls_back", "2025-11-25", "2025-11-25", 1, 0),
+        ("no_fallback", "2026-07-28", "", 1, 0),
+        ("no_probe", "2025-06-18", "2025-06-18", 1, 0),
+        ("no_probe", "2025-06-18", "2026-07-28", 1, 1),
+        ("unknown", "", "", 1, 0),
+    }
+
+    # A method filter does not hide the probes that classify the client.
+    calls = query(client, group_by="client_fallback", method="tools/call", **scope)
+    assert [(r["client_fallback"], r["requests"]) for r in calls.json()["items"]] == [
+        ("falls_back", 1)
+    ]
+    only = query(client, group_by="client", client_fallback="no_fallback", **scope)
+    assert [(r["client"], r["requests"]) for r in only.json()["items"]] == [("modern", 1)]
+    refused = query(client, group_by="client", upstream_protocol="2026-07-28", **scope)
+    assert [(r["client"], r["requests"]) for r in refused.json()["items"]] == [("legacy", 1)]
+    # Over both teams, the other team's initialize reclassifies `modern`.
+    both = query(client, group_by="client,client_fallback", **{"client": "modern"})
+    assert [(r["client_fallback"], r["requests"]) for r in both.json()["items"]] == [
+        ("falls_back", 2)
+    ]
+    # An LLM request has no MCP dimensions.
+    kinds = query(client, group_by="kind,client_fallback", **scope).json()["items"]
+    assert {(r["kind"], r["client_fallback"]) for r in kinds} == {
+        ("llm", None),
+        ("mcp", "falls_back"),
+        ("mcp", "no_fallback"),
+        ("mcp", "no_probe"),
+        ("mcp", "unknown"),
+    }
+    assert query(client, client_fallback="maybe", **scope).status_code == 422
 
 
 @pytest.mark.parametrize(

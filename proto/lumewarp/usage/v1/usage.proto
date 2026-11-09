@@ -86,6 +86,20 @@ message UsageEvent {
   // MCP tools/call and prompts/get: the upstream tool or prompt name, at
   // most 400 bytes.
   string tool = 31;
+  // MCP only: the client's self-reported implementation (`clientInfo` of
+  // initialize, `io.modelcontextprotocol/clientInfo` of a server/discover
+  // probe, or the one its session was opened with). Name at most 128 bytes,
+  // version at most 64; empty when the client sent none.
+  string client_name = 32;
+  string client_version = 33;
+  // MCP only: the protocol revision the client asked for (initialize or a
+  // server/discover probe) or the one its session runs, at most 32 bytes.
+  string client_protocol = 34;
+  // MCP only: the revision the upstream answered with on this request's leg,
+  // at most 32 bytes. A revision the gateway does not speak (an upstream that
+  // refused the handshake era) is reported as the newest one the upstream
+  // named. Empty when the request reached no single upstream.
+  string upstream_protocol = 35;
 }
 
 enum TrafficKind {
