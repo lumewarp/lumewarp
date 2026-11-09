@@ -319,6 +319,27 @@ async fn list(gw: &Gw, session: &str, secret: &str) -> Vec<String> {
     panic!("cursor did not terminate");
 }
 #[tokio::test]
+async fn server_discover_advertises_the_handshake_era_without_a_session() {
+    let mock = Mock::start(2).await;
+    let gw = Gw::start(&[("s1", mock.addr)], 0).await;
+    let discover = json!({"jsonrpc":"2.0","id":"d1","method":"server/discover","params":{}});
+    for route in ["/mcp", "/mcp/servers/s1"] {
+        let (status, body) = gw.rpc(route, None, "secret", discover.clone()).await;
+        assert_eq!(status, 200, "{route}: {body}");
+        assert_eq!(body["id"], "d1");
+        let versions = body["result"]["supportedVersions"].as_array().unwrap();
+        assert!(versions.contains(&json!("2025-11-25")), "{body}");
+        assert!(!versions.contains(&json!("2026-07-28")), "{body}");
+        assert!(body["result"]["capabilities"].is_object(), "{body}");
+    }
+    let (status, _) = gw.rpc("/mcp/servers/nope", None, "secret", discover).await;
+    assert_eq!(status, 404);
+    // The probe leaves no state: the handshake still works afterwards.
+    let s = gw.initialize("/mcp", "secret").await;
+    assert!(list(&gw, &s, "secret").await.contains(&"s1__echo".into()));
+}
+
+#[tokio::test]
 async fn aggregate_sessions_grants_pagination_rug_pull_and_reverse_rpc() {
     let mock1 = Mock::start(2).await;
     let mock2 = Mock::start(2).await;

@@ -315,6 +315,9 @@ impl Context<'_> {
         {
             return fail(StatusCode::BAD_REQUEST, "An RPC request id is required");
         }
+        if name == "server/discover" {
+            return self.discover(id);
+        }
         if name == "initialize" {
             if !value
                 .pointer("/params/protocolVersion")
@@ -564,6 +567,30 @@ impl Context<'_> {
             }
             Err(error) => fail(error.status(), "MCP upstream failed"),
         }
+    }
+    /// The MCP 2026-07-28 era probe. The gateway speaks the handshake era only, so
+    /// it answers locally with handshake versions and no modern one: MCP SDK
+    /// clients (Python, TypeScript, Go) read that as a legacy advertisement and
+    /// fall back to `initialize`. A modern-only client fails with a clear version
+    /// mismatch instead of a 400 that every probe would count as an error.
+    fn discover(&self, id: Value) -> Response<ProxyBody> {
+        if let Route::Server { name } = self.route {
+            if self.targets.server(name).is_none() || !self.grants().may_see_server(name) {
+                return fail(StatusCode::NOT_FOUND, "Unknown MCP server");
+            }
+        }
+        ok(
+            id,
+            json!({
+                "resultType": "complete",
+                "supportedVersions": ["2025-11-25", "2025-06-18"],
+                "capabilities": {"tools": {"listChanged": false}, "prompts": {"listChanged": false}},
+                "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "lumewarp", "version": env!("CARGO_PKG_VERSION")}},
+                // The answer depends on the key's grants on a single-server route.
+                "ttlMs": 3_600_000,
+                "cacheScope": "private",
+            }),
+        )
     }
     async fn initialize(&self, value: Value) -> Response<ProxyBody> {
         let id = value["id"].clone();
@@ -1060,6 +1087,7 @@ fn rpc(id: Value, code: i32, message: &str) -> Response<ProxyBody> {
 fn method_label(method: &str) -> &'static str {
     match method {
         "initialize" => "initialize",
+        "server/discover" => "server/discover",
         "tools/list" => "tools/list",
         "tools/call" => "tools/call",
         "prompts/list" => "prompts/list",

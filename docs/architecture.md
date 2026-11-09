@@ -148,7 +148,7 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 
 ### MCP gateway
 
-- **端點：** `POST /mcp` 是依 key 聚合的虛擬 server，工具與 prompt 名是 `<server>__<name>`，在第一個 `__` 切分；`POST /mcp/servers/<name>` 是單一上游，名字不加前綴。`DELETE` 轉給對應上游；`GET /mcp` 回 405，`GET /mcp/servers/<name>` 原樣轉發（`list_changed` 只在單一 server 端點收得到）。MCP 2025-11-25（Streamable HTTP）；上游回 2025-06-18 時原樣轉發，不做欄位轉換。
+- **端點：** `POST /mcp` 是依 key 聚合的虛擬 server，工具與 prompt 名是 `<server>__<name>`，在第一個 `__` 切分；`POST /mcp/servers/<name>` 是單一上游，名字不加前綴。`DELETE` 轉給對應上游；`GET /mcp` 回 405，`GET /mcp/servers/<name>` 原樣轉發（`list_changed` 只在單一 server 端點收得到）。MCP 2025-11-25（Streamable HTTP）；上游回 2025-06-18 時原樣轉發，不做欄位轉換。2026-07-28 的 `server/discover` 探測由 gateway 直接回應，`supportedVersions` 只列 2025-11-25 與 2025-06-18，SDK client 會退回 `initialize` 握手；只支援 2026-07-28 的 client 會得到版本不相容。
 - **認證：** 兩個端點都只接受恰好一個 `X-Lumewarp-Key`；0 個或多個回 401，`Authorization: Bearer` 與 Playground 的 `lwpg.` token 都不算。撤銷、暫停、過期的 key 拒絕；`BUDGET_EXCEEDED` 接受，因為預算屬於 LLM 路徑。
 - **出站認證：** 每個 server 一個 `UpstreamAuth`：內建 `none`（不加憑證）、`static_bearer`（token 來自 gateway 環境變數或封存的密文）、`passthrough`（把 client 的 `Authorization` 原樣送上游），或 WASM `upstream-auth` plugin。gateway 一律移除 `X-Lumewarp-Key`、`Cookie`、`Proxy-Authorization`；client 的 `Authorization` 只有 `passthrough` 保留。auth 結果依（流量、target id、params digest）快取，`passthrough` 不快取。
 - **Session 與 id：** 聚合端點的 `initialize` 由 gateway 自己回答，回一個封存的 `Mcp-Session-Id`：以 `LUMEWARP_GATEWAY_ID_KEY` 經 HKDF 派生金鑰的 AES-256-GCM，內含 key id、各上游 session id 與協商版本，24 小時過期；任何一台同金鑰的 gateway 都能接手，不需要 sticky。initialize 時平行初始化這把 key 看得到的所有上游，失敗的上游在這個 session 內視為不存在，membership 之後不變。上游回 404 → client 也回 404，讓它重新 initialize。上游發給 client 的 request（elicitation、sampling、roots）id 改寫成 `"lw:<server>:<原 id JSON>"`；聚合端點的 cursor 是 gateway 封存的 (server 序號, 上游 cursor)。
