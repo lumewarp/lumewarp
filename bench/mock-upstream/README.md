@@ -179,25 +179,59 @@ affecting inference. The response reports the current values and how many times
 `/metrics` was scraped. Neither endpoint is subject to fault injection.
 
 Endpoints: `POST /v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
-`GET /v1/models`, `/health`. Unknown routes/methods return an OpenAI-shaped 404;
-invalid request JSON returns 400. Embeddings contain 16 fixed float components,
-with one entry per string or per array element. Responses use the requested model
-(default `mock`). IDs, timestamps, text and token counts are deterministic fixtures,
-not real inference or tokenization. `/health` has no simulated latency.
+`/v1/responses`, `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/decisions`,
+`/v1/systemone`, `GET /v1/models`, `/health`. Unknown routes/methods return an
+OpenAI-shaped 404; invalid request JSON returns 400. Embeddings contain 16 fixed float
+components, with one entry per string or per array element. Responses use the requested
+model (default `mock`). IDs, timestamps, text and token counts are deterministic
+fixtures, not real inference or tokenization. `/health` has no simulated latency.
+
+### Model-type endpoints
+
+`POST /v1/responses` takes the Responses API JSON body and answers a response object
+(`object:"response"`, `output[0].type:"message"` with one `output_text` content part,
+and `usage:{input_tokens,output_tokens,total_tokens}`). With `stream:true` it sends
+`response.created`, one `response.output_text.delta` per `--stream-chunks` and
+`response.completed` as SSE events; every event carries `type`, the created and
+completed events carry `response.model` and completed adds `response.usage`. There is
+no `[DONE]` event.
+
+`POST /v1/audio/transcriptions` and `/v1/audio/translations` take
+`multipart/form-data` and read only the `model`, `stream` and `response_format` parts
+plus the presence of a `file` part; a missing `file` or `model` is 400 and a body that
+is not multipart is 400. The default JSON body is
+`{"text":"Hello from mock.","usage":{"type":"duration","seconds":1.5}}`; a model name
+containing `tokens` answers
+`{"usage":{"type":"tokens","input_tokens":8,"output_tokens":N,"total_tokens":8+N}}`
+instead. `response_format=text` answers `text/plain` with no usage. `stream:true` sends
+`--stream-chunks` `transcript.text.delta` events and a final `transcript.text.done`
+carrying token `usage`.
+
+`POST /v1/decisions` takes `{"model", "input", "questions":[{"type","name",...}]}`
+and answers `object:"decision"` with one `answers` entry per question, echoing its
+`name` (`q<index>` when absent) and `type`, plus
+`usage:{input_tokens,output_tokens,total_tokens}`. Missing `questions` is 400.
+`POST /v1/systemone` takes the same body with `id` on each question and answers
+`object:"structured_decision"` with `created` and `answers` keyed by that `id`
+(`q<index>` when absent), each `{type,probabilities,confidence}` and the same token
+usage. Decisions are never streamed. Latency, `--stream-chunks`,
+`--chunk-interval-ms` and echo mode apply to these endpoints as they do to chat; echo
+mode reflects their original body and SSE streams prepend the echo event.
 
 By default, latency precedes both response headers and body, preserving existing
-benchmark behavior. With `--headers-first`, chat/completions `stream:true` requests
-receive 200 + SSE headers immediately after request parsing, then wait
-`--latency-ms` before any SSE event (including an echo event). This simulates
+benchmark behavior. With `--headers-first`, streaming chat/completions, responses and
+transcription requests receive 200 + SSE headers immediately after request parsing,
+then wait `--latency-ms` before any SSE event (including an echo event). This simulates
 vLLM/OpenAI prefill after headers; non-stream and embedding responses are unchanged.
 For example: `./target/release/mock-upstream --headers-first --latency-ms 200`.
 
-Streaming emits exactly N content events, a stop event, optionally an empty-choices
-usage event when `stream_options.include_usage` is true, then `[DONE]`. Every event
-is its own Hyper body frame (network/proxy layers may combine frames). Stop, usage
-and `[DONE]` have no extra delay. Echo streaming prepends an echo event; non-stream
-and embedding requests in echo mode return only the echo object. Its `body` preserves
-the original JSON bytes, including unknown fields and numeric representations.
+Chat/completions streaming emits exactly N content events, a stop event, optionally an
+empty-choices usage event when `stream_options.include_usage` is true, then `[DONE]`.
+Every event is its own Hyper body frame (network/proxy layers may combine frames). Stop,
+usage and `[DONE]` have no extra delay. Echo streaming prepends an echo event;
+non-stream and embedding requests in echo mode return only the echo object. Its `body`
+preserves the original JSON bytes, including unknown fields and numeric
+representations.
 
 The HTTP/1 server uses keep-alive and TCP_NODELAY. Default-model JSON and SSE
 fragments are serialized at startup and shared as reference-counted Bytes; dynamic
@@ -266,7 +300,9 @@ cargo test
 
 Tests bind ephemeral loopback ports and cover response shapes, event ordering,
 usage chunks, incremental delivery, raw echo preservation, embeddings, error
-responses and the load client's fragmented/malformed SSE handling. `tests/mcp.rs`
+responses, the responses/transcription/decision endpoints (multipart parsing,
+both usage shapes, SSE event order) and the load client's fragmented/malformed SSE
+handling. `tests/mcp.rs`
 and `tests/a2a.rs` drive the example servers over HTTP: initialize/sessions,
 pagination, SSE progress, the `ask` elicitation round trip, GET notifications,
 HMAC/bearer auth, control endpoints (including their refusal of non-loopback

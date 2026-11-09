@@ -453,3 +453,325 @@ async fn large_embedding_body_has_model_after_data() {
     assert_eq!(small["model"], "other");
     assert_eq!(small["data"][0]["embedding"].as_array().unwrap().len(), 16);
 }
+
+fn multipart_body(boundary: &str, fields: &[(&str, &str)], file: Option<(&str, &[u8])>) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (name, value) in fields {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            )
+            .as_bytes(),
+        );
+    }
+    if let Some((filename, content)) = file {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: audio/wav\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(content);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    body
+}
+
+fn transcription(
+    client: &reqwest::Client,
+    base: &str,
+    path: &str,
+    fields: &[(&str, &str)],
+    file: Option<(&str, &[u8])>,
+) -> reqwest::RequestBuilder {
+    const BOUNDARY: &str = "mock-boundary";
+    client
+        .post(format!("{base}{path}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(multipart_body(BOUNDARY, fields, file))
+}
+
+fn mock_file() -> Option<(&'static str, &'static [u8])> {
+    Some(("probe.wav", &b"RIFFmockWAVE"[..]))
+}
+
+#[tokio::test]
+async fn responses_non_stream_and_stream_shapes() {
+    let server = server(&[]).await;
+    let client = reqwest::Client::new();
+    let body: Value = client
+        .post(format!("{}/v1/responses", server.url))
+        .json(&json!({"model":"other-model","input":"hi"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["object"], "response");
+    assert_eq!(body["model"], "other-model");
+    assert!(body["id"].is_string());
+    assert_eq!(body["output"][0]["type"], "message");
+    assert_eq!(body["output"][0]["content"][0]["type"], "output_text");
+    assert!(body["output"][0]["content"][0]["text"].is_string());
+    let input = body["usage"]["input_tokens"].as_u64().unwrap();
+    let output = body["usage"]["output_tokens"].as_u64().unwrap();
+    assert_eq!(body["usage"]["total_tokens"], input + output);
+
+    for model in ["mock", "other-model"] {
+        let events = events(
+            &server,
+            "/v1/responses",
+            json!({"model":model,"input":"hi","stream":true}),
+        )
+        .await;
+        assert_eq!(events.len(), 4);
+        let created: Value = serde_json::from_str(&events[0]).unwrap();
+        assert_eq!(created["type"], "response.created");
+        assert_eq!(created["response"]["model"], model);
+        for delta in &events[1..3] {
+            let delta: Value = serde_json::from_str(delta).unwrap();
+            assert_eq!(delta["type"], "response.output_text.delta");
+            assert!(!delta["delta"].as_str().unwrap().is_empty());
+        }
+        let completed: Value = serde_json::from_str(&events[3]).unwrap();
+        assert_eq!(completed["type"], "response.completed");
+        assert_eq!(completed["response"]["model"], model);
+        let input = completed["response"]["usage"]["input_tokens"]
+            .as_u64()
+            .unwrap();
+        let output = completed["response"]["usage"]["output_tokens"]
+            .as_u64()
+            .unwrap();
+        assert!(input > 0);
+        assert_eq!(
+            completed["response"]["usage"]["total_tokens"],
+            input + output
+        );
+    }
+}
+
+#[tokio::test]
+async fn transcription_multipart_usage_formats() {
+    let server = server(&[]).await;
+    let client = reqwest::Client::new();
+    for path in ["/v1/audio/transcriptions", "/v1/audio/translations"] {
+        for model in ["whisper-1", "gpt-4o-transcribe"] {
+            let body: Value =
+                transcription(&client, &server.url, path, &[("model", model)], mock_file())
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+            assert!(body["text"].is_string(), "{path} {model}");
+            assert_eq!(body["usage"]["type"], "duration", "{path} {model}");
+            assert_eq!(body["usage"]["seconds"], 1.5);
+        }
+        for model in ["whisper-tokens", "audio-tokens-large"] {
+            let body: Value =
+                transcription(&client, &server.url, path, &[("model", model)], mock_file())
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+            assert_eq!(body["usage"]["type"], "tokens", "{path} {model}");
+            let input = body["usage"]["input_tokens"].as_u64().unwrap();
+            let output = body["usage"]["output_tokens"].as_u64().unwrap();
+            assert_eq!(body["usage"]["total_tokens"], input + output);
+        }
+
+        let response = transcription(
+            &client,
+            &server.url,
+            path,
+            &[("model", "whisper-1"), ("response_format", "text")],
+            mock_file(),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), 200);
+        assert!(response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain"));
+        assert_eq!(response.text().await.unwrap(), "Hello from mock.");
+
+        let response = transcription(
+            &client,
+            &server.url,
+            path,
+            &[("model", "whisper-1"), ("stream", "TRUE")],
+            mock_file(),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        let text = response.text().await.unwrap();
+        let events: Vec<&str> = text
+            .split("\n\n")
+            .filter_map(|frame| frame.strip_prefix("data: "))
+            .collect();
+        assert_eq!(events.len(), 3, "{path}");
+        for delta in &events[..2] {
+            let delta: Value = serde_json::from_str(delta).unwrap();
+            assert_eq!(delta["type"], "transcript.text.delta");
+            assert!(delta["delta"].is_string());
+        }
+        let done: Value = serde_json::from_str(events[2]).unwrap();
+        assert_eq!(done["type"], "transcript.text.done");
+        assert_eq!(done["usage"]["type"], "tokens");
+        let input = done["usage"]["input_tokens"].as_u64().unwrap();
+        let output = done["usage"]["output_tokens"].as_u64().unwrap();
+        assert_eq!(done["usage"]["total_tokens"], input + output);
+    }
+}
+
+#[tokio::test]
+async fn transcription_requires_file_and_model() {
+    let server = server(&[]).await;
+    let client = reqwest::Client::new();
+    for (fields, file, _label) in [
+        (&[("model", "whisper-1")][..], None, "missing file"),
+        (&[][..], mock_file(), "missing model"),
+        (&[("model", "")][..], mock_file(), "empty model"),
+    ] {
+        let response = transcription(
+            &client,
+            &server.url,
+            "/v1/audio/transcriptions",
+            fields,
+            file,
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), 400);
+        assert!(response.json::<Value>().await.unwrap()["error"]["message"].is_string());
+    }
+    let response = client
+        .post(format!("{}/v1/audio/transcriptions", server.url))
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+}
+
+#[tokio::test]
+async fn transcription_model_part_after_file_part() {
+    let server = server(&[]).await;
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        b"--x\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\nRIFF\r\n",
+    );
+    body.extend_from_slice(
+        b"--x\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\naudio-tokens\r\n",
+    );
+    body.extend_from_slice(b"--x--\r\n");
+    let body: Value = reqwest::Client::new()
+        .post(format!("{}/v1/audio/translations", server.url))
+        .header("content-type", "multipart/form-data; boundary=x")
+        .body(body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["usage"]["type"], "tokens");
+}
+
+#[tokio::test]
+async fn decision_and_systemone_shapes() {
+    let server = server(&[]).await;
+    let client = reqwest::Client::new();
+    let decision: Value = client
+        .post(format!("{}/v1/decisions", server.url))
+        .json(&json!({"model":"mock","input":"ping","questions":[
+            {"type":"predicate","name":"ok","instructions":"Is the input a word?"},
+            {"type":"categorical","name":"kind","instructions":"What kind is it?"}]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(decision["object"], "decision");
+    assert_eq!(decision["model"], "mock");
+    assert!(decision["id"].is_string());
+    let answers = decision["answers"].as_array().unwrap();
+    assert_eq!(answers.len(), 2);
+    assert_eq!(answers[0]["name"], "ok");
+    assert_eq!(answers[0]["type"], "predicate");
+    assert_eq!(answers[1]["name"], "kind");
+    assert_eq!(answers[1]["type"], "categorical");
+    assert!(answers[0]["probabilities"].is_object());
+    let input = decision["usage"]["input_tokens"].as_u64().unwrap();
+    let output = decision["usage"]["output_tokens"].as_u64().unwrap();
+    assert!(input > 0 && output > 0);
+    assert_eq!(decision["usage"]["total_tokens"], input + output);
+
+    let unnamed: Value = client
+        .post(format!("{}/v1/decisions", server.url))
+        .json(&json!({"model":"mock","questions":[{"type":"predicate"}]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unnamed["answers"][0]["name"], "q0");
+
+    let missing = client
+        .post(format!("{}/v1/decisions", server.url))
+        .json(&json!({"model":"mock"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 400);
+
+    let systemone: Value = client
+        .post(format!("{}/v1/systemone", server.url))
+        .json(&json!({"model":"mock","input":"ping","questions":[
+            {"id":"q-1","type":"predicate","name":"ok"},
+            {"type":"categorical","name":"kind"}]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(systemone["object"], "structured_decision");
+    assert_eq!(systemone["model"], "mock");
+    assert!(systemone["created"].is_number());
+    let answers = systemone["answers"].as_object().unwrap();
+    assert_eq!(answers.len(), 2);
+    assert_eq!(answers["q-1"]["type"], "predicate");
+    assert!(answers["q-1"]["probabilities"].is_object());
+    assert!(answers["q-1"]["confidence"].is_number());
+    assert_eq!(answers["q1"]["type"], "categorical");
+    let input = systemone["usage"]["input_tokens"].as_u64().unwrap();
+    let output = systemone["usage"]["output_tokens"].as_u64().unwrap();
+    assert!(input > 0 && output > 0);
+    assert_eq!(systemone["usage"]["total_tokens"], input + output);
+
+    let missing = client
+        .post(format!("{}/v1/systemone", server.url))
+        .json(&json!({"model":"mock"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 400);
+}

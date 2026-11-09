@@ -9,6 +9,8 @@ pub mod mcp;
 pub mod server;
 pub mod util;
 
+mod multipart;
+
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
 use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full, StreamBody};
@@ -88,6 +90,31 @@ fn default_workers() -> usize {
     std::thread::available_parallelism().map_or(1, usize::from)
 }
 
+/// Endpoints answered with a JSON body or SSE events.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Endpoint {
+    Chat,
+    Completions,
+    Embeddings,
+    Responses,
+    Decisions,
+    SystemOne,
+}
+
+impl Endpoint {
+    fn from_path(path: &str) -> Option<Self> {
+        match path {
+            "/v1/chat/completions" => Some(Self::Chat),
+            "/v1/completions" => Some(Self::Completions),
+            "/v1/embeddings" => Some(Self::Embeddings),
+            "/v1/responses" => Some(Self::Responses),
+            "/v1/decisions" => Some(Self::Decisions),
+            "/v1/systemone" => Some(Self::SystemOne),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Default, Deserialize)]
 struct Fields<'a> {
     #[serde(borrow)]
@@ -117,8 +144,63 @@ fn usage(chunks: u32) -> Value {
     json!({"prompt_tokens": 8, "completion_tokens": chunks, "total_tokens": 8_u64 + u64::from(chunks)})
 }
 
+fn response_usage(chunks: u32) -> Value {
+    json!({"input_tokens": 8, "output_tokens": chunks, "total_tokens": 8_u64 + u64::from(chunks)})
+}
+
 fn event(value: Value) -> Bytes {
     Bytes::from(format!("data: {value}\n\n"))
+}
+
+fn response_object(model: &str, chunks: u32) -> Value {
+    json!({
+        "id": "resp_mock-001",
+        "object": "response",
+        "created_at": 1700000000,
+        "status": "completed",
+        "model": model,
+        "output": [{
+            "id": "msg_mock-001",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Hello from mock.", "annotations": []}],
+        }],
+        "usage": response_usage(chunks),
+    })
+}
+
+/// Responses payloads for one model: the non-stream object plus the three SSE
+/// events whose `response` carries the model (`created`, `completed`).
+struct ResponsePayloads {
+    full: Bytes,
+    created: Bytes,
+    delta: Bytes,
+    completed: Bytes,
+}
+
+impl ResponsePayloads {
+    fn new(model: &str, chunks: u32) -> Self {
+        let full = response_object(model, chunks);
+        let mut created = full.clone();
+        created["status"] = json!("in_progress");
+        created["output"] = json!([]);
+        if let Some(object) = created.as_object_mut() {
+            object.remove("usage");
+        }
+        Self {
+            full: Bytes::from(full.to_string()),
+            created: event(json!({"type": "response.created", "response": created})),
+            delta: event(json!({
+                "type": "response.output_text.delta",
+                "item_id": "msg_mock-001",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "hello ",
+            })),
+            completed: event(json!({"type": "response.completed", "response": full})),
+        }
+    }
 }
 
 impl Payloads {
@@ -186,6 +268,7 @@ pub struct App {
     options: Options,
     chat: Arc<Payloads>,
     completions: Arc<Payloads>,
+    responses: Arc<ResponsePayloads>,
     large_embedding: Option<Bytes>,
     models: Bytes,
     fault: AtomicU16,
@@ -203,6 +286,7 @@ impl App {
         Arc::new(Self {
             chat: Arc::new(Payloads::new("mock", true, options.stream_chunks)),
             completions: Arc::new(Payloads::new("mock", false, options.stream_chunks)),
+            responses: Arc::new(ResponsePayloads::new("mock", options.stream_chunks)),
             large_embedding: (options.large_embedding_bytes > 0)
                 .then(|| large_embedding(options.large_embedding_bytes)),
             models: Bytes::from(json!({"object":"list","data":[{"id":"mock","object":"model","created":1700000000,"owned_by":"mock"}]}).to_string()),
@@ -304,11 +388,17 @@ impl App {
             self.latency().await;
             return response(StatusCode::OK, "application/json", self.models.clone());
         }
-        let chat = path == "/v1/chat/completions";
-        let embeddings = path == "/v1/embeddings";
-        if request.method() != Method::POST || !(chat || embeddings || path == "/v1/completions") {
+        if request.method() != Method::POST {
             return error(StatusCode::NOT_FOUND, "Unknown endpoint");
         }
+        if matches!(path, "/v1/audio/transcriptions" | "/v1/audio/translations") {
+            return self.transcribe(request).await;
+        }
+        let Some(endpoint) = Endpoint::from_path(path) else {
+            return error(StatusCode::NOT_FOUND, "Unknown endpoint");
+        };
+        let chat = endpoint == Endpoint::Chat;
+        let embeddings = endpoint == Endpoint::Embeddings;
         let (parts, body) = request.into_parts();
         let Ok(body) = body.collect().await else {
             return error(StatusCode::BAD_REQUEST, "Cannot read body");
@@ -354,12 +444,17 @@ impl App {
         } else {
             None
         };
-        let headers_first = self.options.headers_first && fields.stream && !embeddings;
+        let streaming = fields.stream
+            && matches!(
+                endpoint,
+                Endpoint::Chat | Endpoint::Completions | Endpoint::Responses
+            );
+        let headers_first = self.options.headers_first && streaming;
         if !headers_first {
             self.latency().await;
         }
         if let Some(ref echo) = echo {
-            if !fields.stream || embeddings {
+            if !streaming {
                 return response(StatusCode::OK, "application/json", echo.clone());
             }
         }
@@ -384,6 +479,12 @@ impl App {
                 )
                 .collect();
             return response(StatusCode::OK, "application/json", Bytes::from(json!({"object":"list","model":model,"data":data,"usage":{"prompt_tokens":8,"total_tokens":8}}).to_string()));
+        }
+        if matches!(endpoint, Endpoint::Decisions | Endpoint::SystemOne) {
+            return self.decision(endpoint, model, raw);
+        }
+        if endpoint == Endpoint::Responses {
+            return self.responses(model, streaming, echo, headers_first);
         }
         let payload = if model == "mock" {
             if chat {
@@ -424,12 +525,221 @@ impl App {
             if include_usage { yield Ok(Frame::data(payload.usage.clone())); }
             yield Ok(Frame::data(Bytes::from_static(b"data: [DONE]\n\n")));
         };
-        Response::builder()
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-cache")
-            .header("x-accel-buffering", "no")
-            .body(StreamBody::new(stream).boxed_unsync())
-            .expect("static headers")
+        sse_response(stream)
+    }
+
+    /// `POST /v1/responses`: the OpenAI Response object, or its SSE events.
+    fn responses(
+        &self,
+        model: &str,
+        streaming: bool,
+        echo: Option<Bytes>,
+        headers_first: bool,
+    ) -> Response<Body> {
+        let payload = if model == "mock" {
+            self.responses.clone()
+        } else {
+            Arc::new(ResponsePayloads::new(model, self.options.stream_chunks))
+        };
+        if !streaming {
+            return response(StatusCode::OK, "application/json", payload.full.clone());
+        }
+        let chunks = self.options.stream_chunks;
+        let interval = Duration::from_millis(self.options.chunk_interval_ms);
+        let prefill = Duration::from_millis(if headers_first {
+            self.options.latency_ms
+        } else {
+            0
+        });
+        let stream = async_stream::stream! {
+            if !prefill.is_zero() {
+                tokio::time::sleep(prefill).await;
+            }
+            if let Some(echo) = echo {
+                let mut frame = Vec::with_capacity(echo.len() + 8);
+                frame.extend_from_slice(b"data: ");
+                frame.extend_from_slice(&echo);
+                frame.extend_from_slice(b"\n\n");
+                yield Ok::<_, Infallible>(Frame::data(Bytes::from(frame)));
+            }
+            yield Ok(Frame::data(payload.created.clone()));
+            for index in 0..chunks {
+                if index > 0 && !interval.is_zero() { tokio::time::sleep(interval).await; }
+                yield Ok(Frame::data(payload.delta.clone()));
+            }
+            yield Ok(Frame::data(payload.completed.clone()));
+        };
+        sse_response(stream)
+    }
+
+    /// `POST /v1/decisions` and `POST /v1/systemone`: one answer per question.
+    fn decision(&self, endpoint: Endpoint, model: &str, raw: &RawValue) -> Response<Body> {
+        let Ok(body) = serde_json::from_str::<Value>(raw.get()) else {
+            return error(StatusCode::BAD_REQUEST, "Invalid JSON request");
+        };
+        let Some(questions) = body.get("questions").and_then(Value::as_array) else {
+            return error(StatusCode::BAD_REQUEST, "Missing questions");
+        };
+        let output_tokens = u32::try_from(questions.len())
+            .unwrap_or(u32::MAX)
+            .saturating_mul(2);
+        let usage = json!({
+            "input_tokens": 8,
+            "output_tokens": output_tokens,
+            "total_tokens": 8_u64 + u64::from(output_tokens),
+        });
+        let body = if endpoint == Endpoint::SystemOne {
+            let mut answers = serde_json::Map::new();
+            for (index, question) in questions.iter().enumerate() {
+                let id = question
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map_or_else(|| format!("q{index}"), str::to_owned);
+                let kind = question
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("predicate");
+                answers.insert(
+                    id,
+                    json!({
+                        "type": kind,
+                        "probabilities": {"true": 0.95, "false": 0.05},
+                        "confidence": 0.95,
+                    }),
+                );
+            }
+            json!({
+                "id": "structured-decision-mock-001",
+                "object": "structured_decision",
+                "created": 1700000000,
+                "model": model,
+                "answers": answers,
+                "usage": usage,
+            })
+        } else {
+            let answers: Vec<Value> = questions
+                .iter()
+                .enumerate()
+                .map(|(index, question)| {
+                    let name = question
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map_or_else(|| format!("q{index}"), str::to_owned);
+                    let kind = question
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("predicate");
+                    json!({
+                        "name": name,
+                        "type": kind,
+                        "answer": true,
+                        "confidence": 0.98,
+                        "probabilities": {"true": 0.98, "false": 0.02},
+                    })
+                })
+                .collect();
+            json!({
+                "id": "decision-mock-001",
+                "object": "decision",
+                "model": model,
+                "answers": answers,
+                "usage": usage,
+            })
+        };
+        response(
+            StatusCode::OK,
+            "application/json",
+            Bytes::from(body.to_string()),
+        )
+    }
+
+    /// `POST /v1/audio/transcriptions` and `POST /v1/audio/translations`.
+    async fn transcribe(&self, request: Request<hyper::body::Incoming>) -> Response<Body> {
+        let (parts, body) = request.into_parts();
+        let Ok(body) = body.collect().await else {
+            return error(StatusCode::BAD_REQUEST, "Cannot read body");
+        };
+        let body = body.to_bytes();
+        let content_type = server::header_str(&parts.headers, "content-type").unwrap_or_default();
+        let Some(boundary) = multipart::boundary(content_type) else {
+            return error(StatusCode::BAD_REQUEST, "Invalid multipart body");
+        };
+        let parts = multipart::parts(&body, &boundary);
+        let mut model = None;
+        let mut stream = false;
+        let mut response_format = "json";
+        let mut has_file = false;
+        for part in &parts {
+            match part.name {
+                "model" => model = Some(part.text()),
+                "stream" => stream = part.body.trim_ascii().eq_ignore_ascii_case(b"true"),
+                "response_format" => response_format = part.text(),
+                "file" => has_file = true,
+                _ => {}
+            }
+        }
+        let Some(model) = model.filter(|model| !model.is_empty()) else {
+            return error(StatusCode::BAD_REQUEST, "Missing model");
+        };
+        if !has_file {
+            return error(StatusCode::BAD_REQUEST, "Missing file");
+        }
+        let headers_first = self.options.headers_first && stream;
+        if !headers_first {
+            self.latency().await;
+        }
+        let chunks = self.options.stream_chunks;
+        let tokens = stream || model.contains("tokens");
+        let usage = if tokens {
+            json!({
+                "type": "tokens",
+                "input_tokens": 8,
+                "output_tokens": chunks,
+                "total_tokens": 8_u64 + u64::from(chunks),
+            })
+        } else {
+            json!({"type": "duration", "seconds": 1.5})
+        };
+        if stream {
+            let interval = Duration::from_millis(self.options.chunk_interval_ms);
+            let prefill = Duration::from_millis(if headers_first {
+                self.options.latency_ms
+            } else {
+                0
+            });
+            let delta = Bytes::from_static(
+                b"data: {\"type\":\"transcript.text.delta\",\"delta\":\"hello \"}\n\n",
+            );
+            let done = event(json!({
+                "type": "transcript.text.done",
+                "text": "Hello from mock.",
+                "usage": usage,
+            }));
+            let stream = async_stream::stream! {
+                if !prefill.is_zero() {
+                    tokio::time::sleep(prefill).await;
+                }
+                for index in 0..chunks {
+                    if index > 0 && !interval.is_zero() { tokio::time::sleep(interval).await; }
+                    yield Ok::<_, Infallible>(Frame::data(delta.clone()));
+                }
+                yield Ok(Frame::data(done.clone()));
+            };
+            return sse_response(stream);
+        }
+        if response_format == "text" {
+            return response(
+                StatusCode::OK,
+                "text/plain; charset=utf-8",
+                Bytes::from_static(b"Hello from mock."),
+            );
+        }
+        let body = json!({"text": "Hello from mock.", "usage": usage});
+        response(
+            StatusCode::OK,
+            "application/json",
+            Bytes::from(body.to_string()),
+        )
     }
 
     /// `POST /load?waiting=<n>&kv=<0..1>&metrics_status=<0|400..599>`: any
@@ -530,6 +840,18 @@ fn response(status: StatusCode, content_type: &'static str, data: Bytes) -> Resp
 
 fn error(status: StatusCode, message: &str) -> Response<Body> {
     response(status, "application/json", Bytes::from(json!({"error":{"message":message,"type":"invalid_request_error","param":null,"code":status.as_u16()}}).to_string()))
+}
+
+fn sse_response<S>(stream: S) -> Response<Body>
+where
+    S: futures_util::Stream<Item = Result<Frame<Bytes>, Infallible>> + Send + 'static,
+{
+    Response::builder()
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .header("x-accel-buffering", "no")
+        .body(StreamBody::new(stream).boxed_unsync())
+        .expect("static headers")
 }
 
 /// Serve HTTP/1 keep-alive connections. Dropping the enclosing task stops accepting.
