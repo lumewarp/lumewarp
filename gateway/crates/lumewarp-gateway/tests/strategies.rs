@@ -22,7 +22,7 @@ async fn looping_plugin_times_out_and_request_is_served_by_fallback() {
     let admin_addr = admin.local_addr().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.yaml");
-    std::fs::write(&path, format!("server: {{listen: '{addr}', admin_listen: '{admin_addr}'}}\nupstreams: [{{name: u, kind: vllm, base_url: 'http://{}/prefix/v1'}}]\nmodels: [{{name: m, upstream: u, upstream_model: actual}}]\nrouters: [{{name: public, strategy: loop_test, plugin_timeout_ms: 500, members: [{{model: m}}], fallbacks: [m], retry: {{max_attempts: 2}}}}]\n", upstream.addr)).unwrap();
+    std::fs::write(&path, format!("server: {{listen: '{addr}', admin_listen: '{admin_addr}'}}\nupstreams: [{{name: u, kind: vllm, base_url: 'http://{}/prefix/v1'}}]\nmodels: [{{type: llm, name: m, upstream: u, upstream_model: actual}}]\nrouters: [{{name: public, strategy: loop_test, plugin_timeout_ms: 500, members: [{{model: m}}], fallbacks: [m], retry: {{max_attempts: 2}}}}]\n", upstream.addr)).unwrap();
     drop(listen);
     drop(admin);
     struct Child(std::process::Child);
@@ -112,7 +112,7 @@ async fn an_ineligible_pick_answer_is_a_trap_and_the_fallback_serves() {
     let path = dir.path().join("config.yaml");
     // The router has one member (position 0); the strategy answers 7, which is
     // not an eligible candidate, so the fallback model has to serve.
-    std::fs::write(&path, format!("server: {{listen: '{addr}', admin_listen: '{admin_addr}'}}\nupstreams: [{{name: u, kind: vllm, base_url: 'http://{}/prefix/v1'}}]\nmodels: [{{name: m, upstream: u, upstream_model: actual}}]\nrouters: [{{name: public, strategy: misbehave_test, plugin_timeout_ms: 2000, params: {{mode: bad_index, index: 7}}, members: [{{model: m}}], fallbacks: [m]}}]\n", upstream.addr)).unwrap();
+    std::fs::write(&path, format!("server: {{listen: '{addr}', admin_listen: '{admin_addr}'}}\nupstreams: [{{name: u, kind: vllm, base_url: 'http://{}/prefix/v1'}}]\nmodels: [{{type: llm, name: m, upstream: u, upstream_model: actual}}]\nrouters: [{{name: public, strategy: misbehave_test, plugin_timeout_ms: 2000, params: {{mode: bad_index, index: 7}}, members: [{{model: m}}], fallbacks: [m]}}]\n", upstream.addr)).unwrap();
     drop(listen);
     drop(admin);
     struct Child(std::process::Child);
@@ -267,7 +267,7 @@ fn missing_directory_is_fatal() {
 fn builtin_member_params_fail_without_leaking_values() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.yaml");
-    std::fs::write(&path, "upstreams: [{name: u, kind: vllm, base_url: 'http://127.0.0.1:9/v1'}]\nmodels: [{name: m, upstream: u, upstream_model: x}]\nrouters: [{name: r, strategy: weighted, members: [{model: m, params: {zone: private}}]}]\n").unwrap();
+    std::fs::write(&path, "upstreams: [{name: u, kind: vllm, base_url: 'http://127.0.0.1:9/v1'}]\nmodels: [{type: llm, name: m, upstream: u, upstream_model: x}]\nrouters: [{name: r, strategy: weighted, members: [{model: m, params: {zone: private}}]}]\n").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_lumewarp"))
         .arg("--config")
         .arg(path)

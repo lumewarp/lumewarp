@@ -207,8 +207,8 @@ fn config(a: SocketAddr, b: SocketAddr, upstream_options: &str, router: &str) ->
   - {{name: a, kind: vllm, base_url: 'http://{a}/v1', timeout_ms: 100, {upstream_options}}}
   - {{name: b, kind: vllm, base_url: 'http://{b}/v1', timeout_ms: 100}}
 models:
-  - {{name: a, upstream: a, upstream_model: actual-a}}
-  - {{name: b, upstream: b, upstream_model: actual-b}}
+  - {{type: llm, name: a, upstream: a, upstream_model: actual-a}}
+  - {{type: llm, name: b, upstream: b, upstream_model: actual-b}}
 routers:
 {router}
 "#

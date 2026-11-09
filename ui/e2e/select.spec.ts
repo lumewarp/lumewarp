@@ -51,7 +51,7 @@ async function signIn(page: Page, request: APIRequestContext, path: string) {
   await page.goto(path);
 }
 const upstream = (request: APIRequestContext, name: string) => post(request, "/upstreams", { name, kind: "vllm", base_url: "http://127.0.0.1:9/v1" });
-const model = (request: APIRequestContext, name: string, upstream_id: string) => post(request, "/models", { name, upstream_id, upstream_model: "m" });
+const model = (request: APIRequestContext, name: string, upstream_id: string) => post(request, "/models", { name, upstream_id, upstream_model: "m", model_type: "llm" });
 
 /** Bodies of the writes a page sends: `sent("POST", "routers")` is live, it fills as the page sends. */
 function recordWrites(page: Page, method: "POST" | "PATCH", resource: string) {
@@ -170,6 +170,7 @@ test("select contract: options that arrive late are chosen from by value", async
   await expect.poll(async () => (await optionNames(d, "Upstream")).length).toBeGreaterThanOrEqual(2);
   await pick(d, "Upstream", "sel-b-up");
   await d.getByLabel("Name", { exact: true }).fill("sel-late");
+  await pick(d, "Type", "LLM");
   await d.getByLabel("Upstream model", { exact: true }).fill("m");
   await d.getByRole("button", { name: "Create" }).click();
   await expect(page).toHaveURL(/\/models$/);
@@ -212,6 +213,7 @@ test("select contract: when the options are reordered after a choice, the chosen
   // ... and the trigger still shows the upstream that was chosen, not whatever sits at its old position.
   await expect(await control(d, "Upstream")).toHaveText("sel-b-up");
   await d.getByLabel("Name", { exact: true }).fill("sel-reordered");
+  await pick(d, "Type", "LLM");
   await d.getByLabel("Upstream model", { exact: true }).fill("m");
   await d.getByRole("button", { name: "Create" }).click();
   await expect(page).toHaveURL(/\/models$/);

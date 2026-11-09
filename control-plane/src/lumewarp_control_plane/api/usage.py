@@ -48,6 +48,7 @@ from lumewarp_control_plane.models import (
     CatalogKind,
     CatalogName,
     KeyOwnerKind,
+    ModelType,
     RequestOutcome,
     ScopeType,
     Team,
@@ -60,6 +61,8 @@ router = APIRouter(tags=["usage"])
 
 DIMENSIONS = (
     "day",
+    "endpoint",
+    "model_type",
     "kind",
     "target",
     "method",
@@ -76,6 +79,8 @@ DIMENSIONS = (
 # Output columns behind each dimension, in cursor order.
 COLUMNS = {
     "day": ("day",),
+    "endpoint": ("endpoint",),
+    "model_type": ("model_type",),
     "kind": ("kind",),
     "target": ("target",),
     "method": ("method",),
@@ -91,7 +96,19 @@ COLUMNS = {
 }
 UUID_COLUMNS = {"team", "owner_id", "key"}
 # Dimensions that are plain columns of the event: no catalog name to resolve.
-PLAIN_DIMENSIONS = frozenset({"kind", "target", "method", "tool"})
+PLAIN_DIMENSIONS = frozenset({"kind", "target", "method", "tool", "endpoint", "model_type"})
+
+ENDPOINT_TYPES = {
+    "chat_completions": "llm",
+    "completions": "llm",
+    "responses": "llm",
+    "embeddings": "embedding",
+    "audio_transcriptions": "transcription",
+    "audio_translations": "transcription",
+    "decisions": "decision",
+    "systemone": "decision",
+}
+MODEL_TYPE_COLUMN = case(ENDPOINT_TYPES, value=UsageEvent.endpoint, else_=None)
 
 FromQuery = Annotated[datetime | None, Query(alias="from")]
 ToQuery = Annotated[datetime | None, Query(alias="to")]
@@ -194,6 +211,7 @@ async def _totals_page(
             func.coalesce(func.sum(UsageTotal.completion_tokens), 0),
             func.coalesce(func.sum(UsageTotal.cost_nano_usd), 0),
             func.coalesce(func.sum(UsageTotal.unknown_cost_count), 0),
+            func.coalesce(func.sum(UsageTotal.audio_ms), 0),
         )
         .where(
             UsageTotal.scope_type == ScopeType.TEAM,
@@ -214,6 +232,7 @@ async def _totals_page(
     next_cursor = str(rows[limit - 1][0]) if len(rows) > limit else None
     items = [
         UsageRowOut(
+            audio_ms=int(row[6]),
             # The totals table holds LLM requests only (usage.ingest), so a row from it is one.
             kind=TrafficKind.LLM,
             team_id=row[0],
@@ -236,6 +255,7 @@ _AMOUNTS = (
     "requests",
     "prompt_tokens",
     "completion_tokens",
+    "audio_ms",
     "cost_nano_usd",
     "unknown_cost_count",
     "error_count",
@@ -268,6 +288,9 @@ def _events_query(
     fields = {
         "day": func.date_trunc("day", func.timezone("UTC", UsageEvent.ts)),
         "kind": UsageEvent.kind,
+        "endpoint": UsageEvent.endpoint,
+        # Use a non-null cursor key; expose the absent type as null in the response.
+        "model_type": func.coalesce(MODEL_TYPE_COLUMN, ""),
         "target": UsageEvent.target,
         "method": UsageEvent.method,
         "tool": UsageEvent.tool,
@@ -305,6 +328,7 @@ def _events_query(
         func.count().label("requests"),
         func.coalesce(func.sum(UsageEvent.prompt_tokens), 0).label("prompt_tokens"),
         func.coalesce(func.sum(UsageEvent.completion_tokens), 0).label("completion_tokens"),
+        func.coalesce(func.sum(UsageEvent.audio_ms), 0).label("audio_ms"),
         func.coalesce(func.sum(UsageEvent.cost_nano_usd), 0).label("cost_nano_usd"),
         func.coalesce(func.sum(case((UsageEvent.cost_known.is_(False), 1), else_=0)), 0).label(
             "unknown_cost_count"
@@ -401,6 +425,8 @@ async def _events_page(
             provenance["upstream_models"] = sorted(value for value in values if value)
         # `kind`, `target`, `method` and `tool` are plain dimensions: no catalog refs.
         plain = {name: row[name] for name in names if name in PLAIN_DIMENSIONS}
+        if plain.get("model_type") == "":
+            plain["model_type"] = None
         items.append(
             UsageRowOut(
                 **provenance,
@@ -440,6 +466,8 @@ async def get_usage(
     service_account_id: uuid.UUID | None = None,
     key_id: uuid.UUID | None = None,
     kind: TrafficKind | None = None,
+    endpoint: str | None = None,
+    model_type: ModelType | None = None,
     target: str | None = None,
     method: str | None = None,
     tool: str | None = None,
@@ -521,6 +549,8 @@ async def get_usage(
         and all(
             value is None
             for value in (
+                endpoint,
+                model_type,
                 target,
                 method,
                 tool,
@@ -570,6 +600,8 @@ async def get_usage(
                 )
     for column, value in (
         (UsageEvent.kind, kind),
+        (UsageEvent.endpoint, endpoint),
+        (MODEL_TYPE_COLUMN, model_type),
         (UsageEvent.target, target),
         (UsageEvent.method, method),
         (UsageEvent.tool, tool),

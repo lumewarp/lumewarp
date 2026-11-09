@@ -677,7 +677,7 @@ class Stack:
                 "base_url": f"http://127.0.0.1:{self.mock_port}/v1",
             },
         )
-        dep = {"name": "mock-a", "upstream_id": up["id"], "upstream_model": "mock"}
+        dep = {"name": "mock-a", "upstream_id": up["id"], "upstream_model": "mock", "model_type": "llm"}
         if priced:
             dep |= {
                 "price_input_nano_usd_per_mtok": 1_000_000_000,

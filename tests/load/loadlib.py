@@ -155,6 +155,7 @@ class Fleet:
                 "name": name,
                 "upstream_id": self.upstream_id,
                 "upstream_model": "mock",
+                "model_type": "llm",
                 "price_input_nano_usd_per_mtok": price_in,
                 "price_output_nano_usd_per_mtok": price_out,
             },

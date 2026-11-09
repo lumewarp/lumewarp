@@ -10,7 +10,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::BodyExt;
 use hyper::{header::HeaderValue, Request, Uri};
 use lumewarp_proto::config::v1::{CircuitBreaker, HealthCheck};
 use prometheus_client::metrics::gauge::Gauge;
@@ -253,13 +253,15 @@ fn spawn_probe(probe: Probe, client: UpstreamClient, changed: Arc<Notify>) -> Jo
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            let mut request = Request::new(Full::new(probe.body.clone().unwrap_or_default()));
+            let mut request = Request::new(crate::request_body::RequestBody::from(
+                probe.body.clone().unwrap_or_default(),
+            ));
             *request.uri_mut() = probe.uri.clone();
             if probe.body.is_some() {
                 *request.method_mut() = hyper::Method::POST;
                 request.headers_mut().insert(
                     hyper::header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/json"),
+                    HeaderValue::from_static(probe.content_type),
                 );
             }
             if let Some(value) = &probe.authorization {
@@ -333,7 +335,7 @@ impl Drop for Registry {
 pub enum Target {
     /// GET of the upstream's health URL.
     Upstream,
-    /// POST of a chat completion through the model.
+    /// Type-specific synthetic POST through the model.
     Model,
 }
 
@@ -351,8 +353,9 @@ pub struct Probe {
     pub target: Target,
     pub name: String,
     pub uri: Uri,
-    /// A JSON body to POST (model chat checks); `None` sends a GET.
+    /// A JSON or multipart probe body to POST; `None` sends a GET.
     pub body: Option<Bytes>,
+    pub content_type: &'static str,
     pub authorization: Option<HeaderValue>,
     pub config: HealthCheck,
     pub healthy: Arc<AtomicBool>,
@@ -367,6 +370,7 @@ impl Probe {
             && self.name == other.name
             && self.uri == other.uri
             && self.body == other.body
+            && self.content_type == other.content_type
             && self.config == other.config
             && self.authorization == other.authorization
     }
@@ -527,6 +531,7 @@ mod tests {
             // Nothing is ever sent: the first tick fires after the asserts.
             uri: "http://127.0.0.1:9/v1/models".parse().unwrap(),
             body: None,
+            content_type: "application/json",
             authorization: None,
             config: HealthCheck {
                 interval_ms: 60_000,

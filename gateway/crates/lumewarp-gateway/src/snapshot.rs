@@ -30,6 +30,8 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     "default_body",
     "reasoning_effort",
     "model_chat_check",
+    "model_types",
+    "audio_price",
     "strategy:weighted",
     "strategy:least_in_flight",
     "strategy:lowest_latency",
@@ -277,6 +279,26 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
     }
     let models = unique(snapshot.models.iter().map(|d| d.name.as_str()), "model")?;
     for d in &snapshot.models {
+        let kind = known::<pb::ModelType>(d.r#type, false, "model type")?;
+        require(kind != pb::ModelType::Llm, "model_types")?;
+        let audio = d
+            .price
+            .as_ref()
+            .is_some_and(|p| p.nano_usd_per_audio_second != 0);
+        require(audio, "audio_price")?;
+        if (audio && kind != pb::ModelType::Transcription)
+            || (kind == pb::ModelType::Embedding
+                && d.price
+                    .as_ref()
+                    .is_some_and(|p| p.output_nano_usd_per_mtok != 0))
+            || (kind != pb::ModelType::Llm
+                && (d.max_output_tokens != 0 || d.reasoning_effort.is_some()))
+            || (kind == pb::ModelType::Transcription && !d.default_body_json.is_empty())
+        {
+            return Err(ApplyError::invalid(
+                "model settings do not apply to its type",
+            ));
+        }
         require(d.max_output_tokens > 0, "model_limits")?;
         require(!d.default_body_json.is_empty(), "default_body")?;
         require(d.reasoning_effort.is_some(), "reasoning_effort")?;
@@ -348,6 +370,22 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
                     "router {:?} fallback {:?} is not a model",
                     r.name, fallback
                 )));
+            }
+        }
+        let mut member_type = None;
+        let members = if r.traffic_split.is_empty() {
+            r.members.iter().collect::<Vec<_>>()
+        } else {
+            r.traffic_split.iter().flat_map(|s| &s.members).collect()
+        };
+        for name in members.iter().map(|m| &m.model).chain(r.fallbacks.iter()) {
+            if let Some(model) = snapshot.models.iter().find(|m| &m.name == name) {
+                if member_type.is_some_and(|kind| kind != model.r#type) {
+                    return Err(ApplyError::invalid(
+                        "router members and fallbacks must share one model type",
+                    ));
+                }
+                member_type = Some(model.r#type);
             }
         }
         validate_strategy(r, &require)?;
@@ -889,6 +927,7 @@ pub(crate) mod tests {
 
     pub fn model(name: &str, upstream: &str) -> pb::Model {
         pb::Model {
+            r#type: pb::ModelType::Llm as i32,
             name: name.into(),
             upstream: upstream.into(),
             upstream_model: "actual".into(),
@@ -1044,6 +1083,15 @@ pub(crate) mod tests {
                         url: "https://agent.example.test/rpc".into(),
                         ..Default::default()
                     }]
+                }
+                "model_types" => s.models[0].r#type = pb::ModelType::Embedding as i32,
+                "audio_price" => {
+                    s.models[0].r#type = pb::ModelType::Transcription as i32;
+                    s.required_capabilities.push("model_types".into());
+                    s.models[0].price = Some(pb::Price {
+                        nano_usd_per_audio_second: 1,
+                        ..Default::default()
+                    });
                 }
                 "strategy:least_in_flight" | "rotation_grace" => continue,
                 strategy => {

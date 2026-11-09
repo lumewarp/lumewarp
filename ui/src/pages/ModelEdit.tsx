@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 
-import { api, type Model, type ModelTest } from "../api";
+import { api, ApiError, type Model, type ModelTest } from "../api";
 import { Badge, nanoToUsd, usdToNano } from "../components/Bits";
 import { EditPage, Section } from "../components/EditPage";
 import { CheckField, Field, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
@@ -15,6 +15,7 @@ import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { useAliases, useModels, useMut, useNames, useRouters, useUpstreams } from "../hooks";
 import { usedBy } from "../lib/catalog";
+import { MODEL_TYPES, type ModelType, typeLabel } from "../lib/modelType";
 import { PageLoading } from "./Access";
 import { ProbeRow } from "./UpstreamEdit";
 import { HealthBadge } from "./Upstreams";
@@ -50,6 +51,7 @@ const PRESETS: { label: string; mode: Mode; rows?: [string, string][]; level?: s
 ];
 
 interface Values {
+  model_type: ModelType | "";
   name: string;
   keep_old_name_as_alias: boolean;
   upstream_id: string;
@@ -58,6 +60,7 @@ interface Values {
   max_output_tokens: number | null;
   price_in: number | null;
   price_out: number | null;
+  price_audio: number | null;
   default_body: string;
   reasoning_on: boolean;
   reasoning_mode: Mode;
@@ -71,6 +74,7 @@ interface Values {
 }
 
 const blank: Values = {
+  model_type: "",
   name: "",
   keep_old_name_as_alias: true,
   upstream_id: "",
@@ -79,6 +83,7 @@ const blank: Values = {
   max_output_tokens: null,
   price_in: null,
   price_out: null,
+  price_audio: null,
   default_body: "",
   reasoning_on: false,
   reasoning_mode: "mapped",
@@ -92,6 +97,7 @@ const blank: Values = {
 };
 
 const fromModel = (m: Model): Values => ({
+  model_type: m.model_type,
   name: m.name,
   keep_old_name_as_alias: true,
   upstream_id: m.upstream_id,
@@ -100,6 +106,7 @@ const fromModel = (m: Model): Values => ({
   max_output_tokens: m.max_output_tokens,
   price_in: nanoToUsd(m.price_input_nano_usd_per_mtok),
   price_out: nanoToUsd(m.price_output_nano_usd_per_mtok),
+  price_audio: nanoToUsd(m.price_nano_usd_per_audio_second),
   default_body: m.default_body ? JSON.stringify(m.default_body, null, 2) : "",
   // Pass through without a default level changes nothing, which is the same as no handling.
   reasoning_on: !(m.reasoning.mode === "passthrough" && !m.reasoning.default_level),
@@ -153,26 +160,46 @@ function reasoning(v: Values) {
 }
 
 /** Prices are entered as USD per 1M tokens and stored as integer nano-USD per 1M tokens. */
-const body = (v: Values) => ({
+/** What each type shows: token prices, an audio price, reasoning and output length, and a default body. */
+const SHOWS: Record<ModelType, { out: boolean; audio: boolean; llm: boolean; body: boolean }> = {
+  llm: { out: true, audio: false, llm: true, body: true },
+  decision: { out: true, audio: false, llm: false, body: true },
+  embedding: { out: false, audio: false, llm: false, body: true },
+  transcription: { out: true, audio: true, llm: false, body: false },
+};
+
+/** A chosen type that is not llm hides reasoning, so its fields are not validated. */
+const hidesReasoning = (v: Values) => !!v.model_type && !SHOWS[v.model_type].llm;
+
+/** Settings of another type are sent as null so changing the type never leaves them behind. */
+const body = (v: Values) => {
+  const type = v.model_type as ModelType;
+  const shows = SHOWS[type];
+  return {
+  model_type: type,
   name: v.name.trim(),
   upstream_id: v.upstream_id,
   upstream_model: v.upstream_model.trim(),
   price_input_nano_usd_per_mtok: usdToNano(v.price_in),
-  price_output_nano_usd_per_mtok: usdToNano(v.price_out),
+  price_output_nano_usd_per_mtok: shows.out ? usdToNano(v.price_out) : null,
+  price_nano_usd_per_audio_second: shows.audio ? usdToNano(v.price_audio) : null,
   max_input_tokens: v.max_input_tokens,
-  max_output_tokens: v.max_output_tokens,
-  default_body: parseObject(v.default_body),
+  max_output_tokens: shows.llm ? v.max_output_tokens : null,
+  default_body: shows.body ? parseObject(v.default_body) : null,
   // Level names are free strings; schema.d.ts may still list the old literals.
-  reasoning: reasoning(v),
+  reasoning: shows.llm ? reasoning(v) : null,
   chat_check: v.check_enabled
     ? { interval_ms: v.check_interval_ms ?? 0, timeout_ms: v.check_timeout_ms ?? 0, unhealthy_threshold: v.check_unhealthy, healthy_threshold: v.check_healthy }
     : null,
-});
+  };
+};
 
 /** Leaf field names of 422 messages mapped to form fields. */
 const ALIAS = {
   price_input_nano_usd_per_mtok: "price_in",
   price_output_nano_usd_per_mtok: "price_out",
+  price_nano_usd_per_audio_second: "price_audio",
+  model_type: "model_type",
   reasoning: "reasoning_mode",
   mode: "reasoning_mode",
   fragments: "levels",
@@ -204,14 +231,15 @@ function ModelForm({ existing }: { existing?: Model }) {
   const upstreamName = useNames(upstreams.data);
   const initial = existing ? fromModel(existing) : blank;
   const form = useForm<Values>(initial, {
+    model_type: required("Type"),
     name: required("Name"),
     upstream_id: required("Upstream"),
     upstream_model: required("Upstream model"),
     // reasoning_effort has its own default below.
-    default_body: (x) => jsonObjectProblem(x, [...RESERVED, "reasoning_effort"]),
-    levels: (x, all) => (all.reasoning_on && all.reasoning_mode === "mapped" ? levelsProblem(x) : undefined),
+    default_body: (x, all) => (all.model_type && !SHOWS[all.model_type].body ? undefined : jsonObjectProblem(x, [...RESERVED, "reasoning_effort"])),
+    levels: (x, all) => (hidesReasoning(all) ? undefined : all.reasoning_on && all.reasoning_mode === "mapped" ? levelsProblem(x) : undefined),
     reasoning_default: (x, all) => {
-      if (!all.reasoning_on || all.reasoning_mode === "strip") return undefined;
+      if (hidesReasoning(all) || !all.reasoning_on || all.reasoning_mode === "strip") return undefined;
       if (all.reasoning_mode === "mapped") return x && !all.levels.some((r) => r.name.trim() === x) ? "This level is not in the list" : undefined;
       return LEVEL_NAME.test(x.trim()) ? undefined : "Letters, digits, . _ - (max 32)";
     },
@@ -219,6 +247,7 @@ function ModelForm({ existing }: { existing?: Model }) {
     check_timeout_ms: (x, all) => (all.check_enabled && ((x ?? 0) < 1 || (x ?? 0) >= (all.check_interval_ms ?? 0)) ? "Must be above 0 and below the interval" : undefined),
   });
   const v = form.values;
+  const shows = v.model_type ? SHOWS[v.model_type] : null;
   const dirty = JSON.stringify(v) !== JSON.stringify(initial);
   const test = useChatTest(v);
   const renamed = !!existing && v.name.trim() !== existing.name;
@@ -270,7 +299,14 @@ function ModelForm({ existing }: { existing?: Model }) {
       }
       onSubmit={async () => {
         if (!form.validate()) return false;
-        const ok = await form.run(() => save.mutateAsync(v), ALIAS);
+        // A type refused because a router uses the model has no field of its own; show it on the type.
+        const ok = await form.run(
+          () =>
+            save.mutateAsync(v).catch((e: unknown) => {
+              throw e instanceof ApiError && e.code === "model_type_in_use" ? new ApiError(e.status, e.message, e.code, "model_type") : e;
+            }),
+          ALIAS,
+        );
         if (ok === false) return false;
         await navigate({ to: "/models" });
       }}
@@ -278,6 +314,15 @@ function ModelForm({ existing }: { existing?: Model }) {
       {test.panel}
 
       <Section title="Model">
+        <SelectField
+          label="Type"
+          value={v.model_type || undefined}
+          onChange={(x) => form.set("model_type", x as ModelType)}
+          options={MODEL_TYPES}
+          error={form.errors.model_type}
+          placeholder="Select a type…"
+          hint="Fixes which endpoints may call this model; it cannot change while a router uses the model."
+        />
         <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus={!existing} hint="What clients send as model." />
         {renamed && <CheckField label="Keep old name as alias" checked={v.keep_old_name_as_alias} onChange={(c) => form.set("keep_old_name_as_alias", c)} />}
         <ComboboxField label="Upstream" value={v.upstream_id} onChange={(x) => form.set("upstream_id", x)} error={form.errors.upstream_id} options={(upstreams.data ?? []).map((u) => ({ value: u.id, label: u.name }))} />
@@ -296,17 +341,20 @@ function ModelForm({ existing }: { existing?: Model }) {
       <Section title="Limits and pricing">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <NumberField label="Input length (tokens)" value={v.max_input_tokens} onChange={(x) => form.set("max_input_tokens", x)} error={form.errors.max_input_tokens} min={1} placeholder="" />
-          <NumberField label="Max output (tokens)" value={v.max_output_tokens} onChange={(x) => form.set("max_output_tokens", x)} error={form.errors.max_output_tokens} min={1} placeholder="" />
+          {shows?.llm && <NumberField label="Max output (tokens)" value={v.max_output_tokens} onChange={(x) => form.set("max_output_tokens", x)} error={form.errors.max_output_tokens} min={1} placeholder="" />}
           <NumberField label="Input price (USD / 1M tokens)" value={v.price_in} onChange={(x) => form.set("price_in", x)} error={form.errors.price_in} step="any" placeholder="0" />
-          <NumberField label="Output price (USD / 1M tokens)" value={v.price_out} onChange={(x) => form.set("price_out", x)} error={form.errors.price_out} step="any" placeholder="0" />
+          {shows?.out && <NumberField label="Output price (USD / 1M tokens)" value={v.price_out} onChange={(x) => form.set("price_out", x)} error={form.errors.price_out} step="any" placeholder="0" />}
+          {shows?.audio && <NumberField label="Audio price (USD / second)" value={v.price_audio} onChange={(x) => form.set("price_audio", x)} error={form.errors.price_audio} step="any" placeholder="0" />}
         </div>
       </Section>
 
-      <Section title="Default request body" hint="Merged into every request; fields the client sends win.">
-        <JsonField label="JSON object" value={v.default_body} onChange={(x) => form.set("default_body", x)} error={form.errors.default_body} placeholder={'{\n  "temperature": 0.6,\n  "top_k": 20\n}'} rows={5} />
-      </Section>
+      {shows?.body && (
+        <Section title="Default request body" hint="Merged into every request; fields the client sends win.">
+          <JsonField label="JSON object" value={v.default_body} onChange={(x) => form.set("default_body", x)} error={form.errors.default_body} placeholder={'{\n  "temperature": 0.6,\n  "top_k": 20\n}'} rows={5} />
+        </Section>
+      )}
 
-      <Section
+      {shows?.llm && <Section
         title="Reasoning effort"
         hint="Off forwards the client's reasoning_effort untouched."
         toggle={{ label: "Handle reasoning effort", checked: v.reasoning_on, onChange: (x) => form.set("reasoning_on", x) }}
@@ -373,11 +421,11 @@ function ModelForm({ existing }: { existing?: Model }) {
             )}
           </>
         )}
-      </Section>
+      </Section>}
 
       <Section
         title="Periodic health check"
-        hint="A short chat completion to this model. While on, each gateway sends it on this schedule (it uses tokens), and while it fails the model gets no traffic if another candidate is available."
+        hint="While on, each gateway sends a short request of this model's type on this schedule, which the upstream may bill, and a failing model gets no traffic if another candidate is available."
         toggle={{ label: "Check periodically", checked: v.check_enabled, onChange: (x) => form.set("check_enabled", x) }}
       >
         {v.check_enabled && (
@@ -401,22 +449,22 @@ const CREDENTIAL: Record<ModelTest["credential"], string> = {
   env_unset: "The upstream's variable is not set on the control plane, so this test sent no key; gateways use their own environment.",
   none: "Sent without a key.",
 };
-/** One chat completion now, from the control plane, of the form as it stands: the button goes in the page actions, the result at the top of the form. */
+/** One probe request now, from the control plane, of the form as it stands: the button goes in the page actions, the result at the top of the form. */
 function useChatTest(values: Values) {
   const [result, setResult] = useState<ModelTest | null>(null);
   const run = useMutation({
     mutationFn: () => {
       let defaultBody: Record<string, unknown> | null = null;
       try {
-        defaultBody = parseObject(values.default_body);
+        defaultBody = values.model_type && SHOWS[values.model_type].body ? parseObject(values.default_body) : null;
       } catch {
         // An invalid body is flagged on the field; test without it.
       }
-      return api.testModel({ upstream_id: values.upstream_id, upstream_model: values.upstream_model.trim(), default_body: defaultBody });
+      return api.testModel({ model_type: values.model_type as ModelType, upstream_id: values.upstream_id, upstream_model: values.upstream_model.trim(), default_body: defaultBody });
     },
     onSuccess: setResult,
   });
-  const missing = !values.upstream_id ? "Pick the upstream first." : !values.upstream_model.trim() ? "Enter the upstream model first." : null;
+  const missing = !values.model_type ? "Pick the type first." : !values.upstream_id ? "Pick the upstream first." : !values.upstream_model.trim() ? "Enter the upstream model first." : null;
   const button = (
     <Button type="button" variant="outline" size="sm" title={missing ?? undefined} disabled={!!missing || run.isPending} onClick={() => run.mutate()}>
       {run.isPending ? "Testing…" : "Test now"}
@@ -428,7 +476,7 @@ function useChatTest(values: Values) {
       {result && <p className={result.credential === "env_unset" ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>{CREDENTIAL[result.credential]}</p>}
       {result && (
         <DescriptionList data-testid="model-test-result">
-          <ProbeRow label="Chat" probe={result.probe} />
+          <ProbeRow label={typeLabel(values.model_type as ModelType)} probe={result.probe} />
           {result.reply !== null && (
             <>
               <DescriptionTerm>Reply</DescriptionTerm>

@@ -99,6 +99,13 @@ class TimestampMixin:
 # --------------------------------------------------------------------------- enums
 
 
+class ModelType(enum.StrEnum):
+    LLM = "llm"
+    EMBEDDING = "embedding"
+    TRANSCRIPTION = "transcription"
+    DECISION = "decision"
+
+
 class ModelAccess(enum.StrEnum):
     """Per-level model allowlist mode (O1 M1).
 
@@ -1221,8 +1228,9 @@ def _name_fk() -> ForeignKeyConstraint:
 
 
 class Model(TimestampMixin, Base):
-    """One public name -> one model on one upstream. Price NULL = unknown (not free); both
-    or neither. Calling it directly is a single attempt; weights live on router members.
+    """One typed public name -> one upstream model. All prices NULL = unknown, not free.
+    Token pairs are complete except for embedding (input only); transcription can add
+    audio pricing. Calling directly is a single attempt; weights live on router members.
     """
 
     __tablename__ = "models"
@@ -1230,13 +1238,30 @@ class Model(TimestampMixin, Base):
         _name_fk(),
         CheckConstraint("kind = 'model'", name="kind_model"),
         CheckConstraint(
-            "(price_input_nano_usd_per_mtok IS NULL) = (price_output_nano_usd_per_mtok IS NULL)",
+            "(model_type = 'embedding' AND (price_output_nano_usd_per_mtok IS NULL"
+            " OR price_output_nano_usd_per_mtok = 0) AND (price_output_nano_usd_per_mtok IS NULL"
+            " OR price_input_nano_usd_per_mtok IS NOT NULL)) OR (model_type <> 'embedding' AND"
+            " (price_input_nano_usd_per_mtok IS NULL) = (price_output_nano_usd_per_mtok IS NULL))",
             name="price_both_or_neither",
         ),
         CheckConstraint(
-            "price_input_nano_usd_per_mtok IS NULL OR (price_input_nano_usd_per_mtok >= 0"
-            " AND price_output_nano_usd_per_mtok >= 0)",
+            "(price_input_nano_usd_per_mtok IS NULL OR price_input_nano_usd_per_mtok >= 0)"
+            " AND (price_output_nano_usd_per_mtok IS NULL OR price_output_nano_usd_per_mtok >= 0)"
+            " AND (price_nano_usd_per_audio_second IS NULL"
+            " OR price_nano_usd_per_audio_second >= 0)",
             name="price_nonneg",
+        ),
+        CheckConstraint(
+            "model_type = 'transcription' OR price_nano_usd_per_audio_second IS NULL",
+            name="audio_price_type",
+        ),
+        CheckConstraint(
+            "model_type <> 'transcription' OR default_body IS NULL", name="default_body_type"
+        ),
+        CheckConstraint(
+            "model_type = 'llm' OR (max_output_tokens IS NULL AND reasoning_mode = 'passthrough'"
+            " AND reasoning_fragments IS NULL AND reasoning_default_level IS NULL)",
+            name="llm_settings_type",
         ),
         CheckConstraint(
             "(max_input_tokens IS NULL OR max_input_tokens > 0)"
@@ -1278,6 +1303,8 @@ class Model(TimestampMixin, Base):
         ForeignKey("upstreams.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     upstream_model: Mapped[str] = mapped_column(String(400), nullable=False)
+    model_type: Mapped[ModelType] = mapped_column(_enum(ModelType, "model_type"), nullable=False)
+    price_nano_usd_per_audio_second: Mapped[int | None] = mapped_column(BigInteger)
     price_input_nano_usd_per_mtok: Mapped[int | None] = mapped_column(BigInteger)
     price_output_nano_usd_per_mtok: Mapped[int | None] = mapped_column(BigInteger)
     # Context window, informational (the gateway does not tokenize). NULL = unknown.
@@ -1292,7 +1319,7 @@ class Model(TimestampMixin, Base):
     )
     reasoning_fragments: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     reasoning_default_level: Mapped[str | None] = mapped_column(String(32))
-    # Periodic "1 + 1 = ?" chat completion by the gateway; interval NULL = not probed.
+    # Periodic type-specific probe by the gateway; interval NULL = not probed.
     chat_check_interval_ms: Mapped[int | None] = mapped_column(Integer)
     chat_check_timeout_ms: Mapped[int | None] = mapped_column(Integer)
     chat_check_unhealthy_threshold: Mapped[int | None] = mapped_column(Integer)
@@ -1899,7 +1926,8 @@ class UsageEvent(Base):
     __tablename__ = "usage_events"
     __table_args__ = (
         CheckConstraint(
-            "prompt_tokens >= 0 AND completion_tokens >= 0 AND cost_nano_usd >= 0",
+            "prompt_tokens >= 0 AND completion_tokens >= 0"
+            " AND audio_ms >= 0 AND cost_nano_usd >= 0",
             name="nonneg",
         ),
         Index(None, "ts"),
@@ -1971,6 +1999,7 @@ class UsageEvent(Base):
     model_id: Mapped[uuid.UUID | None] = mapped_column()
     alias_id: Mapped[uuid.UUID | None] = mapped_column()
     router_id: Mapped[uuid.UUID | None] = mapped_column()
+    audio_ms: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     endpoint: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     stream: Mapped[bool] = mapped_column(Boolean, nullable=False)
@@ -2020,7 +2049,7 @@ class UsageTotal(Base):
         PrimaryKeyConstraint("scope_type", "scope_id", "window_start"),
         CheckConstraint(
             "cost_nano_usd >= 0 AND prompt_tokens >= 0 AND completion_tokens >= 0"
-            " AND request_count >= 0 AND unknown_cost_count >= 0",
+            " AND audio_ms >= 0 AND request_count >= 0 AND unknown_cost_count >= 0",
             name="nonneg",
         ),
     )
@@ -2032,6 +2061,7 @@ class UsageTotal(Base):
     prompt_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     completion_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     request_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    audio_ms: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     # Events whose cost is unknown (no price or usage not REPORTED).
     unknown_cost_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     exceeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

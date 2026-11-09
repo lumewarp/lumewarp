@@ -40,6 +40,7 @@ The model catalog (`docs/architecture.md`, "模型目錄已實作"):
 - Grants by id, checked against the called name. Rollback restores the catalog by id.
 - Usage records the served model plus alias, router, fallback and attempts. No access log: a request is looked up in OTel by `x-lumewarp-request-id`.
 - Strategies are WASM plugins loaded from `LUMEWARP_ROUTER_PLUGIN_DIR`, reported in `Hello.plugins` with their schemas, validated on write; the four built-ins (`weighted`, `least_in_flight`, `lowest_latency`, `vllm_load`) are native.
+- Model types: every model has one required `model_type` (`llm`: `/v1/chat/completions`, `/v1/completions`, `/v1/responses` POST only with ids passed through; `embedding`: `/v1/embeddings`; `transcription`: `/v1/audio/transcriptions|translations`, multipart parsed strictly by the gateway; `decision`: `/v1/decisions`, `/v1/systemone`). Aliases and routers take their target's/members' type, a router's members, splits and fallbacks share one, and a call on another type's endpoint is 400 `model_type_mismatch`. Probes and Test now are typed (transcription sends a generated silent WAV); usage records `audio_ms` and transcription can be priced per audio second; usage groups by `endpoint` and `model_type`; the Playground lists `llm` only. There is no OCR type.
 
 MCP, A2A and gateway plugins (`docs/architecture.md`, "MCP gateway", "A2A gateway", "Gateway plugin（WASM）"; `docs/plugins.md`):
 

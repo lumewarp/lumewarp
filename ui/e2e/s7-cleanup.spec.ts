@@ -80,7 +80,7 @@ test("screenshots: the whole matrix, desktop and 390 px, light and dark", async 
   const account = await post(request, `/teams/${team.id}/service-accounts`, { name: "s7-agent", description: "Screenshots" });
   await post(request, `/teams/${team.id}/keys`, { name: "s7-key", service_account_id: account.id });
   const upstream = await post(request, "/upstreams", { name: "s7-up", kind: "vllm", base_url: "http://127.0.0.1:9/v1" });
-  const model = await post(request, "/models", { name: "s7/m", upstream_id: upstream.id, upstream_model: "m" });
+  const model = await post(request, "/models", { name: "s7/m", upstream_id: upstream.id, upstream_model: "m", model_type: "llm" });
   // The alias refers to s7/m, so deleting the model is the 409 while deleting the alias only asks.
   await post(request, "/aliases", { name: "s7-alias", target: model.id });
 

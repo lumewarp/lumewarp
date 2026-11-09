@@ -133,6 +133,7 @@ async def make_model(
     upstream = upstream or await make_upstream(session)
     row = await catalog_name(session, name or _unique("model"))
     model = Model(
+        model_type=kw.pop("model_type", "llm"),
         name_id=row.id,
         upstream_id=upstream.id,
         upstream_model=kw.pop("upstream_model", f"{row.name}-name"),

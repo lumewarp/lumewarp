@@ -177,7 +177,7 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
         "policy_changed": None,
         "changes": _POLICY_CHANGES,
     },
-    "model.create": {"name": None, "upstream": None},
+    "model.create": {"name": None, "upstream": None, "model_type": None},
     "model.delete": {"name": None},
     "model.rename": {"old_name": None, "new_name": None},
     "model.update": {
@@ -186,6 +186,8 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
             "name": None,
             "upstream_id": None,
             "upstream_model": None,
+            "model_type": None,
+            "price_nano_usd_per_audio_second": None,
             "price_input_nano_usd_per_mtok": None,
             "price_output_nano_usd_per_mtok": None,
             "keep_old_name_as_alias": None,

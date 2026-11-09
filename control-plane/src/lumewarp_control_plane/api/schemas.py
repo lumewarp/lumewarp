@@ -42,6 +42,7 @@ from lumewarp_control_plane.models import (
     McpDefinitionState,
     McpReviewMode,
     ModelAccess,
+    ModelType,
     PluginKind,
     RequestOutcome,
     StickyBy,
@@ -820,9 +821,9 @@ class _ModelSettings(ApiModel):
     chat_check: ChatCheckIn | None = Field(
         default=None,
         description=(
-            "Periodic '1 + 1 = ?' chat completion sent by every gateway through this model;"
+            "Periodic type-specific probe sent by every gateway through this model;"
             " while it fails the model gets no traffic. null = not probed (Test now still"
-            " works). Every probe uses tokens."
+            " works). Probes may incur upstream charges."
         ),
     )
 
@@ -833,6 +834,8 @@ class _ModelSettings(ApiModel):
 
 
 class ModelCreate(_ModelSettings):
+    model_type: ModelType
+    price_nano_usd_per_audio_second: int | None = Field(default=None, ge=0)
     name: ModelName
     upstream_id: uuid.UUID
     upstream_model: str = Field(min_length=1, max_length=400)
@@ -841,11 +844,38 @@ class ModelCreate(_ModelSettings):
 
     @model_validator(mode="after")
     def _price_pair(self) -> ModelCreate:
-        if (self.price_input_nano_usd_per_mtok is None) != (
-            self.price_output_nano_usd_per_mtok is None
-        ):
-            raise ValueError("price input and output must both be set or both be null")
+        validate_model_settings(self)
         return self
+
+
+def validate_model_settings(value: Any) -> None:
+    """Validate the complete desired state, including merged PATCH values.
+
+    Unknown pricing is all NULL. Transcription allows a token pair, audio pricing,
+    both, or neither; embedding allows input alone (or an explicit zero output).
+    """
+    kind = value.model_type
+    pi = value.price_input_nano_usd_per_mtok
+    po = value.price_output_nano_usd_per_mtok
+    if kind == "embedding":
+        if po not in (None, 0) or (pi is None and po is not None):
+            raise ValueError("embedding pricing needs input and output must be null or zero")
+    elif (pi is None) != (po is None):
+        raise ValueError("price input and output must both be set or both be null")
+    if kind != "transcription" and value.price_nano_usd_per_audio_second is not None:
+        raise ValueError("audio price is only allowed on transcription models")
+    if kind == "transcription" and value.default_body is not None:
+        raise ValueError("default_body is not allowed on transcription models")
+    reasoning = getattr(value, "reasoning", None)
+    mode = reasoning.mode if reasoning else getattr(value, "reasoning_mode", "passthrough")
+    fragments = reasoning.fragments if reasoning else getattr(value, "reasoning_fragments", None)
+    level = (
+        reasoning.default_level if reasoning else getattr(value, "reasoning_default_level", None)
+    )
+    if kind != "llm" and (
+        value.max_output_tokens is not None or mode != "passthrough" or fragments or level
+    ):
+        raise ValueError("reasoning and max_output_tokens are only allowed on llm models")
 
 
 class ModelUpdate(_ModelSettings):
@@ -853,6 +883,8 @@ class ModelUpdate(_ModelSettings):
     null to remove the setting.
     """
 
+    model_type: ModelType | None = None
+    price_nano_usd_per_audio_second: int | None = Field(default=None, ge=0)
     name: ModelName | None = None
     upstream_id: uuid.UUID | None = None
     upstream_model: str | None = Field(default=None, min_length=1, max_length=400)
@@ -865,6 +897,8 @@ class ModelUpdate(_ModelSettings):
 
 
 class ModelOut(ReadModel):
+    model_type: ModelType
+    price_nano_usd_per_audio_second: int | None
     id: uuid.UUID
     name: str
     upstream_id: uuid.UUID
@@ -894,6 +928,8 @@ class ModelOut(ReadModel):
         return {
             "id": data.id,
             "name": data.name,
+            "model_type": data.model_type,
+            "price_nano_usd_per_audio_second": data.price_nano_usd_per_audio_second,
             "upstream_id": data.upstream_id,
             "upstream_model": data.upstream_model,
             "price_input_nano_usd_per_mtok": data.price_input_nano_usd_per_mtok,
@@ -930,6 +966,7 @@ class AliasUpdate(ApiModel):
 
 
 class AliasOut(ReadModel):
+    model_type: ModelType | None = None
     id: uuid.UUID
     name: str
     target: uuid.UUID = Field(validation_alias="target_name_id")
@@ -940,6 +977,7 @@ class AliasOut(ReadModel):
 
 
 class CatalogEntryOut(ReadModel):
+    model_type: ModelType | None = None
     id: uuid.UUID
     name: str
     kind: CatalogKind
@@ -1106,6 +1144,7 @@ class RouterUpdate(ApiModel):
 
 
 class RouterOut(ReadModel):
+    model_type: ModelType | None = None
     id: uuid.UUID
     name: str
     strategy: str
@@ -1282,7 +1321,13 @@ class MeMcpGrantOut(ApiModel):
     )
 
 
+class EffectiveModelOut(ApiModel):
+    name: str
+    model_type: ModelType | None
+
+
 class MeTeamOut(ApiModel):
+    typed_models: list[EffectiveModelOut] = Field(default_factory=list)
     team_id: uuid.UUID
     team_name: str
     role: TeamRole
@@ -1383,6 +1428,9 @@ class UsageRowOut(ApiModel):
     monthly totals fast path (LLM requests only) reports both as 0.
     """
 
+    endpoint: str | None = None
+    model_type: ModelType | None = None
+    audio_ms: int = 0
     date: date_type | None = None
     kind: TrafficKind | None = None
     target: str | None = None
@@ -1416,6 +1464,8 @@ class UsageRowOut(ApiModel):
 
 class UsageEventOut(ReadModel):
     """Optional recent-event view (`include_events=1`), never the default list."""
+
+    audio_ms: int
 
     request_id: uuid.UUID
     ts: datetime
@@ -1595,6 +1645,8 @@ class UpstreamTestIn(ApiModel):
 class ModelTestIn(ApiModel):
     """The model form as it stands, saved or not."""
 
+    model_type: ModelType
+
     upstream_id: uuid.UUID
     upstream_model: str = Field(min_length=1, max_length=400)
     default_body: dict[str, Any] | None = None
@@ -1603,6 +1655,12 @@ class ModelTestIn(ApiModel):
     @classmethod
     def _check_default_body(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         return _body_object(value, "default_body") or None
+
+    @model_validator(mode="after")
+    def _type_settings(self) -> ModelTestIn:
+        if self.model_type == ModelType.TRANSCRIPTION and self.default_body is not None:
+            raise ValueError("default_body is not allowed on transcription models")
+        return self
 
 
 class ModelTestOut(ReadModel):

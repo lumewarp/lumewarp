@@ -45,6 +45,7 @@ def _create(client, **settings):
         "name": f"m-{suffix()}",
         "upstream_id": _upstream(client),
         "upstream_model": "Qwen/Qwen3-8B",
+        "model_type": "llm",
         **settings,
     }
     return client.post(f"{API}/models", json=body, headers=H)

@@ -304,24 +304,44 @@ impl Drop for TrafficRecorder {
 pub struct Tokens {
     pub prompt: u64,
     pub completion: u64,
+    pub audio_ms: u64,
 }
 
 /// OpenAI `usage`. Embeddings report only prompt/total tokens.
 #[derive(Deserialize)]
 struct RawUsage {
     prompt_tokens: Option<u64>,
+    input_tokens: Option<u64>,
     completion_tokens: Option<u64>,
+    output_tokens: Option<u64>,
     total_tokens: Option<u64>,
+    r#type: Option<String>,
+    seconds: Option<f64>,
 }
 
 impl RawUsage {
     fn tokens(&self) -> Option<Tokens> {
-        let prompt = self.prompt_tokens?;
+        if self.r#type.as_deref() == Some("duration") {
+            let seconds = self.seconds?;
+            if !seconds.is_finite() || seconds < 0.0 || seconds * 1000.0 > u64::MAX as f64 {
+                return None;
+            }
+            return Some(Tokens {
+                audio_ms: (seconds * 1000.0).round() as u64,
+                ..Default::default()
+            });
+        }
+        let prompt = self.prompt_tokens.or(self.input_tokens)?;
         let completion = self
             .completion_tokens
+            .or(self.output_tokens)
             .or_else(|| self.total_tokens.map(|total| total.saturating_sub(prompt)))
             .unwrap_or(0);
-        Some(Tokens { prompt, completion })
+        Some(Tokens {
+            prompt,
+            completion,
+            audio_ms: 0,
+        })
     }
 }
 
@@ -652,6 +672,11 @@ impl SseFilter {
         struct Chunk {
             choices: Option<Vec<IgnoredAny>>,
             usage: Option<RawUsage>,
+            response: Option<NestedUsage>,
+        }
+        #[derive(Deserialize)]
+        struct NestedUsage {
+            usage: Option<RawUsage>,
         }
         // Fast path: in a single-line event nothing can sit between the key
         // and its value, so the raw check is exact (`"usage":null` chunks
@@ -697,11 +722,12 @@ impl SseFilter {
         let Ok(chunk) = serde_json::from_slice::<Chunk>(data) else {
             return false;
         };
-        let Some(usage) = chunk.usage else {
+        let nested = chunk.response.is_some();
+        let Some(usage) = chunk.usage.or_else(|| chunk.response.and_then(|r| r.usage)) else {
             return false;
         };
         self.usage = Some(usage.tokens().ok_or(()));
-        self.strip && chunk.choices.is_none_or(|choices| choices.is_empty())
+        self.strip && !nested && chunk.choices.is_none_or(|choices| choices.is_empty())
     }
 }
 
@@ -762,12 +788,29 @@ impl Tee {
 // ---------------------------------------------------------------------------
 
 /// Cost of `tokens` at `price` in nano-USD, rounded half up. `None` when the
-/// arithmetic overflows (reported as unknown cost, never as a wrong number).
+/// arithmetic overflows or a reported unit is unpriced on a non-free model
+/// (reported as unknown cost, never as a wrong number).
 pub fn cost_nano_usd(price: &Price, tokens: Tokens) -> Option<u64> {
+    let token_unpriced = price.input_nano_usd_per_mtok == 0 && price.output_nano_usd_per_mtok == 0;
+    let audio_unpriced = price.nano_usd_per_audio_second == 0;
+    let free = token_unpriced && audio_unpriced;
+    if !free
+        && (((tokens.prompt != 0 || tokens.completion != 0) && token_unpriced)
+            || (tokens.audio_ms != 0 && audio_unpriced))
+    {
+        return None;
+    }
     let input = u128::from(tokens.prompt).checked_mul(price.input_nano_usd_per_mtok.into())?;
     let output =
         u128::from(tokens.completion).checked_mul(price.output_nano_usd_per_mtok.into())?;
-    let total = input.checked_add(output)?.checked_add(500_000)? / 1_000_000;
+    let audio = u128::from(tokens.audio_ms)
+        .checked_mul(price.nano_usd_per_audio_second.into())?
+        .checked_mul(1000)?;
+    let total = input
+        .checked_add(output)?
+        .checked_add(audio)?
+        .checked_add(500_000)?
+        / 1_000_000;
     u64::try_from(total).ok()
 }
 
@@ -867,6 +910,7 @@ impl UsageCapture {
             stream: self.stream,
             prompt_tokens: tokens.prompt,
             completion_tokens: tokens.completion,
+            audio_ms: tokens.audio_ms,
             duration_ms: u32::try_from(elapsed.as_millis()).unwrap_or(u32::MAX),
             config_version: self.config_version,
             usage_state: state as i32,
@@ -1473,6 +1517,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
     const USAGE_EVENT: &[u8] = b"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"total_tokens\":18,\"completion_tokens\":7}}\n\n";
     const DONE: &[u8] = b"data: [DONE]\n\n";
     const TOKENS: Tokens = Tokens {
+        audio_ms: 0,
         prompt: 11,
         completion: 7,
     };
@@ -1959,6 +2004,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 assert_eq!(
                     filter.captured(),
                     Captured::Reported(Tokens {
+                        audio_ms: 0,
                         prompt: 3,
                         completion: 4
                     })
@@ -1983,6 +2029,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         assert_eq!(
             filter.captured(),
             Captured::Reported(Tokens {
+                audio_ms: 0,
                 prompt: 2,
                 completion: 5
             })
@@ -2029,6 +2076,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         // key and its object.
         let usage = b"data: {\"choices\":[],\"usage\"\ndata: :{\"prompt_tokens\":2,\"completion_tokens\":3}}\n\n";
         let expected_tokens = Captured::Reported(Tokens {
+            audio_ms: 0,
             prompt: 2,
             completion: 3,
         });
@@ -2064,6 +2112,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
     #[test]
     fn escaped_usage_keys_are_captured_at_every_frame_split() {
         let expected_tokens = Captured::Reported(Tokens {
+            audio_ms: 0,
             prompt: 2,
             completion: 3,
         });
@@ -2116,6 +2165,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
             assert_eq!(
                 filter.captured(),
                 Captured::Reported(Tokens {
+                    audio_ms: 0,
                     prompt: 2,
                     completion: 3
                 })
@@ -2221,6 +2271,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         assert_eq!(
             tee.finish(),
             Captured::Reported(Tokens {
+                audio_ms: 0,
                 prompt: 5,
                 completion: 2
             })
@@ -2232,6 +2283,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         assert_eq!(
             tee.finish(),
             Captured::Reported(Tokens {
+                audio_ms: 0,
                 prompt: 5,
                 completion: 2
             })
@@ -2241,6 +2293,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         assert_eq!(
             parse_response_usage(embeddings),
             Captured::Reported(Tokens {
+                audio_ms: 0,
                 prompt: 8,
                 completion: 0
             })
@@ -2269,18 +2322,62 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
     }
 
     #[test]
+    fn both_token_naming_conventions_are_accepted() {
+        assert_eq!(parse_response_usage(br#"{"usage":{"prompt_tokens":3,"input_tokens":7,"completion_tokens":4,"output_tokens":8}}"#),
+            Captured::Reported(Tokens { prompt: 3, completion: 4, audio_ms: 0 }));
+    }
+
+    #[test]
+    fn unpriced_usage_units_are_unknown_unless_explicitly_free() {
+        let token_usage = Tokens {
+            prompt: 1_000_000,
+            completion: 1_000_000,
+            audio_ms: 0,
+        };
+        let duration_usage = Tokens {
+            audio_ms: 1000,
+            ..Default::default()
+        };
+        let audio = Price {
+            nano_usd_per_audio_second: 5,
+            ..Default::default()
+        };
+        let token = Price {
+            input_nano_usd_per_mtok: 2,
+            output_nano_usd_per_mtok: 3,
+            ..Default::default()
+        };
+        let both = Price {
+            nano_usd_per_audio_second: 5,
+            ..token
+        };
+        assert_eq!(cost_nano_usd(&audio, token_usage), None);
+        assert_eq!(cost_nano_usd(&token, duration_usage), None);
+        assert_eq!(cost_nano_usd(&both, token_usage), Some(5));
+        assert_eq!(cost_nano_usd(&both, duration_usage), Some(5));
+        assert_eq!(cost_nano_usd(&Price::default(), token_usage), Some(0));
+        assert_eq!(cost_nano_usd(&Price::default(), duration_usage), Some(0));
+    }
+
+    #[test]
     fn cost_is_fixed_point_and_checked() {
         let price = Price {
             input_nano_usd_per_mtok: 150_000_000,     // $0.15 / Mtok
             output_nano_usd_per_mtok: 12_000_000_000, // $12 / Mtok
+            nano_usd_per_audio_second: 0,
         };
-        let t = |prompt, completion| Tokens { prompt, completion };
+        let t = |prompt, completion| Tokens {
+            prompt,
+            completion,
+            audio_ms: 0,
+        };
         assert_eq!(cost_nano_usd(&price, t(1_000_000, 0)), Some(150_000_000));
         assert_eq!(cost_nano_usd(&price, t(11, 7)), Some(1650 + 84_000));
         // Rounded half up: 0.499999 -> 0, 0.5 -> 1, 0.999998 -> 1.
         let tiny = Price {
             input_nano_usd_per_mtok: 1,
             output_nano_usd_per_mtok: 499_999,
+            nano_usd_per_audio_second: 0,
         };
         assert_eq!(cost_nano_usd(&tiny, t(0, 1)), Some(0));
         assert_eq!(cost_nano_usd(&tiny, t(1, 1)), Some(1));
@@ -2288,6 +2385,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         let max = Price {
             input_nano_usd_per_mtok: u64::MAX,
             output_nano_usd_per_mtok: u64::MAX,
+            nano_usd_per_audio_second: 0,
         };
         assert_eq!(cost_nano_usd(&max, t(u64::MAX, u64::MAX)), None);
         assert_eq!(cost_nano_usd(&max, t(1_000_000, 0)), Some(u64::MAX));

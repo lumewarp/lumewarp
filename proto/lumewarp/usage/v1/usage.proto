@@ -44,7 +44,9 @@ message UsageEvent {
   // The model that finally served the request; prices and cost follow it.
   // Empty when no model was selected.
   string model = 8;
-  // Endpoint: chat_completions | completions | embeddings | mcp | a2a.
+  // Endpoint: chat_completions | completions | responses | embeddings |
+  // audio_transcriptions | audio_translations | decisions | systemone | mcp |
+  // a2a. The model type follows from it.
   string endpoint = 9;
   uint32 status = 10;
   bool stream = 11;
@@ -86,6 +88,9 @@ message UsageEvent {
   // MCP tools/call and prompts/get: the upstream tool or prompt name, at
   // most 400 bytes.
   string tool = 31;
+  // Transcription: audio duration reported by the upstream (usage type
+  // "duration"), in milliseconds; 0 when it reported tokens or nothing.
+  uint64 audio_ms = 32;
 }
 
 enum TrafficKind {

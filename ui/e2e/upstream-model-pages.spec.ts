@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { pick } from "./helpers";
 
 /*
  * The upstream and model edit pages: Test now probes the form as it stands (a typed key is sent,
@@ -66,6 +67,7 @@ test("the model picker offers the upstream's list and a custom name, and fills t
   await signIn(page, request, "/models/new");
   const main = page.locator("#main");
   await main.getByLabel("Name", { exact: true }).fill("pg-model");
+  await pick(main, "Type", "LLM");
   await main.getByRole("combobox", { name: "Upstream", exact: true }).click();
   await page.getByRole("option", { name: "pg-up" }).click();
   const picker = main.getByRole("combobox", { name: "Upstream model", exact: true });
@@ -100,6 +102,7 @@ test("model Test now asks the model, and the periodic check is saved", async ({ 
   const main = page.locator("#main");
   await expect(main.getByRole("button", { name: "Test now" })).toBeDisabled();
   await main.getByLabel("Name", { exact: true }).fill("pg-checked");
+  await pick(main, "Type", "LLM");
   await main.getByRole("combobox", { name: "Upstream", exact: true }).click();
   await page.getByRole("option", { name: "pg-up2" }).click();
   const picker = main.getByRole("combobox", { name: "Upstream model", exact: true });
@@ -110,7 +113,7 @@ test("model Test now asks the model, and the periodic check is saved", async ({ 
   await main.getByRole("button", { name: "Test now" }).click();
   await expect(main.getByTestId("model-test-result")).toContainText("HTTP 200");
   await expect(main.getByTestId("model-test-result")).toContainText("2");
-  expect(sent).toEqual([{ upstream_id: up.id, upstream_model: "qwen", default_body: { top_k: 20 } }]);
+  expect(sent).toEqual([{ model_type: "llm", upstream_id: up.id, upstream_model: "qwen", default_body: { top_k: 20 } }]);
 
   await main.getByLabel("Check periodically").click();
   await main.getByLabel("Interval (ms)").fill("30000");
@@ -130,6 +133,7 @@ test("reasoning effort: switch on, add custom levels, set the default, and store
   await signIn(page, request, "/models/new");
   const main = page.locator("#main");
   await main.getByLabel("Name", { exact: true }).fill("pg-reasoning");
+  await pick(main, "Type", "LLM");
   await main.getByRole("combobox", { name: "Upstream", exact: true }).click();
   await page.getByRole("option", { name: "pg-up3" }).click();
   await main.getByRole("combobox", { name: "Upstream model", exact: true }).fill("qwen");

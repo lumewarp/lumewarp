@@ -1,7 +1,7 @@
 import { TriangleAlert } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import { api, type Model, type Plugin, type Router } from "../api";
-import { Badge, PageHeader } from "../components/Bits";
+import { Badge, PageHeader, TypeBadge } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { CheckField, Field, FormDialog, NumberField, required, SelectField, SwitchField, TextField, useForm } from "../components/Form";
 import { CreateButton, RowActions } from "../components/RowActions";
@@ -16,6 +16,7 @@ import { Combobox, ComboboxField } from "../components/ui/combobox-field";
 import { Label } from "../components/ui/label";
 import { useAliases, useCan, useModels, useMut, useNames, useRouters, useStrategies } from "../hooks";
 import { matches, routerUpstreamModels } from "../lib/catalog";
+import { typeLabel, typeOfFirst } from "../lib/modelType";
 import { parseSchema, sameJson, settingTitles, strategyDescription, strategyTitle, unknownKeys, validateValues, type ParsedSchema, type Values as Params } from "../lib/schema";
 import { useById } from "../hooks";
 
@@ -387,8 +388,20 @@ export function Routers() {
     setProblems({});
   };
 
-  const depOptions = models.data ?? [];
-  const fallbackOptions = depOptions.filter((m) => !v.fallback_model_ids.includes(m.id));
+  // Every member, split member and fallback shares one type: the first one chosen sets it.
+  const memberIds = [...v.members.map((m) => m.model_id), ...v.splits.flatMap((s) => s.members.map((m) => m.model_id))];
+  const chosenIds = [...memberIds, ...v.fallback_model_ids];
+  const routerType = typeOfFirst(chosenIds, (id) => modelById.get(id)?.model_type);
+  // A lone member does not pin the type: picking a model of another type replaces it (see `retype`).
+  const memberType = chosenIds.length === 1 && memberIds.length === 1 ? undefined : routerType;
+  const depOptions = (models.data ?? []).filter((m) => !memberType || m.model_type === memberType);
+  const fallbackOptions = (models.data ?? []).filter((m) => (!routerType || m.model_type === routerType) && !v.fallback_model_ids.includes(m.id));
+  /** Members just picked set the type; anything chosen of another type is dropped so the router stays single-typed. */
+  const retype = (prev: MemberV[], next: MemberV[]): MemberV[] => {
+    const added = next.find((m) => !prev.some((p) => p.model_id === m.model_id));
+    const type = added && modelById.get(added.model_id)?.model_type;
+    return type ? next.filter((m) => modelById.get(m.model_id)?.model_type === type) : next;
+  };
   const strategyOptions = [
     ...(strategies.data ?? []).map((s) => ({ value: s.name, label: strategyTitle(s) })),
     ...(strategyByName.has(v.strategy) || !v.strategy ? [] : [{ value: v.strategy, label: `${v.strategy} (not reported by any gateway)` }]),
@@ -412,7 +425,7 @@ export function Routers() {
     () =>
       (list.data ?? []).filter((r) => {
         const upstreamModels = routerUpstreamModels(r, modelById);
-        return matches(search, r.name, ...upstreamModels);
+        return matches(search, r.name, r.model_type, typeLabel(r.model_type), ...upstreamModels);
       }),
     [list.data, search, modelById],
   );
@@ -437,6 +450,7 @@ export function Routers() {
         empty={search ? "No routers match your search." : "No routers yet."}
         columns={[
           { key: "name", header: "Name", sort: (a, b) => a.name.localeCompare(b.name), cell: (r) => <strong>{r.name}</strong> },
+          { key: "type", header: "Type", cell: (r) => <TypeBadge type={r.model_type} /> },
           {
             key: "strategy",
             header: "Strategy",
@@ -546,7 +560,7 @@ export function Routers() {
           </p>
         ) : (
           <Field label="Models" error={form.errors.members} hint={shape.usesWeight ? undefined : "This strategy does not use weights."}>
-            {(p) => <MemberEditor id={p.id} invalid={p["aria-invalid"]} describedBy={p["aria-describedby"]} scope="m" label="Models" options={depOptions} members={v.members} onChange={(next) => form.set("members", next)} shape={shape} errors={schemaErrors} showErrors={submitted} onProblem={setProblem} />}
+            {(p) => <MemberEditor id={p.id} invalid={p["aria-invalid"]} describedBy={p["aria-describedby"]} scope="m" label="Models" options={depOptions} members={v.members} onChange={(next) => form.set("members", retype(v.members, next))} shape={shape} errors={schemaErrors} showErrors={submitted} onProblem={setProblem} />}
           </Field>
         )}
 
@@ -625,7 +639,7 @@ export function Routers() {
                   Remove
                 </Button>
               </div>
-              <MemberEditor scope={`s${i}`} label={`Models of split ${i + 1}`} options={depOptions} members={s.members} onChange={(next) => setSplit(i, { members: next })} shape={shape} errors={schemaErrors} showErrors={submitted} onProblem={setProblem} />
+              <MemberEditor scope={`s${i}`} label={`Models of split ${i + 1}`} options={depOptions} members={s.members} onChange={(next) => setSplit(i, { members: retype(s.members, next) })} shape={shape} errors={schemaErrors} showErrors={submitted} onProblem={setProblem} />
             </div>
           ))}
           <div>

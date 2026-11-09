@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { api, type UsageQuery, type UsageRow } from "../api";
-import { Badge, fmtNumber as n, fmtUsd, PageHeader } from "../components/Bits";
+import { Badge, fmtNumber as n, fmtUsd, PageHeader, TypeBadge } from "../components/Bits";
 import { SelectField, TextField } from "../components/Form";
 import { UsageChart } from "../components/UsageChart";
 import { Card } from "../components/ui/card";
@@ -9,6 +9,7 @@ import { ComboboxField } from "../components/ui/combobox-field";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { DataTable, type Column } from "../components/Table";
 import { dayStart, isoDay, shiftDay } from "../lib/days";
+import { MODEL_TYPES, type ModelType } from "../lib/modelType";
 import { useUsageMetric } from "../lib/usageMetric";
 import { useCan, useCatalog, useMe, useModels, useNames, useTeamDirectory, useTeams } from "../hooks";
 
@@ -28,6 +29,8 @@ const GROUPS = [
   { value: "alias", label: "Alias" },
   { value: "router", label: "Router" },
   { value: "requested", label: "Requested name" },
+  { value: "endpoint", label: "Endpoint" },
+  { value: "model_type", label: "Model type" },
   { value: "team", label: "Team" },
   { value: "owner", label: "Owner" },
   { value: "key", label: "API key" },
@@ -52,6 +55,21 @@ const A2A_GROUPS = [
   { value: "method", label: "Method" },
   { value: "target", label: "Agent" },
 ];
+
+/** The gateway's endpoint labels, as the usage API filters them. */
+const ENDPOINTS = [
+  { value: "chat_completions", label: "Chat completions" },
+  { value: "completions", label: "Completions" },
+  { value: "responses", label: "Responses" },
+  { value: "embeddings", label: "Embeddings" },
+  { value: "audio_transcriptions", label: "Audio transcriptions" },
+  { value: "audio_translations", label: "Audio translations" },
+  { value: "decisions", label: "Decisions" },
+  { value: "systemone", label: "SystemOne" },
+];
+const endpointLabel = (value: string | null | undefined) => ENDPOINTS.find((e) => e.value === value)?.label ?? value ?? "—";
+/** Audio is stored in milliseconds and read in seconds. */
+const fmtSeconds = (ms: number) => (ms / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 });
 
 const today = new Date();
 const daysAgo = (count: number) => new Date(today.getTime() - count * 86_400_000);
@@ -207,6 +225,8 @@ function LlmUsage({ range }: { range: RangeProps }) {
   const upstreamModel = useDebounced(upstreamText.trim(), 300);
   const [alias, setAlias] = useState(ANY);
   const [router, setRouter] = useState(ANY);
+  const [endpoint, setEndpoint] = useState(ANY);
+  const [modelType, setModelType] = useState<ModelType | "">("");
   const perms = useCan();
   const me = useMe();
   const teams = useTeams();
@@ -245,6 +265,8 @@ function LlmUsage({ range }: { range: RangeProps }) {
     team_id: range.teamId || undefined,
     model: model || undefined,
     upstream_model: upstreamModel || undefined,
+    endpoint: endpoint || undefined,
+    model_type: modelType || undefined,
     ...provenanceFilter("alias", alias),
     ...provenanceFilter("router", router),
   };
@@ -271,13 +293,14 @@ function LlmUsage({ range }: { range: RangeProps }) {
       (query.data ?? []).reduce(
         (acc, row) => ({
           requests: acc.requests + row.requests,
+          audio: acc.audio + row.audio_ms,
           prompt: acc.prompt + row.prompt_tokens,
           completion: acc.completion + row.completion_tokens,
           tokens: acc.tokens + row.total_tokens,
           cost: acc.cost + row.cost_nano_usd,
           unpriced: acc.unpriced + row.unknown_cost_count,
         }),
-        { requests: 0, prompt: 0, completion: 0, tokens: 0, cost: 0, unpriced: 0 },
+        { requests: 0, audio: 0, prompt: 0, completion: 0, tokens: 0, cost: 0, unpriced: 0 },
       ),
     [query.data],
   );
@@ -299,6 +322,8 @@ function LlmUsage({ range }: { range: RangeProps }) {
   };
   const dimCols: Record<string, Column<Row>[]> = {
     day: [{ key: "day", header: "Date", sort: (a, b) => (a.date ?? "").localeCompare(b.date ?? ""), cell: (row) => row.date ?? "—" }],
+    endpoint: [{ key: "endpoint", header: "Endpoint", sort: (a, b) => (a.endpoint ?? "").localeCompare(b.endpoint ?? ""), cell: (row) => (row.endpoint ? <code>{endpointLabel(row.endpoint)}</code> : <span className="text-muted-foreground">—</span>) }],
+    model_type: [{ key: "model_type", header: "Type", sort: (a, b) => (a.model_type ?? "").localeCompare(b.model_type ?? ""), cell: (row) => <TypeBadge type={row.model_type} /> }],
     requested: [{ key: "requested", header: "Requested", sort: (a, b) => (a.requested ?? "").localeCompare(b.requested ?? ""), cell: (row) => row.requested ?? "—" }],
     model: [
       { key: "model", header: "Model", sort: (a, b) => (a.model ?? "").localeCompare(b.model ?? ""), cell: (row) => <strong>{row.model || "—"}</strong> },
@@ -332,10 +357,13 @@ function LlmUsage({ range }: { range: RangeProps }) {
         <ComboboxField free label="Upstream model" hint="Any name, including one no model uses any more." placeholder="All upstream models" value={upstreamText} onChange={setUpstreamText} options={upstreamSuggestions.map((name) => ({ value: name, label: name }))} />
         <ComboboxField label="Alias" value={alias} onChange={setAlias} options={provenanceOptions("alias")} />
         <ComboboxField label="Router" value={router} onChange={setRouter} options={provenanceOptions("router")} />
+        <ComboboxField label="Endpoint" value={endpoint} onChange={setEndpoint} options={[{ value: ANY, label: "All endpoints" }, ...ENDPOINTS]} />
+        <SelectField label="Model type" value={modelType} onChange={(x) => setModelType(x as ModelType | "")} options={[{ value: "", label: "All types" }, ...MODEL_TYPES]} />
         <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={GROUPS} />
       </Card>
       <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
         <Stat label="Requests" value={n(total.requests)} />
+        {total.audio > 0 && <Stat label="Audio (seconds)" value={fmtSeconds(total.audio)} />}
         <Stat label="Total tokens" value={n(total.tokens)} />
         <Stat label="Prompt / completion" value={`${n(total.prompt)} / ${n(total.completion)}`} />
         <Stat label="Spend" value={fmtUsd(total.cost)} />
@@ -360,7 +388,7 @@ function LlmUsage({ range }: { range: RangeProps }) {
         loading={query.isPending || teams.isPending || (directoryEnabled && directory.isPending)}
         error={query.error ?? teams.error ?? (directoryEnabled ? directory.error : null)}
         onRetry={() => void query.refetch()}
-        rowKey={(row) => [row.date, row.requested, row.model_id ?? row.model, row.alias_id ?? row.alias, row.router_id ?? row.router, row.upstream_model, row.team_id, row.owner_kind, row.owner_id, row.key_id].join("|")}
+        rowKey={(row) => [row.date, row.endpoint, row.model_type, row.requested, row.model_id ?? row.model, row.alias_id ?? row.alias, row.router_id ?? row.router, row.upstream_model, row.team_id, row.owner_kind, row.owner_id, row.key_id].join("|")}
         empty="No usage in this period."
         columns={[
           ...dims.flatMap((dimension) => dimCols[dimension] ?? []),
@@ -381,6 +409,7 @@ function LlmUsage({ range }: { range: RangeProps }) {
           },
           { key: "prompt", header: "Prompt", align: "right", hideBelow: "md", cell: (row) => n(row.prompt_tokens) },
           { key: "completion", header: "Completion", align: "right", hideBelow: "md", cell: (row) => n(row.completion_tokens) },
+          ...(total.audio > 0 ? [{ key: "audio", header: "Audio (s)", align: "right" as const, hideBelow: "md" as const, sort: (a: Row, b: Row) => a.audio_ms - b.audio_ms, cell: (row: Row) => (row.audio_ms ? fmtSeconds(row.audio_ms) : <span className="text-muted-foreground">—</span>) }] : []),
           { key: "cost", header: "Cost", align: "right", sort: (a, b) => a.cost_nano_usd - b.cost_nano_usd, cell: (row) => fmtUsd(row.cost_nano_usd) },
         ]}
       />

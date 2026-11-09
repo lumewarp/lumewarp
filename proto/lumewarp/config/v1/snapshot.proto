@@ -126,11 +126,36 @@ message Model {
   // How the OpenAI `reasoning_effort` field is handled. Absent = passed
   // through untouched. Capability "reasoning_effort".
   ReasoningEffort reasoning_effort = 8;
-  // Periodic chat completion ("1 + 1 = ?") sent through this model's own body
-  // rules to <upstream base_url>/chat/completions; while it fails the model gets
+  // Periodic request through this model, shaped by its type: LLM a chat
+  // completion ("1 + 1 = ?") through its body rules to /chat/completions,
+  // EMBEDDING {"input":"ping"} to /embeddings, TRANSCRIPTION a multipart
+  // upload of a generated one-second silent WAV to /audio/transcriptions,
+  // DECISION one yes/no question to /decisions. While it fails the model gets
   // no traffic (on top of its upstream's health check). Absent = not probed.
   // Probes are not metered. Capability "model_chat_check".
   ChatCheck chat_check = 9;
+  // Required. Decides the endpoints that may call this model (see ModelType),
+  // which settings apply and how usage is read. A type other than LLM needs
+  // capability "model_types". max_output_tokens and reasoning_effort are
+  // LLM-only; default_body_json is not allowed on TRANSCRIPTION.
+  ModelType type = 10;
+}
+
+// What a model serves. An alias or a router has the type of its target or
+// members; all members, split members and fallbacks of a router share one
+// type. Calling a name on an endpoint of another type is answered 400
+// model_type_mismatch.
+enum ModelType {
+  // Invalid: every model names its type.
+  MODEL_TYPE_UNSPECIFIED = 0;
+  // /chat/completions, /completions, /responses (POST only).
+  MODEL_TYPE_LLM = 1;
+  // /embeddings.
+  MODEL_TYPE_EMBEDDING = 2;
+  // /audio/transcriptions, /audio/translations (multipart/form-data).
+  MODEL_TYPE_TRANSCRIPTION = 3;
+  // /decisions (OpenAI) and /systemone (vLLM structured decisions).
+  MODEL_TYPE_DECISION = 4;
 }
 
 // Same timing rules as HealthCheck: interval at least 1000 ms, timeout above 0
@@ -169,11 +194,19 @@ enum ReasoningEffortMode {
   REASONING_EFFORT_MODE_MAPPED = 3;
 }
 
-// Fixed-point: nano-USD (1e-9 USD) per one million tokens. An explicit
-// all-zero Price means free.
+// Fixed-point nano-USD (1e-9 USD). Only an explicit all-zero Price means free;
+// an absent Price means unknown cost. For a non-all-zero Price, a reported unit
+// whose corresponding rates are all zero has unknown cost (both input/output
+// rates zero for tokens, or audio_second zero for duration). Transcription token
+// rates of 0/0 with a nonzero audio rate do not make token usage free.
+// Cost = input tokens x input + output tokens x output (per one million
+// tokens) + audio seconds x audio_second. A model sets only the fields its
+// type uses: EMBEDDING has no output price, audio_second is TRANSCRIPTION-only
+// and needs capability "audio_price".
 message Price {
   uint64 input_nano_usd_per_mtok = 1;
   uint64 output_nano_usd_per_mtok = 2;
+  uint64 nano_usd_per_audio_second = 3;
 }
 
 // Another callable name for a model or a router (never another alias). It is

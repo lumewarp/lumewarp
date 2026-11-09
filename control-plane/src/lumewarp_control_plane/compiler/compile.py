@@ -433,12 +433,24 @@ async def compile_scope(
         else:
             valid_models.append(d)
             out = pb.Model(
-                name=d.name, upstream=upstream_name[d.upstream_id], upstream_model=d.upstream_model
+                name=d.name,
+                upstream=upstream_name[d.upstream_id],
+                upstream_model=d.upstream_model,
+                type={
+                    "llm": pb.MODEL_TYPE_LLM,
+                    "embedding": pb.MODEL_TYPE_EMBEDDING,
+                    "transcription": pb.MODEL_TYPE_TRANSCRIPTION,
+                    "decision": pb.MODEL_TYPE_DECISION,
+                }[d.model_type],
             )
-            if d.price_input_nano_usd_per_mtok is not None:
+            if (
+                d.price_input_nano_usd_per_mtok is not None
+                or d.price_nano_usd_per_audio_second is not None
+            ):
                 out.price.CopyFrom(
                     pb.Price(
-                        input_nano_usd_per_mtok=d.price_input_nano_usd_per_mtok,
+                        input_nano_usd_per_mtok=d.price_input_nano_usd_per_mtok or 0,
+                        nano_usd_per_audio_second=d.price_nano_usd_per_audio_second or 0,
                         output_nano_usd_per_mtok=d.price_output_nano_usd_per_mtok or 0,
                     )
                 )

@@ -230,7 +230,7 @@ seed() {
   org="$(api GET /orgs | jq -r '.items | map(select(.name == "default")) | first | .id // empty')"
   [[ -n "$org" ]] || org="$(api POST /orgs '{"name":"default"}' | jq -r .id)"
   up="$(api POST /upstreams '{"name":"mock","kind":"openai_compatible","base_url":"http://127.0.0.1:9100/v1"}' | jq -r .id)"
-  model="$(api POST /models "{\"name\":\"mock-local\",\"upstream_id\":\"$up\",\"upstream_model\":\"mock\"}" | jq -r .id)"
+  model="$(api POST /models "{\"name\":\"mock-local\",\"upstream_id\":\"$up\",\"upstream_model\":\"mock\",\"model_type\":\"llm\"}" | jq -r .id)"
   router="$(api POST /routers "{\"name\":\"demo\",\"members\":[{\"model_id\":\"$model\"}]}" | jq -r .id)"
   api POST /aliases "{\"name\":\"demo-latest\",\"target\":\"$router\"}" >/dev/null
   team="$(api POST /teams "{\"name\":\"demo\",\"org_id\":\"$org\",\"model_access\":\"all\"}" | jq -r .id)"

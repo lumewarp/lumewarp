@@ -300,6 +300,25 @@ impl Gateway {
         server_options: &str,
         extra: &str,
     ) -> Self {
+        Self::start_with_type(
+            upstreams,
+            authenticated,
+            timeout_ms,
+            server_options,
+            extra,
+            "llm",
+        )
+        .await
+    }
+
+    pub async fn start_with_type(
+        upstreams: &[SocketAddr],
+        authenticated: bool,
+        timeout_ms: u32,
+        server_options: &str,
+        extra: &str,
+        model_type: &str,
+    ) -> Self {
         // Reserve distinct ports until immediately before spawning the child.
         let listen = StdListener::bind("127.0.0.1:0").unwrap();
         let admin = StdListener::bind("127.0.0.1:0").unwrap();
@@ -319,7 +338,7 @@ impl Gateway {
         yaml.push_str("models:\n");
         for i in 0..upstreams.len() {
             yaml.push_str(&format!(
-                "  - {{name: d{i}, upstream: u{i}, upstream_model: actual}}\n"
+                "  - {{type: {model_type}, name: d{i}, upstream: u{i}, upstream_model: actual}}\n"
             ));
         }
         let members = (0..upstreams.len())

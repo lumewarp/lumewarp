@@ -693,6 +693,31 @@ direction is implied. A router's fallback is not re-checked. The API still reads
 `allowed_models` as names, which must exist; a member's or service account's list must be a
 subset of its team's.
 
+**Model types.** `POST /models` requires `model_type`: `llm`, `embedding`,
+`transcription` or `decision`. Models, aliases, routers and catalog entries expose
+`model_type`; aliases derive it from their target, routers from their members (null
+when empty). Every router member, split member and fallback must share one type.
+Changing a referenced model's type returns 409 `model_type_in_use`.
+
+Prices use integer nano-USD: `price_input_nano_usd_per_mtok`,
+`price_output_nano_usd_per_mtok` and `price_nano_usd_per_audio_second`. All null means
+unknown; only an explicitly all-zero Price is free. For a non-all-zero Price,
+usage in a unit whose corresponding rates are all zero has unknown cost: both
+input/output rates zero for tokens, or the audio rate zero for duration.
+Transcription token rates of 0/0 alongside a nonzero audio rate therefore do not
+make token usage free. LLM and decision require both token prices or
+neither; embedding accepts input only, optionally with zero output. Transcription
+accepts a complete token pair, an audio price, both, or neither (unknown); a partial
+token pair is never allowed. Audio pricing is transcription-only; reasoning and
+`max_output_tokens` are LLM-only, and transcription cannot set `default_body`.
+Periodic `chat_check` and Test now probe each type's endpoint, including generated
+silent WAV multipart uploads for transcription. JSON probes apply `default_body`.
+
+Usage stores `audio_ms` and supports `endpoint` and historical, endpoint-derived
+`model_type` dimensions and filters; MCP/A2A have no model type. `/users/me` retains
+`models: string[]` and adds `typed_models: [{name, model_type}]` in each team.
+Playground lists and proxies only LLM names, including LLM aliases and routers.
+
 Settings that compile 1:1 into the snapshot (`proto/lumewarp/config/v1/snapshot.proto`):
 
 | API field | Where | Snapshot / default |

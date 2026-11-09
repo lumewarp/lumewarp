@@ -59,7 +59,7 @@ class ReportResponse(_message.Message):
     def __init__(self, accepted: _Optional[int] = ...) -> None: ...
 
 class UsageEvent(_message.Message):
-    __slots__ = ("request_id", "timestamp_unix_ms", "key_id", "team_id", "requested", "model", "endpoint", "status", "stream", "prompt_tokens", "completion_tokens", "duration_ms", "config_version", "usage_state", "outcome", "started_at_unix_ms", "cost_nano_usd", "cost_known", "alias", "router", "upstream", "upstream_model", "fallback", "attempts", "kind", "target", "method", "tool")
+    __slots__ = ("request_id", "timestamp_unix_ms", "key_id", "team_id", "requested", "model", "endpoint", "status", "stream", "prompt_tokens", "completion_tokens", "duration_ms", "config_version", "usage_state", "outcome", "started_at_unix_ms", "cost_nano_usd", "cost_known", "alias", "router", "upstream", "upstream_model", "fallback", "attempts", "kind", "target", "method", "tool", "audio_ms")
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     TIMESTAMP_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
     KEY_ID_FIELD_NUMBER: _ClassVar[int]
@@ -88,6 +88,7 @@ class UsageEvent(_message.Message):
     TARGET_FIELD_NUMBER: _ClassVar[int]
     METHOD_FIELD_NUMBER: _ClassVar[int]
     TOOL_FIELD_NUMBER: _ClassVar[int]
+    AUDIO_MS_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     timestamp_unix_ms: int
     key_id: str
@@ -116,4 +117,5 @@ class UsageEvent(_message.Message):
     target: str
     method: str
     tool: str
-    def __init__(self, request_id: _Optional[str] = ..., timestamp_unix_ms: _Optional[int] = ..., key_id: _Optional[str] = ..., team_id: _Optional[str] = ..., requested: _Optional[str] = ..., model: _Optional[str] = ..., endpoint: _Optional[str] = ..., status: _Optional[int] = ..., stream: _Optional[bool] = ..., prompt_tokens: _Optional[int] = ..., completion_tokens: _Optional[int] = ..., duration_ms: _Optional[int] = ..., config_version: _Optional[int] = ..., usage_state: _Optional[_Union[UsageState, str]] = ..., outcome: _Optional[_Union[RequestOutcome, str]] = ..., started_at_unix_ms: _Optional[int] = ..., cost_nano_usd: _Optional[int] = ..., cost_known: _Optional[bool] = ..., alias: _Optional[str] = ..., router: _Optional[str] = ..., upstream: _Optional[str] = ..., upstream_model: _Optional[str] = ..., fallback: _Optional[bool] = ..., attempts: _Optional[int] = ..., kind: _Optional[_Union[TrafficKind, str]] = ..., target: _Optional[str] = ..., method: _Optional[str] = ..., tool: _Optional[str] = ...) -> None: ...
+    audio_ms: int
+    def __init__(self, request_id: _Optional[str] = ..., timestamp_unix_ms: _Optional[int] = ..., key_id: _Optional[str] = ..., team_id: _Optional[str] = ..., requested: _Optional[str] = ..., model: _Optional[str] = ..., endpoint: _Optional[str] = ..., status: _Optional[int] = ..., stream: _Optional[bool] = ..., prompt_tokens: _Optional[int] = ..., completion_tokens: _Optional[int] = ..., duration_ms: _Optional[int] = ..., config_version: _Optional[int] = ..., usage_state: _Optional[_Union[UsageState, str]] = ..., outcome: _Optional[_Union[RequestOutcome, str]] = ..., started_at_unix_ms: _Optional[int] = ..., cost_nano_usd: _Optional[int] = ..., cost_known: _Optional[bool] = ..., alias: _Optional[str] = ..., router: _Optional[str] = ..., upstream: _Optional[str] = ..., upstream_model: _Optional[str] = ..., fallback: _Optional[bool] = ..., attempts: _Optional[int] = ..., kind: _Optional[_Union[TrafficKind, str]] = ..., target: _Optional[str] = ..., method: _Optional[str] = ..., tool: _Optional[str] = ..., audio_ms: _Optional[int] = ...) -> None: ...

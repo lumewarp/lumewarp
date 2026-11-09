@@ -80,6 +80,8 @@ def test_supported_capabilities_match_gateway() -> None:
         "default_body",
         "reasoning_effort",
         "model_chat_check",
+        "model_types",
+        "audio_price",
         "mcp",
         "a2a",
         "strategy:weighted",
@@ -319,6 +321,8 @@ async def test_all_capabilities_together(factory) -> None:
             "strategy:weighted",
             "strategy:least_in_flight",
             "rotation_grace",
+            "model_types",
+            "audio_price",
             # MCP/A2A capabilities appear only when a server or agent exists.
             "mcp",
             "a2a",
@@ -333,8 +337,8 @@ def _base() -> pb.Snapshot:
     return pb.Snapshot(
         upstreams=[pb.Upstream(name="u", kind=pb.UPSTREAM_KIND_VLLM, base_url="http://u/v1")],
         models=[
-            pb.Model(name="a", upstream="u", upstream_model="m"),
-            pb.Model(name="b", upstream="u", upstream_model="m"),
+            pb.Model(name="a", upstream="u", upstream_model="m", type=pb.MODEL_TYPE_LLM),
+            pb.Model(name="b", upstream="u", upstream_model="m", type=pb.MODEL_TYPE_LLM),
         ],
         routers=[
             pb.Router(name="r", members=_m("a"), strategy="weighted"),
@@ -486,6 +490,8 @@ def test_validate_accepts_full_routing_snapshot() -> None:
             "strategy:least_in_flight",
             "strategy:lowest_latency",
             "rotation_grace",
+            "model_types",
+            "audio_price",
             "mcp",
             "a2a",
         }

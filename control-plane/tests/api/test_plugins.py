@@ -87,7 +87,12 @@ def _model(client) -> str:
     ).json()
     resp = client.post(
         "/api/v1/models",
-        json={"name": f"m-{suffix()}", "upstream_id": upstream["id"], "upstream_model": "m"},
+        json={
+            "name": f"m-{suffix()}",
+            "upstream_id": upstream["id"],
+            "upstream_model": "m",
+            "model_type": "llm",
+        },
         headers=H,
     )
     assert resp.status_code == 201, resp.text

@@ -536,7 +536,7 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
   const upstream = await post("/upstreams", { name: "smoke-up", kind: "vllm", base_url: "http://127.0.0.1:9/v1" });
   const deps: Record<string, string> = {};
   for (const name of ["smoke-stable", "smoke-canary", "smoke-backup"]) {
-    deps[name] = (await post("/models", { name, upstream_id: upstream.id, upstream_model: "m" })).id;
+    deps[name] = (await post("/models", { name, upstream_id: upstream.id, upstream_model: "m", model_type: "llm" })).id;
   }
   const main = await post("/routers", { name: "smoke-main", members: [{ model_id: deps["smoke-stable"] }] });
 

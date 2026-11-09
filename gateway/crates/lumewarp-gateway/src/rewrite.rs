@@ -113,6 +113,9 @@ struct JsonScanner {
     key_code: u16,
     /// The last complete key was `model`.
     is_model: bool,
+    response_mode: bool,
+    response_key: bool,
+    in_response: bool,
 }
 
 const fn repeat(byte: u8) -> u64 {
@@ -156,6 +159,9 @@ impl JsonScanner {
             key_escape: 0,
             key_code: 0,
             is_model: false,
+            response_mode: false,
+            response_key: false,
+            in_response: false,
         }
     }
 
@@ -165,6 +171,7 @@ impl JsonScanner {
         self.key_escape = 0;
         self.escaped = false;
         self.is_model = false;
+        self.response_key = false;
     }
 
     /// Scans until the opening quote of a `model` value and returns its offset,
@@ -213,6 +220,9 @@ impl JsonScanner {
                 State::FirstKey | State::NextKey => {
                     if byte == b'"' {
                         self.begin_key();
+                    } else if byte == b'}' && self.in_response && self.state == State::FirstKey {
+                        self.in_response = false;
+                        self.state = State::AfterValue;
                     } else {
                         self.state = State::Pass;
                     }
@@ -225,6 +235,10 @@ impl JsonScanner {
                     };
                 }
                 State::Value => match byte {
+                    b'{' if self.response_key && self.response_mode && !self.in_response => {
+                        self.in_response = true;
+                        self.state = State::FirstKey;
+                    }
                     b'"' if self.is_model => {
                         self.state = State::Replacing;
                         self.escaped = false;
@@ -245,6 +259,9 @@ impl JsonScanner {
                 State::AfterValue => {
                     self.state = if byte == b',' {
                         State::NextKey
+                    } else if byte == b'}' && self.in_response {
+                        self.in_response = false;
+                        State::AfterValue
                     } else {
                         // `}` ends the object: what follows is not rewritten.
                         State::Pass
@@ -261,13 +278,17 @@ impl JsonScanner {
         let mut at = 0;
         while let Some(&byte) = bytes.get(at) {
             if self.key_at == NOT_MODEL {
+                self.response_key = false;
                 return at + self.skip_string(&bytes[at..]);
             }
             at += 1;
             match self.key_escape {
                 0 => match byte {
                     b'"' => {
-                        self.is_model = usize::from(self.key_at) == MODEL.len();
+                        self.is_model =
+                            !self.response_key && usize::from(self.key_at) == MODEL.len();
+                        self.response_key =
+                            self.response_key && usize::from(self.key_at) == b"response".len();
                         self.state = State::AfterKey;
                         return at;
                     }
@@ -307,9 +328,20 @@ impl JsonScanner {
     }
 
     fn key_char(&mut self, unit: u16) {
-        match MODEL.get(usize::from(self.key_at)) {
+        if self.key_at == 0 && unit == u16::from(b'r') && self.response_mode && !self.in_response {
+            self.response_key = true;
+        }
+        let key: &[u8] = if self.response_key {
+            b"response"
+        } else {
+            MODEL
+        };
+        match key.get(usize::from(self.key_at)) {
             Some(&expected) if unit == u16::from(expected) => self.key_at += 1,
-            _ => self.key_at = NOT_MODEL,
+            _ => {
+                self.key_at = NOT_MODEL;
+                self.response_key = false;
+            }
         }
     }
 
@@ -446,6 +478,11 @@ pub struct ModelRewriter {
 }
 
 impl ModelRewriter {
+    pub fn nested_response(mut self, enabled: bool) -> Self {
+        self.json.response_mode = enabled;
+        self
+    }
+
     pub fn new(name: Bytes, sse: bool) -> Self {
         Self {
             name,
@@ -533,7 +570,11 @@ impl ModelRewriter {
                             lines.after_cr = byte == b'\r';
                             lines.line = Line::Name(0);
                             match matched {
-                                0 => self.json = JsonScanner::new(),
+                                0 => {
+                                    let mode = self.json.response_mode;
+                                    self.json = JsonScanner::new();
+                                    self.json.response_mode = mode;
+                                }
                                 // `data` without a colon is an empty value.
                                 4 => {
                                     self.json.scan(b"\n");

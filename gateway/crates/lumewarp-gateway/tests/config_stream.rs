@@ -55,6 +55,7 @@ fn snapshot(version: u64, keys: &[(&str, &str)]) -> Snapshot {
             ..Default::default()
         }],
         models: vec![Model {
+            r#type: 1,
             name: "d".into(),
             upstream: "u".into(),
             upstream_model: "actual".into(),
@@ -415,6 +416,35 @@ async fn invalid_snapshot_is_nacked_without_swap() {
         ),
         2.0
     );
+}
+
+#[tokio::test]
+async fn mixed_model_types_nack_without_replacing_the_active_snapshot() {
+    let env = env();
+    let mut cp = FakeCp::start().await;
+    let gw = Gw::spawn(&cp.url(), &env.state, &env.work, "gw-types");
+    let mut conn = cp.accept().await;
+    hello(&mut conn).await;
+    conn.send(full(snapshot(1, &[("k1", "secret-1")])));
+    ack(&mut conn, 1, &env.state).await;
+    let mut mixed = snapshot(2, &[]);
+    let mut embedding = mixed.models[0].clone();
+    embedding.name = "embedding".into();
+    embedding.r#type = lumewarp_proto::config::v1::ModelType::Embedding as i32;
+    mixed.models.push(embedding);
+    mixed.routers[0].members.push(RouterMember {
+        model: "embedding".into(),
+        weight: 1,
+        ..Default::default()
+    });
+    mixed.required_capabilities.push("model_types".into());
+    conn.send(full(mixed));
+    let nack = recv_nack(&mut conn).await;
+    assert_eq!(nack.code(), NackCode::InvalidConfig);
+    assert_eq!(nack.have_version, 1);
+    assert!(nack.reason.contains("one model type"), "{}", nack.reason);
+    assert_eq!(on_disk_version(&env.state), Some(1));
+    assert_eq!(gw.models("secret-1").await, 200);
 }
 
 async fn nack_code(conn: &mut Conn) -> NackCode {

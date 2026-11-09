@@ -55,7 +55,7 @@ server:
 upstreams:
   - {name: local, kind: openai_compatible, base_url: 'http://127.0.0.1:9100/v1'}
 models:
-  - {name: mock-local, upstream: local, upstream_model: mock}
+  - {name: mock-local, upstream: local, upstream_model: mock, type: llm}
 routers:
   - {name: demo, members: [{model: mock-local}]}
 ```

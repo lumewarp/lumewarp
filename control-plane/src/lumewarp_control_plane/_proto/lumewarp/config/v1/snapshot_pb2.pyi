@@ -20,6 +20,14 @@ class UpstreamKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     UPSTREAM_KIND_VLLM: _ClassVar[UpstreamKind]
     UPSTREAM_KIND_OPENAI_COMPATIBLE: _ClassVar[UpstreamKind]
 
+class ModelType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    MODEL_TYPE_UNSPECIFIED: _ClassVar[ModelType]
+    MODEL_TYPE_LLM: _ClassVar[ModelType]
+    MODEL_TYPE_EMBEDDING: _ClassVar[ModelType]
+    MODEL_TYPE_TRANSCRIPTION: _ClassVar[ModelType]
+    MODEL_TYPE_DECISION: _ClassVar[ModelType]
+
 class ReasoningEffortMode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     REASONING_EFFORT_MODE_UNSPECIFIED: _ClassVar[ReasoningEffortMode]
@@ -68,6 +76,11 @@ UPSTREAM_KIND_UNSPECIFIED: UpstreamKind
 UPSTREAM_KIND_OPENAI: UpstreamKind
 UPSTREAM_KIND_VLLM: UpstreamKind
 UPSTREAM_KIND_OPENAI_COMPATIBLE: UpstreamKind
+MODEL_TYPE_UNSPECIFIED: ModelType
+MODEL_TYPE_LLM: ModelType
+MODEL_TYPE_EMBEDDING: ModelType
+MODEL_TYPE_TRANSCRIPTION: ModelType
+MODEL_TYPE_DECISION: ModelType
 REASONING_EFFORT_MODE_UNSPECIFIED: ReasoningEffortMode
 REASONING_EFFORT_MODE_PASSTHROUGH: ReasoningEffortMode
 REASONING_EFFORT_MODE_STRIP: ReasoningEffortMode
@@ -168,7 +181,7 @@ class CircuitBreaker(_message.Message):
     def __init__(self, failure_threshold: _Optional[int] = ..., open_ms: _Optional[int] = ...) -> None: ...
 
 class Model(_message.Message):
-    __slots__ = ("name", "upstream", "upstream_model", "price", "max_output_tokens", "default_body_json", "reasoning_effort", "chat_check")
+    __slots__ = ("name", "upstream", "upstream_model", "price", "max_output_tokens", "default_body_json", "reasoning_effort", "chat_check", "type")
     NAME_FIELD_NUMBER: _ClassVar[int]
     UPSTREAM_FIELD_NUMBER: _ClassVar[int]
     UPSTREAM_MODEL_FIELD_NUMBER: _ClassVar[int]
@@ -177,6 +190,7 @@ class Model(_message.Message):
     DEFAULT_BODY_JSON_FIELD_NUMBER: _ClassVar[int]
     REASONING_EFFORT_FIELD_NUMBER: _ClassVar[int]
     CHAT_CHECK_FIELD_NUMBER: _ClassVar[int]
+    TYPE_FIELD_NUMBER: _ClassVar[int]
     name: str
     upstream: str
     upstream_model: str
@@ -185,7 +199,8 @@ class Model(_message.Message):
     default_body_json: str
     reasoning_effort: ReasoningEffort
     chat_check: ChatCheck
-    def __init__(self, name: _Optional[str] = ..., upstream: _Optional[str] = ..., upstream_model: _Optional[str] = ..., price: _Optional[_Union[Price, _Mapping]] = ..., max_output_tokens: _Optional[int] = ..., default_body_json: _Optional[str] = ..., reasoning_effort: _Optional[_Union[ReasoningEffort, _Mapping]] = ..., chat_check: _Optional[_Union[ChatCheck, _Mapping]] = ...) -> None: ...
+    type: ModelType
+    def __init__(self, name: _Optional[str] = ..., upstream: _Optional[str] = ..., upstream_model: _Optional[str] = ..., price: _Optional[_Union[Price, _Mapping]] = ..., max_output_tokens: _Optional[int] = ..., default_body_json: _Optional[str] = ..., reasoning_effort: _Optional[_Union[ReasoningEffort, _Mapping]] = ..., chat_check: _Optional[_Union[ChatCheck, _Mapping]] = ..., type: _Optional[_Union[ModelType, str]] = ...) -> None: ...
 
 class ChatCheck(_message.Message):
     __slots__ = ("interval_ms", "timeout_ms", "unhealthy_threshold", "healthy_threshold")
@@ -217,12 +232,14 @@ class ReasoningEffort(_message.Message):
     def __init__(self, mode: _Optional[_Union[ReasoningEffortMode, str]] = ..., fragments_json: _Optional[_Mapping[str, str]] = ..., default_level: _Optional[str] = ...) -> None: ...
 
 class Price(_message.Message):
-    __slots__ = ("input_nano_usd_per_mtok", "output_nano_usd_per_mtok")
+    __slots__ = ("input_nano_usd_per_mtok", "output_nano_usd_per_mtok", "nano_usd_per_audio_second")
     INPUT_NANO_USD_PER_MTOK_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_NANO_USD_PER_MTOK_FIELD_NUMBER: _ClassVar[int]
+    NANO_USD_PER_AUDIO_SECOND_FIELD_NUMBER: _ClassVar[int]
     input_nano_usd_per_mtok: int
     output_nano_usd_per_mtok: int
-    def __init__(self, input_nano_usd_per_mtok: _Optional[int] = ..., output_nano_usd_per_mtok: _Optional[int] = ...) -> None: ...
+    nano_usd_per_audio_second: int
+    def __init__(self, input_nano_usd_per_mtok: _Optional[int] = ..., output_nano_usd_per_mtok: _Optional[int] = ..., nano_usd_per_audio_second: _Optional[int] = ...) -> None: ...
 
 class Alias(_message.Message):
     __slots__ = ("name", "target")

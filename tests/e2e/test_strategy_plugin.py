@@ -112,7 +112,7 @@ def _standalone_accepts(
             {
                 "server": {"listen": f"127.0.0.1:{listen}", "admin_listen": f"127.0.0.1:{admin}"},
                 "upstreams": [{"name": "u", "kind": "vllm", "base_url": "http://127.0.0.1:9/v1"}],
-                "models": [{"name": "m", "upstream": "u", "upstream_model": "m"}],
+                "models": [{"name": "m", "upstream": "u", "upstream_model": "m", "type": "llm"}],
                 "routers": [
                     {
                         "name": "r",

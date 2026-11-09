@@ -113,6 +113,7 @@ def traffic(keys):
             "name": "mock-a",
             "upstream_id": upstream["id"],
             "upstream_model": "mock",
+            "model_type": "llm",
             "price_input_nano_usd_per_mtok": 1_000_000_000,
             "price_output_nano_usd_per_mtok": 2_000_000_000,
         },

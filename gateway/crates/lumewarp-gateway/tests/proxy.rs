@@ -43,8 +43,20 @@ async fn complete_stream(body: Incoming, control: StreamControl) {
 #[tokio::test]
 async fn non_stream_endpoints_rewrite_only_model_and_preserve_raw_bytes() {
     let mut mock = Mock::start(Behavior::Json).await;
-    let gateway = Gateway::start(&[mock.addr], false, 2000).await;
-    for endpoint in ["chat/completions", "completions", "embeddings"] {
+    for endpoint in [
+        "chat/completions",
+        "completions",
+        "responses",
+        "embeddings",
+        "decisions",
+        "systemone",
+    ] {
+        let model_type = match endpoint {
+            "embeddings" => "embedding",
+            "decisions" | "systemone" => "decision",
+            _ => "llm",
+        };
+        let gateway = Gateway::start_with_type(&[mock.addr], false, 2000, "", "", model_type).await;
         // Exact whitespace/order, escaped strings and nested model fields must survive.
         let original = br#"{ "unknown" : [1, {"model":"public"}], "model" : "public", "extra_body": {"n":1.2300e+02}, "guided_json":{"type":"object"}, "input":["hi"], "messages":[{"role":"user","content":"hi\nthere"}], "stream":false }"#;
         let mut expected = Vec::new();

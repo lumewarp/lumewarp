@@ -108,6 +108,8 @@ async def session_factory(c4_engine: AsyncEngine) -> SessionFactory:
 async def test_duplicate_batch_replay_counts_once(session_factory: SessionFactory):
     scope_name, key = await _seed(session_factory)
     event = _event(key, request_id=uuid7(), cost=123)
+    event.endpoint = "audio_transcriptions"
+    event.audio_ms = 1250
 
     for _ in range(2):
         async with session_factory() as session, session.begin():
@@ -121,7 +123,14 @@ async def test_duplicate_batch_replay_counts_once(session_factory: SessionFactor
             )
         )
         assert total is not None
-        assert (total.cost_nano_usd, total.request_count) == (123, 1)
+        assert (total.cost_nano_usd, total.request_count, total.audio_ms) == (123, 1, 1250)
+        team_total = await session.scalar(
+            select(UsageTotal).where(
+                UsageTotal.scope_type == ScopeType.TEAM,
+                UsageTotal.scope_id == key.team_id,
+            )
+        )
+        assert team_total.audio_ms == 1250
         assert (
             await session.scalar(
                 select(func.count())

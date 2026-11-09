@@ -42,6 +42,8 @@ SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
         "default_body",
         "reasoning_effort",
         "model_chat_check",
+        "model_types",
+        "audio_price",
         "mcp",
         "a2a",
         *(f"strategy:{name}" for name in BUILTIN_PLUGINS[PluginKind.ROUTER_STRATEGY]),
@@ -238,6 +240,10 @@ def capabilities_used(snap: pb.Snapshot) -> list[str]:
         if u.api_key_ciphertext:
             used.add("encrypted_api_key")
     for d in snap.models:
+        if d.type != pb.MODEL_TYPE_LLM:
+            used.add("model_types")
+        if d.price.nano_usd_per_audio_second:
+            used.add("audio_price")
         if d.max_output_tokens:
             used.add("model_limits")
         if d.default_body_json:
@@ -500,6 +506,21 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
 
     models = _unique([d.name for d in snap.models], "model")
     for d in snap.models:
+        if d.type not in (
+            pb.MODEL_TYPE_LLM,
+            pb.MODEL_TYPE_EMBEDDING,
+            pb.MODEL_TYPE_TRANSCRIPTION,
+            pb.MODEL_TYPE_DECISION,
+        ):
+            raise SnapshotInvalid(f"model {d.name!r}: model type is required")
+        if d.type != pb.MODEL_TYPE_LLM and (d.max_output_tokens or d.HasField("reasoning_effort")):
+            raise SnapshotInvalid(f"model {d.name!r}: reasoning and output limits require llm")
+        if d.type == pb.MODEL_TYPE_TRANSCRIPTION and d.default_body_json:
+            raise SnapshotInvalid(f"model {d.name!r}: transcription cannot set default_body")
+        if d.type != pb.MODEL_TYPE_TRANSCRIPTION and d.price.nano_usd_per_audio_second:
+            raise SnapshotInvalid(f"model {d.name!r}: audio price requires transcription")
+        if d.type == pb.MODEL_TYPE_EMBEDDING and d.price.output_nano_usd_per_mtok:
+            raise SnapshotInvalid(f"model {d.name!r}: embedding cannot set output price")
         if d.HasField("chat_check") and (problem := chat_check_problem(d.chat_check)):
             raise SnapshotInvalid(f"model {d.name!r}: {problem}")
         if d.default_body_json and (
@@ -567,6 +588,16 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
             raise SnapshotInvalid(
                 f"router {r.name!r}: retry max_attempts must be <= {MAX_RETRY_ATTEMPTS}"
                 " and statuses in 400..=599"
+            )
+        types_by_name = {d.name: d.type for d in snap.models}
+        referenced = (
+            [m.model for m in r.members]
+            + [m.model for s in r.traffic_split for m in s.members]
+            + list(r.fallbacks)
+        )
+        if len({types_by_name[n] for n in referenced if n in types_by_name}) > 1:
+            raise SnapshotInvalid(
+                f"router {r.name!r}: members and fallbacks must share one model type"
             )
         for fallback in r.fallbacks:
             if fallback not in models:

@@ -202,6 +202,7 @@ pub enum StreamUsageMode {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Model {
+    pub r#type: ModelType,
     pub name: String,
     pub upstream: String,
     pub upstream_model: String,
@@ -216,7 +217,7 @@ pub struct Model {
     pub default_body: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
-    /// Periodic "1 + 1 = ?" chat completion through this model.
+    /// Periodic type-specific synthetic request through this model.
     #[serde(default)]
     pub chat_check: Option<ChatCheck>,
 }
@@ -255,6 +256,15 @@ pub enum ReasoningMode {
     Mapped,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelType {
+    Llm,
+    Embedding,
+    Transcription,
+    Decision,
+}
+
 fn default_weight() -> u32 {
     1
 }
@@ -265,10 +275,12 @@ fn default_weight() -> u32 {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Price {
-    #[serde(deserialize_with = "usd")]
-    pub input_usd_per_mtok: u64,
-    #[serde(deserialize_with = "usd")]
-    pub output_usd_per_mtok: u64,
+    #[serde(default, deserialize_with = "optional_usd")]
+    pub input_usd_per_mtok: Option<u64>,
+    #[serde(default, deserialize_with = "optional_usd")]
+    pub output_usd_per_mtok: Option<u64>,
+    #[serde(default, deserialize_with = "usd")]
+    pub audio_usd_per_second: u64,
 }
 
 /// Another callable name for a model or a router.
@@ -730,6 +742,10 @@ pub fn parse_usd_nano(s: &str) -> Result<u64, String> {
         .ok_or_else(err)
 }
 
+fn optional_usd<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u64>, D::Error> {
+    usd(deserializer).map(Some)
+}
+
 fn usd<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
     let s = String::deserialize(deserializer).map_err(|_| {
         serde::de::Error::custom("prices must be decimal USD amounts, e.g. \"0.15\"")
@@ -824,6 +840,67 @@ impl Config {
     /// Converts to a version-0 snapshot. References and duplicates are
     /// checked by the gateway's snapshot validation, not here.
     pub fn to_snapshot(&self) -> Result<Snapshot, ConfigError> {
+        for model in &self.models {
+            if let Some(price) = &model.price {
+                let input = price.input_usd_per_mtok.is_some();
+                let output = price.output_usd_per_mtok.is_some();
+                let valid = match model.r#type {
+                    ModelType::Llm | ModelType::Decision => input && output,
+                    ModelType::Embedding => input && price.output_usd_per_mtok.unwrap_or(0) == 0,
+                    ModelType::Transcription => input == output,
+                };
+                if !valid {
+                    return Err(ConfigError::Invalid(
+                        "incomplete token prices for model type".into(),
+                    ));
+                }
+            }
+            let audio = model
+                .price
+                .as_ref()
+                .is_some_and(|p| p.audio_usd_per_second != 0);
+            if (audio && model.r#type != ModelType::Transcription)
+                || (model.r#type == ModelType::Embedding
+                    && model
+                        .price
+                        .as_ref()
+                        .is_some_and(|p| p.output_usd_per_mtok.unwrap_or(0) != 0))
+                || (model.r#type != ModelType::Llm
+                    && (model.max_output_tokens.unwrap_or(0) != 0
+                        || model.reasoning_effort.is_some()))
+                || (model.r#type == ModelType::Transcription && !model.default_body.is_empty())
+            {
+                return Err(ConfigError::Invalid(
+                    "model settings do not apply to its type".into(),
+                ));
+            }
+        }
+        for router in &self.routers {
+            let mut kind = None;
+            let members: Vec<_> = if router.traffic_split.is_empty() {
+                router.members.iter().collect()
+            } else {
+                router
+                    .traffic_split
+                    .iter()
+                    .flat_map(|s| &s.members)
+                    .collect()
+            };
+            for name in members
+                .iter()
+                .map(|m| &m.model)
+                .chain(router.fallbacks.iter())
+            {
+                if let Some(model) = self.models.iter().find(|m| &m.name == name) {
+                    if kind.is_some_and(|k| k != model.r#type) {
+                        return Err(ConfigError::Invalid(
+                            "router members and fallbacks must share one model type".into(),
+                        ));
+                    }
+                    kind = Some(model.r#type);
+                }
+            }
+        }
         let upstreams = self
             .upstreams
             .iter()
@@ -863,9 +940,16 @@ impl Config {
                 name: d.name.clone(),
                 upstream: d.upstream.clone(),
                 upstream_model: d.upstream_model.clone(),
+                r#type: match d.r#type {
+                    ModelType::Llm => pb::ModelType::Llm,
+                    ModelType::Embedding => pb::ModelType::Embedding,
+                    ModelType::Transcription => pb::ModelType::Transcription,
+                    ModelType::Decision => pb::ModelType::Decision,
+                } as i32,
                 price: d.price.as_ref().map(|p| pb::Price {
-                    input_nano_usd_per_mtok: p.input_usd_per_mtok,
-                    output_nano_usd_per_mtok: p.output_usd_per_mtok,
+                    input_nano_usd_per_mtok: p.input_usd_per_mtok.unwrap_or(0),
+                    output_nano_usd_per_mtok: p.output_usd_per_mtok.unwrap_or(0),
+                    nano_usd_per_audio_second: p.audio_usd_per_second,
                 }),
                 max_output_tokens: d.max_output_tokens.unwrap_or(0),
                 default_body_json: params_json(&d.default_body),
@@ -1046,6 +1130,18 @@ impl Config {
             required_capabilities: {
                 let mut caps = Vec::new();
                 for (cap, used) in [
+                    (
+                        "model_types",
+                        self.models.iter().any(|d| d.r#type != ModelType::Llm),
+                    ),
+                    (
+                        "audio_price",
+                        self.models.iter().any(|d| {
+                            d.price
+                                .as_ref()
+                                .is_some_and(|p| p.audio_usd_per_second != 0)
+                        }),
+                    ),
                     ("retry", self.routers.iter().any(|r| r.retry.is_some())),
                     (
                         "fallbacks",
@@ -1167,8 +1263,8 @@ upstreams:
     health_check: {interval_ms: 1000, timeout_ms: 100}
     circuit_breaker: {}
 models:
-  - {name: d, upstream: u, upstream_model: actual}
-  - {name: backup, upstream: u, upstream_model: actual}
+  - {type: llm, name: d, upstream: u, upstream_model: actual}
+  - {type: llm, name: backup, upstream: u, upstream_model: actual}
 routers:
   - name: public
     members: [{model: d}]
@@ -1222,6 +1318,38 @@ routers:
     }
 
     #[test]
+    fn model_type_is_required_and_type_rules_apply() {
+        assert!(Config::parse("models: [{name: m, upstream: u, upstream_model: actual}]").is_err());
+        assert!(Config::parse(
+            "models: [{name: m, type: ocr, upstream: u, upstream_model: actual}]"
+        )
+        .is_err());
+        let (_, s) = Config::parse("models: [{name: m, type: transcription, upstream: u, upstream_model: actual, price: {audio_usd_per_second: '0.006'}}]").unwrap();
+        assert_eq!(s.models[0].r#type, pb::ModelType::Transcription as i32);
+        assert_eq!(
+            s.models[0].price.unwrap().nano_usd_per_audio_second,
+            6_000_000
+        );
+        assert_eq!(s.required_capabilities, ["model_types", "audio_price"]);
+        for fields in [
+            "type: embedding, max_output_tokens: 1",
+            "type: decision, reasoning_effort: {}",
+            "type: transcription, default_body: {language: en}",
+            "type: embedding, price: {output_usd_per_mtok: '1'}",
+            "type: llm, price: {audio_usd_per_second: '1'}",
+        ] {
+            assert!(
+                Config::parse(&format!(
+                    "models: [{{name: m, upstream: u, upstream_model: actual, {fields}}}]"
+                ))
+                .is_err(),
+                "{fields}"
+            );
+        }
+        assert!(Config::parse("models: [{name: m, type: llm, upstream: u, upstream_model: x}, {name: e, type: embedding, upstream: u, upstream_model: x}]\nrouters: [{name: r, members: [{model: m}, {model: e}]}]").is_err());
+    }
+
+    #[test]
     fn example_and_bench_configs_convert() {
         let quickstart = include_str!("../../../../README.md")
             .split_once("```yaml\n")
@@ -1265,8 +1393,8 @@ routers:
 upstreams:
   - { name: u, kind: vllm, base_url: "http://localhost:8000/v1", api_key_env: K, stream_usage_mode: passthrough }
 models:
-  - { name: d, upstream: u, upstream_model: m, price: { input_usd_per_mtok: "0.15", output_usd_per_mtok: "12" } }
-  - { name: e, upstream: u, upstream_model: m }
+  - { type: llm, name: d, upstream: u, upstream_model: m, price: { input_usd_per_mtok: "0.15", output_usd_per_mtok: "12" } }
+  - { type: llm, name: e, upstream: u, upstream_model: m }
 routers:
   - { name: pool, members: [{model: d, weight: 3, params: {zone: a}}, {model: e}], strategy: least_in_flight }
 aliases:
@@ -1286,6 +1414,7 @@ aliases:
             Some(pb::Price {
                 input_nano_usd_per_mtok: 150_000_000,
                 output_nano_usd_per_mtok: 12_000_000_000,
+                nano_usd_per_audio_second: 0,
             })
         );
         assert_eq!(s.models[1].price, None);
@@ -1298,7 +1427,7 @@ aliases:
         assert_eq!(s.required_capabilities, ["strategy:least_in_flight"]);
         // The removed fields are errors, not silently ignored.
         for removed in [
-            "models: [{name: d, upstream: u, upstream_model: m, weight: 3}]",
+            "models: [{type: llm, name: d, upstream: u, upstream_model: m, weight: 3}]",
             "routers: [{name: r, models: [d]}]",
             "routers: [{name: r, custom_strategy: x}]",
             "routers: [{name: r, strategy_params: {}}]",
@@ -1528,6 +1657,31 @@ routers:
     }
 
     #[test]
+    fn prices_require_type_specific_token_pairs() {
+        for kind in ["llm", "decision", "embedding", "transcription"] {
+            let unpriced =
+                format!("models: [{{name: m, type: {kind}, upstream: u, upstream_model: m}}]");
+            assert!(Config::parse(&unpriced).is_ok());
+            for (price, valid) in [
+                ("input_usd_per_mtok: '1'", kind == "embedding"),
+                ("input_usd_per_mtok: '0'", kind == "embedding"),
+                ("output_usd_per_mtok: '1'", false),
+                ("output_usd_per_mtok: '0'", false),
+                ("audio_usd_per_second: '1'", kind == "transcription"),
+                ("input_usd_per_mtok: '1', output_usd_per_mtok: '0'", true),
+                ("input_usd_per_mtok: '0', output_usd_per_mtok: '0'", true),
+                (
+                    "input_usd_per_mtok: '1', output_usd_per_mtok: '2', audio_usd_per_second: '1'",
+                    kind == "transcription",
+                ),
+            ] {
+                let yaml = format!("models: [{{name: m, type: {kind}, upstream: u, upstream_model: m, price: {{{price}}}}}]");
+                assert_eq!(Config::parse(&yaml).is_ok(), valid, "{yaml}");
+            }
+        }
+    }
+
+    #[test]
     fn usd_parsing_is_exact() {
         assert_eq!(parse_usd_nano("0"), Ok(0));
         assert_eq!(parse_usd_nano("0.000000001"), Ok(1));
@@ -1550,7 +1704,7 @@ routers:
         // Plain YAML numbers are read from their source text, never via f64.
         let plain = r#"
 models:
-  - { name: d, upstream: u, upstream_model: m, price: { input_usd_per_mtok: 0.10, output_usd_per_mtok: 1.000000001 } }
+  - { type: llm, name: d, upstream: u, upstream_model: m, price: { input_usd_per_mtok: 0.10, output_usd_per_mtok: 1.000000001 } }
 "#;
         let (_, s) = Config::parse(plain).unwrap();
         assert_eq!(
@@ -1558,10 +1712,11 @@ models:
             Some(pb::Price {
                 input_nano_usd_per_mtok: 100_000_000,
                 output_nano_usd_per_mtok: 1_000_000_001,
+                nano_usd_per_audio_second: 0,
             })
         );
         for bad in ["1e-3", "-1", "true", "[1]"] {
-            let yaml = format!("models:\n  - {{ name: d, upstream: u, upstream_model: m, price: {{ input_usd_per_mtok: {bad}, output_usd_per_mtok: '1' }} }}");
+            let yaml = format!("models:\n  - {{ type: llm, name: d, upstream: u, upstream_model: m, price: {{ input_usd_per_mtok: {bad}, output_usd_per_mtok: '1' }} }}");
             assert!(Config::parse(&yaml).is_err(), "{bad}");
         }
     }

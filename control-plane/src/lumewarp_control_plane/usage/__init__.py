@@ -72,6 +72,7 @@ _EVENT_FIELDS = (
     "stream",
     "prompt_tokens",
     "completion_tokens",
+    "audio_ms",
     "cost_nano_usd",
     "cost_known",
     "duration_ms",
@@ -207,7 +208,8 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
     prompt_tokens = _bounded_int(event.prompt_tokens, "prompt_tokens")
     completion_tokens = _bounded_int(event.completion_tokens, "completion_tokens")
     cost = _bounded_int(event.cost_nano_usd, "cost_nano_usd")
-    if not llm and (prompt_tokens or completion_tokens or cost or event.cost_known):
+    audio_ms = _bounded_int(event.audio_ms, "audio_ms")
+    if not llm and (prompt_tokens or completion_tokens or audio_ms or cost or event.cost_known):
         raise InvalidUsageBatch("an MCP or A2A event carries no tokens or cost")
     if event.cost_known and usage_state is not UsageState.REPORTED:
         raise InvalidUsageBatch("known cost requires reported usage")
@@ -238,6 +240,7 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
         "stream": event.stream,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
+        "audio_ms": audio_ms,
         "cost_nano_usd": cost,
         "cost_known": event.cost_known,
         "duration_ms": event.duration_ms,
@@ -268,9 +271,10 @@ def _add_totals(
         int(values["completion_tokens"]),
         1,
         int(not bool(values["cost_known"])),
+        int(values["audio_ms"]),
     )
     for kind, scope_id in ((ScopeType.TEAM, key.team_id), key.owner_scope):
-        bucket = totals.setdefault((kind, scope_id, start), [0, 0, 0, 0, 0])
+        bucket = totals.setdefault((kind, scope_id, start), [0, 0, 0, 0, 0, 0])
         for i, amount in enumerate(amounts):
             bucket[i] += amount
             if bucket[i] > _MAX_BIGINT:
@@ -335,13 +339,14 @@ async def _upsert_totals(
             )
         ).scalar_one()
         previous_costs[key] = total.cost_nano_usd
-        cost, prompt, completion, requests, unknown = aggregates[key]
+        cost, prompt, completion, requests, unknown, audio = aggregates[key]
         for field, increment in (
             ("cost_nano_usd", cost),
             ("prompt_tokens", prompt),
             ("completion_tokens", completion),
             ("request_count", requests),
             ("unknown_cost_count", unknown),
+            ("audio_ms", audio),
         ):
             updated = getattr(total, field) + increment
             if updated > _MAX_BIGINT:

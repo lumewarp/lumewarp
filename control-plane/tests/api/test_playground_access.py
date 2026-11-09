@@ -6,7 +6,7 @@ from sqlalchemy import delete
 
 from lumewarp_control_plane.models import ModelAccess, TeamMember
 from tests.api.test_playground import setup_keys
-from tests.factories import make_key, make_member, make_team
+from tests.factories import make_key, make_member, make_model, make_team
 
 
 async def test_effective_models_and_live_team(client, committed):
@@ -14,6 +14,7 @@ async def test_effective_models_and_live_team(client, committed):
     team = await make_team(
         committed, model_access=ModelAccess.LIST, allowed_models=["visible", "team-only"]
     )
+    await make_model(committed, "visible")
     # Reuse the same session user, but narrow this team's member policy.
     from lumewarp_control_plane.models import User
 
@@ -55,6 +56,41 @@ async def test_effective_models_and_live_team(client, committed):
     )
     assert response.status_code == 404
     assert response.json()["error"]["message"] == "key not found"
+
+
+async def test_only_llm_and_typed_effective_models(client, committed):
+    from pydantic import SecretStr
+
+    from lumewarp_control_plane.models import ModelType
+    from tests.factories import make_alias, make_router
+
+    own, _, headers, _ = await setup_keys(committed)
+    llm = await make_model(committed, "chat")
+    embedding = await make_model(committed, "embed", model_type=ModelType.EMBEDDING)
+    await make_alias(committed, "chat-alias", llm)
+    await make_alias(committed, "embed-alias", embedding)
+    await make_router(committed, "chat-router", [llm])
+    await make_router(committed, "embed-router", [embedding])
+    await committed.commit()
+    response = client.get("/api/v1/playground", headers=headers)
+    models = response.json()["keys"][0]["models"]
+    assert {"chat", "chat-alias", "chat-router"} <= set(models)
+    assert not {"embed", "embed-alias", "embed-router"} & set(models)
+    me = client.get("/api/v1/users/me", headers=headers).json()
+    team = next(t for t in me["teams"] if t["team_id"] == str(own.team_id))
+    typed = {m["name"]: m["model_type"] for m in team["typed_models"]}
+    assert typed["chat-router"] == "llm" and typed["embed-alias"] == "embedding"
+    assert set(team["models"]) == set(typed)
+    client.app.state.settings.playground_gateway_url = "http://gateway:4000"
+    client.app.state.settings.encryption_key = SecretStr("x" * 32)
+    for model in ("embed", "embed-alias", "embed-router"):
+        response = client.post(
+            "/api/v1/playground/v1/chat/completions",
+            headers={**headers, "x-lumewarp-act-as": str(own.id)},
+            json={"model": model},
+        )
+        assert response.status_code == 400, response.text
+        assert response.json()["error"]["code"] == "model_type_mismatch"
 
 
 async def test_missing_encryption_key_disables(client, committed):

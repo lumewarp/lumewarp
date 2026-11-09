@@ -186,47 +186,131 @@ impl Transform {
     }
 
     /// `body` is the already spliced request (model, stream_options).
+    #[cfg(test)]
     pub fn apply(&self, body: Bytes) -> Result<Bytes, Rejected> {
+        self.apply_endpoint(body, 0)
+    }
+
+    pub fn apply_endpoint(&self, body: Bytes, endpoint: usize) -> Result<Bytes, Rejected> {
+        let responses = crate::endpoint::ENDPOINTS[endpoint].label == "responses";
         let text =
             std::str::from_utf8(&body).map_err(|_| invalid("Invalid JSON request object"))?;
         let mut entries = Entries::parse(text)?;
+        let original_reasoning = if responses {
+            entries.get("reasoning").map(str::to_owned)
+        } else {
+            None
+        };
+        let passthrough_value_present = responses
+            && matches!(self.reasoning, Reasoning::Passthrough)
+            && original_reasoning.as_ref().is_some_and(|raw| {
+                serde_json::from_str::<Value>(raw).is_ok_and(|value| {
+                    value.as_object().is_none_or(|object| {
+                        object.get("effort").is_some_and(|effort| !effort.is_null())
+                    })
+                })
+            });
+        let nested_effort = responses
+            && !passthrough_value_present
+            && (!matches!(self.reasoning, Reasoning::Passthrough) || self.default_level.is_some());
+        let mut reasoning = if nested_effort {
+            entries
+                .get("reasoning")
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default()
+        } else {
+            Map::new()
+        };
+        let original_effort = if nested_effort {
+            let original = entries.get(REASONING_FIELD).map(str::to_owned);
+            entries.remove(REASONING_FIELD);
+            entries.remove("reasoning");
+            if let Some(effort) = reasoning.remove("effort") {
+                entries
+                    .0
+                    .push((REASONING_FIELD.into(), Cow::Owned(effort.to_string())));
+            }
+            original
+        } else {
+            None
+        };
         if self.rewrites() {
             let mut defaults = self.default_body.clone();
-            match &self.reasoning {
-                // The client's value goes through as sent, whatever it is.
-                Reasoning::Passthrough => {
-                    if let Some(level) = &self.default_level {
-                        if entries
-                            .get(REASONING_FIELD)
-                            .is_none_or(|v| v.trim() == "null")
-                        {
-                            entries.remove(REASONING_FIELD);
-                            defaults.insert(REASONING_FIELD.into(), Value::String(level.clone()));
+            if !responses || nested_effort {
+                match &self.reasoning {
+                    // The client's value goes through as sent, whatever it is.
+                    Reasoning::Passthrough => {
+                        if let Some(level) = &self.default_level {
+                            if entries
+                                .get(REASONING_FIELD)
+                                .is_none_or(|v| v.trim() == "null")
+                            {
+                                entries.remove(REASONING_FIELD);
+                                defaults
+                                    .insert(REASONING_FIELD.into(), Value::String(level.clone()));
+                            }
                         }
                     }
-                }
-                Reasoning::Strip => entries.remove(REASONING_FIELD),
-                Reasoning::Mapped(fragments) => {
-                    let client_level = entries.reasoning_level()?;
-                    let level = client_level.as_deref().or(self.default_level.as_deref());
-                    if let Some(level) = level {
-                        let Some(fragment) = fragments.get(level) else {
-                            return Err(Rejected {
-                                reason: "reasoning_effort",
-                                message: format!(
-                                    "reasoning_effort {level:?} is not supported by this model"
-                                ),
-                            });
-                        };
-                        merge_values(&mut defaults, fragment);
+                    Reasoning::Strip => entries.remove(REASONING_FIELD),
+                    Reasoning::Mapped(fragments) => {
+                        let client_level = entries.reasoning_level()?;
+                        let level = client_level.as_deref().or(self.default_level.as_deref());
+                        if let Some(level) = level {
+                            let Some(fragment) = fragments.get(level) else {
+                                return Err(Rejected {
+                                    reason: "reasoning_effort",
+                                    message: format!(
+                                        "reasoning_effort {level:?} is not supported by this model"
+                                    ),
+                                });
+                            };
+                            merge_values(&mut defaults, fragment);
+                        }
+                        entries.remove(REASONING_FIELD);
                     }
-                    entries.remove(REASONING_FIELD);
+                }
+            }
+            if nested_effort {
+                if let Some(raw) = entries.get(REASONING_FIELD) {
+                    reasoning.insert(
+                        "effort".into(),
+                        serde_json::from_str(raw)
+                            .map_err(|_| invalid("Invalid reasoning effort"))?,
+                    );
+                } else if let Some(effort) = defaults.remove(REASONING_FIELD) {
+                    reasoning.insert("effort".into(), effort);
+                }
+                entries.remove(REASONING_FIELD);
+                if let Some(raw) = original_effort {
+                    entries.0.push((REASONING_FIELD.into(), Cow::Owned(raw)));
+                }
+                if !reasoning.is_empty() {
+                    entries.0.push((
+                        "reasoning".into(),
+                        Cow::Owned(Value::Object(reasoning).to_string()),
+                    ));
+                } else if matches!(self.reasoning, Reasoning::Passthrough)
+                    || original_reasoning
+                        .as_ref()
+                        .is_some_and(|raw| !raw.trim_start().starts_with('{'))
+                {
+                    if let Some(raw) = original_reasoning {
+                        entries.0.push(("reasoning".into(), Cow::Owned(raw)));
+                    }
                 }
             }
             entries.merge_defaults(&defaults)?;
         }
         if let Some(limit) = self.max_output_tokens {
-            for field in OUTPUT_FIELDS {
+            let fields: &[&str] = if responses {
+                &["max_output_tokens"]
+            } else if crate::endpoint::ENDPOINTS[endpoint].label == "completions" {
+                &["max_tokens"]
+            } else {
+                &OUTPUT_FIELDS
+            };
+            for &field in fields {
                 if let Some(raw) = entries.get(field) {
                     if serde_json::from_str::<f64>(raw).is_ok_and(|n| n > limit as f64) {
                         return Err(Rejected {
@@ -368,6 +452,7 @@ mod tests {
 
     fn model() -> pb::Model {
         pb::Model {
+            r#type: pb::ModelType::Llm as i32,
             name: "m".into(),
             upstream: "u".into(),
             upstream_model: "x".into(),
@@ -394,6 +479,16 @@ mod tests {
 
     fn json(text: &str) -> Value {
         serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn chat_preserves_opaque_reasoning_bytes() {
+        let mut m = model();
+        m.default_body_json = r#"{"temperature":0.5}"#.into();
+        let raw = r#"{ "effort":"high", "budget":1.2300e+02 }"#;
+        let body = format!(r#"{{"model":"x","reasoning":{raw}}}"#);
+        let out = run(&m, &body).unwrap();
+        assert!(out.contains(raw));
     }
 
     #[test]

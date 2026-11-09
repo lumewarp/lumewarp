@@ -71,7 +71,7 @@ async function upstream(request: APIRequestContext, name: string) {
   return post(request, "/upstreams", { name, kind: "vllm", base_url: "http://127.0.0.1:9/v1" });
 }
 async function model(request: APIRequestContext, name: string, upstream_id: string, upstream_model = "m") {
-  return post(request, "/models", { name, upstream_id, upstream_model });
+  return post(request, "/models", { name, upstream_id, upstream_model, model_type: "llm" });
 }
 const noOverflow = (page: Page) => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
 
@@ -91,6 +91,7 @@ test("models, aliases and routers: create through the forms, search by upstream 
     await page.getByRole("button", { name: "New model" }).click();
     const d = page.locator("#main");
     await d.getByLabel("Name", { exact: true }).fill(name);
+    await pick(d, "Type", "LLM");
     await pick(d, "Upstream", "cat-up");
     await d.getByLabel("Upstream model", { exact: true }).fill(upstreamModel);
     await d.getByRole("button", { name: "Create" }).click();
@@ -117,7 +118,7 @@ test("models, aliases and routers: create through the forms, search by upstream 
   await nav.getByRole("link", { name: "Aliases" }).click();
   await page.getByRole("button", { name: "New alias" }).click();
   await dialog(page).getByLabel("Name").fill("cat-alias");
-  await pick(dialog(page), "Points to", "cat/alpha (model)");
+  await pick(dialog(page), "Points to", "cat/alpha (model · LLM)");
   await dialog(page).getByRole("button", { name: "Create" }).click();
   const aliasRow = row(page, "cat-alias");
   await expect(aliasRow).toContainText("cat/alpha");
@@ -199,7 +200,7 @@ test("models, aliases and routers: create through the forms, search by upstream 
   await row(page, "cat-alias").getByRole("button", { name: "Edit" }).click();
   await expect(dialog(page).getByLabel("Keep old name as alias")).toHaveCount(0);
   await dialog(page).getByLabel("Name").fill("cat-alias2");
-  await pick(dialog(page), "Points to", "cat-router (router)");
+  await pick(dialog(page), "Points to", "cat-router (router · LLM)");
   await dialog(page).getByRole("button", { name: "Save" }).click();
   await expect(row(page, "cat-alias2")).toContainText("router");
   await expect(row(page, "cat-alias2")).toContainText("Org/Alpha-8B");

@@ -84,6 +84,7 @@ def self_service(request, binaries):
                 "/models",
                 json={
                     "name": "mock-a",
+                    "model_type": "llm",
                     "upstream_id": upstream["id"],
                     "upstream_model": "mock",
                     "price_input_nano_usd_per_mtok": 1_000_000_000,
@@ -95,6 +96,7 @@ def self_service(request, binaries):
                 "/models",
                 json={
                     "name": "other-a",
+                    "model_type": "llm",
                     "upstream_id": upstream["id"],
                     "upstream_model": "mock",
                     "price_input_nano_usd_per_mtok": 1_000_000_000,

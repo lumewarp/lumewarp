@@ -394,6 +394,7 @@ def upgrade() -> None:
         sa.Column("model_id", sa.Uuid(), nullable=True),
         sa.Column("alias_id", sa.Uuid(), nullable=True),
         sa.Column("router_id", sa.Uuid(), nullable=True),
+        sa.Column("audio_ms", sa.BigInteger(), server_default="0", nullable=False),
         sa.Column("endpoint", sa.String(length=64), nullable=False),
         sa.Column("status", sa.SmallInteger(), nullable=False),
         sa.Column("stream", sa.Boolean(), nullable=False),
@@ -435,7 +436,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("attempts >= 0", name=op.f("ck_usage_events_attempts_nonneg")),
         sa.CheckConstraint(
-            "prompt_tokens >= 0 AND completion_tokens >= 0 AND cost_nano_usd >= 0",
+            "prompt_tokens >= 0 AND completion_tokens >= 0 AND audio_ms >= 0 AND cost_nano_usd >= 0",
             name=op.f("ck_usage_events_nonneg"),
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_usage_events")),
@@ -493,6 +494,7 @@ def upgrade() -> None:
         sa.Column("prompt_tokens", sa.BigInteger(), server_default="0", nullable=False),
         sa.Column("completion_tokens", sa.BigInteger(), server_default="0", nullable=False),
         sa.Column("request_count", sa.BigInteger(), server_default="0", nullable=False),
+        sa.Column("audio_ms", sa.BigInteger(), server_default="0", nullable=False),
         sa.Column("unknown_cost_count", sa.BigInteger(), server_default="0", nullable=False),
         sa.Column("exceeded_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
@@ -502,7 +504,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.CheckConstraint(
-            "cost_nano_usd >= 0 AND prompt_tokens >= 0 AND completion_tokens >= 0 AND request_count >= 0 AND unknown_cost_count >= 0",
+            "cost_nano_usd >= 0 AND prompt_tokens >= 0 AND completion_tokens >= 0 AND audio_ms >= 0 AND request_count >= 0 AND unknown_cost_count >= 0",
             name=op.f("ck_usage_totals_nonneg"),
         ),
         sa.PrimaryKeyConstraint(
@@ -757,6 +759,21 @@ def upgrade() -> None:
         sa.Column("kind", sa.String(length=32), server_default="model", nullable=False),
         sa.Column("upstream_id", sa.Uuid(), nullable=False),
         sa.Column("upstream_model", sa.String(length=400), nullable=False),
+        sa.Column(
+            "model_type",
+            sa.Enum(
+                "llm",
+                "embedding",
+                "transcription",
+                "decision",
+                name="model_type",
+                native_enum=False,
+                create_constraint=True,
+                length=32,
+            ),
+            nullable=False,
+        ),
+        sa.Column("price_nano_usd_per_audio_second", sa.BigInteger(), nullable=True),
         sa.Column("price_input_nano_usd_per_mtok", sa.BigInteger(), nullable=True),
         sa.Column("price_output_nano_usd_per_mtok", sa.BigInteger(), nullable=True),
         sa.Column("max_input_tokens", sa.Integer(), nullable=True),
@@ -785,11 +802,23 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("kind = 'model'", name=op.f("ck_models_kind_model")),
         sa.CheckConstraint(
-            "(price_input_nano_usd_per_mtok IS NULL) = (price_output_nano_usd_per_mtok IS NULL)",
+            "model_type <> 'transcription' OR default_body IS NULL",
+            name=op.f("ck_models_default_body_type"),
+        ),
+        sa.CheckConstraint(
+            "model_type = 'llm' OR (max_output_tokens IS NULL AND reasoning_mode = 'passthrough' AND reasoning_fragments IS NULL AND reasoning_default_level IS NULL)",
+            name=op.f("ck_models_llm_settings_type"),
+        ),
+        sa.CheckConstraint(
+            "model_type = 'transcription' OR price_nano_usd_per_audio_second IS NULL",
+            name=op.f("ck_models_audio_price_type"),
+        ),
+        sa.CheckConstraint(
+            "(model_type = 'embedding' AND (price_output_nano_usd_per_mtok IS NULL OR price_output_nano_usd_per_mtok = 0) AND (price_output_nano_usd_per_mtok IS NULL OR price_input_nano_usd_per_mtok IS NOT NULL)) OR (model_type <> 'embedding' AND (price_input_nano_usd_per_mtok IS NULL) = (price_output_nano_usd_per_mtok IS NULL))",
             name=op.f("ck_models_price_both_or_neither"),
         ),
         sa.CheckConstraint(
-            "price_input_nano_usd_per_mtok IS NULL OR (price_input_nano_usd_per_mtok >= 0 AND price_output_nano_usd_per_mtok >= 0)",
+            "(price_input_nano_usd_per_mtok IS NULL OR price_input_nano_usd_per_mtok >= 0) AND (price_output_nano_usd_per_mtok IS NULL OR price_output_nano_usd_per_mtok >= 0) AND (price_nano_usd_per_audio_second IS NULL OR price_nano_usd_per_audio_second >= 0)",
             name=op.f("ck_models_price_nonneg"),
         ),
         sa.CheckConstraint(

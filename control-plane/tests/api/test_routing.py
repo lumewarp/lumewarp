@@ -22,6 +22,7 @@ def _model(client, upstream_id, **body):
         "name": f"dep-{suffix()}",
         "upstream_id": upstream_id,
         "upstream_model": "name",
+        "model_type": "llm",
         **body,
     }
     return client.post("/api/v1/models", json=body, headers=ADMIN_AUTH)
@@ -70,10 +71,18 @@ def test_upstream_model_router_crud(client) -> None:
         model["id"],
     ]
 
-    # Read aliases are available to every authenticated principal.
-    resp = client.get("/api/v1/routers", headers=ADMIN_AUTH)
-    assert resp.status_code == 200
-    assert any(item["id"] == router_body["id"] for item in resp.json()["items"])
+    # Follow pagination: other modules share this database and may create many routers.
+    cursor = None
+    listed_ids = set()
+    while True:
+        params = {"cursor": cursor} if cursor else {}
+        resp = client.get("/api/v1/routers", params=params, headers=ADMIN_AUTH)
+        assert resp.status_code == 200
+        listed_ids.update(item["id"] for item in resp.json()["items"])
+        cursor = resp.json()["next_cursor"]
+        if cursor is None:
+            break
+    assert router_body["id"] in listed_ids
 
     # Dependency conflicts are 409, not cascades.
     assert (

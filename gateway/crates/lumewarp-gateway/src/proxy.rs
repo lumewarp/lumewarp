@@ -45,7 +45,7 @@ use crate::{
 
 pub type BoxError = Box<dyn Error + Send + Sync>;
 pub type ProxyBody = UnsyncBoxBody<Bytes, BoxError>;
-pub type UpstreamClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
+pub type UpstreamClient = Client<HttpsConnector<HttpConnector>, crate::request_body::RequestBody>;
 const MAX_BODY: usize = 32 * 1024 * 1024;
 
 pub fn client() -> UpstreamClient {
@@ -328,32 +328,65 @@ pub async fn forward(
             };
         }
     };
-    let fields = match RequestFields::parse(&body) {
+    let multipart =
+        if crate::endpoint::ENDPOINTS[endpoint].body == crate::endpoint::BodyKind::Multipart {
+            match crate::multipart::Fields::from_headers(&body, &parts.headers) {
+                Ok(fields) => Some(fields),
+                Err(message) => {
+                    return error::json(StatusCode::BAD_REQUEST, "invalid_request", message)
+                }
+            }
+        } else {
+            None
+        };
+    if let Some(fields) = &multipart {
+        parts.headers.insert(
+            header::CONTENT_TYPE,
+            fields
+                .content_type
+                .parse()
+                .expect("validated multipart boundary"),
+        );
+    }
+    let json_fields = if multipart.is_none() {
+        Some(RequestFields::parse(&body))
+    } else {
+        None
+    };
+    let fields = match json_fields.transpose() {
         Ok(fields) => fields,
         Err(message) => return error::json(StatusCode::BAD_REQUEST, "invalid_request", message),
     };
-    let stream = match fields.stream() {
-        Ok(stream) => stream,
-        Err(_) => {
-            return error::json(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                "Expected a boolean or null stream field",
-            )
+    let stream = if let Some(fields) = &multipart {
+        fields.stream
+    } else {
+        match fields.as_ref().expect("JSON").stream() {
+            Ok(stream) => stream,
+            Err(_) => {
+                return error::json(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "Expected a boolean or null stream field",
+                )
+            }
         }
     };
-    let model = match fields.model() {
-        Ok(model) => model,
-        Err(_) => {
-            return error::json(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                "Expected a string model",
-            )
+    let model = if let Some(fields) = &multipart {
+        std::borrow::Cow::Borrowed(fields.model)
+    } else {
+        match fields.as_ref().expect("JSON").model() {
+            Ok(model) => model,
+            Err(_) => {
+                return error::json(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "Expected a string model",
+                )
+            }
         }
     };
-    let include_usage = match fields.include_usage() {
-        Ok(include_usage) => include_usage,
+    let include_usage = match fields.as_ref().map(|f| f.include_usage()).transpose() {
+        Ok(value) => value.unwrap_or(IncludeUsage::True),
         Err(message) => return error::json(StatusCode::BAD_REQUEST, "invalid_request", message),
     };
     observation.requested(&model);
@@ -392,8 +425,35 @@ pub async fn forward(
         );
         return error::json(StatusCode::NOT_FOUND, "model_not_found", "Model not found");
     };
-    let router = &*called.target;
     observation.provenance(called.alias.as_deref(), called.router.as_deref());
+    if called.model_type != crate::endpoint::ENDPOINTS[endpoint].model_type {
+        let handles = routing_table.rejected_model(&caller, &model, endpoint);
+        observation.routed(handles.clone(), stream);
+        routing_table
+            .runtime
+            .metrics
+            .request_rejected(&called.name, "model_type_mismatch");
+        report_rejection(
+            routing_table,
+            &caller,
+            request,
+            handles,
+            &model,
+            endpoint,
+            stream,
+            StatusCode::BAD_REQUEST,
+        );
+        return error::json(
+            StatusCode::BAD_REQUEST,
+            "model_type_mismatch",
+            &format!(
+                "Model {:?} does not serve {}",
+                crate::usage::bounded_requested(&model),
+                crate::endpoint::ENDPOINTS[endpoint].path
+            ),
+        );
+    }
+    let router = &*called.target;
     let permit = match routing_table.runtime.limiters.admit(&caller) {
         Ok(permit) => permit,
         Err(limited) => {
@@ -506,31 +566,37 @@ pub async fn forward(
         tried[attempt - 1] = guard.model.label;
         let model = &guard.model;
         let inject = stream
+            && crate::endpoint::ENDPOINTS[endpoint].supports_stream_options()
             && model.stream_usage_mode == StreamUsageMode::IncludeUsage
             && !include_usage.requested();
-        let rewritten = fields.rewrite(
-            &body,
-            &model.upstream_model_json,
-            inject.then_some(&include_usage),
-        );
-        // Per attempt: the model serving it decides its own body rules.
-        let rewritten = match &model.transform {
-            None => rewritten,
-            Some(transform) => match transform.apply(rewritten) {
-                Ok(body) => body,
-                Err(rejected) => {
-                    pending.discard();
-                    routing_table
-                        .runtime
-                        .metrics
-                        .request_rejected(&model.name, rejected.reason);
-                    return error::json(
-                        StatusCode::BAD_REQUEST,
-                        rejected.reason,
-                        &rejected.message,
-                    );
-                }
-            },
+        let rewritten = if let Some(fields) = &multipart {
+            fields.rewrite(&body, &model.upstream_model)
+        } else {
+            let rewritten = fields.as_ref().expect("JSON").rewrite(
+                &body,
+                &model.upstream_model_json,
+                inject.then_some(&include_usage),
+            );
+            // Per attempt: the model serving it decides its own body rules.
+            let rewritten = match &model.transform {
+                None => rewritten,
+                Some(transform) => match transform.apply_endpoint(rewritten, endpoint) {
+                    Ok(body) => body,
+                    Err(rejected) => {
+                        pending.discard();
+                        routing_table
+                            .runtime
+                            .metrics
+                            .request_rejected(&model.name, rejected.reason);
+                        return error::json(
+                            StatusCode::BAD_REQUEST,
+                            rejected.reason,
+                            &rejected.message,
+                        );
+                    }
+                },
+            };
+            crate::request_body::RequestBody::from(rewritten)
         };
         let mut parts = next_parts
             .take()
@@ -572,7 +638,7 @@ pub async fn forward(
             let _entered = span.enter();
             telemetry::inject(&mut parts.headers);
         }
-        let upstream_request = Request::from_parts(parts, Full::new(rewritten));
+        let upstream_request = Request::from_parts(parts, rewritten);
         // `capped`: the router's total_timeout, not the model's own
         // timeout, bounds this attempt.
         let (timeout, capped) = match deadline {
@@ -749,7 +815,7 @@ pub async fn forward(
     observation.served(&guard.model, attempt, fallback_response);
     let (mut parts, body) = response.into_parts();
     strip_response_headers(&mut parts.headers);
-    let meter = Meter::select(&parts, stream, inject, include_usage.requested());
+    let meter = Meter::select(&parts, stream, inject, include_usage.requested(), endpoint);
     let mut capture = pending.take();
     capture.status = parts.status.as_u16();
     let rewriter = if parts.status.is_success() && needs_rewrite(&called.name, &guard.model) {
@@ -764,10 +830,16 @@ pub async fn forward(
             }
             Some(format) => {
                 strip_representation_fields(&mut parts.headers);
-                Some(ModelRewriter::new(
-                    Bytes::from(serde_json::to_vec(&*called.name).expect("name serializes")),
-                    format == BodyFormat::Sse,
-                ))
+                Some(
+                    ModelRewriter::new(
+                        Bytes::from(serde_json::to_vec(&*called.name).expect("name serializes")),
+                        format == BodyFormat::Sse,
+                    )
+                    .nested_response(
+                        crate::endpoint::ENDPOINTS[endpoint].label == "responses"
+                            && format == BodyFormat::Sse,
+                    ),
+                )
             }
         }
     } else {
@@ -938,12 +1010,7 @@ mod resilience_tests {
 }
 
 fn upstream_uri(model: &Model, request: &Uri) -> Result<Uri, hyper::http::Error> {
-    let index = match request.path() {
-        "/v1/chat/completions" => 0,
-        "/v1/completions" => 1,
-        "/v1/embeddings" => 2,
-        _ => unreachable!("dispatch only forwards supported endpoints"),
-    };
+    let index = crate::endpoint::endpoint_index(request.path());
     let endpoint = &model.endpoints[index];
     let Some(query) = request.query() else {
         return Ok(endpoint.clone());
@@ -1021,6 +1088,7 @@ impl Meter {
         stream: bool,
         inject: bool,
         requested: bool,
+        endpoint: usize,
     ) -> Self {
         if !parts.status.is_success() {
             return Self::Off;
@@ -1033,12 +1101,22 @@ impl Meter {
         // The same reading of the body as the rewrite.
         match rewrite_format(&parts.headers, stream) {
             Some(BodyFormat::Json) => Self::Json(Tee::default()),
-            Some(BodyFormat::Sse) if inject || requested || !stream => {
+            Some(BodyFormat::Sse)
+                if inject
+                    || requested
+                    || !stream
+                    || !crate::endpoint::ENDPOINTS[endpoint].supports_stream_options() =>
+            {
                 Self::Sse(SseFilter::new(inject))
             }
             Some(BodyFormat::Sse) => Self::Off,
             // Opaque: only ever observed. Tokens are still read if they are
             // there, but the filter does not strip, so bytes and length stay.
+            None if crate::endpoint::ENDPOINTS[endpoint].body
+                == crate::endpoint::BodyKind::Multipart =>
+            {
+                Self::Off
+            }
             None if !stream => Self::Json(Tee::default()),
             None if inject || requested => Self::Sse(SseFilter::new(false)),
             None => Self::Off,
@@ -1349,7 +1427,7 @@ mod tests {
 upstreams:
   - {name: u, kind: vllm, base_url: 'http://localhost:8123/prefix/v1/'}
 models:
-  - {name: d, upstream: u, upstream_model: actual}
+  - {type: llm, name: d, upstream: u, upstream_model: actual}
 routers:
   - {name: public, members: [{model: d}]}
 "#,

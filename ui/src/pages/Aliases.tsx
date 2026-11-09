@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { api, type Alias } from "../api";
-import { Badge, PageHeader } from "../components/Bits";
+import { Badge, PageHeader, TypeBadge } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, required, TextField, useForm } from "../components/Form";
 import { CreateButton, RowActions } from "../components/RowActions";
@@ -9,6 +9,7 @@ import { DataTable } from "../components/Table";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { useAliases, useById, useCan, useModels, useMut, useRouters } from "../hooks";
 import { aliasUpstreamModels, matches } from "../lib/catalog";
+import { typeLabel } from "../lib/modelType";
 
 interface Values {
   name: string;
@@ -32,7 +33,7 @@ export function Aliases() {
   const remove = useMut((id: string) => api.deleteAlias(id), "Alias deleted");
 
   const rows = useMemo(
-    () => (list.data ?? []).filter((a) => matches(search, a.name, a.target_name, ...aliasUpstreamModels(a, modelById, routerById))),
+    () => (list.data ?? []).filter((a) => matches(search, a.name, a.target_name, a.model_type, typeLabel(a.model_type), ...aliasUpstreamModels(a, modelById, routerById))),
     [list.data, search, modelById, routerById],
   );
 
@@ -45,14 +46,14 @@ export function Aliases() {
     return form.run(() => (editing === "new" ? create.mutateAsync(form.values) : update.mutateAsync({ id: (editing as Alias).id, v: form.values })));
   };
   const targets = [
-    ...(models.data ?? []).map((m) => ({ value: m.id, label: `${m.name} (model)` })),
-    ...(routers.data ?? []).map((r) => ({ value: r.id, label: `${r.name} (router)` })),
+    ...(models.data ?? []).map((m) => ({ value: m.id, label: `${m.name} (model · ${typeLabel(m.model_type)})` })),
+    ...(routers.data ?? []).map((r) => ({ value: r.id, label: `${r.name} (router${r.model_type ? ` · ${typeLabel(r.model_type)}` : ""})` })),
   ];
 
   return (
     <>
       <PageHeader title="Aliases" hint="Access is granted to the alias itself, not to its target." actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => open("new")}>New alias</CreateButton>} />
-      <SearchBox value={search} onChange={setSearch} label="Search aliases" placeholder="Name, target or upstream model" />
+      <SearchBox value={search} onChange={setSearch} label="Search aliases" placeholder="Name, type, target or upstream model" />
       <DataTable
         rows={rows}
         loading={list.isPending || models.isPending || routers.isPending}
@@ -76,6 +77,7 @@ export function Aliases() {
               </span>
             ),
           },
+          { key: "type", header: "Type", cell: (r) => <TypeBadge type={r.model_type} /> },
           {
             key: "upstream",
             header: "Upstream model",

@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 
 import { api, type Key, type Me, type Schemas } from "../api";
-import { Badge, fmtDate, fmtUsd, KeyBadge, PageHeader, SuspendedReason } from "../components/Bits";
+import { Badge, fmtDate, fmtUsd, KeyBadge, PageHeader, SuspendedReason, TypeBadge } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
 import { blankKeyLimits, KeyLimitFields, keyLimitsBody, keyLimitsFrom, type KeyLimitValues } from "../components/KeyLimits";
@@ -108,6 +108,7 @@ function CallableModels({ team }: { team: Team }) {
     );
   }
   if (team.models.length === 0) return <span className="text-muted-foreground">No models</span>;
+  const typeOf = new Map((team.typed_models ?? []).map((m) => [m.name, m.model_type]));
   return (
     <div
       className="flex max-h-28 flex-wrap gap-1 overflow-y-auto pr-1"
@@ -116,9 +117,10 @@ function CallableModels({ team }: { team: Team }) {
       aria-label="Callable models"
     >
       {team.models.map((name) => (
-        <UiBadge key={name} variant="muted" role="listitem">
-          {name}
-        </UiBadge>
+        <span key={name} className="inline-flex items-center gap-1" role="listitem">
+          <UiBadge variant="muted">{name}</UiBadge>
+          {typeOf.get(name) && <TypeBadge type={typeOf.get(name)} />}
+        </span>
       ))}
     </div>
   );

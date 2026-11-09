@@ -22,11 +22,11 @@ upstreams:
     base_url: http://127.0.0.1:9000/v1
 
 models:
-  - {name: mock-m0, upstream: mock, upstream_model: mock}
-  - {name: mock-m1, upstream: mock, upstream_model: mock}
-  - {name: mock-m2, upstream: mock, upstream_model: mock}
-  - {name: mock-m3, upstream: mock, upstream_model: mock}
-  - {name: mock-m4, upstream: mock, upstream_model: mock}
+  - {name: mock-m0, upstream: mock, upstream_model: mock, type: llm}
+  - {name: mock-m1, upstream: mock, upstream_model: mock, type: llm}
+  - {name: mock-m2, upstream: mock, upstream_model: mock, type: llm}
+  - {name: mock-m3, upstream: mock, upstream_model: mock, type: llm}
+  - {name: mock-m4, upstream: mock, upstream_model: mock, type: llm}
 
 routers:
   # The called name stays `mock`, so the load generators are identical to the

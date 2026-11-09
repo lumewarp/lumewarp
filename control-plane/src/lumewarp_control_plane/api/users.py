@@ -24,6 +24,7 @@ from lumewarp_control_plane.api.common import (
 )
 from lumewarp_control_plane.api.policy import policy_of
 from lumewarp_control_plane.api.schemas import (
+    EffectiveModelOut,
     MeBudgetOut,
     MeKeyLimitsOut,
     MeLimitsOut,
@@ -173,7 +174,12 @@ async def _team_details(
     """
     if not rows:
         return []
-    catalog = sorted((await session.scalars(select(CatalogName.name))).all())
+    from lumewarp_control_plane.model_types import catalog_types
+
+    types = await catalog_types(session)
+    names = (await session.execute(select(CatalogName.id, CatalogName.name))).all()
+    types_by_name = {name: types.get(id_) for id_, name in names}
+    catalog = sorted(types_by_name)
     window_start, window_end = month_window(datetime.now(UTC))
     team_ids = [team.id for team, _, _ in rows]
     org_ids = {team.org_id for team, _, _ in rows}
@@ -284,6 +290,14 @@ async def _team_details(
                 models=catalog
                 if effective_limits.models is None
                 else sorted(effective_limits.models),
+                typed_models=[
+                    EffectiveModelOut(name=name, model_type=types_by_name.get(name))
+                    for name in (
+                        catalog
+                        if effective_limits.models is None
+                        else sorted(effective_limits.models)
+                    )
+                ],
                 all_models=effective_limits.models is None,
                 mcp_servers=(
                     [MeMcpGrantOut(server=name, all_tools=True, tools=[]) for name in mcp_targets]

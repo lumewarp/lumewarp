@@ -31,6 +31,7 @@ def _model(client, upstream: dict, **body) -> dict:
         "name": f"m-{suffix()}",
         "upstream_id": upstream["id"],
         "upstream_model": "qwen",
+        "model_type": "llm",
         **body,
     }
     response = client.post("/api/v1/models", json=body, headers=ADMIN_AUTH)
@@ -65,7 +66,12 @@ def test_chat_check_round_trips_and_clears(client) -> None:
 )
 def test_bad_chat_check_is_rejected(client, check) -> None:
     up = _upstream(client)
-    body = {"name": f"m-{suffix()}", "upstream_id": up["id"], "upstream_model": "q"}
+    body = {
+        "name": f"m-{suffix()}",
+        "upstream_id": up["id"],
+        "upstream_model": "q",
+        "model_type": "llm",
+    }
     response = client.post("/api/v1/models", json={**body, "chat_check": check}, headers=ADMIN_AUTH)
     assert response.status_code == 422
 
@@ -133,7 +139,7 @@ def replies(monkeypatch):
 
 
 def _test(client, up: dict, **extra):
-    body = {"upstream_id": up["id"], "upstream_model": "qwen", **extra}
+    body = {"upstream_id": up["id"], "upstream_model": "qwen", "model_type": "llm", **extra}
     return client.post("/api/v1/models/test", json=body, headers=ADMIN_AUTH)
 
 

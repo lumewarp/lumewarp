@@ -29,7 +29,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, Limited, StreamBody};
+use http_body_util::{BodyExt, Limited, StreamBody};
 use hyper::{
     body::{Frame, Incoming},
     header::{self, HeaderMap, HeaderName, HeaderValue},
@@ -466,7 +466,7 @@ async fn run(
     let upstream_request = match Request::builder()
         .method(Method::POST)
         .uri(target.url.clone())
-        .body(Full::new(Bytes::from(body)))
+        .body(crate::request_body::RequestBody::from(Bytes::from(body)))
     {
         Ok(mut upstream_request) => {
             *upstream_request.headers_mut() = headers;

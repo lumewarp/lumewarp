@@ -154,6 +154,7 @@ async def test_end_to_end(cp: ControlPlane) -> None:
             "name": "llama-a",
             "upstream_id": up["id"],
             "upstream_model": "llama",
+            "model_type": "llm",
             "price_input_nano_usd_per_mtok": 1_000,
             "price_output_nano_usd_per_mtok": 2_000,
         },

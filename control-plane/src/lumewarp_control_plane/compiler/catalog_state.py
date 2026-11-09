@@ -45,7 +45,8 @@ TARGET_TABLES = tuple(cls.__table__ for cls in _TARGET_TYPES)
 TABLES = (*ENTITY_TABLES, *EDGE_TABLES, *TARGET_TABLES)
 # 4: targets carry `config_revision` (CatalogReport provenance). An older sidecar's column
 # set no longer matches, so it is refused explicitly rather than half-restored.
-FORMAT_VERSION = 4
+# 5: models carry an explicit model_type and audio pricing.
+FORMAT_VERSION = 5
 
 
 def _encode(value: Any) -> Any:

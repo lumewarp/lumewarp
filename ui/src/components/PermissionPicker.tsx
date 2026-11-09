@@ -2,6 +2,7 @@ import { useMemo } from "react";
 
 import type { CatalogEntry, CatalogKind, ModelAccess } from "../api";
 import { useCatalog } from "../hooks";
+import { TypeBadge } from "./Bits";
 import { Checkbox } from "./ui/checkbox";
 import { HelpTip } from "./ui/help-tip";
 import { Label } from "./ui/label";
@@ -79,6 +80,7 @@ export function PermissionPicker({ isTeam, access, onAccess, selected, onSelecte
                       <Label htmlFor={`perm-${e.id}`} className="min-w-0 cursor-pointer font-normal [overflow-wrap:anywhere]">
                         {e.name}
                       </Label>
+                      {e.model_type && <TypeBadge type={e.model_type} />}
                     </div>
                   ))}
                 </div>

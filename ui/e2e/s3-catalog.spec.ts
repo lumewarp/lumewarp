@@ -39,7 +39,7 @@ for (const [label, viewport] of [["desktop", { width: 1280, height: 800 }], ["39
     await page.setViewportSize(viewport);
     const up = await post(request, "/upstreams", { name: "s3c-up", kind: "vllm", base_url: "http://127.0.0.1:9/v1" });
     const models: { id: string; name: string }[] = [];
-    for (let i = 0; i < 65; i++) models.push(await post(request, "/models", { name: `s3c/${String(i).padStart(2, "0")}`, upstream_id: up.id, upstream_model: "m" }));
+    for (let i = 0; i < 65; i++) models.push(await post(request, "/models", { name: `s3c/${String(i).padStart(2, "0")}`, upstream_id: up.id, upstream_model: "m", model_type: "llm" }));
     await page.context().addCookies((await request.storageState()).cookies);
     await page.goto("/aliases");
     const sent: any[] = [];
@@ -73,11 +73,11 @@ for (const [label, viewport] of [["desktop", { width: 1280, height: 800 }], ["39
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
     expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
-    const last = popup.getByRole("option", { name: "s3c/64 (model)", exact: true });
+    const last = popup.getByRole("option", { name: "s3c/64 (model · LLM)", exact: true });
     await last.scrollIntoViewIfNeeded();
     await expect(last).toBeInViewport();
-    await popup.getByRole("option", { name: "s3c/00 (model)", exact: true }).scrollIntoViewIfNeeded();
-    await expect(popup.getByRole("option", { name: "s3c/00 (model)", exact: true })).toBeInViewport();
+    await popup.getByRole("option", { name: "s3c/00 (model · LLM)", exact: true }).scrollIntoViewIfNeeded();
+    await expect(popup.getByRole("option", { name: "s3c/00 (model · LLM)", exact: true })).toBeInViewport();
 
     // Search matches the label and narrows the list; no match says so.
     await page.getByRole("combobox", { name: "Search Points to" }).fill("s3c/4");
@@ -92,7 +92,7 @@ for (const [label, viewport] of [["desktop", { width: 1280, height: 800 }], ["39
     await expect(control).toHaveAttribute("aria-expanded", "false");
     await expect(popup).toHaveCount(0);
     await expect(control).toBeFocused();
-    await expect(control).toHaveText(/s3c\/07 \(model\)/);
+    await expect(control).toHaveText(/s3c\/07 \(model · LLM\)/);
     await expect(d).toBeVisible();
 
     // Arrow keys move through the list: a second pick moves the choice.
@@ -101,11 +101,11 @@ for (const [label, viewport] of [["desktop", { width: 1280, height: 800 }], ["39
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
     await expect(control).toHaveAttribute("aria-expanded", "false");
-    await expect(control).not.toHaveText(/s3c\/07 \(model\)/);
-    await expect(control).toHaveText(/\(model\)/);
+    await expect(control).not.toHaveText(/s3c\/07 \(model · LLM\)/);
+    await expect(control).toHaveText(/\(model · LLM\)/);
 
     // A click picks the last entry; the request carries the id, not the label.
-    await pick(d, "Points to", "s3c/64 (model)");
+    await pick(d, "Points to", "s3c/64 (model · LLM)");
     await d.getByLabel("Name", { exact: true }).fill("s3c-alias");
     await d.getByRole("button", { name: "Create" }).click();
     await expect(d).toHaveCount(0);

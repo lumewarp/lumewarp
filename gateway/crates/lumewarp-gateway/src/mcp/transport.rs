@@ -7,7 +7,7 @@ use crate::{
     upstream_auth,
 };
 use bytes::{Bytes, BytesMut};
-use http_body_util::{BodyExt, Full, StreamBody};
+use http_body_util::{BodyExt, StreamBody};
 use hyper::{
     body::{Frame, Incoming},
     HeaderMap, Method, Request, Response, StatusCode,
@@ -102,7 +102,7 @@ pub async fn send(
     let mut req = Request::builder()
         .method(method)
         .uri(target.url.clone())
-        .body(Full::new(body))
+        .body(crate::request_body::RequestBody::from(body))
         .map_err(|_| SendError::Other)?;
     *req.headers_mut() = headers;
     let start = std::time::Instant::now();

@@ -101,6 +101,17 @@ async def _reasoning(session) -> dict[str, PlaygroundReasoning]:
     return out
 
 
+async def _llm_names(session: SessionDep) -> set[str]:
+    from lumewarp_control_plane.model_types import catalog_types
+
+    types = await catalog_types(session)
+    return {
+        name
+        for id_, name in (await session.execute(select(CatalogName.id, CatalogName.name))).all()
+        if types.get(id_) == "llm"
+    }
+
+
 def _session_only(authz: Authz) -> None:
     if authz.principal.kind is not PrincipalKind.SESSION:
         raise HTTPException(401, "a user session is required")
@@ -121,6 +132,7 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
             ApiKey.user_id == authz.user_id, ApiKey.owner_kind == KeyOwnerKind.USER
         )
     )
+    llm_names = await _llm_names(session)
     for key in rows:
         if not _usable(key):
             continue
@@ -131,11 +143,7 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
         if not await authz.allowed(Action.KEY_MANAGE_OWN, team.id):
             continue
         effective = await _owner_effective(session, team, key)
-        models = (
-            sorted((await session.scalars(select(CatalogName.name))).all())
-            if effective.models is None
-            else sorted(effective.models)
-        )
+        models = sorted(llm_names) if effective.models is None else sorted(effective.models)
         keys.append(
             PlaygroundKey(
                 id=key.id,
@@ -143,7 +151,7 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
                 display_prefix=key.display_prefix,
                 team_id=team.id,
                 team_name=team.name,
-                models=models,
+                models=sorted(set(models) & llm_names),
             )
         )
     callable_names = {name for key in keys for name in key.models}
@@ -192,7 +200,7 @@ async def chat_completions(
         raise HTTPException(400, "invalid JSON body") from None
     model = payload.get("model") if isinstance(payload, dict) else None
     audited_model = None
-    if isinstance(model, str) and len(model) <= 256:
+    if isinstance(model, str):
         effective = await _owner_effective(session, team, key)
         allowed = (
             await session.scalar(select(CatalogName.name).where(CatalogName.name == model))
@@ -201,7 +209,11 @@ async def chat_completions(
             else model in effective.models
         )
         if allowed:
-            audited_model = model
+            from lumewarp_control_plane.model_types import called_name_type
+
+            if await called_name_type(session, model) != "llm":
+                raise ApiError(400, "model_type_mismatch", "Playground supports only llm models")
+            audited_model = model if len(model) <= 256 else None
     audit.record(
         session,
         action="playground.request",

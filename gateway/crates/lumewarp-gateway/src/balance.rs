@@ -17,7 +17,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::{BodyExt, Limited};
 use hyper::{header::HeaderValue, Request, Uri};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use tokio::task::JoinHandle;
@@ -280,7 +280,7 @@ impl Drop for Registry {
 }
 
 async fn fetch(client: &UpstreamClient, scrape: &Scrape) -> Option<String> {
-    let mut request = Request::new(Full::new(Bytes::new()));
+    let mut request = Request::new(crate::request_body::RequestBody::from(Bytes::new()));
     *request.uri_mut() = scrape.uri.clone();
     if let Some(value) = &scrape.authorization {
         request

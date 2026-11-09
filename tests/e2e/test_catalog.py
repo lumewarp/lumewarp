@@ -45,6 +45,7 @@ def _model(stack, name: str, upstream: str, *, upstream_model: str = "mock", pri
             "name": name,
             "upstream_id": upstream,
             "upstream_model": upstream_model,
+            "model_type": "llm",
             "price_input_nano_usd_per_mtok": price[0],
             "price_output_nano_usd_per_mtok": price[1],
         },

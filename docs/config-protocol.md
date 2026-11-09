@@ -108,8 +108,18 @@ receive → apply to a private copy → validate (capabilities, references, hash
 A snapshot has three kinds of callable name, unique across all three. `unknown`
 is reserved in every kind.
 
-- `Model { name, upstream, upstream_model, price }`: callable directly, as a
-  single-attempt pool with no retry and no fallback.
+- `Model { name, upstream, upstream_model, price, type }`: callable directly, as a
+  single-attempt pool with no retry and no fallback. `type` is required
+  (`MODEL_TYPE_UNSPECIFIED` is `INVALID_CONFIG`) and fixes the endpoints that
+  may call the name: LLM `/v1/chat/completions`, `/v1/completions`,
+  `/v1/responses`; EMBEDDING `/v1/embeddings`; TRANSCRIPTION
+  `/v1/audio/transcriptions`, `/v1/audio/translations`; DECISION
+  `/v1/decisions`, `/v1/systemone`. An alias has its target's type; a router's
+  members, split members and fallbacks must share one type, which is the
+  router's (`INVALID_CONFIG` otherwise). `max_output_tokens` and
+  `reasoning_effort` are LLM-only, `default_body_json` is not allowed on
+  TRANSCRIPTION, and a price field outside the type's units is
+  `INVALID_CONFIG`.
 - `Alias { name, target }`: a second name for a model or a router, one level
   only. It shares the target's pool and has no settings of its own.
 - `Router { name, members, strategy, params_json, retry, fallbacks,
@@ -192,7 +202,8 @@ Standalone YAML has no previous-hash field.
 ### Routing capabilities
 
 The gateway advertises `retry`, `fallbacks`, `health_check`, `circuit_breaker`,
-`traffic_split`, `vllm_load`, `rotation_grace`, `model_chat_check`, `mcp`, `a2a`,
+`traffic_split`, `vllm_load`, `rotation_grace`, `model_chat_check`, `model_types`,
+`audio_price`, `mcp`, `a2a`,
 `strategy:<name>`, `auth:<name>` and `a2a_middleware:<name>`: the last three name
 plugins the gateway has (built-ins included), and `mcp`/`a2a` gate MCP servers
 and A2A agents. Compilers add a capability only when it is used:
@@ -207,6 +218,8 @@ and A2A agents. Compilers add a capability only when it is used:
 | `vllm_load` | Nonempty `Upstream.metrics_url` |
 | `rotation_grace` | Nonempty `ApiKey.previous_key_hash` |
 | `model_chat_check` | Present `Model.chat_check` |
+| `model_types` | Any `Model.type` other than `MODEL_TYPE_LLM` |
+| `audio_price` | Nonzero `Price.nano_usd_per_audio_second` |
 | `mcp` | Nonempty `Snapshot.mcp_servers` |
 | `a2a` | Nonempty `Snapshot.a2a_agents` |
 | `strategy:<name>` | Any router with `Router.strategy = <name>`, including `strategy:weighted` |

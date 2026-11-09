@@ -37,8 +37,8 @@ use crate::{
     transform::Transform,
 };
 
-/// Proxied endpoints: chat_completions, completions, embeddings.
-const ENDPOINTS: usize = 3;
+/// URI slots derived from the single endpoint table.
+const ENDPOINTS: usize = crate::endpoint::ENDPOINTS.len();
 
 pub struct Model {
     pub name: String,
@@ -47,6 +47,7 @@ pub struct Model {
     pub upstream_model: Arc<str>,
     // Each absolute URI contains its precompiled endpoint PathAndQuery.
     pub endpoints: [Uri; ENDPOINTS],
+    pub model_type: pb::ModelType,
     pub host: HeaderValue,
     pub authorization: Option<HeaderValue>,
     pub upstream_model_json: Bytes,
@@ -281,6 +282,7 @@ pub struct Router {
 /// An alias shares its target's `Arc<Router>`, so the called name and the
 /// provenance must be read from here, never from the pool.
 pub struct Callable {
+    pub model_type: pb::ModelType,
     /// The called name: `requested` in metrics, usage and spans.
     pub name: Arc<str>,
     label: LabelId,
@@ -356,7 +358,10 @@ impl Router {
     /// returns its `circuit_open` counters. Compile time only.
     fn preregister(&self, name: &str, metrics: &Metrics) -> Vec<(LabelId, Counter)> {
         for model in std::iter::once("").chain(self.models().map(|d| d.name.as_str())) {
-            for endpoint in 0..ENDPOINTS {
+            for (endpoint, spec) in crate::endpoint::ENDPOINTS.iter().enumerate() {
+                if spec.model_type != self.models().next().expect("nonempty pool").model_type {
+                    continue;
+                }
                 drop(metrics.handles(name, model, endpoint, ""));
             }
         }
@@ -606,11 +611,12 @@ impl RoutingTable {
                 Uri::from_parts(parts)
                     .map_err(|_| invalid(format!("upstream {name:?} has an invalid URL")))
             };
-            let endpoints = [
-                endpoint("/chat/completions")?,
-                endpoint("/completions")?,
-                endpoint("/embeddings")?,
-            ];
+            let endpoints: [Uri; ENDPOINTS] = crate::endpoint::ENDPOINTS
+                .iter()
+                .map(|spec| endpoint(spec.upstream_suffix))
+                .collect::<Result<Vec<_>, _>>()?
+                .try_into()
+                .expect("endpoint count");
             let metrics_uri = metrics_uri(&base, &upstream.metrics_url).ok_or_else(|| {
                 invalid(format!(
                     "upstream {name:?} requires an http(s) metrics_url without userinfo"
@@ -642,6 +648,7 @@ impl RoutingTable {
                     name: name.clone(),
                     uri,
                     body: None,
+                    content_type: "application/json",
                     authorization,
                     config: config.clone(),
                     healthy: healthy.clone(),
@@ -698,8 +705,13 @@ impl RoutingTable {
                 Some(check) => probes.push(Probe {
                     target: Target::Model,
                     name: d.name.clone(),
-                    uri: endpoints[0].clone(),
+                    uri: endpoints[crate::probe::endpoint(d.r#type)].clone(),
                     body: Some(chat_check_body(d, transform.as_deref())),
+                    content_type: if d.r#type == pb::ModelType::Transcription as i32 {
+                        crate::probe::AUDIO_CONTENT_TYPE
+                    } else {
+                        "application/json"
+                    },
                     authorization: authorization.clone(),
                     config: HealthCheck {
                         url: String::new(),
@@ -719,6 +731,7 @@ impl RoutingTable {
                     name: d.name.clone(),
                     upstream: upstream_name.clone(),
                     upstream_model: d.upstream_model.as_str().into(),
+                    model_type: pb::ModelType::try_from(d.r#type).expect("validated type"),
                     endpoints: endpoints.clone(),
                     host: host.clone(),
                     authorization: authorization.clone(),
@@ -873,6 +886,7 @@ impl RoutingTable {
             let (pool, router) = &targets[target];
             let name: Arc<str> = name.into();
             Arc::new(Callable {
+                model_type: pool.models().next().expect("nonempty pool").model_type,
                 label: metrics.label_id(&name),
                 alias: alias.then(|| name.clone()),
                 router: router.clone(),
@@ -965,8 +979,8 @@ impl RoutingTable {
             keys,
             keys_by_id,
             playground_key,
+            models_json: models_json(listed.iter().map(|n| (n, names[n].model_type))),
             names,
-            models_json: models_json(listed.iter()),
             auth_mode,
             rejected: std::array::from_fn(|endpoint| metrics.handles("", "", endpoint, "")),
             runtime: runtime.clone(),
@@ -1311,7 +1325,8 @@ impl RoutingTable {
             Caller::Key(key) if !key.allow_all_models => models_json(
                 self.listed
                     .iter()
-                    .filter(|m| key.allowed_models.contains(m.as_ref())),
+                    .filter(|m| key.allowed_models.contains(m.as_ref()))
+                    .map(|m| (m, self.names[m].model_type)),
             ),
             _ => self.models_json.clone(),
         }
@@ -1375,25 +1390,15 @@ pub fn plain_http_uri(text: &str) -> Option<Uri> {
     plain.then_some(uri)
 }
 
-/// The model chat check: "1 + 1 = ?" with a small max_tokens, through the
-/// model's own default body and reasoning rules, as real traffic would be.
+/// Type-specific model probe through the same JSON body rules as real traffic.
 fn chat_check_body(d: &pb::Model, transform: Option<&Transform>) -> Bytes {
-    let max_tokens = match d.max_output_tokens {
-        0 => 16,
-        n => n.min(16),
-    };
-    let raw = Bytes::from(
-        serde_json::to_vec(&serde_json::json!({
-            "model": d.upstream_model,
-            "messages": [{"role": "user", "content": "1 + 1 = ?"}],
-            "max_tokens": max_tokens,
-            "stream": false,
-        }))
-        .expect("json serializes"),
-    );
+    let raw = crate::probe::body(d);
     // A rule that rejects even this request leaves the plain probe.
     transform
-        .and_then(|t| t.apply(raw.clone()).ok())
+        .and_then(|t| {
+            t.apply_endpoint(raw.clone(), crate::probe::endpoint(d.r#type))
+                .ok()
+        })
         .unwrap_or(raw)
 }
 
@@ -1431,11 +1436,11 @@ fn metrics_uri(base: &Uri, explicit: &str) -> Option<Uri> {
     root_uri(base, "/metrics")
 }
 
-fn models_json<'a>(models: impl Iterator<Item = &'a Box<str>>) -> Bytes {
+fn models_json<'a>(models: impl Iterator<Item = (&'a Box<str>, pb::ModelType)>) -> Bytes {
     let data: Vec<_> = models
-        .map(|model| {
+        .map(|(model, kind)| {
             serde_json::json!({
-                "id": model.as_ref(), "object": "model", "created": 0, "owned_by": "lumewarp",
+                "id": model.as_ref(), "object": "model", "created": 0, "owned_by": "lumewarp", "type": crate::endpoint::type_name(kind),
             })
         })
         .collect();
@@ -2219,6 +2224,7 @@ mod tests {
         s.models[0].price = Some(pb::Price {
             input_nano_usd_per_mtok: 150_000_000,
             output_nano_usd_per_mtok: 600_000_000,
+            nano_usd_per_audio_second: 0,
         });
         s.models[1].upstream = "p".into();
         s.routers = vec![router("paid", &["a"]), router("free", &["b"])];
@@ -2243,6 +2249,7 @@ mod tests {
         next.models[0].price = Some(pb::Price {
             input_nano_usd_per_mtok: 1,
             output_nano_usd_per_mtok: 2,
+            nano_usd_per_audio_second: 0,
         });
         let swapped = RoutingTable::compile(&next, AuthMode::Open, &runtime).unwrap();
         drop(routing_table);

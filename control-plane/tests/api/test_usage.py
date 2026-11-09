@@ -11,6 +11,7 @@ from lumewarp_control_plane.models import (
     ScopeType,
     TeamRole,
     TrafficKind,
+    UsageTotal,
 )
 from lumewarp_control_plane.usage import ingest
 from tests.api.helpers import ADMIN_AUTH, auth, usage_event, usage_total, user_with_token
@@ -121,14 +122,31 @@ async def test_monthly_team_totals_fast_path(client, committed) -> None:
     committed.add(
         usage_total(ScopeType.SERVICE_ACCOUNT, account.id, window_start=START, requests=99)
     )
+    await committed.flush()
+    total = await committed.get(UsageTotal, (ScopeType.TEAM, team.id, START))
+    total.audio_ms = 9876
     await committed.commit()
-    response = query(client, group_by="team", team_id=str(team.id))
+    from sqlalchemy import event
+
+    statements = []
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    engine = client.app.state.engine.sync_engine
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        response = query(client, group_by="team", team_id=str(team.id))
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    assert not any("usage_events" in statement for statement in statements)
     assert response.status_code == 200, response.text
     assert len(response.json()["items"]) == 1
     row = response.json()["items"][0]
     assert (row["team_id"], row["requests"], row["total_tokens"]) == (str(team.id), 7, 100)
     assert row["cost_nano_usd"] == 7000
     assert row["unknown_cost_count"] == 1
+    assert row["audio_ms"] == 9876
     events = query(client, group_by="team", team_id=str(team.id), requested="mock")
     assert events.json()["items"][0]["requests"] == 1
 

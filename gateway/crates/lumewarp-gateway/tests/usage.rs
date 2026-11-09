@@ -4,6 +4,8 @@
 //! upstream that controls every response frame.
 
 mod common;
+#[path = "common/model_types.rs"]
+mod model_types;
 #[path = "common/usage_cp.rs"]
 mod usage_cp;
 
@@ -65,6 +67,7 @@ const EMBEDDINGS_JSON: &[u8] = br#"{"object":"list","data":[{"object":"embedding
 const PRICE: Price = Price {
     input_nano_usd_per_mtok: 1_000_000_000,
     output_nano_usd_per_mtok: 2_000_000_000,
+    nano_usd_per_audio_second: 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -275,6 +278,7 @@ fn snapshot(upstream: SocketAddr) -> Snapshot {
         ..Default::default()
     };
     let model = |name: &str, upstream: &str, price: Option<Price>| Model {
+        r#type: 1,
         name: name.into(),
         upstream: upstream.into(),
         upstream_model: "actual".into(),
@@ -780,7 +784,22 @@ async fn cancelled_and_failed_streams_are_reported_once() {
 
 #[tokio::test]
 async fn non_stream_and_embeddings_usage() {
-    let (mut cp, mut upstream, gateway) = setup().await;
+    let mut upstream = Upstream::start().await;
+    let mut s = snapshot(upstream.addr);
+    let mut embedding = s.models[0].clone();
+    embedding.name = "embedding".into();
+    embedding.r#type = 2;
+    embedding.price.as_mut().unwrap().output_nano_usd_per_mtok = 0;
+    s.models.push(embedding);
+    s.api_keys[0]
+        .policy
+        .as_mut()
+        .unwrap()
+        .allowed_models
+        .push("embedding".into());
+    s.required_capabilities.push("model_types".into());
+    let mut cp = FakeCp::start(s).await;
+    let gateway = Gateway::start(cp.addr).await;
     // Split mid-object: the tee reassembles it.
     upstream.respond(
         200,
@@ -809,7 +828,11 @@ async fn non_stream_and_embeddings_usage() {
 
     upstream.respond(200, "application/json", &[EMBEDDINGS_JSON]);
     let response = gateway
-        .post("/v1/embeddings", KEY, r#"{"model":"public","input":"hi"}"#)
+        .post(
+            "/v1/embeddings",
+            KEY,
+            r#"{"model":"embedding","input":"hi"}"#,
+        )
         .await;
     assert_eq!(json(&bytes(response).await)["object"], "list");
     assert_eq!(upstream.received().await.path, "/v1/embeddings");
@@ -1122,6 +1145,10 @@ async fn compressed_streams_pass_through_unparsed() {
 /// `flaky` always fails its only member, the model on the dead upstream, and
 /// falls back to `d`, which is the live one.
 async fn catalog_setup() -> (FakeCp, Upstream, Gateway) {
+    catalog_setup_kind(1).await
+}
+
+async fn catalog_setup_kind(kind: i32) -> (FakeCp, Upstream, Gateway) {
     let upstream = Upstream::start().await;
     let mut snapshot = snapshot(upstream.addr);
     snapshot.aliases = vec![
@@ -1166,6 +1193,17 @@ async fn catalog_setup() -> (FakeCp, Upstream, Gateway) {
     ]
     .map(String::from)
     .to_vec();
+    for model in &mut snapshot.models {
+        model.r#type = kind;
+        if kind == 2 {
+            if let Some(price) = &mut model.price {
+                price.output_nano_usd_per_mtok = 0;
+            }
+        }
+    }
+    if kind != 1 {
+        snapshot.required_capabilities.push("model_types".into());
+    }
     let cp = FakeCp::start(snapshot).await;
     let gateway = Gateway::start(cp.addr).await;
     (cp, upstream, gateway)
@@ -1470,7 +1508,7 @@ async fn a_client_asking_for_usage_gets_that_event_rewritten_too() {
 
 #[tokio::test]
 async fn embeddings_with_model_after_data_are_rewritten() {
-    let (mut cp, upstream, gateway) = catalog_setup().await;
+    let (mut cp, upstream, gateway) = catalog_setup_kind(2).await;
     let at = EMBEDDINGS_JSON.len() / 2;
     upstream.respond(
         200,
@@ -1734,7 +1772,7 @@ async fn a_retry_decides_rewrite_and_encoding_per_attempt() {
 async fn a_response_above_max_body_is_rewritten_without_breaking() {
     const FRAME: usize = 1024 * 1024;
     const FRAMES: usize = 33;
-    let (mut cp, mut upstream, gateway) = catalog_setup().await;
+    let (mut cp, mut upstream, gateway) = catalog_setup_kind(2).await;
     let frames_tx = upstream.respond_live("application/json");
     let response = gateway
         .post("/v1/embeddings", KEY, r#"{"model":"to-model","input":"x"}"#)
@@ -1967,7 +2005,7 @@ async fn only_json_and_sse_media_types_are_rewritten() {
             "application/octet-stream",
             BINARY,
             non_stream,
-            "/v1/embeddings",
+            "/v1/chat/completions",
         ),
         ("text/plain", TEXT, non_stream, "/v1/chat/completions"),
         (
@@ -2015,7 +2053,7 @@ async fn only_json_and_sse_media_types_are_rewritten() {
         ],
         frames(&[BINARY]),
     );
-    let response = gateway.post("/v1/embeddings", KEY, non_stream).await;
+    let response = gateway.post("/v1/chat/completions", KEY, non_stream).await;
     assert_eq!(bytes(response).await, BINARY);
     cp.event().await;
     assert_eq!(

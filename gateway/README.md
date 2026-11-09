@@ -33,6 +33,7 @@ upstreams:
     base_url: http://127.0.0.1:9100/v1
 models:
   - name: mock-local
+    type: llm
     upstream: local
     upstream_model: mock
 routers:
@@ -164,7 +165,7 @@ increments. There is no disk spool: a gateway crash loses queued events, and a
 long control-plane outage eventually drops them. On shutdown the reporter
 flushes for up to 5 s.
 
-For streams the gateway injects `stream_options.include_usage: true` when the
+For chat/completions streams the gateway injects `stream_options.include_usage: true` when the
 upstream's `stream_usage_mode` is `include_usage` (the default) and the client
 did not ask for usage; the extra usage-only chunk is stripped before it reaches
 the client. `passthrough` disables the injection for upstreams that do not
@@ -178,7 +179,7 @@ rejected at every object level. The YAML is converted to a version-0 snapshot
 and validated exactly like a control-plane snapshot: names/ids are unique within
 each upstream, model, router, team and key list; references must resolve;
 key hashes must be unique. Environment-variable substitution inside arbitrary
-YAML strings is not implemented. Older files load unchanged.
+YAML strings is not implemented. Every model must explicitly declare its `type`.
 
 | Top-level field | Default | Meaning |
 | --- | --- | --- |
@@ -198,7 +199,7 @@ YAML strings is not implemented. Older files load unchanged.
 | `server.api_keys` | `[]` | Shorthand for team-less keys that may call every model: client bearer-key SHA-256 hashes, exactly 64 lowercase hexadecimal characters each. Duplicates collapse into one key. |
 | `server.shutdown_grace_ms` | `25000` | Maximum connection drain time after shutdown begins; must be greater than zero. |
 | `server.header_read_timeout_ms` | `30000` | HTTP request-header read timeout on both listeners; must be greater than zero. |
-| `server.body_read_timeout_ms` | `30000` | Total time allowed to collect a proxied request body, not an idle timeout; must be greater than zero. |
+| `server.body_read_timeout_ms` | `30000` | Total time allowed to collect the whole proxied upload, including multipart transcription uploads, not an idle timeout; must be greater than zero. Slow uploads may require increasing this value. |
 | `server.retry_budget_percent` | `20` | Process-wide retry allowance, `0..=20`; `0` disables retries. Each client request on a router **with a `retry` policy** funds this percentage of one retry, so retries stay at about this share of the traffic that may retry; routers without a retry policy neither fund nor touch the budget (no shared atomic on their request path). The token bucket holds about three retries (the cap is approximate under concurrent deposits) and restores that minimum after ten idle seconds. |
 
 **Auth mode.** If neither `server.api_keys` nor `keys` configures any key, the
@@ -274,18 +275,19 @@ rustls with WebPKI roots.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
+| `models[].type` | Required | `llm`, `embedding`, `transcription` or `decision`; aliases and routers inherit it, and every router member and fallback must share one type. |
 | `models[].name` | Required | Unique name across models, aliases and routers; callable directly, listed by `/v1/models`, and used in metrics. A direct call is one attempt, with no retry and no fallback. `unknown` is reserved. |
 | `models[].upstream` | Required | Name of an existing upstream. |
 | `models[].upstream_model` | Required | Model string substituted for the name the client called. |
-| `models[].price` | Absent | `{input_usd_per_mtok, output_usd_per_mtok}`: USD per one million tokens as decimals, e.g. `"0.15"` (quoted or plain). Parsed from the YAML text, never through floating point, and converted exactly to integer nano-USD; at most 9 fractional digits, no exponent or sign. Absent means the price is unknown (usage is metered, cost reported as unknown); explicit zeros mean free. |
-| `models[].max_output_tokens` | Absent | A request whose `max_tokens` or `max_completion_tokens` is larger gets a 400 (`max_output_tokens`) before reaching the upstream. Requires capability `model_limits`. |
+| `models[].price` | Absent | `{input_usd_per_mtok, output_usd_per_mtok, audio_usd_per_second}`: token rates are USD per one million tokens; audio is USD per second (transcription only), embedding output price must be zero. Prices are decimals, e.g. `"0.15"` (quoted or plain). Parsed from the YAML text, never through floating point, and converted exactly to integer nano-USD; at most 9 fractional digits, no exponent or sign. Absent means the price is unknown (usage is metered, cost reported as unknown); only an explicitly all-zero Price is free. For a non-all-zero Price, a reported unit whose corresponding rates are all zero has unknown cost (both input/output rates zero for tokens, or audio rate zero for duration). Transcription token rates of 0/0 with a nonzero audio rate do not make token usage free. |
+| `models[].max_output_tokens` | Absent | LLM-only: bounds chat `max_tokens` / `max_completion_tokens`, completions `max_tokens`, and responses `max_output_tokens`; larger values get a 400 (`max_output_tokens`) before reaching the upstream. Requires capability `model_limits`. |
 | `models[].default_body` | Empty | JSON object merged under every request body: the client's fields win, objects on both sides merge recursively. Must not set `model`, `stream`, `stream_options` or `reasoning_effort` (use `reasoning_effort.default_level`); at most 32 levels of nesting. Requires capability `default_body`. |
 | `models[].reasoning_effort` | Absent | `{mode, fragments, default_level}` for the OpenAI `reasoning_effort` field (levels `none`, `minimal`, `low`, `medium`, `high`, `xhigh`). `passthrough` forwards it unchecked, `strip` removes it, `mapped` replaces it with `fragments[level]` (e.g. `{chat_template_kwargs: {enable_thinking: false}}` for vLLM) and answers 400 for an unmapped level. `default_level` applies when the client sends none. Precedence: `default_body` < fragment < client. Requires capability `reasoning_effort`. |
-| `models[].chat_check` | Absent | Periodic model probe: `{interval_ms, timeout_ms, unhealthy_threshold, healthy_threshold}`. POSTs a non-streaming `"1 + 1 = ?"` chat completion (`max_tokens` is 16 or `max_output_tokens`, whichever is smaller) to `base_url` + `/chat/completions` with the upstream's token, through the model's `default_body` and `reasoning_effort` rules; 2xx is healthy. While unhealthy only this model is skipped, failing open when no candidate is healthy. Same timing rules and threshold defaults as `health_check`. Reported in `HealthReport.models`. Requires capability `model_chat_check`. |
+| `models[].chat_check` | Absent | Periodic model probe: `{interval_ms, timeout_ms, unhealthy_threshold, healthy_threshold}`. POSTs a chat completion for LLM, `input: ping` to `/embeddings`, one predicate question to `/decisions`, or a generated one-second silent WAV multipart upload to `/audio/transcriptions`, with the upstream's token and the model's JSON body rules; 2xx is healthy. While unhealthy only this model is skipped, failing open when no candidate is healthy. Same timing rules and threshold defaults as `health_check`. Reported in `HealthReport.models`. Requires capability `model_chat_check`. |
 
 A model with none of the last three settings is not parsed on the request path.
 Only top-level body keys are parsed; untouched values keep their exact bytes.
-Rejections count in `lumewarp_requests_rejected_total{model,reason}`.
+Rejections count in `lumewarp_requests_rejected_total{model,reason}`; calling a name on an endpoint of another type returns 400 and uses reason `model_type_mismatch`.
 
 ### Aliases
 
@@ -591,7 +593,8 @@ Label semantics:
   `upstream_model`. Unknown requested names use the fixed label `unknown`; other pre-routing rejections and local
   endpoints use `requested=""` / `model=""`. Arbitrary client names never become
   labels; they are kept only in the usage event.
-- `endpoint` is `chat_completions`, `completions`, `embeddings`, or `models`; local
+- `endpoint` is `chat_completions`, `completions`, `responses`, `embeddings`,
+  `audio_transcriptions`, `audio_translations`, `decisions`, `systemone`, or `models`; local
   health/admin/other paths use bounded `healthz`, `metrics`, or `other` labels.
 - `model` is the configured model name, also in `lumewarp_fallbacks_total`, where
   `router` is the router whose fallback was used, whatever name the client called.

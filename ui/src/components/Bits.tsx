@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 
-import type { Key } from "../api";
+import type { Key, Schemas } from "../api";
+import { typeLabel } from "../lib/modelType";
 import { Badge as ShadcnBadge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { HelpTip } from "./ui/help-tip";
@@ -16,6 +17,12 @@ export function KeyBadge({ k }: { k: Key }) {
 
 export function Badge({ children, tone = "muted" }: { children: ReactNode; tone?: Tone }) {
   return <ShadcnBadge variant={tone}>{children}</ShadcnBadge>;
+}
+
+/** A model's type; nothing for an entry without one (an empty router). */
+export function TypeBadge({ type }: { type: Schemas["ModelType"] | null | undefined }) {
+  if (!type) return <span className="text-muted-foreground">—</span>;
+  return <ShadcnBadge variant="muted">{typeLabel(type)}</ShadcnBadge>;
 }
 
 const SUSPENDED_REASONS: Record<string, string> = {

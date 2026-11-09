@@ -235,8 +235,8 @@ upstreams:
   - {{name: good-up, kind: vllm, base_url: 'http://{good}/v1', timeout_ms: 2000}}
   - {{name: bad-up, kind: vllm, base_url: 'http://{bad}/v1', timeout_ms: 2000}}
 models:
-  - {{name: good, upstream: good-up, upstream_model: actual-good}}
-  - {{name: bad, upstream: bad-up, upstream_model: actual-bad}}
+  - {{type: llm, name: good, upstream: good-up, upstream_model: actual-good}}
+  - {{type: llm, name: bad, upstream: bad-up, upstream_model: actual-bad}}
 routers:
   - {{name: pool, members: [{{model: bad}}], retry: {{max_attempts: 2}}, fallbacks: [good]}}
 aliases:
@@ -604,6 +604,7 @@ fn catalog(good: SocketAddr, held: SocketAddr, dead: SocketAddr) -> Snapshot {
         ..Default::default()
     };
     let model = |name: &str, upstream: &str, actual: &str| Model {
+        r#type: 1,
         name: name.into(),
         upstream: upstream.into(),
         upstream_model: actual.into(),

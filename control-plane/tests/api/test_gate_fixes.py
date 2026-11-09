@@ -49,6 +49,7 @@ def _model(client, *, upstream_id=None):
         name=f"dep-{suffix()}",
         upstream_id=upstream_id,
         upstream_model="m",
+        model_type="llm",
     )
     assert resp.status_code == 201, resp.text
     return resp.json()

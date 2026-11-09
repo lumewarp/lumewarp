@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -167,11 +168,15 @@ MAX_REPLY_CHARS = 200
 
 
 async def chat_check(
-    base_url: str, token: str | None, upstream_model: str, default_body: dict | None
+    base_url: str,
+    token: str | None,
+    upstream_model: str,
+    default_body: dict | None,
+    model_type: str = "llm",
 ) -> tuple[ProbeResult, str | None]:
-    """One "1 + 1 = ?" chat completion, as the gateway's periodic check sends it (the
-    default body below the probe's own fields). Returns the probe and the start of the
-    answer; an error never carries the response body.
+    """One type-specific probe matching the gateway's periodic check. JSON probes
+    place default body below their own fields; transcription uploads generated silence.
+    Returns the probe and a chat reply excerpt; errors never carry the response body.
     """
     url = f"{base_url.rstrip('/')}/chat/completions"
     body = {
@@ -181,10 +186,56 @@ async def chat_check(
         "max_tokens": 16,
         "stream": False,
     }
+    if model_type == "embedding":
+        url = f"{base_url.rstrip('/')}/embeddings"
+        body = {**(default_body or {}), "model": upstream_model, "input": "ping"}
+    elif model_type == "decision":
+        url = f"{base_url.rstrip('/')}/decisions"
+        body = {
+            **(default_body or {}),
+            "model": upstream_model,
+            "input": "ping",
+            "questions": [
+                {"type": "predicate", "name": "ok", "instructions": "Is the input a word?"}
+            ],
+        }
+    elif model_type == "transcription":
+        url = f"{base_url.rstrip('/')}/audio/transcriptions"
     started = time.monotonic()
     try:
         async with _client() as client:
-            status, raw = await _post(client, url, token, body)
+            if model_type == "transcription":
+                wav = struct.pack(
+                    "<4sI4s4sIHHIIHH4sI",
+                    b"RIFF",
+                    32036,
+                    b"WAVE",
+                    b"fmt ",
+                    16,
+                    1,
+                    1,
+                    16000,
+                    32000,
+                    2,
+                    16,
+                    b"data",
+                    32000,
+                ) + bytes(32000)
+                async with client.stream(
+                    "POST",
+                    url,
+                    headers=_headers(token),
+                    data={"model": upstream_model, "response_format": "json"},
+                    files={"file": ("probe.wav", wav, "audio/wav")},
+                ) as response:
+                    out = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        out += chunk
+                        if len(out) > MAX_BODY_BYTES:
+                            raise UpstreamCallFailed("response larger than 4 MiB")
+                    status, raw = response.status_code, bytes(out)
+            else:
+                status, raw = await _post(client, url, token, body)
     except (httpx.HTTPError, UpstreamCallFailed) as exc:
         message = _describe(exc) if isinstance(exc, httpx.HTTPError) else str(exc)
         return ProbeResult(url, None, _elapsed(started), False, message), None

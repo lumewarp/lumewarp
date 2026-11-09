@@ -508,9 +508,9 @@ export interface paths {
         put?: never;
         /**
          * Test Model
-         * @description Send one "1 + 1 = ?" chat completion now, from the control plane straight to the
-         *     upstream, as the form stands (saved or not), with the upstream's credential and the
-         *     default body. Reflects the control plane's network, not each gateway's.
+         * @description Probe the model's endpoint from the control plane with the form's current type
+         *     and settings (saved or not). Uses the upstream's credential and JSON defaults.
+         *     Reflects the control plane's network, not each gateway's.
          */
         post: operations["testModel"];
         delete?: never;
@@ -708,8 +708,11 @@ export interface paths {
          *
          *     The token is used once, never stored and never audited. With `server_id` the result is
          *     recorded as observed definitions of that server, under the same first-writer rules as a
-         *     gateway's `CatalogReport`; without it nothing is written. A server behind a WASM
-         *     upstream-auth plugin cannot be discovered here (the control plane does not run WASM).
+         *     gateway's `CatalogReport`; without it nothing is written. Nothing is recorded for a URL
+         *     other than the saved one, or when the server's configuration changed while the call was
+         *     in flight (`recorded` is false): a preview must not decide a review for a configuration
+         *     it did not observe. A server behind a WASM upstream-auth plugin cannot be discovered
+         *     here (the control plane does not run WASM).
          */
         post: operations["discoverMcp"];
         delete?: never;
@@ -1323,6 +1326,7 @@ export interface components {
         };
         /** AliasOut */
         AliasOut: {
+            model_type?: components["schemas"]["ModelType"] | null;
             /**
              * Id
              * Format: uuid
@@ -1394,6 +1398,7 @@ export interface components {
         };
         /** CatalogEntryOut */
         CatalogEntryOut: {
+            model_type?: components["schemas"]["ModelType"] | null;
             /**
              * Id
              * Format: uuid
@@ -1482,6 +1487,12 @@ export interface components {
             created_at: string;
             /** Compacted At */
             compacted_at: string | null;
+        };
+        /** EffectiveModelOut */
+        EffectiveModelOut: {
+            /** Name */
+            name: string;
+            model_type: components["schemas"]["ModelType"] | null;
         };
         /**
          * ErrorBody
@@ -1817,8 +1828,9 @@ export interface components {
          * @description One `tools/list`/`prompts/list` from the control plane, with a token used once.
          *
          *     Give `server_id` to record the result as observed definitions of that server (the same
-         *     rules as a gateway report). Without it nothing is stored. A server whose auth is a WASM
-         *     plugin cannot be discovered here.
+         *     rules as a gateway report). Without it nothing is stored, and nothing is stored either
+         *     for a URL other than the saved one or when the server changed while the call ran. A
+         *     server whose auth is a WASM plugin cannot be discovered here.
          */
         McpDiscoverIn: {
             /** Url */
@@ -1862,7 +1874,10 @@ export interface components {
              * @description The plan's per-server bound stopped the listing.
              */
             truncated: boolean;
-            /** Recorded */
+            /**
+             * Recorded
+             * @description Whether the result was recorded against the saved server. False means the states above are 'unrecorded'.
+             */
             recorded: boolean;
         };
         /** McpDiscoveredOut */
@@ -1876,7 +1891,7 @@ export interface components {
             definition_json: string;
             /**
              * State
-             * @description The state after recording; 'unrecorded' when no server_id was given.
+             * @description The state after recording; 'unrecorded' when nothing was recorded (no server_id, a URL other than the saved one, a configuration that changed meanwhile, or an item the database cannot store).
              * @enum {string}
              */
             state: "approved" | "pending" | "rejected" | "unrecorded";
@@ -2142,6 +2157,8 @@ export interface components {
         };
         /** MeTeamOut */
         MeTeamOut: {
+            /** Typed Models */
+            typed_models?: components["schemas"]["EffectiveModelOut"][];
             /**
              * Team Id
              * Format: uuid
@@ -2319,8 +2336,11 @@ export interface components {
             } | null;
             /** @description null = passthrough. */
             reasoning?: components["schemas"]["ReasoningIn"] | null;
-            /** @description Periodic '1 + 1 = ?' chat completion sent by every gateway through this model; while it fails the model gets no traffic. null = not probed (Test now still works). Every probe uses tokens. */
+            /** @description Periodic type-specific probe sent by every gateway through this model; while it fails the model gets no traffic. null = not probed (Test now still works). Probes may incur upstream charges. */
             chat_check?: components["schemas"]["ChatCheckIn"] | null;
+            model_type: components["schemas"]["ModelType"];
+            /** Price Nano Usd Per Audio Second */
+            price_nano_usd_per_audio_second?: number | null;
             /** Name */
             name: string;
             /**
@@ -2337,6 +2357,9 @@ export interface components {
         };
         /** ModelOut */
         ModelOut: {
+            model_type: components["schemas"]["ModelType"];
+            /** Price Nano Usd Per Audio Second */
+            price_nano_usd_per_audio_second: number | null;
             /**
              * Id
              * Format: uuid
@@ -2388,6 +2411,7 @@ export interface components {
          * @description The model form as it stands, saved or not.
          */
         ModelTestIn: {
+            model_type: components["schemas"]["ModelType"];
             /**
              * Upstream Id
              * Format: uuid
@@ -2415,6 +2439,11 @@ export interface components {
             reply: string | null;
         };
         /**
+         * ModelType
+         * @enum {string}
+         */
+        ModelType: "llm" | "embedding" | "transcription" | "decision";
+        /**
          * ModelUpdate
          * @description PATCH: omitted fields are unchanged; the limits, default_body and reasoning accept
          *     null to remove the setting.
@@ -2439,8 +2468,11 @@ export interface components {
             } | null;
             /** @description null = passthrough. */
             reasoning?: components["schemas"]["ReasoningIn"] | null;
-            /** @description Periodic '1 + 1 = ?' chat completion sent by every gateway through this model; while it fails the model gets no traffic. null = not probed (Test now still works). Every probe uses tokens. */
+            /** @description Periodic type-specific probe sent by every gateway through this model; while it fails the model gets no traffic. null = not probed (Test now still works). Probes may incur upstream charges. */
             chat_check?: components["schemas"]["ChatCheckIn"] | null;
+            model_type?: components["schemas"]["ModelType"] | null;
+            /** Price Nano Usd Per Audio Second */
+            price_nano_usd_per_audio_second?: number | null;
             /** Name */
             name?: string | null;
             /** Upstream Id */
@@ -3114,6 +3146,7 @@ export interface components {
         };
         /** RouterOut */
         RouterOut: {
+            model_type?: components["schemas"]["ModelType"] | null;
             /**
              * Id
              * Format: uuid
@@ -3787,11 +3820,19 @@ export interface components {
          *
          *     `error_count` and `total_duration_ms` describe how the group's requests ended
          *     (an error outcome, or a 4xx/5xx status that is not a client cancellation;
-         *     summed duration, so the mean is the sum over `requests`). The LLM tabs ignore them; the MCP and A2A tabs read them in
-         *     place of tokens and cost. The monthly totals fast path (LLM requests only)
-         *     reports both as 0.
+         *     summed duration, so the mean is the sum over `requests`). The LLM tabs
+         *     ignore them; the MCP and A2A tabs read them in place of tokens and cost. The
+         *     monthly totals fast path (LLM requests only) reports both as 0.
          */
         UsageRowOut: {
+            /** Endpoint */
+            endpoint?: string | null;
+            model_type?: components["schemas"]["ModelType"] | null;
+            /**
+             * Audio Ms
+             * @default 0
+             */
+            audio_ms: number;
             /** Date */
             date?: string | null;
             kind?: components["schemas"]["TrafficKind"] | null;
@@ -9811,6 +9852,8 @@ export interface operations {
                 service_account_id?: string | null;
                 key_id?: string | null;
                 kind?: components["schemas"]["TrafficKind"] | null;
+                endpoint?: string | null;
+                model_type?: components["schemas"]["ModelType"] | null;
                 target?: string | null;
                 method?: string | null;
                 tool?: string | null;

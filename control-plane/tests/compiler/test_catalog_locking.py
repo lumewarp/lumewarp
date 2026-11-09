@@ -248,7 +248,9 @@ async def test_create_model_and_delete_upstream_serialize(factory, monkeypatch, 
     authz = _authz()
 
     def create(session):
-        body = ModelCreate(name="fresh", upstream_id=upstream_id, upstream_model="x")
+        body = ModelCreate(
+            name="fresh", model_type="llm", upstream_id=upstream_id, upstream_model="x"
+        )
         return routing.create_model(body, authz, session, SETTINGS)
 
     def delete(session):
@@ -411,7 +413,9 @@ async def test_diff_after_rename_keep_old_alias_reuse_and_rollback(factory):
     # 3. The old name m is free again: reuse it for a different model.
     async with factory() as session:
         await routing.create_model(
-            ModelCreate(name="m", upstream_id=ids.upstream, upstream_model="other"),
+            ModelCreate(
+                name="m", model_type="llm", upstream_id=ids.upstream, upstream_model="other"
+            ),
             authz,
             session,
             SETTINGS,

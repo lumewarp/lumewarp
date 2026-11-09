@@ -171,6 +171,7 @@ def _model(stack, name: str, upstream_id: str, **settings) -> str:
             "name": name,
             "upstream_id": upstream_id,
             "upstream_model": "mock",
+            "model_type": "llm",
             "price_input_nano_usd_per_mtok": 1_000_000_000,
             "price_output_nano_usd_per_mtok": 2_000_000_000,
             **settings,

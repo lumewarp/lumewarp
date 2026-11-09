@@ -46,7 +46,13 @@ def _upstream(client, **body):
 def _model(client, upstream_id: str | None = None, **body) -> dict:
     if upstream_id is None:
         upstream_id = _upstream(client).json()["id"]
-    body = {"name": f"dep-{suffix()}", "upstream_id": upstream_id, "upstream_model": "m", **body}
+    body = {
+        "name": f"dep-{suffix()}",
+        "upstream_id": upstream_id,
+        "upstream_model": "m",
+        "model_type": "llm",
+        **body,
+    }
     resp = client.post("/api/v1/models", json=body, headers=H)
     assert resp.status_code == 201, resp.text
     return resp.json()

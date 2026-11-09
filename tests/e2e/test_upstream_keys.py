@@ -27,7 +27,7 @@ def test_sealed_upstream_key_reaches_the_upstream(stack):
     model = stack.ok(
         "POST",
         "/models",
-        json={"name": "sealed-a", "upstream_id": upstream["id"], "upstream_model": "echo"},
+        json={"name": "sealed-a", "upstream_id": upstream["id"], "upstream_model": "echo", "model_type": "llm"},
     )
     assert UPSTREAM_KEY not in str(stack.ok("GET", f"/upstreams/{upstream['id']}"))
     assert UPSTREAM_KEY not in stack.api("GET", "/audit").text

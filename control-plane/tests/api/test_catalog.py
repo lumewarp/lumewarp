@@ -44,6 +44,7 @@ def _model(client, name: str | None = None) -> dict:
         "name": name or _name("model"),
         "upstream_id": _upstream(client),
         "upstream_model": "real-name",
+        "model_type": "llm",
     }
     return _ok(client.post(f"{API}/models", json=body, headers=H))
 
@@ -105,7 +106,12 @@ def test_name_is_unique_across_kinds(client, taken_by, creating) -> None:
     else:
         _router(client, [model["id"]], name)
     if creating == "model":
-        body = {"name": name, "upstream_id": model["upstream_id"], "upstream_model": "m"}
+        body = {
+            "name": name,
+            "upstream_id": model["upstream_id"],
+            "upstream_model": "m",
+            "model_type": "llm",
+        }
         resp = client.post(f"{API}/models", json=body, headers=H)
     elif creating == "alias":
         resp = client.post(f"{API}/aliases", json={"name": name, "target": model["id"]}, headers=H)
@@ -148,7 +154,7 @@ async def test_catalog_reads_and_writes_need_their_actions(client, committed) ->
     # Names are for every caller (allowlist pickers); routing details are not.
     catalog = client.get(f"{API}/catalog", headers=plain)
     assert catalog.status_code == 200
-    assert set(catalog.json()["items"][0]) == {"id", "name", "kind"}
+    assert set(catalog.json()["items"][0]) == {"id", "name", "kind", "model_type"}
     for path in (
         f"{API}/aliases",
         f"{API}/aliases/{alias['id']}",
@@ -182,6 +188,7 @@ def test_model_body_rejects_weight(client) -> None:
         "name": _name(),
         "upstream_id": _upstream(client),
         "upstream_model": "m",
+        "model_type": "llm",
         "weight": 2,
     }
     assert client.post(f"{API}/models", json=body, headers=H).status_code == 422

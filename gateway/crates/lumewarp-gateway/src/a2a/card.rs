@@ -36,7 +36,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, Limited};
+use http_body_util::{BodyExt, Limited};
 use hyper::{
     header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, ETAG, IF_NONE_MATCH},
     Method, Request, Response, StatusCode, Uri,
@@ -413,7 +413,7 @@ async fn fetch(target: &A2aTarget, client: &UpstreamClient) -> Result<String, St
     let mut request = Request::builder()
         .method(Method::GET)
         .uri(target.card_url.clone())
-        .body(Full::new(Bytes::new()))
+        .body(crate::request_body::RequestBody::from(Bytes::new()))
         .map_err(|_| "invalid card request".to_string())?;
     // The review found this line missing: `headers` (Accept and the outbound
     // auth) was computed but the request never carried it.

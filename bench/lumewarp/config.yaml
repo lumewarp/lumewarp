@@ -24,6 +24,7 @@ models:
   - name: mock-model
     upstream: mock
     upstream_model: mock
+    type: llm
 
 routers:
   # Called name == upstream_model: the fast path, no response scanning.

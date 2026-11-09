@@ -512,7 +512,7 @@ async fn serve_api(
             .header(header::CONTENT_TYPE, "application/json")
             .body(full_body(routing_table.models_for(&caller)))
             .expect("static response parts are valid"),
-        (&Method::POST, "/v1/chat/completions" | "/v1/completions" | "/v1/embeddings") => {
+        (&Method::POST, _) if endpoint < crate::endpoint::ENDPOINTS.len() => {
             proxy::forward(
                 routing_table,
                 client,

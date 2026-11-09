@@ -444,7 +444,7 @@ async def seed_usage(url: str) -> None:
     api = Api()
     upstream = api.call("POST", "/upstreams", {"name": "use-up", "kind": "vllm", "base_url": "http://127.0.0.1:9/v1"})
     model = {
-        name: api.call("POST", "/models", {"name": name, "upstream_id": upstream["id"], "upstream_model": up_model})
+        name: api.call("POST", "/models", {"name": name, "upstream_id": upstream["id"], "upstream_model": up_model, "model_type": "llm"})
         for name, up_model in [("use/a", "Qwen/UseA"), ("use/b", "Qwen/UseA"), ("use/c", "Other/UseC")]
     }
     # Existed once: usage keeps its names, the catalog does not.

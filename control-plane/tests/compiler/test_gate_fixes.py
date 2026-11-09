@@ -125,7 +125,7 @@ def _valid_snapshot() -> pb.Snapshot:
     return pb.Snapshot(
         scope="s",
         upstreams=[pb.Upstream(name="u", kind=pb.UPSTREAM_KIND_VLLM, base_url="http://u/v1")],
-        models=[pb.Model(name="d", upstream="u", upstream_model="m")],
+        models=[pb.Model(name="d", upstream="u", upstream_model="m", type=pb.MODEL_TYPE_LLM)],
         routers=[
             pb.Router(
                 name="a",

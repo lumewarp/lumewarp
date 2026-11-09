@@ -61,6 +61,7 @@ from lumewarp_control_plane.api.schemas import (
     UpstreamTestIn,
     UpstreamTestOut,
     UpstreamUpdate,
+    validate_model_settings,
 )
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.compiler.plugins import (
@@ -74,6 +75,7 @@ from lumewarp_control_plane.compiler.plugins import (
     validate_plugin_params,
 )
 from lumewarp_control_plane.errors import ApiError, not_found
+from lumewarp_control_plane.model_types import catalog_types
 from lumewarp_control_plane.models import (
     Alias,
     CatalogKind,
@@ -315,6 +317,18 @@ async def _validate_spec(session: AsyncSession, spec: RouterSpec) -> None:
             "fallback_model_ids", "fallbacks need a retry policy with at least 2 attempts"
         )
     await _existing_models(session, spec.fallback_model_ids, "fallback_model_ids")
+    all_ids = (
+        member_ids
+        + spec.fallback_model_ids
+        + [m.model_id for s in spec.traffic_split for m in s.members]
+    )
+    kinds = set(
+        (await session.scalars(select(Model.model_type).where(Model.name_id.in_(all_ids)))).all()
+    )
+    if len(kinds) > 1:
+        raise validation_error(
+            "members", "router members, split members and fallbacks must share one model_type"
+        )
 
 
 async def _validate_strategy(
@@ -451,8 +465,10 @@ async def _routers_out(session: AsyncSession, scope: str, rows: list[Router]) ->
     problems = {
         row.id: _router_out_problems(registry, row, members[row.id], splits[row.id]) for row in rows
     }
+    types = await catalog_types(session)
     return [
         RouterOut(
+            model_type=types.get(row.id),
             id=row.id,
             name=row.name,
             strategy=row.strategy,
@@ -718,8 +734,13 @@ async def list_catalog(
     await authz.require(Action.CATALOG_READ)
     stmt = select(CatalogName).order_by(CatalogName.id)
     rows, next_cursor = await uuid_page(session, stmt, CatalogName.id, limit, cursor)
+    types = await catalog_types(session)
     return Page[CatalogEntryOut](
-        items=[CatalogEntryOut.model_validate(row) for row in rows], next_cursor=next_cursor
+        items=[
+            CatalogEntryOut.model_validate(row).model_copy(update={"model_type": types.get(row.id)})
+            for row in rows
+        ],
+        next_cursor=next_cursor,
     )
 
 
@@ -766,6 +787,8 @@ async def create_model(
             name_id=name.id,
             upstream_id=upstream.id,
             upstream_model=body.upstream_model,
+            model_type=body.model_type,
+            price_nano_usd_per_audio_second=body.price_nano_usd_per_audio_second,
             price_input_nano_usd_per_mtok=body.price_input_nano_usd_per_mtok,
             price_output_nano_usd_per_mtok=body.price_output_nano_usd_per_mtok,
         )
@@ -779,7 +802,7 @@ async def create_model(
             resource_type="model",
             resource_id=row.id,
             principal=authz.principal,
-            details={"name": row.name, "upstream": upstream.name},
+            details={"name": row.name, "upstream": upstream.name, "model_type": row.model_type},
         )
         await enqueue_recompile(session, settings, "api.model.create")
     return (await _models_out(session, settings, [row]))[0]
@@ -804,9 +827,9 @@ async def get_model(
 async def test_model(
     body: ModelTestIn, authz: Authz, session: SessionDep, settings: SettingsDep
 ) -> ModelTestOut:
-    """Send one "1 + 1 = ?" chat completion now, from the control plane straight to the
-    upstream, as the form stands (saved or not), with the upstream's credential and the
-    default body. Reflects the control plane's network, not each gateway's.
+    """Probe the model's endpoint from the control plane with the form's current type
+    and settings (saved or not). Uses the upstream's credential and JSON defaults.
+    Reflects the control plane's network, not each gateway's.
     """
     await authz.require(Action.ROUTING_MANAGE)
     upstream = await session.get(Upstream, body.upstream_id)
@@ -822,7 +845,7 @@ async def test_model(
     elif upstream.api_key_ref:
         credential = "env" if token else "env_unset"
     probe, reply = await upstream_client.chat_check(
-        upstream.base_url, token, body.upstream_model, body.default_body
+        upstream.base_url, token, body.upstream_model, body.default_body, body.model_type
     )
     return ModelTestOut(credential=credential, probe=ProbeOut(**vars(probe)), reply=reply)
 
@@ -840,12 +863,18 @@ async def update_model(
     settings: SettingsDep,
 ) -> ModelOut:
     await authz.require(Action.ROUTING_MANAGE)
-    _non_null(body, "name", "upstream_id", "upstream_model")
+    _non_null(body, "name", "upstream_id", "upstream_model", "model_type")
     async with mutation(session):
         await lock_scope(session, settings)
         row = await session.get(Model, model_id)
         if row is None:
             raise not_found("model not found")
+        if body.model_type is not None and body.model_type != row.model_type:
+            for edge in (RouterMember, RouterSplitMember, RouterFallback):
+                if await session.scalar(
+                    select(edge.model_id).where(edge.model_id == row.id).limit(1)
+                ):
+                    raise ApiError(409, "model_type_in_use", "model type is in use by a router")
         renaming = body.name is not None and body.name != row.name
         if body.keep_old_name_as_alias and not renaming:
             raise validation_error("keep_old_name_as_alias", "needs a new name")
@@ -856,6 +885,12 @@ async def update_model(
             row.upstream_id = upstream.id
         if body.upstream_model is not None:
             row.upstream_model = body.upstream_model
+        # Finish all lookups before changing type-dependent fields: a query could
+        # otherwise autoflush a temporarily inconsistent state during a PATCH.
+        if body.model_type is not None:
+            row.model_type = body.model_type
+        if "price_nano_usd_per_audio_second" in body.model_fields_set:
+            row.price_nano_usd_per_audio_second = body.price_nano_usd_per_audio_second
         price_in = (
             body.price_input_nano_usd_per_mtok
             if "price_input_nano_usd_per_mtok" in body.model_fields_set
@@ -866,14 +901,13 @@ async def update_model(
             if "price_output_nano_usd_per_mtok" in body.model_fields_set
             else row.price_output_nano_usd_per_mtok
         )
-        if (price_in is None) != (price_out is None):
-            raise validation_error(
-                "price_input_nano_usd_per_mtok",
-                "price input and output must both be set or both be null",
-            )
         row.price_input_nano_usd_per_mtok = price_in
         row.price_output_nano_usd_per_mtok = price_out
         _apply_model_settings(row, body, create=False)
+        try:
+            validate_model_settings(row)
+        except ValueError as exc:
+            raise validation_error("model_type", str(exc)) from None
         if renaming:
             old_name = await _rename(session, row.id, body.name)
             row.updated_at = func.now()
@@ -966,6 +1000,12 @@ async def _alias_target(session: AsyncSession, target: uuid.UUID) -> CatalogKind
     return kind
 
 
+async def _alias_out(session: AsyncSession, row: Alias, types=None) -> AliasOut:
+    item = AliasOut.model_validate(row)
+    item.model_type = (await catalog_types(session) if types is None else types).get(row.id)
+    return item
+
+
 @router.get("/aliases", response_model=Page[AliasOut], operation_id="listAliases")
 async def list_aliases(
     authz: Authz,
@@ -976,8 +1016,9 @@ async def list_aliases(
     await authz.require(Action.ROUTING_READ)
     stmt = select(Alias).order_by(Alias.name_id)
     rows, next_cursor = await uuid_page(session, stmt, Alias.name_id, limit, cursor)
+    types = await catalog_types(session)
     return Page[AliasOut](
-        items=[AliasOut.model_validate(row) for row in rows], next_cursor=next_cursor
+        items=[await _alias_out(session, row, types) for row in rows], next_cursor=next_cursor
     )
 
 
@@ -1011,7 +1052,7 @@ async def create_alias(
             details={"name": row.name, "target": body.target},
         )
         await enqueue_recompile(session, settings, "api.alias.create")
-    return AliasOut.model_validate(row)
+    return await _alias_out(session, row)
 
 
 @router.get("/aliases/{alias_id}", response_model=AliasOut, operation_id="getAlias")
@@ -1020,7 +1061,7 @@ async def get_alias(alias_id: uuid.UUID, authz: Authz, session: SessionDep) -> A
     row = await session.get(Alias, alias_id)
     if row is None:
         raise not_found("alias not found")
-    return AliasOut.model_validate(row)
+    return await _alias_out(session, row)
 
 
 @router.patch("/aliases/{alias_id}", response_model=AliasOut, operation_id="updateAlias")
@@ -1064,7 +1105,7 @@ async def update_alias(
             details={"name": row.name, "changes": body.model_dump(exclude_unset=True, mode="json")},
         )
         await enqueue_recompile(session, settings, "api.alias.update")
-    return AliasOut.model_validate(row)
+    return await _alias_out(session, row)
 
 
 @router.delete(

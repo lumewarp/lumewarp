@@ -229,7 +229,13 @@ async def test_routing_checks(session: AsyncSession) -> None:
     await session.flush()
     await _fails(
         session,
-        Model(name="d1", upstream_id=up.id, upstream_model="m", price_input_nano_usd_per_mtok=1),
+        Model(
+            name="d1",
+            model_type="llm",
+            upstream_id=up.id,
+            upstream_model="m",
+            price_input_nano_usd_per_mtok=1,
+        ),
     )
     await _fails(
         session, Upstream(name="u2", kind=UpstreamKind.OPENAI, base_url="x", api_key_ref="$(rm)")

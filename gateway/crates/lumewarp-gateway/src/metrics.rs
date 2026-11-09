@@ -32,15 +32,7 @@ use crate::{
     runtime::InFlightRegistry,
 };
 
-pub const API_ENDPOINTS: [&str; 7] = [
-    "chat_completions",
-    "completions",
-    "embeddings",
-    "models",
-    "healthz",
-    "metrics",
-    "other",
-];
+pub use crate::endpoint::{endpoint_index, API_ENDPOINTS};
 const STATUSES: [&str; 15] = [
     "200", "400", "401", "404", "408", "413", "429", "500", "502", "503", "504", "other", "204",
     "499", "403",
@@ -286,18 +278,6 @@ pub enum UpstreamError {
     Timeout,
     Stream,
     Protocol,
-}
-
-pub fn endpoint_index(path: &str) -> usize {
-    match path {
-        "/v1/chat/completions" => 0,
-        "/v1/completions" => 1,
-        "/v1/embeddings" => 2,
-        "/v1/models" => 3,
-        "/healthz" => 4,
-        "/metrics" => 5,
-        _ => 6,
-    }
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -1578,7 +1558,7 @@ pub(crate) mod tests {
 upstreams:
   - {name: u, kind: vllm, base_url: 'http://localhost:8123/v1'}
 models:
-  - {name: d, upstream: u, upstream_model: actual}
+  - {type: llm, name: d, upstream: u, upstream_model: actual}
 routers:
   - {name: public, members: [{model: d}]}
 "#,
