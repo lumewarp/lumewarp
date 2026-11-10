@@ -80,6 +80,8 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - name: Build the example and test WASM plugins
         run: bash plugins/build.sh --tests
+      - name: Build the MCP/A2A mock the MCP tests spawn
+        run: cargo build --manifest-path ../bench/mock-upstream/Cargo.toml --bin mcp-a2a-mock
       - run: cargo test
       - name: Built-in plugin manifest matches the control plane's copy
         run: |
@@ -175,6 +177,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          # The version comes from packageManager, which lives in ui/, not the root.
+          package_json_file: ui/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 24

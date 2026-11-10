@@ -212,10 +212,12 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid RUN_ID: $RUN_ID"
 
 REQUEST_BODY='{"model":"mock","messages":[{"role":"user","content":"benchmark"}],"max_tokens":16,"temperature":0}'
-EMBED_BODY='{"model":"mock","input":"benchmark"}'
+EMBED_BODY='{"model":"mock-embedding","input":"benchmark"}'
 MODEL="mock"
-# Routes to the same pool as `mock`; only the called name differs from upstream_model.
-REWRITE_MODEL="mock-renamed"
+# /v1/embeddings needs a model of type embedding (bench/lumewarp/config.yaml).
+EMBED_MODEL="mock-embedding"
+# `<model>-renamed` routes to the same pool as `<model>`; only the called name
+# differs from upstream_model, so the response `model` is rewritten.
 
 # --------------------------------------------------------------------------- #
 # Process-tree helpers (LiteLLM forks workers, uvx wraps the real server)
@@ -704,9 +706,20 @@ run_load() {
 }
 
 # The model a target is called with; the upstream always sees `mock`.
+# The model a target is called with, for a body that names `base` (default MODEL).
 target_model() {
+  local base="${2:-$MODEL}"
   if [[ "$1" == "lumewarp-rewrite" ]]; then
-    printf '%s' "$REWRITE_MODEL"
+    printf '%s' "$base-renamed"
+  else
+    printf '%s' "$base"
+  fi
+}
+
+# The bench model `body` names: EMBED_MODEL or MODEL.
+body_model() {
+  if [[ "$1" == *"\"model\":\"$EMBED_MODEL\""* ]]; then
+    printf '%s' "$EMBED_MODEL"
   else
     printf '%s' "$MODEL"
   fi
@@ -714,9 +727,10 @@ target_model() {
 
 # `body` with the model a target is called with.
 body_for() {
-  local target="$1" body="$2" old new
-  old="\"model\":\"$MODEL\""
-  new="\"model\":\"$(target_model "$target")\""
+  local target="$1" body="$2" base old new
+  base="$(body_model "$body")"
+  old="\"model\":\"$base\""
+  new="\"model\":\"$(target_model "$target" "$base")\""
   printf '%s' "${body/"$old"/"$new"}"
 }
 
@@ -857,7 +871,7 @@ verify_rewrite_paths() {
   headers="$RUN_DIR/logs/verify.headers"
   out="$RUN_DIR/logs/verify.body"
   for target in lumewarp lumewarp-rewrite; do
-    expected="$(target_model "$target")"
+    expected="$(target_model "$target" "$(body_model "$body")")"
     curl -fsS -m 30 -D "$headers" -o "$out" -H 'content-type: application/json' \
       ${auth_args[@]+"${auth_args[@]}"} \
       -d "$(body_for "$target" "$body")" \

@@ -25,6 +25,12 @@ models:
     upstream: mock
     upstream_model: mock
     type: llm
+  # /v1/embeddings needs a model of type embedding; a call on `mock` is 400
+  # model_type_mismatch.
+  - name: mock-embedding-model
+    upstream: mock
+    upstream_model: mock-embedding
+    type: embedding
 
 routers:
   # Called name == upstream_model: the fast path, no response scanning.
@@ -36,3 +42,10 @@ routers:
   - name: mock-renamed
     members:
       - {model: mock-model}
+  # The embedding pool under the same two kinds of name.
+  - name: mock-embedding
+    members:
+      - {model: mock-embedding-model}
+  - name: mock-embedding-renamed
+    members:
+      - {model: mock-embedding-model}

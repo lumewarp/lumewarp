@@ -142,7 +142,8 @@ measure the scanner:
 - `BENCH_EMBED_BYTES=<n>` starts the mock with `--large-embedding-bytes` and adds a
   non-stream `POST /v1/embeddings` scenario (`EMBED_RATES`, default 50 RPS) with a
   response of at least `n` bytes, `model` after `data`, so the scanner reads all of
-  it. LiteLLM is left out of this one. Keep `n` at or below 4 MiB to include usage
+  it. It calls `mock-embedding` (and `mock-embedding-renamed` on the rewrite path),
+  the bench's `embedding` model. LiteLLM is left out of this one. Keep `n` at or below 4 MiB to include usage
   parsing as well: larger bodies skip it (`MAX_JSON_CAPTURE`, reported INVALID).
 - `BENCH_LITELLM=0` skips LiteLLM, for runs that only compare the gateway's two
   paths. A6 then reports a missing LiteLLM result.
@@ -300,7 +301,7 @@ bench/scripts/run-locust.sh --help             # all overrides
   listener never takes the default 9464.
 - **Workload** (`LOCUST_WEIGHTS`, defaults): chat non-stream 55, chat stream 25
   (half with `stream_options.include_usage`, `STREAM_USAGE_SHARE`), completions
-  5, embeddings 10 (two inputs), models 5, plus negative 2 on the gateways only:
+  5, embeddings 10 (two inputs, on `mock-embedding`, `LW_EMBEDDING_MODEL`), models 5, plus negative 2 on the gateways only:
   unknown model and, with `BENCH_AUTH=1`, a bad key. Negatives are reported as
   `neg_*` and pass on any 4xx; they never count as failures, but a negative the
   gateway accepts is flagged. `LW_MAX_TOKENS` (16) sets the requested output

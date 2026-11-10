@@ -8,6 +8,8 @@ so the driver does not have to template this file:
   LW_TARGET            direct | lumewarp | litellm (labels only; default direct)
   LW_MODEL             model sent in every positive request (default mock)
   LW_ACCEPT_MODELS     comma-separated accepted response models (default LW_MODEL)
+  LW_EMBEDDING_MODEL   model sent in embeddings requests, an `embedding` model on
+                       Lumewarp (default mock-embedding)
   LW_MAX_TOKENS        output token limit (default 16)
   LW_API_KEYS          comma-separated bearer keys; user i sends key i mod N.
                        Empty = no Authorization header.
@@ -122,6 +124,7 @@ def _env_flag(name: str) -> bool:
 
 TARGET = os.environ.get("LW_TARGET", "direct")
 MODEL = os.environ.get("LW_MODEL", "mock")
+EMBEDDING_MODEL = os.environ.get("LW_EMBEDDING_MODEL", "mock-embedding")
 ACCEPT_MODELS = frozenset(m.strip() for m in os.environ.get("LW_ACCEPT_MODELS", MODEL).split(",") if m.strip())
 MAX_TOKENS = int(os.environ.get("LW_MAX_TOKENS", "16"))
 if not ACCEPT_MODELS or MAX_TOKENS <= 0:
@@ -147,7 +150,7 @@ STREAM_BODY = {**CHAT_BODY, "stream": True}
 STREAM_USAGE_BODY = {**STREAM_BODY, "stream_options": {"include_usage": True}}
 COMPLETIONS_BODY = {"model": MODEL, "prompt": "benchmark", "max_tokens": MAX_TOKENS, "temperature": 0}
 EMBEDDINGS_INPUT = ["benchmark one", "benchmark two"]
-EMBEDDINGS_BODY = {"model": MODEL, "input": EMBEDDINGS_INPUT}
+EMBEDDINGS_BODY = {"model": EMBEDDING_MODEL, "input": EMBEDDINGS_INPUT}
 UNKNOWN_MODEL_BODY = {**CHAT_BODY, "model": "lumewarp-bench-no-such-model"}
 
 
@@ -478,7 +481,7 @@ def _build_locust() -> None:
                 "/v1/embeddings",
                 "embeddings",
                 EMBEDDINGS_BODY,
-                lambda b: check_embeddings(b, ACCEPT_MODELS, len(EMBEDDINGS_INPUT)),
+                lambda b: check_embeddings(b, EMBEDDING_MODEL, len(EMBEDDINGS_INPUT)),
             )
 
         def models(self) -> None:

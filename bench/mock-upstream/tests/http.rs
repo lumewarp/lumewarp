@@ -441,11 +441,11 @@ async fn large_embedding_body_has_model_after_data() {
             .json(&json!({"model": model, "input": "x"}))
             .send()
     };
-    let text = post("mock").await.unwrap().text().await.unwrap();
+    let text = post("mock-embedding").await.unwrap().text().await.unwrap();
     assert!(text.len() >= SIZE, "{}", text.len());
     assert!(text.find("\"data\"").unwrap() < text.find("\"model\"").unwrap());
     let body: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(body["model"], "mock");
+    assert_eq!(body["model"], "mock-embedding");
     assert_eq!(body["usage"]["prompt_tokens"], 8);
     assert_eq!(body["data"][0]["embedding"].as_array().unwrap().len(), 1536);
     // Any other model keeps the small response.

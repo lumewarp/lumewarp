@@ -19,6 +19,11 @@ model_list:
       model: openai/mock
       api_base: http://127.0.0.1:9000/v1
       api_key: sk-mock
+  - model_name: mock-embedding
+    litellm_params:
+      model: openai/mock-embedding
+      api_base: http://127.0.0.1:9000/v1
+      api_key: sk-mock
 
 litellm_settings:
   num_retries: 0

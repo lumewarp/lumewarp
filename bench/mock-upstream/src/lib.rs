@@ -65,7 +65,7 @@ pub struct Options {
     /// Initial `vllm:kv_cache_usage_perc` (0..1).
     #[arg(long, default_value_t = 0.0)]
     pub kv_cache_usage: f64,
-    /// Answer embeddings for model `mock` with a shared body of at least this
+    /// Answer embeddings for model `mock-embedding` with a shared body of at least this
     /// many bytes, `model` after `data`; zero keeps the small response.
     #[arg(long, default_value_t = 0)]
     pub large_embedding_bytes: usize,
@@ -260,7 +260,7 @@ fn large_embedding(size: usize) -> Bytes {
         ));
         index += 1;
     }
-    body.push_str(r#"],"model":"mock","usage":{"prompt_tokens":8,"total_tokens":8}}"#);
+    body.push_str(r#"],"model":"mock-embedding","usage":{"prompt_tokens":8,"total_tokens":8}}"#);
     Bytes::from(body)
 }
 
@@ -470,7 +470,7 @@ impl App {
                 Value::Array(ref values) => values.len(),
                 _ => return error(StatusCode::BAD_REQUEST, "input must be a string or array"),
             };
-            if let Some(large) = self.large_embedding.as_ref().filter(|_| model == "mock") {
+            if let Some(large) = self.large_embedding.as_ref().filter(|_| model == "mock-embedding") {
                 return response(StatusCode::OK, "application/json", large.clone());
             }
             let data: Vec<_> = (0..count)
