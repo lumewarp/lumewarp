@@ -117,7 +117,7 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
     "gateway_token.revoke": {"gateway_id": None, "name": None},
     "installation_admin.assign": {"user_id": None, "role": None},
     "installation_admin.bootstrap": {"user_id": None, "role": None},
-    "installation_admin.remove": {"user_id": None, "role": None},
+    "installation_admin.remove": {"user_id": None, "role": None, "suspended_keys": None},
     "installation_admin.revoke_tokens": {"user_id": None, "revoked": None},
     "installation_admin.transfer": {
         "previous_user_id": None,
@@ -204,7 +204,7 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
         },
     },
     "org.admin.assign": {"org_id": None, "user_id": None},
-    "org.admin.remove": {"org_id": None, "user_id": None},
+    "org.admin.remove": {"org_id": None, "user_id": None, "suspended_keys": None},
     "org.archive": {"name": None},
     "org.create": {"name": None},
     "org.update": {"name": None, "policy_changed": None, "changes": _POLICY_CHANGES},

@@ -46,6 +46,7 @@ from lumewarp_control_plane.models import (
     A2aAgent,
     ApiKey,
     CatalogName,
+    InheritedFrom,
     InstallationRole,
     KeyLifecycle,
     KeyOwnerKind,
@@ -116,7 +117,14 @@ async def _my_teams(
     user_id: uuid.UUID,
     *,
     installation_admin: bool,
+    admin_org_ids: set[uuid.UUID],
 ) -> list[MeTeamOut]:
+    """Direct memberships plus the teams the caller administers by inheritance.
+
+    An installation admin inherits every live team, an org admin the live teams of
+    `admin_org_ids`; both may own keys there (`keys.owners`), so they are listed with
+    `inherited_from` and role `admin`.
+    """
     rows: list[tuple[Team, TeamRole, TeamMember | None]]
     if authz.authorizer.manages_grants:
         result = await session.execute(
@@ -153,7 +161,32 @@ async def _my_teams(
             for team in teams
             if team.id in members or team.id in admins
         ]
-    return await _team_details(session, user_id, rows, installation_admin=installation_admin)
+    direct = {team.id for team, _, _ in rows}
+    if installation_admin or admin_org_ids:
+        stmt = select(Team).where(Team.deleted_at.is_(None))
+        if not installation_admin:
+            stmt = stmt.where(Team.org_id.in_(admin_org_ids))
+        source = InheritedFrom.INSTALLATION if installation_admin else InheritedFrom.ORG
+        inherited = {team.id: (team, source) for team in await session.scalars(stmt)}
+    else:
+        inherited = {}
+    rows = [
+        (team, TeamRole.ADMIN if team.id in inherited else role, member)
+        for team, role, member in rows
+    ] + [
+        (team, TeamRole.ADMIN, None)
+        for team_id, (team, _) in inherited.items()
+        if team_id not in direct
+    ]
+    rows.sort(key=lambda row: (row[0].name, row[0].id))
+    return await _team_details(
+        session,
+        user_id,
+        rows,
+        installation_admin=installation_admin,
+        inherited={team_id: source for team_id, (_, source) in inherited.items()},
+        direct=direct,
+    )
 
 
 async def _team_details(
@@ -162,6 +195,8 @@ async def _team_details(
     rows: list[tuple[Team, TeamRole, TeamMember | None]],
     *,
     installation_admin: bool,
+    inherited: dict[uuid.UUID, InheritedFrom] | None = None,
+    direct: set[uuid.UUID] | None = None,
 ) -> list[MeTeamOut]:
     """Enrich memberships with what a key of this member could do in each team.
 
@@ -198,9 +233,9 @@ async def _team_details(
             select(Team.id, Team.org_id).where(Team.org_id.in_(org_ids))
         )
     }
-    member_ids = [
-        member_scope_id(team.id, user_id) for team, _, member in rows if member is not None
-    ]
+    # Every team's member scope: inherited admins and external-backend members have no local
+    # membership row, yet their keys compile with the same uuid5 scope id.
+    member_ids = [member_scope_id(team.id, user_id) for team, _, _ in rows]
     scope_filters = [
         and_(UsageTotal.scope_type == ScopeType.TEAM, UsageTotal.scope_id.in_(org_team_ids))
     ]
@@ -287,6 +322,8 @@ async def _team_details(
                 team_id=team.id,
                 team_name=team.name,
                 role=role,
+                inherited_from=(inherited or {}).get(team.id),
+                direct=direct is None or team.id in direct,
                 models=catalog
                 if effective_limits.models is None
                 else sorted(effective_limits.models),
@@ -408,15 +445,11 @@ async def get_current_user(request: Request, authz: Authz, session: SessionDep) 
         raise not_found("user not found")
     role = await authz.installation_role()
     unavailable = False
-    try:
-        teams = await _my_teams(authz, session, user.id, installation_admin=role is not None)
-    except AuthzUnavailable:
-        teams = []
-        unavailable = True
     admin_orgs: list[MeOrgOut] = []
+    administered: set[uuid.UUID] = set()
     try:
-        # Direct org-admin grants only. `RequestAuthz` applies the team inheritance from
-        # them; `/users/me` never mixes those teams into the direct-membership list.
+        # Direct org-admin grants. `RequestAuthz` applies the team inheritance from them,
+        # and `_my_teams` lists those teams with `inherited_from`.
         orgs = await live_orgs(session)
         administered = (
             {org.id for org in orgs}
@@ -425,6 +458,17 @@ async def get_current_user(request: Request, authz: Authz, session: SessionDep) 
         )
         admin_orgs = [MeOrgOut(id=org.id, name=org.name) for org in orgs if org.id in administered]
     except AuthzUnavailable:
+        unavailable = True
+    try:
+        teams = await _my_teams(
+            authz,
+            session,
+            user.id,
+            installation_admin=role is not None,
+            admin_org_ids=administered,
+        )
+    except AuthzUnavailable:
+        teams = []
         unavailable = True
     return MeOut(
         kind=principal.kind.value,

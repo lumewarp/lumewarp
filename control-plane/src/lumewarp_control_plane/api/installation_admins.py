@@ -16,11 +16,16 @@ from sqlalchemy import select
 from lumewarp_control_plane import audit, installation
 from lumewarp_control_plane.api.common import (
     LimitDep,
+    MetricsDep,
     SessionDep,
+    SettingsDep,
     conflict,
+    enqueue_recompile,
+    lock_scope,
     mutation,
     parse_uuid_cursor,
     require_signed_in,
+    suspend_ineligible_user_keys,
     validation_error,
 )
 from lumewarp_control_plane.api.schemas import (
@@ -137,10 +142,18 @@ async def delete_installation_admin(
     user_id: uuid.UUID,
     authz: Authz,
     session: SessionDep,
+    settings: SettingsDep,
+    metrics: MetricsDep,
 ) -> Response:
-    """Remove an `admin`. The proxy_admin must be transferred, never removed."""
+    """Remove an `admin`. The proxy_admin must be transferred, never removed.
+
+    The user's keys are suspended (`owner_removed`) in every team where they are neither a
+    direct member nor an admin of the team's org.
+    """
     await authz.require(Action.INSTALLATION_ADMIN_MANAGE)
     async with mutation(session):
+        # Lock order shared with every hierarchy write: scope, then installation.
+        await lock_scope(session, settings)
         await installation.lock_installation(session)
         await installation.recheck_principal(session, authz.principal)
         await installation.recheck_role(session, authz)
@@ -151,14 +164,20 @@ async def delete_installation_admin(
         if row.role is InstallationRole.PROXY_ADMIN:
             raise forbidden("the proxy_admin cannot be removed; transfer the role instead")
         await session.delete(row)
+        suspended = await suspend_ineligible_user_keys(
+            session, authz.authorizer, authz.principal, user_id=user_id
+        )
         audit.record(
             session,
             action="installation_admin.remove",
             resource_type="installation_admin",
             resource_id=user_id,
             principal=authz.principal,
-            details={"user_id": user_id, "role": row.role.value},
+            details={"user_id": user_id, "role": row.role.value, "suspended_keys": suspended},
         )
+        if suspended:
+            await enqueue_recompile(session, settings, "api.installation_admin.delete")
+    metrics.count_committed_suspensions(session)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

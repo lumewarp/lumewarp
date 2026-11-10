@@ -137,6 +137,17 @@ class TeamRole(enum.StrEnum):
     MEMBER = "member"
 
 
+class InheritedFrom(enum.StrEnum):
+    """Where an inherited admin role comes from (not stored); the higher source wins.
+
+    An installation admin administers every org and team, an org admin its org's teams;
+    either may also own keys there (`keys.owners`).
+    """
+
+    INSTALLATION = "installation"
+    ORG = "org"
+
+
 class InstallationRole(enum.StrEnum):
     """Installation-level role. `proxy_admin` is unique; `admin` may be assigned to many."""
 

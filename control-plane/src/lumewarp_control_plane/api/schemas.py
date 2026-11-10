@@ -35,6 +35,7 @@ from lumewarp_control_plane.compiler.validate import (
 )
 from lumewarp_control_plane.models import (
     CatalogKind,
+    InheritedFrom,
     InstallationRole,
     KeyLifecycle,
     KeyOwnerKind,
@@ -280,6 +281,13 @@ class OrgOut(PolicyOut):
 
 
 class OrgAdminOut(ReadModel):
+    """An org admin: a local `org_admins` row, or an installation admin listed by inheritance.
+
+    `inherited_from` is `installation` for an installation admin (who administers every
+    org). Without a local row (`direct` false) it is read-only here, and `assigned_by`/
+    `assigned_at` are those of the installation role.
+    """
+
     org_id: uuid.UUID
     user_id: uuid.UUID
     email: str
@@ -287,6 +295,9 @@ class OrgAdminOut(ReadModel):
     is_active: bool
     assigned_by: uuid.UUID | None
     assigned_at: datetime
+    inherited_from: InheritedFrom | None = None
+    # False when the user has no local `org_admins` row: nothing to remove here.
+    direct: bool = True
 
 
 class OrgTeamUsageOut(ApiModel):
@@ -365,6 +376,14 @@ class MemberUpdate(PolicyFields):
 
 
 class MemberOut(PolicyOut):
+    """A direct member, or an admin of the team by inheritance (`inherited_from`).
+
+    An inherited-only row has role `admin`, no membership to edit or remove (it changes at
+    the org or installation level), and its timestamps are those of the inherited role.
+    A direct member who also inherits the role keeps their direct row with `inherited_from`
+    set; removing the membership then leaves their keys in place.
+    """
+
     team_id: uuid.UUID
     user_id: uuid.UUID
     email: str
@@ -374,6 +393,9 @@ class MemberOut(PolicyOut):
     member_scope_id: uuid.UUID
     created_at: datetime
     updated_at: datetime
+    inherited_from: InheritedFrom | None = None
+    # False for an inherited-only row: there is no membership to edit or remove.
+    direct: bool = True
 
 
 class ServiceAccountCreate(PolicyFields):
@@ -1330,7 +1352,13 @@ class MeTeamOut(ApiModel):
     typed_models: list[EffectiveModelOut] = Field(default_factory=list)
     team_id: uuid.UUID
     team_name: str
+    # The role the caller acts with: `admin` for a direct admin and for an inherited one.
     role: TeamRole
+    # Set when the caller administers the team from above (an installation admin, or an
+    # admin of the team's org), whether or not they are also a direct member.
+    inherited_from: InheritedFrom | None = None
+    # Whether the caller holds a direct membership; an inherited-only team is false.
+    direct: bool = True
     # Effective names the caller may call, already narrowed by their member policy. For a
     # universal grant this lists the current catalog; `all_models` also covers names added
     # later. Never the team's full list when the member is narrower.
@@ -1350,8 +1378,8 @@ class MeTeamOut(ApiModel):
 class MeOrgOut(ApiModel):
     """An org the caller administers directly (`admin_orgs`).
 
-    Its teams are administered by inheritance and are not mixed into `MeOut.teams`,
-    which lists direct memberships only.
+    Its teams are administered by inheritance and appear in `MeOut.teams` with
+    `inherited_from` set.
     """
 
     id: uuid.UUID
@@ -1368,7 +1396,8 @@ class MeOut(ApiModel):
     installation_role: InstallationRole | None = None
     authz_unavailable: bool = False
     manages_grants: bool
-    # Direct memberships only; an org admin's other teams come through `admin_orgs`.
+    # Every team the caller may own keys in: direct memberships, plus every team an
+    # installation admin or org admin administers by inheritance (`inherited_from`).
     teams: list[MeTeamOut]
     # Orgs the caller administers. An installation admin administers every org and does
     # not need this list; break-glass has no user and gets an empty one.

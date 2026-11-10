@@ -100,10 +100,12 @@ export interface paths {
         };
         /**
          * List Org Admins
-         * @description The org's local admin grants; installation admins only.
+         * @description The org's admins: local admin grants plus every installation admin (inherited).
          *
-         *     Under an external authorization backend these rows are not the source of truth (the
-         *     backend answers the relation), so the list is informational and the writes answer 409.
+         *     Installation admins only. Under an external authorization backend the local rows are
+         *     not the source of truth (the backend answers the relation), so the list is
+         *     informational and the writes answer 409. An installation admin is listed with
+         *     `inherited_from: installation` and cannot be removed here.
          */
         get: operations["listOrgAdmins"];
         put?: never;
@@ -131,6 +133,9 @@ export interface paths {
         /**
          * Delete Org Admin
          * @description Remove an org admin relation. Installation admins only.
+         *
+         *     The user's keys in the org's teams are suspended (`owner_removed`) where they are
+         *     neither a direct member nor an installation admin.
          */
         delete: operations["deleteOrgAdmin"];
         options?: never;
@@ -168,7 +173,14 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Members */
+        /**
+         * List Members
+         * @description Direct members plus the team's admins by inheritance, in one user-id order.
+         *
+         *     Installation admins and the local admins of the team's org are listed with
+         *     `inherited_from`; an external backend's org admins appear only as far as local rows
+         *     exist, because a backend cannot list who holds a relation.
+         */
         get: operations["listMembers"];
         put?: never;
         /** Create Member */
@@ -928,6 +940,9 @@ export interface paths {
         /**
          * Delete Installation Admin
          * @description Remove an `admin`. The proxy_admin must be transferred, never removed.
+         *
+         *     The user's keys are suspended (`owner_removed`) in every team where they are neither a
+         *     direct member nor an admin of the team's org.
          */
         delete: operations["deleteInstallationAdmin"];
         options?: never;
@@ -1613,6 +1628,15 @@ export interface components {
             healthy_threshold: number | null;
         };
         /**
+         * InheritedFrom
+         * @description Where an inherited admin role comes from (not stored); the higher source wins.
+         *
+         *     An installation admin administers every org and team, an org admin its org's teams;
+         *     either may also own keys there (`keys.owners`).
+         * @enum {string}
+         */
+        InheritedFrom: "installation" | "org";
+        /**
          * InstallationAdminAssign
          * @description Only `admin` can be assigned here; proxy_admin moves through transfer.
          */
@@ -2118,8 +2142,8 @@ export interface components {
          * MeOrgOut
          * @description An org the caller administers directly (`admin_orgs`).
          *
-         *     Its teams are administered by inheritance and are not mixed into `MeOut.teams`,
-         *     which lists direct memberships only.
+         *     Its teams are administered by inheritance and appear in `MeOut.teams` with
+         *     `inherited_from` set.
          */
         MeOrgOut: {
             /**
@@ -2167,6 +2191,12 @@ export interface components {
             /** Team Name */
             team_name: string;
             role: components["schemas"]["TeamRole"];
+            inherited_from?: components["schemas"]["InheritedFrom"] | null;
+            /**
+             * Direct
+             * @default true
+             */
+            direct: boolean;
             /** Models */
             models: string[];
             /** All Models */
@@ -2208,7 +2238,15 @@ export interface components {
             /** Email */
             email?: string | null;
         };
-        /** MemberOut */
+        /**
+         * MemberOut
+         * @description A direct member, or an admin of the team by inheritance (`inherited_from`).
+         *
+         *     An inherited-only row has role `admin`, no membership to edit or remove (it changes at
+         *     the org or installation level), and its timestamps are those of the inherited role.
+         *     A direct member who also inherits the role keeps their direct row with `inherited_from`
+         *     set; removing the membership then leaves their keys in place.
+         */
         MemberOut: {
             model_access: components["schemas"]["ModelAccess"];
             /** Allowed Models */
@@ -2259,6 +2297,12 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+            inherited_from?: components["schemas"]["InheritedFrom"] | null;
+            /**
+             * Direct
+             * @default true
+             */
+            direct: boolean;
         };
         /** MemberUpdate */
         MemberUpdate: {
@@ -2490,7 +2534,14 @@ export interface components {
              */
             keep_old_name_as_alias: boolean;
         };
-        /** OrgAdminOut */
+        /**
+         * OrgAdminOut
+         * @description An org admin: a local `org_admins` row, or an installation admin listed by inheritance.
+         *
+         *     `inherited_from` is `installation` for an installation admin (who administers every
+         *     org). Without a local row (`direct` false) it is read-only here, and `assigned_by`/
+         *     `assigned_at` are those of the installation role.
+         */
         OrgAdminOut: {
             /**
              * Org Id
@@ -2515,6 +2566,12 @@ export interface components {
              * Format: date-time
              */
             assigned_at: string;
+            inherited_from?: components["schemas"]["InheritedFrom"] | null;
+            /**
+             * Direct
+             * @default true
+             */
+            direct: boolean;
         };
         /** OrgCreate */
         OrgCreate: {

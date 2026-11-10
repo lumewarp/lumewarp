@@ -60,7 +60,8 @@ export function can(me: Me | undefined, teams: TeamAny[] | undefined) {
     canSetTeamQuota: (teamId: string) => isInstallationAdmin || isOrgTeamAdmin(teamId),
     canAssignTeamAdmin: (teamId: string) => isInstallationAdmin || isOrgTeamAdmin(teamId),
     canUpdateTeamSettings: teamAdmin,
-    // A key belongs to its owner, and only a direct membership can own one.
+    // A key belongs to its owner: a direct member, or an admin by inheritance (installation or
+    // org), whose inherited teams `/users/me` lists too.
     canCreateOwnKey: (teamId: string) => teamRole(teamId) !== undefined,
     canManageKey,
     canResumeKey: (key: Key) =>

@@ -108,9 +108,9 @@ class AuthzContract:
     async def test_org_admin_is_direct_only(self, authz_backend, authz_seed: AuthzSeed) -> None:
         """`admin` on an org is a relation, not an inherited team role.
 
-        Inheritance is applied by `RequestAuthz`; a backend that also reported team
-        relations for the org admin would make `member` lie (and `_is_member`/`/users/me`
-        with it).
+        Inheritance is applied by `RequestAuthz` and `keys.owners`; a backend that also
+        reported team relations for the org admin would make `member` lie (and list the
+        org admin as a direct member).
         """
         authz = Authorizer(authz_backend)
         seed = authz_seed

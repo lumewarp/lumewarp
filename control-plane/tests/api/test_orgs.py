@@ -198,7 +198,7 @@ async def test_org_admin_assignment_is_installation_only_and_needs_a_login(
     assert assigned.json()["user_id"] == str(target.id)
     # Idempotent.
     assert client.put(path, headers=ADMIN_AUTH).status_code == 200
-    listed = client.get(f"/api/v1/orgs/{world.org_a.id}/admins", headers=ADMIN_AUTH)
+    listed = client.get(f"/api/v1/orgs/{world.org_a.id}/admins?limit=500", headers=ADMIN_AUTH)
     assert str(target.id) in {row["user_id"] for row in listed.json()["items"]}
 
     # The target now administers the org; an org admin still cannot assign.

@@ -17,12 +17,13 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Query, Request, Response, status
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, func, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import audit
 from lumewarp_control_plane.api.common import (
     LimitDep,
+    MetricsDep,
     SessionDep,
     SettingsDep,
     aware,
@@ -35,6 +36,7 @@ from lumewarp_control_plane.api.common import (
     mutation,
     parse_uuid_cursor,
     require_signed_in,
+    suspend_ineligible_user_keys,
     uuid_page,
     validation_error,
 )
@@ -57,6 +59,8 @@ from lumewarp_control_plane.api.schemas import (
 from lumewarp_control_plane.authz import Action, Authz, RequestAuthz
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import (
+    InheritedFrom,
+    InstallationAdmin,
     ModelAccess,
     Org,
     OrgAdmin,
@@ -271,26 +275,61 @@ async def list_org_admins(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[OrgAdminOut]:
-    """The org's local admin grants; installation admins only.
+    """The org's admins: local admin grants plus every installation admin (inherited).
 
-    Under an external authorization backend these rows are not the source of truth (the
-    backend answers the relation), so the list is informational and the writes answer 409.
+    Installation admins only. Under an external authorization backend the local rows are
+    not the source of truth (the backend answers the relation), so the list is
+    informational and the writes answer 409. An installation admin is listed with
+    `inherited_from: installation` and cannot be removed here.
     """
     await authz.require(Action.ORG_MANAGE)
     await _org_or_404(session, org_id)
-    stmt = (
-        select(OrgAdmin, User)
-        .join(User, User.id == OrgAdmin.user_id)
-        .where(OrgAdmin.org_id == org_id)
-        .order_by(OrgAdmin.user_id)
-    )
+    ids = union(
+        select(OrgAdmin.user_id.label("user_id")).where(OrgAdmin.org_id == org_id),
+        select(InstallationAdmin.user_id),
+    ).subquery()
+    stmt = select(ids.c.user_id).order_by(ids.c.user_id)
     if cursor is not None:
-        stmt = stmt.where(OrgAdmin.user_id > parse_uuid_cursor(cursor))
-    rows = (await session.execute(stmt.limit(limit + 1))).all()
-    next_cursor = str(rows[limit - 1][0].user_id) if len(rows) > limit else None
-    return Page[OrgAdminOut](
-        items=[_admin_out(row, user) for row, user in rows[:limit]], next_cursor=next_cursor
-    )
+        stmt = stmt.where(ids.c.user_id > parse_uuid_cursor(cursor))
+    page_ids = list((await session.scalars(stmt.limit(limit + 1))).all())
+    next_cursor = str(page_ids[limit - 1]) if len(page_ids) > limit else None
+    page_ids = page_ids[:limit]
+    users = {
+        user.id: user for user in await session.scalars(select(User).where(User.id.in_(page_ids)))
+    }
+    local = {
+        row.user_id: row
+        for row in await session.scalars(
+            select(OrgAdmin).where(OrgAdmin.org_id == org_id, OrgAdmin.user_id.in_(page_ids))
+        )
+    }
+    installation = {
+        row.user_id: row
+        for row in await session.scalars(
+            select(InstallationAdmin).where(InstallationAdmin.user_id.in_(page_ids))
+        )
+    }
+    items = []
+    for user_id in page_ids:
+        row = local.get(user_id)
+        role = installation.get(user_id)
+        if row is not None:
+            out = _admin_out(row, users[user_id])
+        else:
+            assert role is not None
+            out = _admin_out(
+                OrgAdmin(
+                    org_id=org_id,
+                    user_id=user_id,
+                    assigned_by=role.assigned_by,
+                    assigned_at=role.assigned_at,
+                ),
+                users[user_id],
+            )
+        out.inherited_from = InheritedFrom.INSTALLATION if role is not None else None
+        out.direct = row is not None
+        items.append(out)
+    return Page[OrgAdminOut](items=items, next_cursor=next_cursor)
 
 
 @router.put(
@@ -347,10 +386,17 @@ async def delete_org_admin(
     request: Request,
     authz: Authz,
     session: SessionDep,
+    settings: SettingsDep,
+    metrics: MetricsDep,
 ) -> Response:
-    """Remove an org admin relation. Installation admins only."""
+    """Remove an org admin relation. Installation admins only.
+
+    The user's keys in the org's teams are suspended (`owner_removed`) where they are
+    neither a direct member nor an installation admin.
+    """
     await authz.require(Action.ORG_MANAGE)
     async with mutation(session):
+        await lock_scope(session, settings)
         org = await _org_or_404(session, org_id)
         if org.deleted_at is not None:
             raise conflict("the org is archived")
@@ -359,6 +405,10 @@ async def delete_org_admin(
         if row is None:
             raise not_found("org admin not found")
         await session.delete(row)
+        teams = set(await session.scalars(select(Team.id).where(Team.org_id == org.id)))
+        suspended = await suspend_ineligible_user_keys(
+            session, authz.authorizer, authz.principal, user_id=user_id, team_ids=teams
+        )
         audit.record(
             session,
             action="org.admin.remove",
@@ -366,8 +416,11 @@ async def delete_org_admin(
             resource_id=user_id,
             principal=authz.principal,
             org_id=org.id,
-            details={"org_id": org.id, "user_id": user_id},
+            details={"org_id": org.id, "user_id": user_id, "suspended_keys": suspended},
         )
+        if suspended:
+            await enqueue_recompile(session, settings, "api.org.admin.delete")
+    metrics.count_committed_suspensions(session)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

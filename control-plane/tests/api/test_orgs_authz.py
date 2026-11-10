@@ -1,5 +1,8 @@
 """Org administration: inheritance, its boundaries and the direct-membership rule.
 
+An org admin administers its org's teams and may own keys in them without becoming a
+direct member; `member of team` stays the direct relation.
+
 Orgs and `org_admins` rows are created directly so this file tests inheritance itself,
 not the org write path (see `test_orgs.py`).
 Every check here is what `RequestAuthz` adds on top of the backend's direct relations.
@@ -71,11 +74,20 @@ def test_org_admin_reads_every_team_of_its_org(client, world: World) -> None:
     for path in ("members", "keys", "service-accounts"):
         response = client.get(f"/api/v1/teams/{world.team_a.id}/{path}", headers=headers)
         assert response.status_code == 200, (path, response.text)
-    members = client.get(f"/api/v1/teams/{world.team_a.id}/members", headers=headers)
-    assert {row["user_id"] for row in members.json()["items"]} == {
+    members = client.get(f"/api/v1/teams/{world.team_a.id}/members?limit=500", headers=headers)
+    rows = {row["user_id"]: row for row in members.json()["items"]}
+    assert {user for user, row in rows.items() if row["direct"]} == {
         str(world.member.id),
         str(world.team_admin.id),
     }
+    # The org admin is listed by inheritance, as an admin with no membership to edit.
+    inherited = rows[str(world.org_admin.id)]
+    assert (inherited["role"], inherited["inherited_from"], inherited["direct"]) == (
+        "admin",
+        "org",
+        False,
+    )
+    assert rows[str(world.member.id)]["inherited_from"] is None
     keys = client.get(f"/api/v1/teams/{world.team_a.id}/keys", headers=headers).json()["items"]
     assert [row["id"] for row in keys] == [str(world.key.id)]
     usage = client.get("/api/v1/usage", params={**USAGE, "group_by": "team"}, headers=headers)
@@ -147,15 +159,21 @@ def test_org_admin_administers_its_teams_and_another_org_is_404(client, world: W
     ]
 
 
-def test_org_admin_without_membership_cannot_create_a_key(client, world: World) -> None:
+def test_org_admin_owns_keys_in_its_org_teams_only(client, world: World) -> None:
     response = client.post(
         f"/api/v1/teams/{world.team_a.id}/keys",
         json={"name": "by-org-admin"},
         headers=world.org_admin_pat,
     )
-    assert response.status_code == 422, response.text
-    assert response.json()["error"]["code"] == "validation_error"
-    assert "not a member" in response.json()["error"]["message"]
+    assert response.status_code == 201, response.text
+    assert response.json()["key"]["user_id"] == str(world.org_admin.id)
+    # Another org's team is not even visible to it.
+    response = client.post(
+        f"/api/v1/teams/{world.team_b.id}/keys",
+        json={"name": "elsewhere"},
+        headers=world.org_admin_pat,
+    )
+    assert response.status_code == 404, response.text
 
 
 def test_team_admin_can_neither_set_quota_nor_assign_admins(client, world: World) -> None:
@@ -211,19 +229,23 @@ def test_pat_and_session_agree(client, world: World) -> None:
         assert statuses[0] == statuses[1], (method, path, statuses)
 
 
-def test_users_me_lists_admin_orgs_separately_from_direct_memberships(client, world: World) -> None:
+def test_users_me_lists_admin_orgs_and_their_teams_as_inherited(client, world: World) -> None:
     response = client.get("/api/v1/users/me", headers=world.org_admin_pat)
     assert response.status_code == 200, response.text
     me = response.json()
     assert me["is_admin"] is False
     assert [org["id"] for org in me["admin_orgs"]] == [str(world.org_a.id)]
     assert me["admin_orgs"][0]["name"] == world.org_a.name
-    # Direct memberships only: the org's team is not mixed in, even though the org admin
-    # administers it.
-    assert me["teams"] == []
+    # The org's team is listed by inheritance; another org's team is not.
+    assert [
+        (team["team_id"], team["role"], team["inherited_from"], team["direct"])
+        for team in me["teams"]
+    ] == [(str(world.team_a.id), "admin", "org", False)]
 
     member_me = client.get("/api/v1/users/me", headers=world.member_pat).json()
     assert [team["team_id"] for team in member_me["teams"]] == [str(world.team_a.id)]
+    assert member_me["teams"][0]["inherited_from"] is None
+    assert member_me["teams"][0]["direct"] is True
     assert member_me["admin_orgs"] == []
 
     admin_me = client.get("/api/v1/users/me", headers=ADMIN_AUTH).json()
@@ -277,16 +299,16 @@ async def test_usage_without_team_filter_is_scoped_to_the_org(
 
 
 async def test_org_admin_does_not_gain_direct_membership(client, committed, world: World) -> None:
-    """`member of team` stays direct: the org relation must not create a members row or a key."""
+    """`member of team` stays direct: owning a key creates no members row."""
+    response = client.post(
+        f"/api/v1/teams/{world.team_a.id}/keys",
+        json={"name": "inherited-owner"},
+        headers=world.org_admin_pat,
+    )
+    assert response.status_code == 201, response.text
     assert (
         await committed.scalar(
             select(TeamMember.user_id).where(TeamMember.user_id == world.org_admin.id)
         )
         is None
     )
-    response = client.post(
-        f"/api/v1/teams/{world.team_a.id}/keys",
-        json={"name": "not-a-member"},
-        headers=world.org_admin_pat,
-    )
-    assert response.status_code == 422

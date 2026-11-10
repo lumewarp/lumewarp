@@ -310,12 +310,14 @@ successful writes are audited, so a client cannot flood the audit table. A limit
 `PATCH` never touches the key's lifecycle or suspension reason.
 
 Removing a member suspends that member's user-owned keys in the team
-(`suspended_reason=owner_removed`); deactivating a user suspends their user-owned keys
+(`suspended_reason=owner_removed`) unless they still administer it by inheritance (an
+installation admin or an admin of the team's org); removing an org admin or an installation
+admin does the same in every team where nothing else allows them. Deactivating a user suspends their user-owned keys
 (`owner_deactivated`). Revoked keys are kept for usage history; a key or a service
 account no longer prevents archiving a team.
 
 An active owner may resume a key they suspended themselves (`owner`) and, once they
-are a member again, one suspended by their removal (`owner_removed`). An `admin`
+may own keys in the team again, one suspended by their removal (`owner_removed`). An `admin`
 suspension needs a team admin; `owner_deactivated` needs an administrator after the
 account is reactivated. Nothing can be resumed while the key's owner is inactive.
 
@@ -384,8 +386,9 @@ An *org admin* holds `admin` on one org (`org_admins` rows for the built-in back
 are administered by inheritance: it reads every team of the org (with the whole-team policy
 view), reads their members, service accounts, keys, usage and audit, changes their settings,
 sets their quota and assigns their team admins. It never reaches another org, and it does not
-become a team *member*: a direct membership is still required to own a key (and the key
-reconciler only looks at direct memberships).
+become a team *member*, yet it may own keys in those teams (`keys.owners`): a user may own keys
+in a team as a direct member, an installation admin or an admin of the team's org. No row is
+written for that; key creation, resume and the key reconciler combine the direct relations.
 
 | Action | Installation admin | Org admin | Team admin | Member |
 | --- | --- | --- | --- | --- |
@@ -405,12 +408,21 @@ decides from what actually changes (`proposed != base`), so resending the curren
 is not a quota change. `ORG_MANAGE` is installation-level: create, rename, policy, archive and
 org admin assignment.
 
-`KEY_CREATE_OWN` passes for an org admin (it has the team's read capability) but creating a
-user-owned key also requires a direct membership, so an org admin that is not a member of the
-team gets `422 not a member of this team`. The same rule keeps `/users/me` honest: `teams` lists
-direct memberships only, and `admin_orgs` (id and name) lists the orgs the caller administers;
-an installation admin administers every org and gets an empty `admin_orgs`, and break-glass has
-no user.
+`KEY_CREATE_OWN` passes for an org admin (it has the team's read capability), and creating a
+user-owned key then checks key ownership: anyone else gets `422 not a member or admin of this
+team`. Inherited keys follow the team's member defaults and key limits, and an inherited admin
+has no member exception policy (add them as a member for one). `/users/me` lists in `teams` the
+direct memberships plus every inherited team, with `inherited_from` (`installation` or `org`)
+and `direct`; `admin_orgs` (id and name) lists the orgs the caller administers (every live org
+for an installation admin), and break-glass has no user.
+
+`GET /orgs/{id}/admins` lists the local org admin rows and every installation admin
+(`inherited_from: installation`, `direct: false` without a local row; removed only at the
+installation level). `GET /teams/{id}/members` lists direct members and, by inheritance, the
+local admins of the team's org and every installation admin, in one user-id order; an
+inherited-only row has role `admin`, `direct: false` and no membership to edit or remove. An
+external backend cannot list who holds a relation, so its org admins are listed only as far as
+local rows exist.
 
 `TEAM_READ` is the team's basic record (`id`, `org_id`, `name`, timestamps and the member key
 limits); a member's effective policy comes from `/users/me`, never from the team. `TeamOut` (with
@@ -526,10 +538,12 @@ backend already suspends keys in the same transaction that removes the member):
   rejected by the gateway within about 5 s.
 - Every `LUMEWARP_KEY_RECONCILE_FULL_SECONDS` (default 300 s), and whenever the change
   cursor is reset, it rechecks every active user-owned key (in slices).
-- An explicit `DENY` suspends that owner's keys in that team with
+- Ownership is checked as in `keys.owners` (direct member, installation admin, admin of the
+  team's org). When every source answers an explicit `DENY`, the owner's keys in that team
+  are suspended with
   `suspended_reason=owner_removed`, audited with the system actor `key_reconciler`, and
   publishes a new snapshot. `ERROR` or a timeout never suspends anything.
-- Restoring membership does not resume keys automatically; the owner or a team admin
+- Restoring membership or an admin role does not resume keys automatically; the owner or a team admin
   resumes them. Service-account keys are never touched: rotate them when people leave.
 - `LUMEWARP_KEY_RECONCILE_ENABLED=false` turns the loop off.
 

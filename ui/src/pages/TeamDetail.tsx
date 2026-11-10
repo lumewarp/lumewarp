@@ -2,7 +2,7 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, ApiError, hasPolicy, type Key, type Member, type Schemas, type ServiceAccount, type Team, type TeamAny } from "../api";
-import { Badge, fmtDate, fmtUsd, KeyBadge, PageHeader, SuspendedReason } from "../components/Bits";
+import { Badge, fmtDate, fmtUsd, InheritedBadge, KeyBadge, PageHeader, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
 import { blankKeyLimits, KeyLimitFields, keyLimitsBody, keyLimitsFrom, type KeyLimitCap, type KeyLimitValues } from "../components/KeyLimits";
@@ -142,7 +142,8 @@ function MembersPanel({
   const [editing, setEditing] = useState<Member | "new" | null>(null);
   const [deleting, setDeleting] = useState<Member | null>(null);
   const form = useForm<MemberValues>(blankMember, { email: required("Email") });
-  const existingUserIds = new Set((list.data ?? []).map((member) => member.user_id));
+  // An inherited admin may still be added as a direct member, so only memberships count.
+  const existingUserIds = new Set((list.data ?? []).filter((member) => member.direct).map((member) => member.user_id));
   const matchingUsers = (userDirectory.data ?? []).filter(
     (user) =>
       user.is_active &&
@@ -228,19 +229,31 @@ function MembersPanel({
         columns={[
           { key: "email", header: "Email", sort: (a, b) => a.email.localeCompare(b.email), cell: (member) => <><strong>{member.email}</strong>{!member.user_active && <> <Badge tone="danger">Inactive</Badge></>}</> },
           { key: "name", header: "Name", cell: (member) => member.display_name || "—" },
-          { key: "role", header: "Role", cell: (member) => <Badge tone="info">{member.role}</Badge> },
+          {
+            key: "role",
+            header: "Role",
+            cell: (member) => (
+              <span className="inline-flex flex-wrap gap-1">
+                <Badge tone="info">{member.role}</Badge>
+                <InheritedBadge from={member.inherited_from} />
+              </span>
+            ),
+          },
           { key: "policy", header: "Policy", cell: (member) => <PolicySummary p={member} /> },
           {
             key: "actions",
             header: "",
             cell: (member) => (
-              <RowActions
-                canEdit={isAdmin && !memberWritesDisabled}
-                // Removing an admin is org-level; a team admin removes plain members.
-                canDelete={isAdmin && !memberWritesDisabled && (member.role === "member" || canAssignAdmin)}
-                onEdit={() => open(member)}
-                onDelete={() => setDeleting(member)}
-              />
+              // An inherited admin has no membership here; the role changes where it is granted.
+              member.direct ? (
+                <RowActions
+                  canEdit={isAdmin && !memberWritesDisabled}
+                  // Removing an admin is org-level; a team admin removes plain members.
+                  canDelete={isAdmin && !memberWritesDisabled && (member.role === "member" || canAssignAdmin)}
+                  onEdit={() => open(member)}
+                  onDelete={() => setDeleting(member)}
+                />
+              ) : null
             ),
           },
         ]}
@@ -328,7 +341,11 @@ function MembersPanel({
         open={!!deleting}
         title="Remove member"
         confirmLabel="Remove"
-        message={`Remove ${deleting?.email} from ${team.name}? Their active keys will be suspended.`}
+        message={
+          deleting?.inherited_from
+            ? `Remove ${deleting.email}'s membership of ${team.name}? They stay an admin by inheritance and keep their keys.`
+            : `Remove ${deleting?.email} from ${team.name}? Their active keys will be suspended.`
+        }
         onConfirm={() => remove.mutateAsync(deleting!)}
         onClose={() => setDeleting(null)}
       />

@@ -36,12 +36,22 @@ export function Settings() {
                 {me.data.installation_role === "proxy_admin" ? "proxy admin" : "installation admin"}
               </Badge>
             )}
-            {me.data?.teams.map((team) => (
-              <Badge key={team.team_id} tone="info">
-                {team.team_name} · {team.role}
-              </Badge>
-            ))}
-            {me.data && !me.data.is_admin && me.data.teams.length === 0 && <span className="text-muted-foreground">No team memberships.</span>}
+            {me.data?.admin_orgs?.length && !me.data.installation_role
+              ? me.data.admin_orgs.map((org) => (
+                  <Badge key={org.id} tone="info">
+                    {org.name} · org admin
+                  </Badge>
+                ))
+              : null}
+            {/* Direct memberships only: inherited teams follow from the roles above. */}
+            {me.data?.teams
+              .filter((team) => team.direct)
+              .map((team) => (
+                <Badge key={team.team_id} tone="info">
+                  {team.team_name} · {team.role}
+                </Badge>
+              ))}
+            {me.data && !me.data.is_admin && !me.data.admin_orgs?.length && me.data.teams.length === 0 && <span className="text-muted-foreground">No team memberships.</span>}
           </DescriptionDetails>
         </DescriptionList>
       </Card>

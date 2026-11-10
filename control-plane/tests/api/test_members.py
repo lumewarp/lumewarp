@@ -43,8 +43,8 @@ async def test_member_upsert_patch_list_and_delete(client, committed) -> None:
     patched = client.patch(path, json={"rpm_limit": 5}, headers=ADMIN_AUTH)
     assert patched.status_code == 200
     assert patched.json()["rpm_limit"] == 5
-    listed = client.get(f"/api/v1/teams/{team.id}/members", headers=ADMIN_AUTH)
-    assert [r["user_id"] for r in listed.json()["items"]] == [str(user.id)]
+    listed = client.get(f"/api/v1/teams/{team.id}/members?limit=500", headers=ADMIN_AUTH)
+    assert [r["user_id"] for r in listed.json()["items"] if r["direct"]] == [str(user.id)]
     assert client.delete(path, headers=ADMIN_AUTH).status_code == 204
     assert client.patch(path, json={"role": "member"}, headers=ADMIN_AUTH).status_code == 404
     unknown = client.put(
@@ -144,8 +144,12 @@ async def test_installation_admin_manages_admins_and_may_leave_none(
     )
     assert response.status_code == (204 if method == "DELETE" else 200), response.text
     # No last-admin rule: the team keeps existing with no admin at all.
-    rows = client.get(f"/api/v1/teams/{team.id}/members", headers=ADMIN_AUTH).json()["items"]
-    assert [r["role"] for r in rows] == ([] if method == "DELETE" else ["member"])
+    rows = client.get(f"/api/v1/teams/{team.id}/members?limit=500", headers=ADMIN_AUTH).json()[
+        "items"
+    ]
+    # Installation admins are listed too, by inheritance; only memberships count here.
+    direct = [r["role"] for r in rows if r["direct"]]
+    assert direct == ([] if method == "DELETE" else ["member"])
     promoted = await make_user(committed)
     await committed.commit()
     created = client.post(
@@ -231,7 +235,10 @@ async def test_external_grants_are_read_only(client, committed, monkeypatch, met
     )
     assert response.status_code == 409, response.text
     assert response.json()["error"]["code"] == "managed_externally"
-    assert client.get(f"/api/v1/teams/{team.id}/members", headers=auth(token)).status_code == 200
+    assert (
+        client.get(f"/api/v1/teams/{team.id}/members?limit=500", headers=auth(token)).status_code
+        == 200
+    )
 
 
 @pytest.mark.parametrize("selector", ["user_id", "email"])
@@ -264,7 +271,7 @@ async def test_create_member_by_id_or_email(client, committed, selector, caller)
     assert body["member_scope_id"] == str(member_scope_id(team.id, user.id))
     duplicate = client.post(path, json={**payload, "role": "admin"}, headers=headers)
     assert duplicate.status_code == 409, duplicate.text
-    listed = client.get(path, headers=headers).json()["items"]
+    listed = client.get(path + "?limit=500", headers=headers).json()["items"]
     assert next(row for row in listed if row["user_id"] == str(user.id))["role"] == "member"
     events = (
         await committed.scalars(
@@ -384,7 +391,7 @@ async def test_member_list_includes_inactive_account_status(client, committed) -
     user = await make_user(committed, is_active=False, display_name="Inactive member")
     await make_member(committed, team, user)
     await committed.commit()
-    listed = client.get(f"/api/v1/teams/{team.id}/members", headers=auth(token))
+    listed = client.get(f"/api/v1/teams/{team.id}/members?limit=500", headers=auth(token))
     assert listed.status_code == 200, listed.text
     members = {row["user_id"]: row for row in listed.json()["items"]}
     assert members[str(admin.id)]["user_active"] is True
@@ -402,9 +409,11 @@ async def test_external_members_list_is_empty_without_local_rows(client, committ
         return Decision.ALLOW if user_id == str(user.id) else Decision.DENY
 
     monkeypatch.setattr(client.app.state, "authorizer", Authorizer(check, "external"))
-    response = client.get(f"/api/v1/teams/{team.id}/members", headers=auth(token))
+    response = client.get(f"/api/v1/teams/{team.id}/members?limit=500", headers=auth(token))
     assert response.status_code == 200
-    assert response.json() == {"items": [], "next_cursor": None}
+    # No local membership rows; only installation admins appear, by inheritance.
+    assert [r for r in response.json()["items"] if r["direct"]] == []
+    assert all(r["inherited_from"] == "installation" for r in response.json()["items"])
 
 
 @pytest.mark.parametrize("caller", ["member", "outsider"])

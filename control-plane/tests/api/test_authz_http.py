@@ -388,8 +388,12 @@ async def test_mutation_backend_error_is_503_and_preserves_state(
     assert response.json()["error"]["code"] == "authz_unavailable"
     stored = client.get(f"/api/v1/keys/{key.id}", headers=ADMIN_AUTH).json()
     assert (stored["name"], stored["lifecycle"]) == ("unchanged", "active")
-    member_rows = client.get(f"/api/v1/teams/{team.id}/members", headers=ADMIN_AUTH).json()["items"]
-    assert [(r["user_id"], r["role"]) for r in member_rows] == [(str(target.id), "member")]
+    member_rows = client.get(
+        f"/api/v1/teams/{team.id}/members?limit=500", headers=ADMIN_AUTH
+    ).json()["items"]
+    # Installation admins are listed by inheritance; only the membership is checked here.
+    direct = [(r["user_id"], r["role"]) for r in member_rows if r["direct"]]
+    assert direct == [(str(target.id), "member")]
     assert (
         client.get(f"/api/v1/teams/{team.id}/service-accounts", headers=ADMIN_AUTH).json()["items"]
         == []

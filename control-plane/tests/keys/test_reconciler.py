@@ -102,7 +102,9 @@ class Backend:
 
     async def check(self, user, relation, resource):
         self.calls.append((user, relation, resource))
-        return self.overrides.get((user, resource.id), self.decision)
+        # `decision` answers team membership; nobody administers an org unless overridden.
+        default = Decision.DENY if resource.type == "org" else self.decision
+        return self.overrides.get((user, resource.id), default)
 
 
 class ChangesBackend(Backend):
@@ -182,8 +184,12 @@ async def test_deny_suspends_only_matching_pair_and_publishes(store):
         assert current[rows[name].id] == (KeyLifecycle.ACTIVE, None)
     assert current[rows["manual"].id] == (KeyLifecycle.SUSPENDED, "admin")
     assert current[rows["revoked"].id] == (KeyLifecycle.REVOKED, None)
-    assert len(backend.calls) == 3  # Distinct (user, team), not one check per key.
-    assert all(relation is Relation.MEMBER for _, relation, _ in backend.calls)
+    member_calls = [call for call in backend.calls if call[1] is Relation.MEMBER]
+    assert len(member_calls) == 3  # Distinct (user, team), not one check per key.
+    # Only the denied pair is asked whether the owner administers the team's org instead.
+    assert [(user, relation, resource.type) for user, relation, resource in backend.calls[3:]] == [
+        (str(rows["owner"].id), Relation.ADMIN, "org")
+    ]
     async with factory() as session:
         audits = (await session.scalars(select(AuditLog))).all()
         assert len(audits) == 2
@@ -227,7 +233,8 @@ async def test_allow_and_repeated_errors_change_nothing(store, monkeypatch, deci
     before = await states(factory)
     backend = Backend(decision)
     await run_ticks(monkeypatch, factory, settings, backend, 8, full=3)
-    assert len(backend.calls) == 24
+    # An unanswered membership also asks whether the owner administers the team's org.
+    assert len(backend.calls) == (24 if decision is Decision.ALLOW else 48)
     assert await states(factory) == before
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(AuditLog)) == 0
@@ -254,8 +261,9 @@ async def test_full_scan_slices_isolate_slow_backend(store):
         suspended = await reconciler.reconcile_keys(
             factory, Authorizer(backend, timeout=0.01), settings
         )
-    assert [len(items) for items in backend.calls] == [500, 1]
-    user_id, _, resource = backend.calls[-1][0]
+    # Per slice: membership, then org admin for the pairs membership did not allow.
+    assert [len(items) for items in backend.calls] == [500, 500, 1, 1]
+    user_id, _, resource = backend.calls[-2][0]
     async with factory() as session:
         expected = await session.scalar(
             select(func.count())

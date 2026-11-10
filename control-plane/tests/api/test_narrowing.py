@@ -153,7 +153,12 @@ async def test_team_narrowing_keeps_owner_models_and_effective_is_intersection(
     )
     assert response.status_code == 200, response.text
     # The owner's stored setting survives; `narrow` applies at compile time.
-    stored = client.get(listing, headers=ADMIN_AUTH).json()["items"][0]
+    # Installation admins are listed among members by inheritance; skip them.
+    stored = next(
+        row
+        for row in client.get(listing + "?limit=500", headers=ADMIN_AUTH).json()["items"]
+        if row.get("direct", True)
+    )
     assert stored["allowed_models"] == ["a", "b"]
     # Saving unrelated fields does not force the owner to re-narrow.
     assert client.patch(path, json={"rpm_limit": 5}, headers=ADMIN_AUTH).status_code == 200

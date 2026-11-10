@@ -22,16 +22,18 @@ The team -> org mapping is always read from Postgres by `RequestAuthz`, never fr
 request payload. A caller that needs a direct relation must ask for one explicitly and
 must not use the inherited capabilities:
 
-- `_is_member` (key creation) requires a direct membership, so an org admin who is not a
-  member cannot own a key;
-- the key reconciler and `Authorizer.list_objects(..., "team", ...)` see direct relations;
-- `/users/me` lists direct memberships and the caller's `admin_orgs` separately;
+- key ownership (`keys.owners`: key creation, resume and the key reconciler) combines the
+  direct relations itself: a direct member, an installation admin or an admin of the
+  team's org may own keys in a team;
+- `Authorizer.list_objects(..., "team", ...)` sees direct relations;
+- `/users/me` lists direct memberships and inherited teams, marking the latter;
 - `is_admin()` is installation-level only (proxy_admin, admin, break-glass), never "any
   admin".
 
-A backend guarantees that team `admin` implies `member`. The new contract is that
+A backend guarantees that team `admin` implies `member`. The contract is that
 `member of team` is a **direct** membership only: a backend must not make an org admin
-inherit it, because `_is_member`, `/users/me` and the reconciler would then be wrong.
+inherit it, because Lumewarp applies the inheritance itself and would otherwise list an
+org admin as a direct member.
 The matrix separates reading a team's basic record (`TEAM_READ`, any member or above) from
 reading what a team admin sees (`TEAM_ADMIN_READ`: members, service accounts, every key,
 usage, audit). Team creation and archiving (`TEAM_CREATE`, `TEAM_DELETE`), team quota
@@ -545,7 +547,8 @@ class RequestAuthz:
 
         Installation admins always have it; org admins have both relations on their org's
         teams by inheritance. This is a capability, not a direct relation: never use it to
-        decide membership (keys, the reconciler, `/users/me`).
+        decide membership, and decide key ownership with `keys.owners`, which also covers
+        users other than the caller.
         """
         if await self.is_admin():
             return True

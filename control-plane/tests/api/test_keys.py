@@ -77,18 +77,28 @@ async def test_member_creates_and_manages_only_own_key(client, committed) -> Non
     )
 
 
-@pytest.mark.parametrize("caller", ["bootstrap", "installation_admin"])
-async def test_non_member_cannot_create_user_key(client, committed, caller) -> None:
+async def test_installation_admin_owns_keys_without_membership(client, committed) -> None:
+    """Break-glass has no user and owns nothing; an installation admin inherits every team."""
     team = await make_team(committed)
-    _, token = await user_with_token(committed, installation_admin=True)
+    admin, token = await user_with_token(committed, installation_admin=True)
+    await committed.commit()
+    path = f"/api/v1/teams/{team.id}/keys"
+    response = client.post(path, json={"name": "own"}, headers=ADMIN_AUTH)
+    assert response.status_code == 422, response.text
+    assert "not a member or admin of this team" in response.json()["error"]["message"]
+    response = client.post(path, json={"name": "own"}, headers=auth(token))
+    assert response.status_code == 201, response.text
+    assert response.json()["key"]["user_id"] == str(admin.id)
+
+
+async def test_plain_user_cannot_create_user_key_in_a_foreign_team(client, committed) -> None:
+    team = await make_team(committed)
+    _, token = await user_with_token(committed)
     await committed.commit()
     response = client.post(
-        f"/api/v1/teams/{team.id}/keys",
-        json={"name": "own"},
-        headers=ADMIN_AUTH if caller == "bootstrap" else auth(token),
+        f"/api/v1/teams/{team.id}/keys", json={"name": "own"}, headers=auth(token)
     )
-    assert response.status_code == 422, response.text
-    assert "not a member of this team" in response.json()["error"]["message"]
+    assert response.status_code == 404, response.text
 
 
 @pytest.mark.parametrize("role", ["admin", "installation_admin", "bootstrap"])
@@ -383,12 +393,14 @@ async def test_external_membership_error_is_unavailable_not_a_denial(
     client, committed, monkeypatch, operation, decision, reason
 ) -> None:
     team = await make_team(committed)
-    owner, token = await user_with_token(committed, installation_admin=True)
+    # Not an installation admin: that alone would let the owner hold keys anywhere.
+    owner, token = await user_with_token(committed)
     key = await make_key(
         committed, team, owner, lifecycle=KeyLifecycle.SUSPENDED, suspended_reason=reason
     )
     await committed.commit()
     membership_checks = []
+    org_checks = []
 
     async def check(user_id, relation, resource):
         if resource.type == "group":
@@ -396,6 +408,11 @@ async def test_external_membership_error_is_unavailable_not_a_denial(
         if relation is Relation.MEMBER:
             membership_checks.append((user_id, resource.id))
             return decision
+        if resource.type == "org":
+            # Not an org admin either, so the membership answer decides.
+            org_checks.append((user_id, resource.id))
+            return Decision.DENY
+        # The team admin relation lets the owner act on the team at all.
         return Decision.ALLOW
 
     monkeypatch.setattr(client.app.state, "authorizer", Authorizer(check, "external"))
@@ -412,6 +429,7 @@ async def test_external_membership_error_is_unavailable_not_a_denial(
     if decision is Decision.ERROR:
         assert response.json()["error"]["code"] == "authz_unavailable"
     assert membership_checks == [(str(owner.id), str(team.id))]
+    assert (str(owner.id), str(team.org_id)) in org_checks
     stored = client.get(f"/api/v1/keys/{key.id}", headers=ADMIN_AUTH).json()
     assert (stored["lifecycle"], stored["suspended_reason"]) == ("suspended", reason)
     keys = client.get(f"/api/v1/teams/{team.id}/keys", headers=ADMIN_AUTH).json()["items"]

@@ -239,5 +239,7 @@ async def test_user_delete_leaves_a_team_without_admins(client, committed, calle
     assert client.get("/api/v1/users/me", headers=auth(token)).status_code == 401
     for team in (first, last, ordinary):
         assert client.get(f"/api/v1/teams/{team.id}", headers=ADMIN_AUTH).status_code == 200
-        rows = client.get(f"/api/v1/teams/{team.id}/members", headers=ADMIN_AUTH).json()["items"]
+        rows = client.get(f"/api/v1/teams/{team.id}/members?limit=500", headers=ADMIN_AUTH).json()[
+            "items"
+        ]
         assert str(owner.id) not in {r["user_id"] for r in rows}

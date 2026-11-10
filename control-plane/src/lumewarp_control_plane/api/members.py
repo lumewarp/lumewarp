@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Request, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import audit
@@ -21,7 +22,7 @@ from lumewarp_control_plane.api.common import (
     lock_scope,
     mutation,
     parse_uuid_cursor,
-    suspend_user_keys,
+    suspend_ineligible_user_keys,
     validation_error,
 )
 from lumewarp_control_plane.api.policy import (
@@ -40,8 +41,11 @@ from lumewarp_control_plane.api.schemas import (
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import ApiError, not_found
 from lumewarp_control_plane.models import (
+    InheritedFrom,
+    InstallationAdmin,
     MemberPolicy,
     ModelAccess,
+    OrgAdmin,
     Team,
     TeamMember,
     TeamRole,
@@ -76,6 +80,26 @@ def _out(member: TeamMember, user: User, policy: MemberPolicy | None) -> MemberO
         max_parallel=policy.max_parallel if policy is not None else None,
         budget_nano_usd=policy.budget_nano_usd if policy is not None else None,
     )
+
+
+def _inherited_out(
+    team_id: uuid.UUID,
+    user: User,
+    inherited: tuple[InheritedFrom, datetime],
+    policy: MemberPolicy | None,
+) -> MemberOut:
+    """An admin of the team by inheritance, with no membership row of its own."""
+    source, at = inherited
+    out = _out(
+        TeamMember(
+            team_id=team_id, user_id=user.id, role=TeamRole.ADMIN, created_at=at, updated_at=at
+        ),
+        user,
+        policy,
+    )
+    out.inherited_from = source
+    out.direct = False
+    return out
 
 
 async def _policy_or_none(
@@ -120,34 +144,70 @@ async def list_members(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[MemberOut]:
+    """Direct members plus the team's admins by inheritance, in one user-id order.
+
+    Installation admins and the local admins of the team's org are listed with
+    `inherited_from`; an external backend's org admins appear only as far as local rows
+    exist, because a backend cannot list who holds a relation.
+    """
     team = await get_team_or_404(session, authz, team_id)
     await authz.require(Action.TEAM_ADMIN_READ, team.id)
-    stmt = (
-        select(TeamMember, User)
-        .join(User, User.id == TeamMember.user_id)
-        .where(TeamMember.team_id == team.id)
-        .order_by(TeamMember.user_id)
-    )
+    ids = union(
+        select(TeamMember.user_id.label("user_id")).where(TeamMember.team_id == team.id),
+        select(OrgAdmin.user_id).where(OrgAdmin.org_id == team.org_id),
+        select(InstallationAdmin.user_id),
+    ).subquery()
+    stmt = select(ids.c.user_id).order_by(ids.c.user_id)
     if cursor is not None:
-        stmt = stmt.where(TeamMember.user_id > parse_uuid_cursor(cursor))
-    rows = (await session.execute(stmt.limit(limit + 1))).all()
-    next_cursor = str(rows[limit - 1][0].user_id) if len(rows) > limit else None
-    policies = {
-        (row.team_id, row.user_id): row
-        for row in await session.scalars(
-            select(MemberPolicy).where(
-                MemberPolicy.team_id == team.id,
-                MemberPolicy.user_id.in_([member.user_id for member, _ in rows[:limit]]),
+        stmt = stmt.where(ids.c.user_id > parse_uuid_cursor(cursor))
+    page_ids = list((await session.scalars(stmt.limit(limit + 1))).all())
+    next_cursor = str(page_ids[limit - 1]) if len(page_ids) > limit else None
+    page_ids = page_ids[:limit]
+    users = {
+        user.id: user for user in await session.scalars(select(User).where(User.id.in_(page_ids)))
+    }
+    members = {
+        member.user_id: member
+        for member in await session.scalars(
+            select(TeamMember).where(
+                TeamMember.team_id == team.id, TeamMember.user_id.in_(page_ids)
             )
         )
     }
-    return Page[MemberOut](
-        items=[
-            _out(member, user, policies.get((member.team_id, member.user_id)))
-            for member, user in rows[:limit]
-        ],
-        next_cursor=next_cursor,
-    )
+    policies = {
+        row.user_id: row
+        for row in await session.scalars(
+            select(MemberPolicy).where(
+                MemberPolicy.team_id == team.id, MemberPolicy.user_id.in_(page_ids)
+            )
+        )
+    }
+    granted: dict[uuid.UUID, tuple[InheritedFrom, datetime]] = {}
+    for user_id, at in await session.execute(
+        select(OrgAdmin.user_id, OrgAdmin.assigned_at).where(
+            OrgAdmin.org_id == team.org_id, OrgAdmin.user_id.in_(page_ids)
+        )
+    ):
+        granted[user_id] = (InheritedFrom.ORG, at)
+    for user_id, at in await session.execute(
+        select(InstallationAdmin.user_id, InstallationAdmin.assigned_at).where(
+            InstallationAdmin.user_id.in_(page_ids)
+        )
+    ):
+        granted[user_id] = (InheritedFrom.INSTALLATION, at)
+    items = []
+    for user_id in page_ids:
+        user = users[user_id]
+        inherited = granted.get(user_id)
+        member = members.get(user_id)
+        if member is not None:
+            out = _out(member, user, policies.get(user_id))
+            out.inherited_from = inherited[0] if inherited else None
+        else:
+            assert inherited is not None
+            out = _inherited_out(team.id, user, inherited, policies.get(user_id))
+        items.append(out)
+    return Page[MemberOut](items=items, next_cursor=next_cursor)
 
 
 @router.put(
@@ -358,12 +418,14 @@ async def delete_member(
         ensure_grants_managed(request)
         await _ensure_admin_role_change(authz, team.id, row.role, None)
         await session.delete(row)
-        suspended = await suspend_user_keys(
+        # An installation admin or org admin keeps their keys: they still administer
+        # the team, and may own keys in it, without the membership.
+        suspended = await suspend_ineligible_user_keys(
             session,
+            authz.authorizer,
             authz.principal,
             user_id=user_id,
-            team_id=team.id,
-            reason="owner_removed",
+            team_ids={team.id},
         )
         audit.record(
             session,

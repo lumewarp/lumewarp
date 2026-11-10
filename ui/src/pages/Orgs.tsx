@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { api, hasPolicy, type Org, type OrgAdmin, type TeamAny } from "../api";
-import { Badge, fmtDate, fmtUsd, PageHeader } from "../components/Bits";
+import { Badge, fmtDate, fmtUsd, InheritedBadge, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, required, TextField, useForm } from "../components/Form";
 import { blankPolicy, Budget, PolicyFields, policyBody, policyFrom, PolicySummary, POLICY_ALIAS, type PolicyValues } from "../components/Policy";
@@ -91,7 +91,8 @@ function AssignAdminDialog({ org, onClose }: { org: Org; onClose: () => void }) 
   const users = useQuery({ queryKey: ["user-directory"], queryFn: () => api.users() });
   const form = useForm<{ user_id: string }>({ user_id: "" }, { user_id: (value) => (value ? undefined : "Choose a user") });
   const assign = useMut((id: string) => api.putOrgAdmin(org.id, id), "Org admin assigned");
-  const existing = new Set((admins.data ?? []).map((admin) => admin.user_id));
+  // An installation admin is listed by inheritance and may still be given a local grant.
+  const existing = new Set((admins.data ?? []).filter((admin) => admin.direct).map((admin) => admin.user_id));
   const options = (users.data ?? [])
     .filter((user) => user.is_active && !existing.has(user.id))
     .map((user) => ({ value: user.id, label: user.email }));
@@ -361,7 +362,16 @@ export function OrgDetail() {
             rowKey={(admin) => admin.user_id}
             empty="No org admins assigned."
             columns={[
-              { key: "email", header: "Email", sort: (a, b) => a.email.localeCompare(b.email), cell: (admin) => <strong>{admin.email}</strong> },
+              {
+                key: "email",
+                header: "Email",
+                sort: (a, b) => a.email.localeCompare(b.email),
+                cell: (admin) => (
+                  <>
+                    <strong>{admin.email}</strong> <InheritedBadge from={admin.inherited_from} />
+                  </>
+                ),
+              },
               { key: "name", header: "Name", cell: (admin) => admin.display_name || "—" },
               {
                 key: "status",
@@ -372,7 +382,9 @@ export function OrgDetail() {
               {
                 key: "actions",
                 header: "",
-                cell: (admin) => (
+                cell: (admin) =>
+                  // An installation admin without a local grant is removed at the installation level.
+                  !admin.direct ? null : (
                   <RowActions
                     canDelete={!readOnly}
                     deleteLabel="Remove"

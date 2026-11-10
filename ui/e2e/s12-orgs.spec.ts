@@ -189,6 +189,37 @@ test("org admin sees only its org, creates and archives a team there, and cannot
   }
 });
 
+test("org admin is listed in its org's teams by inheritance and owns a key there", async ({ page }) => {
+  const own = await admin.post<{ id: string; name: string }>("/orgs", { name: "s12-org-inherit" });
+  await admin.putOrgAdmin(own.id, ORG_ADMIN_EMAIL);
+  const team = await admin.post<{ id: string; name: string }>("/teams", { name: "s12-inherit-team", org_id: own.id });
+
+  // The members list shows the org admin as an inherited admin, with nothing to edit.
+  await signIn(page, ORG_ADMIN, `/teams/${team.id}`);
+  await page.getByRole("tab", { name: "Members", exact: true }).click();
+  const row = rowOf(page, ORG_ADMIN_EMAIL);
+  await expect(row).toContainText("via org");
+  await expect(row.getByRole("button", { name: "Edit", exact: true })).toHaveCount(0);
+  await expect(row.getByRole("button", { name: "Delete", exact: true })).toHaveCount(0);
+
+  // My keys lists the team, marked as inherited, and creates a key in it without a membership.
+  // Without a key there yet, the inherited team waits behind "Show" so an installation
+  // admin is not handed every team at once.
+  await page.goto("/my-keys");
+  const section = page.getByTestId("team-s12-inherit-team");
+  await expect(section).toHaveCount(0);
+  await page.getByTestId("inherited-teams").getByRole("button", { name: /^Show/ }).click();
+  await expect(section).toContainText("via org");
+  await section.getByRole("button", { name: "New key" }).click();
+  const form = page.getByRole("dialog", { name: "New key in s12-inherit-team" });
+  await form.getByLabel("Name").fill("s12-inherited");
+  await form.getByRole("button", { name: "Create key" }).click();
+  const secret = page.getByRole("dialog", { name: "API key created" });
+  await expect(secret.getByTestId("secret-value")).toHaveText(/^lw-/);
+  const keys = await admin.get<{ items: { name: string; owner_kind: string }[] }>(`/teams/${team.id}/keys`);
+  expect(keys.items.map((key) => [key.name, key.owner_kind])).toContainEqual(["s12-inherited", "user"]);
+});
+
 test("team admin cannot edit team totals but edits member defaults and a member exception", async ({ page }) => {
   const team = await admin.ensureTeam("s12-settings");
   await admin.patch(`/teams/${team.id}`, { rpm_limit: 100 });

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -14,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import audit, outbox
-from lumewarp_control_plane.authz import Action, RequestAuthz
+from lumewarp_control_plane.authz import Action, Authorizer, Decision, RequestAuthz
 from lumewarp_control_plane.db import get_session
 from lumewarp_control_plane.errors import ApiError, forbidden, not_found
 from lumewarp_control_plane.metrics import DISCARD, Metrics, note_suspended
@@ -28,6 +29,8 @@ from lumewarp_control_plane.models import (
 )
 from lumewarp_control_plane.security import Principal
 from lumewarp_control_plane.settings import Settings
+
+log = logging.getLogger(__name__)
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 LimitDep = Annotated[int, Query(ge=1, le=500)]
@@ -215,6 +218,53 @@ async def suspend_user_keys(
             details={"name": key.name, "user_id": user_id, "reason": reason},
         )
     return len(keys)
+
+
+async def suspend_ineligible_user_keys(
+    session: AsyncSession,
+    authorizer: Authorizer,
+    principal: Principal,
+    *,
+    user_id: uuid.UUID,
+    team_ids: set[uuid.UUID] | None = None,
+    reason: str = "owner_removed",
+) -> int:
+    """After a membership or admin role was removed in this transaction, suspend the user's
+    keys in every team (of `team_ids`, or any) where they may no longer own keys.
+
+    A user keeps their keys in a team while any source still allows them (direct member,
+    installation admin, admin of the team's org). An ERROR leaves the team's keys alone:
+    the key reconciler checks again on its next pass. The caller enqueues the recompile.
+    """
+    from lumewarp_control_plane.keys.owners import key_owner_decisions
+
+    await session.flush()
+    stmt = (
+        select(ApiKey.team_id)
+        .where(
+            ApiKey.owner_kind == KeyOwnerKind.USER,
+            ApiKey.user_id == user_id,
+            ApiKey.lifecycle != KeyLifecycle.REVOKED,
+        )
+        .distinct()
+    )
+    if team_ids is not None:
+        stmt = stmt.where(ApiKey.team_id.in_(team_ids))
+    teams = sorted((await session.scalars(stmt)).all())
+    decisions = await key_owner_decisions(session, authorizer, [(user_id, t) for t in teams])
+    suspended = 0
+    for team_id, decision in zip(teams, decisions, strict=True):
+        if decision is Decision.DENY:
+            suspended += await suspend_user_keys(
+                session, principal, user_id=user_id, team_id=team_id, reason=reason
+            )
+        elif decision is Decision.ERROR:
+            log.warning(
+                "key owner check unavailable for user %s team %s; left to the reconciler",
+                user_id,
+                team_id,
+            )
+    return suspended
 
 
 def ensure_parent_matches(provided: uuid.UUID | None, actual: uuid.UUID, field: str) -> None:

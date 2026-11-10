@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 
 import { api, type Key, type Me, type Schemas } from "../api";
-import { Badge, fmtDate, fmtUsd, KeyBadge, PageHeader, SuspendedReason, TypeBadge } from "../components/Bits";
+import { Badge, fmtDate, fmtUsd, InheritedBadge, KeyBadge, PageHeader, SuspendedReason, TypeBadge } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
 import { blankKeyLimits, KeyLimitFields, keyLimitsBody, keyLimitsFrom, type KeyLimitValues } from "../components/KeyLimits";
@@ -32,6 +32,7 @@ type Team = Me["teams"][number];
 export function MyKeys() {
   const me = useMe();
   const keys = useOwnKeys();
+  const [showInherited, setShowInherited] = useState(false);
   if (me.isPending) return <PageLoading label="Loading your access…" />;
   if (me.error && !me.data) {
     return (
@@ -41,6 +42,10 @@ export function MyKeys() {
     );
   }
   const teams = me.data?.teams ?? [];
+  // An installation admin inherits every team: show memberships and teams that already hold
+  // the caller's keys, and the other administered teams only on request.
+  const shown = teams.filter((team) => showInherited || team.direct || team.key_limits.key_count > 0);
+  const hidden = teams.length - shown.length;
   return (
     <>
       <PageHeader
@@ -56,7 +61,7 @@ export function MyKeys() {
         <NoTeams />
       ) : (
         <>
-          {teams.map((team) => (
+          {shown.map((team) => (
             <TeamSection
               key={team.team_id}
               team={team}
@@ -66,7 +71,17 @@ export function MyKeys() {
               onRetry={() => void keys.refetch()}
             />
           ))}
-          {me.data?.user_id && <MyUsage teams={teams} userId={me.data.user_id} />}
+          {hidden > 0 && (
+            <Card className="mb-5 flex-row flex-wrap items-center justify-between gap-3 p-4 shadow-none" data-testid="inherited-teams">
+              <p className="m-0 text-sm text-muted-foreground">
+                You administer {hidden} more {hidden === 1 ? "team" : "teams"} by inheritance and may create keys there.
+              </p>
+              <Button variant="outline" onClick={() => setShowInherited(true)}>
+                Show {hidden === 1 ? "it" : "them"}
+              </Button>
+            </Card>
+          )}
+          {me.data?.user_id && shown.length > 0 && <MyUsage teams={shown} userId={me.data.user_id} />}
         </>
       )}
     </>
@@ -288,6 +303,7 @@ function TeamSection({
         <h2 className="m-0 flex flex-wrap items-center gap-2">
           {team.team_name}
           <Badge tone="info">{team.role}</Badge>
+          <InheritedBadge from={team.inherited_from} />
         </h2>
         <Button onClick={() => setCreating(true)}>New key</Button>
       </div>

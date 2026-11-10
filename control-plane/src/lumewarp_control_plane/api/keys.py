@@ -52,11 +52,10 @@ from lumewarp_control_plane.authz import (
     Authz,
     AuthzUnavailable,
     Decision,
-    Relation,
     RequestAuthz,
-    team_resource,
 )
 from lumewarp_control_plane.errors import ApiError, forbidden, not_found
+from lumewarp_control_plane.keys.owners import key_owner_decisions
 from lumewarp_control_plane.metrics import note_suspended
 from lumewarp_control_plane.models import (
     ApiKey,
@@ -65,7 +64,6 @@ from lumewarp_control_plane.models import (
     MemberPolicy,
     ServiceAccount,
     Team,
-    TeamMember,
     User,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
@@ -313,15 +311,13 @@ async def _page(
     )
 
 
-async def _is_member(
+async def _may_own_keys(
     session: AsyncSession, authz: RequestAuthz, team_id: uuid.UUID, user_id: uuid.UUID
 ) -> bool:
-    """Whether the user holds a membership of the team itself. `authz.has` is not enough:
-    it is true for every installation admin, who may not be a member and so cannot own keys.
+    """Whether the user may own keys in the team: a direct member, an installation admin or
+    an admin of the team's org (`keys.owners`). Break-glass has no user and owns none.
     """
-    if authz.authorizer.manages_grants:
-        return await session.get(TeamMember, (team_id, user_id)) is not None
-    decision = await authz.authorizer.check(str(user_id), Relation.MEMBER, team_resource(team_id))
+    (decision,) = await key_owner_decisions(session, authz.authorizer, [(user_id, team_id)])
     if decision is Decision.ERROR:
         raise AuthzUnavailable()
     return decision is Decision.ALLOW
@@ -416,8 +412,8 @@ async def create_key(
         if body.service_account_id is None:
             await authz.require(Action.KEY_CREATE_OWN, team.id)
             user_id = authz.user_id
-            if user_id is None or not await _is_member(session, authz, team.id, user_id):
-                raise validation_error("team_id", "not a member of this team")
+            if user_id is None or not await _may_own_keys(session, authz, team.id, user_id):
+                raise validation_error("team_id", "not a member or admin of this team")
             owner = {"owner_kind": KeyOwnerKind.USER, "user_id": user_id}
             expires_at = await _member_key_expiry(session, team, user_id, body.expires_at)
         else:
@@ -529,8 +525,8 @@ async def update_key(
                 owner = await session.get(User, row.user_id)
                 if owner is None or not owner.is_active:
                     raise conflict("the key's owner is not active")
-                if not await _is_member(session, authz, row.team_id, row.user_id):
-                    raise conflict("the key's owner is no longer a member of the team")
+                if not await _may_own_keys(session, authz, row.team_id, row.user_id):
+                    raise conflict("the key's owner is no longer a member or admin of the team")
             if row.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT:
                 account = await session.get(ServiceAccount, row.service_account_id)
                 if account is None or account.deactivated_at is not None:

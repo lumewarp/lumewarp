@@ -1,4 +1,8 @@
-"""Suspend active user keys after a confirmed membership loss; never auto-resume."""
+"""Suspend active user keys after a confirmed loss of key ownership; never auto-resume.
+
+A user may own keys in a team while they are a direct member, an installation admin or an
+admin of the team's org (`keys.owners`).
+"""
 
 import asyncio
 import logging
@@ -12,8 +16,9 @@ from sqlalchemy import select
 
 from lumewarp_control_plane import audit
 from lumewarp_control_plane.api.common import enqueue_recompile, lock_scope
-from lumewarp_control_plane.authz import Authorizer, Decision, Relation, team_resource
+from lumewarp_control_plane.authz import Authorizer, Decision
 from lumewarp_control_plane.db import SessionFactory
+from lumewarp_control_plane.keys.owners import key_owner_decisions
 from lumewarp_control_plane.metrics import DISCARD, Metrics
 from lumewarp_control_plane.models import ActorType, ApiKey, KeyLifecycle, KeyOwnerKind, User
 from lumewarp_control_plane.settings import Settings
@@ -80,9 +85,10 @@ async def _reconcile(
     errors = 0
     for start in range(0, len(pairs), CHECK_SLICE_SIZE):
         batch = pairs[start : start + CHECK_SLICE_SIZE]
-        decisions = await authorizer.batch_check(
-            [(str(user), Relation.MEMBER, team_resource(team)) for user, team, _ in batch]
-        )
+        async with session_factory() as session:
+            decisions = await key_owner_decisions(
+                session, authorizer, [(user, team) for user, team, _ in batch]
+            )
         decided_at = datetime.now(UTC)
         for (user, team, is_active), decision in zip(batch, decisions, strict=True):
             if not is_active or decision is Decision.DENY:

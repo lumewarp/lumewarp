@@ -406,7 +406,11 @@ async def test_installation_admins_can_list_assign_and_remove_admins(
     assert await role_of(roles_engine, target.id) is None
     removed_rows = await audit_rows(roles_engine, "installation_admin.remove")
     assert len(removed_rows) == 1
-    assert removed_rows[0].details == {"user_id": str(target.id), "role": "admin"}
+    assert removed_rows[0].details == {
+        "user_id": str(target.id),
+        "role": "admin",
+        "suspended_keys": 0,
+    }
     assert (
         roles_client.get("/api/v1/users", headers=auth("session:" + target_token)).status_code
         == 403
