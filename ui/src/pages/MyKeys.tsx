@@ -32,7 +32,6 @@ type Team = Me["teams"][number];
 export function MyKeys() {
   const me = useMe();
   const keys = useOwnKeys();
-  const [showInherited, setShowInherited] = useState(false);
   if (me.isPending) return <PageLoading label="Loading your access…" />;
   if (me.error && !me.data) {
     return (
@@ -42,10 +41,6 @@ export function MyKeys() {
     );
   }
   const teams = me.data?.teams ?? [];
-  // An installation admin inherits every team: show memberships and teams that already hold
-  // the caller's keys, and the other administered teams only on request.
-  const shown = teams.filter((team) => showInherited || team.direct || team.key_limits.key_count > 0);
-  const hidden = teams.length - shown.length;
   return (
     <>
       <PageHeader
@@ -61,7 +56,7 @@ export function MyKeys() {
         <NoTeams />
       ) : (
         <>
-          {shown.map((team) => (
+          {teams.map((team) => (
             <TeamSection
               key={team.team_id}
               team={team}
@@ -71,17 +66,7 @@ export function MyKeys() {
               onRetry={() => void keys.refetch()}
             />
           ))}
-          {hidden > 0 && (
-            <Card className="mb-5 flex-row flex-wrap items-center justify-between gap-3 p-4 shadow-none" data-testid="inherited-teams">
-              <p className="m-0 text-sm text-muted-foreground">
-                You administer {hidden} more {hidden === 1 ? "team" : "teams"} by inheritance and may create keys there.
-              </p>
-              <Button variant="outline" onClick={() => setShowInherited(true)}>
-                Show {hidden === 1 ? "it" : "them"}
-              </Button>
-            </Card>
-          )}
-          {me.data?.user_id && shown.length > 0 && <MyUsage teams={shown} userId={me.data.user_id} />}
+          {me.data?.user_id && <MyUsage teams={teams} userId={me.data.user_id} />}
         </>
       )}
     </>

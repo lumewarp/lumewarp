@@ -198,18 +198,14 @@ test("org admin is listed in its org's teams by inheritance and owns a key there
   await signIn(page, ORG_ADMIN, `/teams/${team.id}`);
   await page.getByRole("tab", { name: "Members", exact: true }).click();
   const row = rowOf(page, ORG_ADMIN_EMAIL);
-  await expect(row).toContainText("via org");
+  await expect(row).toContainText("inherit");
   await expect(row.getByRole("button", { name: "Edit", exact: true })).toHaveCount(0);
   await expect(row.getByRole("button", { name: "Delete", exact: true })).toHaveCount(0);
 
   // My keys lists the team, marked as inherited, and creates a key in it without a membership.
-  // Without a key there yet, the inherited team waits behind "Show" so an installation
-  // admin is not handed every team at once.
   await page.goto("/my-keys");
   const section = page.getByTestId("team-s12-inherit-team");
-  await expect(section).toHaveCount(0);
-  await page.getByTestId("inherited-teams").getByRole("button", { name: /^Show/ }).click();
-  await expect(section).toContainText("via org");
+  await expect(section).toContainText("inherit");
   await section.getByRole("button", { name: "New key" }).click();
   const form = page.getByRole("dialog", { name: "New key in s12-inherit-team" });
   await form.getByLabel("Name").fill("s12-inherited");

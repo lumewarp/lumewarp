@@ -28,7 +28,7 @@ export function TypeBadge({ type }: { type: Schemas["ModelType"] | null | undefi
 /** Marks an admin listed by inheritance: from the installation role or from the team's org. */
 export function InheritedBadge({ from }: { from: Schemas["InheritedFrom"] | null | undefined }) {
   if (!from) return null;
-  return <ShadcnBadge variant="muted">{from === "installation" ? "via installation" : "via org"}</ShadcnBadge>;
+  return <ShadcnBadge variant="muted">inherit</ShadcnBadge>;
 }
 
 const SUSPENDED_REASONS: Record<string, string> = {
