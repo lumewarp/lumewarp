@@ -396,3 +396,25 @@ async def test_limits(factory) -> None:
 async def test_unknown_scope(factory) -> None:
     with pytest.raises(CompileError, match="unknown config scope"):
         await compile_(factory)
+
+
+@pytest.mark.parametrize("via", ["installation", "org", "other_org", "none"])
+async def test_inherited_admins_keep_their_keys_active(factory, via) -> None:
+    from lumewarp_control_plane.models import InstallationAdmin, InstallationRole, Org
+
+    await seed_scope(factory)
+    async with factory() as s, s.begin():
+        team = await factories.make_team(s, model_access=LIST, allowed_models=["a"])
+        user = await factories.make_user(s)
+        if via == "installation":
+            s.add(InstallationAdmin(user_id=user.id, role=InstallationRole.ADMIN))
+        elif via == "org":
+            await factories.make_org_admin(s, await s.get(Org, team.org_id), user)
+        elif via == "other_org":
+            await factories.make_org_admin(s, await factories.make_org(s), user)
+        key = await add_key(s, team, user)
+    wire = key_of(await compile_(factory, require_local_membership=True), key)
+    inherited = via in ("installation", "org")
+    assert wire.status == (pb.KEY_STATUS_ACTIVE if inherited else pb.KEY_STATUS_SUSPENDED)
+    # No membership row: the team's member defaults apply.
+    assert list(wire.policy.allowed_models) == ["a"]

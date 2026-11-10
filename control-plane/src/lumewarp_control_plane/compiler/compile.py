@@ -28,6 +28,7 @@ from lumewarp_control_plane.models import (
     ApiKey,
     CatalogName,
     GatewaySession,
+    InstallationAdmin,
     KeyLifecycle,
     KeyOwnerKind,
     McpDefinition,
@@ -39,6 +40,7 @@ from lumewarp_control_plane.models import (
     Model,
     ModelAccess,
     Org,
+    OrgAdmin,
     PluginKind,
     PolicyGrant,
     Router,
@@ -292,8 +294,9 @@ async def compile_scope(
       key). A member's level takes the member-policy exception, else the team's
       `member_*_default`, even without a membership row.
       Status: SUSPENDED from lifecycle, or for a user-owned key whose owner is no longer
-      a member of the key's team (builtin only) or is deactivated; external owners without
-      a local policy row inherit the team policy. Else BUDGET_EXCEEDED if the org (its
+      a member of the key's team, an installation admin or an admin of its org (builtin
+      only), or is deactivated; external owners and inherited admins without a local
+      policy row inherit the team policy. Else BUDGET_EXCEEDED if the org (its
       spend derived from its teams), the team or the owner has a budget and the matching
       spend for the UTC month of `now` is >= it; else ACTIVE. Revoked keys are left out
       (the gateway answers 401 for them either way), so revocation is a key removal in
@@ -678,6 +681,9 @@ async def compile_scope(
         return granted.get((None, entity.team_id, None, entity.id), [])
 
     members = {(m.team_id, m.user_id): m for m in await session.scalars(select(TeamMember))}
+    # Inherited administrators may own keys in the teams they administer (keys/owners.py).
+    installation_admins = set(await session.scalars(select(InstallationAdmin.user_id)))
+    org_admins = set((await session.execute(select(OrgAdmin.org_id, OrgAdmin.user_id))).all())
     member_policies = {
         (m.team_id, m.user_id): m for m in await session.scalars(select(MemberPolicy))
     }
@@ -746,7 +752,10 @@ async def compile_scope(
             owner_policy = member_policies.get((k.team_id, k.user_id))
             # keys/reconciler.py suspends keys whose external membership was revoked.
             owner_gone = k.user_id not in active_users or (
-                require_local_membership and member is None
+                require_local_membership
+                and member is None
+                and k.user_id not in installation_admins
+                and (team.org_id, k.user_id) not in org_admins
             )
             service_account = False
         else:
