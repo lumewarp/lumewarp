@@ -1,3 +1,5 @@
+import { AudioLinesIcon, MessageSquareTextIcon, SplitIcon, WaypointsIcon, type LucideIcon } from "lucide-react";
+
 import type { Schemas } from "../api";
 
 export type ModelType = Schemas["ModelType"];
@@ -8,6 +10,14 @@ export const MODEL_TYPES: { value: ModelType; label: string }[] = [
   { value: "transcription", label: "Transcription" },
   { value: "decision", label: "Decision" },
 ];
+
+/** One icon per type, beside its label wherever a type is shown. */
+export const TYPE_ICON: Record<ModelType, LucideIcon> = {
+  llm: MessageSquareTextIcon,
+  embedding: WaypointsIcon,
+  transcription: AudioLinesIcon,
+  decision: SplitIcon,
+};
 
 export const typeLabel = (t: ModelType | null | undefined): string => MODEL_TYPES.find((x) => x.value === t)?.label ?? "—";
 

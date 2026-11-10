@@ -15,7 +15,7 @@ from typing import Any
 
 from fastapi import APIRouter, Response, status
 from pydantic import SecretStr
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import audit, catalog, sealing, upstream_client
@@ -173,6 +173,35 @@ def _health(reports: list[dict], name: str) -> str:
     """Unhealthy if any connected gateway says so; unknown before any has reported."""
     seen = [r[name] for r in reports if isinstance(r.get(name), bool)]
     return "unhealthy" if False in seen else "healthy" if seen else "unknown"
+
+
+_PROBE_CLEARED = {"probe_at": None, "probe_ok": None, "probe_ok_at": None}
+
+
+def _upstream_probed(row: Upstream) -> tuple:
+    """What an upstream's Test now depends on; a change makes its result stale."""
+    return (row.base_url, row.health_url, row.api_key_ref, row.api_key_ciphertext)
+
+
+def _model_probed(row: Model) -> tuple:
+    """What a model's Test now depends on; a change makes its result stale."""
+    return (row.upstream_id, row.upstream_model, row.model_type, row.default_body)
+
+
+async def _record_probe(session: AsyncSession, entity, conditions: list, ok: bool) -> None:
+    """Keep a Test now result on the saved row it probed. The conditions restate the
+    probed settings, so a row changed while the probe ran is left alone; updated_at
+    stays, as no setting changed.
+    """
+    values: dict[str, Any] = {
+        "probe_at": func.now(),
+        "probe_ok": ok,
+        "updated_at": entity.updated_at,
+    }
+    if ok:
+        values["probe_ok_at"] = func.now()
+    await session.execute(update(entity).where(*conditions).values(**values))
+    await session.commit()
 
 
 async def _upstreams_out(
@@ -629,6 +658,18 @@ async def test_upstream(
                 raise ApiError(502, "upstream_unavailable", str(exc)) from None
             credential = "stored"
     probe = await upstream_client.test_upstream(body.base_url, body.health_url, token)
+    if body.upstream_id is not None and body.api_key is None:
+        await _record_probe(
+            session,
+            Upstream,
+            [
+                Upstream.id == body.upstream_id,
+                Upstream.base_url == body.base_url,
+                Upstream.health_url.is_not_distinct_from(body.health_url),
+                Upstream.api_key_ref.is_not_distinct_from(body.api_key_ref),
+            ],
+            probe.ok,
+        )
     return UpstreamTestOut(credential=credential, probe=ProbeOut(**vars(probe)))
 
 
@@ -647,6 +688,7 @@ async def update_upstream(
         row = await session.get(Upstream, upstream_id)
         if row is None:
             raise not_found("upstream not found")
+        probed = _upstream_probed(row)
         for name in ("name", "kind", "base_url", "timeout_ms", "stream_usage_mode"):
             if name in body.model_fields_set:
                 setattr(row, name, getattr(body, name))
@@ -668,6 +710,15 @@ async def update_upstream(
             _apply_health(row, body.health_check)
         if "circuit_breaker" in body.model_fields_set:
             _apply_breaker(row, body.circuit_breaker)
+        if _upstream_probed(row) != probed:
+            for name, value in _PROBE_CLEARED.items():
+                setattr(row, name, value)
+            # Its models' results went through the old address or key.
+            await session.execute(
+                update(Model)
+                .where(Model.upstream_id == row.id)
+                .values(**_PROBE_CLEARED, updated_at=Model.updated_at)
+            )
         await session.flush()
         await session.refresh(row)
         audit.record(
@@ -847,6 +898,19 @@ async def test_model(
     probe, reply = await upstream_client.chat_check(
         upstream.base_url, token, body.upstream_model, body.default_body, body.model_type
     )
+    if body.model_id is not None:
+        await _record_probe(
+            session,
+            Model,
+            [
+                Model.name_id == body.model_id,
+                Model.upstream_id == body.upstream_id,
+                Model.upstream_model == body.upstream_model,
+                Model.model_type == body.model_type,
+                Model.default_body.is_not_distinct_from(body.default_body),
+            ],
+            probe.ok,
+        )
     return ModelTestOut(credential=credential, probe=ProbeOut(**vars(probe)), reply=reply)
 
 
@@ -869,6 +933,7 @@ async def update_model(
         row = await session.get(Model, model_id)
         if row is None:
             raise not_found("model not found")
+        probed = _model_probed(row)
         if body.model_type is not None and body.model_type != row.model_type:
             for edge in (RouterMember, RouterSplitMember, RouterFallback):
                 if await session.scalar(
@@ -908,6 +973,9 @@ async def update_model(
             validate_model_settings(row)
         except ValueError as exc:
             raise validation_error("model_type", str(exc)) from None
+        if _model_probed(row) != probed:
+            for name, value in _PROBE_CLEARED.items():
+                setattr(row, name, value)
         if renaming:
             old_name = await _rename(session, row.id, body.name)
             row.updated_at = func.now()

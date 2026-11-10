@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
+import { BanIcon, BotIcon, BoxesIcon, CableIcon, ChevronDownIcon, ChevronRightIcon, PauseIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { api, type Key, type Me, type Schemas } from "../api";
-import { Badge, fmtDate, fmtUsd, InheritedBadge, KeyBadge, PageHeader, SuspendedReason, TypeBadge } from "../components/Bits";
+import { Badge, fmtDate, fmtUsd, InheritedBadge, KeyBadge, ModelPill, PageHeader, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
+import { IconAction } from "../components/RowActions";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
 import { blankKeyLimits, KeyLimitFields, keyLimitsBody, keyLimitsFrom, type KeyLimitValues } from "../components/KeyLimits";
 import { DataTable } from "../components/Table";
@@ -11,6 +13,8 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge as UiBadge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { HelpTip } from "../components/ui/help-tip";
 import { useAction, useCan, useMe, useMut, useOwnKeys, useSecretMut } from "../hooks";
 import { useShowSecret } from "../components/SecretProvider";
@@ -28,10 +32,15 @@ import {
 
 type Team = Me["teams"][number];
 
-/** A self-service page: every team the caller is on, with the caller's own keys in it. */
+/**
+ * A self-service page: the caller's own keys in one table, then every team they may hold keys in
+ * (memberships first, then teams administered by inheritance) with what a key there can do.
+ */
 export function MyKeys() {
   const me = useMe();
   const keys = useOwnKeys();
+  const [creating, setCreating] = useState<{ team: Team | null } | null>(null);
+  const showSecret = useShowSecret();
   if (me.isPending) return <PageLoading label="Loading your access…" />;
   if (me.error && !me.data) {
     return (
@@ -40,12 +49,14 @@ export function MyKeys() {
       </Alert>
     );
   }
-  const teams = me.data?.teams ?? [];
+  const teams = orderTeams(me.data?.teams ?? []);
+  const blocked = !!me.data?.authz_unavailable || me.data?.kind === "break_glass" || teams.length === 0;
   return (
     <>
       <PageHeader
         title="My keys"
         hint="A secret is shown only once, when a key is created or rotated."
+        actions={blocked ? undefined : <Button onClick={() => setCreating({ team: teams.length === 1 ? teams[0] : null })}>New key</Button>}
       />
       {me.error && me.data && <CheckFailed onRetry={() => void me.refetch()} />}
       {me.data?.authz_unavailable ? (
@@ -56,21 +67,31 @@ export function MyKeys() {
         <NoTeams />
       ) : (
         <>
-          {teams.map((team) => (
-            <TeamSection
-              key={team.team_id}
-              team={team}
-              keys={(keys.data ?? []).filter((key) => key.team_id === team.team_id)}
-              loading={keys.isPending}
-              error={keys.error}
-              onRetry={() => void keys.refetch()}
-            />
-          ))}
+          <KeysTable
+            teams={teams}
+            keys={keys.data}
+            loading={keys.isPending}
+            error={keys.error}
+            onRetry={() => void keys.refetch()}
+          />
+          <TeamsTable teams={teams} onNewKey={(team) => setCreating({ team })} />
           {me.data?.user_id && <MyUsage teams={teams} userId={me.data.user_id} />}
+          <CreateKeyDialog
+            teams={teams}
+            team={creating?.team ?? null}
+            open={!!creating}
+            onClose={() => setCreating(null)}
+            onCreated={(value) => showSecret({ value, title: "API key created" })}
+          />
         </>
       )}
     </>
   );
+}
+
+/** Memberships first, then teams held by inheritance; each group by name. */
+function orderTeams(teams: Team[]): Team[] {
+  return [...teams].sort((a, b) => Number(!a.direct) - Number(!b.direct) || a.team_name.localeCompare(b.team_name));
 }
 
 function NoTeams() {
@@ -117,9 +138,8 @@ function CallableModels({ team }: { team: Team }) {
       aria-label="Callable models"
     >
       {team.models.map((name) => (
-        <span key={name} className="inline-flex items-center gap-1" role="listitem">
-          <UiBadge variant="muted">{name}</UiBadge>
-          {typeOf.get(name) && <TypeBadge type={typeOf.get(name)} />}
+        <span key={name} role="listitem">
+          <ModelPill name={name} type={typeOf.get(name)} />
         </span>
       ))}
     </div>
@@ -171,65 +191,6 @@ function AgentAccess({ team }: { team: Team }) {
   );
 }
 
-/**
- * How a key of this team reaches the MCP and A2A endpoints: the paths, the header they take, and one server or
- * agent as an example. The key itself is a placeholder — this page never holds a secret.
- */
-function connectionSnippet(team: Team): string {
-  const servers = team.all_mcp ? ["<server>"] : team.mcp_servers.map((grant) => grant.server);
-  const agents = team.all_agents ? ["<agent>"] : team.agents;
-  const more = (count: number, what: string) => (count > 2 ? [`# and ${count - 2} more ${what}`, ""] : []);
-  return [
-    "# exactly one on every MCP and A2A request",
-    "X-Lumewarp-Key: lw-YOUR-KEY",
-    "",
-    "# MCP: every server this key may use, then one server",
-    "POST <gateway>/mcp",
-    ...servers.slice(0, 2).map((name) => `POST <gateway>/mcp/servers/${name}`),
-    ...more(servers.length, "servers"),
-    "",
-    "# A2A: the agents this key may use, then one agent",
-    "GET  <gateway>/a2a",
-    ...agents.slice(0, 2).map((name) => `POST <gateway>/a2a/${name}`),
-    ...more(agents.length, "agents"),
-  ]
-    .join("\n")
-    .trimEnd();
-}
-
-function Connection({ team }: { team: Team }) {
-  const [copied, setCopied] = useState(false);
-  const snippet = connectionSnippet(team);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(snippet);
-      setCopied(true);
-    } catch {
-      /* clipboard blocked: the block is selectable */
-    }
-  };
-  return (
-    <section className="flex flex-col gap-2" aria-label={`MCP and A2A connection for ${team.team_name}`}>
-      <div className="flex items-center gap-1 text-sm font-semibold">
-        MCP and A2A
-        <HelpTip label="MCP and A2A" text="Prefix the paths with the gateway's public URL; a key sees only what its grants allow." />
-      </div>
-      <div className="flex items-stretch gap-2">
-        <code
-          className="min-w-0 flex-1 overflow-x-auto rounded-md border bg-secondary px-2.5 py-2 font-mono text-xs whitespace-pre"
-          data-testid="connection-snippet"
-          tabIndex={0}
-        >
-          {snippet}
-        </code>
-        <Button type="button" variant="outline" className="self-start" onClick={copy}>
-          {copied ? "Copied" : "Copy"}
-        </Button>
-      </div>
-    </section>
-  );
-}
-
 function rateLimits(team: Team) {
   const parts = [
     team.limits.rpm_limit !== null ? `${team.limits.rpm_limit} requests/min` : null,
@@ -254,22 +215,51 @@ function remainingBudget(team: Team) {
   );
 }
 
-function TeamSection({
-  team,
+function keyLimitText(team: Team) {
+  const limits = team.key_limits;
+  return limits.max_keys_per_member === null
+    ? `${limits.key_count} non-revoked ${limits.key_count === 1 ? "key" : "keys"}, no cap`
+    : `${limits.key_count} of ${limits.max_keys_per_member} non-revoked keys`;
+}
+
+const NONE = <span className="text-muted-foreground">—</span>;
+
+/** Table cells: the short form; the details row spells each one out. */
+function compactLimits(team: Team) {
+  const parts = [
+    team.limits.rpm_limit !== null ? `${team.limits.rpm_limit} rpm` : null,
+    team.limits.tpm_limit !== null ? `${team.limits.tpm_limit.toLocaleString()} tpm` : null,
+    team.limits.max_parallel !== null ? `${team.limits.max_parallel} parallel` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : NONE;
+}
+
+function compactBudget(team: Team) {
+  return team.budget.remaining_nano_usd === null ? NONE : fmtUsd(team.budget.remaining_nano_usd);
+}
+
+function compactKeys(team: Team) {
+  const limits = team.key_limits;
+  return `${limits.key_count} / ${limits.max_keys_per_member ?? "∞"}`;
+}
+
+/** Every key the caller owns, across their teams, in one table. */
+function KeysTable({
+  teams,
   keys,
   loading,
   error,
   onRetry,
 }: {
-  team: Team;
-  keys: Key[];
+  teams: Team[];
+  keys: Key[] | undefined;
   loading: boolean;
   error: Error | null;
   onRetry: () => void;
 }) {
   const perms = useCan();
   const showSecret = useShowSecret();
-  const [creating, setCreating] = useState(false);
+  const [teamFilter, setTeamFilter] = useState("");
   const [editing, setEditing] = useState<Key | null>(null);
   const [rotating, setRotating] = useState<Key | null>(null);
   const [revoking, setRevoking] = useState<Key | null>(null);
@@ -279,60 +269,32 @@ function TeamSection({
     "Key updated",
   );
   const revoke = useMut((key: Key) => api.revokeKey(key.id), "Key revoked");
-  const limits = team.key_limits;
-  const lifetime = limits.max_member_key_lifetime_seconds;
-  const atCap = limits.max_keys_per_member !== null && limits.key_count >= limits.max_keys_per_member;
+  const byId = new Map(teams.map((team) => [team.team_id, team]));
+  const multiple = teams.length > 1;
+  // Keys of a team the caller can no longer see (archived, or access lost) are not listed.
+  // Newest first, so a key just made or rotated is on the first page.
+  const own = keys?.filter((key) => byId.has(key.team_id) && (!teamFilter || key.team_id === teamFilter)).sort((a, b) => b.created_at.localeCompare(a.created_at));
+  const withKeys = teams.filter((team) => keys?.some((key) => key.team_id === team.team_id));
+  const editingTeam = editing ? byId.get(editing.team_id) : undefined;
   return (
-    <Card className="mb-5 gap-4 p-4 shadow-none" data-testid={`team-${team.team_name}`}>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <h2 className="m-0 flex flex-wrap items-center gap-2">
-          {team.team_name}
-          <Badge tone="info">{team.role}</Badge>
-          <InheritedBadge from={team.inherited_from} />
-        </h2>
-        <Button onClick={() => setCreating(true)}>New key</Button>
-      </div>
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-3">
-        <Fact label="Callable models">
-          <CallableModels team={team} />
-        </Fact>
-        <Fact label="MCP servers" hint="A server with a tool list allows only those tools.">
-          <McpAccess team={team} />
-        </Fact>
-        <Fact label="A2A agents">
-          <AgentAccess team={team} />
-        </Fact>
-        <Fact label="Rate limits" hint="Counted per gateway instance.">
-          {rateLimits(team)}
-        </Fact>
-        <Fact label="Remaining budget" hint="The remaining amount is capped by org, team and personal budgets for the current month.">
-          {remainingBudget(team)}
-        </Fact>
-        <Fact
-          label="Key limit"
-          hint="Revoked keys stay in the list but do not count toward the cap."
-          note={`Longest lifetime: ${fmtLifetime(lifetime)}`}
-        >
-          {limits.max_keys_per_member === null
-            ? `${limits.key_count} non-revoked ${limits.key_count === 1 ? "key" : "keys"}, no cap`
-            : `${limits.key_count} of ${limits.max_keys_per_member} non-revoked keys`}
-        </Fact>
-      </div>
-      {atCap && (
-        <p className="m-0 text-sm text-muted-foreground">
-          You hold this team's maximum of {limits.max_keys_per_member} non-revoked keys. Revoke one to make room;
-          until then the server refuses a new key.
-        </p>
+    <section className="mb-6" aria-label="Keys" data-testid="my-keys">
+      {multiple && withKeys.length > 1 && (
+        <div className="mb-3 w-full max-w-56">
+          <SelectField
+            label="Team"
+            value={teamFilter}
+            onChange={setTeamFilter}
+            options={[{ value: "", label: "All teams" }, ...withKeys.map((team) => ({ value: team.team_id, label: team.team_name }))]}
+          />
+        </div>
       )}
-      <Connection team={team} />
       <DataTable
-        rows={keys}
+        rows={own}
         loading={loading}
         error={error}
         onRetry={onRetry}
         rowKey={(key) => key.id}
-        empty="No keys in this team yet."
-        pageSize={5}
+        empty="No keys yet."
         columns={[
           {
             key: "name",
@@ -348,6 +310,16 @@ function TeamSection({
               </>
             ),
           },
+          ...(multiple
+            ? [
+                {
+                  key: "team",
+                  header: "Team",
+                  sort: (a: Key, b: Key) => (byId.get(a.team_id)?.team_name ?? "").localeCompare(byId.get(b.team_id)?.team_name ?? ""),
+                  cell: (key: Key) => <span className="[overflow-wrap:anywhere]">{byId.get(key.team_id)?.team_name}</span>,
+                },
+              ]
+            : []),
           {
             key: "status",
             header: "Status",
@@ -379,45 +351,31 @@ function TeamSection({
               const suspended = key.lifecycle === "suspended";
               const canResume = suspended && perms.canResumeKey(key);
               return (
-                <div className="flex flex-col items-end gap-1 whitespace-nowrap sm:flex-row sm:justify-end sm:gap-1.5">
-                  <Button variant="outline" size="sm" disabled={!canManage} onClick={() => setEditing(key)}>
-                    Edit
-                  </Button>
-                  <Button variant="outline" size="sm" disabled={!canManage} onClick={() => setRotating(key)}>
-                    Rotate
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
+                <div className="flex justify-end gap-0.5 whitespace-nowrap">
+                  <IconAction label="Edit" icon={PencilIcon} disabled={!canManage} onClick={() => setEditing(key)} />
+                  <IconAction label="Rotate" icon={RefreshCwIcon} disabled={!canManage} onClick={() => setRotating(key)} />
+                  <IconAction
+                    label={suspended ? "Resume" : "Suspend"}
+                    icon={suspended ? PlayIcon : PauseIcon}
                     disabled={suspended ? !canResume : !canManage}
-                    title={suspended && ownerInactive ? "Cannot resume because the owner is inactive" : undefined}
+                    reason={suspended && ownerInactive ? "Cannot resume because the owner is inactive" : undefined}
                     onClick={() => void setLifecycle({ key, lifecycle: suspended ? "active" : "suspended" })}
-                  >
-                    {suspended ? "Resume" : "Suspend"}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
+                  />
+                  <IconAction
+                    label="Revoke"
+                    icon={BanIcon}
                     className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                     disabled={!canManage}
                     onClick={() => setRevoking(key)}
-                  >
-                    Revoke
-                  </Button>
+                  />
                 </div>
               );
             },
           },
         ]}
       />
-      <CreateKeyDialog
-        team={team}
-        open={creating}
-        onClose={() => setCreating(false)}
-        onCreated={(value) => showSecret({ value, title: "API key created" })}
-      />
-      {editing && (
-        <EditKeyDialog key={editing.id} team={team} target={editing} onClose={() => setEditing(null)} />
+      {editing && editingTeam && (
+        <EditKeyDialog key={editing.id} team={editingTeam} target={editing} onClose={() => setEditing(null)} />
       )}
       <RotateKeyDialog
         target={rotating}
@@ -435,7 +393,170 @@ function TeamSection({
         onConfirm={() => revoke.mutateAsync(revoking!)}
         onClose={() => setRevoking(null)}
       />
-    </Card>
+    </section>
+  );
+}
+
+/** How many models, MCP servers and A2A agents a key in this team reaches, one colored pill each. */
+function AccessPills({ team }: { team: Team }) {
+  const pills: [string, typeof BoxesIcon, boolean, number, "info" | "ok" | "warn"][] = [
+    ["Models", BoxesIcon, team.all_models, team.models.length, "info"],
+    ["MCP servers", CableIcon, team.all_mcp, team.mcp_servers.length, "ok"],
+    ["A2A agents", BotIcon, team.all_agents, team.agents.length, "warn"],
+  ];
+  return (
+    <span className="flex flex-wrap gap-1.5">
+      {pills.map(([label, Icon, all, count, tone]) => {
+        const text = all ? "all" : String(count);
+        return (
+          <Tooltip key={label}>
+            <TooltipTrigger asChild>
+              <UiBadge variant={!all && count === 0 ? "muted" : tone} aria-label={`${label}: ${text}`} tabIndex={0}>
+                <Icon aria-hidden="true" />
+                {all ? "All" : count}
+              </UiBadge>
+            </TooltipTrigger>
+            <TooltipContent>{`${label}: ${text}`}</TooltipContent>
+          </Tooltip>
+        );
+      })}
+    </span>
+  );
+}
+
+/**
+ * One row per team with the facts most often needed; a row opens to the full version of each fact
+ * under its own column. A lone team starts open.
+ */
+function TeamsTable({ teams, onNewKey }: { teams: Team[]; onNewKey: (team: Team) => void }) {
+  const [open, setOpen] = useState<Set<string>>(() => new Set(teams.length === 1 ? [teams[0].team_id] : []));
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const shown = needle ? teams.filter((team) => team.team_name.toLowerCase().includes(needle)) : teams;
+  const toggle = (id: string) =>
+    setOpen((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  const wide = "max-md:hidden";
+  return (
+    <section className="mb-6" aria-labelledby="my-teams-title">
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+        <h2 id="my-teams-title" className="m-0 flex items-center gap-1">
+          Teams
+          <HelpTip label="Teams" text="An inherited team is one you administer from its org or the installation, without a membership." />
+        </h2>
+        {teams.length > 5 && (
+          <div className="w-full max-w-64">
+            <TextField label="Search teams" value={query} onChange={setQuery} />
+          </div>
+        )}
+      </div>
+      <Card className="gap-0 overflow-hidden p-0 shadow-none">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-10 pr-0" />
+              <TableHead>Team</TableHead>
+              <TableHead className={wide}>Access</TableHead>
+              <TableHead className={wide}>Limits</TableHead>
+              <TableHead className={wide}>Budget left</TableHead>
+              <TableHead className={wide}>Keys</TableHead>
+              <TableHead className="w-10" />
+            </TableRow>
+          </TableHeader>
+          {shown.map((team) => {
+            const expanded = open.has(team.team_id);
+            const limits = team.key_limits;
+            const atCap = limits.max_keys_per_member !== null && limits.key_count >= limits.max_keys_per_member;
+            return (
+              // One body per team, so a team's row and its details stay together.
+              <TableBody key={team.team_id} data-testid={`team-${team.team_name}`}>
+                <TableRow>
+                  <TableCell className="w-10 pr-0">
+                    <IconAction
+                      label={expanded ? "Hide details" : "Details"}
+                      icon={expanded ? ChevronDownIcon : ChevronRightIcon}
+                      onClick={() => toggle(team.team_id)}
+                    />
+                  </TableCell>
+                  <TableCell>
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <strong className="[overflow-wrap:anywhere]">{team.team_name}</strong>
+                      <Badge tone="info">{team.role}</Badge>
+                      <InheritedBadge from={team.inherited_from} />
+                    </span>
+                  </TableCell>
+                  <TableCell className={wide}>
+                    <AccessPills team={team} />
+                  </TableCell>
+                  <TableCell className={wide}>{compactLimits(team)}</TableCell>
+                  <TableCell className={wide}>{compactBudget(team)}</TableCell>
+                  <TableCell className={wide}>{compactKeys(team)}</TableCell>
+                  <TableCell className="w-10 text-right">
+                    <IconAction label="New key" icon={PlusIcon} onClick={() => onNewKey(team)} />
+                  </TableCell>
+                </TableRow>
+                {expanded && (
+                  <TableRow className="bg-muted/40 hover:bg-muted/40">
+                    {/* A shaded band under the row, starting where the team name does. */}
+                    <TableCell colSpan={7} className="py-5 pr-6 pl-[3.25rem] whitespace-normal">
+                      <TeamDetails team={team} atCap={atCap} />
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            );
+          })}
+        </Table>
+        {shown.length === 0 && <p className="m-0 p-4 text-sm text-muted-foreground">No team matches “{query.trim()}”.</p>}
+      </Card>
+    </section>
+  );
+}
+
+/** The full version of each fact, in one row of six under the team (wrapping on narrow screens). */
+function TeamDetails({ team, atCap }: { team: Team; atCap: boolean }) {
+  return (
+    <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-4">
+      <Fact label="Callable models">
+        <CallableModels team={team} />
+      </Fact>
+      <Fact label="MCP servers" hint="A server with a tool list allows only those tools.">
+        <McpAccess team={team} />
+      </Fact>
+      <Fact label="A2A agents">
+        <AgentAccess team={team} />
+      </Fact>
+      <Fact label="Rate limits" hint="Counted per gateway instance.">
+        {rateLimits(team)}
+      </Fact>
+      <Fact label="Remaining budget" hint="The remaining amount is capped by org, team and personal budgets for the current month.">
+        {remainingBudget(team)}
+      </Fact>
+      <KeyLimitFact team={team} atCap={atCap} />
+    </div>
+  );
+}
+
+function KeyLimitFact({ team, atCap }: { team: Team; atCap: boolean }) {
+  const limits = team.key_limits;
+  return (
+    <div className="flex flex-col gap-2">
+      <Fact
+        label="Key limit"
+        hint="Revoked keys stay in the list but do not count toward the cap."
+        note={`Longest lifetime: ${fmtLifetime(limits.max_member_key_lifetime_seconds)}`}
+      >
+        {keyLimitText(team)}
+      </Fact>
+      {atCap && (
+        <p className="m-0 text-xs text-muted-foreground">
+          At this team's maximum of {limits.max_keys_per_member}; revoke a key to make room.
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -443,34 +564,44 @@ type CreateValues = KeyLimitValues & { name: string; expires: string };
 const blankCreate: CreateValues = { name: "", expires: "", ...blankKeyLimits() };
 
 function CreateKeyDialog({
-  team,
+  teams,
+  team: given,
   open,
   onClose,
   onCreated,
 }: {
-  team: Team;
+  teams: Team[];
+  /** The team to create in; null asks for one. */
+  team: Team | null;
   open: boolean;
   onClose: () => void;
   onCreated: (secret: string) => void;
 }) {
   const form = useForm<CreateValues>(blankCreate, { name: required("Name") });
+  const [picked, setPicked] = useState("");
+  const [teamError, setTeamError] = useState<string>();
+  const team = given ?? teams.find((item) => item.team_id === picked) ?? null;
   const create = useSecretMut(
     (values: CreateValues) =>
-      api.createKey(team.team_id, {
+      api.createKey(team!.team_id, {
         name: values.name.trim(),
         expires_at: expiryFromDay(values.expires),
         ...keyLimitsBody(values),
       }),
     (secret) => onCreated(secret),
   );
-  const lifetime = team.key_limits.max_member_key_lifetime_seconds;
+  const lifetime = team?.key_limits.max_member_key_lifetime_seconds ?? null;
   const max = lifetime === null ? undefined : lastExpiryDay(lifetime);
   const close = () => {
     form.reset(blankCreate);
+    setPicked("");
+    setTeamError(undefined);
     onClose();
   };
   const submit = async () => {
-    if (!form.validate()) return false;
+    const valid = form.validate();
+    if (!team) setTeamError("Choose a team");
+    if (!team || !valid) return false;
     try {
       return await form.run(() => create.mutateAsync(form.values), { expires_at: "expires" });
     } catch (e) {
@@ -481,17 +612,30 @@ function CreateKeyDialog({
   return (
     <FormDialog
       open={open}
-      title={`New key in ${team.team_name}`}
+      title={given ? `New key in ${given.team_name}` : "New key"}
       submitLabel="Create key"
       onClose={close}
       onSubmit={submit}
     >
+      {!given && (
+        <SelectField
+          label="Team"
+          value={picked}
+          onChange={(value) => {
+            setPicked(value);
+            setTeamError(undefined);
+          }}
+          error={teamError}
+          note={team ? keyLimitText(team) : undefined}
+          options={[{ value: "", label: "Choose a team" }, ...teams.map((item) => ({ value: item.team_id, label: item.inherited_from && !item.direct ? `${item.team_name} (inherit)` : item.team_name }))]}
+        />
+      )}
       <TextField
         label="Name"
         value={form.values.name}
         onChange={(value) => form.set("name", value)}
         error={form.errors.name}
-        autoFocus
+        autoFocus={!!given}
       />
       <TextField
         label="Expires"
@@ -506,11 +650,13 @@ function CreateKeyDialog({
             : `Optional. This team limits member keys to ${fmtLifetime(lifetime)}; empty uses that limit. The latest day is ${max}.`
         }
       />
-      <KeyLimitFields values={form.values} errors={form.errors} set={form.set} cap={team.limits} />
-      <div className="flex flex-col gap-1.5">
-        <span className="text-sm font-semibold">This key can call</span>
-        <CallableModels team={team} />
-      </div>
+      {team && <KeyLimitFields values={form.values} errors={form.errors} set={form.set} cap={team.limits} />}
+      {team && (
+        <div className="flex flex-col gap-1.5">
+          <span className="text-sm font-semibold">This key can call</span>
+          <CallableModels team={team} />
+        </div>
+      )}
     </FormDialog>
   );
 }

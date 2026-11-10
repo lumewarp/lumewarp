@@ -1,4 +1,4 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
@@ -185,7 +185,7 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
       submitLabel={existing ? "Save" : "Create"}
       actions={
         <>
-          {existing && <HealthBadge health={existing.health} />}
+          {existing && <HealthBadge health={existing.health} probe={existing.probe} />}
           {test.button}
         </>
       }
@@ -267,7 +267,10 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
 /** The form as it stands, saved or not: a typed key wins, else the stored one, else the env variable. */
 function testBody(v: Values, upstream: Upstream | undefined) {
   const key = v.key_source === "stored" && v.api_key.trim() ? { api_key: v.api_key.trim() } : v.key_source === "stored" && upstream?.api_key_set ? { upstream_id: upstream.id } : v.key_source === "env" && v.api_key_ref.trim() ? { api_key_ref: v.api_key_ref.trim() } : {};
-  return { base_url: v.base_url.trim(), health_url: v.health_url.trim() || null, ...key };
+  // The saved upstream's id lets the control plane keep the result when the form matches it;
+  // it is left out when the form drops a stored key, which the id would otherwise send.
+  const saved = upstream && (v.key_source === "stored" || !upstream.api_key_set) ? { upstream_id: upstream.id } : {};
+  return { base_url: v.base_url.trim(), health_url: v.health_url.trim() || null, ...saved, ...key };
 }
 
 const CREDENTIAL: Record<UpstreamTest["credential"], string> = {
@@ -281,7 +284,8 @@ const CREDENTIAL: Record<UpstreamTest["credential"], string> = {
 /** Test now of the form as it stands: the button goes in the page actions, the panel at the top of the form. */
 function useTestNow(upstream: Upstream | undefined, values: Values) {
   const [result, setResult] = useState<UpstreamTest | null>(null);
-  const run = useMutation({ mutationFn: () => api.testUpstream(testBody(values, upstream)), onSuccess: setResult });
+  const qc = useQueryClient();
+  const run = useMutation({ mutationFn: () => api.testUpstream(testBody(values, upstream)), onSuccess: setResult, onSettled: () => upstream && void qc.invalidateQueries({ queryKey: ["upstreams"] }) });
   useEffect(() => setResult(null), [upstream?.id]);
   const urlProblem = values.base_url.trim() ? validUrl(values.base_url.trim()) : "Enter the base URL first.";
   const button = (

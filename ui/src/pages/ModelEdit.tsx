@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
@@ -249,7 +249,7 @@ function ModelForm({ existing }: { existing?: Model }) {
   const v = form.values;
   const shows = v.model_type ? SHOWS[v.model_type] : null;
   const dirty = JSON.stringify(v) !== JSON.stringify(initial);
-  const test = useChatTest(v);
+  const test = useChatTest(v, existing?.id);
   const renamed = !!existing && v.name.trim() !== existing.name;
   const save = useMut(
     (x: Values) => (existing ? api.updateModel(existing.id, { ...body(x), keep_old_name_as_alias: renamed && x.keep_old_name_as_alias }) : api.createModel(body(x))),
@@ -293,7 +293,7 @@ function ModelForm({ existing }: { existing?: Model }) {
       submitLabel={existing ? "Save" : "Create"}
       actions={
         <>
-          {existing && <HealthBadge health={existing.health} />}
+          {existing && <HealthBadge health={existing.health} probe={existing.probe} />}
           {test.button}
         </>
       }
@@ -450,9 +450,12 @@ const CREDENTIAL: Record<ModelTest["credential"], string> = {
   none: "Sent without a key.",
 };
 /** One probe request now, from the control plane, of the form as it stands: the button goes in the page actions, the result at the top of the form. */
-function useChatTest(values: Values) {
+function useChatTest(values: Values, modelId: string | undefined) {
   const [result, setResult] = useState<ModelTest | null>(null);
+  const qc = useQueryClient();
   const run = useMutation({
+    // The control plane keeps the result on the saved model only when the form matches it.
+    onSettled: () => modelId && void qc.invalidateQueries({ queryKey: ["models"] }),
     mutationFn: () => {
       let defaultBody: Record<string, unknown> | null = null;
       try {
@@ -460,7 +463,7 @@ function useChatTest(values: Values) {
       } catch {
         // An invalid body is flagged on the field; test without it.
       }
-      return api.testModel({ model_type: values.model_type as ModelType, upstream_id: values.upstream_id, upstream_model: values.upstream_model.trim(), default_body: defaultBody });
+      return api.testModel({ model_type: values.model_type as ModelType, upstream_id: values.upstream_id, upstream_model: values.upstream_model.trim(), default_body: defaultBody, model_id: modelId });
     },
     onSuccess: setResult,
   });

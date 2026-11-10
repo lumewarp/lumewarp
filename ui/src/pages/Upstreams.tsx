@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ActivityIcon } from "lucide-react";
 import { useState } from "react";
@@ -10,6 +10,7 @@ import { CreateButton, IconAction, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { useCan, useMut } from "../hooks";
 import { useToast } from "../components/Toast";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
 
 export const KINDS = [
   { value: "vllm", label: "vLLM" },
@@ -27,12 +28,31 @@ const HEALTH: Record<HealthState, { tone: "ok" | "danger" | "muted"; label: stri
 };
 
 /** An upstream's probe or a model's chat check, as the connected gateways report it. */
-export function HealthBadge({ health }: { health: HealthState }) {
-  const h = HEALTH[health];
+type ProbeResult = Upstream["probe"];
+
+const at = (iso: string) => new Date(iso).toLocaleString();
+
+/**
+ * Gateway checks first; without one (or before any report), the last Test now of the
+ * saved settings shows as Success or Failed.
+ */
+export function HealthBadge({ health, probe }: { health: HealthState; probe?: ProbeResult }) {
+  const lastOk = probe?.ok_at ? `Last succeeded ${at(probe.ok_at)}.` : null;
+  let h = HEALTH[health];
+  if (probe && (health === "not_probed" || health === "unknown")) {
+    h = probe.ok ? { tone: "ok", label: "Success", title: lastOk! } : { tone: "danger", label: "Failed", title: [`Test now failed ${at(probe.at)}.`, lastOk].filter(Boolean).join(" ") };
+  } else if (lastOk) {
+    h = { ...h, title: `${h.title} ${lastOk}` };
+  }
   return (
-    <span title={h.title}>
-      <Badge tone={h.tone}>{h.label}</Badge>
-    </span>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span tabIndex={0} aria-label={`${h.label}. ${h.title}`} className="inline-flex rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
+          <Badge tone={h.tone}>{h.label}</Badge>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{h.title}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -68,7 +88,7 @@ export function Upstreams() {
           },
           { key: "kind", header: "Kind", cell: (r) => <Badge tone="info">{KINDS.find((k) => k.value === r.kind)?.label ?? r.kind}</Badge> },
           { key: "url", header: "Base URL", cell: (r) => <code>{r.base_url}</code> },
-          { key: "health", header: "Health", cell: (r) => <HealthBadge health={r.health} /> },
+          { key: "health", header: "Health", cell: (r) => <HealthBadge health={r.health} probe={r.probe} /> },
           { key: "actions", header: "", cell: (r) => <RowActions extra={perms.isInstallationAdmin && <TestUpstreamAction upstream={r} />} canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => edit(r)} onDelete={() => setDeleting(r)} /> },
         ]}
       />
@@ -80,11 +100,10 @@ export function Upstreams() {
 /** Probes the saved upstream from the control plane and reports in a toast. */
 function TestUpstreamAction({ upstream }: { upstream: Upstream }) {
   const toast = useToast();
+  const qc = useQueryClient();
   const run = useMutation({
-    mutationFn: () => {
-      const key = upstream.api_key_set ? { upstream_id: upstream.id } : upstream.api_key_ref ? { api_key_ref: upstream.api_key_ref } : {};
-      return api.testUpstream({ base_url: upstream.base_url, health_url: upstream.health_url, ...key });
-    },
+    mutationFn: () => api.testUpstream({ base_url: upstream.base_url, health_url: upstream.health_url, upstream_id: upstream.id, api_key_ref: upstream.api_key_ref }),
+    onSettled: () => void qc.invalidateQueries({ queryKey: ["upstreams"] }),
     onSuccess: (r) => {
       const { probe, credential } = r;
       const note = credential === "env_unset" ? " · variable not set on the control plane, sent no key" : "";

@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ActivityIcon } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -68,9 +68,9 @@ export function Models() {
           },
           { key: "type", header: "Type", sort: (a, b) => a.model_type.localeCompare(b.model_type), cell: (r) => <TypeBadge type={r.model_type} /> },
           { key: "maps", header: "Mapped name", sort: (a, b) => mapped(a).localeCompare(mapped(b)), cell: (r) => <code className="text-muted-foreground">{mapped(r)}</code> },
-          { key: "health", header: "Health", cell: (r) => <HealthBadge health={r.health} /> },
-          { key: "length", header: "Input / Output length", align: "right", hideBelow: "lg", cell: (r) => <span title={`${r.max_input_tokens ?? "—"} / ${r.max_output_tokens ?? "—"} tokens`}>{`${fmtTokens(r.max_input_tokens)} / ${fmtTokens(r.max_output_tokens)}`}</span> },
-          { key: "cost", header: "Cost (input / output, 1M tok)", align: "right", hideBelow: "lg", cell: (r) => <Cost model={r} /> },
+          { key: "health", header: "Health", cell: (r) => <HealthBadge health={r.health} probe={r.probe} /> },
+          { key: "length", header: "Input / Output length", align: "right", hideBelow: "lg", cell: (r) => <Length model={r} /> },
+          { key: "price", header: "Input / Output price", align: "right", hideBelow: "lg", cell: (r) => <Price model={r} /> },
           { key: "actions", header: "", cell: (r) => <RowActions extra={perms.isInstallationAdmin && <TestModelAction model={r} />} canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => void navigate({ to: "/models/$modelId", params: { modelId: r.id } })} onDelete={() => setDeleting(r)} /> },
         ]}
       />
@@ -82,8 +82,10 @@ export function Models() {
 /** Sends a short probe request to the saved model from the control plane and reports in a toast. */
 function TestModelAction({ model }: { model: Model }) {
   const toast = useToast();
+  const qc = useQueryClient();
   const run = useMutation({
-    mutationFn: () => api.testModel({ model_type: model.model_type, upstream_id: model.upstream_id, upstream_model: model.upstream_model, default_body: model.default_body ?? null }),
+    mutationFn: () => api.testModel({ model_type: model.model_type, upstream_id: model.upstream_id, upstream_model: model.upstream_model, default_body: model.default_body ?? null, model_id: model.id }),
+    onSettled: () => void qc.invalidateQueries({ queryKey: ["models"] }),
     onSuccess: (r) => {
       const { probe, reply } = r;
       if (probe.ok) toast("success", `${model.name}: OK · HTTP ${probe.status} · ${probe.latency_ms} ms${reply ? ` · ${reply}` : ""}`);
@@ -94,10 +96,27 @@ function TestModelAction({ model }: { model: Model }) {
   return <IconAction label="Test" icon={ActivityIcon} busy={run.isPending} onClick={() => run.mutate()} />;
 }
 
-/** Prices a model's type uses: tokens in and out per 1M, embedding input only, transcription also per audio second. */
-function Cost({ model: m }: { model: Model }) {
-  const parts: string[] = [];
-  if (m.price_input_nano_usd_per_mtok !== null) parts.push(m.model_type === "embedding" ? fmtUsd(m.price_input_nano_usd_per_mtok) : `${fmtUsd(m.price_input_nano_usd_per_mtok)} / ${fmtUsd(m.price_output_nano_usd_per_mtok)}`);
-  if (m.price_nano_usd_per_audio_second !== null) parts.push(`${fmtUsd(m.price_nano_usd_per_audio_second)} / s`);
-  return parts.length ? <>{parts.join(" · ")}</> : <span className="text-muted-foreground">unpriced</span>;
+/** "input / output" with "--" for an unset side; the units are in the tooltip. Both price and length columns use it. */
+function InOut({ input, output, title, extra }: { input: string | null; output: string | null; title: string; extra?: string }) {
+  const side = (x: string | null) => (x === null ? <span className="text-muted-foreground">--</span> : x);
+  return (
+    <span title={title} className="whitespace-nowrap tabular-nums">
+      {side(input)}
+      <span className="text-muted-foreground"> / </span>
+      {side(output)}
+      {extra && <span className="text-muted-foreground"> · {extra}</span>}
+    </span>
+  );
+}
+
+function Length({ model: m }: { model: Model }) {
+  const tokens = (n: number | null) => (n === null ? "not set" : `${n.toLocaleString()} tokens`);
+  return <InOut input={m.max_input_tokens === null ? null : fmtTokens(m.max_input_tokens)} output={m.max_output_tokens === null ? null : fmtTokens(m.max_output_tokens)} title={`Input ${tokens(m.max_input_tokens)}, output ${tokens(m.max_output_tokens)}`} />;
+}
+
+/** Per 1M tokens; embedding has no output price, transcription may add a price per audio second. */
+function Price({ model: m }: { model: Model }) {
+  const price = (n: number | null) => (n === null ? null : fmtUsd(n));
+  const audio = m.price_nano_usd_per_audio_second === null ? undefined : `${fmtUsd(m.price_nano_usd_per_audio_second)} / s`;
+  return <InOut input={price(m.price_input_nano_usd_per_mtok)} output={price(m.price_output_nano_usd_per_mtok)} extra={audio} title={`Per 1M tokens${audio ? ", audio per second" : ""}`} />;
 }

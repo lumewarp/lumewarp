@@ -2,7 +2,7 @@ import { useMemo } from "react";
 
 import type { CatalogEntry, CatalogKind, ModelAccess } from "../api";
 import { useCatalog } from "../hooks";
-import { TypeBadge } from "./Bits";
+import { ModelPill } from "./Bits";
 import { Checkbox } from "./ui/checkbox";
 import { HelpTip } from "./ui/help-tip";
 import { Label } from "./ui/label";
@@ -77,10 +77,9 @@ export function PermissionPicker({ isTeam, access, onAccess, selected, onSelecte
                   {items.map((e) => (
                     <div key={e.id} className="flex items-center gap-2">
                       <Checkbox id={`perm-${e.id}`} checked={selected.includes(e.name)} onCheckedChange={(c) => toggle(e.name, c === true)} />
-                      <Label htmlFor={`perm-${e.id}`} className="min-w-0 cursor-pointer font-normal [overflow-wrap:anywhere]">
-                        {e.name}
+                      <Label htmlFor={`perm-${e.id}`} className="min-w-0 cursor-pointer font-normal">
+                        {e.model_type ? <ModelPill name={e.name} type={e.model_type} /> : <span className="[overflow-wrap:anywhere]">{e.name}</span>}
                       </Label>
-                      {e.model_type && <TypeBadge type={e.model_type} />}
                     </div>
                   ))}
                 </div>

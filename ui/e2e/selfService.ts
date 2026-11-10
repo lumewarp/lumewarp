@@ -1,5 +1,7 @@
 import { expect, test, type APIRequestContext, type Browser, type Locator, type Page } from "@playwright/test";
 
+import { pick } from "./helpers";
+
 /** The users and cookie sessions serve.py seeds for the self-service specs. */
 export const BREAK_GLASS = "e2e-break-glass-password";
 export const VIEWER = "e2e-viewer-session-0123456789abcdef";
@@ -180,4 +182,27 @@ export async function routeChange(page: Page, path: string) {
     history.pushState({}, "", target);
     window.dispatchEvent(new PopStateEvent("popstate", { state: {} }));
   }, path);
+}
+
+/** Opens a team's details row on My keys (a lone team starts open) and returns the team's rows. */
+export async function teamDetails(page: Page, teamName: string) {
+  const section = page.getByTestId(`team-${teamName}`);
+  await expect(section.getByRole("button", { name: /^(Details|Hide details)$/ })).toBeVisible();
+  const open = section.getByRole("button", { name: "Details", exact: true });
+  if (await open.count()) await open.click();
+  await expect(section.getByRole("button", { name: "Hide details" })).toBeVisible();
+  return section;
+}
+
+/**
+ * A key's row in the My keys table. The table pages and other specs leave keys behind, so with
+ * several teams the Team filter narrows it to `team` first.
+ */
+export async function myKeyRow(page: Page, team: string, name: string) {
+  const keys = page.getByTestId("my-keys");
+  const row = rowOf(keys, name);
+  const filter = keys.getByRole("combobox", { name: "Team", exact: true });
+  await expect(row.or(filter).first()).toBeVisible();
+  if ((await filter.count()) && (await filter.textContent()) !== team) await pick(keys, "Team", team);
+  return row;
 }

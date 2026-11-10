@@ -1,9 +1,9 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
-import { dialog, pick } from "./helpers";
+import { pick } from "./helpers";
 
 /*
- * The Combobox inside a plain Dialog: the alias form's "Points to" (wave 0 could only test it in a Sheet).
+ * The Combobox on a page: the alias form's "Points to".
  * Desktop and 390 px, a 65 entry list, search, keyboard, Esc, focus return and the payload.
  */
 
@@ -35,7 +35,7 @@ async function unlocked(page: Page) {
 }
 
 for (const [label, viewport] of [["desktop", { width: 1280, height: 800 }], ["390 px", { width: 390, height: 844 }]] as const) {
-  test(`combobox in a plain dialog (${label}): long list, search, keyboard, Esc closes only the popover, focus returns, payload is the picked id`, async ({ page, request }) => {
+  test(`combobox on the alias page (${label}): long list, search, keyboard, Esc closes only the popover, focus returns, payload is the picked id`, async ({ page, request }) => {
     await page.setViewportSize(viewport);
     const up = await post(request, "/upstreams", { name: "s3c-up", kind: "vllm", base_url: "http://127.0.0.1:9/v1" });
     const models: { id: string; name: string }[] = [];
@@ -48,13 +48,13 @@ for (const [label, viewport] of [["desktop", { width: 1280, height: 800 }], ["39
     });
     const opener = page.getByRole("button", { name: "New alias" });
     await opener.click();
-    const d = dialog(page);
-    await expect(d).toBeVisible();
+    const d = page.locator("#main");
+    await expect(page).toHaveURL(/\/aliases\/new$/);
     const trigger = d.getByRole("combobox", { name: "Points to", exact: true });
     const triggerId = (await trigger.getAttribute("id"))!;
     const control = page.locator(`[id="${triggerId}"]`);
 
-    // Esc closes only the popover; the dialog and focus on the trigger stay.
+    // Esc closes only the popover; the page and focus on the trigger stay.
     await control.click();
     await expect(control).toHaveAttribute("aria-expanded", "true");
     const search = page.getByRole("combobox", { name: "Search Points to" });
@@ -108,10 +108,9 @@ for (const [label, viewport] of [["desktop", { width: 1280, height: 800 }], ["39
     await pick(d, "Points to", "s3c/64 (model · LLM)");
     await d.getByLabel("Name", { exact: true }).fill("s3c-alias");
     await d.getByRole("button", { name: "Create" }).click();
-    await expect(d).toHaveCount(0);
+    await expect(page).toHaveURL(/\/aliases$/);
     expect(sent).toHaveLength(1);
     expect(sent[0]).toEqual({ name: "s3c-alias", target: models[64].id });
-    await expect(opener).toBeFocused();
     await unlocked(page);
   });
 }

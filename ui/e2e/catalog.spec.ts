@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { confirmDialog, dialog, ensureOrg, optionNames, pick } from "./helpers";
+import { teamDetails } from "./selfService";
 
 /*
  * The model catalog UI through the real control plane (e2e/serve.py): Models, Aliases, Routers with
@@ -117,9 +118,9 @@ test("models, aliases and routers: create through the forms, search by upstream 
   await expect(nav.getByRole("group", { name: "Routing" }).getByRole("link")).toHaveText(["Upstreams", "Models", "Aliases", "Routers"]);
   await nav.getByRole("link", { name: "Aliases" }).click();
   await page.getByRole("button", { name: "New alias" }).click();
-  await dialog(page).getByLabel("Name").fill("cat-alias");
-  await pick(dialog(page), "Points to", "cat/alpha (model · LLM)");
-  await dialog(page).getByRole("button", { name: "Create" }).click();
+  await page.locator("#main").getByLabel("Name").fill("cat-alias");
+  await pick(page.locator("#main"), "Points to", "cat/alpha (model · LLM)");
+  await page.locator("#main").getByRole("button", { name: "Create" }).click();
   const aliasRow = row(page, "cat-alias");
   await expect(aliasRow).toContainText("cat/alpha");
   await expect(aliasRow).toContainText("model");
@@ -134,7 +135,7 @@ test("models, aliases and routers: create through the forms, search by upstream 
   // --- Routers
   await nav.getByRole("link", { name: "Routers" }).click();
   await page.getByRole("button", { name: "New router" }).click();
-  let d = dialog(page);
+  let d = page.locator("#main");
   await d.getByLabel("Name").fill("cat-router");
   await pick(d, "Strategy", "Weighted");
   await d.getByLabel("cat/alpha", { exact: true }).check();
@@ -142,7 +143,7 @@ test("models, aliases and routers: create through the forms, search by upstream 
   await d.getByLabel("cat/beta", { exact: true }).check();
   await d.getByLabel("Weight of cat/beta").fill("80");
   await d.getByRole("button", { name: "Create" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
   const routerRow = row(page, "cat-router");
   await expect(routerRow).toContainText("Weighted");
   await expect(routerRow).toContainText("×20");
@@ -198,18 +199,18 @@ test("models, aliases and routers: create through the forms, search by upstream 
   // Aliases and routers rename through their forms too, and keep their references.
   await nav.getByRole("link", { name: "Aliases" }).click();
   await row(page, "cat-alias").getByRole("button", { name: "Edit" }).click();
-  await expect(dialog(page).getByLabel("Keep old name as alias")).toHaveCount(0);
-  await dialog(page).getByLabel("Name").fill("cat-alias2");
-  await pick(dialog(page), "Points to", "cat-router (router · LLM)");
-  await dialog(page).getByRole("button", { name: "Save" }).click();
+  await expect(page.locator("#main").getByLabel("Keep old name as alias")).toHaveCount(0);
+  await page.locator("#main").getByLabel("Name").fill("cat-alias2");
+  await pick(page.locator("#main"), "Points to", "cat-router (router · LLM)");
+  await page.locator("#main").getByRole("button", { name: "Save" }).click();
   await expect(row(page, "cat-alias2")).toContainText("router");
   await expect(row(page, "cat-alias2")).toContainText("Org/Alpha-8B");
   await nav.getByRole("link", { name: "Routers" }).click();
   await expect(row(page, "cat-router")).toContainText("cat-alias2");
   await row(page, "cat-router").getByRole("button", { name: "Edit" }).click();
-  await expect(dialog(page).getByLabel("Keep old name as alias")).toHaveCount(0);
-  await dialog(page).getByLabel("Name").fill("cat-router2");
-  await dialog(page).getByRole("button", { name: "Save" }).click();
+  await expect(page.locator("#main").getByLabel("Keep old name as alias")).toHaveCount(0);
+  await page.locator("#main").getByLabel("Name").fill("cat-router2");
+  await page.locator("#main").getByRole("button", { name: "Save" }).click();
   await expect(row(page, "cat-router2")).toContainText("cat-alias2");
   expect((await items<{ name: string; members: unknown[] }>(request, "/routers")).find((r) => r.name === "cat-router2")?.members).toHaveLength(2);
 
@@ -227,7 +228,7 @@ test("reference strategy: form from its descriptor, weight hidden, Save anyway f
   await signIn(page, request, "/routers");
 
   await page.getByRole("button", { name: "New router" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   await d.getByLabel("Name").fill("pf-router");
   await pick(d, "Strategy", "Priority failover");
   await expect(d.getByText("Use the lowest priority number that is healthy.")).toBeVisible();
@@ -264,7 +265,7 @@ test("reference strategy: form from its descriptor, weight hidden, Save anyway f
   await shot(page, "router-form-priority-failover");
   await d.getByLabel("Save anyway").check();
   await d.getByRole("button", { name: "Create" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
 
   const stored = (await items<any>(request, "/routers")).find((r) => r.name === "pf-router");
   expect(stored.strategy).toBe("priority_failover");
@@ -293,8 +294,8 @@ test("reference strategy: form from its descriptor, weight hidden, Save anyway f
 
   // Editing shows what was saved.
   await listed.getByRole("button", { name: "Edit" }).click();
-  await expect(dialog(page).getByLabel("Max in flight")).toHaveValue("5");
-  await expect(dialog(page).getByTestId("member-pf/two").getByLabel("Priority")).toHaveValue("2");
+  await expect(page.locator("#main").getByLabel("Max in flight")).toHaveValue("5");
+  await expect(page.locator("#main").getByTestId("member-pf/two").getByLabel("Priority")).toHaveValue("2");
 });
 
 test("no UI code knows a strategy by name", () => {
@@ -315,7 +316,7 @@ test("schema fields: required, bounds, enum, boolean, nested, header list", asyn
   const a = await model(request, "tuned/a", up.id);
   await signIn(page, request, "/routers");
   await page.getByRole("button", { name: "New router" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   await d.getByLabel("Name").fill("tuned-router");
   await pick(d, "Strategy", "E2E tuned");
   // Supported by every connected gateway: nothing to confirm.
@@ -354,7 +355,7 @@ test("schema fields: required, bounds, enum, boolean, nested, header list", asyn
   await headers.getByLabel("Pin headers 2", { exact: true }).fill("x-team");
   await shot(page, "router-form-tuned");
   await d.getByRole("button", { name: "Create" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
 
   const stored = (await items<any>(request, "/routers")).find((r) => r.name === "tuned-router");
   expect(stored.params).toEqual({ max_waiting: 7, mode: "relaxed", skip_unpriced: true, tuning: { fail_back_ms: 5 }, headers: ["X-Session-Id", "x-team"] });
@@ -374,7 +375,7 @@ test("no usable schema: a JSON editor, for null and for a schema outside the sub
   });
   await signIn(page, request, "/routers");
   await page.getByRole("button", { name: "New router" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
 
   await pick(d, "Strategy", "E2E weird");
   await expect(d.getByTestId("strategy-settings-json")).toContainText("outside what the form can show");
@@ -393,7 +394,7 @@ test("no usable schema: a JSON editor, for null and for a schema outside the sub
   await editor.fill('{"threshold": 3}');
   await d.getByLabel("Settings for json/a (JSON)").fill('{"zone": "z1"}');
   await d.getByRole("button", { name: "Create" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
   const stored = (await items<any>(request, "/routers")).find((r) => r.name === "json-router");
   expect(stored.params).toEqual({ threshold: 3 });
   expect(stored.members[0].params).toEqual({ zone: "z1" });
@@ -404,7 +405,7 @@ test("hostile strategy text is only ever shown as text", async ({ page, request 
   await signIn(page, request, "/routers");
   await page.evaluate(() => ((window as any).__pwned = undefined));
   await page.getByRole("button", { name: "New router" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   await pick(d, "Strategy", HOSTILE_TITLE);
   const settings = d.getByTestId("strategy-settings");
   await expect(settings).toBeVisible();
@@ -414,8 +415,10 @@ test("hostile strategy text is only ever shown as text", async ({ page, request 
   expect(text).toContain("<b>bold</b>");
   expect(text).toContain("[click](javascript:window.__pwned=1)");
   expect(text).toContain("https://evil.example/phish");
-  for (const tag of ["img", "b", "a", "script", "iframe"]) await expect(page.locator(`main ${tag}, [role=dialog] ${tag}`)).toHaveCount(0);
-  await expect(d.locator("[onerror], [href]")).toHaveCount(0);
+  // The form's own links (Back, Cancel) are not strategy text; the settings and the open popovers are.
+  for (const tag of ["img", "b", "a", "script", "iframe"]) await expect(page.locator(`[data-testid=strategy-settings] ${tag}, [role=dialog] ${tag}, [role=listbox] ${tag}`)).toHaveCount(0);
+  await expect(settings.locator("[onerror], [href]")).toHaveCount(0);
+  await expect(d.locator("[onerror]")).toHaveCount(0);
   // A 3000 character description is cut to the size limit, not rendered whole.
   const longest = await d.evaluate((el) => Math.max(...[...el.querySelectorAll("p")].map((p) => p.textContent?.length ?? 0)));
   expect(longest).toBeLessThanOrEqual(2100);
@@ -425,8 +428,8 @@ test("hostile strategy text is only ever shown as text", async ({ page, request 
   const hostile = options.find((o) => o.includes("<img"));
   expect(hostile).toBeTruthy();
   await pick(d, "Pick", hostile!);
-  await expect(page.locator("img, [onerror]")).toHaveCount(0);
-  await d.getByRole("button", { name: "Cancel" }).click();
+  await expect(page.locator("img:not([src=\"/favicon.svg\"]), [onerror]")).toHaveCount(0);
+  await cancelForm(page);
   // The installed-strategies table shows the title as text too.
   await expect(page.getByRole("row").filter({ has: page.getByText("e2e_hostile", { exact: true }) })).toContainText("<b>bold</b>");
   await expect(page.locator("main img")).toHaveCount(0);
@@ -439,7 +442,7 @@ test("traffic split: models move under each split", async ({ page, request }) =>
   const canary = await model(request, "split/canary", up.id);
   await signIn(page, request, "/routers");
   await page.getByRole("button", { name: "New router" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   await d.getByLabel("Name").fill("split-router");
   await d.getByLabel("split/stable", { exact: true }).check();
   await d.getByRole("button", { name: "Add split" }).click();
@@ -459,7 +462,7 @@ test("traffic split: models move under each split", async ({ page, request }) =>
   await expect(d.getByTestId("order-row")).toHaveCount(0);
   await expect(d.getByLabel("Add fallback model")).toHaveText("None — add a fallback model…");
   await d.getByRole("button", { name: "Create" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
   const stored = (await items<any>(request, "/routers")).find((r) => r.name === "split-router");
   expect(stored.members).toEqual([]);
   expect(stored.fallback_model_ids).toEqual([]);
@@ -495,12 +498,12 @@ test("permission picker: team All or Selected, member Inherit or Selected within
   await d.getByRole("radio", { name: "Selected" }).click();
   const options = d.getByTestId("permission-options");
   for (const group of ["Models", "Aliases", "Routers"]) await expect(options.getByRole("group", { name: group })).toBeVisible();
-  await expect(options.getByRole("group", { name: "Models" }).getByLabel("perm/a", { exact: true })).toBeVisible();
-  await expect(options.getByRole("group", { name: "Aliases" }).getByLabel("perm-alias", { exact: true })).toBeVisible();
-  await expect(options.getByRole("group", { name: "Routers" }).getByLabel("perm-router", { exact: true })).toBeVisible();
-  await options.getByLabel("perm/a", { exact: true }).check();
-  await options.getByLabel("perm/b", { exact: true }).check();
-  await options.getByLabel("perm-alias", { exact: true }).check();
+  await expect(options.getByRole("group", { name: "Models" }).getByLabel("perm/a (LLM)", { exact: true })).toBeVisible();
+  await expect(options.getByRole("group", { name: "Aliases" }).getByLabel("perm-alias (LLM)", { exact: true })).toBeVisible();
+  await expect(options.getByRole("group", { name: "Routers" }).getByLabel("perm-router (LLM)", { exact: true })).toBeVisible();
+  await options.getByLabel("perm/a (LLM)", { exact: true }).check();
+  await options.getByLabel("perm/b (LLM)", { exact: true }).check();
+  await options.getByLabel("perm-alias (LLM)", { exact: true }).check();
   await shot(page, "permission-picker-team");
   await d.getByRole("button", { name: "Create" }).click();
   await expect(d).toBeHidden();
@@ -519,12 +522,12 @@ test("permission picker: team All or Selected, member Inherit or Selected within
   await expect(d.getByRole("radio", { name: "All" })).toHaveCount(0);
   await d.getByRole("radio", { name: "Selected" }).click();
   const memberOptions = d.getByTestId("permission-options");
-  await expect(memberOptions.getByLabel("perm/a", { exact: true })).toBeVisible();
-  await expect(memberOptions.getByLabel("perm-alias", { exact: true })).toBeVisible();
-  await expect(memberOptions.getByLabel("perm/c", { exact: true })).toHaveCount(0); // outside the team
-  await expect(memberOptions.getByLabel("perm-router", { exact: true })).toHaveCount(0);
+  await expect(memberOptions.getByLabel("perm/a (LLM)", { exact: true })).toBeVisible();
+  await expect(memberOptions.getByLabel("perm-alias (LLM)", { exact: true })).toBeVisible();
+  await expect(memberOptions.getByLabel("perm/c (LLM)", { exact: true })).toHaveCount(0); // outside the team
+  await expect(memberOptions.getByLabel("perm-router (LLM)", { exact: true })).toHaveCount(0);
   await expect(memberOptions.getByRole("group", { name: "Routers" })).toHaveCount(0);
-  await memberOptions.getByLabel("perm/b", { exact: true }).check();
+  await memberOptions.getByLabel("perm/b (LLM)", { exact: true }).check();
   await d.getByRole("button", { name: "Save" }).click();
   await expect(d).toBeHidden();
   const members = await items<any>(request, `/teams/${team.id}/members`);
@@ -537,8 +540,8 @@ test("permission picker: team All or Selected, member Inherit or Selected within
   d = dialog(page);
   await d.getByLabel("Name").fill("perm-agent");
   await d.getByRole("radio", { name: "Selected" }).click();
-  await expect(d.getByTestId("permission-options").getByLabel("perm/c", { exact: true })).toHaveCount(0);
-  await d.getByTestId("permission-options").getByLabel("perm-alias", { exact: true }).check();
+  await expect(d.getByTestId("permission-options").getByLabel("perm/c (LLM)", { exact: true })).toHaveCount(0);
+  await d.getByTestId("permission-options").getByLabel("perm-alias (LLM)", { exact: true }).check();
   await d.getByRole("button", { name: "Create" }).click();
   await expect(d).toBeHidden();
   const accounts = await items<any>(request, `/teams/${team.id}/service-accounts`);
@@ -565,7 +568,7 @@ test("My keys shows what a new key can call; a member cannot open admin pages", 
   const member = await context.newPage();
   await context.addCookies([{ name: "lumewarp_session", value: VIEWER, url: test.info().project.use.baseURL! }]);
   await member.goto("/my-keys");
-  const section = member.getByTestId("team-Mine team");
+  const section = await teamDetails(member, "Mine team");
   const names = section.getByTestId("callable-models");
   await expect(names).toContainText("mine/b");
   await expect(names).not.toContainText("mine/a"); // the member's own list narrows the team's
@@ -749,9 +752,9 @@ test("dark mode and phone width", async ({ page, request }) => {
   // The router form is usable on a phone: it fits and can be submitted.
   await page.goto("/routers");
   await page.getByRole("button", { name: "New router" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   await pick(d, "Strategy", "E2E tuned");
-  // Once it has slid in, the drawer lies within the screen (subpixel layout).
+  // The page lies within the screen (subpixel layout).
   await expect
     .poll(async () => {
       const box = await d.boundingBox();
@@ -761,7 +764,7 @@ test("dark mode and phone width", async ({ page, request }) => {
   expect(await noOverflow(page)).toBe(true);
   await d.getByRole("button", { name: "Create" }).scrollIntoViewIfNeeded();
   await shot(page, "phone-dark-router-form");
-  await d.getByRole("button", { name: "Cancel" }).click();
+  await cancelForm(page);
   // Light, desktop.
   await page.addInitScript(() => localStorage.setItem("lumewarp.theme", "light"));
   await page.setViewportSize({ width: 1280, height: 900 });
@@ -807,6 +810,15 @@ function recordPatches(page: Page) {
   });
   return sent;
 }
+/** Leaves an edit page through Cancel, discarding unsaved changes when it asks. */
+async function cancelForm(page: Page) {
+  await page.locator("#main").getByRole("link", { name: "Cancel", exact: true }).click();
+  const discard = page.getByRole("alertdialog").getByRole("button", { name: "Discard" });
+  await expect(page).toHaveURL(/\/(routers|aliases)$/, { timeout: 2000 }).catch(async () => {
+    await discard.click();
+    await expect(page).toHaveURL(/\/(routers|aliases)$/);
+  });
+}
 async function editRouter(page: Page, name: string) {
   await page.getByLabel("Search routers").fill(name);
   await row(page, name).getByRole("button", { name: "Edit" }).click();
@@ -843,9 +855,9 @@ test("saving a router sends only what changed: settings, hidden weights and spli
   for (const [stored, name] of [[plain, "rt-plain"], [split, "rt-split"]] as const) {
     const before = await get<any>(request, `/routers/${stored.id}`);
     await editRouter(page, name);
-    await dialog(page).getByLabel("Name", { exact: true }).fill(`${name}-renamed`);
-    await dialog(page).getByRole("button", { name: "Save" }).click();
-    await expect(dialog(page)).toBeHidden();
+    await page.locator("#main").getByLabel("Name", { exact: true }).fill(`${name}-renamed`);
+    await page.locator("#main").getByRole("button", { name: "Save" }).click();
+    await expect(page).toHaveURL(/\/(routers|aliases)$/);
     // Renaming sends the name and nothing else ...
     expect(JSON.parse(sent[sent.length - 1])).toEqual({ name: `${name}-renamed` });
     // ... so settings, weights (hidden by this strategy) and split members are exactly what they were.
@@ -859,17 +871,17 @@ test("saving a router sends only what changed: settings, hidden weights and spli
   // Changing one setting sends the settings with everything else in them untouched (empty strings, the
   // spaces, the keys the form does not show, nested ones included) and no members.
   await editRouter(page, "rt-plain-renamed");
-  await pick(dialog(page), "Enabled *", "On");
-  await dialog(page).getByRole("button", { name: "Save" }).click();
-  await expect(dialog(page)).toBeHidden();
+  await pick(page.locator("#main"), "Enabled *", "On");
+  await page.locator("#main").getByRole("button", { name: "Save" }).click();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
   expect(JSON.parse(sent[sent.length - 1])).toEqual({ params: { ...params, enabled: true } });
   expect((await get<any>(request, `/routers/${plain.id}`)).params).toEqual({ ...params, enabled: true });
 
   // Adding a model sends the members: the ones already there keep their weights, the new one starts at 1.
   await editRouter(page, "rt-plain-renamed");
-  await dialog(page).getByLabel("rt/c", { exact: true }).check();
-  await dialog(page).getByRole("button", { name: "Save" }).click();
-  await expect(dialog(page)).toBeHidden();
+  await page.locator("#main").getByLabel("rt/c", { exact: true }).check();
+  await page.locator("#main").getByRole("button", { name: "Save" }).click();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
   expect(Object.keys(JSON.parse(sent[sent.length - 1]))).toEqual(["members"]);
   expect((await get<any>(request, `/routers/${plain.id}`)).members).toEqual([
     { model_id: a.id, weight: 20, params: { region: "" } },
@@ -883,7 +895,7 @@ test("schema presence: required values, empty values and optional objects follow
   const a = await model(request, "pres/a", up.id);
   await signIn(page, request, "/routers");
   await page.getByRole("button", { name: "New router" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   await d.getByLabel("Name").fill("pres-router");
   await pick(d, "Strategy", "E2E presence");
   await d.getByLabel("pres/a", { exact: true }).check();
@@ -902,7 +914,7 @@ test("schema presence: required values, empty values and optional objects follow
   await d.getByRole("group", { name: "Regions" }).getByRole("button", { name: "Use empty list" }).click();
   await d.getByRole("button", { name: "Add Limits" }).click();
   await d.getByRole("button", { name: "Create" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
   const stored = (await items<any>(request, "/routers")).find((r) => r.name === "pres-router");
   expect(stored.params).toEqual({ enabled: false, scope: "", regions: [], limits: {} });
 
@@ -913,12 +925,12 @@ test("schema presence: required values, empty values and optional objects follow
   await expect(d.getByText("Priority is required")).toBeVisible();
   await d.getByLabel("Priority *", { exact: true }).fill("3");
   await d.getByRole("button", { name: "Save" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
   expect((await get<any>(request, `/routers/${stored.id}`)).params.tuning).toEqual({ priority: 3 });
   await editRouter(page, "pres-router");
   await d.getByRole("button", { name: "Remove Tuning" }).click();
   await d.getByRole("button", { name: "Save" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
   expect(Object.hasOwn((await get<any>(request, `/routers/${stored.id}`)).params, "tuning")).toBe(false);
 
   // An optional string: typed then emptied is "", which is not the same as unset.
@@ -926,12 +938,12 @@ test("schema presence: required values, empty values and optional objects follow
   await d.getByLabel("Prefix", { exact: true }).fill("abc");
   await d.getByLabel("Prefix", { exact: true }).fill("");
   await d.getByRole("button", { name: "Save" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
   expect((await get<any>(request, `/routers/${stored.id}`)).params.prefix).toBe("");
   await editRouter(page, "pres-router");
   await d.getByRole("button", { name: "Unset Prefix" }).click();
   await d.getByRole("button", { name: "Save" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
   expect(Object.hasOwn((await get<any>(request, `/routers/${stored.id}`)).params, "prefix")).toBe(false);
   expect(a.id).toBeTruthy();
 });
@@ -941,7 +953,7 @@ test("property names that are also Object.prototype members or __proto__ round-t
   const a = await model(request, "proto/a", up.id);
   await signIn(page, request, "/routers");
   await page.getByRole("button", { name: "New router" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   await d.getByLabel("Name").fill("proto-router");
   await pick(d, "Strategy", "E2E presence");
   await d.getByLabel("proto/a", { exact: true }).check();
@@ -952,7 +964,7 @@ test("property names that are also Object.prototype members or __proto__ round-t
   // Optional and untouched: an inherited `constructor` must not read as a value or an error.
   await d.getByRole("button", { name: "Create" }).click();
   await expect(d.getByText("Must be text")).toHaveCount(0);
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
   const created = (await items<any>(request, "/routers")).find((r) => r.name === "proto-router");
   expect(JSON.stringify(created.params)).not.toMatch(/constructor|toString|__proto__/);
 
@@ -963,7 +975,7 @@ test("property names that are also Object.prototype members or __proto__ round-t
   await d.getByRole("button", { name: "Add Proto" }).click();
   await d.getByLabel("Inner", { exact: true }).fill("i");
   await d.getByRole("button", { name: "Save" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
   const text = await (await request.get(`/api/v1/routers/${created.id}`, { headers: admin })).text();
   expect(text).toContain('"constructor":"c"');
   expect(text).toContain('"toString":"t"');
@@ -972,7 +984,7 @@ test("property names that are also Object.prototype members or __proto__ round-t
   // Reopened, the nested `__proto__` object is shown with its field, not lost into a prototype.
   await editRouter(page, "proto-router");
   await expect(d.getByLabel("Inner", { exact: true })).toHaveValue("i");
-  await d.getByRole("button", { name: "Cancel" }).click();
+  await cancelForm(page);
 
   // The JSON editor keeps an own `__proto__` key too.
   const m = await model(request, "proto/b", up.id);
@@ -990,7 +1002,7 @@ test("property names that are also Object.prototype members or __proto__ round-t
   expect(JSON.parse(shown).constructor).toBe(2);
   await editor.fill('{"__proto__": {"a": 1}, "constructor": 2, "toString": 3, "z": 4}');
   await d.getByRole("button", { name: "Save" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
   expect(sent[sent.length - 1]).toContain('"__proto__":{"a":1}');
   const stored = await (await request.get(`/api/v1/routers/${jsonRouter.id}`, { headers: admin })).text();
   expect(stored).toContain('"__proto__":{"a":1}');
@@ -1004,7 +1016,7 @@ test("switching between strategies without a schema resets the JSON editors to w
   await model(request, "sw/a", up.id);
   await signIn(page, request, "/routers");
   await page.getByRole("button", { name: "New router" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   await d.getByLabel("Name").fill("sw-router");
   await pick(d, "Strategy", "E2E schemaless");
   await d.getByLabel("sw/a", { exact: true }).check();
@@ -1035,7 +1047,7 @@ test("switching between strategies without a schema resets the JSON editors to w
   await expect(memberSettings).toHaveValue("{}");
   await expect(d.getByText(/Expected|Unexpected|position/)).toHaveCount(0);
   await d.getByRole("button", { name: "Create" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/(routers|aliases)$/);
   expect(posts).toHaveLength(1);
   expect(posts[0].strategy).toBe("e2e_schemaless2");
   expect(posts[0].params).toEqual({});
@@ -1111,10 +1123,11 @@ test("screenshots", async ({ page, request }, info) => {
     }
     await page.goto("/routers");
     await page.getByRole("button", { name: "New router" }).click();
-    await pick(dialog(page), "Strategy", "E2E tuned");
-    await dialog(page).getByLabel("Name").fill("shot");
+    await pick(page.locator("#main"), "Strategy", "E2E tuned");
+    await page.locator("#main").getByLabel("Name").fill("shot");
     await page.waitForTimeout(300);
     await shot(page, `${label}-router-form`);
-    await page.keyboard.press("Escape");
+    // The next page.goto leaves the unsaved form: the browser asks first.
+    page.once("dialog", (dlg) => void dlg.accept());
   }
 });

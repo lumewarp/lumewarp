@@ -879,6 +879,11 @@ class Upstream(TimestampMixin, Base):
     health_check_timeout_ms: Mapped[int | None] = mapped_column(Integer)
     health_check_unhealthy_threshold: Mapped[int | None] = mapped_column(Integer)
     health_check_healthy_threshold: Mapped[int | None] = mapped_column(Integer)
+    # Last control-plane Test now of the saved settings (not a gateway check);
+    # cleared when the settings it probed change.
+    probe_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    probe_ok: Mapped[bool | None] = mapped_column(Boolean)
+    probe_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Per-model circuit breaker (proto CircuitBreaker); NULL settings = gateway
     # defaults (5 failures / 30000 ms).
     circuit_breaker_enabled: Mapped[bool] = mapped_column(
@@ -1335,6 +1340,11 @@ class Model(TimestampMixin, Base):
     chat_check_timeout_ms: Mapped[int | None] = mapped_column(Integer)
     chat_check_unhealthy_threshold: Mapped[int | None] = mapped_column(Integer)
     chat_check_healthy_threshold: Mapped[int | None] = mapped_column(Integer)
+    # Last control-plane Test now of the saved settings (not a gateway check);
+    # cleared when the settings it probed change.
+    probe_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    probe_ok: Mapped[bool | None] = mapped_column(Boolean)
+    probe_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     id = synonym("name_id")
 

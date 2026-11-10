@@ -61,7 +61,7 @@ export function Login() {
       <Card className="w-[min(380px,100%)] py-7">
         <form className="flex flex-col gap-4 px-7" onSubmit={submit} noValidate>
           <div className="flex items-center gap-2.5 text-base font-bold">
-            <span className="size-5 rounded-md bg-[linear-gradient(135deg,var(--primary),#22d3ee)]" aria-hidden="true" />
+            <img src="/favicon.svg" alt="" aria-hidden="true" className="size-6" />
             Lumewarp
           </div>
           <h1 className="text-xl font-semibold">Sign in</h1>

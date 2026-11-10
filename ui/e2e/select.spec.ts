@@ -3,7 +3,7 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 import { confirmDialog, control, dialog, optionNames, pick } from "./helpers";
 
 /*
- * Select, Combobox, Dialog / Sheet and the confirm dialog, through the real control plane (e2e/serve.py).
+ * Select, Combobox, Dialog and the confirm dialog, through the real control plane (e2e/serve.py).
  *
  * The contract under test (src/components/choice.ts): the domain value is the only state and is what the
  * request carries; the widget only sees an index key; a value that is none of the options is shown as such and
@@ -68,7 +68,7 @@ async function newRouter(page: Page, request: APIRequestContext, name: string, s
   const m = await model(request, `${name}/m`, up.id);
   await signIn(page, request, "/routers");
   await page.getByRole("button", { name: "New router" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   await d.getByLabel("Name", { exact: true }).fill(name);
   await pick(d, "Strategy", strategy);
   await d.getByLabel(`${name}/m`, { exact: true }).check();
@@ -85,7 +85,7 @@ test("select payloads: a number enum with 0, an empty string, a boolean and a 64
   await pick(d, "Skip unpriced models", "Off");
   await pick(d, "Big list", "opt-63");
   await d.getByRole("button", { name: "Create" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/routers$/);
   // Typed values, not strings: 0 and 0.5 are numbers, "" is kept, false is kept.
   expect(posted).toHaveLength(1);
   expect(posted[0].params).toStrictEqual({ max_waiting: 7, level: 0, ratio: 0.5, scope: "", skip_unpriced: false, big: "opt-63" });
@@ -107,7 +107,7 @@ test("select payloads: Not set is not the empty string, and picking it again rem
   await pick(d, "Skip unpriced models", "On");
   await pick(d, "Skip unpriced models", "Not set");
   await d.getByRole("button", { name: "Create" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/routers$/);
   // "" stays; the ones set and then unset are not sent at all.
   expect(posted[0].params).toStrictEqual({ max_waiting: 7, scope: "" });
 });
@@ -127,7 +127,7 @@ test("select contract: a stored value that is not an option is shown as such, ne
   await signIn(page, request, "/routers");
   await page.getByLabel("Search routers").fill("sel-stale");
   await page.getByRole("row").filter({ hasText: "sel-stale" }).getByRole("button", { name: "Edit" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   await expect(await control(d, "Scope")).toHaveText("Current value not in list");
   // Opened, none of its options is marked chosen (the first one was not picked for it).
   const { popup } = await openPopup(page, d, "Scope");
@@ -146,7 +146,7 @@ test("select contract: a stored value that is not an option is shown as such, ne
   // The user fixes it by choosing: only then does the request carry the settings, and only the chosen value changed.
   await pick(d, "Scope", "narrow");
   await d.getByRole("button", { name: "Save" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/routers$/);
   expect(patched).toEqual([{ name: "sel-stale-2", params: { max_waiting: 7, scope: "narrow", level: 1 } }]);
 });
 
@@ -242,8 +242,7 @@ async function openPopup(page: Page, scope: Page | ReturnType<typeof dialog>, la
 }
 
 test("select: the label names its control; clicking it activates that control and Esc gives focus back to it", async ({ page, request }) => {
-  await newRouter(page, request, "sel-label");
-  const d = dialog(page);
+  const { d } = await newRouter(page, request, "sel-label");
   // One label, one control: each label of the form names exactly one combobox.
   for (const name of ["Strategy", "Level", "Scope", "Big list"]) await expect(d.getByRole("combobox", { name, exact: true })).toHaveCount(1);
   const scope = await control(d, "Scope");
@@ -296,12 +295,12 @@ test("select: keyboard picks an option with Enter and ArrowDown, Home and End re
   await page.keyboard.press("Enter");
   await expect(level).toHaveText("1");
   await d.getByRole("button", { name: "Create" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/routers$/);
   expect(posted[0].params.level).toBe(1);
   expect(posted[0].params.big).toBe("opt-00");
 });
 
-test("select and combobox inside a sheet: Esc closes only the top layer, focus returns, the page is not left locked", async ({ page, request }) => {
+test("select and combobox on a page: Esc closes only the popover and focus returns", async ({ page, request }) => {
   const { d } = await newRouter(page, request, "sel-esc");
   const scope = await control(d, "Scope");
   await scope.focus();
@@ -309,7 +308,6 @@ test("select and combobox inside a sheet: Esc closes only the top layer, focus r
   await expect(scope).toHaveAttribute("aria-expanded", "true");
   await page.keyboard.press("Escape");
   await expect(scope).toHaveAttribute("aria-expanded", "false");
-  await expect(d).toBeVisible(); // the sheet is still there
   await expect(scope).toBeFocused();
   // The Combobox: its popover is the top layer.
   const fallback = await control(d, "Add fallback model");
@@ -318,49 +316,32 @@ test("select and combobox inside a sheet: Esc closes only the top layer, focus r
   await expect(page.getByRole("combobox", { name: "Search fallback models" })).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(fallback).toHaveAttribute("aria-expanded", "false");
-  await expect(d).toBeVisible();
   await expect(fallback).toBeFocused();
-  // Then the sheet itself, and focus goes back to the button that opened it.
-  await page.keyboard.press("Escape");
-  await expect(d).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "New router" })).toBeFocused();
-  await expectPageUnlocked(page);
+  await expect(page).toHaveURL(/\/routers\/new$/);
+  await expect.poll(() => page.evaluate(() => document.body.hasAttribute("data-scroll-locked"))).toBe(false);
 });
 
-async function expectPageUnlocked(page: Page) {
-  await expect.poll(() => page.evaluate(() => [document.body.hasAttribute("data-scroll-locked"), getComputedStyle(document.body).pointerEvents, getComputedStyle(document.body).overflow, document.body.getAttribute("aria-hidden")])).toEqual([false, "auto", "visible", null]);
-  // The page behind answers a click again.
-  await page.getByRole("button", { name: "New router" }).click();
-  await expect(dialog(page)).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(dialog(page)).toHaveCount(0);
-}
-
-test("select inside a dialog and a drawer: Esc, focus return and scrolling at the end of the page", async ({ page, request }) => {
-  const up0 = await upstream(request, "sel-dlg-up");
-  await model(request, "sel-dlg/m", up0.id);
-  await signIn(page, request, "/aliases");
-  await page.getByRole("button", { name: "New alias" }).click();
+test("select inside a dialog: Esc closes the popover, then the dialog, and focus returns", async ({ page, request }) => {
+  // Two orgs, so the New team dialog asks for one with a Select.
+  const orgs = ((await get<{ items: { name: string }[] }>(request, "/orgs?limit=200")).items).map((o) => o.name);
+  for (const name of ["sel-org-a", "sel-org-b"]) if (!orgs.includes(name)) await post(request, "/orgs", { name });
+  await signIn(page, request, "/teams");
+  await page.getByRole("button", { name: "New team" }).click();
   const d = dialog(page);
-  const up = await control(d, "Points to");
-  await up.click();
+  const org = await control(d, "Org");
+  await org.click();
+  await expect(org).toHaveAttribute("aria-expanded", "true");
   await page.keyboard.press("Escape");
+  await expect(org).toHaveAttribute("aria-expanded", "false");
   await expect(d).toBeVisible();
-  await expect(up).toBeFocused();
+  await expect(org).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(d).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "New alias" })).toBeFocused();
-  await expect.poll(() => page.evaluate(() => document.body.hasAttribute("data-scroll-locked"))).toBe(false);
-  // A drawer (the router sheet) holds Selects too.
-  await page.goto("/routers");
-  await page.getByRole("button", { name: "New router" }).click();
-  await pick(dialog(page), "Strategy", "E2E tuned");
-  await page.keyboard.press("Escape");
-  await expect(dialog(page)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "New team" })).toBeFocused();
   await expect.poll(() => page.evaluate(() => document.body.hasAttribute("data-scroll-locked"))).toBe(false);
 });
 
-test("long lists at 390 px: a 65 entry Combobox on a page, a 64 entry Select and a 65 entry Combobox in a sheet reach their first and last entries", async ({ page, request }) => {
+test("long lists at 390 px: a 65 entry Combobox on a page, a 64 entry Select and a 65 entry Combobox on the router page reach their first and last entries", async ({ page, request }) => {
   await page.setViewportSize({ width: 390, height: 700 });
   // A 65 entry Combobox on the model page: the upstream list.
   const ups = [] as { id: string; name: string }[];
@@ -385,12 +366,12 @@ test("long lists at 390 px: a 65 entry Combobox on a page, a 64 entry Select and
   await expect(popup).toHaveCount(0);
   await expect(trigger).toBeFocused();
 
-  // A 64 entry Select and a 65 entry Combobox inside the router sheet.
+  // A 64 entry Select and a 65 entry Combobox on the router page.
   const up = ups[0];
   for (let i = 0; i < 65; i++) await model(request, `fb/${String(i).padStart(2, "0")}`, up.id);
   await page.goto("/routers");
   await page.getByRole("button", { name: "New router" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   await pick(d, "Strategy", "E2E tuned");
   await pick(d, "Big list", "opt-00");
   await expect(await control(d, "Big list")).toHaveText("opt-00");
@@ -412,7 +393,7 @@ test("long lists at 390 px: a 65 entry Combobox on a page, a 64 entry Select and
   await page.keyboard.press("Enter");
   await expect(d.getByTestId("order-row")).toHaveCount(3);
   await expect(fb).toBeFocused();
-  // The popover scrolls with the wheel inside the sheet's scroll lock, and End jumps to the last entry.
+  // The popover scrolls with the wheel, and End jumps to the last entry.
   await fb.click();
   const list = page.locator("[cmdk-list]");
   await list.hover();
@@ -422,7 +403,7 @@ test("long lists at 390 px: a 65 entry Combobox on a page, a 64 entry Select and
   await page.keyboard.press("End");
   await expect(page.getByRole("option", { selected: true })).toHaveText(shown[shown.length - 1]);
   await page.keyboard.press("Escape");
-  await expect(d).toBeVisible();
+  await expect(fb).toHaveAttribute("aria-expanded", "false");
 });
 
 test("combobox contract: the search matches labels and never the keys, an unmatched search says so, Enter on the first match picks it", async ({ page, request }) => {
@@ -432,7 +413,7 @@ test("combobox contract: the search matches labels and never the keys, an unmatc
   for (const n of ["lead", "Upper", "i:1", "u"]) await model(request, `cb/${n}`, up.id);
   await signIn(page, request, "/routers");
   await page.getByRole("button", { name: "New router" }).click();
-  const d2 = dialog(page);
+  const d2 = page.locator("#main");
   await d2.getByLabel("Name", { exact: true }).fill("cb-contract");
   await pick(d2, "Strategy", "Weighted");
   await d2.getByLabel("cb-contract/m", { exact: true }).check();
@@ -455,43 +436,10 @@ test("combobox contract: the search matches labels and never the keys, an unmatc
   await page.keyboard.press("Enter");
   await expect(d2.getByTestId("order-row")).toHaveText([/1\. cb\/i:1/]);
   await d2.getByRole("button", { name: "Create" }).click();
-  await expect(d2).toBeHidden();
+  await expect(page).toHaveURL(/\/routers$/);
   const stored = (await get<{ items: any[] }>(request, "/models")).items.find((x) => x.name === "cb/i:1");
   expect(posted[0].fallback_model_ids).toEqual([stored.id]);
   expect(posted[0].members.map((x: any) => x.model_id)).toEqual([m.id]);
-});
-
-test("sheet: full width on a phone, xl from sm up, and a long form keeps its header and footer reachable", async ({ page, request }) => {
-  await upstream(request, "sheet-up");
-  await signIn(page, request, "/routers");
-  const widthOf = async () => (await dialog(page).boundingBox())!.width;
-  // 390 px: the whole screen (the library default would be 75%).
-  await page.setViewportSize({ width: 390, height: 700 });
-  await page.getByRole("button", { name: "New router" }).click();
-  await expect(dialog(page)).toBeVisible();
-  await expect.poll(widthOf).toBe(390);
-  await page.keyboard.press("Escape");
-  await expect(dialog(page)).toHaveCount(0);
-  // 1280 px: the router form is a wide drawer, xl (36rem = 576).
-  await page.setViewportSize({ width: 1280, height: 900 });
-  await page.getByRole("button", { name: "New router" }).click();
-  await expect.poll(widthOf).toBe(576);
-  await page.setViewportSize({ width: 390, height: 700 });
-  await expect.poll(widthOf).toBe(390);
-  // Long form, short screen: scroll the body to its end; Close, Cancel and Create stay on screen.
-  await pick(dialog(page), "Strategy", "E2E tuned");
-  const d = dialog(page);
-  const body = d.locator("div.overflow-y-auto");
-  await body.evaluate((el) => (el.scrollTop = el.scrollHeight));
-  await expect.poll(() => body.evaluate((el) => el.scrollTop > 0 && el.scrollTop + el.clientHeight >= el.scrollHeight - 1)).toBe(true);
-  const inView = async (name: string) => {
-    const box = (await d.getByRole("button", { name, exact: true }).boundingBox())!;
-    return box.y >= 0 && box.y + box.height <= 700 && box.x >= 0 && box.x + box.width <= 390;
-  };
-  for (const name of ["Close", "Cancel", "Create"]) expect(await inView(name), `${name} on screen`).toBe(true);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await d.getByRole("button", { name: "Cancel" }).click();
-  await expect(d).toHaveCount(0);
 });
 
 async function aliasFixture(request: APIRequestContext, name: string) {
@@ -616,16 +564,18 @@ test("screenshots of forms, open dropdowns and confirmations", async ({ page, re
     await page.keyboard.press("Escape");
     await page.goto("/routers");
     await page.getByRole("button", { name: "New router" }).click();
-    await pick(dialog(page), "Strategy", "E2E tuned");
-    await (await control(dialog(page), "Big list")).click();
-    await shot(`${label}-router-sheet-enum-open`);
+    const routerPage = page.locator("#main");
+    await pick(routerPage, "Strategy", "E2E tuned");
+    await (await control(routerPage, "Big list")).click();
+    await shot(`${label}-router-page-enum-open`);
     await page.keyboard.press("Escape");
-    await (await control(dialog(page), "Add fallback model")).click();
-    await shot(`${label}-router-sheet-combobox-open`);
+    await (await control(routerPage, "Add fallback model")).click();
+    await shot(`${label}-router-page-combobox-open`);
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Create" }).click();
-    await shot(`${label}-router-sheet-errors`);
-    await page.keyboard.press("Escape");
+    await routerPage.getByRole("button", { name: "Create" }).click();
+    await shot(`${label}-router-page-errors`);
+    // Leaving the unsaved form asks first.
+    page.once("dialog", (d) => void d.accept());
     await page.goto("/aliases");
     await openDelete(page, "shot-alias");
     await shot(`${label}-confirm-delete`);

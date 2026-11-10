@@ -1,21 +1,14 @@
+import { Link, useNavigate } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { api, type Alias } from "../api";
 import { Badge, PageHeader, TypeBadge } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
-import { FormDialog, required, TextField, useForm } from "../components/Form";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { SearchBox } from "../components/Search";
 import { DataTable } from "../components/Table";
-import { ComboboxField } from "../components/ui/combobox-field";
 import { useAliases, useById, useCan, useModels, useMut, useRouters } from "../hooks";
 import { aliasUpstreamModels, matches } from "../lib/catalog";
 import { typeLabel } from "../lib/modelType";
-
-interface Values {
-  name: string;
-  target: string;
-}
-const blank: Values = { name: "", target: "" };
 
 export function Aliases() {
   const perms = useCan();
@@ -25,11 +18,8 @@ export function Aliases() {
   const modelById = useById(models.data);
   const routerById = useById(routers.data);
   const [search, setSearch] = useState("");
-  const [editing, setEditing] = useState<Alias | "new" | null>(null);
   const [deleting, setDeleting] = useState<Alias | null>(null);
-  const form = useForm<Values>(blank, { name: required("Name"), target: required("Target") });
-  const create = useMut((v: Values) => api.createAlias({ name: v.name.trim(), target: v.target }), "Alias created");
-  const update = useMut(({ id, v }: { id: string; v: Values }) => api.updateAlias(id, { name: v.name.trim(), target: v.target }), "Alias saved");
+  const navigate = useNavigate();
   const remove = useMut((id: string) => api.deleteAlias(id), "Alias deleted");
 
   const rows = useMemo(
@@ -37,22 +27,19 @@ export function Aliases() {
     [list.data, search, modelById, routerById],
   );
 
-  const open = (a: Alias | "new") => {
-    form.reset(a === "new" ? blank : { name: a.name, target: a.target });
-    setEditing(a);
-  };
-  const submit = async () => {
-    if (!form.validate()) return false;
-    return form.run(() => (editing === "new" ? create.mutateAsync(form.values) : update.mutateAsync({ id: (editing as Alias).id, v: form.values })));
-  };
-  const targets = [
-    ...(models.data ?? []).map((m) => ({ value: m.id, label: `${m.name} (model · ${typeLabel(m.model_type)})` })),
-    ...(routers.data ?? []).map((r) => ({ value: r.id, label: `${r.name} (router${r.model_type ? ` · ${typeLabel(r.model_type)}` : ""})` })),
-  ];
+  const edit = (a: Alias) => void navigate({ to: "/aliases/$aliasId", params: { aliasId: a.id } });
 
   return (
     <>
-      <PageHeader title="Aliases" hint="Access is granted to the alias itself, not to its target." actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => open("new")}>New alias</CreateButton>} />
+      <PageHeader
+        title="Aliases"
+        hint="Access is granted to the alias itself, not to its target."
+        actions={
+          <CreateButton can={perms.isInstallationAdmin} onClick={() => void navigate({ to: "/aliases/new" })}>
+            New alias
+          </CreateButton>
+        }
+      />
       <SearchBox value={search} onChange={setSearch} label="Search aliases" placeholder="Name, type, target or upstream model" />
       <DataTable
         rows={rows}
@@ -66,7 +53,16 @@ export function Aliases() {
         rowKey={(r) => r.id}
         empty={search ? "No aliases match your search." : "No aliases yet."}
         columns={[
-          { key: "name", header: "Name", sort: (a, b) => a.name.localeCompare(b.name), cell: (r) => <strong>{r.name}</strong> },
+          {
+            key: "name",
+            header: "Name",
+            sort: (a, b) => a.name.localeCompare(b.name),
+            cell: (r) => (
+              <Link to="/aliases/$aliasId" params={{ aliasId: r.id }} className="font-semibold hover:underline">
+                {r.name}
+              </Link>
+            ),
+          },
           {
             key: "target",
             header: "Points to",
@@ -77,7 +73,11 @@ export function Aliases() {
               </span>
             ),
           },
-          { key: "type", header: "Type", cell: (r) => <TypeBadge type={r.model_type} /> },
+          {
+            key: "type",
+            header: "Type",
+            cell: (r) => <TypeBadge type={r.model_type} />,
+          },
           {
             key: "upstream",
             header: "Upstream model",
@@ -94,14 +94,20 @@ export function Aliases() {
               );
             },
           },
-          { key: "actions", header: "", cell: (r) => <RowActions canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => open(r)} onDelete={() => setDeleting(r)} /> },
+          {
+            key: "actions",
+            header: "",
+            cell: (r) => <RowActions canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => edit(r)} onDelete={() => setDeleting(r)} />,
+          },
         ]}
       />
-      <FormDialog open={!!editing} title={editing === "new" ? "New alias" : "Edit alias"} submitLabel={editing === "new" ? "Create" : "Save"} onClose={() => setEditing(null)} onSubmit={submit}>
-        <TextField label="Name" value={form.values.name} onChange={(v) => form.set("name", v)} error={form.errors.name} autoFocus hint="Must be unique across models, aliases and routers." />
-        <ComboboxField label="Points to" value={form.values.target} onChange={(v) => form.set("target", v)} error={form.errors.target} options={targets} placeholder="Select a model or router…" emptyText="No model or router matches" hint="An alias cannot point at another alias." />
-      </FormDialog>
-      <ConfirmDialog open={!!deleting} title="Delete alias" message={`Delete alias “${deleting?.name}”? Clients calling this name will get an error, and access granted to it is removed.`} onConfirm={() => remove.mutateAsync(deleting!.id)} onClose={() => setDeleting(null)} />
+      <ConfirmDialog
+        open={!!deleting}
+        title="Delete alias"
+        message={`Delete alias “${deleting?.name}”? Clients calling this name will get an error, and access granted to it is removed.`}
+        onConfirm={() => remove.mutateAsync(deleting!.id)}
+        onClose={() => setDeleting(null)}
+      />
     </>
   );
 }

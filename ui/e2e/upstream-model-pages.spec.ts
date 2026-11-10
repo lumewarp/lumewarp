@@ -122,7 +122,7 @@ test("model Test now asks the model, and the periodic check is saved", async ({ 
   await expect(page).toHaveURL(/\/models$/);
   const row = page.getByRole("row", { name: /pg-checked/ });
   await expect(row).toContainText("Unknown");
-  await expect(row).toContainText("128k / —");
+  await expect(row).toContainText("128k / --");
   const stored = ((await (await request.get("/api/v1/models?limit=200", { headers: admin })).json()).items as any[]).find((m) => m.name === "pg-checked");
   expect(stored.chat_check).toEqual({ interval_ms: 30000, timeout_ms: 5000, unhealthy_threshold: null, healthy_threshold: null });
 });

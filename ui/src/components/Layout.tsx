@@ -134,7 +134,7 @@ function NavSidebar({ installationAdmin, orgAdmin, teamAdmin, breakGlass }: { in
     <Sidebar>
       <SidebarHeader className="px-5 pt-4 pb-1">
         <div className="flex items-center gap-2.5 text-base font-bold">
-          <span className="size-5 rounded-md bg-[linear-gradient(135deg,var(--primary),#22d3ee)]" aria-hidden="true" />
+          <img src="/favicon.svg" alt="" aria-hidden="true" className="size-6" />
           Lumewarp
         </div>
       </SidebarHeader>

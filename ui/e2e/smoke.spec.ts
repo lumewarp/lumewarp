@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { confirmDialog, dialog, pick, shot } from "./helpers";
+import { myKeyRow } from "./selfService";
 
 const BREAK_GLASS = "e2e-break-glass-password";
 const VIEWER = "e2e-viewer-session-0123456789abcdef";
@@ -437,8 +438,8 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
 
   await viewerPage.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "My keys" }).click();
   await expect(viewerPage.getByRole("heading", { name: "My keys" })).toBeVisible();
-  const research = viewerPage.getByTestId("team-Research");
-  await expect(research.getByRole("cell", { name: /personal-key/ })).toBeVisible();
+  const research = viewerPage.getByTestId("my-keys");
+  await expect(await myKeyRow(viewerPage, "Research", "personal-key")).toBeVisible();
   await viewerPage.route("**/api/v1/keys/*/rotate", async (route) => {
     await route.fulfill({
       status: 409,
@@ -451,7 +452,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await expect(viewerPage.getByText("rotation unavailable")).toBeVisible();
   await dialog(viewerPage).getByRole("button", { name: "Cancel" }).click();
   await viewerPage.unroute("**/api/v1/keys/*/rotate");
-  await research.getByRole("button", { name: "New key" }).click();
+  await viewerPage.getByTestId("team-Research").getByRole("button", { name: "New key" }).click();
   await dialog(viewerPage).getByLabel("Name").fill("central-key");
   await dialog(viewerPage).getByRole("button", { name: "Create key" }).click();
   const centralSecret = (await dialog(viewerPage).getByTestId("secret-value").textContent()) ?? "";
@@ -546,7 +547,7 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
   await page.getByLabel("Search routers").fill("smoke-main");
   const row = page.getByRole("row").filter({ has: page.getByRole("cell", { name: "smoke-main", exact: true }) });
   await row.getByRole("button", { name: "Edit" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   await pick(d, "Strategy", "vLLM load");
   await d.getByLabel("Retry failed attempts").check();
   await d.getByLabel("Max attempts").fill("3");
@@ -572,7 +573,8 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
   await d.getByLabel("Sticky header").fill("X-Session-Id");
   await shot(page, "smoke-router-edit");
   await d.getByRole("button", { name: "Save" }).click();
-  await expect(d).toBeHidden();
+  await expect(page).toHaveURL(/\/routers$/);
+  await page.getByLabel("Search routers").fill("smoke-main");
 
   await expect(row).toContainText("stable 75%");
   await expect(row).toContainText("canary 25%");

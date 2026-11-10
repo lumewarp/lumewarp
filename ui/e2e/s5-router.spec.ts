@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { dialog, pick } from "./helpers";
+import { pick } from "./helpers";
 
 /* The router form: labels and descriptions reach the control they belong to. */
 
@@ -12,7 +12,7 @@ test("router form: the fallback label opens its picker, and hints describe the p
   await page.context().addCookies((await request.storageState()).cookies);
   await page.goto("/routers");
   await page.getByRole("button", { name: "New router" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
 
   const picker = d.getByRole("combobox", { name: "Add fallback model", exact: true });
   await expect(picker).toHaveAccessibleDescription(/Tried in order once this router/);

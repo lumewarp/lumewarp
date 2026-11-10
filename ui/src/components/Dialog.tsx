@@ -1,10 +1,8 @@
 import { XIcon } from "lucide-react";
 import { useLayoutEffect, useRef, type ReactNode } from "react";
 
-import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Dialog as UiDialog, DialogClose, DialogContent, DialogTitle } from "./ui/dialog";
-import { Sheet, SheetClose, SheetContent, SheetTitle } from "./ui/sheet";
 
 interface Props {
   open: boolean;
@@ -12,9 +10,7 @@ interface Props {
   title: string;
   children: ReactNode;
   footer?: ReactNode;
-  /** `drawer` slides in from the right. */
-  variant?: "dialog" | "drawer" | "wide-drawer";
-  /** The dialog variant only: false keeps Esc, an outside click and the header X from closing it. */
+  /** False keeps Esc, an outside click and the header X from closing it. */
   dismissible?: boolean;
 }
 
@@ -38,10 +34,10 @@ export function useReturnFocus(open: boolean) {
 const HEADER = "flex shrink-0 flex-row items-center justify-between gap-3 border-b px-5 py-3.5 text-left";
 
 /**
- * Focus trap, Esc, backdrop close and inert background come from Radix (via ui/dialog and ui/sheet). The
+ * Focus trap, Esc, backdrop close and inert background come from Radix (via ui/dialog). The
  * header and footer stay put and only the body scrolls, so a long form can always be cancelled or saved.
  */
-export function Dialog({ open, onClose, title, children, footer, variant = "dialog", dismissible = true }: Props) {
+export function Dialog({ open, onClose, title, children, footer, dismissible = true }: Props) {
   const onOpenChange = (next: boolean) => (!next ? onClose() : undefined);
   const onCloseAutoFocus = useReturnFocus(open);
   const body = (
@@ -55,40 +51,26 @@ export function Dialog({ open, onClose, title, children, footer, variant = "dial
       <XIcon aria-hidden="true" />
     </Button>
   );
-  if (variant === "dialog") {
-    return (
-      <UiDialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent
-          aria-describedby={undefined}
-          onCloseAutoFocus={onCloseAutoFocus}
-          showCloseButton={false}
-          className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 p-0 sm:max-w-lg"
-          {...(dismissible
-            ? {}
-            : {
-                onEscapeKeyDown: (event: KeyboardEvent) => event.preventDefault(),
-                onInteractOutside: (event: Event) => event.preventDefault(),
-              })}
-        >
-          <header className={HEADER}>
-            <DialogTitle className="m-0">{title}</DialogTitle>
-            {dismissible && <DialogClose asChild>{close}</DialogClose>}
-          </header>
-          {body}
-        </DialogContent>
-      </UiDialog>
-    );
-  }
-  // Sheet's own default is 75% wide and max-w-sm: a drawer is the full width on a phone and md / xl from sm up.
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent aria-describedby={undefined} onCloseAutoFocus={onCloseAutoFocus} showCloseButton={false} side="right" className={cn("w-full gap-0 p-0 data-[state=closed]:duration-200 data-[state=open]:duration-200", variant === "wide-drawer" ? "sm:max-w-xl" : "sm:max-w-md")}>
+    <UiDialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        aria-describedby={undefined}
+        onCloseAutoFocus={onCloseAutoFocus}
+        showCloseButton={false}
+        className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 p-0 sm:max-w-lg"
+        {...(dismissible
+          ? {}
+          : {
+              onEscapeKeyDown: (event: KeyboardEvent) => event.preventDefault(),
+              onInteractOutside: (event: Event) => event.preventDefault(),
+            })}
+      >
         <header className={HEADER}>
-          <SheetTitle className="m-0 text-base">{title}</SheetTitle>
-          <SheetClose asChild>{close}</SheetClose>
+          <DialogTitle className="m-0">{title}</DialogTitle>
+          {dismissible && <DialogClose asChild>{close}</DialogClose>}
         </header>
         {body}
-      </SheetContent>
-    </Sheet>
+      </DialogContent>
+    </UiDialog>
   );
 }

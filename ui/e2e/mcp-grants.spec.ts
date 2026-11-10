@@ -2,7 +2,7 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 import { createServer } from "node:http";
 
 import { deleteTeams, dialog, ensureOrg, pick, shot } from "./helpers";
-import { signIn as signInAsMember, VIEWER, VIEWER_EMAIL } from "./selfService";
+import { signIn as signInAsMember, teamDetails, VIEWER, VIEWER_EMAIL } from "./selfService";
 
 /*
  * MCP and A2A grants, the Usage tabs and the self-service endpoint snippet.
@@ -290,7 +290,7 @@ test("usage: the MCP and A2A tabs group by server, method and tool with failures
   await expect(agent).toContainText("3 s");
 });
 
-test("My keys shows a key's MCP and A2A reach and a connection snippet with a placeholder key", async ({ page, request }) => {
+test("My keys shows a team's MCP and A2A reach in its details", async ({ page, request }) => {
   const target = await seedTargets(request, "mg4", ["echo"]);
   const team = await makeTeam(request, "mg4-team");
   const viewer = await memberId(request, VIEWER_EMAIL);
@@ -309,22 +309,9 @@ test("My keys shows a key's MCP and A2A reach and a connection snippet with a pl
   });
 
   await signInAsMember(page, VIEWER, "/my-keys");
-  const section = page.getByTestId(`team-${team.name}`);
+  const section = await teamDetails(page, team.name);
   await expect(section.getByTestId("mcp-servers")).toContainText(target.server);
   await expect(section.getByTestId("mcp-servers")).toContainText("echo");
   await expect(section.getByTestId("callable-agents")).toContainText(target.agent);
-
-  const snippet = section.getByTestId("connection-snippet");
-  await expect(snippet).toContainText("X-Lumewarp-Key: lw-YOUR-KEY");
-  await expect(snippet).toContainText("POST <gateway>/mcp");
-  await expect(snippet).toContainText(`POST <gateway>/mcp/servers/${target.server}`);
-  await expect(snippet).toContainText("GET  <gateway>/a2a");
-  await expect(snippet).toContainText(`POST <gateway>/a2a/${target.agent}`);
-  // No secret is ever part of the page: the block names a placeholder, never a key.
-  expect(await snippet.textContent()).not.toMatch(/lw-(?!YOUR-KEY)[A-Za-z0-9_-]{16,}/);
-
-  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-  await section.getByRole("button", { name: "Copy" }).click();
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(await snippet.textContent());
   await shot(page, "my-keys-mcp");
 });

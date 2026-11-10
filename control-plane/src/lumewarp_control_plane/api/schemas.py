@@ -686,6 +686,20 @@ class UpstreamUpdate(ApiModel):
         return self
 
 
+class ProbeResultOut(ReadModel):
+    """The last control-plane Test now of the saved settings (not a gateway check)."""
+
+    at: datetime
+    ok: bool
+    ok_at: datetime | None = Field(description="The last successful one, if any.")
+
+
+def _probe(row: Any) -> ProbeResultOut | None:
+    if row.probe_at is None or row.probe_ok is None:
+        return None
+    return ProbeResultOut(at=row.probe_at, ok=row.probe_ok, ok_at=row.probe_ok_at)
+
+
 class UpstreamOut(ReadModel):
     health_url: str | None
     id: uuid.UUID
@@ -707,6 +721,10 @@ class UpstreamOut(ReadModel):
             "Active health check as connected gateways report it: unhealthy if any says so,"
             " unknown when no connected gateway has reported it yet."
         ),
+    )
+    probe: ProbeResultOut | None = Field(
+        default=None,
+        description="The last Test now of the saved settings from the control plane, if any.",
     )
     created_at: datetime
     updated_at: datetime
@@ -742,6 +760,7 @@ class UpstreamOut(ReadModel):
             "health_check": health,
             "circuit_breaker": breaker,
             "metrics_url": data.metrics_url,
+            "probe": _probe(data),
             "created_at": data.created_at,
             "updated_at": data.updated_at,
         }
@@ -939,6 +958,10 @@ class ModelOut(ReadModel):
             " when none has reported it yet."
         ),
     )
+    probe: ProbeResultOut | None = Field(
+        default=None,
+        description="The last Test now of the saved settings from the control plane, if any.",
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -972,6 +995,7 @@ class ModelOut(ReadModel):
                 unhealthy_threshold=data.chat_check_unhealthy_threshold,
                 healthy_threshold=data.chat_check_healthy_threshold,
             ),
+            "probe": _probe(data),
             "created_at": data.created_at,
             "updated_at": data.updated_at,
         }
@@ -1643,7 +1667,10 @@ class UpstreamTestIn(ApiModel):
     api_key_ref: str | None = Field(default=None, max_length=200)
     upstream_id: uuid.UUID | None = Field(
         default=None,
-        description="A saved upstream whose stored key is used when api_key is not given.",
+        description=(
+            "A saved upstream: its stored key is used when no other is given, and the"
+            " result is kept on it when the form matches it."
+        ),
     )
     health_url: str | None = Field(default=None, max_length=2000)
 
@@ -1679,6 +1706,10 @@ class ModelTestIn(ApiModel):
     upstream_id: uuid.UUID
     upstream_model: str = Field(min_length=1, max_length=400)
     default_body: dict[str, Any] | None = None
+    model_id: uuid.UUID | None = Field(
+        default=None,
+        description="A saved model; the result is kept on it when the form matches it.",
+    )
 
     @field_validator("default_body")
     @classmethod

@@ -191,3 +191,65 @@ def test_test_now_reports_failure_without_the_body(client, replies, monkeypatch)
     down = _test(client, other).json()
     assert down["probe"]["ok"] is False and down["probe"]["error"] == "connection failed"
     assert _test(client, {"id": str(uuid.uuid4())}).status_code == 422
+
+
+def test_test_now_result_is_kept_on_the_saved_row_until_its_settings_change(
+    client, replies
+) -> None:
+    _, table = replies
+    up = _upstream(client)
+    model = _model(client, up)
+    assert model["probe"] is None
+
+    def probe() -> dict | None:
+        return client.get(f"/api/v1/models/{model['id']}", headers=ADMIN_AUTH).json()["probe"]
+
+    # Without model_id (an unsaved form) nothing is kept.
+    table[CHAT_URL] = httpx.Response(200, json={"choices": [{"message": {"content": "2"}}]})
+    assert _test(client, up).json()["probe"]["ok"] is True
+    assert probe() is None
+    # A form that differs from the saved model is not kept on it either.
+    _test(client, up, model_id=model["id"], upstream_model="other")
+    assert probe() is None
+
+    _test(client, up, model_id=model["id"])
+    ok = probe()
+    assert ok is not None and ok["ok"] is True and ok["ok_at"] == ok["at"]
+    unchanged = client.get(f"/api/v1/models/{model['id']}", headers=ADMIN_AUTH).json()
+    assert unchanged["updated_at"] == model["updated_at"]
+
+    table[CHAT_URL] = httpx.Response(500)
+    _test(client, up, model_id=model["id"])
+    failed = probe()
+    assert failed is not None and failed["ok"] is False and failed["ok_at"] == ok["ok_at"]
+
+    # Renaming keeps it; changing what was probed clears it.
+    patch = client.patch(
+        f"/api/v1/models/{model['id']}", json={"name": f"m-{suffix()}"}, headers=ADMIN_AUTH
+    )
+    assert patch.status_code == 200 and patch.json()["probe"] == failed
+    patch = client.patch(
+        f"/api/v1/models/{model['id']}", json={"upstream_model": "qwen2"}, headers=ADMIN_AUTH
+    )
+    assert patch.status_code == 200 and patch.json()["probe"] is None
+
+    # An upstream's own result, and a new address clears its models' results too.
+    table[CHAT_URL] = httpx.Response(200, json={"choices": [{"message": {"content": "2"}}]})
+    _test(client, up, model_id=model["id"], upstream_model="qwen2")
+    assert probe() is not None
+    table["http://chat.test/v1/models"] = httpx.Response(200, json={"data": []})
+    test = client.post(
+        "/api/v1/upstreams/test",
+        json={"base_url": up["base_url"], "upstream_id": up["id"]},
+        headers=ADMIN_AUTH,
+    )
+    assert test.json()["probe"]["ok"] is True
+    got = client.get(f"/api/v1/upstreams/{up['id']}", headers=ADMIN_AUTH).json()
+    assert got["probe"]["ok"] is True
+    patch = client.patch(
+        f"/api/v1/upstreams/{up['id']}",
+        json={"base_url": "http://moved.test/v1"},
+        headers=ADMIN_AUTH,
+    )
+    assert patch.status_code == 200 and patch.json()["probe"] is None
+    assert probe() is None

@@ -276,8 +276,7 @@ test("a member edits an own key's limits within the cap and sees the 422 above i
   const created = await memberKey(browser, VIEWER, team.id, "s12-limit-key");
 
   await signIn(page, VIEWER, "/my-keys");
-  const section = page.getByTestId("team-s12-keylimits");
-  const row = rowOf(section, "s12-limit-key");
+  const row = rowOf(page.getByTestId("my-keys"), "s12-limit-key");
   await row.getByRole("button", { name: "Edit", exact: true }).click();
   const edit = page.getByRole("dialog");
   // The owner's effective limit is the cap shown in the form.

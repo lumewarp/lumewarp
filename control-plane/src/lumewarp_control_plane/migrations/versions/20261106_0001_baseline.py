@@ -288,6 +288,9 @@ def upgrade() -> None:
         sa.Column("health_check_timeout_ms", sa.Integer(), nullable=True),
         sa.Column("health_check_unhealthy_threshold", sa.Integer(), nullable=True),
         sa.Column("health_check_healthy_threshold", sa.Integer(), nullable=True),
+        sa.Column("probe_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("probe_ok", sa.Boolean(), nullable=True),
+        sa.Column("probe_ok_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "circuit_breaker_enabled", sa.Boolean(), server_default=sa.text("false"), nullable=False
         ),
@@ -788,6 +791,9 @@ def upgrade() -> None:
         sa.Column("chat_check_timeout_ms", sa.Integer(), nullable=True),
         sa.Column("chat_check_unhealthy_threshold", sa.Integer(), nullable=True),
         sa.Column("chat_check_healthy_threshold", sa.Integer(), nullable=True),
+        sa.Column("probe_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("probe_ok", sa.Boolean(), nullable=True),
+        sa.Column("probe_ok_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),

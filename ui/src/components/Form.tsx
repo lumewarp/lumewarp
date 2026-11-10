@@ -197,10 +197,9 @@ interface FormDialogProps {
   /** Return false to keep the dialog open (validation failed). Throw to show a server error. */
   onSubmit: () => Promise<boolean | void> | boolean | void;
   children: ReactNode;
-  variant?: "dialog" | "drawer" | "wide-drawer";
 }
 
-export function FormDialog({ open, title, submitLabel = "Save", submitDisabled = false, onClose, onSubmit, children, variant }: FormDialogProps) {
+export function FormDialog({ open, title, submitLabel = "Save", submitDisabled = false, onClose, onSubmit, children }: FormDialogProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const submit = async (e: FormEvent) => {
@@ -221,7 +220,6 @@ export function FormDialog({ open, title, submitLabel = "Save", submitDisabled =
       open={open}
       onClose={onClose}
       title={title}
-      variant={variant}
       footer={
         <>
           <Button type="button" variant="outline" onClick={onClose}>

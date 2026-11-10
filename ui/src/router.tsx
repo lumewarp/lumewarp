@@ -22,6 +22,8 @@ const UpstreamsPage = lazy(() => import("./pages/Upstreams").then((module) => ({
 const ModelsPage = lazy(() => import("./pages/Models").then((module) => ({ default: module.Models })));
 const ModelEditPage = lazy(() => import("./pages/ModelEdit").then((module) => ({ default: module.ModelEdit })));
 const UpstreamEditPage = lazy(() => import("./pages/UpstreamEdit").then((module) => ({ default: module.UpstreamEdit })));
+const AliasEditPage = lazy(() => import("./pages/AliasEdit").then((module) => ({ default: module.AliasEdit })));
+const RouterEditPage = lazy(() => import("./pages/RouterEdit").then((module) => ({ default: module.RouterEdit })));
 const AliasesPage = lazy(() => import("./pages/Aliases").then((module) => ({ default: module.Aliases })));
 const GatewaysPage = lazy(() => import("./pages/Gateways").then((module) => ({ default: module.Gateways })));
 const ConfigPage = lazy(() => import("./pages/Config").then((module) => ({ default: module.Config })));
@@ -170,10 +172,14 @@ const routeTree = rootRoute.addChildren([
     teamDetailRoute,
     page("/users", () => <UsersPage />, "installationAdmin"),
     page("/routers", () => <RoutersPage />, "installationAdmin"),
+    page("/routers/new", () => <RouterEditPage />, "installationAdmin"),
+    page("/routers/$routerId", () => <RouterEditPage />, "installationAdmin"),
     page("/models", () => <ModelsPage />, "installationAdmin"),
     page("/models/new", () => <ModelEditPage />, "installationAdmin"),
     page("/models/$modelId", () => <ModelEditPage />, "installationAdmin"),
     page("/aliases", () => <AliasesPage />, "installationAdmin"),
+    page("/aliases/new", () => <AliasEditPage />, "installationAdmin"),
+    page("/aliases/$aliasId", () => <AliasEditPage />, "installationAdmin"),
     page("/upstreams", () => <UpstreamsPage />, "installationAdmin"),
     page("/upstreams/new", () => <UpstreamEditPage />, "installationAdmin"),
     page("/upstreams/$upstreamId", () => <UpstreamEditPage />, "installationAdmin"),

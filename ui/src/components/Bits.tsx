@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 
 import type { Key, Schemas } from "../api";
-import { typeLabel } from "../lib/modelType";
+import { TYPE_ICON, typeLabel } from "../lib/modelType";
 import { Badge as ShadcnBadge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { HelpTip } from "./ui/help-tip";
@@ -22,7 +22,25 @@ export function Badge({ children, tone = "muted" }: { children: ReactNode; tone?
 /** A model's type; nothing for an entry without one (an empty router). */
 export function TypeBadge({ type }: { type: Schemas["ModelType"] | null | undefined }) {
   if (!type) return <span className="text-muted-foreground">—</span>;
-  return <ShadcnBadge variant="muted">{typeLabel(type)}</ShadcnBadge>;
+  const Icon = TYPE_ICON[type];
+  return (
+    <ShadcnBadge variant="muted">
+      <Icon aria-hidden="true" />
+      {typeLabel(type)}
+    </ShadcnBadge>
+  );
+}
+
+/** A model name with its type's icon; the type label is read out and shown on hover. */
+export function ModelPill({ name, type }: { name: string; type: Schemas["ModelType"] | null | undefined }) {
+  const Icon = type ? TYPE_ICON[type] : null;
+  return (
+    <ShadcnBadge variant="muted" title={type ? typeLabel(type) : undefined} className="max-w-full">
+      {Icon && <Icon aria-hidden="true" />}
+      <span className="truncate">{name}</span>
+      {type && <span className="sr-only"> ({typeLabel(type)})</span>}
+    </ShadcnBadge>
+  );
 }
 
 /** Marks an admin listed by inheritance: from the installation role or from the team's org. */

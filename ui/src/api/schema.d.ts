@@ -2439,6 +2439,8 @@ export interface components {
              * @enum {string}
              */
             health: "healthy" | "unhealthy" | "unknown" | "not_probed";
+            /** @description The last Test now of the saved settings from the control plane, if any. */
+            probe?: components["schemas"]["ProbeResultOut"] | null;
             /**
              * Created At
              * Format: date-time
@@ -2467,6 +2469,11 @@ export interface components {
             default_body?: {
                 [key: string]: unknown;
             } | null;
+            /**
+             * Model Id
+             * @description A saved model; the result is kept on it when the form matches it.
+             */
+            model_id?: string | null;
         };
         /** ModelTestOut */
         ModelTestOut: {
@@ -3032,6 +3039,24 @@ export interface components {
              * @description Why no response arrived (never the response body).
              */
             error: string | null;
+        };
+        /**
+         * ProbeResultOut
+         * @description The last control-plane Test now of the saved settings (not a gateway check).
+         */
+        ProbeResultOut: {
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /** Ok */
+            ok: boolean;
+            /**
+             * Ok At
+             * @description The last successful one, if any.
+             */
+            ok_at: string | null;
         };
         /**
          * ReasoningIn
@@ -3783,6 +3808,8 @@ export interface components {
              * @enum {string}
              */
             health: "healthy" | "unhealthy" | "unknown" | "not_probed";
+            /** @description The last Test now of the saved settings from the control plane, if any. */
+            probe?: components["schemas"]["ProbeResultOut"] | null;
             /**
              * Created At
              * Format: date-time
@@ -3810,7 +3837,7 @@ export interface components {
             api_key_ref?: string | null;
             /**
              * Upstream Id
-             * @description A saved upstream whose stored key is used when api_key is not given.
+             * @description A saved upstream: its stored key is used when no other is given, and the result is kept on it when the form matches it.
              */
             upstream_id?: string | null;
             /** Health Url */

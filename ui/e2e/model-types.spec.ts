@@ -1,6 +1,6 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
-import { dialog, optionNames, pick } from "./helpers";
+import { optionNames, pick } from "./helpers";
 
 /*
  * Model types: the type select on the model page decides which settings show, the list filters by type,
@@ -145,7 +145,7 @@ test("a router offers only models of its type, and aliases and the list show it"
   const m = await seed(request);
   await signIn(page, request, "/routers");
   await page.getByRole("button", { name: "New router" }).click();
-  const d = dialog(page);
+  const d = page.locator("#main");
   // Nothing chosen: every model is offered.
   for (const name of ["mt-llm", "mt-emb", "mt-asr", "mt-dec"]) await expect(d.getByTestId(`member-${name}`)).toBeVisible();
   // A lone member does not pin the type: picking another type replaces it.
@@ -161,7 +161,9 @@ test("a router offers only models of its type, and aliases and the list show it"
 
   await post(request, "/routers", { name: "mt-router", members: [{ model_id: m.asr.id }] });
   await post(request, "/aliases", { name: "mt-alias", target: m.dec.id });
-  await page.reload();
+  // Leaving the unsaved form asks first.
+  page.once("dialog", (dlg) => void dlg.accept());
+  await page.goto("/routers");
   await expect(page.getByRole("row").filter({ hasText: "mt-router" })).toContainText("Transcription");
   await page.goto("/aliases");
   await expect(page.getByRole("row").filter({ hasText: "mt-alias" })).toContainText("Decision");
