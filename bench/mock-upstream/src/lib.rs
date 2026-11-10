@@ -470,7 +470,11 @@ impl App {
                 Value::Array(ref values) => values.len(),
                 _ => return error(StatusCode::BAD_REQUEST, "input must be a string or array"),
             };
-            if let Some(large) = self.large_embedding.as_ref().filter(|_| model == "mock-embedding") {
+            if let Some(large) = self
+                .large_embedding
+                .as_ref()
+                .filter(|_| model == "mock-embedding")
+            {
                 return response(StatusCode::OK, "application/json", large.clone());
             }
             let data: Vec<_> = (0..count)
