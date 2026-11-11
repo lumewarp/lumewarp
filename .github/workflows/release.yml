@@ -209,10 +209,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Only what is attached to the release. Without a name every artifact of the run is
+      # fetched: the load and bench reports, and the image builds' .dockerbuild records,
+      # which cannot be downloaded and fail the job.
       - uses: actions/download-artifact@v4
         with:
+          name: chart
           path: assets
-          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: plugins
+          path: assets
       - name: Release notes
         run: |
           owner="${GITHUB_REPOSITORY_OWNER}"
