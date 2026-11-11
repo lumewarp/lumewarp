@@ -344,7 +344,13 @@ jobs:
       - run: uv sync --locked --project ../control-plane
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
-      - run: pnpm exec playwright install --with-deps chromium
+      # --with-deps adds fonts and libraries through apt. The runner image already has
+      # Chrome's libraries, so an unreachable Ubuntu archive must not fail the job: bound
+      # the apt attempt and fall back to the browser alone.
+      - name: Install Chromium
+        run: |
+          timeout 120 pnpm exec playwright install --with-deps chromium \
+            || pnpm exec playwright install chromium
       - name: Playwright (serve.py creates a fresh database on the Postgres service)
         env:
           # serve.py reads LUMEWARP_TEST_DATABASE_URL (an asyncpg URL), not E2E_PG_URL.

@@ -21,6 +21,10 @@ from lumewarp_control_plane.settings import DEV_DATABASE_URL, Settings
 # Tests that start background services bind the metrics listener to an ephemeral port
 # instead of the fixed default.
 os.environ.setdefault("LUMEWARP_METRICS_BIND", "127.0.0.1:0")
+# The 2 s production default bounds an external authz backend. Here the built-in backend
+# queries a Postgres shared with the whole suite, and a slow CI runner exceeds it: the
+# request then answers 503 authz_unavailable and an unrelated test fails.
+os.environ.setdefault("LUMEWARP_AUTHZ_TIMEOUT_SECONDS", "30")
 
 TEST_DB_PREFIX = "lumewarp_test_"
 SERVER_URL = os.environ.get("LUMEWARP_TEST_DATABASE_URL", DEV_DATABASE_URL)
