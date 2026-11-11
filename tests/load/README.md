@@ -40,7 +40,7 @@ show a positive queue depth or an increase in usage report retry events during t
 | `test_steady_mixed_load` | 60 keys over 6 teams × 2 owners (one service account and one member using a PAT) × 5 keys, chat + stream mix: zero 5xx, zero connection errors, well-formed bodies/SSE (no leaked usage-only chunk), exact usage + cost accounting at team and owner scopes, no dropped events, config stream stays up. |
 | `test_churn_under_load` | Under load: revoke keys (each rejected < 2 s, measured per key, never accepted after the first 401), create keys (accepted < 2 s), rotate a pooled key with a one-hour grace (the new secret is accepted within the same bound, both secrets keep serving as the same key id, and every response for either credential generation after the rotation is 200 or the allowed rate-limit answer — a late 401 on the replaced secret fails the run), add model `mock-b` (1:1 split), weight `mock-a` to 0 (all `mock-b`), remove `mock-b` (all `mock-a`) — checked by the config version each request was served under; lower an owner rpm limit (429 `rate_limit_exceeded` + `Retry-After` only for that owner's keys and window, never 5xx), clear it; publish 40 versions back to back through owner policy changes (gateway ACKs the latest, `source_revision` strictly increasing, nothing quarantined). |
 | `test_control_plane_restart_under_load` | CP stopped for 20 s mid-run: every request still 200, usage queued meanwhile is delivered after restart (exact counts, drop counter 0), gateway reconnects and ACKs. |
-| `test_budget_under_load` | Separate service-account, member and team cases with a 0.01 USD budget: every affected key flips to 429 `insufficient_quota` < 5 s after the budget was exceeded at ingestion and is never accepted after its flip; keys outside the scope remain unaffected; overshoot recorded. |
+| `test_budget_under_load` | Separate service-account, member and team cases with a small budget (0.01 USD at the default load): every affected key flips to 429 `insufficient_quota` < 5 s after the budget was exceeded at ingestion and is never accepted after its flip; keys outside the scope remain unaffected; overshoot recorded. |
 | `test_rate_limit_under_load` | A service account and member each share an RPM limiter across their keys: 429 `rate_limit_exceeded` with `Retry-After`, unrelated owners unaffected, clearing both limits restores service, exact usage and cost accounting. |
 | `test_gateway_restart_under_load` | Gateway SIGTERM + restart on the same ports: boots from the on-disk snapshot, reconnects, connection errors only inside the restart window, never 5xx, no lost or duplicated usage. |
 
@@ -101,7 +101,7 @@ Environment (all optional):
 | `LOAD_CP_OUTAGE_SECS` | 20 | control-plane downtime |
 | `LOAD_REVOKE_BOUND`, `LOAD_NEW_KEY_BOUND`, `LOAD_BUDGET_BOUND` | 2, 2, 5 | latency bounds (s) |
 | `LOAD_USAGE_DRAIN_BOUND` | 50 | after a CP restart, seconds for the gateway usage queue to drain (its retry backoff caps at 30 s) |
-| `LOAD_BUDGET_NANO_USD` | 10000000 | tiny owner budget |
+| `LOAD_BUDGET_NANO_USD` | `LOAD_USERS` × `LOAD_USER_RPS` × 25000 (10000000) | tiny owner budget; follows the load so an owner spends it in about 19 s |
 | `LOAD_RATE_LIMIT_SECS` | 20 | mixed-owner rate-limit scenario run time |
 | `LOAD_BURST`, `LOAD_BURST_GAP` | 40, 0.05 | version burst size and spacing (s) |
 | `LOAD_REPEAT`, `LOAD_RESULTS_DIR` | 1, timestamped | consecutive runs, report directory |

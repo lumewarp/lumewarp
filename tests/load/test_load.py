@@ -16,6 +16,8 @@ from collections import Counter, defaultdict
 
 import pytest
 from loadlib import (
+    USER_RPS,
+    USERS,
     ClockSampler,
     Fleet,
     LoadRun,
@@ -58,8 +60,10 @@ BUDGET_BOUND = env_float("LOAD_BUDGET_BOUND", 5.0)
 # The gateway's usage retry backoff caps at 30 s (gateway/.../usage.rs RETRY_MAX), so the
 # first report after the CP is back can come up to 30 s later; then the backlog drains.
 USAGE_DRAIN_BOUND = env_float("LOAD_USAGE_DRAIN_BOUND", 30 + 20)
-# ~16_000 nano-USD per mock request at mock-a prices.
-BUDGET = env_int("LOAD_BUDGET_NANO_USD", 10_000_000)
+# ~16_000 nano-USD per mock request at mock-a prices. The default follows the offered load
+# (10_000_000 at 400 RPS), so one of the 12 owners spends it in about 19 s at any LOAD_USERS:
+# a fixed budget at half the load is not reached within the scenario's wait.
+BUDGET = env_int("LOAD_BUDGET_NANO_USD", round(USERS * USER_RPS * 25_000))
 DROPPED = "lumewarp_usage_events_dropped_total"
 
 
