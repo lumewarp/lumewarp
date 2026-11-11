@@ -660,3 +660,31 @@ test("an expired session lands on a usable login page even when 401s arrive late
   await expect(page.getByText("Single sign-on is not configured.")).toHaveCount(0);
   expect(new URL(page.url()).searchParams.get("next")).toContain(here);
 });
+
+test("a late 401 during another navigation keeps the login page's session check", async ({ page }) => {
+  await login(page, VIEWER);
+  await expect(page.getByRole("link", { name: /My keys/i }).first()).toBeVisible();
+  let first = true;
+  await page.route(/\/api\/v1\/(?!session)/, async (route) => {
+    const late = !first;
+    first = false;
+    if (late) await new Promise((resolve) => setTimeout(resolve, 1000));
+    await route.fulfill({ status: 401, json: { error: { code: "unauthorized", message: "unauthorized" } } });
+  });
+  await page.route("**/api/v1/session", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await route.fulfill({ json: { oidc_enabled: true, break_glass_enabled: true, authenticated: false } });
+  });
+  const go = (path: string) =>
+    page.evaluate((to) => {
+      history.pushState({}, "", to);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    }, path);
+  await go("/usage");
+  // The login page is up and checking the session. Another navigation then starts its own check,
+  // so the router's location is not /login when the late 401 arrives.
+  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+  await go("/my-keys");
+  await expect(page.getByRole("button", { name: "Sign in with SSO" })).toBeVisible({ timeout: 10_000 });
+  await expect(page).toHaveURL(/\/login/);
+});

@@ -33,12 +33,17 @@ const queryClient = new QueryClient({
   },
 });
 
-// Every request still in flight when a session expires answers 401. Only the first one may clear the
-// cache: a later clear would also drop the login page's own session query mid-flight and leave it pending.
+// Every request still in flight when a session expires answers 401, and a late one can arrive while
+// the login page is already checking the session: the router's location is not /login whenever another
+// navigation is pending. Dropping that in-flight session query would leave the login page pending for
+// good, so it is the one thing kept.
 setUnauthorizedHandler(() => {
   const { pathname, href } = router.state.location;
   if (pathname === "/login") return;
-  queryClient.clear();
+  queryClient.removeQueries({
+    predicate: (query) => !(query.queryKey[0] === "session" && query.state.fetchStatus === "fetching"),
+  });
+  queryClient.getMutationCache().clear();
   void router.navigate({ to: "/login", search: { next: href } });
 });
 
