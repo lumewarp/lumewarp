@@ -1,15 +1,164 @@
 name: ci
 
+# A commit is tested once: a PR run, then the push to main only when its tree
+# differs from a PR head that already passed; each job runs only when its paths
+# changed since the last successful run on main. The push of a `Release vX.Y.Z`
+# commit (scripts/release.sh) runs every job, and the release workflow reuses
+# that run for the tag.
 on:
   push:
     branches: [main]
   pull_request:
-  # Manual dispatch runs only the load-e2e job.
   workflow_dispatch:
+    inputs:
+      full:
+        description: "Run every job"
+        type: boolean
+        default: false
+      load:
+        description: "Run load-e2e"
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      full:
+        type: boolean
+        default: true
+      load:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}-${{ format('{0}', inputs.full) }}
+  # A newer push to main or a PR supersedes the older run; the next run diffs
+  # against the last successful one, so nothing a cancelled run held is lost.
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      observability: ${{ steps.decide.outputs.observability }}
+      gateway: ${{ steps.decide.outputs.gateway }}
+      bench-crate: ${{ steps.decide.outputs.bench-crate }}
+      control-plane: ${{ steps.decide.outputs.control-plane }}
+      ui: ${{ steps.decide.outputs.ui }}
+      proto: ${{ steps.decide.outputs.proto }}
+      e2e: ${{ steps.decide.outputs.e2e }}
+      load: ${{ steps.decide.outputs.load }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Empty on push and pull_request; set when dispatched or called.
+      FULL_INPUT: ${{ format('{0}', inputs.full) }}
+      LOAD_INPUT: ${{ format('{0}', inputs.load) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Find what was already tested
+        id: base
+        if: env.FULL_INPUT == ''
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          full=false skip=false base=""
+          if [[ "$EVENT" == "push" ]]; then
+            if [[ "$HEAD_MESSAGE" =~ ^Release\ v[0-9] ]]; then
+              full=true
+            fi
+            # Merged from a PR whose head (same tree) already passed: nothing new to test.
+            pr_head="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+              --jq '[.[] | select(.merged_at != null)][0].head.sha // empty' || true)"
+            if [[ -n "$pr_head" && "$full" == false ]]; then
+              pr_tree="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${pr_head}" --jq .tree.sha || true)"
+              passed="$(gh run list --workflow ci.yml --commit "$pr_head" --event pull_request \
+                --status success --json databaseId --jq length || echo 0)"
+              if [[ "$pr_tree" == "$(git rev-parse 'HEAD^{tree}')" && "$passed" != 0 ]]; then
+                skip=true
+                echo "::notice::tree already passed on PR head ${pr_head}; skipping"
+              fi
+            fi
+            # Diff against the last successful push run, not the previous push:
+            # a cancelled or failed run's changes are tested again.
+            base="$(gh run list --workflow ci.yml --branch main --event push --status success \
+              --limit 1 --json headSha --jq '.[0].headSha // empty' || true)"
+            if [[ -z "$base" ]] || ! git merge-base --is-ancestor "$base" HEAD; then
+              full=true
+            fi
+          fi
+          {
+            echo "full=$full"
+            echo "skip=$skip"
+            echo "base=$base"
+          } >> "$GITHUB_OUTPUT"
+      - uses: dorny/paths-filter@v3
+        id: paths
+        if: env.FULL_INPUT == '' && steps.base.outputs.full == 'false' && steps.base.outputs.skip == 'false'
+        with:
+          base: ${{ steps.base.outputs.base }}
+          # A file counts for a job when it matches every pattern of the job's list.
+          predicate-quantifier: every
+          filters: |
+            workflow:
+              - '.github/workflows/ci.yml'
+            observability:
+              - 'deploy/**'
+              - '!**/*.md'
+            gateway:
+              - '{gateway,proto,bench/mock-upstream}/**'
+              - '!**/*.md'
+            bench-crate:
+              - 'bench/**'
+              - '!**/*.md'
+            control-plane:
+              - '{control-plane,proto,tests/load}/**'
+              - '!**/*.md'
+            ui:
+              - '{ui,control-plane}/**'
+              - '!**/*.md'
+            proto:
+              - '{proto/**,scripts/gen-proto.sh,control-plane/src/lumewarp_control_plane/_proto/**}'
+              - '!**/*.md'
+            e2e:
+              - '{gateway,control-plane,proto,bench/mock-upstream,tests/e2e,scripts}/**'
+              - '!**/*.md'
+      - name: Decide which jobs run
+        id: decide
+        env:
+          FULL: ${{ steps.base.outputs.full }}
+          SKIP: ${{ steps.base.outputs.skip }}
+          PATHS: ${{ toJSON(steps.paths.outputs) }}
+        run: |
+          python3 -I - <<'PY'
+          import json, os
+          jobs = ["observability", "gateway", "bench-crate", "control-plane", "ui", "proto", "e2e"]
+          called = os.environ["FULL_INPUT"] != ""
+          paths = json.loads(os.environ["PATHS"] or "{}") or {}
+          if called:
+              full, skip = os.environ["FULL_INPUT"] == "true", False
+              load = os.environ["LOAD_INPUT"] == "true"
+          else:
+              full = os.environ["FULL"] == "true" or paths.get("workflow") == "true"
+              skip, load = os.environ["SKIP"] == "true", False
+          out = {job: str(not skip and (full or paths.get(job) == "true")).lower() for job in jobs}
+          out["load"] = str(load).lower()
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              for job, run in out.items():
+                  f.write(f"{job}={run}\n")
+          print(json.dumps(out))
+          PY
+
   observability:
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    needs: changes
+    if: needs.changes.outputs.observability == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,7 +212,8 @@ jobs:
           PY
 
   gateway:
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    needs: changes
+    if: needs.changes.outputs.gateway == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -92,7 +242,8 @@ jobs:
           fi
 
   bench-crate:
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    needs: changes
+    if: needs.changes.outputs.bench-crate == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -116,7 +267,8 @@ jobs:
           python3 -I bench/scripts/ci_check.py --selftest
 
   control-plane:
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    needs: changes
+    if: needs.changes.outputs.control-plane == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -153,7 +305,8 @@ jobs:
             --rootdir tests/load tests/load/test_loadlib_unit.py -q -p no:cacheprovider
 
   ui:
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    needs: changes
+    if: needs.changes.outputs.ui == 'true'
     runs-on: ubuntu-latest
     # Setup (uv sync, pnpm install, browser) plus the suite, which takes about 4 minutes.
     timeout-minutes: 20
@@ -207,7 +360,8 @@ jobs:
           if-no-files-found: ignore
 
   proto:
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    needs: changes
+    if: needs.changes.outputs.proto == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -234,7 +388,8 @@ jobs:
           fi
 
   e2e:
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    needs: changes
+    if: needs.changes.outputs.e2e == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -266,7 +421,8 @@ jobs:
         run: scripts/e2e-core.sh
 
   load-e2e:
-    if: github.event_name == 'workflow_dispatch'
+    needs: changes
+    if: needs.changes.outputs.load == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:

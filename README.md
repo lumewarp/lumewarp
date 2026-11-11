@@ -209,6 +209,30 @@ uv-installed package on Python 3.12 as non-root and includes the built Admin UI.
 The [Helm chart](deploy/helm/lumewarp/README.md) deploys both; set the image
 repositories/tags in its values.
 
+## Releases and CI
+
+Releases are tags `vX.Y.Z` (`vX.Y.Z-<pre>` for a pre-release). While Lumewarp is
+0.x there is no upgrade path: drop the control-plane database before installing
+a new release.
+
+```sh
+scripts/release.sh 0.2.0                 # sets every version, commits "Release v0.2.0", tags it
+git push origin main && git push origin v0.2.0
+```
+
+- `ci` runs on pull requests and pushes to `main`. Each job runs only when its
+  paths changed since the last successful run on `main` (documentation alone runs
+  nothing), a newer push cancels an older run, and a merge whose tree already
+  passed on its PR is not tested again. The push of a `Release v…` commit runs
+  every job.
+- `release` (on the tag) reuses that full run, or runs `ci` itself when there is
+  none, then runs load-e2e, the identity e2e and the bench, which never run on
+  push. Only when all pass does it push `ghcr.io/lumewarp/lumewarp-gateway` and
+  `lumewarp-control-plane` (`X.Y.Z`; stable releases also `X.Y` and `latest`),
+  the chart to `oci://ghcr.io/lumewarp/charts/lumewarp`, and create the GitHub
+  release with the example WASM plugins attached.
+- `bench` and `Identity e2e gate` also run by hand (`workflow_dispatch`).
+
 ## More documentation
 
 - [Gateway reference](gateway/README.md) — modes, flags, YAML schema, auth,

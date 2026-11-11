@@ -1,0 +1,250 @@
+name: release
+
+# Push a tag made by scripts/release.sh: vX.Y.Z, or vX.Y.Z-<pre> for a
+# pre-release. The full CI already ran on the release commit's push to main and
+# is reused; it runs here only when no such run passed. The suites that never
+# run on push (load-e2e, identity e2e, bench) run on every release. Nothing is
+# published unless all of them pass.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      need-ci: ${{ steps.ci.outputs.need-ci }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag, versions and branch
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          scripts/release.sh --check "$version"
+          git fetch -q origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::${GITHUB_REF_NAME} points at a commit that is not on main"
+            exit 1
+          fi
+          prerelease=false
+          [[ "$version" == *-* ]] && prerelease=true
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+      - name: Reuse the CI run of the release commit
+        id: ci
+        run: |
+          # The tag is usually pushed right after main: give that run time to appear,
+          # then wait for it.
+          run=""
+          for _ in $(seq 1 12); do
+            run="$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --event push \
+              --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+            [[ -n "$run" ]] && break
+            sleep 10
+          done
+          need=true
+          if [[ -n "$run" ]]; then
+            gh run watch "$run" --interval 30 >/dev/null 2>&1 || true
+            # Full means every job but load-e2e ran and passed (none skipped by paths).
+            not_passed="$(gh run view "$run" --json jobs \
+              --jq '[.jobs[] | select(.name != "load-e2e" and .name != "changes" and .conclusion != "success")] | length')"
+            if [[ "$not_passed" == 0 ]]; then
+              need=false
+              echo "::notice::reusing the full CI run ${run} on ${GITHUB_SHA}"
+            else
+              echo "::notice::CI run ${run} on ${GITHUB_SHA} did not run and pass every job; running CI here"
+            fi
+          else
+            echo "::notice::no CI run on ${GITHUB_SHA}; running CI here"
+          fi
+          echo "need-ci=$need" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: prepare
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      full: ${{ needs.prepare.outputs.need-ci == 'true' }}
+      load: true
+
+  identity:
+    needs: prepare
+    permissions:
+      contents: read
+    uses: ./.github/workflows/e2e-identity.yml
+
+  bench:
+    needs: prepare
+    permissions:
+      contents: read
+    uses: ./.github/workflows/bench.yml
+    with:
+      profile: quick
+      repeat: "1"
+
+  images:
+    needs: [prepare, ci, identity, bench]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        component: [gateway, control-plane]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/lumewarp-${{ matrix.component }}
+          # A pre-release gets only its own version; X.Y and latest follow stable releases.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          flavor: |
+            latest=auto
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.component }}/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+  chart:
+    needs: [prepare, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Package and push the chart
+        env:
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ github.token }}
+        run: |
+          helm lint deploy/helm/lumewarp
+          helm package deploy/helm/lumewarp --destination dist
+          echo "$TOKEN" | helm registry login "$REGISTRY" --username "$ACTOR" --password-stdin
+          helm push "dist/lumewarp-${VERSION}.tgz" "oci://${REGISTRY}/${GITHUB_REPOSITORY_OWNER}/charts"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chart
+          path: dist/
+          retention-days: 7
+
+  plugins:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # gateway/rust-toolchain.toml adds the wasm32-wasip2 target.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gateway
+      - name: Build the example plugins
+        run: |
+          bash gateway/plugins/build.sh
+          mkdir -p dist
+          for file in gateway/target/plugins/*/*.wasm; do
+            kind="$(basename "$(dirname "$file")")"
+            cp "$file" "dist/${kind}-$(basename "$file")"
+          done
+          (cd dist && sha256sum ./*.wasm > SHA256SUMS)
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugins
+          path: dist/
+          retention-days: 7
+
+  release:
+    needs: [prepare, images, chart, plugins]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Release notes
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER}"
+          previous="$(git describe --tags --abbrev=0 --match 'v*' "${GITHUB_SHA}^" 2>/dev/null || true)"
+          {
+            echo "# v${VERSION}"
+            echo
+            echo "> Lumewarp 0.x keeps no upgrade path: drop the control-plane database before installing this release."
+            echo
+            echo '```sh'
+            echo "docker pull ${REGISTRY}/${owner}/lumewarp-gateway:${VERSION}"
+            echo "docker pull ${REGISTRY}/${owner}/lumewarp-control-plane:${VERSION}"
+            echo "helm install lumewarp oci://${REGISTRY}/${owner}/charts/lumewarp --version ${VERSION}"
+            echo '```'
+            echo
+            echo "The example WASM plugins (\`<kind>-<name>.wasm\`, see docs/plugins.md) are attached with their SHA256SUMS."
+            echo
+            echo "## Changes"
+            echo
+            if [[ -z "$previous" ]]; then
+              echo "First release."
+            else
+              git log --no-merges --format='- %s (%h)' "${previous}..${GITHUB_SHA}" \
+                | grep -v -E '^- Release v[0-9]' || echo "- No changes."
+              echo
+              echo "**Full diff**: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${previous}...${GITHUB_REF_NAME}"
+            fi
+          } > notes.md
+          cat notes.md
+      - name: Create the GitHub release
+        run: |
+          flags=()
+          [[ "$PRERELEASE" == true ]] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "v${VERSION}" \
+            --notes-file notes.md "${flags[@]}" assets/*

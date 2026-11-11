@@ -1,7 +1,12 @@
 name: Identity e2e gate
 
+# By hand, and from every release.
 on:
   workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   e2e-identity:

@@ -1,17 +1,16 @@
 name: bench
 
+# Not on push: run it by hand when a change touches the request path (and run
+# bench/ locally before committing such a change); every release runs it.
 on:
-  pull_request:
-    paths:
-      - "gateway/**"
-      - "bench/**"
-      - ".github/workflows/bench.yml"
-  push:
-    branches: [main]
-    paths:
-      - "gateway/**"
-      - "bench/**"
-      - ".github/workflows/bench.yml"
+  workflow_call:
+    inputs:
+      profile:
+        type: string
+        default: quick
+      repeat:
+        type: string
+        default: "1"
   workflow_dispatch:
     inputs:
       profile:
@@ -39,9 +38,8 @@ env:
   GEVENTHTTPCLIENT_VERSION: "2.6.1"
   # GitHub-hosted runners have 4 vCPU.
   LITELLM_WORKERS: "4"
-  # Resolved from workflow_dispatch; PR/push runs use quick with one repetition.
-  PROFILE: ${{ github.event.inputs.profile || 'quick' }}
-  REPEAT: ${{ github.event.inputs.repeat || '1' }}
+  PROFILE: ${{ inputs.profile || 'quick' }}
+  REPEAT: ${{ inputs.repeat || '1' }}
   # Deterministic run directory: bench/results/${RUN_ID}.
   RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
   OHA_VERSION: "1.16.0"
@@ -49,7 +47,7 @@ env:
 jobs:
   bench:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ github.event.inputs.profile == 'full' && 100 || 35 }}
+    timeout-minutes: ${{ inputs.profile == 'full' && 100 || 35 }}
     steps:
       - uses: actions/checkout@v4
 
