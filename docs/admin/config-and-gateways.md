@@ -29,6 +29,8 @@ config: grants on a deleted catalog item do not come back. Keys, teams and polic
 from current state, so a revoked key stays revoked. It goes through the same plugin checks
 as a router write.
 
+![Config versions](/screenshots/config-versions.png)
+
 ## Gateways and their tokens
 
 A gateway authenticates to the control plane with a gateway token (`lwg-…`) bound to one
@@ -37,3 +39,5 @@ which also creates the config scope; later ones are created on the Gateways page
 `POST /api/v1/gateways`. The secret is shown once and only its SHA-256 hash is stored.
 Revoking a token closes that gateway's streams at once; the gateway keeps serving its last
 config and cannot receive a new one until it has a valid token.
+
+![Connected gateways](/screenshots/gateways.png)

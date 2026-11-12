@@ -7,6 +7,8 @@ about once a second. The Usage page and `GET /api/v1/usage` aggregate them by te
 key, name, endpoint and model type. A member sees only their own keys' usage; a team admin
 sees the team's; an org admin its org's teams; an installation admin everything.
 
+![Usage by day, by model](/screenshots/usage.png)
+
 An event records the name the client called, the model that served it, the alias, router
 and fallback it went through, the number of attempts, tokens, audio duration and cost.
 Prompts and responses are never recorded. To look at one request in detail, use its
@@ -45,3 +47,5 @@ keeps only the exception class name. A test scans every
 `audit.record(action=...)` call site, so a new action without a classification fails the
 suite, and `tests/test_schema_secrets.py` fails when a new Text/String/JSONB column is not
 classified as non-secret.
+
+![The audit log](/screenshots/audit.png)

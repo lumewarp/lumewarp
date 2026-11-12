@@ -4,6 +4,8 @@ There is exactly one installation. Below it: org → team → key owners (member
 accounts) → keys. This page describes each level; limits and budgets along the chain are in
 [Keys, limits and budgets](./keys-and-limits.md).
 
+![A team's members, with an inherited installation admin](/screenshots/team.png)
+
 - **Org**: the root of the quota hierarchy: `model_access` and `allowed_models`,
   `rpm_limit`, `tpm_limit`, `max_parallel` and `budget_nano_usd`. Only an installation
   admin may create one (`POST /orgs`), rename or set its policy (`PATCH /orgs/{id}`),

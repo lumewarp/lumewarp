@@ -5,6 +5,8 @@ belong to. A new user starts with no team: a team admin has to add you first.
 
 ## My keys
 
+![My keys: a member's keys and what each team allows them](/screenshots/my-keys.png)
+
 **My keys** is your home page. For each of your teams it shows:
 
 - the names you may call, with their model type;
@@ -20,6 +22,10 @@ not see the team's full policy.
 
 Choose a team, give the key a name, and optionally an expiry and limits of its own. The
 secret (`lw-…`) is shown **once**; Lumewarp stores only its hash and cannot show it again.
+
+![Creating a key](/screenshots/my-keys-create.png)
+
+![The one-time secret after creating a key](/screenshots/my-keys-secret.png)
 
 - If the team sets a maximum key lifetime, a key without an expiry gets one at that
   maximum, and a longer expiry is refused.

@@ -14,6 +14,7 @@ import sys
 import http.cookiejar
 import json
 import time
+import urllib.error
 import urllib.request
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -56,6 +57,8 @@ ORG_ADMIN_TOKEN = "e2e-orgadmin-session-0123456789abcdef"
 SHOTS_EMAIL = "shots@e2e.test"
 SHOTS_TOKEN = "e2e-shots-session-0123456789abcdef"
 SERVER_URL = os.environ.get("LUMEWARP_TEST_DATABASE_URL", DEV_DATABASE_URL)
+# Set by docs/scripts/screenshots.sh: seed the manual's example data instead of the specs' fixtures.
+DOCS = bool(os.environ.get("E2E_DOCS_SHOTS"))
 
 
 async def admin(sql: str) -> None:
@@ -426,8 +429,11 @@ class Api:
             data=None if data is None else json.dumps(data).encode(),
             headers={"content-type": "application/json", "x-lumewarp-csrf": self.csrf},
         )
-        with self.opener.open(request, timeout=10) as response:
-            body = response.read()
+        try:
+            with self.opener.open(request, timeout=10) as response:
+                body = response.read()
+        except urllib.error.HTTPError as error:
+            raise RuntimeError(f"{method} {path}: {error.code} {error.read().decode()}") from None
         return json.loads(body) if body else {}
 
 
@@ -539,6 +545,130 @@ async def seed_usage(url: str) -> None:
         await engine.dispose()
 
 
+async def seed_docs(url: str) -> None:
+    """The manual's screenshots (docs-shots.spec.ts) instead of the specs' fixtures: one org and
+    team, a vLLM upstream with three models and a router, one connected gateway with the
+    built-in plugins only, and two weeks of traffic on those models."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    api = Api()
+    org = api.call("POST", "/orgs", {"name": "acme"})
+    team = api.call("POST", "/teams", {"name": "search", "org_id": org["id"], "model_access": "all", "max_keys_per_member": 5})
+    users = {u["email"]: u["id"] for u in api.call("GET", "/users?limit=200")["items"]}
+    api.call("PUT", f"/teams/{team['id']}/members/{users[MEMBER_EMAIL]}", {"role": "member"})
+    api.call("PUT", f"/teams/{team['id']}/members/{users[TEAM_ADMIN_EMAIL]}", {"role": "admin"})
+    upstream = api.call("POST", "/upstreams", {"name": "vllm-gpu-a", "kind": "vllm", "base_url": "http://vllm-gpu-a.internal:8000/v1"})
+    prices = {"price_input_nano_usd_per_mtok": 200_000_000, "price_output_nano_usd_per_mtok": 600_000_000}
+    model = {
+        name: api.call(
+            "POST",
+            "/models",
+            {
+                "name": name,
+                "upstream_id": upstream["id"],
+                "upstream_model": up_model,
+                "model_type": model_type,
+                **prices,
+                # An embedding has no output tokens to price.
+                **({"price_output_nano_usd_per_mtok": 0} if model_type == "embedding" else {}),
+            },
+        )
+        for name, up_model, model_type in [
+            ("llama-3.1-8b", "meta-llama/Llama-3.1-8B-Instruct", "llm"),
+            ("qwen2.5-7b", "Qwen/Qwen2.5-7B-Instruct", "llm"),
+            ("bge-m3", "BAAI/bge-m3", "embedding"),
+        ]
+    }
+    router = api.call(
+        "POST",
+        "/routers",
+        {
+            "name": "chat",
+            "strategy": "least_in_flight",
+            "members": [{"model_id": model["llama-3.1-8b"]["id"]}, {"model_id": model["qwen2.5-7b"]["id"]}],
+            "retry": {"max_attempts": 2},
+        },
+    )
+
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    engine = create_async_engine(url)
+    try:
+        async with AsyncSession(engine) as session, session.begin():
+            from lumewarp_control_plane.models import InstallationAdmin, InstallationRole
+
+            # Real-looking names in the header, and the shots user as the installation's
+            # proxy_admin so admin pages are not photographed as break-glass.
+            for email, display_name, shown in (
+                (MEMBER_EMAIL, "Dana Lee", "dana@acme.example"),
+                (TEAM_ADMIN_EMAIL, "Sam Ortiz", "sam@acme.example"),
+                (SHOTS_EMAIL, "Alex Kim", "alex@acme.example"),
+            ):
+                user = await session.scalar(select(User).where(User.email == email))
+                user.display_name, user.email = display_name, shown
+            session.add(InstallationAdmin(user_id=uuid.UUID(users[SHOTS_EMAIL]), role=InstallationRole.PROXY_ADMIN))
+            token = await session.scalar(select(GatewayToken).where(GatewayToken.gateway_id == "gw-1"))
+            assert token is not None
+            session.add(
+                GatewaySession(
+                    scope=token.scope,
+                    gateway_id=token.gateway_id,
+                    token_id=token.id,
+                    connected=True,
+                    gateway_version="0.1.0",
+                    capabilities=BUILTIN_CAPABILITIES,
+                    connected_at=now - timedelta(days=2),
+                    last_seen_at=datetime.now(UTC),
+                )
+            )
+            owner, key = uuid.UUID(users[MEMBER_EMAIL]), uuid.uuid4()
+            for day in range(14):
+                weekday = (now - timedelta(days=day)).weekday() < 5
+                for name, endpoint, requests in [
+                    ("llama-3.1-8b", "chat_completions", 30 if weekday else 8),
+                    ("qwen2.5-7b", "chat_completions", 18 if weekday else 5),
+                    ("bge-m3", "embeddings", 40 if weekday else 10),
+                ]:
+                    for n in range(requests):
+                        ts = (now - timedelta(days=day)).replace(hour=9 + n % 9)
+                        prompt = 600 + (n * 37) % 900
+                        completion = 0 if endpoint == "embeddings" else 150 + (n * 53) % 400
+                        session.add(
+                            UsageEvent(
+                                request_id=uuid.uuid4(),
+                                gateway_id="gw-1",
+                                ts=ts,
+                                started_at=ts - timedelta(seconds=2),
+                                key_id=key,
+                                team_id=uuid.UUID(team["id"]),
+                                owner_kind=KeyOwnerKind.USER,
+                                owner_id=owner,
+                                requested="chat" if endpoint == "chat_completions" else name,
+                                model=name,
+                                router="chat" if endpoint == "chat_completions" else "",
+                                upstream="vllm-gpu-a",
+                                upstream_model=model[name]["upstream_model"],
+                                fallback=False,
+                                attempts=1,
+                                model_id=uuid.UUID(model[name]["id"]),
+                                router_id=uuid.UUID(router["id"]) if endpoint == "chat_completions" else None,
+                                endpoint=endpoint,
+                                status=200,
+                                stream=endpoint == "chat_completions",
+                                prompt_tokens=prompt,
+                                completion_tokens=completion,
+                                cost_nano_usd=prompt * 200 + completion * 600,
+                                cost_known=True,
+                                duration_ms=900 if completion else 80,
+                                config_version=1,
+                                usage_state=UsageState.REPORTED,
+                                outcome=RequestOutcome.COMPLETED,
+                            )
+                        )
+    finally:
+        await engine.dispose()
+
+
 def wait_ready() -> None:
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
@@ -575,14 +705,17 @@ def main() -> None:
     server: subprocess.Popen[bytes] | None = None
     try:
         cp("migrate", env=env)
-        cp("bootstrap", "--gateway-id", "e2e-gw", env=env)
+        cp("bootstrap", "--gateway-id", "gw-1" if DOCS else "e2e-gw", env=env)
         asyncio.run(seed_users(url))
         server = subprocess.Popen(
             [sys.executable, "-m", "lumewarp_control_plane", "serve"], env=env
         )
         wait_ready()
-        asyncio.run(seed_gateways(url))
-        asyncio.run(seed_usage(url))
+        if DOCS:
+            asyncio.run(seed_docs(url))
+        else:
+            asyncio.run(seed_gateways(url))
+            asyncio.run(seed_usage(url))
         signal.signal(signal.SIGTERM, lambda *_: server and server.terminate())
         signal.signal(signal.SIGINT, lambda *_: server and server.terminate())
         server.wait()

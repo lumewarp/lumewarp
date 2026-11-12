@@ -1,5 +1,9 @@
 # Upstreams, models and aliases
 
+![The model list](/screenshots/models.png)
+
+![Editing an upstream](/screenshots/upstream-edit.png)
+
 The catalog is installation-wide. A client calls a *name*, and a name is one of three kinds,
 unique across all three (`catalog_names`):
 

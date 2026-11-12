@@ -4,6 +4,8 @@ A router is a name that spreads requests over member models with a strategy, and
 retries, fallbacks and traffic splits. This page lists the settings and their rules; how
 each behaves at request time is described under [Retry and health behavior](#retry-and-health-behavior).
 
+![Editing a router](/screenshots/router-edit.png)
+
 ## Settings
 
 Settings that compile 1:1 into the snapshot (`proto/lumewarp/config/v1/snapshot.proto`):

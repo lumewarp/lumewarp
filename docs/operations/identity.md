@@ -43,6 +43,8 @@ runs the authorization code flow with PKCE itself (Authlib) and issues a server-
 session cookie. The IdP authenticates only: installation roles live in Postgres and team roles
 never come from the IdP.
 
+![The sign-in page](/screenshots/login.png)
+
 | Setting | Meaning |
 | --- | --- |
 | `LUMEWARP_SECRET_KEY` | At least 32 bytes of random text; **required when SSO is enabled**. Derives the AES-256-GCM key for the login-state cookie. `serve` refuses to start with `LUMEWARP_OIDC_ISSUER` set and no key. Changing it invalidates pending logins only. |
