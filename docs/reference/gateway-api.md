@@ -4,6 +4,10 @@ outline: false
 aside: false
 ---
 
+<script setup>
+import { withBase } from "vitepress";
+</script>
+
 # Gateway API
 
 The API clients call, generated from the gateway's own endpoint and error tables
@@ -11,7 +15,7 @@ The API clients call, generated from the gateway's own endpoint and error tables
 endpoints pass through, so this document lists only the fields the gateway itself reads;
 every other field is the upstream's.
 
-Download: <a href="/openapi/gateway.json" target="_blank" download>gateway.json</a>
+Download: <a :href="withBase('/openapi/gateway.json')" target="_blank" download>gateway.json</a>
 
 <ClientOnly>
   <SwaggerUi spec="/openapi/gateway.json" />

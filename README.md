@@ -17,7 +17,7 @@ extended with WASM plugins.
 
 ## Documentation
 
-The manual is in [`docs/`](docs/index.md), organised by reader:
+The manual is published at <https://lumewarp.github.io/lumewarp/> (source in [`docs/`](docs/index.md)), organised by reader:
 
 | | |
 | --- | --- |
