@@ -53,6 +53,8 @@ jobs:
       proto: ${{ steps.decide.outputs.proto }}
       e2e: ${{ steps.decide.outputs.e2e }}
       load: ${{ steps.decide.outputs.load }}
+      docs: ${{ steps.decide.outputs.docs }}
+      plugin-templates: ${{ steps.decide.outputs.plugin-templates }}
     env:
       GH_TOKEN: ${{ github.token }}
       # Empty on push and pull_request; set when dispatched or called.
@@ -130,6 +132,12 @@ jobs:
             e2e:
               - '{gateway,control-plane,proto,bench/mock-upstream,tests/e2e,scripts}/**'
               - '!**/*.md'
+            # Markdown counts here: the manual is the job's input. The API reference is
+            # generated from the gateway and control-plane sources.
+            docs:
+              - '{docs,control-plane/src,gateway/crates/lumewarp-gateway/src,.claude/skills}/**'
+            plugin-templates:
+              - '{.claude/skills/lumewarp-plugin-dev,gateway/crates/lumewarp-plugin-sdk,gateway/crates/lumewarp-router-api,gateway/wit,control-plane/src,scripts/check-plugin-templates.sh}/**'
       - name: Decide which jobs run
         id: decide
         env:
@@ -139,7 +147,8 @@ jobs:
         run: |
           python3 -I - <<'PY'
           import json, os
-          jobs = ["observability", "gateway", "bench-crate", "control-plane", "ui", "proto", "e2e"]
+          jobs = ["observability", "gateway", "bench-crate", "control-plane", "ui", "proto", "e2e",
+                  "docs", "plugin-templates"]
           called = os.environ["FULL_INPUT"] != ""
           paths = json.loads(os.environ["PATHS"] or "{}") or {}
           if called:
@@ -364,6 +373,54 @@ jobs:
           path: ui/test-results/
           retention-days: 7
           if-no-files-found: ignore
+
+  docs:
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: docs/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: docs/pnpm-lock.yaml
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gateway
+      - run: uv sync --locked --project ../control-plane
+      - run: pnpm install --frozen-lockfile
+      # Generates both OpenAPI documents, then builds; VitePress fails on a dead
+      # internal link.
+      - run: pnpm build
+
+  plugin-templates:
+    needs: changes
+    if: needs.changes.outputs.plugin-templates == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gateway
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: bash scripts/check-plugin-templates.sh
 
   proto:
     needs: changes

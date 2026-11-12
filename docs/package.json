@@ -11,5 +11,6 @@
   "devDependencies": {
     "swagger-ui-dist": "5.34.1",
     "vitepress": "1.6.4"
-  }
+  },
+  "packageManager": "pnpm@11.2.2"
 }
