@@ -17,7 +17,7 @@ installation is not supported.
 | Listener | Default | Serves |
 | --- | --- | --- |
 | HTTP | `127.0.0.1:8091` | Admin UI at `/`, REST at `/api/v1`, `/docs` and `/openapi.json`, `/healthz` and `/readyz` |
-| gRPC | `127.0.0.1:50051` | `lumewarp.config.v1.ConfigService`, `lumewarp.usage.v1.UsageService`, `grpc.health.v1.Health` |
+| gRPC | `127.0.0.1:50051` | `lumewarp.config.v1.ConfigService`, `lumewarp.usage.v1.UsageService`, `grpc.health.v1.Health`. Every gateway instance holds one stream: several processes of one gateway id may connect with the same token ([protocol](../config-protocol.md#gateway-instances)). |
 | Metrics | `127.0.0.1:9465` | Prometheus text format on any path (`/metrics`); see [Metrics](../reference/metrics.md). `LUMEWARP_METRICS_BIND=""` disables it. |
 
 All listeners are plaintext unless `LUMEWARP_GRPC_TLS_CERT_FILE` and

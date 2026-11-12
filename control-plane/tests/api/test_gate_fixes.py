@@ -102,7 +102,9 @@ async def test_gateways_are_scoped(client, committed, api_scope) -> None:
         display_prefix=secret.display_prefix,
     )
     committed.add(foreign_token)
-    committed.add(GatewaySession(scope=other_scope, gateway_id=foreign_id, connected=True))
+    committed.add(
+        GatewaySession(scope=other_scope, gateway_id=foreign_id, instance_id="i1", connected=True)
+    )
     await committed.commit()
 
     listed = client.get(f"{API}/gateways?limit=500", headers=ADMIN_AUTH).json()["items"]

@@ -13,7 +13,7 @@ use lumewarp_config::AuthMode;
 use lumewarp_proto::config::v1::{
     config_service_client::ConfigServiceClient, config_update::Update, gateway_message::Msg, Ack,
     CatalogReport, ConfigUpdate, GatewayMessage, HealthReport, Hello, Nack, NackCode,
-    PluginDescriptor, Snapshot, TargetHealth,
+    PluginDescriptor, SharedLimits, Snapshot, TargetHealth,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::ReceiverStream;
@@ -24,7 +24,7 @@ use tonic::{
 };
 
 use crate::{
-    catalog,
+    catalog, instance,
     router::RoutingTable,
     runtime::Runtime,
     server,
@@ -86,6 +86,7 @@ pub fn spawn(
         .map_err(|_| anyhow::anyhow!("gateway token is not a valid header value"))?;
     let mut bearer = bearer;
     bearer.set_sensitive(true);
+    tracing::info!(instance_id = instance::instance_id(), "gateway instance");
     let client = Client {
         endpoint,
         bearer,
@@ -172,6 +173,10 @@ impl Client {
                 },
                 plugins: self.plugins.clone(),
                 plugin_abi: lumewarp_plugin_host::ABI,
+                instance_id: instance::instance_id().to_owned(),
+                // Shared limits arrive with the Redis sync task; until then every
+                // instance counts its limits itself.
+                shared_limits: Some(SharedLimits::default()),
             })),
         })
         .await?;

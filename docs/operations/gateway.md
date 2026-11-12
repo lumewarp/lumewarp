@@ -38,13 +38,17 @@ The token is read from the named environment variable, sent as
 `authorization: Bearer <token>` on the config stream and usage reports, and never
 written to disk. `--gateway-id` defaults to `gateway` for local runs, but the
 control plane binds each token to one gateway id: `Hello.gateway_id` must equal
-the id the token was issued for. The Helm chart requires a non-empty
-`gateway.gatewayId` (default `gw-1`) and runs one replica; multi-replica gateways
-are deferred, so deploy one release per gateway identity instead. The
-chart runs the pod as UID/GID 65532 with `fsGroup: 65532` so the mounted state
-directory is writable. `--local-config` is a YAML file with only the `server:`
-block described below (listener, admin listener, timeouts); upstreams, routers,
-teams and keys (including `server.api_keys`) are ignored in this mode.
+the id the token was issued for. Several processes may present the same token and
+gateway id at once: each is an *instance* with its own stream, version and status,
+so replicas of one gateway are supported without evicting each other
+([protocol](../config-protocol.md#gateway-instances)). Every instance gets its own
+`Hello.instance_id` (`<hostname>-<8 hex>`, generated at startup), so give each pod
+a distinct hostname and `--state-dir`: the directory holds the last good snapshot
+of that process. The Helm chart requires a non-empty `gateway.gatewayId` (default
+`gw-1`). The chart runs the pod as UID/GID 65532 with `fsGroup: 65532` so the
+mounted state directory is writable. `--local-config` is a YAML file with only the
+`server:` block described below (listener, admin listener, timeouts); upstreams,
+routers, teams and keys (including `server.api_keys`) are ignored in this mode.
 
 ### Flags
 

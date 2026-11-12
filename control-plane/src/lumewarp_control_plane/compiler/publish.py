@@ -13,9 +13,9 @@ import random
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, literal, or_, select, update
+from sqlalchemy import delete, func, literal, or_, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -47,6 +47,10 @@ log = logging.getLogger(__name__)
 # NOTIFY channel with payload "<scope>:<version>", sent on commit of a new version.
 PUBLISHED_CHANNEL = "lumewarp_config_published"
 SERIALIZATION_ATTEMPTS = 5
+# A disconnected gateway instance stays visible for a day, then its row goes (D10).
+GATEWAY_SESSION_RETENTION = timedelta(hours=24)
+# How often the compiler loop deletes expired instance rows; the work is a single statement.
+GATEWAY_SESSION_CLEANUP_SECONDS = 3600.0
 
 
 def _serialization_failure(exc: DBAPIError) -> bool:
@@ -418,6 +422,28 @@ async def compact_versions(session: AsyncSession, scope: str, *, retain: int | N
     return result.rowcount or 0
 
 
+# --------------------------------------------------------------------------- housekeeping
+
+
+async def delete_stale_gateway_sessions(
+    session: AsyncSession, scope: str, *, now: datetime | None = None
+) -> int:
+    """Delete the rows of instances disconnected for more than a day (D10).
+
+    A row outlives its stream so an offline instance stays visible, but not forever: the
+    compiler loop calls this. The instance's plugin reports go with it (ON DELETE CASCADE).
+    """
+    cutoff = (now or datetime.now(UTC)) - GATEWAY_SESSION_RETENTION
+    result = await session.execute(
+        delete(GatewaySession).where(
+            GatewaySession.scope == scope,
+            GatewaySession.connected.is_(False),
+            GatewaySession.disconnected_at < cutoff,
+        )
+    )
+    return result.rowcount or 0
+
+
 # --------------------------------------------------------------------------- loop
 
 
@@ -434,12 +460,23 @@ async def run_compiler_loop(
     """Poll the outbox every `interval_seconds` and publish until `stop_event` is set.
 
     After each publish, calls `on_published(scope, version)` (e.g.
-    `SessionRegistry.notify_published`) and compacts old payloads. Errors are logged and
-    retried with backoff (up to 5 s); the loop only returns when stopped.
+    `SessionRegistry.notify_published`) and compacts old payloads. Once an hour it also
+    deletes gateway instance rows that have been disconnected for a day. Errors are logged
+    and retried with backoff (up to 5 s); the loop only returns when stopped.
     """
     scope = scope or get_settings().scope
     backoff = interval_seconds
+    next_cleanup = 0.0
     while not stop_event.is_set():
+        if time.monotonic() >= next_cleanup:
+            next_cleanup = time.monotonic() + GATEWAY_SESSION_CLEANUP_SECONDS
+            try:
+                async with session_factory() as session, session.begin():
+                    stale = await delete_stale_gateway_sessions(session, scope)
+                if stale:
+                    log.info("deleted %d stale gateway instance rows of scope %s", stale, scope)
+            except Exception:
+                log.warning("gateway instance cleanup failed for scope %s", scope, exc_info=True)
         try:
             version = await publish_pending(
                 session_factory,

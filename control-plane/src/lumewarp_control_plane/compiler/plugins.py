@@ -642,15 +642,19 @@ async def replace_gateway_plugins(
     session: AsyncSession,
     scope: str,
     gateway_id: str,
+    instance_id: str,
     token_id: uuid.UUID,
     reported: list[ReportedPlugin],
     now: datetime,
 ) -> None:
-    """What a gateway reports replaces all it reported before; a changed digest updates. The
-    caller holds the gateway's session row lock and has checked that this Hello still owns it.
+    """What a gateway instance reports replaces all it reported before; a changed digest
+    updates. The caller holds the instance's session row lock and has checked that this Hello
+    still owns it.
     """
     stale = delete(GatewayPlugin).where(
-        GatewayPlugin.scope == scope, GatewayPlugin.gateway_id == gateway_id
+        GatewayPlugin.scope == scope,
+        GatewayPlugin.gateway_id == gateway_id,
+        GatewayPlugin.instance_id == instance_id,
     )
     if reported:
         stale = stale.where(
@@ -666,6 +670,7 @@ async def replace_gateway_plugins(
             {
                 "scope": scope,
                 "gateway_id": gateway_id,
+                "instance_id": instance_id,
                 "kind": item.kind,
                 "name": item.name,
                 "digest": item.digest,
@@ -681,6 +686,7 @@ async def replace_gateway_plugins(
             index_elements=[
                 GatewayPlugin.scope,
                 GatewayPlugin.gateway_id,
+                GatewayPlugin.instance_id,
                 GatewayPlugin.kind,
                 GatewayPlugin.name,
             ],
@@ -700,6 +706,9 @@ async def replace_gateway_plugins(
 @dataclass(frozen=True)
 class GatewaySupport:
     gateway_id: str
+    # One entry per gateway *instance*: a plugin counts only if every connected instance of
+    # the gateway id reports it.
+    instance_id: str
     connected: bool
     seen_at: datetime | None
     digest: str | None
@@ -711,7 +720,8 @@ class GatewaySupport:
 class PluginRegistry:
     """The plugins of a scope that count at one moment. Read-only snapshot of the tables."""
 
-    connected: list[str] = field(default_factory=list)
+    # Connected (gateway_id, instance_id) pairs, for `missing`.
+    connected: list[tuple[str, str]] = field(default_factory=list)
     _support: dict[tuple[PluginKind, str], list[GatewaySupport]] = field(default_factory=dict)
 
     def builtin_names(self, kind: PluginKind) -> frozenset[str]:
@@ -722,23 +732,25 @@ class PluginRegistry:
         return sorted(set(BUILTIN_PLUGINS[kind]) | reported)
 
     def support(self, kind: PluginKind, name: str) -> list[GatewaySupport]:
-        """Gateways with this plugin: connected ones first, then the most recently seen."""
+        """Instances with this plugin: connected ones first, then the most recently seen."""
         return self._support.get((kind, name), [])
 
     def known(self, kind: PluginKind, name: str) -> bool:
         return name in BUILTIN_PLUGINS[kind] or bool(self.support(kind, name))
 
     def missing(self, kind: PluginKind, name: str) -> list[str]:
-        """Connected gateways that lack it: they would NACK every version using it."""
-        have = {s.gateway_id for s in self.support(kind, name)}
-        return [gateway for gateway in self.connected if gateway not in have]
+        """Connected gateway ids with an instance that lacks it: they would NACK every
+        version using it.
+        """
+        have = {(s.gateway_id, s.instance_id) for s in self.support(kind, name) if s.connected}
+        return sorted({g for g, instance in self.connected if (g, instance) not in have})
 
     def _reported(self, kind: PluginKind, name: str) -> list[dict[str, Any]]:
         return [s.descriptor for s in self.support(kind, name) if s.descriptor is not None]
 
     def validating(self, kind: PluginKind, name: str) -> list[dict[str, Any]]:
-        """Descriptors settings must pass: all connected gateways' (rolling upgrades); with
-        none connected, the manifest for a built-in or the newest report otherwise.
+        """Descriptors settings must pass: every connected instance's (rolling upgrades);
+        with none connected, the manifest for a built-in or the newest report otherwise.
         """
         live = [
             s.descriptor
@@ -778,16 +790,18 @@ class PluginRegistry:
 async def load_plugins(
     session: AsyncSession, scope: str, *, now: datetime | None = None
 ) -> PluginRegistry:
-    """A gateway counts while the token of its latest Hello is unrevoked and it is connected or
-    was seen within 30 days; a report counts while its own token is unrevoked. One statement,
-    so this sees one snapshot: never a Hello's capabilities with another Hello's reports. It
-    takes no lock, so any caller's lock order is safe.
+    """A gateway instance counts while the token of its latest Hello is unrevoked and it is
+    connected or was seen within 30 days (rows older than 24 h are deleted, so an offline
+    instance usually disappears sooner); a report counts while its own token is unrevoked.
+    One statement, so this sees one snapshot: never a Hello's capabilities with another
+    Hello's reports. It takes no lock, so any caller's lock order is safe.
     """
     cutoff = (now or datetime.now(UTC)) - GATEWAY_RETENTION
     unrevoked = select(GatewayToken.id).where(GatewayToken.revoked_at.is_(None))
     rows = await session.execute(
         select(
             GatewaySession.gateway_id,
+            GatewaySession.instance_id,
             GatewaySession.connected,
             GatewaySession.capabilities,
             GatewaySession.connected_at,
@@ -802,6 +816,7 @@ async def load_plugins(
             and_(
                 GatewayPlugin.scope == GatewaySession.scope,
                 GatewayPlugin.gateway_id == GatewaySession.gateway_id,
+                GatewayPlugin.instance_id == GatewaySession.instance_id,
                 GatewayPlugin.token_id.in_(unrevoked),
             ),
         )
@@ -811,19 +826,21 @@ async def load_plugins(
             or_(GatewaySession.connected, GatewaySession.last_seen_at >= cutoff),
         )
     )
-    gateways: dict[str, Any] = {}
-    reports: dict[str, dict[tuple[PluginKind, str], Any]] = {}
+    instances: dict[tuple[str, str], Any] = {}
+    reports: dict[tuple[str, str], dict[tuple[PluginKind, str], Any]] = {}
     for row in rows:
-        gateways[row.gateway_id] = row
+        key = (row.gateway_id, row.instance_id)
+        instances[key] = row
         if row.name is not None:
-            reports.setdefault(row.gateway_id, {})[(row.kind, row.name)] = row
+            reports.setdefault(key, {})[(row.kind, row.name)] = row
     support: dict[tuple[PluginKind, str], list[GatewaySupport]] = {}
-    for gateway_id, gateway in gateways.items():
-        reported = reports.get(gateway_id, {})
+    for (gateway_id, instance_id), instance in instances.items():
+        reported = reports.get((gateway_id, instance_id), {})
         for kind in PLUGIN_KINDS:
-            # A connected gateway says what it has now; an offline one, what it last reported.
-            if gateway.connected:
-                names, _ = bounded_plugin_names(_capability_names(gateway.capabilities, kind))
+            # A connected instance says what it has now; an offline one, what it last
+            # reported.
+            if instance.connected:
+                names, _ = bounded_plugin_names(_capability_names(instance.capabilities, kind))
             else:
                 names, _ = bounded_plugin_names(
                     sorted(name for reported_kind, name in reported if reported_kind is kind)
@@ -833,8 +850,9 @@ async def load_plugins(
                 support.setdefault((kind, name), []).append(
                     GatewaySupport(
                         gateway_id,
-                        gateway.connected,
-                        report.seen_at if report else gateway.connected_at,
+                        instance_id,
+                        instance.connected,
+                        report.seen_at if report else instance.connected_at,
                         report.digest if report else None,
                         report.descriptor if report else None,
                     )
@@ -843,7 +861,11 @@ async def load_plugins(
     for entries in support.values():
         entries.sort(key=lambda s: (s.connected, s.seen_at or oldest), reverse=True)
     return PluginRegistry(
-        connected=sorted(g.gateway_id for g in gateways.values() if g.connected),
+        connected=sorted(
+            (gateway_id, instance_id)
+            for (gateway_id, instance_id), instance in instances.items()
+            if instance.connected
+        ),
         _support=support,
     )
 

@@ -41,6 +41,7 @@ async def _report(committed, scope, gateway_id, health, *, connected=True) -> No
         GatewaySession(
             scope=scope,
             gateway_id=gateway_id,
+            instance_id=gateway_id,
             session_id=uuid.uuid4(),
             connected=connected,
             upstream_health=health,

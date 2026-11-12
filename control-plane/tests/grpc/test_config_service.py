@@ -34,6 +34,7 @@ from lumewarp_control_plane.models import (
     ConfigVersion,
     ConfigVersionKind,
     GatewayPlugin,
+    GatewayQuarantine,
     GatewaySession,
     GatewayToken,
     PluginKind,
@@ -173,6 +174,8 @@ async def _open_stream(
     plugins: tuple[cpb.PluginDescriptor, ...] = (),
     capabilities: tuple[str, ...] = (),
     gateway_version: str = "test-gateway",
+    instance_id: str = "i1",
+    shared_limits: cpb.SharedLimits | None = None,
 ):
     """Hello; by default have_digest is the stored digest of have_version (if any)."""
     if have_digest is None:
@@ -182,12 +185,14 @@ async def _open_stream(
         cpb.GatewayMessage(
             hello=cpb.Hello(
                 gateway_id=gateway_id,
+                instance_id=instance_id,
                 have_version=have_version,
                 have_digest=have_digest,
                 gateway_version=gateway_version,
                 scope=scope,
                 plugins=plugins,
                 supported_capabilities=capabilities,
+                shared_limits=shared_limits,
             )
         )
     )
@@ -205,28 +210,31 @@ async def test_startup_disconnects_stale_mirrors_before_serving(session_factory:
                 GatewaySession(
                     scope=scope,
                     gateway_id=name,
+                    instance_id="old",
                     connected=connected,
                     acked_version=1,
                     pending_version=1,
                     hello_have_version=1,
                     last_seen_at=old_seen,
                     disconnected_at=None if connected else old_seen,
-                    quarantined_version=1,
                 )
             )
-        session.add(GatewaySession(scope=other_scope, gateway_id="other", connected=True))
+        session.add(
+            GatewaySession(scope=other_scope, gateway_id="other", instance_id="i1", connected=True)
+        )
     server, channel, _ = await _start(session_factory, scope)
     try:
         async with session_factory() as session, session.begin():
-            stale = await session.get(GatewaySession, (scope, "stale"))
+            stale = await session.get(GatewaySession, (scope, "stale", "old"))
             assert stale.connected is False
             assert stale.disconnected_at > old_seen
             assert stale.last_seen_at == old_seen
             assert stale.acked_version == stale.pending_version == stale.hello_have_version == 1
-            assert stale.quarantined_version == 1
-            offline = await session.get(GatewaySession, (scope, "offline"))
+            offline = await session.get(GatewaySession, (scope, "offline", "old"))
             assert offline.disconnected_at == old_seen
-            assert (await session.get(GatewaySession, (other_scope, "other"))).connected is True
+            assert (
+                await session.get(GatewaySession, (other_scope, "other", "i1"))
+            ).connected is True
             assert await compact_versions(session, scope, retain=1) == 1
     finally:
         await channel.close()
@@ -246,7 +254,7 @@ async def test_disconnected_gateway_reconnects_with_compacted_base_gets_full(
         await call.done_writing()
         assert await asyncio.wait_for(call.read(), 2) is grpc.aio.EOF
         async with session_factory() as session, session.begin():
-            mirror = await session.get(GatewaySession, (scope, "gateway-a"))
+            mirror = await session.get(GatewaySession, (scope, "gateway-a", "i1"))
             assert mirror.connected is False
             assert mirror.hello_have_version == mirror.acked_version == 1
             assert await compact_versions(session, scope, retain=1) == 1
@@ -287,7 +295,7 @@ async def test_full_then_delta_after_ack_and_session_mirror(
         await asyncio.sleep(0.05)
 
         async with session_factory() as session:
-            status = await session.get(GatewaySession, (scope, "gateway-a"))
+            status = await session.get(GatewaySession, (scope, "gateway-a", "i1"))
             assert status is not None
             assert status.connected is True
             assert status.acked_version == 2
@@ -406,10 +414,17 @@ async def test_invalid_version_is_quarantined_until_newer_publish(
         assert newer.WhichOneof("update") == "full"
         assert newer.full.version == 2
         async with session_factory() as session:
-            status = await session.get(GatewaySession, (scope, "gateway-a"))
+            status = await session.get(GatewaySession, (scope, "gateway-a", "i1"))
             assert status is not None
-            assert status.quarantined_version == first.full.version
+            assert status.last_nack_version == first.full.version
             assert status.last_nack_reason == "invalid config"
+            quarantined = await session.scalar(
+                select(GatewayQuarantine.quarantined_version).where(
+                    GatewayQuarantine.scope == scope,
+                    GatewayQuarantine.gateway_id == "gateway-a",
+                )
+            )
+            assert quarantined == first.full.version
     finally:
         call.cancel()
         await channel.close()
@@ -759,7 +774,7 @@ async def test_replaced_stream_is_closed_without_further_updates(session_factory
         new = await _open_stream(stub, tokens["gateway-a"], "gateway-a", 1, scope)
         registry = registry_for(server)
         for _ in range(100):
-            current = registry._sessions.get((scope, "gateway-a"))
+            current = registry._sessions.get((scope, "gateway-a", "i1"))
             if current is not None and current.hello_version == 1:
                 break
             await asyncio.sleep(0.01)
@@ -906,13 +921,16 @@ def _descriptor_with_title(name: str, digest: str, title: str) -> cpb.PluginDesc
     return descriptor
 
 
-async def _stored(factory: SessionFactory, scope: str, gateway_id: str) -> dict[str, GatewayPlugin]:
-    """The gateway's reported router strategies, by name."""
+async def _stored(
+    factory: SessionFactory, scope: str, gateway_id: str, instance_id: str = "i1"
+) -> dict[str, GatewayPlugin]:
+    """The instance's reported router strategies, by name."""
     async with factory() as session:
         rows = await session.scalars(
             select(GatewayPlugin).where(
                 GatewayPlugin.scope == scope,
                 GatewayPlugin.gateway_id == gateway_id,
+                GatewayPlugin.instance_id == instance_id,
                 GatewayPlugin.kind == PluginKind.ROUTER_STRATEGY,
             )
         )
@@ -1081,9 +1099,11 @@ STRICT = '{"type":"object","properties":{"n":{"type":"integer","maximum":1}}}'
 LOOSE = '{"type":"object","properties":{"n":{"type":"integer","maximum":100}}}'
 
 
-async def _session_row(factory: SessionFactory, scope: str, gateway_id: str) -> GatewaySession:
+async def _session_row(
+    factory: SessionFactory, scope: str, gateway_id: str, instance_id: str = "i1"
+) -> GatewaySession:
     async with factory() as session:
-        return await session.get(GatewaySession, (scope, gateway_id))
+        return await session.get(GatewaySession, (scope, gateway_id, instance_id))
 
 
 async def _token_id(factory: SessionFactory, scope: str, gateway_id: str) -> uuid.UUID:
@@ -1149,7 +1169,7 @@ async def test_a_stale_hello_read_slowly_cannot_overwrite_a_newer_connection(
         assert not registry.known(PluginKind.ROUTER_STRATEGY, "loose")
         assert registry.router_problems("shared", {"n": 50}, [])
         # And the live stream still is the new one.
-        current = registry_for(server)._sessions[(scope, "gateway-a")]
+        current = registry_for(server)._sessions[(scope, "gateway-a", "i1")]
         assert current.gateway_version == "new-build"
         await _close(new)
     finally:
@@ -1167,8 +1187,8 @@ async def test_hello_transaction_holds_the_row_lock_until_its_descriptors_are_wr
     real = module.replace_gateway_plugins
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def pause_first(session, scope, gateway_id, token_id, reported, now):
-        await real(session, scope, gateway_id, token_id, reported, now)
+    async def pause_first(session, scope, gateway_id, instance_id, token_id, reported, now):
+        await real(session, scope, gateway_id, instance_id, token_id, reported, now)
         if any(item.name == "loose" for item in reported):
             entered.set()
             await asyncio.wait_for(release.wait(), 10)
@@ -1228,8 +1248,8 @@ async def test_router_validation_sees_one_hello_never_a_mix(
     real = module.replace_gateway_plugins
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def pause_new_build(session, scope, gateway_id, token_id, reported, now):
-        await real(session, scope, gateway_id, token_id, reported, now)
+    async def pause_new_build(session, scope, gateway_id, instance_id, token_id, reported, now):
+        await real(session, scope, gateway_id, instance_id, token_id, reported, now)
         if any(item.digest == "b0" for item in reported):
             entered.set()
             await asyncio.wait_for(release.wait(), 10)
@@ -1459,9 +1479,11 @@ async def test_session_ids_always_move_forward(session_factory: SessionFactory, 
         await server.stop(0)
 
 
-async def _status(factory: SessionFactory, scope: str, gateway_id: str) -> GatewaySession:
+async def _status(
+    factory: SessionFactory, scope: str, gateway_id: str, instance_id: str = "i1"
+) -> GatewaySession:
     async with factory() as session:
-        return await session.get(GatewaySession, (scope, gateway_id))
+        return await session.get(GatewaySession, (scope, gateway_id, instance_id))
 
 
 @pytest.mark.asyncio
@@ -1654,5 +1676,351 @@ async def test_oversized_health_report_closes_the_stream(
         assert err.value.code() == grpc.StatusCode.INVALID_ARGUMENT
     finally:
         call.cancel()
+        await channel.close()
+        await server.stop(0)
+
+
+# --------------------------------------------------------------------------- gateway instances
+
+
+@pytest.mark.asyncio
+async def test_two_instances_of_one_gateway_stay_connected_and_both_get_updates(
+    session_factory: SessionFactory, monkeypatch
+):
+    """One token, one gateway id, two processes: neither evicts the other."""
+    from lumewarp_control_plane.metrics import Metrics
+
+    _stub_diff(monkeypatch)
+    metrics = Metrics()
+    scope, tokens = await _seed(session_factory)
+    server = await serve(
+        Settings(scope=scope, grpc_bind="127.0.0.1:0", background_enabled=False),
+        session_factory,
+        metrics,
+    )
+    channel = grpc.aio.insecure_channel(f"127.0.0.1:{bound_port(server)}")
+    stub = cpb_grpc.ConfigServiceStub(channel)
+    try:
+        first = await _open_stream(stub, tokens["gateway-a"], "gateway-a", instance_id="pod-1-aa")
+        second = await _open_stream(stub, tokens["gateway-a"], "gateway-a", instance_id="pod-2-bb")
+        updates = await asyncio.gather(
+            asyncio.wait_for(first.read(), 2), asyncio.wait_for(second.read(), 2)
+        )
+        assert [update.full.version for update in updates] == [1, 1]
+        await first.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
+        await second.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
+        async with asyncio.timeout(2):
+            while metrics.value("lumewarp_cp_gateway_sessions") != 2:
+                await asyncio.sleep(0.01)
+        for instance_id in ("pod-1-aa", "pod-2-bb"):
+            async with asyncio.timeout(2):
+                while (
+                    await _status(session_factory, scope, "gateway-a", instance_id)
+                ).acked_version != 1:
+                    await asyncio.sleep(0.01)
+
+        await _publish(session_factory, scope, 2)
+        registry_for(server).notify_published(scope, 2)
+        following = await asyncio.gather(
+            asyncio.wait_for(first.read(), 2), asyncio.wait_for(second.read(), 2)
+        )
+        assert all(update.delta.version == 2 for update in following)
+        assert metrics.value("lumewarp_cp_gateway_sessions") == 2
+        # A graceful end of the request stream lets each instance write its disconnected row
+        # before the server goes away.
+        await first.done_writing()
+        await second.done_writing()
+        assert await asyncio.wait_for(first.read(), 2) is grpc.aio.EOF
+        assert await asyncio.wait_for(second.read(), 2) is grpc.aio.EOF
+    finally:
+        await channel.close()
+        await server.stop(0)
+    async with asyncio.timeout(5):
+        while True:
+            async with session_factory() as session:
+                rows = (
+                    await session.scalars(
+                        select(GatewaySession).where(
+                            GatewaySession.scope == scope,
+                            GatewaySession.gateway_id == "gateway-a",
+                        )
+                    )
+                ).all()
+            if len(rows) == 2 and all(not row.connected for row in rows):
+                break
+            await asyncio.sleep(0.02)
+    assert {row.instance_id for row in rows} == {"pod-1-aa", "pod-2-bb"}
+    assert all(row.disconnected_at is not None for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_a_nack_from_one_instance_quarantines_the_version_for_the_gateway(
+    session_factory: SessionFactory,
+):
+    """D9: replicas of one gateway id never serve different versions on purpose."""
+    scope, tokens = await _seed(session_factory, versions=(1,))
+    server, channel, stub = await _start(session_factory, scope)
+    nacker = await _open_stream(stub, tokens["gateway-a"], "gateway-a", instance_id="pod-1-aa")
+    try:
+        first = await nacker.read()
+        assert first.full.version == 1
+        await _nack_invalid(nacker, 1)
+        async with asyncio.timeout(5):
+            while True:
+                async with session_factory() as session:
+                    quarantined = await session.scalar(
+                        select(GatewayQuarantine.quarantined_version).where(
+                            GatewayQuarantine.scope == scope,
+                            GatewayQuarantine.gateway_id == "gateway-a",
+                        )
+                    )
+                if quarantined == 1:
+                    break
+                await asyncio.sleep(0.02)
+
+        # An instance that connects afterwards starts with the quarantine: no v1.
+        second = await _open_stream(stub, tokens["gateway-a"], "gateway-a", instance_id="pod-2-bb")
+        waiting = asyncio.create_task(second.read())
+        await asyncio.sleep(0.2)
+        assert not waiting.done(), "the quarantined version was sent to another instance"
+        await _publish(session_factory, scope, 2)
+        registry_for(server).notify_published(scope, 2)
+        newer = await asyncio.wait_for(waiting, 2)
+        assert newer.WhichOneof("update") == "full"
+        assert newer.full.version == 2
+
+        # And a brand-new instance of the id, after both are gone, starts with it too.
+        await _close(nacker)
+        await _close(second)
+        third = await _open_stream(stub, tokens["gateway-a"], "gateway-a", instance_id="pod-3-cc")
+        update = await asyncio.wait_for(third.read(), 2)
+        assert update.WhichOneof("update") == "full"
+        assert update.full.version == 2
+        await _close(third)
+    finally:
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.parametrize(
+    "instance_id",
+    ["", "x" * 101, "bad/id", "with space", "semi;colon"],
+    ids=["empty", "too-long", "slash", "space", "punctuation"],
+)
+@pytest.mark.asyncio
+async def test_an_invalid_instance_id_is_rejected(
+    session_factory: SessionFactory, instance_id: str
+):
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    try:
+        call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", instance_id=instance_id)
+        with pytest.raises(grpc.aio.AioRpcError) as error:
+            await asyncio.wait_for(call.read(), 2)
+        assert error.value.code() is grpc.StatusCode.INVALID_ARGUMENT
+        assert "instance_id" in error.value.details()
+    finally:
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.asyncio
+async def test_shared_limits_are_mirrored_per_instance(session_factory: SessionFactory):
+    scope, tokens = await _seed(session_factory, versions=(1,))
+    server, channel, stub = await _start(session_factory, scope)
+    shared = await _open_stream(
+        stub,
+        tokens["gateway-a"],
+        "gateway-a",
+        instance_id="pod-1-aa",
+        shared_limits=cpb.SharedLimits(enabled=True, namespace="team-ns"),
+    )
+    alone = await _open_stream(stub, tokens["gateway-a"], "gateway-a", instance_id="pod-2-bb")
+    try:
+        await asyncio.gather(shared.read(), alone.read())
+        async with asyncio.timeout(2):
+            while (
+                await _session_row(session_factory, scope, "gateway-a", "pod-1-aa")
+            ).shared_limits_namespace != "team-ns":
+                await asyncio.sleep(0.01)
+        row = await _session_row(session_factory, scope, "gateway-a", "pod-1-aa")
+        assert (row.shared_limits_enabled, row.shared_limits_namespace) == (True, "team-ns")
+        row = await _session_row(session_factory, scope, "gateway-a", "pod-2-bb")
+        assert (row.shared_limits_enabled, row.shared_limits_namespace) == (False, "")
+    finally:
+        await _close(shared)
+        await _close(alone)
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.asyncio
+async def test_stale_instance_rows_and_their_plugins_are_deleted_after_a_day(
+    session_factory: SessionFactory,
+):
+    from datetime import timedelta
+
+    from lumewarp_control_plane.compiler.publish import delete_stale_gateway_sessions
+
+    scope, tokens = await _seed(session_factory)
+    now = datetime.now(UTC)
+    token_id = await _token_id(session_factory, scope, "gateway-a")
+    instances = (
+        ("old", False, now - timedelta(hours=25)),
+        ("recent", False, now - timedelta(hours=1)),
+        ("live", True, None),
+    )
+    async with session_factory() as session, session.begin():
+        for instance_id, connected, disconnected_at in instances:
+            session.add(
+                GatewaySession(
+                    scope=scope,
+                    gateway_id="gateway-a",
+                    instance_id=instance_id,
+                    token_id=token_id,
+                    connected=connected,
+                    disconnected_at=disconnected_at,
+                    connected_at=now - timedelta(days=2),
+                    last_seen_at=now - timedelta(days=2),
+                )
+            )
+        await session.flush()
+        for instance_id, *_ in instances:
+            session.add(
+                GatewayPlugin(
+                    scope=scope,
+                    gateway_id="gateway-a",
+                    instance_id=instance_id,
+                    kind=PluginKind.ROUTER_STRATEGY,
+                    name="sticky",
+                    digest="aa",
+                    descriptor={},
+                    token_id=token_id,
+                    seen_at=now - timedelta(days=2),
+                )
+            )
+    async with session_factory() as session, session.begin():
+        assert await delete_stale_gateway_sessions(session, scope, now=now) == 1
+    async with session_factory() as session:
+        remaining = (
+            await session.scalars(
+                select(GatewaySession.instance_id).where(
+                    GatewaySession.scope == scope, GatewaySession.gateway_id == "gateway-a"
+                )
+            )
+        ).all()
+        plugins = (
+            await session.scalars(
+                select(GatewayPlugin.instance_id).where(
+                    GatewayPlugin.scope == scope, GatewayPlugin.gateway_id == "gateway-a"
+                )
+            )
+        ).all()
+    assert set(remaining) == {"recent", "live"}
+    assert set(plugins) == {"recent", "live"}
+
+
+@pytest.mark.asyncio
+async def test_a_quarantine_that_lands_while_a_hello_is_read_still_applies(
+    session_factory: SessionFactory, monkeypatch
+):
+    """The in-process quarantine closes the window between a NACK and a Hello's row read."""
+    import lumewarp_control_plane.grpc as module
+
+    real = module.normalize_hello
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(hello):
+        if hello.gateway_version == "slow-build":
+            entered.set()
+            assert release.wait(10)
+        return real(hello)
+
+    monkeypatch.setattr(module, "normalize_hello", slow)
+    scope, tokens = await _seed(session_factory, versions=(1,))
+    server, channel, stub = await _start(session_factory, scope)
+    registry = registry_for(server)
+    try:
+        call = await _open_stream(
+            stub,
+            tokens["gateway-a"],
+            "gateway-a",
+            instance_id="pod-1-aa",
+            gateway_version="slow-build",
+        )
+        assert await asyncio.to_thread(entered.wait, 10)
+        # Another instance's NACK of v1 is now in process, but this Hello already read the
+        # quarantine row, before that transaction existed.
+        registry.quarantine(scope, "gateway-a", 1)
+        release.set()
+        waiting = asyncio.create_task(call.read())
+        await asyncio.sleep(0.2)
+        assert not waiting.done(), "the quarantined version reached an instance that missed it"
+        await _publish(session_factory, scope, 2)
+        registry.notify_published(scope, 2)
+        update = await asyncio.wait_for(waiting, 2)
+        assert update.WhichOneof("update") == "full"
+        assert update.full.version == 2
+        await _close(call)
+    finally:
+        release.set()
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.asyncio
+async def test_a_hello_version_is_only_shown_once_its_digest_is_verified(
+    session_factory: SessionFactory,
+):
+    """A version the gateway merely claims is not an applied version (F7)."""
+    scope, tokens = await _seed(session_factory, versions=(1,))
+    server, channel, stub = await _start(session_factory, scope)
+    fresh = await _open_stream(stub, tokens["gateway-a"], "gateway-a", instance_id="pod-1-aa")
+    try:
+        assert (await fresh.read()).full.version == 1
+        row = await _session_row(session_factory, scope, "gateway-a", "pod-1-aa")
+        assert row.hello_have_version == 0
+        assert row.acked_version is None, "a fresh instance with no snapshot is not at version 0"
+        await fresh.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
+        async with asyncio.timeout(2):
+            while (
+                await _session_row(session_factory, scope, "gateway-a", "pod-1-aa")
+            ).acked_version != 1:
+                await asyncio.sleep(0.01)
+        await _close(fresh)
+
+        # The same number with a digest this control plane never stored is a claim too.
+        claimed = await _open_stream(
+            stub,
+            tokens["gateway-a"],
+            "gateway-a",
+            1,
+            scope,
+            have_digest=b"\x01" * 32,
+            instance_id="pod-2-bb",
+        )
+        assert (await claimed.read()).WhichOneof("update") == "full"
+        row = await _session_row(session_factory, scope, "gateway-a", "pod-2-bb")
+        assert row.hello_have_version == 1
+        assert row.acked_version is None
+        await _close(claimed)
+
+        # A verified Hello is the applied version even though no update is sent: an
+        # up-to-date instance must not read as version 0 (or nothing) forever.
+        current = await _open_stream(
+            stub, tokens["gateway-a"], "gateway-a", 1, scope, instance_id="pod-3-cc"
+        )
+        waiting = asyncio.create_task(current.read())
+
+        async def verified() -> bool:
+            row = await _session_row(session_factory, scope, "gateway-a", "pod-3-cc")
+            return row is not None and row.acked_version == 1
+
+        async with asyncio.timeout(2):
+            while not await verified():
+                await asyncio.sleep(0.01)
+        assert not waiting.done(), "an up-to-date instance received an update"
+        await _close(current)
+    finally:
         await channel.close()
         await server.stop(0)

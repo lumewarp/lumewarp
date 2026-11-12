@@ -163,13 +163,15 @@ async def report_plugins(
     last_seen_at=None,
     revoked: bool = False,
     capabilities: list[str] | None = None,
+    instance_id: str = "only",
 ) -> uuid.UUID:
     """A gateway as Hello leaves it: a new token, the session and the reports of its Hello.
     Returns the token.
 
-    A key names a router strategy by name, or any plugin by `(kind, name)`; the value is
-    (params schema, member schema), each a dict or the raw text a gateway sends, and the
-    member schema is a router strategy's.
+    One instance per call (`instance_id`), so two calls with the same `gateway_id` are two
+    replicas of it. A key names a router strategy by name, or any plugin by `(kind, name)`;
+    the value is (params schema, member schema), each a dict or the raw text a gateway sends,
+    and the member schema is a router strategy's.
     """
     import hashlib
     import json
@@ -224,8 +226,8 @@ async def report_plugins(
     }
     await session.execute(
         insert(GatewaySession)
-        .values(scope=scope, gateway_id=gateway_id, **values)
-        .on_conflict_do_update(index_elements=["scope", "gateway_id"], set_=values)
+        .values(scope=scope, gateway_id=gateway_id, instance_id=instance_id, **values)
+        .on_conflict_do_update(index_elements=["scope", "gateway_id", "instance_id"], set_=values)
     )
     text = lambda schema: schema if isinstance(schema, str) else json.dumps(schema)  # noqa: E731
     reported = []
@@ -247,6 +249,8 @@ async def report_plugins(
             )
         )
     normalized = normalize_hello(cpb.Hello(plugins=reported))
-    await replace_gateway_plugins(session, scope, gateway_id, token.id, normalized.plugins, now)
+    await replace_gateway_plugins(
+        session, scope, gateway_id, instance_id, token.id, normalized.plugins, now
+    )
     await session.commit()
     return token.id

@@ -10,7 +10,7 @@ a gateway keeps serving while the control plane is down.
 
 | | Use it for | Page |
 | --- | --- | --- |
-| Helm | Kubernetes: the control plane, one gateway per release, migrations as a hook, optional ServiceMonitors. | [Deploy with Helm](./helm.md) |
+| Helm | Kubernetes: the control plane, a gateway (several replicas of one gateway id allowed), migrations as a hook, optional ServiceMonitors. | [Deploy with Helm](./helm.md) |
 | Docker Compose | One host: Postgres, the control plane and a gateway from the published images. | [Deploy with Docker](./docker.md) |
 | Standalone gateway | A gateway alone, configured by one YAML file: no control plane, database, Admin UI, usage or self-service. | [Deploy with Docker](./docker.md#a-standalone-gateway), [Quick start](../guide/quickstart-standalone.md) |
 
@@ -64,7 +64,7 @@ control plane's HTTP listener speak plain HTTP (the gRPC listener can use TLS,
 | --- | --- | --- |
 | `LUMEWARP_DATABASE_URL` | Control plane | PostgreSQL 16+, as a SQLAlchemy async URL. |
 | `migrate`, then `bootstrap --gateway-id <id>` | Control plane CLI, once | Creates the schema, the config scope and the first gateway token (`lwg-…`, shown once). |
-| Gateway token and id | Gateway | `--gateway-token-env` names the variable holding the token; `--gateway-id` must be the id it was issued for. One token is one gateway. |
+| Gateway token and id | Gateway | `--gateway-token-env` names the variable holding the token; `--gateway-id` must be the id it was issued for. One token authenticates every instance of its gateway id, so several gateway processes may share it. |
 | A persistent `--state-dir` | Gateway | The last good snapshot, so a restart while the control plane is down still serves. |
 | `LUMEWARP_BREAK_GLASS_PASSWORD_HASH` | Control plane | Emergency login, and the way to sign in before SSO is set up. An argon2id hash from `hash-password`. |
 | `LUMEWARP_ENCRYPTION_KEY` | Control plane **and every gateway**, same value | Seals upstream API keys entered in the Admin UI. |

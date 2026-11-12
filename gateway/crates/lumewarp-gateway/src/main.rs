@@ -8,6 +8,7 @@ mod endpoint;
 mod error;
 mod grants;
 mod health;
+mod instance;
 mod mcp;
 mod mcp_hash;
 mod metrics;

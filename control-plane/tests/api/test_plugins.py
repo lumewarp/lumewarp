@@ -593,3 +593,20 @@ async def test_validate_plugin_params_needs_force_for_a_gateway_lacking_it(
         await validate_plugin_params(
             committed, PluginKind.UPSTREAM_AUTH, name, {"ttl_ms": 0}, force=True, scope=api_scope
         )
+
+
+async def test_a_plugin_needs_every_connected_instance_of_a_gateway(client, report):
+    """Replicas of one gateway id: one lacking the strategy would NACK every version using it."""
+    name = _name()
+    await report("replica", {name: FAILOVER}, connected=True, instance_id="pod-1")
+    await report("replica", {}, connected=True, instance_id="pod-2", capabilities=[])
+    item = _strategy(client, name)
+    assert item["missing_gateways"] == [f"{PREFIX}replica"]
+    _422(_create(client, name), "force")
+    assert {g["instance_id"] for g in item["gateways"]} == {"pod-1"}
+
+    await report("replica", {name: FAILOVER}, connected=True, instance_id="pod-2")
+    item = _strategy(client, name)
+    assert item["missing_gateways"] == []
+    assert {g["instance_id"] for g in item["gateways"]} == {"pod-1", "pod-2"}
+    assert _create(client, name).status_code == 201

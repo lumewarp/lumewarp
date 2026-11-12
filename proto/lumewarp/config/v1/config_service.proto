@@ -67,6 +67,25 @@ message Hello {
   repeated PluginDescriptor plugins = 8;
   // WASM plugin ABI (WIT package major version) this gateway hosts.
   uint32 plugin_abi = 9;
+  // The process, not the gateway id: several processes may run as instances of one
+  // gateway id and share its token, each with its own session, version and status
+  // (docs/config-protocol.md, "Gateway instances"). Required in control-plane mode:
+  // 1..100 of [A-Za-z0-9._-]; the gateway derives it from its hostname and a random
+  // suffix. Empty is INVALID_ARGUMENT.
+  string instance_id = 10;
+  // How this instance counts rate limits. Display only: the control plane shows it on
+  // the Gateways page and never derives behaviour from it.
+  SharedLimits shared_limits = 11;
+}
+
+// Rate-limit counting of one gateway instance, as Hello reports it.
+message SharedLimits {
+  // True when the instance shares its counters with other instances, instead of
+  // counting per process.
+  bool enabled = 1;
+  // The shared counters' namespace (the scope in control-plane mode); empty when
+  // disabled.
+  string namespace = 2;
 }
 
 enum PluginKind {

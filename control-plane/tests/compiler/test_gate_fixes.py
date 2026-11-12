@@ -267,7 +267,11 @@ async def test_compaction_reads_pins_and_updates_in_one_statement(factory) -> No
     async with factory() as s, s.begin():
         for v in range(1, 5):
             await store_version(s, SCOPE, pb.Snapshot(scope=SCOPE), version=v, source_revision=v)
-        s.add(GatewaySession(scope=SCOPE, gateway_id="a", connected=True, acked_version=3))
+        s.add(
+            GatewaySession(
+                scope=SCOPE, gateway_id="a", instance_id="i1", connected=True, acked_version=3
+            )
+        )
     async with factory() as s, s.begin():
         real_execute, statements = s.execute, []
 
@@ -296,7 +300,11 @@ async def test_compaction_sees_sessions_committed_before_the_statement(factory) 
     async with factory() as s, s.begin():
         await s.execute(select(1))  # transaction already running
         async with factory() as other, other.begin():
-            other.add(GatewaySession(scope=SCOPE, gateway_id="b", connected=True, acked_version=1))
+            other.add(
+                GatewaySession(
+                    scope=SCOPE, gateway_id="b", instance_id="i1", connected=True, acked_version=1
+                )
+            )
         assert await compact_versions(s, SCOPE, retain=1) == 2  # 2 and 3 go, 1 is pinned
     async with factory() as s:
         row = await s.get(ConfigVersion, (SCOPE, 1))

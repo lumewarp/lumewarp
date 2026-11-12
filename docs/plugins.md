@@ -134,7 +134,7 @@ A write is a router, an MCP server or an A2A agent that names a plugin. Every pa
 | No gateway connected | Built-ins validate against the descriptors committed with the control plane; other plugins against the most recent report from any gateway. |
 | Stored settings fail a schema after an upgrade | The entity reads `config_invalid: true` with `config_problems`. The data is not altered, and writes that do not touch the plugin or its settings still save. |
 
-Which gateways count: a gateway counts while the token of its latest `Hello` is unrevoked and it is connected or was seen in the last 30 days. A connected gateway has what its latest `Hello` lists; an offline one what it last reported. A report counts while the token that made it is unrevoked. Each `Hello` replaces the reports under the gateway's session row lock, and a reader sees one `Hello`, never parts of two.
+Which gateways count: the unit is the gateway *instance*, one process of a gateway id (several may share its token). An instance counts while the token of its latest `Hello` is unrevoked and it is connected or was disconnected less than 24 h ago, when its row is deleted; a connected instance has what its latest `Hello` lists, an offline one what it last reported. A plugin or capability is available only while every connected instance reports it. A report counts while the token that made it is unrevoked. Each `Hello` replaces the instance's reports under its session row lock, and a reader sees one `Hello`, never parts of two.
 
 Each gateway counts for at most 128 plugins per kind: descriptors first, then that kind's capabilities, with the names above. The rest of a `Hello` is ignored, logged and counted by the control plane; the stream stays up.
 

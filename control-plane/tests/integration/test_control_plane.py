@@ -98,6 +98,7 @@ class Gateway:
             cpb.GatewayMessage(
                 hello=cpb.Hello(
                     gateway_id=self.gateway_id,
+                    instance_id="itest-1",
                     have_version=self.snapshot.version,
                     have_digest=self.digest,
                     scope=self.snapshot.scope,

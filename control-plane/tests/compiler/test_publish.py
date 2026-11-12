@@ -333,9 +333,10 @@ async def test_compaction(factory) -> None:
     async with factory() as s, s.begin():
         for v in range(1, 61):
             await store_version(s, SCOPE, pb.Snapshot(scope=SCOPE), version=v, source_revision=v)
-        s.add(GatewaySession(scope=SCOPE, gateway_id="a", connected=True,
+        s.add(GatewaySession(scope=SCOPE, gateway_id="a", instance_id="i1", connected=True,
                              acked_version=3, pending_version=5))  # fmt: skip
-        s.add(GatewaySession(scope=SCOPE, gateway_id="b", connected=True, hello_have_version=7))
+        s.add(GatewaySession(scope=SCOPE, gateway_id="b", instance_id="i1", connected=True,
+                             hello_have_version=7))  # fmt: skip
     async with factory() as s, s.begin():
         assert await compact_versions(s, SCOPE, retain=50) == 10 - 3
     vs = {v.version: v for v in await versions(factory)}
@@ -364,6 +365,7 @@ async def test_compaction_releases_disconnected_or_removed_gateway(factory, remo
             GatewaySession(
                 scope=SCOPE,
                 gateway_id="gone",
+                instance_id="i1",
                 connected=True,
                 hello_have_version=1,
                 acked_version=2,
@@ -372,7 +374,7 @@ async def test_compaction_releases_disconnected_or_removed_gateway(factory, remo
         )
     async with factory() as s, s.begin():
         assert await compact_versions(s, SCOPE, retain=1) == 0
-        gateway = await s.get(GatewaySession, (SCOPE, "gone"))
+        gateway = await s.get(GatewaySession, (SCOPE, "gone", "i1"))
         if removed:
             await s.delete(gateway)
         else:

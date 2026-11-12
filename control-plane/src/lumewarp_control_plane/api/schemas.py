@@ -1217,6 +1217,7 @@ class RouterOut(ReadModel):
 
 class PluginGatewayOut(ReadModel):
     gateway_id: str
+    instance_id: str = Field(description="The process of that gateway id that reported it.")
     connected: bool
     digest: str | None = Field(description="Null when known only from its capabilities.")
     seen_at: datetime | None
@@ -1589,6 +1590,40 @@ class GatewayTokenCreated(ApiModel):
     secret: str
 
 
+class GatewayInstanceOut(ApiModel):
+    """One process of a gateway id: its own config stream, version and status row."""
+
+    instance_id: str = Field(
+        description="`Hello.instance_id`: the process, stable only for its lifetime."
+    )
+    connected: bool = Field(description="Its config stream is open.")
+    peer: str | None = Field(description="gRPC peer of the stream, as the control plane sees it.")
+    gateway_version: str = Field(description="The gateway build it reported in Hello.")
+    acked_version: int | None = Field(
+        description=(
+            "Config version it ACKed last, or the version its Hello proved it holds; null until"
+            " one of those (a fresh instance with no snapshot stays null)."
+        )
+    )
+    pending_version: int | None = Field(
+        description="Version sent and not yet answered; null when it is up to date."
+    )
+    last_nack_version: int | None = Field(
+        description="Version it NACKed last; null after it ACKs one."
+    )
+    connected_at: datetime | None = Field(description="When this stream connected.")
+    disconnected_at: datetime | None = Field(
+        description="When the stream ended; null while connected."
+    )
+    last_seen_at: datetime | None = Field(description="Last status write of this instance.")
+    shared_limits_enabled: bool = Field(
+        description="`Hello.shared_limits.enabled`: it shares rate-limit counters."
+    )
+    shared_limits_namespace: str = Field(
+        description="`Hello.shared_limits.namespace`; empty while sharing is off."
+    )
+
+
 class GatewayOut(ApiModel):
     gateway_id: str
     connected: bool
@@ -1603,6 +1638,12 @@ class GatewayOut(ApiModel):
     connected_at: datetime | None
     disconnected_at: datetime | None
     last_seen_at: datetime | None
+    instances: list[GatewayInstanceOut] = Field(
+        description=(
+            "The processes known under this gateway id, by instance id; the fields above are"
+            " derived from them. A disconnected one stays for 24 h."
+        )
+    )
     tokens: list[GatewayTokenOut]
 
 

@@ -138,3 +138,44 @@ def test_router_problem(strategy, params, needle):
 )
 def test_strategy_accepted(strategy, params):
     assert router_problem(strategy, params) is None
+
+
+async def test_a_capability_needs_every_connected_instance_of_a_gateway(factory):
+    """Replicas of one gateway id: a capability only one of them has would make the others
+    NACK the version, so the compile warns until all of them report it.
+    """
+    await seed_scope(factory)
+    async with factory() as s, s.begin():
+        a = await factories.make_model(s, "a")
+        await factories.make_router(
+            s, "custom", [(a, 1)], strategy="header_pin", params={"headers": ["x-pin"]}
+        )
+    async with factory() as s:
+        await report_plugins(
+            s,
+            SCOPE,
+            "replica",
+            {},
+            connected=True,
+            capabilities=["strategy:header_pin"],
+            instance_id="pod-1-aa",
+        )
+        await report_plugins(
+            s, SCOPE, "replica", {}, connected=True, capabilities=[], instance_id="pod-2-bb"
+        )
+    async with factory() as s:
+        result = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
+    assert len(result.warnings) == 1
+    assert "not advertised by every connected gateway" in result.warnings[0]
+    async with factory() as s:
+        await report_plugins(
+            s,
+            SCOPE,
+            "replica",
+            {},
+            connected=True,
+            capabilities=["strategy:header_pin"],
+            instance_id="pod-2-bb",
+        )
+    async with factory() as s:
+        assert not (await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)).warnings

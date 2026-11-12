@@ -347,15 +347,21 @@ async def compile_scope(
     catalog_rows = select(Alias).order_by(Alias.name).execution_options(populate_existing=True)
     aliases = (await session.scalars(catalog_rows)).all()
     model_by_id = {d.id: d for d in models}
-    advertised = {
-        cap
+    # A capability counts only if every connected instance of every gateway id reports it:
+    # a replica without it would NACK the version that needs it (docs/config-protocol.md).
+    reported_capabilities = [
+        set(caps)
         for caps in await session.scalars(
             select(GatewaySession.capabilities).where(
                 GatewaySession.scope == scope, GatewaySession.connected.is_(True)
             )
         )
-        for cap in caps
-    }
+    ]
+    advertised = (
+        reported_capabilities[0].intersection(*reported_capabilities[1:])
+        if reported_capabilities
+        else set()
+    )
     router_members: dict[uuid.UUID, list[RouterMember]] = {}
     for rm in await session.scalars(
         select(RouterMember).order_by(RouterMember.router_id, RouterMember.position)
@@ -499,7 +505,7 @@ async def compile_scope(
         capability = f"strategy:{r.strategy}"
         if not builtin and capability not in advertised:
             warnings.append(
-                f"router {r.name!r}: {capability} is not advertised by any connected gateway"
+                f"router {r.name!r}: {capability} is not advertised by every connected gateway"
             )
         router_splits = splits.get(r.id, [])
         if router_splits:

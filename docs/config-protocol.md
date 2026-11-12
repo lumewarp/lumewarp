@@ -7,7 +7,7 @@ Normative rules for `lumewarp.config.v1.ConfigService` and `lumewarp.usage.v1.Us
 - **Scope**: one control-plane installation (`Snapshot.scope`). A gateway is configured with exactly one scope and never applies or boots from a snapshot of another scope.
 - **Version**: strictly increasing per scope. Every published version has an immutable, complete `Snapshot` payload stored by the control plane.
 - **Desired version**: the latest published version for the scope.
-- **ACKed version**: per gateway session, the last version the gateway confirmed.
+- **ACKed version**: per gateway instance (one process, one stream), the last version it confirmed.
 
 ## Control plane: publishing
 
@@ -22,8 +22,9 @@ Normative rules for `lumewarp.config.v1.ConfigService` and `lumewarp.usage.v1.Us
 
 ```
 gateway                                   control plane
-  |-- Hello{gateway_id, have_version, scope, supported_capabilities, plugins, plugin_abi} -->
-  |                                       authenticate token; bind gateway_id
+  |-- Hello{gateway_id, instance_id, have_version, scope,
+  |         supported_capabilities, plugins, plugin_abi, shared_limits} -->
+  |                                       authenticate token; bind gateway_id and instance_id
   |<-- full(desired) or delta(have_version -> desired) ---------------
   |   apply privately, persist, swap
   |-- Ack{version} or Nack{version, code, have_version} ------------->
@@ -34,18 +35,32 @@ gateway                                   control plane
 - The base of a delta is always the session's ACKed version (or Hello.have_version before the first ACK) — never a global "last sent" version.
 - The first update after Hello is a delta only when `Hello.scope` matches, `have_version` is retained, `have_version <= desired` and `Hello.have_digest` equals the stored digest of `have_version`; otherwise full. Until the first ACK after a full, the session has **no** delta base (a NACKed full is never followed by a delta).
 - Digest = `config_versions.digest` (sha256 of the control plane's serialized payload). It is sent as `ConfigUpdate.target_digest`; the gateway treats it as opaque, persists it with the snapshot and echoes it in `Hello.have_digest` (serialization is not byte-identical across languages, so the gateway never recomputes it). `have_version > desired` (control plane restored from backup) → full.
+
 - `Hello.plugins` lists a `PluginDescriptor` per plugin the gateway has: built-ins and the WASM components loaded from its three plugin directories at startup. A descriptor carries the kind (`router-strategy`, `upstream-auth`, `a2a-middleware`), name, title, description, `builtin`, the params JSON Schema, the router-only `uses_weight`/`needs`/member schema, the component's `wasm_sha256` (empty for built-ins) and a `digest` that changes whenever any other field does. `Hello.plugin_abi` is the WIT package major version the gateway hosts (1). The list is untrusted and only informs the API and UI, which validate writes against its schemas: nothing in it can end the stream, and it does not gate snapshots, which `supported_capabilities` and the gateway's own `configure` still do. [Gateway plugins](plugins.md) has the manifest and schema rules.
-  - Normalized off the event loop: at most 128 plugins per kind per gateway, descriptors first, then that kind's capabilities, names matching `^[a-z][a-z0-9_]{0,62}$`; each schema capped at 16 KiB and restricted to a subset, or dropped. The rest is ignored, logged and counted in `lumewarp_cp_gateway_plugins_ignored_total`. Other capabilities are capped at 64, of at most 128 characters each. The session's stored capabilities list every kept plugin.
+  - Normalized off the event loop: at most 128 plugins per kind per instance, descriptors first, then that kind's capabilities, names matching `^[a-z][a-z0-9_]{0,62}$`; each schema capped at 16 KiB and restricted to a subset, or dropped. The rest is ignored, logged and counted in `lumewarp_cp_gateway_plugins_ignored_total`. Other capabilities are capped at 64, of at most 128 characters each. The session's stored capabilities list every kept plugin.
   - The status row and the stored descriptors change in one transaction, under that row's lock, and only for the session owning the row. Session ids move forward, so a slower older connection neither overwrites a newer one's report nor replaces its stream: it ends with `UNAVAILABLE`. A reader sees one Hello, never parts of two.
-  - A Hello replaces all the gateway reported before. A gateway counts while the token of its latest Hello is unrevoked and it is connected or was seen in the last 30 days; a report counts while the token that made it is unrevoked. A connected gateway has what its latest Hello lists, an offline one what it last reported.
+  - A Hello replaces all that instance reported before. An instance counts while the token of its latest Hello is unrevoked and it is connected or was disconnected less than 24 h ago (its row is deleted then); a report counts while the token that made it is unrevoked. A connected instance has what its latest Hello lists, an offline one what it last reported.
 - ACK/NACK must name the session's pending version; anything else is a protocol error and the control plane closes the stream.
 - NACK handling:
   - `BASE_MISMATCH` → send full(desired).
-  - `INVALID_CONFIG` / `UNSUPPORTED_FEATURE` → quarantine that version for that gateway; do not resend it. Send again only when a newer version is published. Surface it in gateway status and metrics.
+  - `INVALID_CONFIG` / `UNSUPPORTED_FEATURE` → quarantine that version for the whole gateway id: every instance of it skips the version, and an instance connecting later starts with it. Do not resend it; send again only when a newer version is published. Surface it in gateway status and metrics. An instance that had already been sent the version before the NACK may still ACK it; quarantine applies from the NACK on.
   - `PERSIST_FAILED` → retry the same version with exponential backoff (1 s → 60 s).
 - ACK timeout: 30 s, then the control plane closes the stream; the gateway reconnects with backoff (0.5 s → 30 s, full jitter).
 - Keepalive: the gateway sends an HTTP/2 PING every 30 s, also while the stream is idle, and drops the connection if no ACK arrives within 10 s. The control plane must accept pings without data at least every 10 s (`grpc.http2.min_ping_interval_without_data_ms`, `grpc.keepalive_permit_without_calls`); gRPC core's default (5 min) answers them with GOAWAY `too_many_pings` and resets the stream every few minutes. The control plane pings every 60 s (20 s timeout) to notice gateways that vanished. Any L7 proxy between them must allow the same ping rate.
 - Delta semantics: upserts replace the whole entity by key (name / key_id / team id); removes delete by key; MCP servers and A2A agents are keyed by name, and removing one drops its grants from the next compile; `created_at_unix_ms` and `required_capabilities` replace the target metadata. Removing an entity that does not exist is not an error. A delta whose result fails validation is NACKed `INVALID_CONFIG`.
+
+### Gateway instances
+
+One gateway id may run as several processes behind a Service, all with the same token and `Hello.gateway_id`: each process is an *instance* and gets its own stream, version, status row and health reports. Nothing evicts another instance; a new connection replaces only a stream with the same `(gateway_id, instance_id)`.
+
+- `Hello.instance_id` identifies the process and is required in control-plane mode: 1–100 of `[A-Za-z0-9._-]` (the gateway sends `<hostname>-<8 hex>`, generated at startup), and empty or otherwise malformed is `INVALID_ARGUMENT`. A restarted process is a new instance.
+- `Hello.shared_limits { enabled, namespace }` says whether the instance shares its rate-limit counters with other instances and under which namespace. It is display only: the control plane shows it on the Gateways page and derives no behaviour from it. Instances of one gateway id may disagree during a rollout; the API shows both values.
+- Gateway state is derived from the connected instances: `connected` if any is, the applied version is the **lowest** ACKed version of the connected instances, it is pending while any connected instance has an update in flight, and the last NACK is the newest one of a live instance that the gateway has not ACKed since. The build versions are listed when the instances report different ones.
+- A capability or plugin counts as available only if **every** connected instance of **every** gateway id reports it; otherwise the version needing it would be NACKed by the instances that lack it, so the compiler warns and a save needs `force`.
+- A target (upstream or model) counts as unhealthy if **any** connected instance reports it unhealthy: a request may be routed to that instance.
+- An instance row stays after its stream ends and is deleted after 24 h disconnected; its plugin reports go with it.
+- A NACK from one old-build instance during a rolling upgrade quarantines the version for the whole gateway id, so the new-build instances skip it too until the next publish: publish nothing that needs the new build until the rollout finishes.
+
 
 ## Catalog reports
 
