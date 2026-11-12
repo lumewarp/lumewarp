@@ -531,8 +531,11 @@ class Stack:
         record_secret(self.admin.cookies.get(COOKIE_NAME), "Lumewarp session cookie")
         record_response_secrets(info, "GET /session", endpoint="/session")
 
-    def start_mock(self, tag: str, *args: str) -> int:
-        """Start another mock upstream (e.g. with fault injection); returns its port."""
+    def start_mock(self, tag: str, *args: str, latency_ms: int = 5) -> int:
+        """Start another mock upstream (e.g. with fault injection); returns its port.
+
+        `latency_ms` replaces the 5 ms default so a test can hold a request open.
+        """
         port = free_port()
         proc = Proc(
             tag,
@@ -541,7 +544,7 @@ class Stack:
                 "--listen",
                 f"127.0.0.1:{port}",
                 "--latency-ms",
-                "5",
+                str(latency_ms),
                 *args,
             ],
             self.base_env,
