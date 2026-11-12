@@ -20,4 +20,26 @@ spec:
       protocol: TCP
   selector:
     {{- include "lumewarp.gateway.selectorLabels" . | nindent 4 }}
+{{- if .Values.gateway.stateDir.persistence.enabled }}
+---
+# The governing Service of the gateway StatefulSet: no cluster IP, so Kubernetes creates one
+# DNS name per pod. Clients keep calling the Service above, which load balances. It exposes
+# `http` only: a second `admin` port here would make the ServiceMonitor discover every pod
+# twice (once per Service) and double every lumewarp_* series in Prometheus.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lumewarp.gateway.headlessServiceName" . }}
+  labels:
+    {{- include "lumewarp.gateway.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+    - name: http
+      port: {{ .Values.gateway.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "lumewarp.gateway.selectorLabels" . | nindent 4 }}
+{{- end }}
 {{- end }}

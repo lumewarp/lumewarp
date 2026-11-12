@@ -1,0 +1,29 @@
+{{- if .Values.gateway.enabled }}
+{{- $pdb := .Values.gateway.podDisruptionBudget }}
+{{- $scalable := or (gt (int .Values.gateway.replicaCount) 1) .Values.gateway.autoscaling.enabled }}
+{{- if and $pdb.enabled $scalable }}
+{{- $min := toString $pdb.minAvailable }}
+{{- $max := toString $pdb.maxUnavailable }}
+{{- if and (ne $min "") (ne $max "") }}
+{{- fail "gateway.podDisruptionBudget takes either minAvailable or maxUnavailable, not both" }}
+{{- end }}
+{{- if and (eq $min "") (eq $max "") }}
+{{- fail "gateway.podDisruptionBudget needs minAvailable or maxUnavailable when it is enabled" }}
+{{- end }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "lumewarp.gateway.name" . }}
+  labels:
+    {{- include "lumewarp.gateway.labels" . | nindent 4 }}
+spec:
+  {{- if ne $min "" }}
+  minAvailable: {{ $min }}
+  {{- else }}
+  maxUnavailable: {{ $max }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "lumewarp.gateway.selectorLabels" . | nindent 6 }}
+{{- end }}
+{{- end }}

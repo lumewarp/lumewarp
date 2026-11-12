@@ -55,10 +55,13 @@ helm upgrade lumewarp deploy/helm/lumewarp -n lumewarp \
   --reuse-values --set gateway.enabled=true --set gateway.gatewayId=gw-1
 ```
 
-The gateway Deployment runs one replica: a token identifies one gateway, so do not
-scale it. If you need more gateway instances, deploy another release (normally in a
-separate namespace, or with `controlPlane.enabled=false`) with its own `gateway.gatewayId`
-and token.
+The gateway runs one replica by default. `gateway.replicaCount` (or `gateway.autoscaling`)
+can raise that: every replica uses the same token and the same `gateway.gatewayId`, because a
+token identifies one gateway and not one process, and the control plane shows the pods as that
+gateway's instances. Rate limits are counted per instance unless the gateways share a Redis;
+`redis.enabled` ships one with the release. The manual's
+[Gateway replicas](../../../docs/operations/helm.md#gateway-replicas) and
+[Shared rate limits](../../../docs/operations/helm.md#shared-rate-limits) have the details.
 
 Installation admins are stored in Postgres: the first verified login whose email matches
 `controlPlane.initialAdminEmail` becomes the proxy_admin, who can then assign other admins (and
@@ -81,9 +84,11 @@ pods start.
 | Control-plane Deployment | One replica. Runs the HTTP API + UI, gRPC ConfigService/UsageService, compiler loop and monthly rollover. `strategy: Recreate`. |
 | Control-plane Service | `http` (8091), `grpc` (50051) and `metrics` (9465, Prometheus `/metrics`; only with `controlPlane.metrics.enabled`) ports. |
 | Migration Job | Helm `pre-install,pre-upgrade` hook running `python -m lumewarp_control_plane migrate` with the database Secret. |
-| Gateway Deployment | One replica. The token is bound to `gateway.gatewayId`; boots from its state volume, then follows the config stream; `/readyz` stays 503 until a snapshot is loaded. |
+| Gateway Deployment | One replica by default. The token is bound to `gateway.gatewayId`; boots from its state volume, then follows the config stream; `/readyz` stays 503 until a snapshot is loaded. |
+| Gateway StatefulSet | Instead of the Deployment when `gateway.stateDir.persistence.enabled`: one ReadWriteOnce claim per pod from a `volumeClaimTemplate`, plus the headless Service it needs. |
 | Gateway Service | `http` (4000) and `admin` (9464, `/metrics` + `/readyz`) ports. |
-| Gateway state PVC | Only when `gateway.stateDir.persistence.enabled=true`; otherwise an `emptyDir` per pod. |
+| Gateway PodDisruptionBudget / HorizontalPodAutoscaler | Optional, `gateway.podDisruptionBudget` and `gateway.autoscaling`. |
+| Valkey Deployment, Service and Secret | Only when `redis.enabled`: shared rate limits across gateway replicas, password in a Secret the chart creates once. |
 | ServiceMonitors | Optional: one for the gateway admin port, one for the control-plane `metrics` port. Requires the Prometheus Operator CRDs. |
 
 Readiness/liveness:
@@ -97,16 +102,20 @@ Readiness/liveness:
 ## Chart checks
 
 ```sh
-helm lint deploy/helm/lumewarp
+# Lints and renders every supported value combination (replicas, autoscaling, persistence,
+# the bundled Valkey, an external Redis) and checks the result.
+bash deploy/helm/check.sh
+
+helm lint deploy/helm/lumewarp --strict
 helm template lumewarp deploy/helm/lumewarp -n lumewarp \
   --set controlPlane.databaseUrl.secretName=db \
   --set gateway.gatewayId=gw-1 \
   --set gateway.token.secretName=gw
 
-# Expected to fail: one token is bound to one gateway id; multi-replica gateways are
-# deferred.
+# Expected to fail: the bundled Valkey and an external Redis URL are exclusive.
 helm template lumewarp deploy/helm/lumewarp -n lumewarp \
-  --set gateway.replicaCount=2
+  --set redis.enabled=true \
+  --set gateway.sharedLimits.redis.existingSecret=redis-url
 ```
 
 `kubectl port-forward svc/lumewarp-control-plane 8091:8091` reaches the UI/API; probe the

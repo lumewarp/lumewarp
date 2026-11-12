@@ -13,17 +13,28 @@ when the snapshot format changed; the release notes say when.
   single-process; the chart uses `Recreate`.
 - **Migration is a pre-upgrade hook.** The old control-plane pod is still running while
   the schema migrates (Rolling/Recreate), so expect a short outage window on upgrades.
-- **One gateway replica and one token per gateway id.** Each gateway token is bound to a
-  single `gateway_id`. `gateway.replicaCount` must stay 1; the chart rejects higher
-  values. `gateway.gatewayId` must equal the id used when the token was issued. Deploy one
-  release per gateway identity if you need more gateway instances.
+- **Many gateway replicas, one token per gateway id.** Each gateway token is bound to a
+  single `gateway_id`, not to a process: `gateway.replicaCount` (or `gateway.autoscaling`)
+  runs several pods on the same token and `gateway.gatewayId`, and the control plane shows
+  them as instances of that gateway. `gateway.gatewayId` must equal the id the token was
+  issued for. Rate limits are counted per instance unless the gateways share a Redis
+  (`redis.enabled`, or `gateway.sharedLimits.redis.existingSecret`).
+- **A rolling gateway upgrade can quarantine a version.** A NACK from one instance quarantines
+  that config version for the whole gateway id, so replicas never apply different versions on
+  purpose. An instance still on the old build NACKs a version that needs a capability or
+  plugin it does not have, which parks that version for the new instances too, and a
+  quarantined version stays refused until a newer one is published. Finish the rollout before
+  publishing anything that needs the new build, and publish again afterwards if a version was
+  quarantined during it.
 - **Gateway state volume.** With the default `emptyDir`, a new pod has no cache and returns
-  503 on `/readyz` and `/v1/*` until the first full snapshot arrives. A chart-created PVC
-  must be `ReadWriteOnce` (other access modes are rejected), and an `existingClaim` must
-  also be RWO and used only by this single replica. The chart runs the gateway as
-  UID/GID 65532 with `fsGroup: 65532`, so both emptyDir and PVC mounts are writable; no
-  manual `fsGroup` is needed. Override `gateway.podSecurityContext` only for a custom
-  image with another UID/GID.
+  503 on `/readyz` and `/v1/*` until the first full snapshot arrives. With
+  `gateway.stateDir.persistence.enabled` the gateway is a StatefulSet with one
+  `ReadWriteOnce` claim per pod, so a restarted pod serves from its cached snapshot; `size`,
+  `storageClass` and `annotations` of that claim template cannot change once the StatefulSet
+  exists (see [Deploy with Helm](./helm.md#state-volume)). The chart runs the gateway as
+  UID/GID 65532 with `fsGroup: 65532`, so emptyDir and PVC mounts are writable; no manual
+  `fsGroup` is needed. Override `gateway.podSecurityContext` only for a custom image with
+  another UID/GID.
 - **gRPC is plaintext by default.** Set `controlPlane.grpcTls.enabled` to terminate TLS on
   the control-plane listener, but note that the gateway verifies with the WebPKI root
   store only; a private CA must be added to the gateway image. Inside a trusted cluster,

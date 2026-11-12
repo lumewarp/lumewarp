@@ -92,9 +92,27 @@ controlPlane:
 
 gateway:
   enabled: true
-  # One gateway token is bound to one gateway id; multi-replica gateways are not
-  # supported. The chart rejects replicaCount > 1; deploy one release per gateway identity.
+  # Replicas of one release share the token and gateway.gatewayId: they are the same
+  # gateway and appear as its instances in the Admin UI (so a rolling update never runs two
+  # gateway identities). Rate limits are counted per instance unless the gateways share a
+  # Redis: see redis.enabled and gateway.sharedLimits below.
   replicaCount: 1
+  # HorizontalPodAutoscaler (autoscaling/v2) for the gateway. When enabled it replaces
+  # replicaCount: the workload carries no fixed replica count and the HPA keeps between
+  # minReplicas and maxReplicas pods. The CPU target is an average over the pods' CPU
+  # requests (gateway.resources), so a target of 0 or no request never scales.
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 80
+  # Only rendered when enabled and the gateway can have more than one pod (replicaCount > 1
+  # or autoscaling). Set exactly one of minAvailable and maxUnavailable: minAvailable: 1
+  # keeps one pod serving while a node drains.
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+    maxUnavailable: ""
   image:
     repository: ghcr.io/lumewarp/lumewarp-gateway
     tag: ""
@@ -169,20 +187,39 @@ gateway:
     key: gateway-id-key
   stateDir:
     path: /var/lib/lumewarp
-    # emptyDir is the default, so a pod without a cached snapshot cold-boots from the
-    # control plane. Enable persistence for a ReadWriteOnce PVC-backed snapshot.
+    # Off = the gateway is a Deployment and the state directory is an emptyDir, so a new
+    # pod has no cached snapshot and stays unready until the control plane sends one.
+    # On = a StatefulSet with one ReadWriteOnce claim per pod (the chart creates it), so a
+    # restarted pod keeps its snapshot and serves before the control plane answers.
     persistence:
       enabled: false
-      # Use an existing claim instead of creating one. It must be ReadWriteOnce and
-      # used by this single gateway replica.
-      existingClaim: ""
+      # size, storageClass and annotations are fixed once the StatefulSet exists: changing
+      # one needs `kubectl delete statefulset ... --cascade=orphan` first (see
+      # "State volume" in docs/operations/helm.md).
       storageClass: ""
-      # Only ReadWriteOnce is supported; shared state across gateways is not.
+      # One claim per pod; shared state across gateways is not a thing.
       accessModes:
         - ReadWriteOnce
       size: 1Gi
       # For example {helm.sh/resource-policy: keep} to survive `helm uninstall`.
       annotations: {}
+  # Rate limits across gateways. By default rpm, tpm and max_parallel are counted per
+  # gateway instance, so N replicas admit up to N times a key's limit. Point them at one
+  # Redis (or Valkey) and the counts hold across every gateway of the installation that
+  # uses it.
+  sharedLimits:
+    # An existing Redis instead of redis.enabled: a Secret whose key holds the full URL,
+    # redis://:password@host:6379/0 or rediss://... Mutually exclusive with redis.enabled.
+    redis:
+      existingSecret: ""
+      existingSecretKey: url
+    # Sync interval in milliseconds, 10 to 1000. Empty = the gateway default (100). A
+    # shorter interval is more accurate and more Redis traffic; the fair share between
+    # syncs keeps 100 ms close to exact.
+    syncMs: ""
+    # Namespace of the Redis keys. Empty = the config scope (gateway.scope here).
+    # Gateways that should share counts must use the same value.
+    namespace: ""
   service:
     type: ClusterIP
     port: 4000
@@ -239,3 +276,47 @@ grafanaDashboards:
   # Match the Grafana sidecar's label and labelValue settings.
   sidecarLabel: grafana_dashboard
   sidecarLabelValue: "1"
+
+# One Valkey (Redis protocol, BSD-licensed) for shared rate limits, in this release.
+# Enable it when gateway.replicaCount > 1 so a key's rpm, tpm and max_parallel hold across
+# the replicas; a gateway-only release elsewhere points at the same server through
+# gateway.sharedLimits.redis.existingSecret. Nothing is persisted: every key expires within
+# 150 s, and a restart only means a short window of per-gateway counts.
+redis:
+  enabled: false
+  image:
+    repository: valkey/valkey
+    # Pinned exact tag, no floating 8-alpine.
+    tag: 8.1.11-alpine
+    pullPolicy: IfNotPresent
+  # The server password. Leave existingSecret empty and the chart creates a Secret once
+  # (`lookup` keeps it across upgrades) holding a random 32-character password. With your
+  # own Secret the key below holds just the password, and it must be URL-safe: the gateway
+  # receives it inside a redis:// URL.
+  auth:
+    existingSecret: ""
+    existingSecretKey: password
+  service:
+    port: 6379
+  # The image's valkey user is 999:1000; /data is an emptyDir and the root filesystem is
+  # read-only. Override only for a custom image.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    requests:
+      cpu: 30m
+      memory: 64Mi
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

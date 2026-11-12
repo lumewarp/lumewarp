@@ -1,0 +1,41 @@
+{{- if and .Values.gateway.enabled .Values.gateway.autoscaling.enabled }}
+{{- $autoscaling := .Values.gateway.autoscaling }}
+{{- $min := toString $autoscaling.minReplicas }}
+{{- $max := toString $autoscaling.maxReplicas }}
+{{- if not (regexMatch "^[1-9][0-9]*$" $min) }}
+{{- fail (printf "gateway.autoscaling.minReplicas must be a positive integer, got %s" $min) }}
+{{- end }}
+{{- if not (regexMatch "^[1-9][0-9]*$" $max) }}
+{{- fail (printf "gateway.autoscaling.maxReplicas must be a positive integer, got %s" $max) }}
+{{- end }}
+{{- if lt (int $max) (int $min) }}
+{{- fail "gateway.autoscaling.maxReplicas must be greater than or equal to minReplicas" }}
+{{- end }}
+{{- $target := toString $autoscaling.targetCPUUtilizationPercentage }}
+{{- if not (regexMatch "^[1-9][0-9]*$" $target) }}
+{{- fail (printf "gateway.autoscaling.targetCPUUtilizationPercentage must be a positive integer percentage, got %s" $target) }}
+{{- end }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "lumewarp.gateway.name" . }}
+  labels:
+    {{- include "lumewarp.gateway.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    # Follows the state directory: see gateway.stateDir.persistence.
+    kind: {{ ternary "StatefulSet" "Deployment" .Values.gateway.stateDir.persistence.enabled }}
+    name: {{ include "lumewarp.gateway.name" . }}
+  minReplicas: {{ int $min }}
+  maxReplicas: {{ int $max }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # Average over the pods, against gateway.resources.requests.cpu: a target of 0 or
+          # a missing request makes the HPA report <unknown> and never scale.
+          averageUtilization: {{ int $target }}
+{{- end }}
