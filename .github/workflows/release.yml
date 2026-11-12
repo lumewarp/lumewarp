@@ -196,8 +196,38 @@ jobs:
           path: dist/
           retention-days: 7
 
+  openapi:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gateway
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      # Neither command needs a database or a running service; the control plane only
+      # parses its database URL.
+      - name: Print both OpenAPI documents
+        env:
+          LUMEWARP_DATABASE_URL: postgresql+asyncpg://nobody:nothing@127.0.0.1:1/none
+        run: |
+          mkdir -p dist
+          uv run --locked --project control-plane python -W ignore -m lumewarp_control_plane openapi \
+            > dist/openapi-control-plane.json
+          (cd gateway && cargo run --locked --release -q -p lumewarp-gateway -- openapi) \
+            > dist/openapi-gateway.json
+          python3 -I -c 'import json, sys; [json.load(open(f)) for f in sys.argv[1:]]' dist/*.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openapi
+          path: dist/
+          retention-days: 7
+
   release:
-    needs: [prepare, images, chart, plugins]
+    needs: [prepare, images, chart, plugins, openapi]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -220,6 +250,10 @@ jobs:
         with:
           name: plugins
           path: assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: openapi
+          path: assets
       - name: Release notes
         run: |
           owner="${GITHUB_REPOSITORY_OWNER}"
@@ -236,6 +270,7 @@ jobs:
             echo '```'
             echo
             echo "The example WASM plugins (\`<kind>-<name>.wasm\`, see docs/plugins.md) are attached with their SHA256SUMS."
+            echo "The OpenAPI documents of the control plane and the gateway are attached as \`openapi-control-plane.json\` and \`openapi-gateway.json\`."
             echo
             echo "## Changes"
             echo
