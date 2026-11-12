@@ -69,6 +69,9 @@ Optional members are filled in from `check` when absent:
   candidates. The older team-only `async list_teams(user_id, relation)` is still accepted.
   Without either, candidates are filtered with `batch_check`. A raised exception or an `ERROR`
   decision makes the admin API answer 503.
+- `async changes(cursor)` returns a `ChangeBatch` of users whose relations may have changed
+  since `cursor`, so the key reconciler suspends a removed member's keys within seconds.
+  Without it the reconciler relies on its periodic rescan.
 - `manages_grants: bool` defaults to `False`: memberships live in the external system and the
   member write endpoints answer `409 managed_externally`. The built-in backend sets it to `True`.
 

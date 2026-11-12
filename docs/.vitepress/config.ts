@@ -61,6 +61,7 @@ const sidebar = [
       { text: "Gateway plugins (WASM)", link: "/plugins" },
       { text: "Router strategies", link: "/router-strategies" },
       { text: "Control plane plugins (Python)", link: "/extending/python-plugins" },
+      { text: "Plugin development skill", link: "/extending/skill" },
     ],
   },
   {

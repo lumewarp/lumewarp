@@ -1,0 +1,27 @@
+[package]
+name = "lumewarp-plugin-my-strategy"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# cdylib is the WASM component; rlib lets `cargo test` run natively.
+crate-type = ["cdylib", "rlib"]
+
+# Remove this line if the crate becomes a member of an existing workspace.
+[workspace]
+
+[dependencies]
+# Pin the tag of the gateway release the plugin is deployed to.
+lumewarp-plugin-sdk = { git = "https://github.com/lumewarp/lumewarp", tag = "v0.1.0" }
+schemars = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[profile.release]
+lto = true
+panic = "abort"
+opt-level = "z"
+codegen-units = 1

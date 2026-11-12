@@ -1,0 +1,17 @@
+server:
+  listen: 127.0.0.1:4000
+  admin_listen: 127.0.0.1:9464
+upstreams:
+  - name: mock
+    kind: openai_compatible
+    base_url: http://127.0.0.1:9100/v1
+models:
+  - {name: m-a, type: llm, upstream: mock, upstream_model: a}
+  - {name: m-b, type: llm, upstream: mock, upstream_model: b}
+routers:
+  - name: prio
+    strategy: my_strategy
+    params: {max_in_flight: 8}
+    members:
+      - {model: m-a, params: {priority: 2}}
+      - {model: m-b, params: {priority: 1}}

@@ -88,6 +88,12 @@ lets the gateway fall through.
           gateway/plugins/router/priority-failover/testdata \
           gateway/plugins/router/<name>/
 
+This is the layout inside the Lumewarp repository. In the user's own repository,
+start from `.claude/skills/lumewarp-plugin-dev/templates/router-strategy` instead:
+the same crate shape, with the SDK as a git dependency pinned to a release tag, a
+`rust-toolchain.toml`, and steps to verify the load against the released gateway
+image. The rest of this skill applies unchanged.
+
 The example is its own Cargo workspace (`[workspace]` in `Cargo.toml`), so it is
 not a member of `gateway/Cargo.toml` and that file needs no edit. `Cargo.toml`:
 

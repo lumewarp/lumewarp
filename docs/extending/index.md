@@ -34,5 +34,5 @@ control plane validates on write and the Admin UI renders as a form.
 
 - Start from the examples in
   [`gateway/plugins/`](https://github.com/lumewarp/lumewarp/tree/main/gateway/plugins).
-- A Claude Code skill that walks through the whole loop is planned; until then
-  `.claude/skills/port-router-to-rust` in the repository covers porting a Python router.
+- Copy a template from the [plugin development skill](./skill.md). Each one builds and
+  passes its tests in a repository of your own, against a Lumewarp release tag.
