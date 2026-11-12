@@ -61,6 +61,9 @@ routers, teams and keys (including `server.api_keys`) are ignored in this mode.
 | `--scope SCOPE` | none | required in control-plane mode | Config scope this gateway serves. Must match the control plane and the cached snapshot. |
 | `--gateway-id ID` | none | `gateway` | Identity sent in the stream `Hello`; must match the id the token was issued for and is shown in the control-plane gateway list. The Helm chart sets `gateway.gatewayId`. |
 | `--local-config FILE` | none | unset | YAML with only `server:` listener/timeout settings. Without it the defaults from the YAML reference apply. |
+| `--shared-limits-redis-url URL` | `LUMEWARP_SHARED_LIMITS_REDIS_URL` | unset | `redis://` or `rediss://` endpoint used to share rate-limit counters between gateway instances. Empty/unset keeps the limits per process. The value is never logged. |
+| `--shared-limits-sync-ms MS` | `LUMEWARP_SHARED_LIMITS_SYNC_MS` | `100` | Background sync interval, 10–1000 ms; it doubles up to 1 s while a sync takes more than half of it. |
+| `--shared-limits-namespace NAME` | `LUMEWARP_SHARED_LIMITS_NAMESPACE` | `--scope` in control-plane mode | Redis key namespace. Required with a URL in standalone mode; gateways share counters only when both the Redis endpoint and the namespace match. |
 | none | `LUMEWARP_ENCRYPTION_KEY` | unset | Opens upstream API keys the control plane stores sealed (`api_key_ciphertext`). Must equal the control plane's value; a snapshot with a sealed key is NACKed without it. Read when a snapshot is applied, never per request. |
 
 A minimal local config only needs the listeners:
@@ -120,6 +123,73 @@ did not ask for usage; the extra usage-only chunk is stripped before it reaches
 the client. `passthrough` disables the injection for upstreams that do not
 support it. Non-stream usage is parsed from a bounded copy of the response body.
 
+## Shared rate limits
+
+By default each gateway process counts a key's `requests_per_minute`,
+`tokens_per_minute` and `max_parallel_requests` for itself, so N processes allow up to N
+times a configured limit. Setting `--shared-limits-redis-url` (both modes) makes the
+instances that use the same Redis and namespace share one window instead.
+
+The request path never touches Redis. A background task every
+`--shared-limits-sync-ms` sends this process's dirty per-minute counts (absolute
+values, so a retry overwrites and never double-counts) and its in-flight gauge in one
+pipelined script per 250 scopes, then applies the other instances' counts to the local
+limiter. Only scopes whose counters changed since the last successful sync are written;
+a clean scope with counts in the current or previous minute is a read-only entry. Dirty,
+in-flight, finite-share and multi-instance scopes are read every interval; a clean scope
+with only local counts and one instance is read every fifth interval (it notices a
+joining instance within at most five intervals). Key TTLs are set whenever a write
+creates a field or key and refreshed at most every five seconds per scope; the in-flight
+hash is extended on every sync, so one missed refresh cannot make every instance's slots
+disappear. The interval doubles (up to 1 s) when a sync takes more than half of it; only
+a successful sync steps it back down, and a connect failure leaves it unchanged. A sync
+that finds a connect in flight waits for it inside its own timeout. The interval must
+exceed the Redis round-trip time plus the script time; measure it on the deployment's
+Redis.
+
+Between two syncs a process may use at most `ceil(headroom / n)` of a scope. `n` is per
+dimension: for rpm and tpm it counts the instances with a positive count in the current
+or previous minute, and for max_parallel the instances with a fresh in-flight entry
+(including zero). With one instance the behaviour is exactly the per-process limiter. A
+window may over-admit by about `n` requests, plus up to five sync intervals of traffic
+when an instance first joins a scope (a clean instance refreshes its read-only view
+every fifth interval).
+
+The store layout is namespaced as `{lw:<namespace>}:<scope>:`: one hash per scope,
+dimension and minute (`HSET` of the instance's absolute count, 150 s expiry) and one
+hash per scope for in-flight values (`<n>:<redis_unix_ms>`, entries older than 3 s
+ignored and deleted, 10 s expiry extended on every sync). A zero count is an `HDEL`, not
+a zero-valued field or key. A key created by a write always gets its expiry immediately,
+so even a process killed in the refresh gap leaves nothing permanent. In-flight stamps
+and the staleness check use Redis's clock, so gateway clock skew cannot hide another
+instance's slots; the minute keys use the gateway's wall clock, so keep hosts on NTP to
+line the windows up. A restarted process is a new instance id, so its old fields expire
+with their keys. One Redis or Valkey 6.2+ endpoint is supported (`rediss://` for TLS);
+Cluster and Sentinel are not.
+
+Redis is never on the critical path. After one second without a successful sync the
+gateway falls back to counting for itself (the full local limit, not `limit / n`), so N
+instances allow up to N times the limit again; `/readyz` is unaffected. The next
+successful sync resumes sharing; counts admitted during the outage stay dirty and are
+written then (their minute windows expire as usual). A timed-out sync whose write did
+reach Redis is harmless: the retry sends the same absolute counts and overwrites them.
+An idle gateway still sends a `PING`, so it leaves fallback and does not page. The
+`lumewarp_shared_limits_*` metrics and the `LumewarpSharedLimitsFallback` alert show
+the state ([Observability](./observability.md)).
+
+The URL may carry a password: set `LUMEWARP_SHARED_LIMITS_REDIS_URL` rather than passing
+`--shared-limits-redis-url`, because command-line arguments are visible in `ps`. The value
+is never logged.
+
+Measured on a local `redis:7` (Docker on WSL2), one 250-scope chunk took about 5.8 ms for
+dirty counters and 4.4 ms for read-only entries (4.0 ms when the scope has only one
+dimension). These are aggregate per-Redis figures, across every gateway on that Redis:
+with the five-interval read cadence, 1,000 clean recently used keys cost about 35 ms of
+Redis CPU per second per gateway, so four gateways with 1,000 clean keys each use about
+0.14 s/s (roughly 14% of one Redis); 1,000 dirty keys per gateway cost about 0.23 s/s, so
+about four gateways with that much dirty traffic saturate this host. A dedicated Redis is
+faster; measure the deployment's own limit.
+
 ## Shutdown and current limitations
 
 On SIGTERM (Unix) or Ctrl-C, both listeners stop accepting, active HTTP
@@ -143,13 +213,14 @@ gateway does not yet implement:
 
 - canary or percentage config rollout; publishing and rollback are whole-scope
   versions driven by the control plane;
-- Redis-backed or global rate limits (limits are local per gateway instance);
-  budgets are eventual and in-flight streams are not cut; usage events are lost
-  when the bounded queue is full or the gateway crashes;
 - TPOT metrics; JWT/mTLS client authentication;
 - an idle timeout on upstream response bodies after headers (including
   non-stream bodies); `timeout_ms` stops at response headers;
 - client TLS termination (terminate it in front of the gateway).
+
+Budgets are eventual and in-flight streams are not cut; usage events are lost when the
+bounded queue is full or the gateway crashes. Without a shared Redis, rate limits are
+per process (see above).
 
 MCP and A2A are served on the same listener: `POST /mcp`, `POST /mcp/servers/<name>`,
 `POST /a2a/<agent>`, the agent-card endpoint and `GET /a2a`. They authenticate only

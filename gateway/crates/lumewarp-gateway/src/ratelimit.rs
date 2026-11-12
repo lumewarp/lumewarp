@@ -9,15 +9,15 @@
 //! a slot until the response body ends, errors or is dropped.
 //!
 //! Every count is split into own (this process, exact) and others (the other
-//! instances, from the last sync). `pending_sync` hands the unsynced own
-//! deltas to a store and `apply_sync` writes the others' half back; without a
-//! store others stays 0, which is exactly per-instance limiting. A failed
-//! sync hands its deltas back with `restore`, and `enter_fallback` drops the
-//! others' half entirely when the store is unreachable. `apply_sync` also
-//! divides the remaining headroom into a fair share per instance, so N
-//! instances do not each admit the whole limit between two syncs; a view the
-//! store stops refreshing expires after the previous minute and the shares go
-//! back to unlimited.
+//! instances, from the last sync). `pending_sync` hands a store the dirty
+//! scopes' absolute own counts and `apply_sync` writes the others' half back;
+//! without a store others stays 0, which is exactly per-instance limiting.
+//! `mark_synced` clears the dirty flag only when no count raced with the
+//! write, and `enter_fallback` drops the others' half entirely when the store
+//! is unreachable. `apply_sync` also divides the remaining headroom into a
+//! fair share per instance, so N instances do not each admit the whole limit
+//! between two syncs; a view the store stops refreshing expires after the
+//! previous minute and the shares go back to unlimited.
 //!
 //! State lives in `Runtime` for the life of the process and is keyed by scope
 //! id, so snapshot swaps keep it; limits are read from the caller's compiled
@@ -28,9 +28,12 @@
 //! A key's scopes are acquired all-or-nothing: if one rejects, everything
 //! already taken for that request is given back.
 
-use std::sync::{
-    atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering},
-    Arc, Mutex,
+use std::{
+    sync::{
+        atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
 };
 
 use lumewarp_proto::config::v1::RateLimit;
@@ -118,25 +121,6 @@ impl Sliding {
     }
 }
 
-/// Unsynced own counts for the current and the previous minute. Counts from
-/// an older minute are dropped: they no longer take part in any estimate.
-#[derive(Default)]
-struct DeltaWindow {
-    cur: i64,
-    prev: i64,
-}
-
-impl DeltaWindow {
-    fn advance(&mut self, consecutive: bool) {
-        self.prev = if consecutive { self.cur } else { 0 };
-        self.cur = 0;
-    }
-
-    fn is_zero(&self) -> bool {
-        self.cur == 0 && self.prev == 0
-    }
-}
-
 /// The counters an admit needs to see together. One short lock per scope
 /// keeps the own and others windows consistent; a packed atomic count would
 /// cap tpm at 32 bits per minute.
@@ -151,10 +135,22 @@ struct Counters {
     /// The other instances' counts, as of the last sync.
     others_rpm: Sliding,
     others_tpm: Sliding,
-    /// Counts taken here but not pushed to the store yet, per minute so a
-    /// late sync or an outage cannot move them into the wrong window.
-    rpm_delta: DeltaWindow,
-    tpm_delta: DeltaWindow,
+    /// Counters changed since the last successful sync. `write_gen` moves on
+    /// every change and a sync batch captures it; `mark_synced` only clears
+    /// the dirty state when no change raced with the write. Absolute counts
+    /// make a retried write idempotent, so there is no delta to restore.
+    write_gen: u64,
+    synced_gen: u64,
+    /// When this scope's Redis key TTLs were last refreshed (Unix ms). Only a
+    /// successful sync updates it.
+    ttl_refreshed_ms: u64,
+    /// When the scope was last included in a batch (Unix ms). Clean read-only
+    /// scopes are refreshed every fifth interval, not every sync.
+    last_read_ms: u64,
+    /// The largest instance count the last view reported. A scope with more
+    /// than one instance is read every interval; a lone instance can use the
+    /// slower read-only cadence.
+    instances: u32,
     /// Limits last seen in a caller's policy. `apply_sync` divides their
     /// headroom without waiting for the next request to arrive.
     rpm_limit: u32,
@@ -174,8 +170,11 @@ impl Default for Counters {
             tpm: Sliding::default(),
             others_rpm: Sliding::default(),
             others_tpm: Sliding::default(),
-            rpm_delta: DeltaWindow::default(),
-            tpm_delta: DeltaWindow::default(),
+            write_gen: 0,
+            synced_gen: 0,
+            ttl_refreshed_ms: 0,
+            last_read_ms: 0,
+            instances: 0,
             rpm_limit: 0,
             tpm_limit: 0,
             parallel_limit: 0,
@@ -197,8 +196,6 @@ impl Counters {
             self.tpm.advance(consecutive);
             self.others_rpm.advance(consecutive);
             self.others_tpm.advance(consecutive);
-            self.rpm_delta.advance(consecutive);
-            self.tpm_delta.advance(consecutive);
             self.minute = minute;
         }
         if self.view_minute != 0 && self.view_minute < self.minute.saturating_sub(1) {
@@ -206,6 +203,7 @@ impl Counters {
             self.others_rpm = Sliding::default();
             self.others_tpm = Sliding::default();
             self.share_rpm = UNLIMITED;
+            self.instances = 0;
             return true;
         }
         false
@@ -217,35 +215,23 @@ impl Counters {
         self.others_rpm = Sliding::default();
         self.others_tpm = Sliding::default();
         self.share_rpm = UNLIMITED;
+        self.instances = 0;
     }
 
-    /// Puts a delta handed back by a failed sync into the window it belongs
-    /// to. A delta older than the previous minute is dropped: it cannot
-    /// change an estimate any more.
-    fn restore(&mut self, delta: &ScopeDelta) {
-        let rpm_prev = delta.rpm_prev;
-        let rpm_cur = delta.rpm_cur;
-        let tpm_prev = delta.tpm_prev;
-        let tpm_cur = delta.tpm_cur;
-        if delta.minute == self.minute {
-            self.rpm_delta.prev = self.rpm_delta.prev.saturating_add(rpm_prev);
-            self.rpm_delta.cur = self.rpm_delta.cur.saturating_add(rpm_cur);
-            self.tpm_delta.prev = self.tpm_delta.prev.saturating_add(tpm_prev);
-            self.tpm_delta.cur = self.tpm_delta.cur.saturating_add(tpm_cur);
-        } else if delta.minute.saturating_add(1) == self.minute {
-            self.rpm_delta.prev = self.rpm_delta.prev.saturating_add(rpm_cur);
-            self.tpm_delta.prev = self.tpm_delta.prev.saturating_add(tpm_cur);
-        } else if delta.minute > self.minute {
-            // The clock moved back between the sync and its failure. Keep the
-            // counts in the current window rather than lose them.
-            self.rpm_delta.cur = self
-                .rpm_delta
-                .cur
-                .saturating_add(rpm_prev.saturating_add(rpm_cur));
-            self.tpm_delta.cur = self
-                .tpm_delta
-                .cur
-                .saturating_add(tpm_prev.saturating_add(tpm_cur));
+    /// A local count changed: the next successful sync must write it.
+    fn touch(&mut self) {
+        self.write_gen = self.write_gen.wrapping_add(1);
+    }
+
+    fn dirty(&self) -> bool {
+        self.write_gen != self.synced_gen
+    }
+
+    /// A sync wrote the absolute counts captured at `generation`; a count
+    /// admitted while it was in flight moved `write_gen` on and stays dirty.
+    fn mark_synced(&mut self, generation: u64) {
+        if self.write_gen == generation {
+            self.synced_gen = generation;
         }
     }
 
@@ -297,6 +283,10 @@ impl Counters {
             u64::from(self.rpm_limit),
             view.rpm_instances,
         );
+        self.instances = view
+            .rpm_instances
+            .max(view.tpm_instances)
+            .max(view.in_flight_instances);
         let in_flight = u64::from(own_parallel) + u64::from(view.in_flight);
         let headroom = u64::from(self.parallel_limit).saturating_sub(in_flight);
         if self.parallel_limit == 0 || view.in_flight_instances <= 1 {
@@ -325,10 +315,13 @@ fn uniform_share(headroom: u64, instances: u32) -> i64 {
 }
 
 /// Sliding-window estimate in whole counts: the previous minute is weighted
-/// by how much of it is still inside the one-minute window.
+/// by how much of it is still inside the one-minute window. The weighted part
+/// rounds up, so a previous count never stops counting before the window has
+/// really slid past it (rpm 1 must not admit a second request 1 ms after the
+/// minute boundary).
 fn estimate(prev: u64, cur: u64, elapsed_ms: u64) -> u128 {
     let permille = u128::from(elapsed_ms) * 1000 / 60_000;
-    u128::from(prev) * (1000 - permille) / 1000 + u128::from(cur)
+    (u128::from(prev) * (1000 - permille)).div_ceil(1000) + u128::from(cur)
 }
 
 fn fair_share(prev: u64, cur: u64, elapsed_ms: u64, limit: u64, instances: u32) -> i64 {
@@ -359,7 +352,7 @@ fn retry_after_secs(prev: u64, cur: u64, limit: u64, elapsed_ms: u64) -> u64 {
     u64::try_from(ms.div_ceil(1000)).unwrap_or(60).clamp(1, 60)
 }
 
-/// Milliseconds until `prev * (1000 - f) / 1000 + cur < limit` first holds,
+/// Milliseconds until `ceil(prev * (1000 - f) / 1000) + cur < limit` first holds,
 /// if it holds before this minute ends (f = elapsed / 60 per mille).
 fn ms_until_below(prev: u128, cur: u128, limit: u128, elapsed_ms: u128) -> Option<u128> {
     if cur >= limit {
@@ -368,10 +361,11 @@ fn ms_until_below(prev: u128, cur: u128, limit: u128, elapsed_ms: u128) -> Optio
     if prev == 0 {
         return Some(0);
     }
-    // floor(prev * k / 1000) < limit - cur exactly when prev * k < room, for
-    // k = 1000 - f. The largest k that fits gives the smallest f.
-    let room = (limit - cur) * 1000;
-    let max_k = (room - 1) / prev;
+    // ceil(prev * k / 1000) < limit - cur exactly when
+    // prev * k <= (limit - cur - 1) * 1000, for k = 1000 - f. The largest k
+    // that fits gives the smallest f.
+    let room = (limit - cur - 1) * 1000;
+    let max_k = room / prev;
     if max_k >= 1000 {
         return Some(0);
     }
@@ -471,25 +465,30 @@ impl ScopeState {
 
     /// Gives back one rpm count taken for a request that is rolled back. The
     /// count may have moved to the previous window if the minute rolled in
-    /// between; the delta of the minute it was taken in is reduced either
-    /// way, so the store stays consistent. A count older than the previous
-    /// minute has no window and no delta left to give back.
+    /// between; the next sync rewrites the absolute counts of both windows.
+    /// A count older than the previous minute has no local window left, so
+    /// there is nothing to correct.
     fn refund_rpm(&self, now_minute: u64, taken_minute: u64, share: bool) {
         let mut counters = self.counters.lock().unwrap();
         self.roll(&mut counters, now_minute);
-        if taken_minute == counters.minute {
+        let changed = if taken_minute == counters.minute {
             counters.rpm.cur = counters.rpm.cur.saturating_sub(1);
-            counters.rpm_delta.cur = counters.rpm_delta.cur.saturating_sub(1);
+            true
         } else if taken_minute.saturating_add(1) == counters.minute {
             counters.rpm.prev = counters.rpm.prev.saturating_sub(1);
-            counters.rpm_delta.prev = counters.rpm_delta.prev.saturating_sub(1);
+            true
+        } else {
+            false
+        };
+        if changed {
+            counters.touch();
         }
         if share && counters.share_rpm != UNLIMITED {
             counters.share_rpm = counters.share_rpm.saturating_add(1);
         }
     }
 
-    /// Nothing here is worth keeping: no live permit, no unsynced delta, no
+    /// Nothing here is worth keeping: no live permit, no dirty counters, no
     /// count in the current or previous window.
     fn idle(&self, minute: u64) -> bool {
         if self.parallel.load(Ordering::Relaxed) != 0 {
@@ -497,7 +496,7 @@ impl ScopeState {
         }
         let mut counters = self.counters.lock().unwrap();
         self.roll(&mut counters, minute);
-        if !counters.rpm_delta.is_zero() || !counters.tpm_delta.is_zero() {
+        if counters.dirty() {
             return false;
         }
         counters.rpm.cur == 0
@@ -511,21 +510,32 @@ impl ScopeState {
     }
 }
 
-/// The counts one scope owes the shared store, and its own in-flight count.
-/// Each delta belongs to the minute its count was taken in, so a late sync
-/// (or a sync replayed after an outage) cannot move counts into a window
-/// where they would carry the wrong weight.
+/// One scope's absolute own counts and in-flight count for the shared store.
+/// The store overwrites its own field with the counts, so resending a batch
+/// (or a sync whose reply was lost) can never double-count. `write` says the
+/// counters changed since the last successful sync; read-only entries exist
+/// only to refresh the view of the others' half. `refresh_ttl` asks the
+/// store to extend the key TTLs, at most every five seconds per scope.
 #[cfg_attr(not(test), allow(dead_code))] // The Redis sync task is the first user.
 #[derive(Debug, Clone)]
-pub struct ScopeDelta {
+pub struct ScopeCounts {
     pub id: Arc<str>,
-    /// The current wall-clock minute; the `prev` deltas are for `minute - 1`.
+    /// The current wall-clock minute; the `prev` fields are for `minute - 1`.
     pub minute: u64,
-    pub rpm_prev: i64,
-    pub rpm_cur: i64,
-    pub tpm_prev: i64,
-    pub tpm_cur: i64,
+    pub rpm_prev: u64,
+    pub rpm_cur: u64,
+    pub tpm_prev: u64,
+    pub tpm_cur: u64,
+    /// The scope has a limit in this dimension. The store skips reading and
+    /// writing the other one; its local counts are always zero there.
+    pub rpm: bool,
+    pub tpm: bool,
     pub in_flight: u32,
+    pub write: bool,
+    pub refresh_ttl: bool,
+    /// The dirty generation captured with the counts; `mark_synced` uses it
+    /// to avoid clearing a change that raced with the write.
+    pub generation: u64,
 }
 
 /// One scope's view from the shared store: the other instances' counts for
@@ -753,7 +763,7 @@ impl Registry {
                     }
                 }
                 counters.rpm.cur = counters.rpm.cur.saturating_add(1);
-                counters.rpm_delta.cur = counters.rpm_delta.cur.saturating_add(1);
+                counters.touch();
                 rpm_taken = true;
             }
             let taken_minute = counters.minute;
@@ -811,8 +821,7 @@ impl Registry {
             }
             counters.tpm_limit = limit.tokens_per_minute;
             counters.tpm.cur = counters.tpm.cur.saturating_add(tokens);
-            let delta = i64::try_from(tokens).unwrap_or(i64::MAX);
-            counters.tpm_delta.cur = counters.tpm_delta.cur.saturating_add(delta);
+            counters.touch();
         }
     }
 
@@ -863,7 +872,7 @@ impl Registry {
                 });
             };
             counters.rpm.cur = counters.rpm.cur.saturating_add(1);
-            counters.rpm_delta.cur = counters.rpm_delta.cur.saturating_add(1);
+            counters.touch();
             let taken_minute = counters.minute;
             drop(counters);
             charged.push(Taken {
@@ -878,20 +887,34 @@ impl Registry {
         Ok(())
     }
 
-    /// Hands the unsynced counts of every scope with local activity to the
-    /// caller and resets them, leaving increments made during the call for
-    /// the next one. Deltas carry both the current and the previous minute so
-    /// a late sync keeps each count in the window where it was taken.
+    /// The scopes this sync must touch: counters that changed since the last
+    /// successful sync (written as absolute counts), scopes with a live
+    /// in-flight gauge, and read-only entries for scopes whose view of the
+    /// others' half or finite share still needs refreshing.
     ///
-    /// A scope with a finite share or a non-zero others' half is reported
-    /// even without own traffic: the store has to keep returning a view for
-    /// it, otherwise `apply_sync` would never rewrite the share and a scope
-    /// whose own counts aged out would reject forever. A scope whose limits
-    /// are not known yet is skipped; there is nothing to divide or enforce.
+    /// Dirty, in-flight, finite-share and multi-instance scopes are read every
+    /// interval. A clean scope with only local counts, no share and one
+    /// instance is read every fifth interval: fewer reads keep a large number
+    /// of recently used keys from loading Redis, at the cost of noticing a
+    /// joining instance within five intervals instead of one.
+    ///
+    /// A scope whose limits are not known yet is skipped; there is nothing
+    /// to divide or enforce.
+    #[cfg(test)]
+    pub fn pending_sync(&self) -> Vec<ScopeCounts> {
+        self.pending_sync_interval(Duration::ZERO)
+    }
+
+    /// `read_interval` is the task's current sync interval; the clean
+    /// read-only cadence is five of them.
     #[cfg_attr(not(test), allow(dead_code))] // The Redis sync task is the first user.
-    pub fn pending_sync(&self) -> Vec<ScopeDelta> {
-        let (minute, _) = self.now();
-        let mut deltas = Vec::new();
+    pub fn pending_sync_interval(&self, read_interval: Duration) -> Vec<ScopeCounts> {
+        let ms = u64::try_from(self.clock.now_ms()).unwrap_or(0);
+        let minute = minute_of(ms as i64);
+        let read_every = u64::try_from(read_interval.as_millis())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(5);
+        let mut batch = Vec::new();
         for (id, state) in self.scopes.pin().iter() {
             let mut counters = state.counters.lock().unwrap();
             state.roll(&mut counters, minute);
@@ -899,36 +922,84 @@ impl Registry {
                 continue;
             }
             let in_flight = state.parallel.load(Ordering::Relaxed);
-            let active = in_flight != 0
-                || counters.share_rpm != UNLIMITED
-                || state.share_parallel.load(Ordering::Relaxed) != UNLIMITED
-                || state.others_parallel.load(Ordering::Relaxed) != 0
-                || !counters.rpm_delta.is_zero()
-                || !counters.tpm_delta.is_zero()
-                || counters.rpm.cur != 0
+            let write = counters.dirty();
+            // Own counts keep a clean scope read-only rather than silent: it
+            // must still notice the other instances bound to the same scope.
+            let view = counters.rpm.cur != 0
                 || counters.rpm.prev != 0
                 || counters.tpm.cur != 0
                 || counters.tpm.prev != 0
+                || counters.share_rpm != UNLIMITED
+                || state.share_parallel.load(Ordering::Relaxed) != UNLIMITED
+                || state.others_parallel.load(Ordering::Relaxed) != 0
                 || counters.others_rpm.cur != 0
                 || counters.others_rpm.prev != 0
                 || counters.others_tpm.cur != 0
-                || counters.others_tpm.prev != 0;
-            if !active {
+                || counters.others_tpm.prev != 0
+                || counters.instances > 1;
+            if !write && !view && in_flight == 0 {
                 continue;
             }
-            let rpm = std::mem::take(&mut counters.rpm_delta);
-            let tpm = std::mem::take(&mut counters.tpm_delta);
-            deltas.push(ScopeDelta {
+            let read_only = !write
+                && in_flight == 0
+                && counters.share_rpm == UNLIMITED
+                && state.share_parallel.load(Ordering::Relaxed) == UNLIMITED
+                && counters.others_rpm.cur == 0
+                && counters.others_rpm.prev == 0
+                && counters.others_tpm.cur == 0
+                && counters.others_tpm.prev == 0
+                && counters.instances <= 1;
+            if read_only && read_every != 0 && ms.saturating_sub(counters.last_read_ms) < read_every
+            {
+                continue;
+            }
+            // The value is only a request; `mark_synced` records it once the
+            // write actually succeeded, so a failed sync cannot swallow the
+            // next refresh.
+            let refresh_ttl = ms.saturating_sub(counters.ttl_refreshed_ms) >= 5_000;
+            batch.push(ScopeCounts {
                 id: id.clone(),
                 minute: counters.minute,
-                rpm_prev: rpm.prev,
-                rpm_cur: rpm.cur,
-                tpm_prev: tpm.prev,
-                tpm_cur: tpm.cur,
+                rpm_prev: counters.rpm.prev,
+                rpm_cur: counters.rpm.cur,
+                tpm_prev: counters.tpm.prev,
+                tpm_cur: counters.tpm.cur,
+                rpm: counters.rpm_limit != 0,
+                tpm: counters.tpm_limit != 0,
                 in_flight,
+                write,
+                refresh_ttl,
+                generation: counters.write_gen,
             });
         }
-        deltas
+        batch
+    }
+
+    /// Records what a successful batch actually did: clear the dirty
+    /// generation, move the TTL refresh timestamp, and count the scope as
+    /// read. A count admitted while the sync was in flight moved the
+    /// generation on, so the scope stays dirty and the next sync writes the
+    /// new absolute value.
+    #[cfg_attr(not(test), allow(dead_code))] // The Redis sync task is the first user.
+    pub fn mark_synced(&self, batch: &[ScopeCounts]) {
+        let ms = u64::try_from(self.clock.now_ms()).unwrap_or(0);
+        for counts in batch {
+            let Some(state) = self.scopes.pin().get(&*counts.id).cloned() else {
+                continue;
+            };
+            let mut counters = state.counters.lock().unwrap();
+            if counts.write {
+                counters.mark_synced(counts.generation);
+            }
+            // The script extends the TTL on every created field and when the
+            // batch asks for the periodic refresh.
+            counters.ttl_refreshed_ms = if counts.refresh_ttl {
+                ms
+            } else {
+                counters.ttl_refreshed_ms
+            };
+            counters.last_read_ms = ms;
+        }
     }
 
     /// Stores one sync's view of the other instances per scope and redivides
@@ -964,8 +1035,8 @@ impl Registry {
 
     /// Drops every others' count and every fair share: the store has been
     /// unreachable long enough that this process counts locally only, as the
-    /// design's fallback requires. Own counts and deltas are kept, so they
-    /// are still pushed when the store comes back.
+    /// design's fallback requires. Own counts and dirty state are kept, so
+    /// they are still written when the store comes back.
     #[cfg_attr(not(test), allow(dead_code))] // The Redis sync task is the first user.
     pub fn enter_fallback(&self) {
         let minute = self.minute_now();
@@ -978,29 +1049,14 @@ impl Registry {
         }
     }
 
-    /// Puts deltas from a sync that failed back into their windows. A delta
-    /// from a minute older than the previous one is dropped: its window no
-    /// longer takes part in any estimate, so pushing it later would only
-    /// shift the count into a minute where it was not taken.
-    #[cfg_attr(not(test), allow(dead_code))] // The Redis sync task is the first user.
-    pub fn restore(&self, deltas: &[ScopeDelta]) {
-        let minute = self.minute_now();
-        for delta in deltas {
-            let state = self.state(&delta.id);
-            let mut counters = state.counters.lock().unwrap();
-            state.roll(&mut counters, minute);
-            counters.restore(delta);
-        }
-    }
-
     /// Drops entries that hold no state worth keeping: no live permits, no
-    /// unsynced delta and no counts in the current or previous window. An
+    /// dirty counters and no counts in the current or previous window. An
     /// entry referenced by a `Permit` (or an in-progress admit) is never
     /// removed.
     ///
     /// `retain` can remove an idle entry between the `get` and the clone in
     /// `state`: the request that won that race counts into an orphaned entry
-    /// whose delta is never synced and whose permit releases into the orphan.
+    /// whose count is never written and whose permit releases into the orphan.
     /// The lost count is one request, and only for an entry that was already
     /// idle, so it is accepted rather than serializing every admit behind
     /// prune.
@@ -1113,13 +1169,31 @@ mod tests {
         }
         let limited = registry.admit(&key).err().unwrap();
         assert_eq!(limited.retry_after_secs, 60, "a full minute must pass");
-        // The burst counts fully for one more minute, then decays evenly:
-        // one slot is back after 60 ms.
+        // The burst then decays evenly: one slot is back every 12 s (rpm 5),
+        // and not a millisecond earlier.
         set(&now, BASE_MINUTE + 1, 0);
-        assert_eq!(registry.admit(&key).err().unwrap().retry_after_secs, 1);
-        set(&now, BASE_MINUTE + 1, 60);
+        assert_eq!(registry.admit(&key).err().unwrap().retry_after_secs, 12);
+        set(&now, BASE_MINUTE + 1, 11_999);
+        assert!(registry.admit(&key).is_err());
+        set(&now, BASE_MINUTE + 1, 12_000);
         drop(registry.admit(&key).unwrap());
         assert!(registry.admit(&key).is_err());
+    }
+
+    #[test]
+    fn rpm_one_holds_across_the_minute_boundary() {
+        let (registry, now) = registry_at(BASE_MINUTE, 59_999);
+        let key = caller(&[("key:a", limit(1, 0, 0))]);
+        drop(registry.admit(&key).unwrap());
+        set(&now, BASE_MINUTE + 1, 1);
+        assert!(
+            registry.admit(&key).is_err(),
+            "1 ms later the request still counts"
+        );
+        set(&now, BASE_MINUTE + 1, 59_999);
+        assert!(registry.admit(&key).is_err());
+        set(&now, BASE_MINUTE + 2, 0);
+        drop(registry.admit(&key).unwrap());
     }
 
     #[test]
@@ -1161,11 +1235,14 @@ mod tests {
         let limited = registry.admit(&key).err().unwrap();
         assert_eq!(limited.retry_after_secs, 60);
         // Next minute the whole 120 is the previous window: rejected at the
-        // boundary, and under the limit once 167 per mille has elapsed.
+        // boundary, and under the limit once 175 per mille has elapsed
+        // (ceil(120 * 825 / 1000) = 99).
         set(&now, BASE_MINUTE + 1, 0);
         let limited = registry.admit(&key).err().unwrap();
         assert_eq!(limited.retry_after_secs, 11);
-        set(&now, BASE_MINUTE + 1, 10_020);
+        set(&now, BASE_MINUTE + 1, 10_440);
+        assert!(registry.admit(&key).is_err());
+        set(&now, BASE_MINUTE + 1, 10_500);
         drop(registry.admit(&key).unwrap());
         // Two minutes later nothing is left.
         set(&now, BASE_MINUTE + 3, 0);
@@ -1279,9 +1356,10 @@ mod tests {
         }
         assert!(scopes.get("idle").is_none(), "idle dropped");
         drop(scopes);
-        // Clear the unsynced deltas, then two minutes later the old counts
-        // have aged out too and only the live permit keeps its entry.
-        registry.pending_sync();
+        // Marking the counts synced then two minutes later lets the old
+        // counts age out; only the live permit keeps its entry.
+        let batch = registry.pending_sync();
+        registry.mark_synced(&batch);
         set(&now, BASE_MINUTE + 2, 0);
         registry.prune();
         let scopes = registry.scopes.pin();
@@ -1289,26 +1367,24 @@ mod tests {
         assert!(scopes.get("tokens").is_none());
         assert!(scopes.get("held").is_some(), "live permit kept");
         drop(scopes);
-        // A delta left by a refund keeps an entry alive even after its count
-        // is gone and the window rolled.
+        // A dirty scope keeps its entry even after its counts age out: the
+        // store may still hold the old absolute value and must be rewritten.
         drop(
             registry
-                .admit(&caller(&[("delta", limit(1, 0, 0))]))
+                .admit(&caller(&[("dirty", limit(1, 0, 0))]))
                 .unwrap(),
         );
-        registry.pending_sync();
-        set(&now, BASE_MINUTE + 3, 0);
-        registry
-            .state(&"delta".into())
-            .refund_rpm(BASE_MINUTE + 3, BASE_MINUTE + 2, false);
+        set(&now, BASE_MINUTE + 4, 0);
         registry.prune();
         assert!(
-            registry.scopes.pin().get("delta").is_some(),
-            "unsynced delta"
+            registry.scopes.pin().get("dirty").is_some(),
+            "dirty counters kept"
         );
-        assert_eq!(registry.pending_sync().len(), 2, "held plus delta");
+        let batch = registry.pending_sync();
+        assert_eq!(batch.len(), 2, "held plus dirty");
+        registry.mark_synced(&batch);
         registry.prune();
-        assert!(registry.scopes.pin().get("delta").is_none());
+        assert!(registry.scopes.pin().get("dirty").is_none());
         drop(held);
         registry.prune();
         assert!(registry.scopes.pin().get("held").is_none());
@@ -1353,32 +1429,73 @@ mod tests {
     }
 
     #[test]
-    fn pending_sync_returns_and_resets_deltas() {
+    fn pending_sync_writes_absolute_counts_only_when_dirty() {
         let (registry, now) = registry_at(BASE_MINUTE, 0);
         let key = caller(&[("s", limit(10, 100, 0))]);
         drop(registry.admit(&key).unwrap());
         drop(registry.admit(&key).unwrap());
         registry.charge_tokens(&key, 30);
-        let deltas = registry.pending_sync();
-        assert_eq!(deltas.len(), 1);
-        assert_eq!(&*deltas[0].id, "s");
-        assert_eq!(deltas[0].minute, BASE_MINUTE);
-        assert_eq!((deltas[0].rpm_prev, deltas[0].rpm_cur), (0, 2));
-        assert_eq!((deltas[0].tpm_prev, deltas[0].tpm_cur), (0, 30));
-        assert_eq!(deltas[0].in_flight, 0);
-        // The deltas are handed over once; the window keeps the counts.
-        let again = registry.pending_sync();
-        assert_eq!(again.len(), 1);
-        assert_eq!((again[0].rpm_prev, again[0].rpm_cur), (0, 0));
-        assert_eq!((again[0].tpm_prev, again[0].tpm_cur), (0, 0));
-        // A charge from the minute that just ended belongs to `prev`, not to
-        // the minute the sync happens to run in.
-        registry.charge_tokens(&key, 5);
+        let batch = registry.pending_sync();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(&*batch[0].id, "s");
+        assert_eq!(batch[0].minute, BASE_MINUTE);
+        assert_eq!((batch[0].rpm_prev, batch[0].rpm_cur), (0, 2));
+        assert_eq!((batch[0].tpm_prev, batch[0].tpm_cur), (0, 30));
+        assert_eq!(batch[0].in_flight, 0);
+        assert!(batch[0].write);
+        assert!(batch[0].refresh_ttl);
+        registry.mark_synced(&batch);
+
+        // The scope stays read-only while its counts are in the window, so a
+        // second instance joining is noticed; nothing is written again.
+        let clean = registry.pending_sync();
+        assert_eq!(clean.len(), 1);
+        assert!(!clean[0].write);
+        assert!(!clean[0].refresh_ttl, "TTL refreshed less than 5 s ago");
+        assert_eq!(clean[0].rpm_cur, 2);
+
+        // A new admit changes one absolute count.
+        drop(registry.admit(&key).unwrap());
+        let batch = registry.pending_sync();
+        assert!(batch[0].write);
+        assert_eq!(batch[0].rpm_cur, 3);
+        registry.mark_synced(&batch);
+
+        // After the minute rolls, both windows are read as they are.
         set(&now, BASE_MINUTE + 1, 0);
-        let deltas = registry.pending_sync();
-        assert_eq!(deltas[0].minute, BASE_MINUTE + 1);
-        assert_eq!((deltas[0].rpm_prev, deltas[0].rpm_cur), (0, 0));
-        assert_eq!((deltas[0].tpm_prev, deltas[0].tpm_cur), (5, 0));
+        let batch = registry.pending_sync();
+        assert_eq!(batch[0].minute, BASE_MINUTE + 1);
+        assert_eq!((batch[0].rpm_prev, batch[0].rpm_cur), (3, 0));
+        assert_eq!((batch[0].tpm_prev, batch[0].tpm_cur), (30, 0));
+        assert!(!batch[0].write);
+        // Five seconds after the last refresh the TTL is due again.
+        set(&now, BASE_MINUTE + 1, 5_000);
+        assert!(registry.pending_sync()[0].refresh_ttl);
+    }
+
+    #[test]
+    fn read_only_scopes_refresh_every_fifth_interval() {
+        let (registry, now) = registry_at(BASE_MINUTE, 0);
+        let key = caller(&[("s", limit(10, 0, 0))]);
+        drop(registry.admit(&key).unwrap());
+        let batch = registry.pending_sync_interval(Duration::from_millis(100));
+        assert_eq!(batch.len(), 1);
+        assert!(batch[0].write);
+        registry.mark_synced(&batch);
+
+        // The scope is clean and read-only: not due again for five intervals.
+        assert!(registry
+            .pending_sync_interval(Duration::from_millis(100))
+            .is_empty());
+        now.fetch_add(499, Ordering::Relaxed);
+        assert!(registry
+            .pending_sync_interval(Duration::from_millis(100))
+            .is_empty());
+        now.fetch_add(2, Ordering::Relaxed);
+        let due = registry.pending_sync_interval(Duration::from_millis(100));
+        assert_eq!(due.len(), 1);
+        assert!(!due[0].write);
+        assert_eq!(due[0].rpm_cur, 1);
     }
 
     #[test]
@@ -1409,12 +1526,12 @@ mod tests {
         others.in_flight_instances = 2;
         registry.apply_sync(&[others]);
         assert!(registry.admit(&key).is_err(), "the share is zero");
-        // No own counts or deltas exist, but the finite share and the others'
-        // half keep the scope in the sync, so a fresh view can still arrive.
-        let deltas = registry.pending_sync();
-        assert_eq!(deltas.len(), 1);
-        assert_eq!(&*deltas[0].id, "s");
-        assert_eq!((deltas[0].rpm_prev, deltas[0].rpm_cur), (0, 0));
+        // No own counts or dirty state exist, but the finite share and the
+        // others' half keep the scope in the sync, so a fresh view can arrive.
+        let batch = registry.pending_sync();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(&*batch[0].id, "s");
+        assert_eq!((batch[0].rpm_prev, batch[0].rpm_cur), (0, 0));
         // One minute later the view is still valid, so the scope must keep
         // being reported even though its own count is now in the previous
         // window and its share is still zero.
@@ -1436,9 +1553,9 @@ mod tests {
         let mut others = view("p", BASE_MINUTE);
         others.in_flight_instances = 2;
         registry.apply_sync(&[others]);
-        let deltas = registry.pending_sync();
-        assert_eq!(deltas.len(), 1);
-        assert_eq!(deltas[0].in_flight, 0);
+        let batch = registry.pending_sync();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].in_flight, 0);
         assert_eq!(state.share_parallel.load(Ordering::Relaxed), 4);
     }
 
@@ -1509,35 +1626,19 @@ mod tests {
     }
 
     #[test]
-    fn restore_keeps_the_minute_of_each_delta() {
-        let (registry, now) = registry_at(BASE_MINUTE, 0);
-        let key = caller(&[("s", limit(10, 100, 0))]);
+    fn a_count_that_races_a_sync_stays_dirty() {
+        let (registry, _now) = registry_at(BASE_MINUTE, 0);
+        let key = caller(&[("s", limit(10, 0, 0))]);
         drop(registry.admit(&key).unwrap());
+        let batch = registry.pending_sync();
+        // A second admit lands while the first batch is in flight.
         drop(registry.admit(&key).unwrap());
-        registry.charge_tokens(&key, 30);
-        let sent = registry.pending_sync();
-        assert_eq!((sent[0].rpm_cur, sent[0].tpm_cur), (2, 30));
-        // A failed sync hands the deltas back unchanged.
-        registry.restore(&sent);
-        let again = registry.pending_sync();
-        assert_eq!((again[0].rpm_cur, again[0].tpm_cur), (2, 30));
-
-        // A delta from the minute that is now the previous one lands in prev.
-        registry.restore(&again);
-        let sent = registry.pending_sync();
-        set(&now, BASE_MINUTE + 1, 0);
-        registry.restore(&sent);
-        let restored = registry.pending_sync();
-        assert_eq!(restored[0].minute, BASE_MINUTE + 1);
-        assert_eq!((restored[0].rpm_prev, restored[0].rpm_cur), (2, 0));
-        assert_eq!((restored[0].tpm_prev, restored[0].tpm_cur), (30, 0));
-
-        // Anything older than the previous minute is dropped: it can no
-        // longer change an estimate.
-        let sent = registry.pending_sync();
-        set(&now, BASE_MINUTE + 3, 0);
-        registry.restore(&sent);
-        assert!(registry.pending_sync().is_empty());
+        registry.mark_synced(&batch);
+        let retry = registry.pending_sync();
+        assert!(retry[0].write, "the raced admit must still be written");
+        assert_eq!(retry[0].rpm_cur, 2);
+        registry.mark_synced(&retry);
+        assert!(!registry.pending_sync()[0].write);
     }
 
     #[test]
@@ -1549,9 +1650,10 @@ mod tests {
         set(&now, BASE_MINUTE + 1, 0);
         let state = registry.state(&"s".into());
         state.refund_rpm(BASE_MINUTE + 1, BASE_MINUTE, false);
-        let deltas = registry.pending_sync();
-        assert_eq!(deltas[0].minute, BASE_MINUTE + 1);
-        assert_eq!((deltas[0].rpm_prev, deltas[0].rpm_cur), (-1, 0));
+        let batch = registry.pending_sync();
+        assert_eq!(batch[0].minute, BASE_MINUTE + 1);
+        assert_eq!((batch[0].rpm_prev, batch[0].rpm_cur), (0, 0));
+        assert!(batch[0].write, "the corrected absolute count is rewritten");
         assert_eq!(
             state.counters.lock().unwrap().rpm.prev,
             0,
@@ -1560,14 +1662,14 @@ mod tests {
     }
 
     #[test]
-    fn pending_sync_keeps_concurrent_increments() {
+    fn absolute_writes_keep_concurrent_increments() {
         let (registry, _now) = registry_at(BASE_MINUTE, 0);
         let registry = Arc::new(registry);
         let key = caller(&[("s", limit(u32::MAX, 0, 0))]);
         let threads: u64 = 8;
         let per_thread: u64 = 5_000;
         let key_ref = &key;
-        let mut synced = 0i64;
+        let mut highest = 0u64;
         std::thread::scope(|scope| {
             let handles: Vec<_> = (0..threads)
                 .map(|_| {
@@ -1580,25 +1682,20 @@ mod tests {
                 })
                 .collect();
             while !handles.iter().all(|handle| handle.is_finished()) {
-                synced += registry
-                    .pending_sync()
-                    .iter()
-                    .map(|d| d.rpm_prev.saturating_add(d.rpm_cur))
-                    .sum::<i64>();
+                let batch = registry.pending_sync();
+                highest = highest.max(batch.iter().map(|d| d.rpm_cur).max().unwrap_or(0));
+                registry.mark_synced(&batch);
             }
             for handle in handles {
                 handle.join().unwrap();
             }
         });
-        synced += registry
-            .pending_sync()
-            .iter()
-            .map(|d| d.rpm_prev.saturating_add(d.rpm_cur))
-            .sum::<i64>();
-        let expected = i64::try_from(threads * per_thread).unwrap();
-        assert_eq!(synced, expected);
+        let batch = registry.pending_sync();
+        highest = highest.max(batch.iter().map(|d| d.rpm_cur).max().unwrap_or(0));
+        let expected = threads * per_thread;
+        assert_eq!(highest, expected, "the last write carried every count");
         let state = registry.state(&"s".into());
-        assert_eq!(state.counters.lock().unwrap().rpm.cur, threads * per_thread);
+        assert_eq!(state.counters.lock().unwrap().rpm.cur, expected);
     }
 
     #[test]
@@ -1775,8 +1872,8 @@ mod tests {
         }
     }
 
-    /// In-test store: each instance's deltas accumulate per minute, and a
-    /// view returns the other instances' totals and instance counts. Every
+    /// In-test store: each instance's absolute counts are stored per minute,
+    /// and a view returns the other instances' totals and instance counts. Every
     /// instance writes its in-flight field on each sync, even when zero, so
     /// the parallel `n` covers the live instances (the Redis hash keeps a
     /// field fresh for 3 s, which is 12 ticks here).
@@ -1788,23 +1885,26 @@ mod tests {
     }
 
     impl FakeStore {
-        fn push(&mut self, tick: u64, instance: usize, delta: &ScopeDelta, instances: usize) {
-            let id = delta.id.to_string();
-            let mut minutes = vec![(delta.minute, delta.rpm_cur, delta.tpm_cur)];
-            if delta.minute > 0 {
-                minutes.push((delta.minute - 1, delta.rpm_prev, delta.tpm_prev));
-            }
-            for (minute, rpm, tpm) in minutes {
-                for (counts, amount) in [(&mut self.rpm, rpm), (&mut self.tpm, tpm)] {
-                    let entry = counts
-                        .entry((id.clone(), minute))
-                        .or_insert_with(|| vec![0; instances]);
-                    entry.resize(instances, 0);
-                    entry[instance] += amount;
+        fn push(&mut self, tick: u64, instance: usize, counts: &ScopeCounts, instances: usize) {
+            let id = counts.id.to_string();
+            if counts.write {
+                // Absolute values: a resend overwrites, never adds.
+                let mut minutes = vec![(counts.minute, counts.rpm_cur, counts.tpm_cur)];
+                if counts.minute > 0 {
+                    minutes.push((counts.minute - 1, counts.rpm_prev, counts.tpm_prev));
+                }
+                for (minute, rpm, tpm) in minutes {
+                    for (per_scope, value) in [(&mut self.rpm, rpm), (&mut self.tpm, tpm)] {
+                        let entry = per_scope
+                            .entry((id.clone(), minute))
+                            .or_insert_with(|| vec![0; instances]);
+                        entry.resize(instances, 0);
+                        entry[instance] = i64::try_from(value).unwrap_or(i64::MAX);
+                    }
                 }
             }
             self.in_flight
-                .insert((id, instance), (delta.in_flight, tick));
+                .insert((id, instance), (counts.in_flight, tick));
         }
 
         fn counts(&self, id: &str, minute: u64, instances: usize, own: usize) -> (u64, u64, u32) {
@@ -1871,20 +1971,21 @@ mod tests {
         tick: u64,
     ) -> u64 {
         let minute = registries[0].minute_now();
-        // One batch round-trip: every instance pushes its deltas before any
-        // instance reads a view, like one pipelined store call.
-        let deltas: Vec<_> = registries
+        // One batch round-trip: every instance pushes its absolute counts
+        // before any instance reads a view, like one pipelined store call.
+        let batches: Vec<_> = registries
             .iter()
             .map(|registry| registry.pending_sync())
             .collect();
-        for (i, deltas) in deltas.iter().enumerate() {
-            for delta in deltas {
-                store.push(tick, i, delta, instances);
+        for (i, batch) in batches.iter().enumerate() {
+            for counts in batch {
+                store.push(tick, i, counts, instances);
             }
         }
         for (i, registry) in registries.iter().enumerate() {
             let view = store.view(id, i, instances, minute, tick);
             registry.apply_sync(&[view]);
+            registry.mark_synced(&batches[i]);
         }
         minute
     }

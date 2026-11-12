@@ -154,6 +154,17 @@ groups:
           summary: "Usage queue is near capacity"
           description: "Gateway {{ $labels.instance }} usage queue exceeds 80,000 events for 5 minutes."
           runbook: "Check CP ingestion throughput and connectivity; recover before the 100,000-event queue drops new events."
+      # Shared limits are per-process while Redis is unreachable; two minutes
+      # tolerates a Redis restart or a short network blip.
+      - alert: LumewarpSharedLimitsFallback
+        expr: "lumewarp_shared_limits_fallback == 1"
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway lost shared rate limits"
+          description: "Gateway {{ $labels.instance }} has counted rate limits per process for 2 minutes."
+          runbook: "Check Redis reachability, credentials and the shared-limits namespace; limits are per instance until a successful sync resumes."
       # Any compile failure over two minutes blocks configuration changes.
       - alert: LumewarpCPCompileFailures
         expr: "increase(lumewarp_cp_compile_failures_total[5m]) > 0"

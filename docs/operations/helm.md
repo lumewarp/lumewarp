@@ -187,7 +187,10 @@ the kubelet from a `secretKeyRef`, so the password never appears in a manifest.
 
 With `redis.auth.existingSecret` unset the chart creates the password Secret itself, once,
 with a random 32-character password, and reuses it on every upgrade (`lookup`). `helm
-template` has no cluster to ask and renders a new one each time. To supply your own password,
+template` has no cluster to ask and renders a new one each time. A password supplied through
+`redis.auth.existingSecret` (or `gateway.sharedLimits.redis.existingSecret`) must be
+URL-safe (no `@ : / % # ?`), because the chart interpolates it into the Redis URL. To supply
+your own password,
 set `redis.auth.existingSecret` and `existingSecretKey`: the value is the password alone,
 without a URL around it, and it must be URL-safe because the gateway receives it inside a
 `redis://` URL.

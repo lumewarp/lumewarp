@@ -48,6 +48,9 @@ pub struct StreamConfig {
     pub gateway_id: String,
     pub scope: String,
     pub state_dir: PathBuf,
+    /// `Some` when this instance shares its limiter through Redis; reported in
+    /// `Hello.shared_limits` for the Gateways page.
+    pub shared_limits_namespace: Option<String>,
 }
 
 /// The immutable startup plugin set as Hello reports it.
@@ -174,9 +177,14 @@ impl Client {
                 plugins: self.plugins.clone(),
                 plugin_abi: lumewarp_plugin_host::ABI,
                 instance_id: instance::instance_id().to_owned(),
-                // Shared limits arrive with the Redis sync task; until then every
-                // instance counts its limits itself.
-                shared_limits: Some(SharedLimits::default()),
+                shared_limits: Some(SharedLimits {
+                    enabled: self.config.shared_limits_namespace.is_some(),
+                    namespace: self
+                        .config
+                        .shared_limits_namespace
+                        .clone()
+                        .unwrap_or_default(),
+                }),
             })),
         })
         .await?;
@@ -537,6 +545,7 @@ mod tests {
                 gateway_id: "gw-catalog".into(),
                 scope: "scope-a".into(),
                 state_dir: dir.path().to_owned(),
+                shared_limits_namespace: None,
             };
             let handle = spawn(
                 config,
@@ -605,6 +614,47 @@ mod tests {
             assert_eq!(report.cards.len(), 1);
             assert_eq!(report.cards[0].agent_id, "id-a1");
             assert_eq!(report.cards[0].config_version, 1);
+            handle.abort();
+        }
+
+        #[tokio::test]
+        async fn hello_reports_the_shared_limits_namespace() {
+            let (addr, mut conns) = fake_cp().await;
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = Runtime::new();
+            let slot: server::Snapshot = Arc::new(arc_swap::ArcSwapOption::empty());
+            let config = StreamConfig {
+                url: format!("http://{addr}"),
+                token: "gw-token".into(),
+                gateway_id: "gw-shared".into(),
+                scope: "scope-a".into(),
+                state_dir: dir.path().to_owned(),
+                shared_limits_namespace: Some("team-ns".into()),
+            };
+            let handle = spawn(
+                config,
+                Snapshot {
+                    scope: "scope-a".into(),
+                    ..Default::default()
+                },
+                Vec::new(),
+                false,
+                slot,
+                runtime,
+            )
+            .unwrap();
+            let mut conn = tokio::time::timeout(Duration::from_secs(5), conns.recv())
+                .await
+                .unwrap()
+                .expect("fake control plane accepted no stream");
+            match conn.recv().await {
+                Msg::Hello(hello) => {
+                    let shared = hello.shared_limits.expect("shared limits in Hello");
+                    assert!(shared.enabled);
+                    assert_eq!(shared.namespace, "team-ns");
+                }
+                other => panic!("expected Hello, got {other:?}"),
+            }
             handle.abort();
         }
     }
