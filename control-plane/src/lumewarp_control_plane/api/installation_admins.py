@@ -68,6 +68,7 @@ async def list_installation_admins(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[InstallationAdminOut]:
+    """Requires an installation admin."""
     await authz.require(Action.INSTALLATION_ADMIN_MANAGE)
     stmt = (
         select(InstallationAdmin, User)

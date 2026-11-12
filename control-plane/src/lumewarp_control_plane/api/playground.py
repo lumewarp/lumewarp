@@ -125,6 +125,9 @@ def _usable(key: ApiKey) -> bool:
 
 @router.get("/playground", operation_id="getPlayground")
 async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDep) -> PlaygroundOut:
+    """The caller's usable keys and the `llm` names each may call, for the Admin UI Playground.
+    Requires a browser session; a personal access token answers 401.
+    """
     _session_only(authz)
     keys = []
     rows = await session.scalars(
@@ -167,10 +170,28 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
     )
 
 
-@router.post("/playground/v1/chat/completions", operation_id="playgroundChatCompletions")
+@router.post(
+    "/playground/v1/chat/completions",
+    operation_id="playgroundChatCompletions",
+    response_class=Response,
+    responses={
+        200: {
+            "description": "The gateway's response, passed through",
+            "content": {
+                "application/json": {"schema": {"type": "object"}},
+                "text/event-stream": {"schema": {"type": "string"}},
+            },
+        }
+    },
+)
 async def chat_completions(
     request: Request, authz: Authz, session: SessionDep, settings: SettingsDep
 ) -> Response:
+    """Forward a chat completion to the gateway as one of the caller's own keys, named by
+    its id in the `X-Lumewarp-Act-As` header. The body and the response, streamed or not, are the
+    gateway's `/v1/chat/completions`. Requires a browser session, accepts `llm` names only and
+    at most 1 MiB, and answers 503 `playground_disabled` when no gateway URL is configured.
+    """
     _session_only(authz)
     try:
         key_id = uuid.UUID(request.headers.get("x-lumewarp-act-as", ""))

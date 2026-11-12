@@ -15,12 +15,13 @@ from lumewarp_control_plane.errors import ApiError
 from lumewarp_control_plane.models import User, UserSession
 from lumewarp_control_plane.security import (
     LAST_USED_GRANULARITY,
+    SESSION_COOKIE_NAME,
     Principal,
     PrincipalKind,
     hash_secret,
 )
 
-COOKIE_NAME = "lumewarp_session"
+COOKIE_NAME = SESSION_COOKIE_NAME
 
 
 def csrf_token(token: str) -> str:

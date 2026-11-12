@@ -226,6 +226,11 @@ async def put_member(
     session: SessionDep,
     settings: SettingsDep,
 ) -> MemberOut:
+    """Add the user to the team, or replace their membership. Requires a team admin; granting or
+    taking away the `admin` role requires an org admin. PUT replaces the member's policy:
+    omitted fields go back to inheriting the team's defaults. Answers 201 when the membership
+    was created, and 409 `managed_externally` when the authorization backend owns memberships.
+    """
     return await _save_member(team_id, user_id, body, request, response, authz, session, settings)
 
 
@@ -244,6 +249,9 @@ async def create_member(
     session: SessionDep,
     settings: SettingsDep,
 ) -> MemberOut:
+    """Add a user by `user_id` or `email` (exactly one). Same rules as `PUT`, except that an
+    existing member answers 409 and an unknown email answers 404 `user_not_found`.
+    """
     return await _save_member(
         team_id,
         body.user_id,
@@ -348,6 +356,10 @@ async def update_member(
     session: SessionDep,
     settings: SettingsDep,
 ) -> MemberOut:
+    """Change a member's role or policy; omitted fields keep their stored value. Requires a team
+    admin, and an org admin when the `admin` role is granted or taken away. Answers 409
+    `managed_externally` when the authorization backend owns memberships.
+    """
     async with mutation(session):
         await lock_scope(session, settings)
         team = await get_team_or_404(session, authz, team_id)
@@ -410,6 +422,10 @@ async def delete_member(
     settings: SettingsDep,
     metrics: MetricsDep,
 ) -> Response:
+    """Remove a membership. Requires a team admin, and an org admin when the member is a team
+    admin. The user's keys in this team are suspended (`owner_removed`) unless an org or
+    installation role still lets them own keys here.
+    """
     async with mutation(session):
         await lock_scope(session, settings)
         team: Team = await get_team_or_404(session, authz, team_id)

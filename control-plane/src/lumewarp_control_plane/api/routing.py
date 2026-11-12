@@ -539,6 +539,7 @@ async def list_upstreams(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[UpstreamOut]:
+    """Requires an installation admin."""
     await authz.require(Action.ROUTING_READ)
     stmt = select(Upstream).order_by(Upstream.id)
     rows, next_cursor = await uuid_page(session, stmt, Upstream.id, limit, cursor)
@@ -559,6 +560,9 @@ async def create_upstream(
     session: SessionDep,
     settings: SettingsDep,
 ) -> UpstreamOut:
+    """Create an upstream, an OpenAI-compatible endpoint. Requires an installation admin. The API
+    key is stored encrypted or as an environment reference and is never returned.
+    """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         await lock_scope(session, settings)
@@ -600,6 +604,7 @@ async def create_upstream(
 async def get_upstream(
     upstream_id: uuid.UUID, authz: Authz, session: SessionDep, settings: SettingsDep
 ) -> UpstreamOut:
+    """Requires an installation admin."""
     await authz.require(Action.ROUTING_READ)
     row = await session.get(Upstream, upstream_id)
     if row is None:
@@ -681,6 +686,9 @@ async def update_upstream(
     session: SessionDep,
     settings: SettingsDep,
 ) -> UpstreamOut:
+    """Requires an installation admin. Changing the address or the credential clears the stored
+    health results of the upstream's models.
+    """
     await authz.require(Action.ROUTING_MANAGE)
     _non_null(body, "name", "kind", "base_url", "timeout_ms", "stream_usage_mode")
     async with mutation(session):
@@ -749,6 +757,7 @@ async def delete_upstream(
     session: SessionDep,
     settings: SettingsDep,
 ) -> Response:
+    """Requires an installation admin. Answers 409 while the upstream still has models."""
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         await lock_scope(session, settings)
@@ -782,6 +791,9 @@ async def list_catalog(
     cursor: str | None = None,
 ) -> Page[CatalogEntryOut]:
     # Names and kinds only: any authenticated caller needs them to pick a team allowlist.
+    """Every callable name with its kind (`model`, `alias` or `router`) and model type, for
+    pickers. Any signed-in caller may read it; it carries no upstream or price details.
+    """
     await authz.require(Action.CATALOG_READ)
     stmt = select(CatalogName).order_by(CatalogName.id)
     rows, next_cursor = await uuid_page(session, stmt, CatalogName.id, limit, cursor)
@@ -806,6 +818,7 @@ async def list_models(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[ModelOut]:
+    """Requires an installation admin."""
     await authz.require(Action.ROUTING_READ)
     stmt = select(Model).order_by(Model.name_id)
     rows, next_cursor = await uuid_page(session, stmt, Model.name_id, limit, cursor)
@@ -827,6 +840,9 @@ async def create_model(
     session: SessionDep,
     settings: SettingsDep,
 ) -> ModelOut:
+    """Create a model: one name served by one upstream model. Requires an installation admin. The
+    name shares one namespace with aliases and routers.
+    """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         await lock_scope(session, settings)
@@ -867,6 +883,7 @@ async def create_model(
 async def get_model(
     model_id: uuid.UUID, authz: Authz, session: SessionDep, settings: SettingsDep
 ) -> ModelOut:
+    """Requires an installation admin."""
     await authz.require(Action.ROUTING_READ)
     row = await session.get(Model, model_id)
     if row is None:
@@ -926,6 +943,11 @@ async def update_model(
     session: SessionDep,
     settings: SettingsDep,
 ) -> ModelOut:
+    """Requires an installation admin. A rename keeps every reference, since grants, aliases and
+    routers refer to the model by id; `keep_old_name_as_alias` also leaves the old name
+    callable. Changing `model_type` answers 409 `model_type_in_use` while a router uses the
+    model.
+    """
     await authz.require(Action.ROUTING_MANAGE)
     _non_null(body, "name", "upstream_id", "upstream_model", "model_type")
     async with mutation(session):
@@ -1037,6 +1059,9 @@ async def delete_model(
     session: SessionDep,
     settings: SettingsDep,
 ) -> Response:
+    """Requires an installation admin. Answers 409 naming the aliases and routers that still refer
+    to the model. Grants of the model are removed with it.
+    """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         await lock_scope(session, settings)
@@ -1081,6 +1106,7 @@ async def list_aliases(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[AliasOut]:
+    """Requires an installation admin."""
     await authz.require(Action.ROUTING_READ)
     stmt = select(Alias).order_by(Alias.name_id)
     rows, next_cursor = await uuid_page(session, stmt, Alias.name_id, limit, cursor)
@@ -1102,6 +1128,9 @@ async def create_alias(
     session: SessionDep,
     settings: SettingsDep,
 ) -> AliasOut:
+    """Create an alias: another name for a model or a router. Requires an installation admin. An
+    alias cannot point at another alias.
+    """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         await lock_scope(session, settings)
@@ -1125,6 +1154,7 @@ async def create_alias(
 
 @router.get("/aliases/{alias_id}", response_model=AliasOut, operation_id="getAlias")
 async def get_alias(alias_id: uuid.UUID, authz: Authz, session: SessionDep) -> AliasOut:
+    """Requires an installation admin."""
     await authz.require(Action.ROUTING_READ)
     row = await session.get(Alias, alias_id)
     if row is None:
@@ -1140,6 +1170,7 @@ async def update_alias(
     session: SessionDep,
     settings: SettingsDep,
 ) -> AliasOut:
+    """Rename or retarget an alias. Requires an installation admin."""
     await authz.require(Action.ROUTING_MANAGE)
     _non_null(body, "name", "target")
     async with mutation(session):
@@ -1188,6 +1219,7 @@ async def delete_alias(
     session: SessionDep,
     settings: SettingsDep,
 ) -> Response:
+    """Requires an installation admin. Grants of the alias are removed with it."""
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         await lock_scope(session, settings)
@@ -1218,6 +1250,7 @@ async def list_routers(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[RouterOut]:
+    """Requires an installation admin."""
     await authz.require(Action.ROUTING_READ)
     stmt = select(Router).order_by(Router.name_id)
     rows, next_cursor = await uuid_page(session, stmt, Router.name_id, limit, cursor)
@@ -1238,6 +1271,11 @@ async def create_router(
     session: SessionDep,
     settings: SettingsDep,
 ) -> RouterOut:
+    """Create a router: a strategy over member models, with retries, fallbacks and traffic splits.
+    Requires an installation admin. Members, splits and fallbacks must share one model type.
+    `params` and each member's `params` are validated against the schemas the strategy declares
+    (`GET /plugins`).
+    """
     await authz.require(Action.ROUTING_MANAGE)
     spec = RouterSpec(
         strategy=body.strategy,
@@ -1295,6 +1333,7 @@ async def create_router(
 async def get_router(
     router_id: uuid.UUID, authz: Authz, session: SessionDep, settings: SettingsDep
 ) -> RouterOut:
+    """Requires an installation admin."""
     await authz.require(Action.ROUTING_READ)
     row = await session.get(Router, router_id)
     if row is None:
@@ -1310,6 +1349,10 @@ async def update_router(
     session: SessionDep,
     settings: SettingsDep,
 ) -> RouterOut:
+    """Requires an installation admin. Changing `strategy` drops the stored `params` unless the
+    body sends new ones. Stored settings that no longer match their schema (`config_invalid`) do
+    not block other changes.
+    """
     await authz.require(Action.ROUTING_MANAGE)
     _non_null(
         body,
@@ -1394,6 +1437,9 @@ async def delete_router(
     session: SessionDep,
     settings: SettingsDep,
 ) -> Response:
+    """Requires an installation admin. Answers 409 naming the aliases and routers that still refer
+    to it.
+    """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         await lock_scope(session, settings)

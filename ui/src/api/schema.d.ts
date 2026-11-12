@@ -11,10 +11,21 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Teams */
+        /**
+         * List Teams
+         * @description Teams the caller can read: every live team for an installation admin, otherwise the teams
+         *     the caller belongs to or administers. A team admin gets the full record; any other member
+         *     gets the basic one and reads their own effective policy from `GET /users/me`. Archived teams
+         *     are not listed.
+         */
         get: operations["listTeams"];
         put?: never;
-        /** Create Team */
+        /**
+         * Create Team
+         * @description Create a team in `org_id`. Requires an admin of that org; anyone else gets the same 404 as
+         *     for an unknown org. The team's policy may not exceed the org's effective policy, and an
+         *     archived org answers 409.
+         */
         post: operations["createTeam"];
         delete?: never;
         options?: never;
@@ -29,7 +40,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Team */
+        /**
+         * Get Team
+         * @description A team admin gets the full record; any other member gets the basic one. A caller outside the
+         *     team gets 404.
+         */
         get: operations["getTeam"];
         put?: never;
         post?: never;
@@ -41,7 +56,13 @@ export interface paths {
         delete: operations["deleteTeam"];
         options?: never;
         head?: never;
-        /** Update Team */
+        /**
+         * Update Team
+         * @description Changing models, limits or the budget requires an org admin; changing the name, the member
+         *     key limits or the member defaults requires a team admin. A body that resends the current
+         *     policy unchanged is not a policy change. A member default may not exceed the team's
+         *     effective limit.
+         */
         patch: operations["updateTeam"];
         trace?: never;
     };
@@ -58,7 +79,10 @@ export interface paths {
          */
         get: operations["listOrgs"];
         put?: never;
-        /** Create Org */
+        /**
+         * Create Org
+         * @description Create an org. Requires an installation admin.
+         */
         post: operations["createOrg"];
         delete?: never;
         options?: never;
@@ -73,7 +97,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Org */
+        /**
+         * Get Org
+         * @description Readable by installation admins and by the org's own admins; anyone else gets 404.
+         */
         get: operations["getOrg"];
         put?: never;
         post?: never;
@@ -183,7 +210,11 @@ export interface paths {
          */
         get: operations["listMembers"];
         put?: never;
-        /** Create Member */
+        /**
+         * Create Member
+         * @description Add a user by `user_id` or `email` (exactly one). Same rules as `PUT`, except that an
+         *     existing member answers 409 and an unknown email answers 404 `user_not_found`.
+         */
         post: operations["createMember"];
         delete?: never;
         options?: never;
@@ -199,14 +230,30 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Put Member */
+        /**
+         * Put Member
+         * @description Add the user to the team, or replace their membership. Requires a team admin; granting or
+         *     taking away the `admin` role requires an org admin. PUT replaces the member's policy:
+         *     omitted fields go back to inheriting the team's defaults. Answers 201 when the membership
+         *     was created, and 409 `managed_externally` when the authorization backend owns memberships.
+         */
         put: operations["putMember"];
         post?: never;
-        /** Delete Member */
+        /**
+         * Delete Member
+         * @description Remove a membership. Requires a team admin, and an org admin when the member is a team
+         *     admin. The user's keys in this team are suspended (`owner_removed`) unless an org or
+         *     installation role still lets them own keys here.
+         */
         delete: operations["deleteMember"];
         options?: never;
         head?: never;
-        /** Update Member */
+        /**
+         * Update Member
+         * @description Change a member's role or policy; omitted fields keep their stored value. Requires a team
+         *     admin, and an org admin when the `admin` role is granted or taken away. Answers 409
+         *     `managed_externally` when the authorization backend owns memberships.
+         */
         patch: operations["updateMember"];
         trace?: never;
     };
@@ -217,10 +264,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Service Accounts */
+        /**
+         * List Service Accounts
+         * @description Requires a team admin.
+         */
         get: operations["listServiceAccounts"];
         put?: never;
-        /** Create Service Account */
+        /**
+         * Create Service Account
+         * @description Create a service account, a non-human key owner of the team. Requires a team admin.
+         */
         post: operations["createServiceAccount"];
         delete?: never;
         options?: never;
@@ -235,15 +288,26 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Service Account */
+        /**
+         * Get Service Account
+         * @description Requires a team admin; a caller outside the team gets 404.
+         */
         get: operations["getServiceAccount"];
         put?: never;
         post?: never;
-        /** Delete Service Account */
+        /**
+         * Delete Service Account
+         * @description Requires a team admin. Answers 409 while the account has keys, revoked ones included,
+         *     because usage history refers to them; deactivate it instead.
+         */
         delete: operations["deleteServiceAccount"];
         options?: never;
         head?: never;
-        /** Update Service Account */
+        /**
+         * Update Service Account
+         * @description Rename, change the policy, or deactivate and reactivate. Requires a team admin. Keys of a
+         *     deactivated service account stop authenticating.
+         */
         patch: operations["updateServiceAccount"];
         trace?: never;
     };
@@ -254,10 +318,21 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Team Keys */
+        /**
+         * List Team Keys
+         * @description A team admin sees every key of the team and may filter by owner. Any other member sees only
+         *     their own keys, and a filter naming someone else returns nothing.
+         */
         get: operations["listTeamKeys"];
         put?: never;
-        /** Create Key */
+        /**
+         * Create Key
+         * @description Create a virtual API key (`lw-…`). The secret is in this response only. Without
+         *     `service_account_id` the key belongs to the caller, who must belong to or administer the
+         *     team, and the team's `max_keys_per_member` and `max_member_key_lifetime_seconds` apply. A
+         *     key for a service account requires a team admin. The key's limits may not exceed its owner's
+         *     effective limits. Limited to 30 attempts per 60 seconds per caller (429).
+         */
         post: operations["createKey"];
         delete?: never;
         options?: never;
@@ -272,14 +347,25 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Key */
+        /**
+         * Get Key
+         * @description Readable by a team admin and by the key's owner. Another member of the team gets 403, a
+         *     caller outside the team 404. The secret is never returned.
+         */
         get: operations["getKey"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
         head?: never;
-        /** Update Key */
+        /**
+         * Update Key
+         * @description Rename, change limits, or suspend and resume (`lifecycle`). The owner manages their own key
+         *     and a team admin any key of the team. An owner may resume only their own `owner` and
+         *     `owner_removed` suspensions; `admin` and `owner_deactivated` need a team admin. Revoked keys
+         *     are immutable and revoking has its own operation. Limited to 30 attempts per 60 seconds per
+         *     caller (429).
+         */
         patch: operations["updateKey"];
         trace?: never;
     };
@@ -292,7 +378,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Revoke Key */
+        /**
+         * Revoke Key
+         * @description Revoke a key permanently, including a previous secret still inside its rotation grace.
+         *     Allowed for the owner and for a team admin. Revoking an already revoked key succeeds.
+         */
         post: operations["revokeKey"];
         delete?: never;
         options?: never;
@@ -330,7 +420,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Own Keys */
+        /**
+         * List Own Keys
+         * @description The caller's own keys across every team. Empty for a break-glass session, which is not a
+         *     user.
+         */
         get: operations["listOwnKeys"];
         put?: never;
         post?: never;
@@ -347,7 +441,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Playground */
+        /**
+         * Get Playground
+         * @description The caller's usable keys and the `llm` names each may call, for the Admin UI Playground.
+         *     Requires a browser session; a personal access token answers 401.
+         */
         get: operations["getPlayground"];
         put?: never;
         post?: never;
@@ -366,7 +464,13 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Chat Completions */
+        /**
+         * Chat Completions
+         * @description Forward a chat completion to the gateway as one of the caller's own keys, named by
+         *     its id in the `X-Lumewarp-Act-As` header. The body and the response, streamed or not, are the
+         *     gateway's `/v1/chat/completions`. Requires a browser session, accepts `llm` names only and
+         *     at most 1 MiB, and answers 503 `playground_disabled` when no gateway URL is configured.
+         */
         post: operations["playgroundChatCompletions"];
         delete?: never;
         options?: never;
@@ -381,10 +485,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Upstreams */
+        /**
+         * List Upstreams
+         * @description Requires an installation admin.
+         */
         get: operations["listUpstreams"];
         put?: never;
-        /** Create Upstream */
+        /**
+         * Create Upstream
+         * @description Create an upstream, an OpenAI-compatible endpoint. Requires an installation admin. The API
+         *     key is stored encrypted or as an environment reference and is never returned.
+         */
         post: operations["createUpstream"];
         delete?: never;
         options?: never;
@@ -399,15 +510,25 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Upstream */
+        /**
+         * Get Upstream
+         * @description Requires an installation admin.
+         */
         get: operations["getUpstream"];
         put?: never;
         post?: never;
-        /** Delete Upstream */
+        /**
+         * Delete Upstream
+         * @description Requires an installation admin. Answers 409 while the upstream still has models.
+         */
         delete: operations["deleteUpstream"];
         options?: never;
         head?: never;
-        /** Update Upstream */
+        /**
+         * Update Upstream
+         * @description Requires an installation admin. Changing the address or the credential clears the stored
+         *     health results of the upstream's models.
+         */
         patch: operations["updateUpstream"];
         trace?: never;
     };
@@ -462,7 +583,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Catalog */
+        /**
+         * List Catalog
+         * @description Every callable name with its kind (`model`, `alias` or `router`) and model type, for
+         *     pickers. Any signed-in caller may read it; it carries no upstream or price details.
+         */
         get: operations["listCatalog"];
         put?: never;
         post?: never;
@@ -479,10 +604,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Models */
+        /**
+         * List Models
+         * @description Requires an installation admin.
+         */
         get: operations["listModels"];
         put?: never;
-        /** Create Model */
+        /**
+         * Create Model
+         * @description Create a model: one name served by one upstream model. Requires an installation admin. The
+         *     name shares one namespace with aliases and routers.
+         */
         post: operations["createModel"];
         delete?: never;
         options?: never;
@@ -497,15 +629,28 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Model */
+        /**
+         * Get Model
+         * @description Requires an installation admin.
+         */
         get: operations["getModel"];
         put?: never;
         post?: never;
-        /** Delete Model */
+        /**
+         * Delete Model
+         * @description Requires an installation admin. Answers 409 naming the aliases and routers that still refer
+         *     to the model. Grants of the model are removed with it.
+         */
         delete: operations["deleteModel"];
         options?: never;
         head?: never;
-        /** Update Model */
+        /**
+         * Update Model
+         * @description Requires an installation admin. A rename keeps every reference, since grants, aliases and
+         *     routers refer to the model by id; `keep_old_name_as_alias` also leaves the old name
+         *     callable. Changing `model_type` answers 409 `model_type_in_use` while a router uses the
+         *     model.
+         */
         patch: operations["updateModel"];
         trace?: never;
     };
@@ -538,10 +683,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Aliases */
+        /**
+         * List Aliases
+         * @description Requires an installation admin.
+         */
         get: operations["listAliases"];
         put?: never;
-        /** Create Alias */
+        /**
+         * Create Alias
+         * @description Create an alias: another name for a model or a router. Requires an installation admin. An
+         *     alias cannot point at another alias.
+         */
         post: operations["createAlias"];
         delete?: never;
         options?: never;
@@ -556,15 +708,24 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Alias */
+        /**
+         * Get Alias
+         * @description Requires an installation admin.
+         */
         get: operations["getAlias"];
         put?: never;
         post?: never;
-        /** Delete Alias */
+        /**
+         * Delete Alias
+         * @description Requires an installation admin. Grants of the alias are removed with it.
+         */
         delete: operations["deleteAlias"];
         options?: never;
         head?: never;
-        /** Update Alias */
+        /**
+         * Update Alias
+         * @description Rename or retarget an alias. Requires an installation admin.
+         */
         patch: operations["updateAlias"];
         trace?: never;
     };
@@ -575,10 +736,19 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Routers */
+        /**
+         * List Routers
+         * @description Requires an installation admin.
+         */
         get: operations["listRouters"];
         put?: never;
-        /** Create Router */
+        /**
+         * Create Router
+         * @description Create a router: a strategy over member models, with retries, fallbacks and traffic splits.
+         *     Requires an installation admin. Members, splits and fallbacks must share one model type.
+         *     `params` and each member's `params` are validated against the schemas the strategy declares
+         *     (`GET /plugins`).
+         */
         post: operations["createRouter"];
         delete?: never;
         options?: never;
@@ -593,15 +763,27 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Router */
+        /**
+         * Get Router
+         * @description Requires an installation admin.
+         */
         get: operations["getRouter"];
         put?: never;
         post?: never;
-        /** Delete Router */
+        /**
+         * Delete Router
+         * @description Requires an installation admin. Answers 409 naming the aliases and routers that still refer
+         *     to it.
+         */
         delete: operations["deleteRouter"];
         options?: never;
         head?: never;
-        /** Update Router */
+        /**
+         * Update Router
+         * @description Requires an installation admin. Changing `strategy` drops the stored `params` unless the
+         *     body sends new ones. Stored settings that no longer match their schema (`config_invalid`) do
+         *     not block other changes.
+         */
         patch: operations["updateRouter"];
         trace?: never;
     };
@@ -612,10 +794,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Mcp Servers */
+        /**
+         * List Mcp Servers
+         * @description Requires an installation admin.
+         */
         get: operations["listMcpServers"];
         put?: never;
-        /** Create Mcp Server */
+        /**
+         * Create Mcp Server
+         * @description Register an upstream MCP server that keys can be granted. Requires an installation admin.
+         */
         post: operations["createMcpServer"];
         delete?: never;
         options?: never;
@@ -630,7 +818,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Mcp Server */
+        /**
+         * Get Mcp Server
+         * @description Requires an installation admin.
+         */
         get: operations["getMcpServer"];
         put?: never;
         post?: never;
@@ -642,7 +833,11 @@ export interface paths {
         delete: operations["deleteMcpServer"];
         options?: never;
         head?: never;
-        /** Update Mcp Server */
+        /**
+         * Update Mcp Server
+         * @description Requires an installation admin. A stored plugin reference that is no longer valid blocks
+         *     only a write that names a plugin.
+         */
         patch: operations["updateMcpServer"];
         trace?: never;
     };
@@ -653,7 +848,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Mcp Definitions */
+        /**
+         * List Mcp Definitions
+         * @description The tool and prompt definitions gateways reported for this server, newest first, with their
+         *     review state. Requires an installation admin.
+         */
         get: operations["listMcpDefinitions"];
         put?: never;
         post?: never;
@@ -740,10 +939,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List A2A Agents */
+        /**
+         * List A2A Agents
+         * @description Requires an installation admin.
+         */
         get: operations["listA2aAgents"];
         put?: never;
-        /** Create A2A Agent */
+        /**
+         * Create A2A Agent
+         * @description Register an upstream A2A agent that keys can be granted. Requires an installation admin.
+         */
         post: operations["createA2aAgent"];
         delete?: never;
         options?: never;
@@ -758,7 +963,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get A2A Agent */
+        /**
+         * Get A2A Agent
+         * @description Requires an installation admin.
+         */
         get: operations["getA2aAgent"];
         put?: never;
         post?: never;
@@ -769,7 +977,10 @@ export interface paths {
         delete: operations["deleteA2aAgent"];
         options?: never;
         head?: never;
-        /** Update A2A Agent */
+        /**
+         * Update A2A Agent
+         * @description Requires an installation admin.
+         */
         patch: operations["updateA2aAgent"];
         trace?: never;
     };
@@ -804,10 +1015,18 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Users */
+        /**
+         * List Users
+         * @description Requires an installation admin.
+         */
         get: operations["listUsers"];
         put?: never;
-        /** Create User */
+        /**
+         * Create User
+         * @description Create a user ahead of their first sign-in. Requires an installation admin. A user who signs
+         *     in through the IdP is created automatically, so this is needed only to grant something
+         *     beforehand.
+         */
         post: operations["createUser"];
         delete?: never;
         options?: never;
@@ -822,7 +1041,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Current User */
+        /**
+         * Get Current User
+         * @description The caller: installation role, the orgs and teams they belong to or administer (inherited
+         *     ones marked `inherited_from`), and per team the effective models, limits, key limits and the
+         *     month's remaining budget. A break-glass session has no user and returns only its kind.
+         */
         get: operations["getCurrentUser"];
         put?: never;
         post?: never;
@@ -839,10 +1063,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Own Tokens */
+        /**
+         * List Own Tokens
+         * @description The caller's personal access tokens. Secrets are never returned.
+         */
         get: operations["listOwnTokens"];
         put?: never;
-        /** Create Own Token */
+        /**
+         * Create Own Token
+         * @description Create a personal access token (`lwp-…`) for the caller. The secret is in this response
+         *     only. A break-glass session cannot own tokens (400).
+         */
         post: operations["createOwnToken"];
         delete?: never;
         options?: never;
@@ -879,7 +1110,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Revoke Own Token */
+        /**
+         * Revoke Own Token
+         * @description Revoke one of the caller's own personal access tokens.
+         */
         post: operations["revokeOwnToken"];
         delete?: never;
         options?: never;
@@ -894,15 +1128,28 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get User */
+        /**
+         * Get User
+         * @description Requires an installation admin.
+         */
         get: operations["getUser"];
         put?: never;
         post?: never;
-        /** Delete User */
+        /**
+         * Delete User
+         * @description Requires an installation admin. Answers 409 while the user owns keys, which usage history
+         *     refers to; deactivate the user instead. Memberships and roles are removed with the account.
+         *     You cannot delete yourself.
+         */
         delete: operations["deleteUser"];
         options?: never;
         head?: never;
-        /** Update User */
+        /**
+         * Update User
+         * @description Requires an installation admin. Deactivating a user suspends their keys
+         *     (`owner_deactivated`) and their sessions and
+         *     tokens stop authenticating. You cannot deactivate yourself.
+         */
         patch: operations["updateUser"];
         trace?: never;
     };
@@ -913,7 +1160,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Installation Admins */
+        /**
+         * List Installation Admins
+         * @description Requires an installation admin.
+         */
         get: operations["listInstallationAdmins"];
         put?: never;
         post?: never;
@@ -1013,7 +1263,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Audit */
+        /**
+         * List Audit
+         * @description Audit events, newest first. An installation admin reads everything. An org admin reads their
+         *     orgs' events with `org_id`, org-level events included; a team admin reads their teams'
+         *     events. A caller who administers nothing gets 403, and a `team_id` or `org_id` the caller
+         *     cannot read answers 404.
+         */
         get: operations["listAudit"];
         put?: never;
         post?: never;
@@ -1030,10 +1286,18 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Gateways */
+        /**
+         * List Gateways
+         * @description Gateways with their tokens and the config version each last acknowledged. Requires an
+         *     installation admin.
+         */
         get: operations["listGateways"];
         put?: never;
-        /** Create Gateway Token */
+        /**
+         * Create Gateway Token
+         * @description Create a gateway token (`lwg-…`) bound to one gateway id. The secret is in this response
+         *     only. Requires an installation admin.
+         */
         post: operations["createGatewayToken"];
         delete?: never;
         options?: never;
@@ -1050,7 +1314,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Revoke Gateway Token */
+        /**
+         * Revoke Gateway Token
+         * @description Requires an installation admin. The gateway's open config and usage streams are closed at
+         *     once.
+         */
         post: operations["revokeGatewayToken"];
         delete?: never;
         options?: never;
@@ -1065,7 +1333,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Config Versions */
+        /**
+         * List Config Versions
+         * @description Compiled config versions, newest first. Requires an installation admin.
+         */
         get: operations["listConfigVersions"];
         put?: never;
         post?: never;
@@ -1084,7 +1355,13 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Rollback Config */
+        /**
+         * Rollback Config
+         * @description Restore the routing catalog (upstreams, models, aliases, routers, MCP servers, A2A
+         *     agents) of an earlier version, by id, and publish it as a new version. Requires an
+         *     installation admin. Teams, keys, policies and key states stay as they are now. Answers
+         *     422 when a plugin connected now rejects the restored settings, unless `force` is set.
+         */
         post: operations["rollbackConfig"];
         delete?: never;
         options?: never;
@@ -1099,7 +1376,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Session Info */
+        /**
+         * Session Info
+         * @description The current browser session and what the login page needs: whether OIDC and break-glass are
+         *     enabled, the signed-in user with their
+         *     installation role, and the CSRF token to send as `X-Lumewarp-CSRF` on writes.
+         *     Answers 200 without a session too.
+         */
         get: operations["getSession"];
         put?: never;
         post?: never;
@@ -1118,7 +1401,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Login Break Glass */
+        /**
+         * Login Break Glass
+         * @description Open an emergency session with the break-glass password. Answers 404 when break-glass is
+         *     disabled or the caller is outside the allowed networks, and 429 after too many attempts.
+         *     Every attempt is audited.
+         */
         post: operations["loginBreakGlass"];
         delete?: never;
         options?: never;
@@ -1133,7 +1421,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Login */
+        /**
+         * Login
+         * @description Redirect the browser to the identity provider. `next` must be a same-site relative path.
+         */
         get: operations["startOidcLogin"];
         put?: never;
         post?: never;
@@ -1150,7 +1441,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Callback */
+        /**
+         * Callback
+         * @description The identity provider's redirect target. Creates the user on a first sign-in, sets the
+         *     session cookie and redirects to the Admin UI.
+         */
         get: operations["completeOidcLogin"];
         put?: never;
         post?: never;
@@ -1169,7 +1464,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Logout */
+        /**
+         * Logout
+         * @description End the current session and clear its cookie.
+         */
         post: operations["logoutSession"];
         delete?: never;
         options?: never;
@@ -1224,16 +1522,28 @@ export interface components {
     schemas: {
         /** A2aAgentCreate */
         A2aAgentCreate: {
-            /** Name */
+            /**
+             * Name
+             * @description Lower-case name used in `/a2a/<name>`.
+             */
             name: string;
-            /** Url */
+            /**
+             * Url
+             * @description URL of the upstream agent.
+             */
             url: string;
-            /** Card Url */
+            /**
+             * Card Url
+             * @description Where gateways fetch the Agent Card; null = the origin of `url` plus `/.well-known/agent-card.json`.
+             */
             card_url?: string | null;
+            /** @description Outbound authentication towards the upstream; replaced as a whole. */
             auth?: components["schemas"]["TargetAuthIn"];
+            /** @description One WASM A2A middleware plugin applied to this agent; null = none. */
             middleware?: components["schemas"]["PluginRefIn"] | null;
             /**
              * Timeout Ms
+             * @description Time allowed for one upstream request, in ms; 0 = the gateway default.
              * @default 0
              */
             timeout_ms: number;
@@ -1310,17 +1620,34 @@ export interface components {
          *     pasted `card_json`. `auth` replaces the whole outbound auth.
          */
         A2aAgentUpdate: {
-            /** Name */
+            /**
+             * Name
+             * @description Lower-case name used in `/a2a/<name>`.
+             */
             name?: string | null;
-            /** Url */
+            /**
+             * Url
+             * @description URL of the upstream agent.
+             */
             url?: string | null;
-            /** Card Url */
+            /**
+             * Card Url
+             * @description Where gateways fetch the Agent Card; null = the origin of `url` plus `/.well-known/agent-card.json`.
+             */
             card_url?: string | null;
+            /** @description Outbound authentication towards the upstream; replaced as a whole. */
             auth?: components["schemas"]["TargetAuthIn"] | null;
+            /** @description One WASM A2A middleware plugin applied to this agent; null = none. */
             middleware?: components["schemas"]["PluginRefIn"] | null;
-            /** Timeout Ms */
+            /**
+             * Timeout Ms
+             * @description Time allowed for one upstream request, in ms; 0 = the gateway default.
+             */
             timeout_ms?: number | null;
-            /** Card Json */
+            /**
+             * Card Json
+             * @description A pasted Agent Card (JSON object, at most 64 KiB), served until a gateway fetched one.
+             */
             card_json?: string | null;
             /**
              * Force
@@ -1330,7 +1657,10 @@ export interface components {
         };
         /** AliasCreate */
         AliasCreate: {
-            /** Name */
+            /**
+             * Name
+             * @description The name clients call, without whitespace. Models, aliases and routers share one namespace.
+             */
             name: string;
             /**
              * Target
@@ -1370,9 +1700,15 @@ export interface components {
         };
         /** AliasUpdate */
         AliasUpdate: {
-            /** Name */
+            /**
+             * Name
+             * @description The name clients call, without whitespace. Models, aliases and routers share one namespace.
+             */
             name?: string | null;
-            /** Target */
+            /**
+             * Target
+             * @description Id of a model or a router, not another alias.
+             */
             target?: string | null;
         };
         /** AuditOut */
@@ -1408,6 +1744,7 @@ export interface components {
             /**
              * Password
              * Format: password
+             * @description The break-glass password.
              */
             password: string;
         };
@@ -1431,9 +1768,15 @@ export interface components {
         CatalogKind: "model" | "alias" | "router";
         /** ChatCheckIn */
         ChatCheckIn: {
-            /** Interval Ms */
+            /**
+             * Interval Ms
+             * @description Time between probes in ms, at least 1000.
+             */
             interval_ms: number;
-            /** Timeout Ms */
+            /**
+             * Timeout Ms
+             * @description Must be below interval_ms.
+             */
             timeout_ms: number;
             /**
              * Unhealthy Threshold
@@ -1556,10 +1899,14 @@ export interface components {
         };
         /** GatewayTokenCreate */
         GatewayTokenCreate: {
-            /** Gateway Id */
+            /**
+             * Gateway Id
+             * @description The gateway id the token is bound to. A gateway must present the same id.
+             */
             gateway_id: string;
             /**
              * Name
+             * @description A label for the token.
              * @default
              */
             name: string;
@@ -1598,7 +1945,10 @@ export interface components {
          * @description Active probe: GET <url> every interval; 2xx within timeout = success.
          */
         HealthCheckIn: {
-            /** Interval Ms */
+            /**
+             * Interval Ms
+             * @description Time between probes in ms, at least 1000.
+             */
             interval_ms: number;
             /**
              * Timeout Ms
@@ -1641,7 +1991,10 @@ export interface components {
          * @description Only `admin` can be assigned here; proxy_admin moves through transfer.
          */
         InstallationAdminAssign: {
-            /** @default admin */
+            /**
+             * @description Only `admin` can be assigned; `proxy_admin` moves through transfer.
+             * @default admin
+             */
             role: components["schemas"]["InstallationRole"];
         };
         /** InstallationAdminOut */
@@ -1671,6 +2024,7 @@ export interface components {
             /**
              * User Id
              * Format: uuid
+             * @description The user who becomes `proxy_admin`.
              */
             user_id: string;
         };
@@ -1682,17 +2036,35 @@ export interface components {
         InstallationRole: "proxy_admin" | "admin";
         /** KeyCreate */
         KeyCreate: {
-            /** Name */
+            /**
+             * Name
+             * @description A label for the key.
+             */
             name: string;
-            /** Expires At */
+            /**
+             * Expires At
+             * @description When the key stops authenticating: in the future, with a timezone. null = no expiry. A member's key is bounded by the team's `max_member_key_lifetime_seconds`.
+             */
             expires_at?: string | null;
-            /** Service Account Id */
+            /**
+             * Service Account Id
+             * @description The service account that owns the key; omit for a key owned by the caller.
+             */
             service_account_id?: string | null;
-            /** Rpm Limit */
+            /**
+             * Rpm Limit
+             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             rpm_limit?: number | null;
-            /** Tpm Limit */
+            /**
+             * Tpm Limit
+             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             tpm_limit?: number | null;
-            /** Max Parallel */
+            /**
+             * Max Parallel
+             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             max_parallel?: number | null;
         };
         /** KeyCreated */
@@ -1771,6 +2143,7 @@ export interface components {
         KeyRotate: {
             /**
              * Grace Seconds
+             * @description How long the previous secret keeps authenticating, at most 86400; 0 replaces it at once.
              * @default 0
              */
             grace_seconds: number;
@@ -1780,16 +2153,32 @@ export interface components {
          * @description PATCH: omitted fields are unchanged; an explicit null clears a key limit.
          */
         KeyUpdate: {
-            /** Name */
+            /**
+             * Name
+             * @description A label for the key.
+             */
             name?: string | null;
-            /** Expires At */
+            /**
+             * Expires At
+             * @description When it stops authenticating, with a timezone; null = no expiry.
+             */
             expires_at?: string | null;
+            /** @description `active` resumes the key and `suspended` suspends it. `revoked` is refused here. */
             lifecycle?: components["schemas"]["KeyLifecycle"] | null;
-            /** Rpm Limit */
+            /**
+             * Rpm Limit
+             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             rpm_limit?: number | null;
-            /** Tpm Limit */
+            /**
+             * Tpm Limit
+             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             tpm_limit?: number | null;
-            /** Max Parallel */
+            /**
+             * Max Parallel
+             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             max_parallel?: number | null;
         };
         /**
@@ -1857,7 +2246,10 @@ export interface components {
          *     server whose auth is a WASM plugin cannot be discovered here.
          */
         McpDiscoverIn: {
-            /** Url */
+            /**
+             * Url
+             * @description URL of the MCP server to query.
+             */
             url: string;
             /**
              * Server Id
@@ -1871,6 +2263,7 @@ export interface components {
             token?: string | null;
             /**
              * Timeout Ms
+             * @description Time allowed for the discovery call, in ms.
              * @default 10000
              */
             timeout_ms: number;
@@ -1925,14 +2318,21 @@ export interface components {
          * @description One MCP server grant: every approved tool, or exactly `tools`.
          */
         McpGrantIn: {
-            /** Server */
+            /**
+             * Server
+             * @description Name of an MCP server.
+             */
             server: string;
             /**
              * All Tools
+             * @description Grant every approved tool of the server.
              * @default false
              */
             all_tools: boolean;
-            /** Tools */
+            /**
+             * Tools
+             * @description Upstream tool names, without the `<server>__` prefix; ignored when `all_tools` is true.
+             */
             tools?: string[];
         };
         /** McpGrantOut */
@@ -1956,17 +2356,28 @@ export interface components {
         McpReviewMode: "tofu" | "manual" | "off";
         /** McpServerCreate */
         McpServerCreate: {
-            /** Name */
+            /**
+             * Name
+             * @description Lower-case name used in `/mcp/servers/<name>` and as the `<name>__` prefix of its tools; it must not contain `__`.
+             */
             name: string;
-            /** Url */
+            /**
+             * Url
+             * @description URL of the upstream MCP server.
+             */
             url: string;
+            /** @description Outbound authentication towards the upstream; replaced as a whole. */
             auth?: components["schemas"]["TargetAuthIn"];
             /**
              * Timeout Ms
+             * @description Time allowed for one upstream request, in ms; 0 = the gateway default (30 s).
              * @default 0
              */
             timeout_ms: number;
-            /** @default tofu */
+            /**
+             * @description `tofu` serves a definition seen for the first time and withholds a changed one until approved; `manual` withholds both; `off` serves everything.
+             * @default tofu
+             */
             review_mode: components["schemas"]["McpReviewMode"];
             /**
              * Force
@@ -2029,13 +2440,24 @@ export interface components {
          * @description PATCH: omitted fields are unchanged. `auth` replaces the whole outbound auth.
          */
         McpServerUpdate: {
-            /** Name */
+            /**
+             * Name
+             * @description Lower-case name used in `/mcp/servers/<name>` and as the `<name>__` prefix of its tools; it must not contain `__`.
+             */
             name?: string | null;
-            /** Url */
+            /**
+             * Url
+             * @description URL of the upstream MCP server.
+             */
             url?: string | null;
+            /** @description Outbound authentication towards the upstream; replaced as a whole. */
             auth?: components["schemas"]["TargetAuthIn"] | null;
-            /** Timeout Ms */
+            /**
+             * Timeout Ms
+             * @description Time allowed for one upstream request, in ms; 0 = the gateway default (30 s).
+             */
             timeout_ms?: number | null;
+            /** @description `tofu` serves a definition seen for the first time and withholds a changed one until approved; `manual` withholds both; `off` serves everything. */
             review_mode?: components["schemas"]["McpReviewMode"] | null;
             /**
              * Force
@@ -2215,27 +2637,58 @@ export interface components {
         };
         /** MemberCreate */
         MemberCreate: {
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `allowed_models`. */
             model_access?: components["schemas"]["ModelAccess"] | null;
-            /** Allowed Models */
+            /**
+             * Allowed Models
+             * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
+             */
             allowed_models?: string[] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
-            /** Mcp Servers */
+            /**
+             * Mcp Servers
+             * @description MCP server grants used when `mcp_access` is `list`; empty denies all.
+             */
             mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `a2a_agents`. */
             a2a_access?: components["schemas"]["ModelAccess"] | null;
-            /** A2A Agents */
+            /**
+             * A2A Agents
+             * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
+             */
             a2a_agents?: string[] | null;
-            /** Rpm Limit */
+            /**
+             * Rpm Limit
+             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             rpm_limit?: number | null;
-            /** Tpm Limit */
+            /**
+             * Tpm Limit
+             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             tpm_limit?: number | null;
-            /** Max Parallel */
+            /**
+             * Max Parallel
+             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             max_parallel?: number | null;
-            /** Budget Nano Usd */
+            /**
+             * Budget Nano Usd
+             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
+             */
             budget_nano_usd?: number | null;
+            /** @description `admin` or `member`. */
             role: components["schemas"]["TeamRole"];
-            /** User Id */
+            /**
+             * User Id
+             * @description The user to add. Give exactly one of `user_id` and `email`.
+             */
             user_id?: string | null;
-            /** Email */
+            /**
+             * Email
+             * @description Email of an existing user. Give exactly one of `user_id` and `email`.
+             */
             email?: string | null;
         };
         /**
@@ -2306,44 +2759,94 @@ export interface components {
         };
         /** MemberUpdate */
         MemberUpdate: {
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `allowed_models`. */
             model_access?: components["schemas"]["ModelAccess"] | null;
-            /** Allowed Models */
+            /**
+             * Allowed Models
+             * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
+             */
             allowed_models?: string[] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
-            /** Mcp Servers */
+            /**
+             * Mcp Servers
+             * @description MCP server grants used when `mcp_access` is `list`; empty denies all.
+             */
             mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `a2a_agents`. */
             a2a_access?: components["schemas"]["ModelAccess"] | null;
-            /** A2A Agents */
+            /**
+             * A2A Agents
+             * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
+             */
             a2a_agents?: string[] | null;
-            /** Rpm Limit */
+            /**
+             * Rpm Limit
+             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             rpm_limit?: number | null;
-            /** Tpm Limit */
+            /**
+             * Tpm Limit
+             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             tpm_limit?: number | null;
-            /** Max Parallel */
+            /**
+             * Max Parallel
+             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             max_parallel?: number | null;
-            /** Budget Nano Usd */
+            /**
+             * Budget Nano Usd
+             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
+             */
             budget_nano_usd?: number | null;
+            /** @description `admin` or `member`. */
             role?: components["schemas"]["TeamRole"] | null;
         };
         /** MemberUpsert */
         MemberUpsert: {
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `allowed_models`. */
             model_access?: components["schemas"]["ModelAccess"] | null;
-            /** Allowed Models */
+            /**
+             * Allowed Models
+             * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
+             */
             allowed_models?: string[] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
-            /** Mcp Servers */
+            /**
+             * Mcp Servers
+             * @description MCP server grants used when `mcp_access` is `list`; empty denies all.
+             */
             mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `a2a_agents`. */
             a2a_access?: components["schemas"]["ModelAccess"] | null;
-            /** A2A Agents */
+            /**
+             * A2A Agents
+             * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
+             */
             a2a_agents?: string[] | null;
-            /** Rpm Limit */
+            /**
+             * Rpm Limit
+             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             rpm_limit?: number | null;
-            /** Tpm Limit */
+            /**
+             * Tpm Limit
+             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             tpm_limit?: number | null;
-            /** Max Parallel */
+            /**
+             * Max Parallel
+             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             max_parallel?: number | null;
-            /** Budget Nano Usd */
+            /**
+             * Budget Nano Usd
+             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
+             */
             budget_nano_usd?: number | null;
+            /** @description `admin` or `member`. */
             role: components["schemas"]["TeamRole"];
         };
         /**
@@ -2382,21 +2885,38 @@ export interface components {
             reasoning?: components["schemas"]["ReasoningIn"] | null;
             /** @description Periodic type-specific probe sent by every gateway through this model; while it fails the model gets no traffic. null = not probed (Test now still works). Probes may incur upstream charges. */
             chat_check?: components["schemas"]["ChatCheckIn"] | null;
+            /** @description `llm`, `embedding`, `transcription` or `decision`. It decides which endpoints may call the name. */
             model_type: components["schemas"]["ModelType"];
-            /** Price Nano Usd Per Audio Second */
+            /**
+             * Price Nano Usd Per Audio Second
+             * @description Transcription models only: price of one second of audio in nano-USD.
+             */
             price_nano_usd_per_audio_second?: number | null;
-            /** Name */
+            /**
+             * Name
+             * @description The name clients call, without whitespace. Models, aliases and routers share one namespace.
+             */
             name: string;
             /**
              * Upstream Id
              * Format: uuid
+             * @description The upstream that serves the model.
              */
             upstream_id: string;
-            /** Upstream Model */
+            /**
+             * Upstream Model
+             * @description The model name sent to the upstream.
+             */
             upstream_model: string;
-            /** Price Input Nano Usd Per Mtok */
+            /**
+             * Price Input Nano Usd Per Mtok
+             * @description Price of a million input tokens in nano-USD. Set the input and output prices together, or leave both null (cost unknown).
+             */
             price_input_nano_usd_per_mtok?: number | null;
-            /** Price Output Nano Usd Per Mtok */
+            /**
+             * Price Output Nano Usd Per Mtok
+             * @description Price of a million output tokens in nano-USD. Set the input and output prices together, or leave both null (cost unknown).
+             */
             price_output_nano_usd_per_mtok?: number | null;
         };
         /** ModelOut */
@@ -2457,15 +2977,23 @@ export interface components {
          * @description The model form as it stands, saved or not.
          */
         ModelTestIn: {
+            /** @description `llm`, `embedding`, `transcription` or `decision`. It decides which endpoints may call the name. */
             model_type: components["schemas"]["ModelType"];
             /**
              * Upstream Id
              * Format: uuid
+             * @description The upstream that serves the model.
              */
             upstream_id: string;
-            /** Upstream Model */
+            /**
+             * Upstream Model
+             * @description The model name sent to the upstream.
+             */
             upstream_model: string;
-            /** Default Body */
+            /**
+             * Default Body
+             * @description Merged under the request body, as on a saved model.
+             */
             default_body?: {
                 [key: string]: unknown;
             } | null;
@@ -2521,18 +3049,37 @@ export interface components {
             reasoning?: components["schemas"]["ReasoningIn"] | null;
             /** @description Periodic type-specific probe sent by every gateway through this model; while it fails the model gets no traffic. null = not probed (Test now still works). Probes may incur upstream charges. */
             chat_check?: components["schemas"]["ChatCheckIn"] | null;
+            /** @description `llm`, `embedding`, `transcription` or `decision`. It decides which endpoints may call the name. */
             model_type?: components["schemas"]["ModelType"] | null;
-            /** Price Nano Usd Per Audio Second */
+            /**
+             * Price Nano Usd Per Audio Second
+             * @description Transcription models only: price of one second of audio in nano-USD.
+             */
             price_nano_usd_per_audio_second?: number | null;
-            /** Name */
+            /**
+             * Name
+             * @description The name clients call, without whitespace. Models, aliases and routers share one namespace.
+             */
             name?: string | null;
-            /** Upstream Id */
+            /**
+             * Upstream Id
+             * @description The upstream that serves the model.
+             */
             upstream_id?: string | null;
-            /** Upstream Model */
+            /**
+             * Upstream Model
+             * @description The model name sent to the upstream.
+             */
             upstream_model?: string | null;
-            /** Price Input Nano Usd Per Mtok */
+            /**
+             * Price Input Nano Usd Per Mtok
+             * @description Price of a million input tokens in nano-USD. Set the input and output prices together, or leave both null (cost unknown).
+             */
             price_input_nano_usd_per_mtok?: number | null;
-            /** Price Output Nano Usd Per Mtok */
+            /**
+             * Price Output Nano Usd Per Mtok
+             * @description Price of a million output tokens in nano-USD. Set the input and output prices together, or leave both null (cost unknown).
+             */
             price_output_nano_usd_per_mtok?: number | null;
             /**
              * Keep Old Name As Alias
@@ -2582,24 +3129,51 @@ export interface components {
         };
         /** OrgCreate */
         OrgCreate: {
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `allowed_models`. */
             model_access?: components["schemas"]["ModelAccess"] | null;
-            /** Allowed Models */
+            /**
+             * Allowed Models
+             * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
+             */
             allowed_models?: string[] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
-            /** Mcp Servers */
+            /**
+             * Mcp Servers
+             * @description MCP server grants used when `mcp_access` is `list`; empty denies all.
+             */
             mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `a2a_agents`. */
             a2a_access?: components["schemas"]["ModelAccess"] | null;
-            /** A2A Agents */
+            /**
+             * A2A Agents
+             * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
+             */
             a2a_agents?: string[] | null;
-            /** Rpm Limit */
+            /**
+             * Rpm Limit
+             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             rpm_limit?: number | null;
-            /** Tpm Limit */
+            /**
+             * Tpm Limit
+             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             tpm_limit?: number | null;
-            /** Max Parallel */
+            /**
+             * Max Parallel
+             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             max_parallel?: number | null;
-            /** Budget Nano Usd */
+            /**
+             * Budget Nano Usd
+             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
+             */
             budget_nano_usd?: number | null;
-            /** Name */
+            /**
+             * Name
+             * @description Display name, 1 to 200 characters.
+             */
             name: string;
         };
         /** OrgOut */
@@ -2670,24 +3244,51 @@ export interface components {
         };
         /** OrgUpdate */
         OrgUpdate: {
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `allowed_models`. */
             model_access?: components["schemas"]["ModelAccess"] | null;
-            /** Allowed Models */
+            /**
+             * Allowed Models
+             * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
+             */
             allowed_models?: string[] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
-            /** Mcp Servers */
+            /**
+             * Mcp Servers
+             * @description MCP server grants used when `mcp_access` is `list`; empty denies all.
+             */
             mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `a2a_agents`. */
             a2a_access?: components["schemas"]["ModelAccess"] | null;
-            /** A2A Agents */
+            /**
+             * A2A Agents
+             * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
+             */
             a2a_agents?: string[] | null;
-            /** Rpm Limit */
+            /**
+             * Rpm Limit
+             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             rpm_limit?: number | null;
-            /** Tpm Limit */
+            /**
+             * Tpm Limit
+             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             tpm_limit?: number | null;
-            /** Max Parallel */
+            /**
+             * Max Parallel
+             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             max_parallel?: number | null;
-            /** Budget Nano Usd */
+            /**
+             * Budget Nano Usd
+             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
+             */
             budget_nano_usd?: number | null;
-            /** Name */
+            /**
+             * Name
+             * @description Display name, 1 to 200 characters.
+             */
             name?: string | null;
         };
         /** OrgUsageOut */
@@ -2989,7 +3590,10 @@ export interface components {
         };
         /** PluginRefIn */
         PluginRefIn: {
-            /** Plugin */
+            /**
+             * Plugin
+             * @description A WASM A2A middleware plugin listed by `GET /plugins`.
+             */
             plugin: string;
             /**
              * Params
@@ -3000,6 +3604,7 @@ export interface components {
             };
             /**
              * Timeout Ms
+             * @description WASM plugin only: how long one call may run, in ms; 0 = the gateway default (60 s).
              * @default 0
              */
             timeout_ms: number;
@@ -3057,6 +3662,21 @@ export interface components {
              * @description The last successful one, if any.
              */
             ok_at: string | null;
+        };
+        /** Readiness */
+        Readiness: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ready" | "not_ready";
+            /**
+             * Checks
+             * @description One entry per check (database, migrations, background tasks): `ok`, or what is wrong.
+             */
+            checks: {
+                [key: string]: string;
+            };
         };
         /**
          * ReasoningIn
@@ -3134,7 +3754,10 @@ export interface components {
         };
         /** RollbackCreate */
         RollbackCreate: {
-            /** Version */
+            /**
+             * Version
+             * @description The config version to restore.
+             */
             version: number;
             /**
              * Force
@@ -3149,10 +3772,14 @@ export interface components {
         };
         /** RouterCreate */
         RouterCreate: {
-            /** Name */
+            /**
+             * Name
+             * @description The name clients call, without whitespace. Models, aliases and routers share one namespace.
+             */
             name: string;
             /**
              * Strategy
+             * @description A built-in (`weighted`, `least_in_flight`, `lowest_latency`, `vllm_load`) or a WASM strategy listed by `GET /plugins`.
              * @default weighted
              */
             strategy: string;
@@ -3168,20 +3795,31 @@ export interface components {
              * @description Ordered models; empty exactly when traffic_split is set.
              */
             members?: components["schemas"]["RouterMemberIn"][];
+            /** @description Retry policy; null = one attempt. */
             retry?: components["schemas"]["RetryPolicyIn"] | null;
             /**
              * Fallback Model Ids
              * @description Models tried in order once the members failed.
              */
             fallback_model_ids?: string[];
-            /** Traffic Split */
+            /**
+             * Traffic Split
+             * @description Named, weighted pools of members. When set, `members` is empty.
+             */
             traffic_split?: components["schemas"]["TrafficSplitIn"][];
-            /** @default none */
+            /**
+             * @description Keep a caller on one traffic split: by a request `header`, by `team` or by `key`. `none` draws by weight on every request.
+             * @default none
+             */
             sticky: components["schemas"]["StickyBy"];
-            /** Sticky Header */
+            /**
+             * Sticky Header
+             * @description Header whose value is hashed; required exactly when `sticky` is `header`.
+             */
             sticky_header?: string | null;
             /**
              * Plugin Timeout Ms
+             * @description WASM strategy only: how long one pick may run, in ms; 0 = the gateway default (60 s).
              * @default 0
              */
             plugin_timeout_ms: number;
@@ -3196,6 +3834,7 @@ export interface components {
             /**
              * Model Id
              * Format: uuid
+             * @description A model of the router's model type.
              */
             model_id: string;
             /**
@@ -3281,25 +3920,51 @@ export interface components {
          *     `sticky_header` accept null to remove the setting.
          */
         RouterUpdate: {
-            /** Name */
+            /**
+             * Name
+             * @description The name clients call, without whitespace. Models, aliases and routers share one namespace.
+             */
             name?: string | null;
-            /** Strategy */
+            /**
+             * Strategy
+             * @description A built-in (`weighted`, `least_in_flight`, `lowest_latency`, `vllm_load`) or a WASM strategy listed by `GET /plugins`.
+             */
             strategy?: string | null;
-            /** Params */
+            /**
+             * Params
+             * @description Settings the plugin defines, validated against the schema it declares.
+             */
             params?: {
                 [key: string]: unknown;
             } | null;
-            /** Members */
+            /**
+             * Members
+             * @description The member models, in order.
+             */
             members?: components["schemas"]["RouterMemberIn"][] | null;
+            /** @description Retry policy; null = one attempt. */
             retry?: components["schemas"]["RetryPolicyIn"] | null;
-            /** Fallback Model Ids */
+            /**
+             * Fallback Model Ids
+             * @description Models tried in order once the members failed.
+             */
             fallback_model_ids?: string[] | null;
-            /** Traffic Split */
+            /**
+             * Traffic Split
+             * @description Named, weighted pools of members. When set, `members` is empty.
+             */
             traffic_split?: components["schemas"]["TrafficSplitIn"][] | null;
+            /** @description Keep a caller on one traffic split: by a request `header`, by `team` or by `key`. `none` draws by weight on every request. */
             sticky?: components["schemas"]["StickyBy"] | null;
-            /** Sticky Header */
+            /**
+             * Sticky Header
+             * @description Header whose value is hashed; required exactly when `sticky` is `header`.
+             */
             sticky_header?: string | null;
-            /** Plugin Timeout Ms */
+            /**
+             * Plugin Timeout Ms
+             * @description WASM strategy only: how long one pick may run, in ms; 0 = the gateway default (60 s).
+             */
             plugin_timeout_ms?: number | null;
             /**
              * Force
@@ -3309,27 +3974,55 @@ export interface components {
         };
         /** ServiceAccountCreate */
         ServiceAccountCreate: {
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `allowed_models`. */
             model_access?: components["schemas"]["ModelAccess"] | null;
-            /** Allowed Models */
+            /**
+             * Allowed Models
+             * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
+             */
             allowed_models?: string[] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
-            /** Mcp Servers */
+            /**
+             * Mcp Servers
+             * @description MCP server grants used when `mcp_access` is `list`; empty denies all.
+             */
             mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `a2a_agents`. */
             a2a_access?: components["schemas"]["ModelAccess"] | null;
-            /** A2A Agents */
+            /**
+             * A2A Agents
+             * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
+             */
             a2a_agents?: string[] | null;
-            /** Rpm Limit */
+            /**
+             * Rpm Limit
+             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             rpm_limit?: number | null;
-            /** Tpm Limit */
+            /**
+             * Tpm Limit
+             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             tpm_limit?: number | null;
-            /** Max Parallel */
+            /**
+             * Max Parallel
+             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             max_parallel?: number | null;
-            /** Budget Nano Usd */
+            /**
+             * Budget Nano Usd
+             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
+             */
             budget_nano_usd?: number | null;
-            /** Name */
+            /**
+             * Name
+             * @description Display name, 1 to 200 characters.
+             */
             name: string;
             /**
              * Description
+             * @description Free text.
              * @default
              */
             description: string;
@@ -3384,28 +4077,61 @@ export interface components {
         };
         /** ServiceAccountUpdate */
         ServiceAccountUpdate: {
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `allowed_models`. */
             model_access?: components["schemas"]["ModelAccess"] | null;
-            /** Allowed Models */
+            /**
+             * Allowed Models
+             * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
+             */
             allowed_models?: string[] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
-            /** Mcp Servers */
+            /**
+             * Mcp Servers
+             * @description MCP server grants used when `mcp_access` is `list`; empty denies all.
+             */
             mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `a2a_agents`. */
             a2a_access?: components["schemas"]["ModelAccess"] | null;
-            /** A2A Agents */
+            /**
+             * A2A Agents
+             * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
+             */
             a2a_agents?: string[] | null;
-            /** Rpm Limit */
+            /**
+             * Rpm Limit
+             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             rpm_limit?: number | null;
-            /** Tpm Limit */
+            /**
+             * Tpm Limit
+             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             tpm_limit?: number | null;
-            /** Max Parallel */
+            /**
+             * Max Parallel
+             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             max_parallel?: number | null;
-            /** Budget Nano Usd */
+            /**
+             * Budget Nano Usd
+             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
+             */
             budget_nano_usd?: number | null;
-            /** Name */
+            /**
+             * Name
+             * @description Display name, 1 to 200 characters.
+             */
             name?: string | null;
-            /** Description */
+            /**
+             * Description
+             * @description Free text.
+             */
             description?: string | null;
-            /** Is Active */
+            /**
+             * Is Active
+             * @description false deactivates the account, and its keys stop authenticating; true reactivates it.
+             */
             is_active?: boolean | null;
         };
         /** SessionInfo */
@@ -3468,6 +4194,7 @@ export interface components {
         TargetAuthIn: {
             /**
              * Plugin
+             * @description `none`, `static_bearer`, `passthrough`, or a WASM upstream-auth plugin listed by `GET /plugins`.
              * @default none
              */
             plugin: string;
@@ -3478,12 +4205,19 @@ export interface components {
             params?: {
                 [key: string]: unknown;
             };
-            /** Secret Ref */
+            /**
+             * Secret Ref
+             * @description `static_bearer` only: name of an environment variable on the gateway that holds the token. Mutually exclusive with `secret`.
+             */
             secret_ref?: string | null;
-            /** Secret */
+            /**
+             * Secret
+             * @description `static_bearer` only: the bearer token, stored sealed with `LUMEWARP_ENCRYPTION_KEY` and never returned. Mutually exclusive with `secret_ref`.
+             */
             secret?: string | null;
             /**
              * Timeout Ms
+             * @description WASM plugin only: how long one call may run, in ms; 0 = the gateway default (60 s).
              * @default 0
              */
             timeout_ms: number;
@@ -3526,38 +4260,81 @@ export interface components {
         };
         /** TeamCreate */
         TeamCreate: {
-            /** Member Rpm Default */
+            /**
+             * Member Rpm Default
+             * @description Requests per minute for each member who has no limit of their own; capped by the team's limit. null = none.
+             */
             member_rpm_default?: number | null;
-            /** Member Tpm Default */
+            /**
+             * Member Tpm Default
+             * @description Tokens per minute for each member who has no limit of their own; capped by the team's limit. null = none.
+             */
             member_tpm_default?: number | null;
-            /** Member Max Parallel Default */
+            /**
+             * Member Max Parallel Default
+             * @description Concurrent requests for each member who has no limit of their own; capped by the team's limit. null = none.
+             */
             member_max_parallel_default?: number | null;
-            /** Max Keys Per Member */
+            /**
+             * Max Keys Per Member
+             * @description How many keys one member may own in the team; null = unlimited. Service-account keys do not count.
+             */
             max_keys_per_member?: number | null;
-            /** Max Member Key Lifetime Seconds */
+            /**
+             * Max Member Key Lifetime Seconds
+             * @description Longest lifetime of a member's key, checked on create, rotate and expiry changes; null = unlimited.
+             */
             max_member_key_lifetime_seconds?: number | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `allowed_models`. */
             model_access?: components["schemas"]["ModelAccess"] | null;
-            /** Allowed Models */
+            /**
+             * Allowed Models
+             * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
+             */
             allowed_models?: string[] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
-            /** Mcp Servers */
+            /**
+             * Mcp Servers
+             * @description MCP server grants used when `mcp_access` is `list`; empty denies all.
+             */
             mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `a2a_agents`. */
             a2a_access?: components["schemas"]["ModelAccess"] | null;
-            /** A2A Agents */
+            /**
+             * A2A Agents
+             * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
+             */
             a2a_agents?: string[] | null;
-            /** Rpm Limit */
+            /**
+             * Rpm Limit
+             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             rpm_limit?: number | null;
-            /** Tpm Limit */
+            /**
+             * Tpm Limit
+             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             tpm_limit?: number | null;
-            /** Max Parallel */
+            /**
+             * Max Parallel
+             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             max_parallel?: number | null;
-            /** Budget Nano Usd */
+            /**
+             * Budget Nano Usd
+             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
+             */
             budget_nano_usd?: number | null;
-            /** Name */
+            /**
+             * Name
+             * @description Team name, unique among live teams.
+             */
             name: string;
             /**
              * Org Id
              * Format: uuid
+             * @description The org the team belongs to. It cannot be changed later.
              */
             org_id: string;
         };
@@ -3623,41 +4400,89 @@ export interface components {
         TeamRole: "admin" | "member";
         /** TeamUpdate */
         TeamUpdate: {
-            /** Member Rpm Default */
+            /**
+             * Member Rpm Default
+             * @description Requests per minute for each member who has no limit of their own; capped by the team's limit. null = none.
+             */
             member_rpm_default?: number | null;
-            /** Member Tpm Default */
+            /**
+             * Member Tpm Default
+             * @description Tokens per minute for each member who has no limit of their own; capped by the team's limit. null = none.
+             */
             member_tpm_default?: number | null;
-            /** Member Max Parallel Default */
+            /**
+             * Member Max Parallel Default
+             * @description Concurrent requests for each member who has no limit of their own; capped by the team's limit. null = none.
+             */
             member_max_parallel_default?: number | null;
-            /** Max Keys Per Member */
+            /**
+             * Max Keys Per Member
+             * @description How many keys one member may own in the team; null = unlimited. Service-account keys do not count.
+             */
             max_keys_per_member?: number | null;
-            /** Max Member Key Lifetime Seconds */
+            /**
+             * Max Member Key Lifetime Seconds
+             * @description Longest lifetime of a member's key, checked on create, rotate and expiry changes; null = unlimited.
+             */
             max_member_key_lifetime_seconds?: number | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `allowed_models`. */
             model_access?: components["schemas"]["ModelAccess"] | null;
-            /** Allowed Models */
+            /**
+             * Allowed Models
+             * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
+             */
             allowed_models?: string[] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
-            /** Mcp Servers */
+            /**
+             * Mcp Servers
+             * @description MCP server grants used when `mcp_access` is `list`; empty denies all.
+             */
             mcp_servers?: components["schemas"]["McpGrantIn"][] | null;
+            /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `a2a_agents`. */
             a2a_access?: components["schemas"]["ModelAccess"] | null;
-            /** A2A Agents */
+            /**
+             * A2A Agents
+             * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
+             */
             a2a_agents?: string[] | null;
-            /** Rpm Limit */
+            /**
+             * Rpm Limit
+             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             rpm_limit?: number | null;
-            /** Tpm Limit */
+            /**
+             * Tpm Limit
+             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             tpm_limit?: number | null;
-            /** Max Parallel */
+            /**
+             * Max Parallel
+             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             */
             max_parallel?: number | null;
-            /** Budget Nano Usd */
+            /**
+             * Budget Nano Usd
+             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
+             */
             budget_nano_usd?: number | null;
-            /** Name */
+            /**
+             * Name
+             * @description Team name, unique among live teams.
+             */
             name?: string | null;
         };
         /** TokenCreate */
         TokenCreate: {
-            /** Name */
+            /**
+             * Name
+             * @description A label for the token.
+             */
             name: string;
-            /** Expires At */
+            /**
+             * Expires At
+             * @description When it stops authenticating, with a timezone; null = no expiry.
+             */
             expires_at?: string | null;
         };
         /** TokenCreated */
@@ -3708,7 +4533,10 @@ export interface components {
              * @description Share = weight / sum(weights).
              */
             weight: number;
-            /** Members */
+            /**
+             * Members
+             * @description The models of this split.
+             */
             members: components["schemas"]["RouterMemberIn"][];
         };
         /** TrafficSplitOut */
@@ -3722,14 +4550,27 @@ export interface components {
         };
         /** UpstreamCreate */
         UpstreamCreate: {
-            /** Health Url */
+            /**
+             * Health Url
+             * @description URL of the active health probe; null = `base_url` without a trailing `/v1`, plus `/health`.
+             */
             health_url?: string | null;
-            /** Name */
+            /**
+             * Name
+             * @description Unique upstream name.
+             */
             name: string;
+            /** @description `openai`, `vllm` or `openai_compatible`. All three are proxied the same way. */
             kind: components["schemas"]["UpstreamKind"];
-            /** Base Url */
+            /**
+             * Base Url
+             * @description Absolute http(s) base URL of the upstream API, including `/v1` when that is its prefix.
+             */
             base_url: string;
-            /** Api Key Ref */
+            /**
+             * Api Key Ref
+             * @description Name of an environment variable on the gateway that holds the upstream bearer token. Mutually exclusive with `api_key`.
+             */
             api_key_ref?: string | null;
             /**
              * Api Key
@@ -3738,14 +4579,23 @@ export interface components {
             api_key?: string | null;
             /**
              * Timeout Ms
+             * @description Time allowed until the upstream's response headers arrive, in ms; 0 = the gateway default (600000). It does not limit the response body or a stream.
              * @default 0
              */
             timeout_ms: number;
-            /** @default include_usage */
+            /**
+             * @description `include_usage`: the gateway asks the upstream for a usage chunk on streams, to meter them, and hides it from clients that did not ask. `passthrough`: the upstream does not support that.
+             * @default include_usage
+             */
             stream_usage_mode: components["schemas"]["StreamUsageMode"];
+            /** @description Active health probe of the upstream; null = none. */
             health_check?: components["schemas"]["HealthCheckIn"] | null;
+            /** @description Circuit breaker, kept per model of the upstream; null = none. */
             circuit_breaker?: components["schemas"]["CircuitBreakerIn"] | null;
-            /** Metrics Url */
+            /**
+             * Metrics Url
+             * @description Prometheus endpoint scraped for `vllm_load` routers; null = `base_url` without a trailing `/v1`, plus `/metrics`.
+             */
             metrics_url?: string | null;
         };
         /**
@@ -3826,21 +4676,30 @@ export interface components {
          * @description The upstream form as it stands, saved or not.
          */
         UpstreamTestIn: {
-            /** Base Url */
+            /**
+             * Base Url
+             * @description Absolute http(s) base URL of the upstream API, including `/v1` when that is its prefix.
+             */
             base_url: string;
             /**
              * Api Key
              * @description A key typed in the form; used once, never stored.
              */
             api_key?: string | null;
-            /** Api Key Ref */
+            /**
+             * Api Key Ref
+             * @description Name of an environment variable on the gateway that holds the upstream bearer token. Mutually exclusive with `api_key`.
+             */
             api_key_ref?: string | null;
             /**
              * Upstream Id
              * @description A saved upstream: its stored key is used when no other is given, and the result is kept on it when the form matches it.
              */
             upstream_id?: string | null;
-            /** Health Url */
+            /**
+             * Health Url
+             * @description URL of the active health probe; null = `base_url` without a trailing `/v1`, plus `/health`.
+             */
             health_url?: string | null;
         };
         /** UpstreamTestOut */
@@ -3860,26 +4719,48 @@ export interface components {
          *     (and clears `api_key_ref`); null removes it. Setting `api_key_ref` removes a stored key.
          */
         UpstreamUpdate: {
-            /** Health Url */
+            /**
+             * Health Url
+             * @description URL of the active health probe; null = `base_url` without a trailing `/v1`, plus `/health`.
+             */
             health_url?: string | null;
-            /** Name */
+            /**
+             * Name
+             * @description Unique upstream name.
+             */
             name?: string | null;
+            /** @description `openai`, `vllm` or `openai_compatible`. All three are proxied the same way. */
             kind?: components["schemas"]["UpstreamKind"] | null;
-            /** Base Url */
+            /**
+             * Base Url
+             * @description Absolute http(s) base URL of the upstream API, including `/v1` when that is its prefix.
+             */
             base_url?: string | null;
-            /** Api Key Ref */
+            /**
+             * Api Key Ref
+             * @description Name of an environment variable on the gateway that holds the upstream bearer token. Mutually exclusive with `api_key`.
+             */
             api_key_ref?: string | null;
             /**
              * Api Key
              * @description Bearer token, stored sealed with LUMEWARP_ENCRYPTION_KEY and never returned. Mutually exclusive with api_key_ref.
              */
             api_key?: string | null;
-            /** Timeout Ms */
+            /**
+             * Timeout Ms
+             * @description Time allowed until the upstream's response headers arrive, in ms; 0 = the gateway default (600000). It does not limit the response body or a stream.
+             */
             timeout_ms?: number | null;
+            /** @description `include_usage`: the gateway asks the upstream for a usage chunk on streams, to meter them, and hides it from clients that did not ask. `passthrough`: the upstream does not support that. */
             stream_usage_mode?: components["schemas"]["StreamUsageMode"] | null;
+            /** @description Active health probe of the upstream; null = none. */
             health_check?: components["schemas"]["HealthCheckIn"] | null;
+            /** @description Circuit breaker, kept per model of the upstream; null = none. */
             circuit_breaker?: components["schemas"]["CircuitBreakerIn"] | null;
-            /** Metrics Url */
+            /**
+             * Metrics Url
+             * @description Prometheus endpoint scraped for `vllm_load` routers; null = `base_url` without a trailing `/v1`, plus `/metrics`.
+             */
             metrics_url?: string | null;
         };
         /**
@@ -3982,15 +4863,20 @@ export interface components {
         };
         /** UserCreate */
         UserCreate: {
-            /** Email */
+            /**
+             * Email
+             * @description The email the identity provider reports for the user.
+             */
             email: string;
             /**
              * Display Name
+             * @description Shown in the Admin UI.
              * @default
              */
             display_name: string;
             /**
              * Is Active
+             * @description false creates the user deactivated: they cannot sign in.
              * @default true
              */
             is_active: boolean;
@@ -4021,11 +4907,20 @@ export interface components {
         };
         /** UserUpdate */
         UserUpdate: {
-            /** Email */
+            /**
+             * Email
+             * @description The email the identity provider reports for the user.
+             */
             email?: string | null;
-            /** Display Name */
+            /**
+             * Display Name
+             * @description Shown in the Admin UI.
+             */
             display_name?: string | null;
-            /** Is Active */
+            /**
+             * Is Active
+             * @description false deactivates the user: they cannot sign in and their keys are suspended.
+             */
             is_active?: boolean | null;
         };
     };
@@ -5838,6 +6733,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Too many attempts; `Retry-After` gives the seconds to wait */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     getKey: {
@@ -5976,6 +6880,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Too many attempts; `Retry-After` gives the seconds to wait */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     revokeKey: {
@@ -6107,6 +7020,15 @@ export interface operations {
             };
             /** @description Validation error */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Too many attempts; `Retry-After` gives the seconds to wait */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6258,13 +7180,14 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
+            /** @description The gateway's response, passed through */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": Record<string, never>;
+                    "text/event-stream": string;
                 };
             };
             /** @description Missing or invalid credentials */
@@ -10514,14 +11437,12 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Successful Response */
-            200: {
+            /** @description Session opened; the session cookie is set */
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": unknown;
-                };
+                content?: never;
             };
             /** @description Missing or invalid credentials */
             401: {
@@ -10568,6 +11489,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            /** @description Too many attempts; `Retry-After` gives the seconds to wait */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     startOidcLogin: {
@@ -10581,14 +11511,12 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
-            200: {
+            /** @description Redirect to the identity provider */
+            302: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": unknown;
-                };
+                content?: never;
             };
             /** @description Missing or invalid credentials */
             401: {
@@ -10646,14 +11574,12 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
-            200: {
+            /** @description Redirect to the Admin UI, or to `/login?error=…` on failure */
+            302: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": unknown;
-                };
+                content?: never;
             };
             /** @description Missing or invalid credentials */
             401: {
@@ -10802,7 +11728,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["Readiness"];
+                };
+            };
+            /** @description Not ready */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Readiness"];
                 };
             };
         };

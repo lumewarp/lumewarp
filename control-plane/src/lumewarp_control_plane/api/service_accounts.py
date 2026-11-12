@@ -70,6 +70,7 @@ async def list_service_accounts(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[ServiceAccountOut]:
+    """Requires a team admin."""
     team = await get_team_or_404(session, authz, team_id)
     await authz.require(Action.TEAM_ADMIN_READ, team.id)
     stmt = (
@@ -94,6 +95,7 @@ async def create_service_account(
     session: SessionDep,
     settings: SettingsDep,
 ) -> ServiceAccountOut:
+    """Create a service account, a non-human key owner of the team. Requires a team admin."""
     async with mutation(session):
         await lock_scope(session, settings)
         team = await get_team_or_404(session, authz, team_id)
@@ -132,6 +134,7 @@ async def create_service_account(
 async def get_service_account(
     account_id: uuid.UUID, authz: Authz, session: SessionDep
 ) -> ServiceAccountOut:
+    """Requires a team admin; a caller outside the team gets 404."""
     row, _ = await _account_or_404(session, authz, account_id)
     return ServiceAccountOut.model_validate(row)
 
@@ -148,6 +151,9 @@ async def update_service_account(
     session: SessionDep,
     settings: SettingsDep,
 ) -> ServiceAccountOut:
+    """Rename, change the policy, or deactivate and reactivate. Requires a team admin. Keys of a
+    deactivated service account stop authenticating.
+    """
     async with mutation(session):
         await lock_scope(session, settings)
         ensure_not_null(body, "name", "description")
@@ -200,6 +206,9 @@ async def delete_service_account(
     session: SessionDep,
     settings: SettingsDep,
 ) -> Response:
+    """Requires a team admin. Answers 409 while the account has keys, revoked ones included,
+    because usage history refers to them; deactivate it instead.
+    """
     async with mutation(session):
         await lock_scope(session, settings)
         row, _ = await _account_or_404(session, authz, account_id)

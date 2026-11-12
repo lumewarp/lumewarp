@@ -23,6 +23,7 @@ from pydantic import (
     model_validator,
 )
 
+from lumewarp_control_plane.api import field_docs
 from lumewarp_control_plane.compiler.validate import (
     DEFAULT_BODY_RESERVED_KEYS,
     body_object_problem,
@@ -93,7 +94,9 @@ ModelName = Annotated[str, Field(min_length=1, max_length=400), AfterValidator(_
 
 
 class ApiModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", protected_namespaces=())
+    model_config = ConfigDict(
+        extra="forbid", protected_namespaces=(), json_schema_extra=field_docs.describe
+    )
 
 
 class ErrorDetail(BaseModel):

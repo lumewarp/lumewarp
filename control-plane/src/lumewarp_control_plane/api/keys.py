@@ -34,6 +34,7 @@ from lumewarp_control_plane.api.common import (
     parse_uuid_cursor,
     validation_error,
 )
+from lumewarp_control_plane.api.openapi import RATE_LIMITED
 from lumewarp_control_plane.api.policy import (
     owner_effective_of,
     policy_of,
@@ -372,6 +373,9 @@ async def list_team_keys(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[KeyOut]:
+    """A team admin sees every key of the team and may filter by owner. Any other member sees only
+    their own keys, and a filter naming someone else returns nothing.
+    """
     team = await get_team_or_404(session, authz, team_id)
     stmt = select(ApiKey).where(ApiKey.team_id == team.id).order_by(ApiKey.id)
     if not await authz.allowed(Action.TEAM_ADMIN_READ, team.id):
@@ -395,6 +399,7 @@ async def list_team_keys(
     response_model=KeyCreated,
     status_code=status.HTTP_201_CREATED,
     operation_id="createKey",
+    responses=RATE_LIMITED,
 )
 async def create_key(
     team_id: uuid.UUID,
@@ -405,6 +410,12 @@ async def create_key(
     settings: SettingsDep,
     metrics: MetricsDep,
 ) -> KeyCreated:
+    """Create a virtual API key (`lw-…`). The secret is in this response only. Without
+    `service_account_id` the key belongs to the caller, who must belong to or administer the
+    team, and the team's `max_keys_per_member` and `max_member_key_lifetime_seconds` apply. A
+    key for a service account requires a team admin. The key's limits may not exceed its owner's
+    effective limits. Limited to 30 attempts per 60 seconds per caller (429).
+    """
     await _rate_limit(request, authz, "create", KEY_CREATE_LIMIT, metrics)
     async with mutation(session):
         await lock_scope(session, settings)
@@ -468,6 +479,9 @@ async def create_key(
 
 @router.get("/keys/{key_id}", response_model=KeyOut, operation_id="getKey")
 async def get_key(key_id: uuid.UUID, authz: Authz, session: SessionDep) -> KeyOut:
+    """Readable by a team admin and by the key's owner. Another member of the team gets 403, a
+    caller outside the team 404. The secret is never returned.
+    """
     row = await session.get(ApiKey, key_id)
     if row is None:
         raise not_found("key not found")
@@ -476,7 +490,12 @@ async def get_key(key_id: uuid.UUID, authz: Authz, session: SessionDep) -> KeyOu
     return await _out(session, row)
 
 
-@router.patch("/keys/{key_id}", response_model=KeyOut, operation_id="updateKey")
+@router.patch(
+    "/keys/{key_id}",
+    response_model=KeyOut,
+    operation_id="updateKey",
+    responses=RATE_LIMITED,
+)
 async def update_key(
     key_id: uuid.UUID,
     body: KeyUpdate,
@@ -486,6 +505,12 @@ async def update_key(
     settings: SettingsDep,
     metrics: MetricsDep,
 ) -> KeyOut:
+    """Rename, change limits, or suspend and resume (`lifecycle`). The owner manages their own key
+    and a team admin any key of the team. An owner may resume only their own `owner` and
+    `owner_removed` suspensions; `admin` and `owner_deactivated` need a team admin. Revoked keys
+    are immutable and revoking has its own operation. Limited to 30 attempts per 60 seconds per
+    caller (429).
+    """
     await _rate_limit(request, authz, "update", KEY_UPDATE_LIMIT, metrics)
     async with mutation(session):
         await lock_scope(session, settings)
@@ -574,6 +599,9 @@ async def revoke_key(
     session: SessionDep,
     settings: SettingsDep,
 ) -> KeyOut:
+    """Revoke a key permanently, including a previous secret still inside its rotation grace.
+    Allowed for the owner and for a team admin. Revoking an already revoked key succeeds.
+    """
     async with mutation(session):
         await lock_scope(session, settings)
         row = await _get_key(session, authz, key_id)
@@ -600,7 +628,12 @@ async def revoke_key(
     return await _out(session, row)
 
 
-@router.post("/keys/{key_id}/rotate", response_model=KeyCreated, operation_id="rotateKey")
+@router.post(
+    "/keys/{key_id}/rotate",
+    response_model=KeyCreated,
+    operation_id="rotateKey",
+    responses=RATE_LIMITED,
+)
 async def rotate_key(
     key_id: uuid.UUID,
     request: Request,
@@ -669,6 +702,9 @@ async def list_own_keys(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[KeyOut]:
+    """The caller's own keys across every team. Empty for a break-glass session, which is not a
+    user.
+    """
     if authz.user_id is None:
         return Page[KeyOut](items=[], next_cursor=None)
     stmt = (

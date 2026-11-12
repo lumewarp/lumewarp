@@ -40,6 +40,9 @@ async def list_gateways(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[GatewayOut]:
+    """Gateways with their tokens and the config version each last acknowledged. Requires an
+    installation admin.
+    """
     await authz.require(Action.GATEWAY_READ)
     scope = settings.scope
     ids = union(
@@ -109,6 +112,9 @@ async def create_gateway_token(
     session: SessionDep,
     settings: SettingsDep,
 ) -> GatewayTokenCreated:
+    """Create a gateway token (`lwg-…`) bound to one gateway id. The secret is in this response
+    only. Requires an installation admin.
+    """
     await authz.require(Action.GATEWAY_TOKEN_MANAGE)
     new = generate_secret(SecretKind.GATEWAY_TOKEN)
     async with mutation(session):
@@ -149,6 +155,9 @@ async def revoke_gateway_token(
     session: SessionDep,
     settings: SettingsDep,
 ) -> GatewayTokenOut:
+    """Requires an installation admin. The gateway's open config and usage streams are closed at
+    once.
+    """
     await authz.require(Action.GATEWAY_TOKEN_MANAGE)
     async with mutation(session):
         row = await session.get(GatewayToken, token_id)

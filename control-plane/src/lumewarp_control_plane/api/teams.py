@@ -64,6 +64,11 @@ async def list_teams(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[TeamOut | TeamBasicOut]:
+    """Teams the caller can read: every live team for an installation admin, otherwise the teams
+    the caller belongs to or administers. A team admin gets the full record; any other member
+    gets the basic one and reads their own effective policy from `GET /users/me`. Archived teams
+    are not listed.
+    """
     stmt = select(Team).where(Team.deleted_at.is_(None)).order_by(Team.id)
     is_admin = await authz.is_admin()
     if not is_admin:
@@ -96,6 +101,10 @@ async def create_team(
     session: SessionDep,
     settings: SettingsDep,
 ) -> TeamOut:
+    """Create a team in `org_id`. Requires an admin of that org; anyone else gets the same 404 as
+    for an unknown org. The team's policy may not exceed the org's effective policy, and an
+    archived org answers 409.
+    """
     async with mutation(session):
         await lock_scope(session, settings)
         org = await session.get(Org, body.org_id)
@@ -142,6 +151,9 @@ async def create_team(
     operation_id="getTeam",
 )
 async def get_team(team_id: uuid.UUID, authz: Authz, session: SessionDep) -> TeamOut | TeamBasicOut:
+    """A team admin gets the full record; any other member gets the basic one. A caller outside the
+    team gets 404.
+    """
     row = await get_team_or_404(session, authz, team_id)
     if await authz.allowed(Action.TEAM_ADMIN_READ, row.id):
         return TeamOut.model_validate(row)
@@ -156,6 +168,11 @@ async def update_team(
     session: SessionDep,
     settings: SettingsDep,
 ) -> TeamOut:
+    """Changing models, limits or the budget requires an org admin; changing the name, the member
+    key limits or the member defaults requires a team admin. A body that resends the current
+    policy unchanged is not a policy change. A member default may not exceed the team's
+    effective limit.
+    """
     async with mutation(session):
         await lock_scope(session, settings)
         ensure_not_null(body, "name")

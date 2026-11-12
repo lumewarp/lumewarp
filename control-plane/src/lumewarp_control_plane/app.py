@@ -26,7 +26,9 @@ from sqlalchemy import text
 
 from lumewarp_control_plane import __version__, audit, compiler, migrate, usage
 from lumewarp_control_plane import grpc as grpc_services
+from lumewarp_control_plane.api import openapi
 from lumewarp_control_plane.api import router as api_router
+from lumewarp_control_plane.api.openapi import Readiness
 from lumewarp_control_plane.auth.break_glass import LoginLimiter, enabled, validate_credentials
 from lumewarp_control_plane.authz import load_authorizer
 from lumewarp_control_plane.db import create_engine, create_session_factory
@@ -213,7 +215,13 @@ def create_app(
 ) -> FastAPI:
     settings = settings or get_settings()
     validate_credentials(settings)
-    app = FastAPI(title="Lumewarp control plane", version=__version__, lifespan=lifespan)
+    app = FastAPI(
+        title="Lumewarp control plane",
+        version=__version__,
+        description=openapi.DESCRIPTION,
+        openapi_tags=openapi.TAGS,
+        lifespan=lifespan,
+    )
     app.state.settings = settings
     app.state.break_glass_limiter = LoginLimiter()
     if enabled(settings):
@@ -263,7 +271,12 @@ def create_app(
         """Liveness: the process is serving HTTP."""
         return {"status": "ok"}
 
-    @app.get("/readyz", tags=["health"])
+    @app.get(
+        "/readyz",
+        tags=["health"],
+        response_model=Readiness,
+        responses={503: {"model": Readiness, "description": "Not ready"}},
+    )
     async def readyz() -> JSONResponse:
         """Readiness: DB reachable, schema at the migration head, gRPC server, compiler
         loop and rollover scheduler alive.

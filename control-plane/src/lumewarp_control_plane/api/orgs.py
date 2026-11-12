@@ -131,6 +131,7 @@ async def list_orgs(
     operation_id="createOrg",
 )
 async def create_org(body: OrgCreate, authz: Authz, session: SessionDep) -> OrgOut:
+    """Create an org. Requires an installation admin."""
     await authz.require(Action.ORG_MANAGE)
     policy = policy_from_fields(body, default_mode=ModelAccess.ALL)
     await grant_ids(session, policy.allowed_models)
@@ -155,6 +156,7 @@ async def create_org(body: OrgCreate, authz: Authz, session: SessionDep) -> OrgO
 
 @router.get("/orgs/{org_id}", response_model=OrgOut, operation_id="getOrg")
 async def get_org(org_id: uuid.UUID, authz: Authz, session: SessionDep) -> OrgOut:
+    """Readable by installation admins and by the org's own admins; anyone else gets 404."""
     row = await _readable_org_or_404(session, authz, org_id)
     return OrgOut.model_validate(row)
 

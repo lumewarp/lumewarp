@@ -24,6 +24,7 @@ from enum import StrEnum
 from typing import Annotated
 
 from fastapi import Depends, Request
+from fastapi.security import APIKeyCookie, HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select, update
 
 from lumewarp_control_plane.db import SessionFactory
@@ -39,6 +40,30 @@ class SecretKind(StrEnum):
 
 
 SECRET_BYTES = 32
+SESSION_COOKIE_NAME = "lumewarp_session"
+
+# Declared for the OpenAPI document only (`auto_error=False`): `current_principal` reads the
+# header and the cookie itself, so authentication behaves the same with or without them.
+PAT_SCHEME = HTTPBearer(
+    scheme_name="PersonalAccessToken",
+    bearerFormat="lwp-",
+    description=(
+        "A personal access token (`lwp-…`), created under Settings in the Admin UI or with "
+        "`POST /api/v1/users/me/tokens`. Virtual API keys (`lw-…`) and gateway tokens "
+        "(`lwg-…`) do not authenticate here."
+    ),
+    auto_error=False,
+)
+SESSION_SCHEME = APIKeyCookie(
+    name=SESSION_COOKIE_NAME,
+    scheme_name="Session",
+    description=(
+        "The browser session cookie set by the OIDC or break-glass login. A request that "
+        "writes (POST, PUT, PATCH, DELETE) must also send the `X-Lumewarp-CSRF` header with "
+        "the `csrf_token` from `GET /api/v1/session`."
+    ),
+    auto_error=False,
+)
 DISPLAY_CHARS = 6
 # PAT last_used_at is refreshed at most this often, so reads don't write on every call.
 LAST_USED_GRANULARITY = timedelta(minutes=1)
@@ -139,9 +164,14 @@ async def authenticate(
     return Principal(kind=PrincipalKind.USER, user_id=user.id, token_id=pat.id)
 
 
-async def current_principal(request: Request) -> Principal:
+async def current_principal(
+    request: Request,
+    _bearer: Annotated[HTTPAuthorizationCredentials | None, Depends(PAT_SCHEME)] = None,
+    _cookie: Annotated[str | None, Depends(SESSION_SCHEME)] = None,
+) -> Principal:
     """FastAPI dependency: the authenticated caller, or 401. Authentication runs in its own
     session (see `authenticate`); it does not share the request's `get_session` session.
+    The two scheme parameters only declare the credentials in the OpenAPI document.
     """
     token = parse_bearer(request.headers.get("authorization"))
     if token is None:

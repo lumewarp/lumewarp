@@ -268,6 +268,7 @@ async def list_mcp_servers(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[McpServerOut]:
+    """Requires an installation admin."""
     await authz.require(Action.ROUTING_READ)
     # One ordering and one cursor rule for every list (m1): the previous cursor is an id and
     # the next page is "id greater than it". Ordering by name made the two disagree.
@@ -290,6 +291,7 @@ async def create_mcp_server(
     session: SessionDep,
     settings: SettingsDep,
 ) -> McpServerOut:
+    """Register an upstream MCP server that keys can be granted. Requires an installation admin."""
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         await lock_scope(session, settings)
@@ -341,6 +343,7 @@ async def create_mcp_server(
 async def get_mcp_server(
     server_id: uuid.UUID, authz: Authz, session: SessionDep, settings: SettingsDep
 ) -> McpServerOut:
+    """Requires an installation admin."""
     await authz.require(Action.ROUTING_READ)
     row = await _live_server(session, server_id)
     return (await _mcp_servers_out(session, settings, [row]))[0]
@@ -356,6 +359,9 @@ async def update_mcp_server(
     session: SessionDep,
     settings: SettingsDep,
 ) -> McpServerOut:
+    """Requires an installation admin. A stored plugin reference that is no longer valid blocks
+    only a write that names a plugin.
+    """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         await lock_scope(session, settings)
@@ -447,6 +453,9 @@ async def list_mcp_definitions(
     state: McpDefinitionState | None = None,
     kind: McpDefinitionKind | None = None,
 ) -> Page[McpDefinitionOut]:
+    """The tool and prompt definitions gateways reported for this server, newest first, with their
+    review state. Requires an installation admin.
+    """
     await authz.require(Action.ROUTING_READ)
     await _live_server(session, server_id)
     stmt = select(McpDefinition).where(McpDefinition.server_id == server_id)
@@ -814,6 +823,7 @@ async def list_a2a_agents(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[A2aAgentOut]:
+    """Requires an installation admin."""
     await authz.require(Action.ROUTING_READ)
     stmt = select(A2aAgent).where(A2aAgent.deleted_at.is_(None)).order_by(A2aAgent.id)
     rows, next_cursor = await uuid_page(session, stmt, A2aAgent.id, limit, cursor)
@@ -834,6 +844,7 @@ async def create_a2a_agent(
     session: SessionDep,
     settings: SettingsDep,
 ) -> A2aAgentOut:
+    """Register an upstream A2A agent that keys can be granted. Requires an installation admin."""
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         await lock_scope(session, settings)
@@ -887,6 +898,7 @@ async def create_a2a_agent(
 async def get_a2a_agent(
     agent_id: uuid.UUID, authz: Authz, session: SessionDep, settings: SettingsDep
 ) -> A2aAgentOut:
+    """Requires an installation admin."""
     await authz.require(Action.ROUTING_READ)
     row = await _live_agent(session, agent_id)
     return (await _agents_out(session, settings, [row]))[0]
@@ -900,6 +912,7 @@ async def update_a2a_agent(
     session: SessionDep,
     settings: SettingsDep,
 ) -> A2aAgentOut:
+    """Requires an installation admin."""
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         await lock_scope(session, settings)

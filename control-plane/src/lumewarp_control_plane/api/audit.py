@@ -52,6 +52,11 @@ async def list_audit(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[AuditOut]:
+    """Audit events, newest first. An installation admin reads everything. An org admin reads their
+    orgs' events with `org_id`, org-level events included; a team admin reads their teams'
+    events. A caller who administers nothing gets 403, and a `team_id` or `org_id` the caller
+    cannot read answers 404.
+    """
     start = aware(from_, "from")
     end = aware(to_, "to")
 

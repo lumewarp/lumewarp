@@ -389,6 +389,7 @@ async def list_users(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[UserOut]:
+    """Requires an installation admin."""
     await authz.require(Action.USER_MANAGE)
     stmt = select(User).order_by(User.id)
     rows, next_cursor = await uuid_page(session, stmt, User.id, limit, cursor)
@@ -404,6 +405,10 @@ async def list_users(
     operation_id="createUser",
 )
 async def create_user(body: UserCreate, authz: Authz, session: SessionDep) -> UserOut:
+    """Create a user ahead of their first sign-in. Requires an installation admin. A user who signs
+    in through the IdP is created automatically, so this is needed only to grant something
+    beforehand.
+    """
     await authz.require(Action.USER_MANAGE)
     async with mutation(session):
         row = User(
@@ -427,6 +432,10 @@ async def create_user(body: UserCreate, authz: Authz, session: SessionDep) -> Us
 
 @router.get("/users/me", response_model=MeOut, operation_id="getCurrentUser")
 async def get_current_user(request: Request, authz: Authz, session: SessionDep) -> MeOut:
+    """The caller: installation role, the orgs and teams they belong to or administer (inherited
+    ones marked `inherited_from`), and per team the effective models, limits, key limits and the
+    month's remaining budget. A break-glass session has no user and returns only its kind.
+    """
     principal = authz.principal
     manages_grants = request.app.state.authorizer.manages_grants
     if principal.user_id is None:
@@ -491,6 +500,7 @@ async def list_own_tokens(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[TokenOut]:
+    """The caller's personal access tokens. Secrets are never returned."""
     if authz.user_id is None:
         return Page[TokenOut](items=[], next_cursor=None)
     stmt = (
@@ -515,6 +525,9 @@ async def create_own_token(
     authz: Authz,
     session: SessionDep,
 ) -> TokenCreated:
+    """Create a personal access token (`lwp-…`) for the caller. The secret is in this response
+    only. A break-glass session cannot own tokens (400).
+    """
     if authz.user_id is None:
         raise ApiError(400, "bad_request", "break-glass sessions cannot own personal tokens")
     return await _issue_token(body, authz.principal, session, authz.user_id, authz=authz)
@@ -593,6 +606,7 @@ async def _issue_token(
     operation_id="revokeOwnToken",
 )
 async def revoke_own_token(token_id: uuid.UUID, authz: Authz, session: SessionDep) -> TokenOut:
+    """Revoke one of the caller's own personal access tokens."""
     if authz.user_id is None:
         raise not_found("token not found")
     async with mutation(session):
@@ -616,6 +630,7 @@ async def revoke_own_token(token_id: uuid.UUID, authz: Authz, session: SessionDe
 
 @router.get("/users/{user_id}", response_model=UserOut, operation_id="getUser")
 async def get_user(user_id: uuid.UUID, authz: Authz, session: SessionDep) -> UserOut:
+    """Requires an installation admin."""
     await authz.require(Action.USER_MANAGE)
     row = await session.get(User, user_id)
     if row is None:
@@ -632,6 +647,10 @@ async def update_user(
     settings: SettingsDep,
     metrics: MetricsDep,
 ) -> UserOut:
+    """Requires an installation admin. Deactivating a user suspends their keys
+    (`owner_deactivated`) and their sessions and
+    tokens stop authenticating. You cannot deactivate yourself.
+    """
     await authz.require(Action.USER_MANAGE)
     _check_not_null(body, "email", "display_name", "is_active")
     async with mutation(session):
@@ -683,6 +702,10 @@ async def update_user(
 async def delete_user(
     user_id: uuid.UUID, authz: Authz, session: SessionDep, settings: SettingsDep
 ) -> Response:
+    """Requires an installation admin. Answers 409 while the user owns keys, which usage history
+    refers to; deactivate the user instead. Memberships and roles are removed with the account.
+    You cannot delete yourself.
+    """
     await authz.require(Action.USER_MANAGE)
     async with mutation(session):
         await lock_scope(session, settings)

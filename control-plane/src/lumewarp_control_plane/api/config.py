@@ -56,6 +56,7 @@ async def list_config_versions(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[ConfigVersionOut]:
+    """Compiled config versions, newest first. Requires an installation admin."""
     await authz.require(Action.CONFIG_READ)
     stmt = (
         select(ConfigVersion)
@@ -78,6 +79,11 @@ async def rollback_config(
     session: SessionDep,
     settings: SettingsDep,
 ) -> RollbackOut:
+    """Restore the routing catalog (upstreams, models, aliases, routers, MCP servers, A2A
+    agents) of an earlier version, by id, and publish it as a new version. Requires an
+    installation admin. Teams, keys, policies and key states stay as they are now. Answers
+    422 when a plugin connected now rejects the restored settings, unless `force` is set.
+    """
     await authz.require(Action.CONFIG_ROLLBACK)
     from lumewarp_control_plane import compiler
 

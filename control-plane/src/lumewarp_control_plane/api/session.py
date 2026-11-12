@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy import delete, or_, select, update
 
 from lumewarp_control_plane import audit, installation
+from lumewarp_control_plane.api.openapi import RATE_LIMITED
 from lumewarp_control_plane.auth import break_glass, oidc, sessions
 from lumewarp_control_plane.authz import RequestAuthz
 from lumewarp_control_plane.errors import ApiError, not_found
@@ -56,6 +57,11 @@ class SessionInfo(BaseModel):
 
 @router.get("", response_model_exclude_none=True, operation_id="getSession")
 async def session_info(request: Request, response: Response) -> SessionInfo:
+    """The current browser session and what the login page needs: whether OIDC and break-glass are
+    enabled, the signed-in user with their
+    installation role, and the CSRF token to send as `X-Lumewarp-CSRF` on writes.
+    Answers 200 without a session too.
+    """
     response.headers["Cache-Control"] = "no-store"
     info = SessionInfo(
         oidc_enabled=bool(request.app.state.settings.oidc_issuer),
@@ -90,11 +96,23 @@ async def session_info(request: Request, response: Response) -> SessionInfo:
 
 
 class BreakGlassLogin(BaseModel):
-    password: SecretStr = Field(max_length=4096)
+    password: SecretStr = Field(max_length=4096, description="The break-glass password.")
 
 
-@router.post("/break-glass", operation_id="loginBreakGlass")
+@router.post(
+    "/break-glass",
+    status_code=204,
+    operation_id="loginBreakGlass",
+    responses={
+        204: {"description": "Session opened; the session cookie is set"},
+        **RATE_LIMITED,
+    },
+)
 async def login_break_glass(body: BreakGlassLogin, request: Request) -> Response:
+    """Open an emergency session with the break-glass password. Answers 404 when break-glass is
+    disabled or the caller is outside the allowed networks, and 429 after too many attempts.
+    Every attempt is audited.
+    """
     settings = request.app.state.settings
     if not break_glass.enabled(settings):
         raise not_found()
@@ -178,8 +196,15 @@ def callback_failure(response: RedirectResponse, code: str, exc: Exception) -> R
     return response
 
 
-@router.get("/oidc/login", operation_id="startOidcLogin")
+@router.get(
+    "/oidc/login",
+    status_code=302,
+    response_class=RedirectResponse,
+    operation_id="startOidcLogin",
+    responses={302: {"description": "Redirect to the identity provider"}},
+)
 async def login(request: Request, next: str = "/") -> RedirectResponse:
+    """Redirect the browser to the identity provider. `next` must be a same-site relative path."""
     require_oidc(request)
     try:
         path = oidc.return_path(next)
@@ -243,8 +268,17 @@ async def login(request: Request, next: str = "/") -> RedirectResponse:
     return response
 
 
-@router.get("/oidc/callback", operation_id="completeOidcLogin")
+@router.get(
+    "/oidc/callback",
+    status_code=302,
+    response_class=RedirectResponse,
+    operation_id="completeOidcLogin",
+    responses={302: {"description": "Redirect to the Admin UI, or to `/login?error=…` on failure"}},
+)
 async def callback(request: Request) -> RedirectResponse:
+    """The identity provider's redirect target. Creates the user on a first sign-in, sets the
+    session cookie and redirects to the Admin UI.
+    """
     require_oidc(request)
     state = request.query_params.get("state", "")
     sealed = request.cookies.get(oidc.STATE_COOKIE, "")
@@ -323,6 +357,7 @@ async def callback(request: Request) -> RedirectResponse:
 
 @router.post("/logout", status_code=204, operation_id="logoutSession")
 async def logout(request: Request, principal: CurrentPrincipal) -> Response:
+    """End the current session and clear its cookie."""
     if principal.kind in (PrincipalKind.SESSION, PrincipalKind.BREAK_GLASS):
         async with request.app.state.session_factory() as session, session.begin():
             await session.execute(
