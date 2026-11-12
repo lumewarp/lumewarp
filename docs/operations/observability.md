@@ -24,7 +24,7 @@ What the lookup depends on:
   Use 1 if this serves as an access log. A slow collector loses spans without any log line
   or metric; the queue is tuned with `OTEL_BSP_MAX_QUEUE_SIZE`,
   `OTEL_BSP_SCHEDULE_DELAY` and `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` in `gateway.extraEnv`
-  (measurements in the [gateway README](./gateway.md)).
+  (measurements in the [Gateway](./gateway.md)).
 - Retention is whatever the OTel backend keeps.
 - The gateway ignores the sampled flag of a client's `traceparent`, so a client cannot erase
   its own record; it still joins the client's trace.
@@ -159,7 +159,7 @@ discovery separately. Standalone YAML gateways are excluded from config-stream
 and version-mismatch alerts via `lumewarp_config_info{source="yaml"}`.
 
 `serviceMonitor.enabled` scrapes both the gateway admin port and the control
-plane's dedicated `metrics` port (`lumewarp_cp_*`, see the control-plane README).
+plane's dedicated `metrics` port (`lumewarp_cp_*`, see [Metrics](../reference/metrics.md)).
 Panels whose exporters are not deployed stay empty; missing metrics do not trigger
 these threshold alerts. The control plane exports
 `lumewarp_cp_key_reconcile_last_success_timestamp_seconds` as 0 until the key

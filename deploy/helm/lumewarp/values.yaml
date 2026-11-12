@@ -84,7 +84,7 @@ controlPlane:
   nodeSelector: {}
   tolerations: []
   affinity: {}
-  # SSO needs LUMEWARP_SECRET_KEY, passed here with a secretKeyRef (see the chart README).
+  # SSO needs LUMEWARP_SECRET_KEY, passed here with a secretKeyRef (see "SSO and authorization backend" in docs/operations/index.md).
   extraEnv: []
   extraArgs: []
   # Readiness drains background services; uvicorn allows about 10 s of graceful shutdown.
@@ -188,8 +188,8 @@ gateway:
     port: 4000
     adminPort: 9464
   # OTLP/HTTP traces. The gateway writes no access log: this is where one request is looked
-  # up, by the x-lumewarp-request-id of its response. See "Looking up a request" in the
-  # chart README for what the lookup depends on.
+  # up, by the x-lumewarp-request-id of its response. See "Looking up a request" in
+  # docs/operations/observability.md for what the lookup depends on.
   otel:
     # Base URL, for example http://otel-collector.observability:4318 (/v1/traces is
     # appended). Empty = no traces, and nothing to look a request up in.

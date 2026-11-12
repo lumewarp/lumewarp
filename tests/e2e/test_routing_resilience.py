@@ -272,7 +272,7 @@ def test_fallback_model_serves_with_original_model(stack):
     bad = _bad_upstream(stack)
     good = _upstream_id(stack, "mock")
     # Nothing listens there: connect errors, which streams may retry too (a 503 with
-    # headers ends a stream's attempts, see gateway/README.md "Retry and health").
+    # headers ends a stream's attempts, see docs/admin/routers.md "Retry and health behavior").
     down = stack.ok(
         "POST",
         "/upstreams",

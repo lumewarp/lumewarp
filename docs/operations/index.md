@@ -12,7 +12,8 @@ A release publishes:
 - `ghcr.io/lumewarp/lumewarp-gateway:<version>` and
   `ghcr.io/lumewarp/lumewarp-control-plane:<version>` (stable releases also `X.Y` and `latest`);
 - the chart at `oci://ghcr.io/lumewarp/charts/lumewarp`;
-- the example WASM plugins, attached to the GitHub release with their `SHA256SUMS`.
+- the example WASM plugins, attached to the GitHub release with their `SHA256SUMS`;
+- both OpenAPI documents, attached as `openapi-control-plane.json` and `openapi-gateway.json`.
 
 Both Dockerfiles use the repository root as build context so the gateway can read
 `proto/` and the control-plane image can build `ui/`:
@@ -25,8 +26,7 @@ docker build -f control-plane/Dockerfile -t ghcr.io/lumewarp/lumewarp-control-pl
 The gateway image is distroless, runs as non-root and includes a writable
 `/var/lib/lumewarp` for the cached snapshot. The control-plane image runs the
 uv-installed package on Python 3.12 as non-root and includes the built Admin UI.
-The [Helm chart]() deploys both; set the image
-repositories/tags in its values.
+The Helm chart below deploys both; set the image repositories and tags in its values.
 
 ## Prerequisites
 
@@ -219,7 +219,7 @@ rotation invalidates MCP sessions and the A2A task ids already handed out.
 ## SSO and authorization backend
 
 The control plane reads every setting from `LUMEWARP_*` environment variables (see the
-[control-plane README](./control-plane.md)); pass SSO and authorization
+[Control plane](./control-plane.md)); pass SSO and authorization
 settings through `controlPlane.extraEnv`, secrets through `secretKeyRef`:
 
 ```yaml

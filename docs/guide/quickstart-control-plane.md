@@ -44,7 +44,7 @@ plane publishes an empty version when it starts, so here the gateway is ready at
 and answers 401 until a key exists. Open <http://127.0.0.1:8091/>, use the emergency login with the
 password `dev-break-glass` (a plaintext password needs `LUMEWARP_DEV_MODE=true`; production
 uses an argon2id hash and OIDC, see the
-[control plane README](../operations/identity.md)), then create:
+[Sign-in and authorization](../operations/identity.md)), then create:
 
 - an upstream for `http://127.0.0.1:9100/v1` (kind `openai_compatible`),
 - a model named `mock-local` using upstream model `mock`,
@@ -63,7 +63,7 @@ curl -sS -H "Authorization: Bearer lw-..." -H 'Content-Type: application/json' \
 ```
 
 Usage lands in the UI after the next report batch (about one second); budgets are
-enforced eventually. See the [control-plane README](../operations/control-plane.md) for
+enforced eventually. See [Control plane](../operations/control-plane.md) for
 settings, SSO, authorization backends, the catalog, plugins and operations, and
 [`docs/config-protocol.md`](../config-protocol.md) for the stream contract.
 

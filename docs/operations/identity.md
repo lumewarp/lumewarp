@@ -59,7 +59,7 @@ never come from the IdP.
 | `LUMEWARP_SESSION_COOKIE_SECURE` | `Secure` cookie flag (default true; turn off only for plain-http dev). |
 
 With the Helm chart, pass `LUMEWARP_SECRET_KEY` through `controlPlane.extraEnv` with a
-`secretKeyRef`, as in the [chart README's SSO
+`secretKeyRef`, as in the [Helm SSO
 example](./index.md#sso-and-authorization-backend).
 
 - Users are identified by the token's `iss` + `sub`. On a first login with a verified
