@@ -1351,9 +1351,9 @@ routers:
 
     #[test]
     fn example_and_bench_configs_convert() {
-        let quickstart = include_str!("../../../../README.md")
+        let quickstart = include_str!("../../../../docs/guide/quickstart-standalone.md")
             .split_once("```yaml\n")
-            .expect("README has a YAML quickstart")
+            .expect("the standalone quick start has a YAML block")
             .1
             .split_once("```")
             .expect("quickstart code block is closed")
