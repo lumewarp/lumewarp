@@ -60,7 +60,7 @@ never come from the IdP.
 
 With the Helm chart, pass `LUMEWARP_SECRET_KEY` through `controlPlane.extraEnv` with a
 `secretKeyRef`, as in the [Helm SSO
-example](./index.md#sso-and-authorization-backend).
+example](./helm.md#sso-and-authorization-backend).
 
 - Users are identified by the token's `iss` + `sub`. On a first login with a verified
   email, the identity links to an existing account with that email that

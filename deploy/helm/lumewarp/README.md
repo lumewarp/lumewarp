@@ -6,7 +6,7 @@ config stream, keeps the last ACKed snapshot on a local volume and never calls t
 control plane from the request path.
 
 This page covers installing the chart. Everything else is in the manual:
-[Install](../../../docs/operations/index.md) has the full values reference, upstream API
+[Deploy with Helm](../../../docs/operations/helm.md) has the full values reference, upstream API
 keys, gateway plugins, MCP and A2A, SSO, important limits and verifying a release, and
 [Observability](../../../docs/operations/observability.md) the alert rules, dashboards and
 request lookup in OTel.

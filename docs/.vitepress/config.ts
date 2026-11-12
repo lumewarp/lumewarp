@@ -45,7 +45,9 @@ const sidebar = [
   {
     text: "Operations",
     items: [
-      { text: "Install", link: "/operations/" },
+      { text: "Deploy", link: "/operations/" },
+      { text: "Deploy with Helm", link: "/operations/helm" },
+      { text: "Deploy with Docker", link: "/operations/docker" },
       { text: "Control plane settings", link: "/operations/control-plane" },
       { text: "Gateway settings", link: "/operations/gateway" },
       { text: "Sign-in and authorization", link: "/operations/identity" },

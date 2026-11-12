@@ -51,4 +51,4 @@ all its prompts.
 ## What a gateway needs
 
 MCP and A2A answer 503 until the gateways have `LUMEWARP_GATEWAY_ID_KEY`, and A2A also
-needs `LUMEWARP_GATEWAY_PUBLIC_URL`. See [Install](../operations/index.md#gateway-plugins-wasm).
+needs `LUMEWARP_GATEWAY_PUBLIC_URL`. See [Deploy with Helm](../operations/helm.md#gateway-plugins-wasm) or [Deploy with Docker](../operations/docker.md#operating-it).

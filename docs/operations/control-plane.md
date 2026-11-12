@@ -49,6 +49,7 @@ it off the public admin ingress.
 | `migrate [REV]` / `migrate --downgrade REV` | Apply or roll back Alembic migrations (default `head`). |
 | `openapi [-o FILE]` | Print the OpenAPI document; builds the app without connecting to the database. |
 | `bootstrap --gateway-id ID [--name N] [--scope S]` | Create the config scope row and a `lwg-...` gateway token; the secret goes to stdout once. |
+| `hash-password` | Read a password from stdin (or prompt for it) and print its argon2id hash for `LUMEWARP_BREAK_GLASS_PASSWORD_HASH`. |
 
 The console script is `lumewarp-control-plane`; `python -m lumewarp_control_plane` is
 equivalent.
@@ -105,7 +106,7 @@ wheel build includes the static directory as package data.
 
 ## Deployment
 
-The Helm chart in [`../deploy/helm/lumewarp`](https://github.com/lumewarp/lumewarp/blob/main/deploy/helm/lumewarp) deploys this
-service with `/readyz` and `/healthz` probes, the HTTP/gRPC/metrics Service (plus an
-optional ServiceMonitor for the metrics port), the DB URL Secret and a migration hook Job.
-The control plane must stay at one replica.
+[Deploy with Helm](./helm.md) runs this service with `/readyz` and `/healthz` probes, the
+HTTP/gRPC/metrics Service (plus an optional ServiceMonitor for the metrics port), the
+database URL Secret and a migration hook Job. [Deploy with Docker](./docker.md) runs it with
+Compose next to Postgres and a gateway. Either way the control plane stays at one replica.

@@ -25,7 +25,7 @@ The manual is in [`docs/`](docs/index.md), organised by reader:
 | [Calling the gateway](docs/using/index.md) | Endpoints, errors, MCP and A2A, for client authors. |
 | [Your keys](docs/self-service/index.md) | Self-service keys and the Playground. |
 | [Administration](docs/admin/index.md) | Roles, teams, keys and limits, the catalog, routers, usage and audit. |
-| [Operations](docs/operations/index.md) | Installing, configuring and observing the control plane and the gateway. |
+| [Operations](docs/operations/index.md) | Deploying with [Helm](docs/operations/helm.md) or [Docker](docs/operations/docker.md), configuring and observing the control plane and the gateway. |
 | [Extending](docs/extending/index.md) | Gateway WASM plugins, control-plane Python plugins, the plugin development skill. |
 | [Reference](docs/reference/control-plane-api.md) | Both OpenAPI documents, gateway YAML, errors, metrics. |
 
@@ -77,7 +77,7 @@ Admin UI and a gateway that follows it. `make dev` starts the whole stack with a
 | `ui/` | Admin UI (React + Vite with shadcn/ui on Radix, static; served by the control plane) |
 | `proto/` | Config snapshot and config/usage gRPC schema |
 | `bench/` | Mock upstream and Lumewarp-vs-LiteLLM load tests; [bench/README.md](bench/README.md) |
-| `deploy/` | Helm chart ([README](deploy/helm/lumewarp/README.md)), dev compose, Prometheus rules, Grafana dashboards |
+| `deploy/` | Helm chart ([README](deploy/helm/lumewarp/README.md)), Docker Compose deployment (`docker/`), dev compose, Prometheus rules, Grafana dashboards |
 | `docs/` | The manual (VitePress) |
 | `.claude/skills/` | Claude Code skills: `lumewarp-plugin-dev` and `port-router-to-rust` |
 

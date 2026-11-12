@@ -1,0 +1,5 @@
+# The gateway's local settings in control-plane mode: only the `server:` block is
+# read; upstreams, models, routers and keys come from the control plane.
+server:
+  listen: 0.0.0.0:4000
+  admin_listen: 0.0.0.0:9464

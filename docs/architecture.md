@@ -82,7 +82,7 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 
 ### 憑證儲存與稽核
 
-- DB 只存不可逆或不可用的形式。API key、PAT、gateway token、session／CSRF token 與 OIDC state 只存 sha256：它們是 256-bit 隨機值，快速 hash 就足以防離線猜測。OIDC 的 nonce 與 PKCE code verifier 只放在 AES-256-GCM 封存的登入 cookie（金鑰由 `LUMEWARP_SECRET_KEY` 派生），`oidc_login_states` 只有 state hash、return path、redirect URI 與到期時間，用過即刪；SSO 開啟但沒設金鑰時服務拒絕啟動。Helm 以 `controlPlane.extraEnv` 的 `secretKeyRef` 傳入，範例見 [安裝](./operations/index.md)。
+- DB 只存不可逆或不可用的形式。API key、PAT、gateway token、session／CSRF token 與 OIDC state 只存 sha256：它們是 256-bit 隨機值，快速 hash 就足以防離線猜測。OIDC 的 nonce 與 PKCE code verifier 只放在 AES-256-GCM 封存的登入 cookie（金鑰由 `LUMEWARP_SECRET_KEY` 派生），`oidc_login_states` 只有 state hash、return path、redirect URI 與到期時間，用過即刪；SSO 開啟但沒設金鑰時服務拒絕啟動。Helm 以 `controlPlane.extraEnv` 的 `secretKeyRef` 傳入，範例見 [Helm 部署](./operations/helm.md#sso-and-authorization-backend)。
 - Upstream API key 有兩種來源，擇一：`api_key_ref`（gateway 環境變數名稱）或在 API 輸入的 key。輸入的 key 以 AES-256-GCM 封存在 `upstreams.api_key_ciphertext`（金鑰由 `LUMEWARP_ENCRYPTION_KEY` 以 HKDF 派生，與 `LUMEWARP_SECRET_KEY` 分開），API 只回 `api_key_set`，稽核只記 `credential_changed`。snapshot 帶密文（capability `encrypted_api_key`），gateway 用同一把 `LUMEWARP_ENCRYPTION_KEY` 在套用 snapshot 時解開，不在請求路徑上；落地的 snapshot 也只有密文。gateway 沒有或金鑰不符時 NACK `INVALID_CONFIG`。換這把金鑰後，已存的 key 必須重新輸入。Helm 以 `encryptionKey.secretName` 同時傳給 control plane 與 gateway。
 - `upstreams.metrics_url` 不帶 query string（`?token=...` 會把憑證放進 API 會回傳、也會進稽核的欄位）；API 與 compiler 都拒絕帶 query 或 userinfo 的值。
 - 稽核 `details` 是每個 action 的 allowlist：沒分類的欄位不記錄；`last_error` 類欄位只存 exception class。守門測試掃每個 Text／String／JSONB 欄位與原始碼中每個 `audit.record(action=...)`，新增而未分類就失敗。

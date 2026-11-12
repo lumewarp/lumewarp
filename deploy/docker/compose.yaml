@@ -1,0 +1,82 @@
+# Lumewarp on one Docker host: Postgres, the control plane and one gateway.
+# Described in docs/operations/docker.md. Settings come from `.env` next to this
+# file (copy `env.example`); the gateway token is created after the first start.
+name: lumewarp
+
+x-control-plane: &control-plane
+  image: ghcr.io/lumewarp/lumewarp-control-plane:${LUMEWARP_VERSION:-0.1.0}
+  env_file: .env
+  environment:
+    LUMEWARP_DATABASE_URL: postgresql+asyncpg://lumewarp:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/lumewarp
+    # Inside the container every listener binds all interfaces; `ports:` below
+    # decides what the host exposes.
+    LUMEWARP_HTTP_BIND: 0.0.0.0:8091
+    LUMEWARP_GRPC_BIND: 0.0.0.0:50051
+    LUMEWARP_METRICS_BIND: 0.0.0.0:9465
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lumewarp
+      POSTGRES_USER: lumewarp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lumewarp -d lumewarp"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Runs once per `up`: brings the schema to the image's head, then exits.
+  migrate:
+    <<: *control-plane
+    command: ["migrate"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  control-plane:
+    <<: *control-plane
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8091:8091"   # API and Admin UI; put TLS in front before exposing it
+      - "127.0.0.1:9465:9465"   # Prometheus metrics (lumewarp_cp_*)
+    # gRPC (50051) stays on the compose network: only the gateway uses it.
+
+  gateway:
+    image: ghcr.io/lumewarp/lumewarp-gateway:${LUMEWARP_VERSION:-0.1.0}
+    restart: unless-stopped
+    profiles: ["gateway"]   # started once LUMEWARP_GATEWAY_TOKEN is in .env
+    command:
+      - --control-plane=http://control-plane:50051
+      - --gateway-token-env=LUMEWARP_GATEWAY_TOKEN
+      - --state-dir=/var/lib/lumewarp/state
+      - --scope=default
+      - --gateway-id=${LUMEWARP_GATEWAY_ID:-gw-1}
+      - --local-config=/etc/lumewarp/local.yaml
+    environment:
+      LUMEWARP_GATEWAY_TOKEN: ${LUMEWARP_GATEWAY_TOKEN:-}
+      LUMEWARP_ENCRYPTION_KEY: ${LUMEWARP_ENCRYPTION_KEY:-}
+      LUMEWARP_GATEWAY_ID_KEY: ${LUMEWARP_GATEWAY_ID_KEY:-}
+      LUMEWARP_GATEWAY_PUBLIC_URL: ${LUMEWARP_GATEWAY_PUBLIC_URL:-}
+    volumes:
+      - ./gateway.yaml:/etc/lumewarp/local.yaml:ro
+      # The last good snapshot: the gateway boots and serves from it while the
+      # control plane is down.
+      - gateway-state:/var/lib/lumewarp
+    ports:
+      - "4000:4000"             # the API clients call
+      - "127.0.0.1:9464:9464"   # admin: /metrics and /readyz, unauthenticated
+    depends_on:
+      - control-plane
+
+volumes:
+  postgres:
+  gateway-state:

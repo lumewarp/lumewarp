@@ -44,5 +44,5 @@ Upstreams are OpenAI-compatible only: Lumewarp does not translate to other provi
 | Call models with a key you were given | [Calling the gateway](../using/index.md) |
 | Create and rotate your own keys | [Your keys](../self-service/index.md) |
 | Manage a team or an org | [Roles](../admin/index.md) |
-| Install and run Lumewarp | [Install](../operations/index.md) |
+| Install and run Lumewarp | [Deploy](../operations/index.md): [Helm](../operations/helm.md) or [Docker](../operations/docker.md) |
 | Add a router strategy or an auth plugin | [Extension points](../extending/index.md) |
