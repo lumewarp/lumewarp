@@ -446,6 +446,8 @@ jobs:
           input: proto
           breaking: false
           push: false
+          # The workflow token cannot comment on the PR; failures show as annotations.
+          pr_comment: false
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"

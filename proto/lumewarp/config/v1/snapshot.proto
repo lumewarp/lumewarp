@@ -288,6 +288,8 @@ message TrafficSplit {
 }
 
 enum StickyBy {
+  // Not sticky: a real choice, not an unset value, so it keeps its name.
+  // buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
   STICKY_BY_NONE = 0;
   // Hash of the sticky_header value; requests without it are not sticky.
   STICKY_BY_HEADER = 1;
