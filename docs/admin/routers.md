@@ -10,7 +10,7 @@ Settings that compile 1:1 into the snapshot (`proto/lumewarp/config/v1/snapshot.
 
 | API field | Where | Snapshot / default |
 | --- | --- | --- |
-| `health_check {path, interval_ms, timeout_ms, unhealthy_threshold, healthy_threshold}` | upstream | `Upstream.health_check`; `null` = no active probing; null path = `/models`, null thresholds = 3 / 1 |
+| `health_url`, `health_check {interval_ms, timeout_ms, unhealthy_threshold, healthy_threshold}` | upstream | `Upstream.health_check`; `null` = no active probing; null `health_url` = `base_url` without a trailing `/v1`, plus `/health`; null thresholds = 3 / 1 |
 | `circuit_breaker {failure_threshold, open_ms}` | upstream | `Upstream.circuit_breaker`; `null` = never opens; `{}` = gateway defaults (5 failures, 30000 ms). Breaker state is per model |
 | `metrics_url` | upstream | `Upstream.metrics_url` for `vllm_load`; `null` = base URL minus `/v1` plus `/metrics` |
 | `strategy`, `params` | router | `Router.strategy`, a name: `weighted`, `least_in_flight`, `lowest_latency` (EWMA), `vllm_load`, or a router-strategy plugin a gateway reports; `Router.params_json` |

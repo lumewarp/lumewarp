@@ -185,7 +185,8 @@ BY_MODEL: dict[tuple[str, str], str] = {
     ("KeyUpdate", "name"): "A label for the key.",
     ("KeyCreate", "expires_at"): (
         "When the key stops authenticating: in the future, with a timezone. null = no"
-        " expiry. A member's key is bounded by the team's `max_member_key_lifetime_seconds`."
+        " expiry, except that a member's key gets the team's"
+        " `max_member_key_lifetime_seconds` as its expiry and may not outlive it."
     ),
     ("KeyCreate", "service_account_id"): (
         "The service account that owns the key; omit for a key owned by the caller."
