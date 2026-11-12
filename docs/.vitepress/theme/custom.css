@@ -1,0 +1,9 @@
+/* Swagger UI ships a light theme only: keep it on a light surface in dark mode. */
+.dark .swagger {
+  background: #fafafa;
+  border-radius: 8px;
+  padding: 8px;
+}
+.swagger .information-container {
+  display: none;
+}

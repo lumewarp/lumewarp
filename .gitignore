@@ -8,3 +8,10 @@
 # Python bytecode (checked in by mistake once)
 __pycache__/
 *.pyc
+
+# Manual (VitePress): build output and generated reference files
+docs/node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+docs/public/openapi/
+docs/reference/generated/

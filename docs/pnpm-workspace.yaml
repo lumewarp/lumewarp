@@ -1,0 +1,4 @@
+allowBuilds:
+  # Install-time analytics of swagger-ui-dist; not needed.
+  '@scarf/scarf': false
+  esbuild: true
