@@ -52,6 +52,7 @@ uuid.workspace = true
 memchr.workspace = true
 
 [dev-dependencies]
+utoipa.workspace = true
 schemars.workspace = true
 mock-upstream = { path = "../../../bench/mock-upstream" }
 hyper = { workspace = true, features = ["http2"] }

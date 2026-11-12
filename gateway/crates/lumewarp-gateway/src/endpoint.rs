@@ -13,6 +13,9 @@ pub struct Endpoint {
     pub model_type: ModelType,
     pub upstream_suffix: &'static str,
     pub body: BodyKind,
+    /// One line for the OpenAPI document (`openapi.rs`). Required here so an endpoint
+    /// cannot be added without appearing in the API reference.
+    pub summary: &'static str,
 }
 
 impl Endpoint {
@@ -22,19 +25,19 @@ impl Endpoint {
 }
 
 macro_rules! endpoints {
-    ($(($path:literal, $label:literal, $kind:ident, $suffix:literal, $body:ident)),* $(,)?) => {
-        pub const ENDPOINTS: &[Endpoint] = &[$(Endpoint { path: $path, label: $label, model_type: ModelType::$kind, upstream_suffix: $suffix, body: BodyKind::$body }),*];
+    ($(($path:literal, $label:literal, $kind:ident, $suffix:literal, $body:ident, $summary:literal)),* $(,)?) => {
+        pub const ENDPOINTS: &[Endpoint] = &[$(Endpoint { path: $path, label: $label, model_type: ModelType::$kind, upstream_suffix: $suffix, body: BodyKind::$body, summary: $summary }),*];
     };
 }
 endpoints! {
-    ("/v1/chat/completions", "chat_completions", Llm, "/chat/completions", Json),
-    ("/v1/completions", "completions", Llm, "/completions", Json),
-    ("/v1/embeddings", "embeddings", Embedding, "/embeddings", Json),
-    ("/v1/responses", "responses", Llm, "/responses", Json),
-    ("/v1/audio/transcriptions", "audio_transcriptions", Transcription, "/audio/transcriptions", Multipart),
-    ("/v1/audio/translations", "audio_translations", Transcription, "/audio/translations", Multipart),
-    ("/v1/decisions", "decisions", Decision, "/decisions", Json),
-    ("/v1/systemone", "systemone", Decision, "/systemone", Json),
+    ("/v1/chat/completions", "chat_completions", Llm, "/chat/completions", Json, "Chat completion"),
+    ("/v1/completions", "completions", Llm, "/completions", Json, "Text completion"),
+    ("/v1/embeddings", "embeddings", Embedding, "/embeddings", Json, "Embeddings"),
+    ("/v1/responses", "responses", Llm, "/responses", Json, "Response (OpenAI Responses API)"),
+    ("/v1/audio/transcriptions", "audio_transcriptions", Transcription, "/audio/transcriptions", Multipart, "Transcribe audio"),
+    ("/v1/audio/translations", "audio_translations", Transcription, "/audio/translations", Multipart, "Translate audio to English text"),
+    ("/v1/decisions", "decisions", Decision, "/decisions", Json, "Decision"),
+    ("/v1/systemone", "systemone", Decision, "/systemone", Json, "System-one decision"),
 }
 pub const API_ENDPOINTS: [&str; ENDPOINTS.len() + 4] = {
     let mut labels = [""; ENDPOINTS.len() + 4];

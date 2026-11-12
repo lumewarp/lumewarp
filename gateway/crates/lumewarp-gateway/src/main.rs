@@ -14,6 +14,7 @@ mod metrics;
 #[cfg(test)]
 mod model_types_tests;
 mod multipart;
+mod openapi;
 mod probe;
 mod proxy;
 mod ratelimit;
@@ -136,6 +137,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Print the gateway's OpenAPI document (JSON).
+    Openapi,
 }
 
 fn list_strategies(json: bool) -> anyhow::Result<()> {
@@ -200,6 +203,11 @@ fn standalone(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // Before the plugin host: printing the document needs no plugin directory.
+    if let Some(Command::Openapi) = args.command {
+        println!("{}", serde_json::to_string_pretty(&openapi::document())?);
+        return Ok(());
+    }
     lumewarp_plugin_host::initialize()?;
     if let Some(Command::Plugins { json }) = args.command {
         return list_strategies(json);
