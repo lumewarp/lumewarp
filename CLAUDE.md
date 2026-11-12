@@ -13,6 +13,8 @@ The owner, Andy, writes in Traditional Chinese — reply to him in Traditional C
 - `proto/` — protobuf schema for the config snapshot and the config-stream gRPC service. Single source of truth for types on both sides.
 - `bench/` — mock upstream (fixed latency, SSE streaming) and load scripts comparing Lumewarp vs LiteLLM.
 - `deploy/` — Helm chart, Prometheus rules, Grafana dashboards.
+- `docs/` — the manual (VitePress, English, organised by reader; `pnpm dev` / `pnpm build`), the single source for running, configuring and administering Lumewarp; the READMEs are only a quick start and links. Describes the current state only. `architecture.md` (Traditional Chinese) is the design. `pnpm build` generates both OpenAPI documents and fails on a dead internal link (CI `docs` job). Admin UI screenshots come from `docs/scripts/screenshots.sh` (`ui/e2e/docs-shots.spec.ts`, `serve.py` docs mode); rerun it when a photographed page changes.
+- `.claude/skills/` — `lumewarp-plugin-dev` (templates for all five plugin kinds, SDK and control plane by git tag; `scripts/check-plugin-templates.sh` builds them against the tree in CI) and `port-router-to-rust`.
 
 ## Non-negotiable rules
 
@@ -55,6 +57,8 @@ Self-service keys and credentials (`docs/architecture.md`, "Admin UI", "憑證�
 - Rotation grace: `grace_seconds` defaults to 0 and is at most 24 hours, with one previous hash; both secrets authenticate as the same key and usage stays on it, and the gateway stops accepting the old one at its own expiry from the snapshot alone. Key create, rotate and limits-only update are limited to 30 attempts per 60 s per principal and operation, per process, and a 429 is not audited.
 - Admin UI: `/my-keys` is a plain member's home, a team's Keys tab manages its keys, access states are not denials, and one dialog above the router shows every one-time secret.
 - Credentials at rest: only sha256 hashes and environment references, the OIDC nonce/PKCE in an AES-GCM cookie, `api_key_ref`, `metrics_url` without a query, and an allowlist for audit details.
+
+API documents: the control plane's comes from FastAPI and `tests/api/test_openapi.py` requires a description on every operation and request field (`api/field_docs.py`), security on every non-public operation and typed 2xx responses; the gateway's is built by `lumewarp openapi` from the `ENDPOINTS` and `error::CODES` tables, so a new endpoint or error code goes into those tables. A behaviour change updates the manual page that describes it in the same commit.
 
 Acceptance suites: `scripts/e2e-core.sh`, `scripts/e2e-mcp.sh`, `scripts/e2e-a2a.sh`, `scripts/e2e-identity.sh` (needs `scripts/dev-idp.sh up`), `scripts/load-e2e.sh`, `ui/` Playwright (`pnpm test:e2e`), and `bench/` A6 for request-path changes. The e2e suite scans the database for plaintext credentials.
 
