@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/public/logo.svg" alt="Lumewarp" width="96" height="96"></p>
+
 # Lumewarp
 
 A fast, manageable LLM gateway for OpenAI-compatible upstreams (vLLM, OpenAI).

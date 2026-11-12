@@ -81,11 +81,15 @@ const sidebar = [
   },
 ];
 
+// Set LUMEWARP_DOCS_BASE to the path the site is served under (GitHub Pages: /lumewarp/).
+const base = process.env.LUMEWARP_DOCS_BASE || "/";
+
 export default defineConfig({
   title: "Lumewarp",
   description: "A fast, manageable LLM gateway for OpenAI-compatible upstreams.",
-  // Set LUMEWARP_DOCS_BASE to the path the site is served under (GitHub Pages: /lumewarp/).
-  base: process.env.LUMEWARP_DOCS_BASE || "/",
+  base,
+  // `head` links are not prefixed with the base, unlike `logo` and markdown images.
+  head: [["link", { rel: "icon", type: "image/svg+xml", href: `${base}logo.svg` }]],
   cleanUrls: true,
   lastUpdated: true,
   srcExclude: ["**/node_modules/**"],
@@ -94,6 +98,7 @@ export default defineConfig({
     root: { label: "English", lang: "en" },
   },
   themeConfig: {
+    logo: "/logo.svg",
     nav: [
       { text: "Guide", link: "/guide/" },
       { text: "Administration", link: "/admin/" },

@@ -4,6 +4,9 @@ hero:
   name: Lumewarp
   text: A fast, manageable LLM gateway
   tagline: A Rust data plane for OpenAI-compatible upstreams, with a control plane for teams, keys, budgets and routing.
+  image:
+    src: /logo.svg
+    alt: Lumewarp
   actions:
     - theme: brand
       text: Get started
