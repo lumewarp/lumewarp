@@ -372,7 +372,9 @@ async def seed_gateways(url: str) -> None:
             session.add(token_b)
             await session.flush()
             descriptors = plugin_descriptors()
-            for token in (token_a, token_b):
+            # e2e-gw runs two instances that share rate limits; e2e-gw-b is one instance counting its own.
+            instances = [(token_a, "e2e-gw-1", True), (token_a, "e2e-gw-2", True), (token_b, "e2e-gw-b-1", False)]
+            for token, instance_id, shared in instances:
                 names = [n for n, d in descriptors.items() if token is token_a or n not in ONLY_ON_A]
                 capabilities = [
                     *BUILTIN_CAPABILITIES,
@@ -384,16 +386,20 @@ async def seed_gateways(url: str) -> None:
                     GatewaySession(
                         scope=token.scope,
                         gateway_id=token.gateway_id,
+                        instance_id=instance_id,
                         token_id=token.id,
                         connected=True,
                         gateway_version="e2e",
                         capabilities=capabilities,
+                        peer=f"10.0.0.{10 + instances.index((token, instance_id, shared))}:50051",
+                        shared_limits_enabled=shared,
+                        shared_limits_namespace="prod" if shared else "",
                         connected_at=now,
                         last_seen_at=now,
                     )
                 )
             await session.flush()
-            for token in (token_a, token_b):
+            for token, instance_id, _ in instances:
                 for name, descriptor in descriptors.items():
                     if token is not token_a and name in ONLY_ON_A:
                         continue
@@ -401,6 +407,7 @@ async def seed_gateways(url: str) -> None:
                         GatewayPlugin(
                             scope=token.scope,
                             gateway_id=token.gateway_id,
+                            instance_id=instance_id,
                             kind=PluginKind(descriptor["kind"]),
                             name=name,
                             digest="e2e" + name.replace("_", "")[:20],
@@ -609,18 +616,24 @@ async def seed_docs(url: str) -> None:
             session.add(InstallationAdmin(user_id=uuid.UUID(users[SHOTS_EMAIL]), role=InstallationRole.PROXY_ADMIN))
             token = await session.scalar(select(GatewayToken).where(GatewayToken.gateway_id == "gw-1"))
             assert token is not None
-            session.add(
-                GatewaySession(
-                    scope=token.scope,
-                    gateway_id=token.gateway_id,
-                    token_id=token.id,
-                    connected=True,
-                    gateway_version="0.1.0",
-                    capabilities=BUILTIN_CAPABILITIES,
-                    connected_at=now - timedelta(days=2),
-                    last_seen_at=datetime.now(UTC),
+            # Three replicas of one gateway id sharing rate limits through one Redis namespace.
+            for n in (1, 2, 3):
+                session.add(
+                    GatewaySession(
+                        scope=token.scope,
+                        gateway_id=token.gateway_id,
+                        instance_id=f"gw-1-{n}",
+                        token_id=token.id,
+                        connected=True,
+                        gateway_version="0.1.0",
+                        capabilities=BUILTIN_CAPABILITIES,
+                        peer=f"10.42.0.{10 + n}:51234",
+                        shared_limits_enabled=True,
+                        shared_limits_namespace="prod",
+                        connected_at=now - timedelta(days=2, hours=n),
+                        last_seen_at=datetime.now(UTC),
+                    )
                 )
-            )
             owner, key = uuid.UUID(users[MEMBER_EMAIL]), uuid.uuid4()
             for day in range(14):
                 weekday = (now - timedelta(days=day)).weekday() < 5

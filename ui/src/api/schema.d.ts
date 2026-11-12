@@ -993,9 +993,10 @@ export interface paths {
         };
         /**
          * List Plugins
-         * @description The plugins a write may name, and which connected gateways have each.
+         * @description The plugins a write may name, and which connected instances have each.
          *
-         *     Connected gateways come first in `gateways`; `missing_gateways` is what a forced save is
+         *     A plugin counts only if every connected instance of a gateway id reports it: one entry
+         *     per instance in `gateways`, connected first; `missing_gateways` is what a forced save is
          *     saving past. A schema the control plane cannot use is null, with the reason in
          *     `schema_problems`: only the gateway's own `configure` validates those settings.
          */
@@ -1288,8 +1289,8 @@ export interface paths {
         };
         /**
          * List Gateways
-         * @description Gateways with their tokens and the config version each last acknowledged. Requires an
-         *     installation admin.
+         * @description Gateways with their tokens, their instances and the config version each last
+         *     acknowledged. Requires an installation admin.
          */
         get: operations["listGateways"];
         put?: never;
@@ -1866,6 +1867,72 @@ export interface components {
             /** Message */
             message: string;
         };
+        /**
+         * GatewayInstanceOut
+         * @description One process of a gateway id: its own config stream, version and status row.
+         */
+        GatewayInstanceOut: {
+            /**
+             * Instance Id
+             * @description `Hello.instance_id`: the process, stable only for its lifetime.
+             */
+            instance_id: string;
+            /**
+             * Connected
+             * @description Its config stream is open.
+             */
+            connected: boolean;
+            /**
+             * Peer
+             * @description gRPC peer of the stream, as the control plane sees it.
+             */
+            peer: string | null;
+            /**
+             * Gateway Version
+             * @description The gateway build it reported in Hello.
+             */
+            gateway_version: string;
+            /**
+             * Acked Version
+             * @description Config version it ACKed last, or the version its Hello proved it holds; null until one of those (a fresh instance with no snapshot stays null).
+             */
+            acked_version: number | null;
+            /**
+             * Pending Version
+             * @description Version sent and not yet answered; null when it is up to date.
+             */
+            pending_version: number | null;
+            /**
+             * Last Nack Version
+             * @description Version it NACKed last; null after it ACKs one.
+             */
+            last_nack_version: number | null;
+            /**
+             * Connected At
+             * @description When this stream connected.
+             */
+            connected_at: string | null;
+            /**
+             * Disconnected At
+             * @description When the stream ended; null while connected.
+             */
+            disconnected_at: string | null;
+            /**
+             * Last Seen At
+             * @description Last status write of this instance.
+             */
+            last_seen_at: string | null;
+            /**
+             * Shared Limits Enabled
+             * @description `Hello.shared_limits.enabled`: it shares rate-limit counters.
+             */
+            shared_limits_enabled: boolean;
+            /**
+             * Shared Limits Namespace
+             * @description `Hello.shared_limits.namespace`; empty while sharing is off.
+             */
+            shared_limits_namespace: string;
+        };
         /** GatewayOut */
         GatewayOut: {
             /** Gateway Id */
@@ -1894,6 +1961,11 @@ export interface components {
             disconnected_at: string | null;
             /** Last Seen At */
             last_seen_at: string | null;
+            /**
+             * Instances
+             * @description The processes known under this gateway id, by instance id; the fields above are derived from them. A disconnected one stays for 24 h.
+             */
+            instances: components["schemas"]["GatewayInstanceOut"][];
             /** Tokens */
             tokens: components["schemas"]["GatewayTokenOut"][];
         };
@@ -2043,7 +2115,7 @@ export interface components {
             name: string;
             /**
              * Expires At
-             * @description When the key stops authenticating: in the future, with a timezone. null = no expiry. A member's key is bounded by the team's `max_member_key_lifetime_seconds`.
+             * @description When the key stops authenticating: in the future, with a timezone. null = no expiry, except that a member's key gets the team's `max_member_key_lifetime_seconds` as its expiry and may not outlive it.
              */
             expires_at?: string | null;
             /**
@@ -3518,6 +3590,11 @@ export interface components {
         PluginGatewayOut: {
             /** Gateway Id */
             gateway_id: string;
+            /**
+             * Instance Id
+             * @description The process of that gateway id that reported it.
+             */
+            instance_id: string;
             /** Connected */
             connected: boolean;
             /**

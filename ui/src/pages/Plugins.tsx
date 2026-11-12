@@ -1,4 +1,7 @@
+import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
+
+import { api } from "../api";
 
 import type { Plugin, PluginKind } from "../api";
 import { Badge, PageHeader } from "../components/Bits";
@@ -21,7 +24,10 @@ const KINDS: { kind: PluginKind; title: string }[] = [
 ];
 
 export function Plugins() {
-  const plugins = usePlugins();
+  const plugins = usePlugins(undefined, true, 10_000);
+  // Polled together with the plugins, so the support list and the per-gateway instance counts agree.
+  const gw = useQuery({ queryKey: ["gateways"], queryFn: () => api.gateways(), refetchInterval: 10_000 });
+  const instanceCounts = useMemo(() => Object.fromEntries((gw.data ?? []).map((g) => [g.gateway_id, g.instances.filter((i) => i.connected).length])), [gw.data]);
   const rows = plugins.data ?? [];
 
   // Every gateway any plugin mentions, so "which gateways have it" has a denominator.
@@ -108,7 +114,7 @@ export function Plugins() {
                 key: "gateways",
                 header: "Gateways",
                 align: "right",
-                cell: (p) => <Gateways p={p} total={gateways.length} />,
+                cell: (p) => <Gateways p={p} total={gateways.length} instances={instanceCounts} unknown={gw.isError} />,
               },
             ]}
           />
@@ -140,18 +146,24 @@ function Settings({ p }: { p: Plugin }) {
 }
 
 /** Which gateways have it, and which connected ones do not (they would reject a config that uses it). */
-function Gateways({ p, total }: { p: Plugin; total: number }) {
+function Gateways({ p, total, instances, unknown }: { p: Plugin; total: number; instances: Record<string, number>; unknown: boolean }) {
+  // One entry per instance: show each gateway once with how many of its instances have the plugin.
+  const counts = new Map<string, number>();
+  for (const g of p.gateways) if (g.connected) counts.set(g.gateway_id, (counts.get(g.gateway_id) ?? 0) + 1);
+  const groups = [...counts.entries()];
   if (!total) return <span className="text-muted-foreground">—</span>;
   return (
     <div className="flex flex-col items-end gap-1">
       <Badge tone={p.missing_gateways.length ? "warn" : "ok"}>
-        {p.gateways.length} / {total}
+        {groups.length} / {total}
       </Badge>
-      {p.gateways.map((g) => (
-        <code key={g.gateway_id} className="whitespace-nowrap text-xs text-muted-foreground">
-          {g.gateway_id}
+      {groups.map(([id, n]) => (
+        <code key={id} className="whitespace-nowrap text-xs text-muted-foreground">
+          {id}
+          {instances[id] !== undefined && n < instances[id] && <span data-testid={`partial-${id}`}> ({n}/{instances[id]} instances)</span>}
         </code>
       ))}
+      {unknown && <span className="text-xs text-muted-foreground" data-testid="instances-unknown">Instance counts unavailable</span>}
       {p.missing_gateways.length > 0 && (
         <span className="text-xs text-destructive [overflow-wrap:anywhere]">missing: {p.missing_gateways.join(", ")}</span>
       )}

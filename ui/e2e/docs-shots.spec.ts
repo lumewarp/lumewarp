@@ -90,6 +90,8 @@ test("manual screenshots", async ({ page, request, browser }) => {
   await shot(page, "audit");
   await page.goto("/gateways");
   await expect(page.getByRole("heading").first()).toBeVisible();
+  await page.getByRole("button", { name: "Show instances of gw-1", exact: true }).click();
+  await expect(page.getByTestId("instances-gw-1")).toBeVisible();
   await shot(page, "gateways");
   await page.goto("/config");
   await expect(page.getByRole("heading", { name: "Config versions" })).toBeVisible();

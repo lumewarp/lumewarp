@@ -271,7 +271,7 @@ function StrategiesTable({ strategies, loading, error, onRetry }: { strategies: 
             align: "right",
             cell: (s) => {
               if (!total) return <span className="text-muted-foreground">—</span>;
-              const supported = s.gateways.length;
+              const supported = new Set(s.gateways.map((g) => g.gateway_id)).size;
               return (
                 <Badge tone={s.missing_gateways.length ? "warn" : "ok"}>
                   {supported} / {total}

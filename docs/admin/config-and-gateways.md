@@ -40,4 +40,24 @@ which also creates the config scope; later ones are created on the Gateways page
 Revoking a token closes that gateway's streams at once; the gateway keeps serving its last
 config and cannot receive a new one until it has a valid token.
 
+One gateway id can run several instances (replicas) that use the same token. Each instance
+has its own config stream and reports its own version, applied config and rate-limit
+setting; the Gateways page has one row per gateway id and the row summarises them:
+
+- **Instances.** "n/m instances connected" counts the instances the control plane knows
+  under that id. A disconnected instance stays listed for 24 hours. A gateway whose token
+  exists but that has not connected yet reads "No instances yet".
+- **State and config.** The gateway counts as connected when any instance is. The applied
+  version is the lowest one among the connected instances, so a gateway only reads as up to
+  date when all of them are. A pending update, a NACK and a quarantined version are those of
+  the live instances.
+- **Instance list.** The arrow next to the gateway id opens the instances: instance id,
+  connected or not, gateway version, applied config with any pending update or NACK,
+  last seen and the network peer. Disconnected instances are dimmed.
+- **Rate limits.** "Shared (namespace)" means every connected instance shares its rate-limit
+  counters through Redis under that namespace; "Per instance" means none does. If the
+  connected instances disagree on whether they share or on the namespace, the column shows a
+  warning with the namespaces in use, and a "Versions differ" badge appears when they run
+  different gateway versions. Fix these by restarting or redeploying the odd instance out.
+
 ![Connected gateways](/screenshots/gateways.png)
