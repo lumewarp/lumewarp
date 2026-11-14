@@ -115,7 +115,7 @@ when the enable switch is unset.
 ## Shared-limits sync
 
 A gateway started with `--shared-limits-redis-url` adds five series, with no scope or
-key labels: `lumewarp_shared_limits_fallback` (`1` while it counts per process),
+key labels: `lumewarp_shared_limits_fallback` (`1` while it counts per gateway),
 `lumewarp_shared_limits_sync_duration_seconds{result="success"|"error"}`,
 `lumewarp_shared_limits_sync_errors_total{reason="connect"|"timeout"|"script"}`,
 `lumewarp_shared_limits_last_sync_age_seconds` and `lumewarp_shared_limits_scopes`. They
@@ -124,7 +124,7 @@ a `shared_limits_sync` span with the result, reason, namespace, scope count and 
 milliseconds, so a trace shows whether Redis or the gateway is slow.
 `LumewarpSharedLimitsFallback` warns after two minutes in fallback: check Redis
 reachability, credentials and the namespace, then the sync error reason. While the
-alert fires the limits are per process, so N gateways allow up to N times the configured
+alert fires the limits are per gateway, so N gateways allow up to N times the configured
 rate.
 
 ## Alert rules and Grafana dashboards

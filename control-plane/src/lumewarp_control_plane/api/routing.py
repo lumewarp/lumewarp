@@ -157,7 +157,7 @@ def _sealed_api_key(settings: Settings, api_key: SecretStr) -> bytes:
 
 
 async def _reports(session: AsyncSession, settings: Settings, column) -> list[dict]:
-    """The latest health reports of the connected gateway instances (one column of them)."""
+    """The latest health reports of the connected gateways (one column of them)."""
     return list(
         (
             await session.scalars(
@@ -170,7 +170,7 @@ async def _reports(session: AsyncSession, settings: Settings, column) -> list[di
 
 
 def _health(reports: list[dict], name: str) -> str:
-    """Unhealthy if any connected instance says so; unknown before any has reported."""
+    """Unhealthy if any connected gateway says so; unknown before any has reported."""
     seen = [r[name] for r in reports if isinstance(r.get(name), bool)]
     return "unhealthy" if False in seen else "healthy" if seen else "unknown"
 
@@ -207,7 +207,7 @@ async def _record_probe(session: AsyncSession, entity, conditions: list, ok: boo
 async def _upstreams_out(
     session: AsyncSession, settings: Settings, rows: Sequence[Upstream]
 ) -> list[UpstreamOut]:
-    """UpstreamOut with `health` from the connected instances' latest reports."""
+    """UpstreamOut with `health` from the connected gateways' latest reports."""
     reports = await _reports(session, settings, GatewaySession.upstream_health)
     out = []
     for row in rows:
@@ -221,7 +221,7 @@ async def _upstreams_out(
 async def _models_out(
     session: AsyncSession, settings: Settings, rows: Sequence[Model]
 ) -> list[ModelOut]:
-    """ModelOut with `health` from the connected instances' chat-check reports."""
+    """ModelOut with `health` from the connected gateways' chat-check reports."""
     reports = await _reports(session, settings, GatewaySession.model_health)
     out = []
     for row in rows:

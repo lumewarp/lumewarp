@@ -92,10 +92,10 @@ controlPlane:
 
 gateway:
   enabled: true
-  # Replicas of one release share the token and gateway.gatewayId: they are the same
-  # gateway and appear as its instances in the Admin UI (so a rolling update never runs two
-  # gateway identities). Rate limits are counted per instance unless the gateways share a
-  # Redis: see redis.enabled and gateway.sharedLimits below.
+  # Every pod is a gateway: the process generates its own id at startup, so a rolling
+  # update adds new gateways instead of reusing one identity. All pods share the token.
+  # Rate limits are counted per gateway unless they share a Redis: see redis.enabled and
+  # gateway.sharedLimits below.
   replicaCount: 1
   # HorizontalPodAutoscaler (autoscaling/v2) for the gateway. When enabled it replaces
   # replicaCount: the workload carries no fixed replica count and the HPA keeps between
@@ -129,10 +129,6 @@ gateway:
   controlPlaneUrl: ""
   # Empty = controlPlane.scope.
   scope: ""
-  # Required: the gateway id this token was issued for. It is never derived from the
-  # pod name. Change it together with `bootstrap --gateway-id` and the token Secret.
-  # The default matches the documented install example.
-  gatewayId: "gw-1"
   # Local listener settings. Only the `server:` block is used in control-plane mode.
   # adminListen must be reachable from the kubelet for /readyz and /metrics probes.
   server:
@@ -204,9 +200,8 @@ gateway:
       # For example {helm.sh/resource-policy: keep} to survive `helm uninstall`.
       annotations: {}
   # Rate limits across gateways. By default rpm, tpm and max_parallel are counted per
-  # gateway instance, so N replicas admit up to N times a key's limit. Point them at one
-  # Redis (or Valkey) and the counts hold across every gateway of the installation that
-  # uses it.
+  # gateway, so N pods admit up to N times a key's limit. Point them at one Redis (or
+  # Valkey) and the counts hold across every gateway of the installation that uses it.
   sharedLimits:
     # An existing Redis instead of redis.enabled: a Secret whose key holds the full URL,
     # redis://:password@host:6379/0 or rediss://... Mutually exclusive with redis.enabled.

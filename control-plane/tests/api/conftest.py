@@ -21,6 +21,9 @@ from lumewarp_control_plane.auth.sessions import csrf_token
 from lumewarp_control_plane.models import (
     A2aAgent,
     A2aAgentGrant,
+    GatewayPlugin,
+    GatewaySession,
+    GatewayToken,
     McpDefinition,
     McpServer,
     McpServerGrant,
@@ -92,6 +95,16 @@ async def api_settings(api_database_url: str, api_scope: str, api_engine: AsyncE
         scope=api_scope,
         encryption_key=TEST_ENCRYPTION_KEY,
     )
+
+
+@pytest.fixture(autouse=True)
+async def clean_gateways(api_engine: AsyncEngine) -> AsyncIterator[None]:
+    """No gateway of one test may count as connected in the next one."""
+    yield
+    async with AsyncSession(api_engine) as session, session.begin():
+        await session.execute(delete(GatewayPlugin).where(GatewayPlugin.scope == API_SCOPE))
+        await session.execute(delete(GatewaySession).where(GatewaySession.scope == API_SCOPE))
+        await session.execute(delete(GatewayToken).where(GatewayToken.scope == API_SCOPE))
 
 
 @pytest.fixture

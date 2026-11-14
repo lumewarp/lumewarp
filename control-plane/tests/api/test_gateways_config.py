@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select
 
 from lumewarp_control_plane import compiler
 from lumewarp_control_plane.models import (
@@ -13,7 +13,9 @@ from lumewarp_control_plane.models import (
     ConfigVersionKind,
     GatewayQuarantine,
     GatewaySession,
+    GatewayToken,
 )
+from lumewarp_control_plane.security import SecretKind, generate_secret
 from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
 
 
@@ -31,32 +33,38 @@ def _version(scope: str, version: int, *, kind=ConfigVersionKind.COMPILE, rollba
     )
 
 
-async def test_gateway_tokens(client, committed, api_scope) -> None:
-    gateway_id = f"gw-{suffix()}"
-    resp = client.post(
-        "/api/v1/gateways",
-        json={"gateway_id": gateway_id, "name": "primary"},
-        headers=ADMIN_AUTH,
+def _token(scope: str, name: str) -> GatewayToken:
+    secret = generate_secret(SecretKind.GATEWAY_TOKEN)
+    return GatewayToken(
+        scope=scope,
+        name=name,
+        token_hash=secret.hash,
+        display_prefix=secret.display_prefix,
     )
-    assert resp.status_code == 201, resp.text
-    created = resp.json()
+
+
+async def test_gateway_tokens(client, committed, api_scope) -> None:
+    created_resp = client.post(
+        "/api/v1/gateway-tokens", json={"name": "primary"}, headers=ADMIN_AUTH
+    )
+    assert created_resp.status_code == 201, created_resp.text
+    created = created_resp.json()
     token = created["token"]
     assert created["secret"].startswith("lwg-")
     assert "hash" not in token
-    assert token["gateway_id"] == gateway_id
+    assert (token["name"], token["connected_gateways"]) == ("primary", 0)
 
-    listed = client.get("/api/v1/gateways", headers=ADMIN_AUTH)
+    listed = client.get("/api/v1/gateway-tokens", headers=ADMIN_AUTH)
     assert listed.status_code == 200
-    row = next(item for item in listed.json()["items"] if item["gateway_id"] == gateway_id)
-    assert row["connected"] is False
-    assert row["tokens"][0]["display_prefix"] == token["display_prefix"]
+    row = next(item for item in listed.json()["items"] if item["id"] == token["id"])
+    assert row["display_prefix"] == token["display_prefix"]
 
-    # A session row is reflected in the fleet view.
+    # A session row is one gateway, and it names the token it authenticated with.
     committed.add(
         GatewaySession(
             scope=api_scope,
-            gateway_id=gateway_id,
-            instance_id="i1",
+            gateway_id=f"gw-{suffix()}",
+            token_id=token["id"],
             connected=True,
             gateway_version="0.1",
             acked_version=3,
@@ -64,22 +72,27 @@ async def test_gateway_tokens(client, committed, api_scope) -> None:
         )
     )
     await committed.commit()
-    listed = client.get("/api/v1/gateways?limit=500", headers=ADMIN_AUTH)
-    row = next(item for item in listed.json()["items"] if item["gateway_id"] == gateway_id)
-    assert row["connected"] is True
-    assert row["acked_version"] == 3
+    listed = client.get("/api/v1/gateway-tokens", headers=ADMIN_AUTH)
+    row = next(item for item in listed.json()["items"] if item["id"] == token["id"])
+    assert row["connected_gateways"] == 1
 
-    revoked = client.post(
-        f"/api/v1/gateways/{gateway_id}/tokens/{token['id']}/revoke",
-        headers=ADMIN_AUTH,
-    )
+    fleet = client.get("/api/v1/gateways?limit=500", headers=ADMIN_AUTH)
+    assert fleet.status_code == 200
+    gateway = next(item for item in fleet.json()["items"] if item["token"]["id"] == token["id"])
+    assert gateway["connected"] is True
+    assert gateway["acked_version"] == 3
+    assert gateway["token"] == {
+        "id": token["id"],
+        "name": "primary",
+        "display_prefix": token["display_prefix"],
+    }
+
+    revoked = client.post(f"/api/v1/gateway-tokens/{token['id']}/revoke", headers=ADMIN_AUTH)
     assert revoked.status_code == 200
     assert revoked.json()["revoked_at"] is not None
-    # Wrong gateway id does not match the token.
     assert (
         client.post(
-            f"/api/v1/gateways/other/tokens/{token['id']}/revoke",
-            headers=ADMIN_AUTH,
+            "/api/v1/gateway-tokens/00000000-0000-0000-0000-000000000000/revoke", headers=ADMIN_AUTH
         ).status_code
         == 404
     )
@@ -87,6 +100,7 @@ async def test_gateway_tokens(client, committed, api_scope) -> None:
     user, secret = await user_with_token(committed)
     await committed.commit()
     assert client.get("/api/v1/gateways", headers=auth(secret)).status_code == 403
+    assert client.get("/api/v1/gateway-tokens", headers=auth(secret)).status_code == 403
 
 
 async def test_config_versions_and_rollback(client, committed, api_scope, monkeypatch) -> None:
@@ -97,6 +111,7 @@ async def test_config_versions_and_rollback(client, committed, api_scope, monkey
     assert listed.status_code == 200, listed.text
     body = listed.json()
     assert body["items"][0]["version"] == 2
+    assert body["items"][0]["quarantined"] is False
     assert body["next_cursor"] == "2"
     second = client.get(
         f"/api/v1/config/versions?limit=1&cursor={body['next_cursor']}",
@@ -160,20 +175,30 @@ def test_rollback_rejected_by_strategy_rules_is_422_and_force_reaches_it(client,
         assert seen.pop() == (force, True)
 
 
-async def test_gateway_state_is_derived_from_its_instances(client, committed, api_scope) -> None:
-    """One gateway id, three processes: the row is their aggregate (docs/config-protocol.md)."""
-    gateway_id = f"gw-{suffix()}"
+async def test_gateways_are_listed_one_per_process_connected_first(
+    client, committed, api_scope
+) -> None:
     now = datetime.now(UTC)
+    token = _token(api_scope, "fleet")
+    committed.add(token)
+    await committed.flush()
+    connected_id = f"gw-connected-{suffix()}"
+    offline_id = f"gw-offline-{suffix()}"
     committed.add_all(
         [
             GatewaySession(
                 scope=api_scope,
-                gateway_id=gateway_id,
-                instance_id="pod-1-aa",
+                gateway_id=connected_id,
+                token_id=token.id,
                 connected=True,
+                peer="127.0.0.1:1",
                 gateway_version="0.2.0",
                 capabilities=["retries", "strategy:weighted"],
                 acked_version=4,
+                pending_version=5,
+                last_nack_version=4,
+                last_nack_code="NACK_CODE_INVALID_CONFIG",
+                last_nack_reason="invalid config",
                 connected_at=now,
                 last_seen_at=now,
                 shared_limits_enabled=True,
@@ -181,26 +206,11 @@ async def test_gateway_state_is_derived_from_its_instances(client, committed, ap
             ),
             GatewaySession(
                 scope=api_scope,
-                gateway_id=gateway_id,
-                instance_id="pod-2-bb",
-                connected=True,
-                gateway_version="0.3.0",
-                capabilities=["retries"],
-                acked_version=3,
-                pending_version=5,
-                last_nack_version=4,
-                last_nack_code="NACK_CODE_INVALID_CONFIG",
-                last_nack_reason="invalid config",
-                connected_at=now,
-                last_seen_at=now,
-            ),
-            GatewaySession(
-                scope=api_scope,
-                gateway_id=gateway_id,
-                instance_id="pod-0-zz",
+                gateway_id=offline_id,
+                token_id=token.id,
                 connected=False,
                 gateway_version="0.1.0",
-                capabilities=["retries", "strategy:weighted"],
+                capabilities=["retries"],
                 acked_version=2,
                 connected_at=now,
                 disconnected_at=now,
@@ -208,129 +218,47 @@ async def test_gateway_state_is_derived_from_its_instances(client, committed, ap
             ),
         ]
     )
-    committed.add(GatewayQuarantine(scope=api_scope, gateway_id=gateway_id, quarantined_version=4))
     await committed.commit()
 
     listed = client.get("/api/v1/gateways?limit=500", headers=ADMIN_AUTH)
-    row = next(item for item in listed.json()["items"] if item["gateway_id"] == gateway_id)
-    assert row["connected"] is True
-    # The lowest ACK of the connected instances; the pending version of any; the newest NACK.
-    assert (row["acked_version"], row["pending_version"]) == (3, 5)
-    assert (row["last_nack_version"], row["last_nack_code"]) == (4, "NACK_CODE_INVALID_CONFIG")
-    assert row["last_nack_reason"] == "invalid config"
-    assert row["quarantined_version"] == 4
-    # Every connected instance must report it, and the versions are listed when they differ.
-    assert row["capabilities"] == ["retries"]
-    assert row["gateway_version"] == "0.2.0, 0.3.0"
-    assert row["disconnected_at"] is None
-    assert [item["instance_id"] for item in row["instances"]] == [
-        "pod-0-zz",
-        "pod-1-aa",
-        "pod-2-bb",
-    ]
-    shared = {
-        item["instance_id"]: (item["shared_limits_enabled"], item["shared_limits_namespace"])
-        for item in row["instances"]
-    }
-    assert shared == {
-        "pod-0-zz": (False, ""),
-        "pod-1-aa": (True, "team-ns"),
-        "pod-2-bb": (False, ""),
-    }
-
-    # With nothing connected the row falls back to the instances that are left.
-    async with type(committed)(committed.bind) as session, session.begin():
-        await session.execute(
-            update(GatewaySession)
-            .where(GatewaySession.scope == api_scope, GatewaySession.gateway_id == gateway_id)
-            .values(connected=False, disconnected_at=now)
-        )
-    listed = client.get("/api/v1/gateways?limit=500", headers=ADMIN_AUTH)
-    row = next(item for item in listed.json()["items"] if item["gateway_id"] == gateway_id)
-    assert row["connected"] is False
-    assert row["pending_version"] is None
-    assert row["disconnected_at"] is not None
-    assert row["acked_version"] == 2
-
-
-async def test_a_nack_is_only_shown_while_it_is_still_true(client, committed, api_scope) -> None:
-    """A recovered gateway shows no NACK; a live instance's stale one does not linger for 24 h."""
-    gateway_id = f"gw-{suffix()}"
-    now = datetime.now(UTC)
-    committed.add_all(
-        [
-            GatewaySession(
-                scope=api_scope,
-                gateway_id=gateway_id,
-                instance_id="pod-1-aa",
-                connected=True,
-                acked_version=6,
-                connected_at=now,
-                last_seen_at=now,
-            ),
-            GatewaySession(
-                scope=api_scope,
-                gateway_id=gateway_id,
-                instance_id="pod-2-bb",
-                connected=True,
-                acked_version=6,
-                last_nack_version=5,
-                last_nack_code="NACK_CODE_INVALID_CONFIG",
-                last_nack_reason="invalid config",
-                connected_at=now,
-                last_seen_at=now,
-            ),
-        ]
+    items = listed.json()["items"]
+    connected = next(item for item in items if item["gateway_id"] == connected_id)
+    assert connected["capabilities"] == ["retries", "strategy:weighted"]
+    assert (connected["acked_version"], connected["pending_version"]) == (4, 5)
+    assert (connected["last_nack_version"], connected["last_nack_code"]) == (
+        4,
+        "NACK_CODE_INVALID_CONFIG",
     )
+    assert connected["last_nack_reason"] == "invalid config"
+    assert (connected["shared_limits_enabled"], connected["shared_limits_namespace"]) == (
+        True,
+        "team-ns",
+    )
+    offline = next(item for item in items if item["gateway_id"] == offline_id)
+    assert offline["connected"] is False
+    assert offline["disconnected_at"] is not None
+    assert offline["token"]["name"] == "fleet"
+    # Connected rows sort before disconnected ones; each group is ordered by gateway id.
+    states = [item["connected"] for item in items]
+    assert states == sorted(states, reverse=True)
+    for group in (True, False):
+        ids = [item["gateway_id"] for item in items if item["connected"] is group]
+        assert ids == sorted(ids)
+
+
+async def test_config_version_marks_the_scope_quarantined_version(
+    client, committed, api_scope
+) -> None:
+    committed.add_all([_version(api_scope, 101), _version(api_scope, 102)])
+    committed.add(GatewayQuarantine(scope=api_scope, quarantined_version=102))
     await committed.commit()
-
-    def status() -> dict:
-        listed = client.get("/api/v1/gateways?limit=500", headers=ADMIN_AUTH)
-        return next(item for item in listed.json()["items"] if item["gateway_id"] == gateway_id)
-
-    async def set_instances(**values) -> None:
-        async with type(committed)(committed.bind) as session, session.begin():
-            await session.execute(
-                update(GatewaySession)
-                .where(GatewaySession.scope == api_scope, GatewaySession.gateway_id == gateway_id)
-                .values(**values)
-            )
-
-    # Every instance is at 6: the NACK of 5 no longer applies, even though its row lives on.
-    row = status()
-    assert (row["acked_version"], row["last_nack_version"]) == (6, None)
-    assert (row["last_nack_code"], row["last_nack_reason"]) == (None, None)
-
-    # One instance is still on 4: the NACK of 5 is exactly why.
-    async with type(committed)(committed.bind) as session, session.begin():
-        await session.execute(
-            update(GatewaySession)
-            .where(
-                GatewaySession.scope == api_scope,
-                GatewaySession.gateway_id == gateway_id,
-                GatewaySession.instance_id == "pod-2-bb",
-            )
-            .values(acked_version=4)
+    try:
+        listed = client.get("/api/v1/config/versions?limit=500", headers=ADMIN_AUTH).json()
+        flags = {item["version"]: item["quarantined"] for item in listed["items"]}
+        assert flags[101] is False
+        assert flags[102] is True
+    finally:
+        await committed.execute(
+            delete(GatewayQuarantine).where(GatewayQuarantine.scope == api_scope)
         )
-    row = status()
-    assert (row["acked_version"], row["last_nack_version"]) == (4, 5)
-    assert row["last_nack_reason"] == "invalid config"
-
-    # A disconnected instance's NACK does not count while another one is connected and current.
-    async with type(committed)(committed.bind) as session, session.begin():
-        await session.execute(
-            update(GatewaySession)
-            .where(
-                GatewaySession.scope == api_scope,
-                GatewaySession.gateway_id == gateway_id,
-                GatewaySession.instance_id == "pod-2-bb",
-            )
-            .values(connected=False, disconnected_at=now)
-        )
-    row = status()
-    assert (row["acked_version"], row["last_nack_version"]) == (6, None)
-
-    # With nothing connected the remaining rows are all there is left to report.
-    await set_instances(connected=False, disconnected_at=now)
-    row = status()
-    assert (row["acked_version"], row["last_nack_version"]) == (4, 5)
+        await committed.commit()

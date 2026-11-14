@@ -1,9 +1,9 @@
-//! Sharing rate-limit counters between gateway instances through Redis.
+//! Sharing rate-limit counters between gateways through Redis.
 //!
 //! The request path stays local: the limiter never touches Redis. A background
 //! task pushes this process's dirty absolute counts every sync interval and
-//! pulls the other instances' counts back, so rpm, tpm and max_parallel hold
-//! across the instances that share one Redis and namespace. Without the URL
+//! pulls the other gateways' counts back, so rpm, tpm and max_parallel hold
+//! across the gateways that share one Redis and namespace. Without the URL
 //! this module does nothing and the limiter behaves exactly as before.
 //!
 //! The store is deliberately tiny: one batch operation per sync. Its layout
@@ -13,7 +13,7 @@
 //! Redis being unreachable never stops the gateway: after one second without
 //! a successful sync the task drops the shared half
 //! ([`crate::ratelimit::Registry::enter_fallback`]) and each process counts for
-//! itself again, which is the "N instances allow up to N times" behaviour. The
+//! itself again, which is the "N gateways allow up to N times" behaviour. The
 //! next successful sync resumes sharing; counts admitted in the meantime stay
 //! dirty and are written as absolute values then.
 
@@ -376,7 +376,7 @@ impl<S: Store> SyncTask<S> {
                 namespace = %self.namespace,
                 reason = kind.label(),
                 error = message,
-                "shared rate limits fell back to per-process counting"
+                "shared rate limits fell back to per-gateway counting"
             );
         }
         let span = tracing::info_span!(

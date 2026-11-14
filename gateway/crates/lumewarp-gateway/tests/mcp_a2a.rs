@@ -157,7 +157,7 @@ impl Gw {
             .args(["--gateway-token-env", "LUMEWARP_MCP_TEST_TOKEN"])
             .arg("--state-dir")
             .arg(state)
-            .args(["--scope", SCOPE, "--gateway-id", "gw-mcp"])
+            .args(["--scope", SCOPE])
             .arg("--local-config")
             .arg(local)
             .env("LUMEWARP_MCP_TEST_TOKEN", "gw-token")

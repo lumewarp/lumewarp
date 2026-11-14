@@ -1,8 +1,18 @@
 """Identifier helpers."""
 
 import os
+import re
 import time
 import uuid
+
+# Hello.gateway_id and ReportRequest.gateway_id: one process id, the same rule on both
+# gateway services (proto comments).
+GATEWAY_ID = re.compile(r"[A-Za-z0-9._-]{1,100}")
+
+
+def valid_gateway_id(value: str) -> bool:
+    """Whether `value` is a usable gateway id (`proto` 1..100 of `[A-Za-z0-9._-]`)."""
+    return bool(GATEWAY_ID.fullmatch(value))
 
 
 def uuid7() -> uuid.UUID:

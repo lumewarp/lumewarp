@@ -9,13 +9,13 @@
 //! a slot until the response body ends, errors or is dropped.
 //!
 //! Every count is split into own (this process, exact) and others (the other
-//! instances, from the last sync). `pending_sync` hands a store the dirty
+//! gateways, from the last sync). `pending_sync` hands a store the dirty
 //! scopes' absolute own counts and `apply_sync` writes the others' half back;
-//! without a store others stays 0, which is exactly per-instance limiting.
+//! without a store others stays 0, which is exactly per-gateway limiting.
 //! `mark_synced` clears the dirty flag only when no count raced with the
 //! write, and `enter_fallback` drops the others' half entirely when the store
 //! is unreachable. `apply_sync` also divides the remaining headroom into a
-//! fair share per instance, so N instances do not each admit the whole limit
+//! fair share per gateway, so N gateways do not each admit the whole limit
 //! between two syncs; a view the store stops refreshing expires after the
 //! previous minute and the shares go back to unlimited.
 //!
@@ -132,7 +132,7 @@ struct Counters {
     view_minute: u64,
     rpm: Sliding,
     tpm: Sliding,
-    /// The other instances' counts, as of the last sync.
+    /// The other gateways' counts, as of the last sync.
     others_rpm: Sliding,
     others_tpm: Sliding,
     /// Counters changed since the last successful sync. `write_gen` moves on
@@ -147,10 +147,10 @@ struct Counters {
     /// When the scope was last included in a batch (Unix ms). Clean read-only
     /// scopes are refreshed every fifth interval, not every sync.
     last_read_ms: u64,
-    /// The largest instance count the last view reported. A scope with more
-    /// than one instance is read every interval; a lone instance can use the
+    /// The largest gateway count the last view reported. A scope with more
+    /// than one gateway is read every interval; a lone gateway can use the
     /// slower read-only cadence.
-    instances: u32,
+    gateways: u32,
     /// Limits last seen in a caller's policy. `apply_sync` divides their
     /// headroom without waiting for the next request to arrive.
     rpm_limit: u32,
@@ -174,7 +174,7 @@ impl Default for Counters {
             synced_gen: 0,
             ttl_refreshed_ms: 0,
             last_read_ms: 0,
-            instances: 0,
+            gateways: 0,
             rpm_limit: 0,
             tpm_limit: 0,
             parallel_limit: 0,
@@ -186,7 +186,7 @@ impl Default for Counters {
 impl Counters {
     /// Advances the windows. Returns true when the last applied view is now
     /// older than the previous minute: its counts and the fair share derived
-    /// from them no longer describe the other instances, so the caller must
+    /// from them no longer describe the other gateways, so the caller must
     /// fall back to local limiting. The `Counters` half is reset here;
     /// `ScopeState::roll` resets the atomics.
     fn roll(&mut self, minute: u64) -> bool {
@@ -203,19 +203,19 @@ impl Counters {
             self.others_rpm = Sliding::default();
             self.others_tpm = Sliding::default();
             self.share_rpm = UNLIMITED;
-            self.instances = 0;
+            self.gateways = 0;
             return true;
         }
         false
     }
 
-    /// Local-only mode: nothing another instance reported is trusted.
+    /// Local-only mode: nothing another gateway reported is trusted.
     fn enter_fallback(&mut self) {
         self.view_minute = 0;
         self.others_rpm = Sliding::default();
         self.others_tpm = Sliding::default();
         self.share_rpm = UNLIMITED;
-        self.instances = 0;
+        self.gateways = 0;
     }
 
     /// A local count changed: the next successful sync must write it.
@@ -281,18 +281,18 @@ impl Counters {
             cur,
             elapsed_ms,
             u64::from(self.rpm_limit),
-            view.rpm_instances,
+            view.rpm_gateways,
         );
-        self.instances = view
-            .rpm_instances
-            .max(view.tpm_instances)
-            .max(view.in_flight_instances);
+        self.gateways = view
+            .rpm_gateways
+            .max(view.tpm_gateways)
+            .max(view.in_flight_gateways);
         let in_flight = u64::from(own_parallel) + u64::from(view.in_flight);
         let headroom = u64::from(self.parallel_limit).saturating_sub(in_flight);
-        if self.parallel_limit == 0 || view.in_flight_instances <= 1 {
+        if self.parallel_limit == 0 || view.in_flight_gateways <= 1 {
             UNLIMITED
         } else {
-            uniform_share(headroom, view.in_flight_instances)
+            uniform_share(headroom, view.in_flight_gateways)
         }
     }
 
@@ -310,8 +310,8 @@ impl Counters {
     }
 }
 
-fn uniform_share(headroom: u64, instances: u32) -> i64 {
-    i64::try_from(u128::from(headroom).div_ceil(u128::from(instances))).unwrap_or(UNLIMITED)
+fn uniform_share(headroom: u64, gateways: u32) -> i64 {
+    i64::try_from(u128::from(headroom).div_ceil(u128::from(gateways))).unwrap_or(UNLIMITED)
 }
 
 /// Sliding-window estimate in whole counts: the previous minute is weighted
@@ -324,12 +324,12 @@ fn estimate(prev: u64, cur: u64, elapsed_ms: u64) -> u128 {
     (u128::from(prev) * (1000 - permille)).div_ceil(1000) + u128::from(cur)
 }
 
-fn fair_share(prev: u64, cur: u64, elapsed_ms: u64, limit: u64, instances: u32) -> i64 {
-    if limit == 0 || instances <= 1 {
+fn fair_share(prev: u64, cur: u64, elapsed_ms: u64, limit: u64, gateways: u32) -> i64 {
+    if limit == 0 || gateways <= 1 {
         return UNLIMITED;
     }
     let headroom = u128::from(limit).saturating_sub(estimate(prev, cur, elapsed_ms));
-    i64::try_from(headroom.div_ceil(u128::from(instances))).unwrap_or(UNLIMITED)
+    i64::try_from(headroom.div_ceil(u128::from(gateways))).unwrap_or(UNLIMITED)
 }
 
 /// Seconds until the sliding estimate is under `limit`, at least 1 so a full
@@ -380,7 +380,7 @@ struct ScopeState {
     counters: Mutex<Counters>,
     /// In-flight requests served by this process.
     parallel: AtomicU32,
-    /// In-flight requests at the other instances, from the last sync.
+    /// In-flight requests at the other gateways, from the last sync.
     others_parallel: AtomicU32,
     /// In-flight slots this process may still take before the next sync.
     share_parallel: AtomicI64,
@@ -538,14 +538,14 @@ pub struct ScopeCounts {
     pub generation: u64,
 }
 
-/// One scope's view from the shared store: the other instances' counts for
-/// `minute` and `minute - 1`, how many instances were active in each
+/// One scope's view from the shared store: the other gateways' counts for
+/// `minute` and `minute - 1`, how many gateways were active in each
 /// dimension, and their in-flight requests.
 ///
-/// `in_flight_instances` counts every instance with a fresh in-flight entry
-/// for the scope, including this one and including instances whose value is
-/// zero: every instance writes its entry for every active scope on every
-/// sync, so `n` is the number of live instances that know the scope. The
+/// `in_flight_gateways` counts every gateway with a fresh in-flight entry
+/// for the scope, including this one and including gateways whose value is
+/// zero: every gateway writes its entry for every active scope on every
+/// sync, so `n` is the number of live gateways that know the scope. The
 /// limiter divides the parallel headroom by it.
 #[cfg_attr(not(test), allow(dead_code))] // The Redis sync task is the first user.
 #[derive(Debug, Clone)]
@@ -556,10 +556,10 @@ pub struct ScopeView {
     pub rpm_cur: u64,
     pub tpm_prev: u64,
     pub tpm_cur: u64,
-    pub rpm_instances: u32,
-    pub tpm_instances: u32,
+    pub rpm_gateways: u32,
+    pub tpm_gateways: u32,
     pub in_flight: u32,
-    pub in_flight_instances: u32,
+    pub in_flight_gateways: u32,
 }
 
 /// Wall-clock source for the windows. Tests replace it so no test has to
@@ -892,11 +892,11 @@ impl Registry {
     /// in-flight gauge, and read-only entries for scopes whose view of the
     /// others' half or finite share still needs refreshing.
     ///
-    /// Dirty, in-flight, finite-share and multi-instance scopes are read every
+    /// Dirty, in-flight, finite-share and multi-gateway scopes are read every
     /// interval. A clean scope with only local counts, no share and one
-    /// instance is read every fifth interval: fewer reads keep a large number
+    /// gateway is read every fifth interval: fewer reads keep a large number
     /// of recently used keys from loading Redis, at the cost of noticing a
-    /// joining instance within five intervals instead of one.
+    /// joining gateway within five intervals instead of one.
     ///
     /// A scope whose limits are not known yet is skipped; there is nothing
     /// to divide or enforce.
@@ -924,7 +924,7 @@ impl Registry {
             let in_flight = state.parallel.load(Ordering::Relaxed);
             let write = counters.dirty();
             // Own counts keep a clean scope read-only rather than silent: it
-            // must still notice the other instances bound to the same scope.
+            // must still notice the other gateways bound to the same scope.
             let view = counters.rpm.cur != 0
                 || counters.rpm.prev != 0
                 || counters.tpm.cur != 0
@@ -936,7 +936,7 @@ impl Registry {
                 || counters.others_rpm.prev != 0
                 || counters.others_tpm.cur != 0
                 || counters.others_tpm.prev != 0
-                || counters.instances > 1;
+                || counters.gateways > 1;
             if !write && !view && in_flight == 0 {
                 continue;
             }
@@ -948,7 +948,7 @@ impl Registry {
                 && counters.others_rpm.prev == 0
                 && counters.others_tpm.cur == 0
                 && counters.others_tpm.prev == 0
-                && counters.instances <= 1;
+                && counters.gateways <= 1;
             if read_only && read_every != 0 && ms.saturating_sub(counters.last_read_ms) < read_every
             {
                 continue;
@@ -1002,7 +1002,7 @@ impl Registry {
         }
     }
 
-    /// Stores one sync's view of the other instances per scope and redivides
+    /// Stores one sync's view of the other gateways per scope and redivides
     /// the remaining headroom. Results for a minute that is no longer the
     /// current or the previous one are ignored: the windows have moved on.
     #[cfg_attr(not(test), allow(dead_code))] // The Redis sync task is the first user.
@@ -1142,10 +1142,10 @@ mod tests {
             rpm_cur: 0,
             tpm_prev: 0,
             tpm_cur: 0,
-            rpm_instances: 0,
-            tpm_instances: 0,
+            rpm_gateways: 0,
+            tpm_gateways: 0,
             in_flight: 0,
-            in_flight_instances: 0,
+            in_flight_gateways: 0,
         }
     }
 
@@ -1447,7 +1447,7 @@ mod tests {
         registry.mark_synced(&batch);
 
         // The scope stays read-only while its counts are in the window, so a
-        // second instance joining is noticed; nothing is written again.
+        // second gateway joining is noticed; nothing is written again.
         let clean = registry.pending_sync();
         assert_eq!(clean.len(), 1);
         assert!(!clean[0].write);
@@ -1518,12 +1518,12 @@ mod tests {
             counters.rpm_limit = 10;
             counters.parallel_limit = 10;
         }
-        // Another instance reports a full window and a full in-flight gauge.
+        // Another gateway reports a full window and a full in-flight gauge.
         let mut others = view("s", BASE_MINUTE);
         others.rpm_cur = 10;
-        others.rpm_instances = 2;
+        others.rpm_gateways = 2;
         others.in_flight = 10;
-        others.in_flight_instances = 2;
+        others.in_flight_gateways = 2;
         registry.apply_sync(&[others]);
         assert!(registry.admit(&key).is_err(), "the share is zero");
         // No own counts or dirty state exist, but the finite share and the
@@ -1548,10 +1548,10 @@ mod tests {
         let (registry, _now) = registry_at(BASE_MINUTE, 0);
         let state = registry.state(&"p".into());
         state.counters.lock().unwrap().parallel_limit = 8;
-        // Two instances, nobody in flight: the headroom is divided (4 each)
+        // Two gateways, nobody in flight: the headroom is divided (4 each)
         // and the share is the only thing keeping the scope active.
         let mut others = view("p", BASE_MINUTE);
-        others.in_flight_instances = 2;
+        others.in_flight_gateways = 2;
         registry.apply_sync(&[others]);
         let batch = registry.pending_sync();
         assert_eq!(batch.len(), 1);
@@ -1567,7 +1567,7 @@ mod tests {
         state.counters.lock().unwrap().parallel_limit = 4;
         let mut others = view("p", BASE_MINUTE);
         others.in_flight = 4;
-        others.in_flight_instances = 2;
+        others.in_flight_gateways = 2;
         registry.apply_sync(&[others]);
         assert!(registry.admit(&key).is_err(), "others fill the gauge");
         assert_eq!(
@@ -1592,7 +1592,7 @@ mod tests {
         drop(registry.admit(&key).unwrap());
         let mut others = view("s", BASE_MINUTE);
         others.rpm_cur = 10;
-        others.rpm_instances = 2;
+        others.rpm_gateways = 2;
         registry.apply_sync(&[others]);
         assert!(registry.admit(&key).is_err(), "others used the limit");
         registry.enter_fallback();
@@ -1612,12 +1612,9 @@ mod tests {
         state.counters.lock().unwrap().parallel_limit = 2;
         let mut others = view("p", BASE_MINUTE);
         others.in_flight = 2;
-        others.in_flight_instances = 2;
+        others.in_flight_gateways = 2;
         registry.apply_sync(&[others]);
-        assert!(
-            registry.admit(&key).is_err(),
-            "a vanished instance fills it"
-        );
+        assert!(registry.admit(&key).is_err(), "a vanished gateway fills it");
         registry.enter_fallback();
         let a = registry.admit(&key).unwrap();
         let b = registry.admit(&key).unwrap();
@@ -1705,7 +1702,7 @@ mod tests {
         let key = caller(&[("s", limit(10, 0, 0))]);
         let mut others = view("s", BASE_MINUTE);
         others.rpm_cur = 6;
-        others.rpm_instances = 1;
+        others.rpm_gateways = 1;
         registry.apply_sync(&[others]);
         // estimate = 6, so only four more fit before the window is full.
         for _ in 0..4 {
@@ -1737,27 +1734,27 @@ mod tests {
         // A first request stores the limit the sync divides.
         drop(registry.admit(&key).unwrap());
         let mut shared = view("s", BASE_MINUTE);
-        shared.rpm_instances = 2;
+        shared.rpm_gateways = 2;
         registry.apply_sync(&[shared.clone()]);
-        // estimate 1, headroom 9 over two instances: five more before the
+        // estimate 1, headroom 9 over two gateways: five more before the
         // next sync.
         for _ in 0..5 {
             drop(registry.admit(&key).unwrap());
         }
         assert_eq!(registry.admit(&key).err().unwrap().retry_after_secs, 1);
         // The next sync sees the six local counts and redivides what is left:
-        // headroom 4 over two instances is two.
+        // headroom 4 over two gateways is two.
         registry.apply_sync(&[shared]);
         for _ in 0..2 {
             drop(registry.admit(&key).unwrap());
         }
         assert!(registry.admit(&key).is_err());
 
-        // One active instance is exactly local behaviour.
+        // One active gateway is exactly local behaviour.
         let (solo, _now) = registry_at(BASE_MINUTE, 0);
         drop(solo.admit(&key).unwrap());
         let mut alone = view("s", BASE_MINUTE);
-        alone.rpm_instances = 1;
+        alone.rpm_gateways = 1;
         solo.apply_sync(&[alone]);
         for _ in 0..9 {
             drop(solo.admit(&key).unwrap());
@@ -1773,9 +1770,9 @@ mod tests {
         // Establish the limit the way a request would before the sync runs.
         let first = registry.admit(&key).unwrap();
         let mut shared = view("p", BASE_MINUTE);
-        shared.in_flight_instances = 2;
+        shared.in_flight_gateways = 2;
         registry.apply_sync(&[shared]);
-        // Headroom 9 over two instances: five more before the next sync.
+        // Headroom 9 over two gateways: five more before the next sync.
         let mut permits = vec![first];
         for _ in 0..5 {
             permits.push(registry.admit(&key).unwrap());
@@ -1872,10 +1869,10 @@ mod tests {
         }
     }
 
-    /// In-test store: each instance's absolute counts are stored per minute,
-    /// and a view returns the other instances' totals and instance counts. Every
-    /// instance writes its in-flight field on each sync, even when zero, so
-    /// the parallel `n` covers the live instances (the Redis hash keeps a
+    /// In-test store: each gateway's absolute counts are stored per minute,
+    /// and a view returns the other gateways' totals and gateway counts. Every
+    /// gateway writes its in-flight field on each sync, even when zero, so
+    /// the parallel `n` covers the live gateways (the Redis hash keeps a
     /// field fresh for 3 s, which is 12 ticks here).
     #[derive(Default)]
     struct FakeStore {
@@ -1885,7 +1882,7 @@ mod tests {
     }
 
     impl FakeStore {
-        fn push(&mut self, tick: u64, instance: usize, counts: &ScopeCounts, instances: usize) {
+        fn push(&mut self, tick: u64, gateway: usize, counts: &ScopeCounts, gateways: usize) {
             let id = counts.id.to_string();
             if counts.write {
                 // Absolute values: a resend overwrites, never adds.
@@ -1897,29 +1894,29 @@ mod tests {
                     for (per_scope, value) in [(&mut self.rpm, rpm), (&mut self.tpm, tpm)] {
                         let entry = per_scope
                             .entry((id.clone(), minute))
-                            .or_insert_with(|| vec![0; instances]);
-                        entry.resize(instances, 0);
-                        entry[instance] = i64::try_from(value).unwrap_or(i64::MAX);
+                            .or_insert_with(|| vec![0; gateways]);
+                        entry.resize(gateways, 0);
+                        entry[gateway] = i64::try_from(value).unwrap_or(i64::MAX);
                     }
                 }
             }
             self.in_flight
-                .insert((id, instance), (counts.in_flight, tick));
+                .insert((id, gateway), (counts.in_flight, tick));
         }
 
-        fn counts(&self, id: &str, minute: u64, instances: usize, own: usize) -> (u64, u64, u32) {
+        fn counts(&self, id: &str, minute: u64, gateways: usize, own: usize) -> (u64, u64, u32) {
             let per = |counts: &HashMap<(String, u64), Vec<i64>>, minute: u64| {
                 counts
                     .get(&(id.to_string(), minute))
                     .cloned()
-                    .unwrap_or_else(|| vec![0; instances])
+                    .unwrap_or_else(|| vec![0; gateways])
             };
             let cur = per(&self.rpm, minute);
             let prev = per(&self.rpm, minute.saturating_sub(1));
             let mut other_cur = 0u64;
             let mut other_prev = 0u64;
             let mut active = 0u32;
-            for i in 0..instances {
+            for i in 0..gateways {
                 let cur = u64::try_from(cur.get(i).copied().unwrap_or(0).max(0)).unwrap_or(0);
                 let prev = u64::try_from(prev.get(i).copied().unwrap_or(0).max(0)).unwrap_or(0);
                 if i != own {
@@ -1936,28 +1933,28 @@ mod tests {
         fn view(
             &self,
             id: &str,
-            instance: usize,
-            instances: usize,
+            gateway: usize,
+            gateways: usize,
             minute: u64,
             tick: u64,
         ) -> ScopeView {
-            let (rpm_prev, rpm_cur, rpm_instances) = self.counts(id, minute, instances, instance);
+            let (rpm_prev, rpm_cur, rpm_gateways) = self.counts(id, minute, gateways, gateway);
             let mut view = view(id, minute);
             view.rpm_prev = rpm_prev;
             view.rpm_cur = rpm_cur;
-            view.rpm_instances = rpm_instances;
-            view.tpm_instances = rpm_instances;
-            for i in 0..instances {
+            view.rpm_gateways = rpm_gateways;
+            view.tpm_gateways = rpm_gateways;
+            for i in 0..gateways {
                 let Some(&(in_flight, stamped)) = self.in_flight.get(&(id.to_string(), i)) else {
                     continue;
                 };
                 if tick.saturating_sub(stamped) > 12 {
                     continue;
                 }
-                if i != instance {
+                if i != gateway {
                     view.in_flight += in_flight;
                 }
-                view.in_flight_instances += 1;
+                view.in_flight_gateways += 1;
             }
             view
         }
@@ -1966,24 +1963,24 @@ mod tests {
     fn run_sync(
         registries: &[Registry],
         store: &mut FakeStore,
-        instances: usize,
+        gateways: usize,
         id: &str,
         tick: u64,
     ) -> u64 {
         let minute = registries[0].minute_now();
-        // One batch round-trip: every instance pushes its absolute counts
-        // before any instance reads a view, like one pipelined store call.
+        // One batch round-trip: every gateway pushes its absolute counts
+        // before any gateway reads a view, like one pipelined store call.
         let batches: Vec<_> = registries
             .iter()
             .map(|registry| registry.pending_sync())
             .collect();
         for (i, batch) in batches.iter().enumerate() {
             for counts in batch {
-                store.push(tick, i, counts, instances);
+                store.push(tick, i, counts, gateways);
             }
         }
         for (i, registry) in registries.iter().enumerate() {
-            let view = store.view(id, i, instances, minute, tick);
+            let view = store.view(id, i, gateways, minute, tick);
             registry.apply_sync(&[view]);
             registry.mark_synced(&batches[i]);
         }
@@ -1991,18 +1988,18 @@ mod tests {
     }
 
     #[test]
-    fn simulation_rpm_holds_across_instances() {
-        for instances in 2..=8usize {
+    fn simulation_rpm_holds_across_gateways() {
+        for gateways in 2..=8usize {
             let rpm = 30u32;
             let now = at(BASE_MINUTE, 30_000);
-            let registries: Vec<_> = (0..instances)
+            let registries: Vec<_> = (0..gateways)
                 .map(|_| Registry::with_clock(now.clone()))
                 .collect();
             let key = caller(&[("shared", limit(rpm, 0, 0))]);
             let mut store = FakeStore::default();
             let mut admitted: HashMap<u64, u32> = HashMap::new();
             for tick in 0..480u64 {
-                let minute = run_sync(&registries, &mut store, instances, "shared", tick);
+                let minute = run_sync(&registries, &mut store, gateways, "shared", tick);
                 for (i, registry) in registries.iter().enumerate() {
                     for _ in 0..(1 + i % 3) {
                         if registry.admit(&key).is_ok() {
@@ -2012,30 +2009,30 @@ mod tests {
                 }
                 now.fetch_add(250, Ordering::Relaxed);
             }
-            let bound = rpm + u32::try_from(instances).unwrap();
+            let bound = rpm + u32::try_from(gateways).unwrap();
             for (minute, count) in admitted {
                 assert!(
                     count <= bound,
-                    "{instances} instances, minute {minute}: {count} > {bound}"
+                    "{gateways} gateways, minute {minute}: {count} > {bound}"
                 );
             }
         }
     }
 
     #[test]
-    fn simulation_parallel_holds_across_instances() {
-        for instances in 2..=8usize {
+    fn simulation_parallel_holds_across_gateways() {
+        for gateways in 2..=8usize {
             let max = 16u32;
             let now = at(BASE_MINUTE, 30_000);
-            let registries: Vec<_> = (0..instances)
+            let registries: Vec<_> = (0..gateways)
                 .map(|_| Registry::with_clock(now.clone()))
                 .collect();
             let key = caller(&[("shared", limit(0, 0, max))]);
             let mut store = FakeStore::default();
-            let mut held: Vec<Vec<Permit>> = (0..instances).map(|_| Vec::new()).collect();
+            let mut held: Vec<Vec<Permit>> = (0..gateways).map(|_| Vec::new()).collect();
             let mut peak = 0usize;
             for tick in 0..480u64 {
-                run_sync(&registries, &mut store, instances, "shared", tick);
+                run_sync(&registries, &mut store, gateways, "shared", tick);
                 for (i, registry) in registries.iter().enumerate() {
                     // Keep one slot in use so the in-flight fields stay fresh,
                     // as continuous traffic would.
@@ -2051,11 +2048,8 @@ mod tests {
                 peak = peak.max(held.iter().map(Vec::len).sum());
                 now.fetch_add(250, Ordering::Relaxed);
             }
-            let bound = usize::try_from(max).unwrap() + instances;
-            assert!(
-                peak <= bound,
-                "{instances} instances: peak {peak} > {bound}"
-            );
+            let bound = usize::try_from(max).unwrap() + gateways;
+            assert!(peak <= bound, "{gateways} gateways: peak {peak} > {bound}");
         }
     }
 

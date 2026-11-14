@@ -91,7 +91,7 @@ aliases:
 #     # middleware: {plugin: strip_artifacts, params: {media_types: [application/x-mock-secret]}, timeout_ms: 1500}
 
 # Teams are the bounded `team` metric label. Their rate limits are shared by
-# every key of the team (local to this gateway instance).
+# every key of the team (local to this gateway).
 teams:
   - id: team-research
     name: Research

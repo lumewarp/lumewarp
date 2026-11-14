@@ -6,9 +6,9 @@ mod catalog;
 mod config_stream;
 mod endpoint;
 mod error;
+mod gateway_id;
 mod grants;
 mod health;
-mod instance;
 mod mcp;
 mod mcp_hash;
 mod metrics;
@@ -107,7 +107,7 @@ struct Args {
         long,
         short,
         env = "LUMEWARP_CONFIG",
-        conflicts_with_all = ["control_plane", "gateway_token_env", "state_dir", "scope", "gateway_id", "local_config"],
+        conflicts_with_all = ["control_plane", "gateway_token_env", "state_dir", "scope", "local_config"],
         required_unless_present = "control_plane"
     )]
     config: Option<PathBuf>,
@@ -123,14 +123,11 @@ struct Args {
     /// Control-plane scope this gateway serves.
     #[arg(long)]
     scope: Option<String>,
-    /// Identity presented to the control plane.
-    #[arg(long, default_value = "gateway")]
-    gateway_id: String,
     /// YAML with only `server:` settings (listen, admin, timeouts).
     #[arg(long)]
     local_config: Option<PathBuf>,
     /// Redis URL (`redis://` or `rediss://`) for sharing rate-limit counters
-    /// between gateway instances. Empty = per-process limits.
+    /// between gateways. Empty = per-gateway limits.
     #[arg(long, env = "LUMEWARP_SHARED_LIMITS_REDIS_URL", hide_env_values = true)]
     shared_limits_redis_url: Option<String>,
     /// Shared-limits sync interval in milliseconds (10-1000, default 100).
@@ -276,7 +273,6 @@ async fn main() -> anyhow::Result<()> {
                 usage::ReporterConfig {
                     endpoint: url.clone(),
                     token: token.clone(),
-                    gateway_id: args.gateway_id.clone(),
                     capacity: usage::ReporterConfig::DEFAULT_CAPACITY,
                     batch_max: usage::ReporterConfig::DEFAULT_BATCH_MAX,
                     flush_interval: usage::ReporterConfig::DEFAULT_FLUSH_INTERVAL,
@@ -323,7 +319,6 @@ async fn main() -> anyhow::Result<()> {
                 config_stream::StreamConfig {
                     url: url.clone(),
                     token,
-                    gateway_id: args.gateway_id.clone(),
                     scope,
                     state_dir,
                     shared_limits_namespace: shared_limits

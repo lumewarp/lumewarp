@@ -931,7 +931,7 @@ function TeamSettings({ team }: { team: TeamAny }) {
           value={form.values.member_rpm_default}
           onChange={(value) => form.set("member_rpm_default", value)}
           error={form.errors.member_rpm_default}
-          hint="Member exceptions override this default, which remains capped by the team and is shared across gateways that use the same Redis namespace, otherwise counted per gateway instance."
+          hint="Member exceptions override this default, which remains capped by the team and is shared across gateways that use the same Redis namespace, otherwise counted per gateway."
         />
         <NumberField
           label="Member default tokens per minute"
@@ -939,7 +939,7 @@ function TeamSettings({ team }: { team: TeamAny }) {
           value={form.values.member_tpm_default}
           onChange={(value) => form.set("member_tpm_default", value)}
           error={form.errors.member_tpm_default}
-          hint="A changed value may not exceed the team's effective value and is shared across gateways that use the same Redis namespace, otherwise counted per gateway instance."
+          hint="A changed value may not exceed the team's effective value and is shared across gateways that use the same Redis namespace, otherwise counted per gateway."
         />
         <NumberField
           label="Member default max parallel requests"
@@ -947,7 +947,7 @@ function TeamSettings({ team }: { team: TeamAny }) {
           value={form.values.member_max_parallel_default}
           onChange={(value) => form.set("member_max_parallel_default", value)}
           error={form.errors.member_max_parallel_default}
-          hint="Blank removes the member default; the team's limit still applies, shared across gateways that use the same Redis namespace or else per gateway instance."
+          hint="Blank removes the member default; the team's limit still applies, shared across gateways that use the same Redis namespace or else per gateway."
         />
         <NumberField
           label="Max keys per member"

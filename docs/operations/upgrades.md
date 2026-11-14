@@ -13,19 +13,18 @@ when the snapshot format changed; the release notes say when.
   single-process; the chart uses `Recreate`.
 - **Migration is a pre-upgrade hook.** The old control-plane pod is still running while
   the schema migrates (Rolling/Recreate), so expect a short outage window on upgrades.
-- **Many gateway replicas, one token per gateway id.** Each gateway token is bound to a
-  single `gateway_id`, not to a process: `gateway.replicaCount` (or `gateway.autoscaling`)
-  runs several pods on the same token and `gateway.gatewayId`, and the control plane shows
-  them as instances of that gateway. `gateway.gatewayId` must equal the id the token was
-  issued for. Rate limits are counted per instance unless the gateways share a Redis
-  (`redis.enabled`, or `gateway.sharedLimits.redis.existingSecret`).
-- **A rolling gateway upgrade can quarantine a version.** A NACK from one instance quarantines
-  that config version for the whole gateway id, so replicas never apply different versions on
-  purpose. An instance still on the old build NACKs a version that needs a capability or
-  plugin it does not have, which parks that version for the new instances too, and a
-  quarantined version stays refused until a newer one is published. Finish the rollout before
-  publishing anything that needs the new build, and publish again afterwards if a version was
-  quarantined during it.
+- **Many gateway pods, one token.** A gateway is one process: `gateway.replicaCount` (or
+  `gateway.autoscaling`) starts several pods that all use the token in
+  `gateway.token.secretName`, and each pod generates its own gateway id at startup. The
+  Gateways page shows one row per pod. Rate limits are
+  counted per gateway unless the gateways share a Redis (`redis.enabled`, or
+  `gateway.sharedLimits.redis.existingSecret`).
+- **A rolling upgrade can leave an older gateway behind.** A gateway on the old build that
+  lacks a plugin or capability NACKs `UNSUPPORTED_FEATURE`; only that gateway skips the
+  version, while the others apply it, so the fleet can run different configs during the
+  rollout. An `INVALID_CONFIG` NACK is different: it quarantines the version for the whole
+  scope, including gateways that start later, until a newer version is published. Finish the
+  rollout before publishing anything that needs the new build.
 - **Gateway state volume.** With the default `emptyDir`, a new pod has no cache and returns
   503 on `/readyz` and `/v1/*` until the first full snapshot arrives. With
   `gateway.stateDir.persistence.enabled` the gateway is a StatefulSet with one

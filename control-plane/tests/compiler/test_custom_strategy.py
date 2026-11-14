@@ -140,9 +140,9 @@ def test_strategy_accepted(strategy, params):
     assert router_problem(strategy, params) is None
 
 
-async def test_a_capability_needs_every_connected_instance_of_a_gateway(factory):
-    """Replicas of one gateway id: a capability only one of them has would make the others
-    NACK the version, so the compile warns until all of them report it.
+async def test_a_capability_needs_every_connected_gateway(factory):
+    """A capability only one connected gateway has would make the others NACK the version,
+    so the compile warns until every connected gateway reports it.
     """
     await seed_scope(factory)
     async with factory() as s, s.begin():
@@ -154,15 +154,12 @@ async def test_a_capability_needs_every_connected_instance_of_a_gateway(factory)
         await report_plugins(
             s,
             SCOPE,
-            "replica",
+            "gateway-a",
             {},
             connected=True,
             capabilities=["strategy:header_pin"],
-            instance_id="pod-1-aa",
         )
-        await report_plugins(
-            s, SCOPE, "replica", {}, connected=True, capabilities=[], instance_id="pod-2-bb"
-        )
+        await report_plugins(s, SCOPE, "gateway-b", {}, connected=True, capabilities=[])
     async with factory() as s:
         result = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
     assert len(result.warnings) == 1
@@ -171,11 +168,10 @@ async def test_a_capability_needs_every_connected_instance_of_a_gateway(factory)
         await report_plugins(
             s,
             SCOPE,
-            "replica",
+            "gateway-b",
             {},
             connected=True,
             capabilities=["strategy:header_pin"],
-            instance_id="pod-2-bb",
         )
     async with factory() as s:
         assert not (await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)).warnings

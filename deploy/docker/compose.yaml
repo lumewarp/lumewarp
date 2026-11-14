@@ -59,7 +59,6 @@ services:
       - --gateway-token-env=LUMEWARP_GATEWAY_TOKEN
       - --state-dir=/var/lib/lumewarp/state
       - --scope=default
-      - --gateway-id=${LUMEWARP_GATEWAY_ID:-gw-1}
       - --local-config=/etc/lumewarp/local.yaml
     environment:
       LUMEWARP_GATEWAY_TOKEN: ${LUMEWARP_GATEWAY_TOKEN:-}

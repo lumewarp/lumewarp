@@ -36,9 +36,9 @@ kubectl -n lumewarp create secret generic lumewarp-control-plane \
 ```
 
 The control plane creates gateway tokens itself, so a fresh install has no gateway token
-yet. A token is bound to one gateway id. The example uses `gw-1`; the chart's
-`gateway.gatewayId` defaults to `gw-1`, and the two must match (or both use the id you
-chose). Install the control plane first, bootstrap a token, then enable the gateway:
+yet. A token is a scope credential with a label, not bound to a gateway id; any number of
+gateways may use one. Install the control plane first, bootstrap a token, then enable the
+gateway:
 
 ```sh
 helm install lumewarp deploy/helm/lumewarp -n lumewarp \
@@ -46,20 +46,20 @@ helm install lumewarp deploy/helm/lumewarp -n lumewarp \
 
 # Optional: the pre-install hook Job ran `migrate`. Create a gateway token:
 kubectl -n lumewarp exec deploy/lumewarp-control-plane -- \
-  python -m lumewarp_control_plane bootstrap --gateway-id gw-1
+  python -m lumewarp_control_plane bootstrap --name lumewarp-gateway
 
 kubectl -n lumewarp create secret generic lumewarp-gateway \
   --from-literal=token='lwg-...'
 
 helm upgrade lumewarp deploy/helm/lumewarp -n lumewarp \
-  --reuse-values --set gateway.enabled=true --set gateway.gatewayId=gw-1
+  --reuse-values --set gateway.enabled=true
 ```
 
 The gateway runs one replica by default. `gateway.replicaCount` (or `gateway.autoscaling`)
-can raise that: every replica uses the same token and the same `gateway.gatewayId`, because a
-token identifies one gateway and not one process, and the control plane shows the pods as that
-gateway's instances. Rate limits are counted per instance unless the gateways share a Redis;
-`redis.enabled` ships one with the release. The manual's
+can raise that: every pod is its own gateway, with an id it generates at startup, and all
+pods share the token. A restart therefore adds a new gateway instead of reusing one identity.
+Rate limits are counted per gateway unless the gateways share a Redis; `redis.enabled` ships
+one with the release. The manual's
 [Gateway replicas](../../../docs/operations/helm.md#gateway-replicas) and
 [Shared rate limits](../../../docs/operations/helm.md#shared-rate-limits) have the details.
 
@@ -84,7 +84,7 @@ pods start.
 | Control-plane Deployment | One replica. Runs the HTTP API + UI, gRPC ConfigService/UsageService, compiler loop and monthly rollover. `strategy: Recreate`. |
 | Control-plane Service | `http` (8091), `grpc` (50051) and `metrics` (9465, Prometheus `/metrics`; only with `controlPlane.metrics.enabled`) ports. |
 | Migration Job | Helm `pre-install,pre-upgrade` hook running `python -m lumewarp_control_plane migrate` with the database Secret. |
-| Gateway Deployment | One replica by default. The token is bound to `gateway.gatewayId`; boots from its state volume, then follows the config stream; `/readyz` stays 503 until a snapshot is loaded. |
+| Gateway Deployment | One replica by default. Each pod is a gateway with its own generated id and the shared token; boots from its state volume, then follows the config stream; `/readyz` stays 503 until a snapshot is loaded. |
 | Gateway StatefulSet | Instead of the Deployment when `gateway.stateDir.persistence.enabled`: one ReadWriteOnce claim per pod from a `volumeClaimTemplate`, plus the headless Service it needs. |
 | Gateway Service | `http` (4000) and `admin` (9464, `/metrics` + `/readyz`) ports. |
 | Gateway PodDisruptionBudget / HorizontalPodAutoscaler | Optional, `gateway.podDisruptionBudget` and `gateway.autoscaling`. |
@@ -109,7 +109,6 @@ bash deploy/helm/check.sh
 helm lint deploy/helm/lumewarp --strict
 helm template lumewarp deploy/helm/lumewarp -n lumewarp \
   --set controlPlane.databaseUrl.secretName=db \
-  --set gateway.gatewayId=gw-1 \
   --set gateway.token.secretName=gw
 
 # Expected to fail: the bundled Valkey and an external Redis URL are exclusive.

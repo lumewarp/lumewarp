@@ -223,7 +223,7 @@ function StrategiesTable({ strategies, loading, error, onRetry }: { strategies: 
   const total = useMemo(() => {
     const ids = new Set<string>();
     for (const s of strategies ?? []) {
-      s.gateways.forEach((g) => ids.add(g.gateway_id));
+      s.gateways.forEach((g) => g.connected && ids.add(g.gateway_id));
       s.missing_gateways.forEach((g) => ids.add(g));
     }
     return ids.size;
@@ -271,7 +271,7 @@ function StrategiesTable({ strategies, loading, error, onRetry }: { strategies: 
             align: "right",
             cell: (s) => {
               if (!total) return <span className="text-muted-foreground">—</span>;
-              const supported = new Set(s.gateways.map((g) => g.gateway_id)).size;
+              const supported = s.gateways.filter((g) => g.connected).length;
               return (
                 <Badge tone={s.missing_gateways.length ? "warn" : "ok"}>
                   {supported} / {total}

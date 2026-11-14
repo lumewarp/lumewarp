@@ -25,17 +25,17 @@ _sym_db = _symbol_database.Default()
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as lumewarp_dot_config_dot_v1_dot_snapshot__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\'lumewarp/config/v1/config_service.proto\x12\x12lumewarp.config.v1\x1a!lumewarp/config/v1/snapshot.proto\"\xff\x01\n\x0eGatewayMessage\x12*\n\x05hello\x18\x01 \x01(\x0b\x32\x19.lumewarp.config.v1.HelloH\x00\x12&\n\x03\x61\x63k\x18\x02 \x01(\x0b\x32\x17.lumewarp.config.v1.AckH\x00\x12(\n\x04nack\x18\x03 \x01(\x0b\x32\x18.lumewarp.config.v1.NackH\x00\x12\x32\n\x06health\x18\x04 \x01(\x0b\x32 .lumewarp.config.v1.HealthReportH\x00\x12\x34\n\x07\x63\x61talog\x18\x05 \x01(\x0b\x32!.lumewarp.config.v1.CatalogReportH\x00\x42\x05\n\x03msg\"u\n\x0cHealthReport\x12\x33\n\tupstreams\x18\x01 \x03(\x0b\x32 .lumewarp.config.v1.TargetHealth\x12\x30\n\x06models\x18\x02 \x03(\x0b\x32 .lumewarp.config.v1.TargetHealth\"-\n\x0cTargetHealth\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0f\n\x07healthy\x18\x02 \x01(\x08\"\xb9\x02\n\x05Hello\x12\x12\n\ngateway_id\x18\x01 \x01(\t\x12\x14\n\x0chave_version\x18\x02 \x01(\x04\x12\x17\n\x0fgateway_version\x18\x03 \x01(\t\x12\x1e\n\x16supported_capabilities\x18\x04 \x03(\t\x12\r\n\x05scope\x18\x05 \x01(\t\x12\x13\n\x0bhave_digest\x18\x06 \x01(\x0c\x12\x35\n\x07plugins\x18\x08 \x03(\x0b\x32$.lumewarp.config.v1.PluginDescriptor\x12\x12\n\nplugin_abi\x18\t \x01(\r\x12\x13\n\x0binstance_id\x18\n \x01(\t\x12\x37\n\rshared_limits\x18\x0b \x01(\x0b\x32 .lumewarp.config.v1.SharedLimitsJ\x04\x08\x07\x10\x08R\nstrategies\"2\n\x0cSharedLimits\x12\x0f\n\x07\x65nabled\x18\x01 \x01(\x08\x12\x11\n\tnamespace\x18\x02 \x01(\t\"\xfc\x01\n\x10PluginDescriptor\x12,\n\x04kind\x18\x01 \x01(\x0e\x32\x1e.lumewarp.config.v1.PluginKind\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\r\n\x05title\x18\x03 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x04 \x01(\t\x12\x0f\n\x07\x62uiltin\x18\x05 \x01(\x08\x12\x1a\n\x12params_schema_json\x18\x06 \x01(\t\x12\x36\n\x06router\x18\x07 \x01(\x0b\x32&.lumewarp.config.v1.RouterStrategyInfo\x12\x13\n\x0bwasm_sha256\x18\x08 \x01(\t\x12\x0e\n\x06\x64igest\x18\t \x01(\t\"T\n\x12RouterStrategyInfo\x12\x13\n\x0buses_weight\x18\x01 \x01(\x08\x12\r\n\x05needs\x18\x02 \x03(\t\x12\x1a\n\x12member_schema_json\x18\x03 \x01(\t\"\x80\x01\n\rCatalogReport\x12;\n\x0b\x64\x65\x66initions\x18\x01 \x03(\x0b\x32&.lumewarp.config.v1.ObservedDefinition\x12\x32\n\x05\x63\x61rds\x18\x02 \x03(\x0b\x32#.lumewarp.config.v1.AgentCardReport\"\xed\x01\n\x12ObservedDefinition\x12\x0e\n\x06server\x18\x01 \x01(\t\x12\x33\n\x04kind\x18\x02 \x01(\x0e\x32%.lumewarp.config.v1.McpDefinitionKind\x12\x0c\n\x04name\x18\x03 \x01(\t\x12\x0c\n\x04hash\x18\x04 \x01(\x0c\x12\x17\n\x0f\x64\x65\x66inition_json\x18\x05 \x01(\t\x12\x15\n\rauto_approved\x18\x06 \x01(\x08\x12\x1b\n\x13observed_at_unix_ms\x18\x07 \x01(\x03\x12\x11\n\tserver_id\x18\x08 \x01(\t\x12\x16\n\x0e\x63onfig_version\x18\t \x01(\x04\"\x88\x01\n\x0f\x41gentCardReport\x12\r\n\x05\x61gent\x18\x01 \x01(\t\x12\x11\n\tcard_json\x18\x02 \x01(\t\x12\r\n\x05\x65rror\x18\x03 \x01(\t\x12\x1a\n\x12\x66\x65tched_at_unix_ms\x18\x04 \x01(\x03\x12\x10\n\x08\x61gent_id\x18\x05 \x01(\t\x12\x16\n\x0e\x63onfig_version\x18\x06 \x01(\x04\"\x16\n\x03\x41\x63k\x12\x0f\n\x07version\x18\x01 \x01(\x04\"i\n\x04Nack\x12\x0f\n\x07version\x18\x01 \x01(\x04\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12\x14\n\x0chave_version\x18\x03 \x01(\x04\x12*\n\x04\x63ode\x18\x04 \x01(\x0e\x32\x1c.lumewarp.config.v1.NackCode\"\x89\x01\n\x0c\x43onfigUpdate\x12,\n\x04\x66ull\x18\x01 \x01(\x0b\x32\x1c.lumewarp.config.v1.SnapshotH\x00\x12*\n\x05\x64\x65lta\x18\x02 \x01(\x0b\x32\x19.lumewarp.config.v1.DeltaH\x00\x12\x15\n\rtarget_digest\x18\x03 \x01(\x0c\x42\x08\n\x06update\"\xda\x05\n\x05\x44\x65lta\x12\x14\n\x0c\x62\x61se_version\x18\x01 \x01(\x04\x12\x0f\n\x07version\x18\x02 \x01(\x04\x12\x36\n\x10upsert_upstreams\x18\x03 \x03(\x0b\x32\x1c.lumewarp.config.v1.Upstream\x12\x18\n\x10remove_upstreams\x18\x04 \x03(\t\x12\x30\n\rupsert_models\x18\x05 \x03(\x0b\x32\x19.lumewarp.config.v1.Model\x12\x15\n\rremove_models\x18\x06 \x03(\t\x12\x32\n\x0eupsert_routers\x18\x07 \x03(\x0b\x32\x1a.lumewarp.config.v1.Router\x12\x16\n\x0eremove_routers\x18\x08 \x03(\t\x12\x33\n\x0fupsert_api_keys\x18\t \x03(\x0b\x32\x1a.lumewarp.config.v1.ApiKey\x12\x17\n\x0fremove_api_keys\x18\n \x03(\t\x12.\n\x0cupsert_teams\x18\x0b \x03(\x0b\x32\x18.lumewarp.config.v1.Team\x12\x14\n\x0cremove_teams\x18\x0c \x03(\t\x12\x1a\n\x12\x63reated_at_unix_ms\x18\r \x01(\x03\x12\x1d\n\x15required_capabilities\x18\x0e \x03(\t\x12\x31\n\x0eupsert_aliases\x18\x0f \x03(\x0b\x32\x19.lumewarp.config.v1.Alias\x12\x16\n\x0eremove_aliases\x18\x10 \x03(\t\x12\x39\n\x12upsert_mcp_servers\x18\x11 \x03(\x0b\x32\x1d.lumewarp.config.v1.McpServer\x12\x1a\n\x12remove_mcp_servers\x18\x12 \x03(\t\x12\x37\n\x11upsert_a2a_agents\x18\x13 \x03(\x0b\x32\x1c.lumewarp.config.v1.A2aAgent\x12\x19\n\x11remove_a2a_agents\x18\x14 \x03(\t*\x89\x01\n\nPluginKind\x12\x1b\n\x17PLUGIN_KIND_UNSPECIFIED\x10\x00\x12\x1f\n\x1bPLUGIN_KIND_ROUTER_STRATEGY\x10\x01\x12\x1d\n\x19PLUGIN_KIND_UPSTREAM_AUTH\x10\x02\x12\x1e\n\x1aPLUGIN_KIND_A2A_MIDDLEWARE\x10\x03*\xa1\x01\n\x08NackCode\x12\x19\n\x15NACK_CODE_UNSPECIFIED\x10\x00\x12\x1b\n\x17NACK_CODE_BASE_MISMATCH\x10\x01\x12\x1c\n\x18NACK_CODE_INVALID_CONFIG\x10\x02\x12!\n\x1dNACK_CODE_UNSUPPORTED_FEATURE\x10\x03\x12\x1c\n\x18NACK_CODE_PERSIST_FAILED\x10\x04\x32\x63\n\rConfigService\x12R\n\x06Stream\x12\".lumewarp.config.v1.GatewayMessage\x1a .lumewarp.config.v1.ConfigUpdate(\x01\x30\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\'lumewarp/config/v1/config_service.proto\x12\x12lumewarp.config.v1\x1a!lumewarp/config/v1/snapshot.proto\"\xff\x01\n\x0eGatewayMessage\x12*\n\x05hello\x18\x01 \x01(\x0b\x32\x19.lumewarp.config.v1.HelloH\x00\x12&\n\x03\x61\x63k\x18\x02 \x01(\x0b\x32\x17.lumewarp.config.v1.AckH\x00\x12(\n\x04nack\x18\x03 \x01(\x0b\x32\x18.lumewarp.config.v1.NackH\x00\x12\x32\n\x06health\x18\x04 \x01(\x0b\x32 .lumewarp.config.v1.HealthReportH\x00\x12\x34\n\x07\x63\x61talog\x18\x05 \x01(\x0b\x32!.lumewarp.config.v1.CatalogReportH\x00\x42\x05\n\x03msg\"u\n\x0cHealthReport\x12\x33\n\tupstreams\x18\x01 \x03(\x0b\x32 .lumewarp.config.v1.TargetHealth\x12\x30\n\x06models\x18\x02 \x03(\x0b\x32 .lumewarp.config.v1.TargetHealth\"-\n\x0cTargetHealth\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0f\n\x07healthy\x18\x02 \x01(\x08\"\xb7\x02\n\x05Hello\x12\x12\n\ngateway_id\x18\x01 \x01(\t\x12\x14\n\x0chave_version\x18\x02 \x01(\x04\x12\x17\n\x0fgateway_version\x18\x03 \x01(\t\x12\x1e\n\x16supported_capabilities\x18\x04 \x03(\t\x12\r\n\x05scope\x18\x05 \x01(\t\x12\x13\n\x0bhave_digest\x18\x06 \x01(\x0c\x12\x35\n\x07plugins\x18\x08 \x03(\x0b\x32$.lumewarp.config.v1.PluginDescriptor\x12\x12\n\nplugin_abi\x18\t \x01(\r\x12\x37\n\rshared_limits\x18\x0b \x01(\x0b\x32 .lumewarp.config.v1.SharedLimitsJ\x04\x08\x07\x10\x08J\x04\x08\n\x10\x0bR\nstrategiesR\x0binstance_id\"2\n\x0cSharedLimits\x12\x0f\n\x07\x65nabled\x18\x01 \x01(\x08\x12\x11\n\tnamespace\x18\x02 \x01(\t\"\xfc\x01\n\x10PluginDescriptor\x12,\n\x04kind\x18\x01 \x01(\x0e\x32\x1e.lumewarp.config.v1.PluginKind\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\r\n\x05title\x18\x03 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x04 \x01(\t\x12\x0f\n\x07\x62uiltin\x18\x05 \x01(\x08\x12\x1a\n\x12params_schema_json\x18\x06 \x01(\t\x12\x36\n\x06router\x18\x07 \x01(\x0b\x32&.lumewarp.config.v1.RouterStrategyInfo\x12\x13\n\x0bwasm_sha256\x18\x08 \x01(\t\x12\x0e\n\x06\x64igest\x18\t \x01(\t\"T\n\x12RouterStrategyInfo\x12\x13\n\x0buses_weight\x18\x01 \x01(\x08\x12\r\n\x05needs\x18\x02 \x03(\t\x12\x1a\n\x12member_schema_json\x18\x03 \x01(\t\"\x80\x01\n\rCatalogReport\x12;\n\x0b\x64\x65\x66initions\x18\x01 \x03(\x0b\x32&.lumewarp.config.v1.ObservedDefinition\x12\x32\n\x05\x63\x61rds\x18\x02 \x03(\x0b\x32#.lumewarp.config.v1.AgentCardReport\"\xed\x01\n\x12ObservedDefinition\x12\x0e\n\x06server\x18\x01 \x01(\t\x12\x33\n\x04kind\x18\x02 \x01(\x0e\x32%.lumewarp.config.v1.McpDefinitionKind\x12\x0c\n\x04name\x18\x03 \x01(\t\x12\x0c\n\x04hash\x18\x04 \x01(\x0c\x12\x17\n\x0f\x64\x65\x66inition_json\x18\x05 \x01(\t\x12\x15\n\rauto_approved\x18\x06 \x01(\x08\x12\x1b\n\x13observed_at_unix_ms\x18\x07 \x01(\x03\x12\x11\n\tserver_id\x18\x08 \x01(\t\x12\x16\n\x0e\x63onfig_version\x18\t \x01(\x04\"\x88\x01\n\x0f\x41gentCardReport\x12\r\n\x05\x61gent\x18\x01 \x01(\t\x12\x11\n\tcard_json\x18\x02 \x01(\t\x12\r\n\x05\x65rror\x18\x03 \x01(\t\x12\x1a\n\x12\x66\x65tched_at_unix_ms\x18\x04 \x01(\x03\x12\x10\n\x08\x61gent_id\x18\x05 \x01(\t\x12\x16\n\x0e\x63onfig_version\x18\x06 \x01(\x04\"\x16\n\x03\x41\x63k\x12\x0f\n\x07version\x18\x01 \x01(\x04\"i\n\x04Nack\x12\x0f\n\x07version\x18\x01 \x01(\x04\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12\x14\n\x0chave_version\x18\x03 \x01(\x04\x12*\n\x04\x63ode\x18\x04 \x01(\x0e\x32\x1c.lumewarp.config.v1.NackCode\"\x89\x01\n\x0c\x43onfigUpdate\x12,\n\x04\x66ull\x18\x01 \x01(\x0b\x32\x1c.lumewarp.config.v1.SnapshotH\x00\x12*\n\x05\x64\x65lta\x18\x02 \x01(\x0b\x32\x19.lumewarp.config.v1.DeltaH\x00\x12\x15\n\rtarget_digest\x18\x03 \x01(\x0c\x42\x08\n\x06update\"\xda\x05\n\x05\x44\x65lta\x12\x14\n\x0c\x62\x61se_version\x18\x01 \x01(\x04\x12\x0f\n\x07version\x18\x02 \x01(\x04\x12\x36\n\x10upsert_upstreams\x18\x03 \x03(\x0b\x32\x1c.lumewarp.config.v1.Upstream\x12\x18\n\x10remove_upstreams\x18\x04 \x03(\t\x12\x30\n\rupsert_models\x18\x05 \x03(\x0b\x32\x19.lumewarp.config.v1.Model\x12\x15\n\rremove_models\x18\x06 \x03(\t\x12\x32\n\x0eupsert_routers\x18\x07 \x03(\x0b\x32\x1a.lumewarp.config.v1.Router\x12\x16\n\x0eremove_routers\x18\x08 \x03(\t\x12\x33\n\x0fupsert_api_keys\x18\t \x03(\x0b\x32\x1a.lumewarp.config.v1.ApiKey\x12\x17\n\x0fremove_api_keys\x18\n \x03(\t\x12.\n\x0cupsert_teams\x18\x0b \x03(\x0b\x32\x18.lumewarp.config.v1.Team\x12\x14\n\x0cremove_teams\x18\x0c \x03(\t\x12\x1a\n\x12\x63reated_at_unix_ms\x18\r \x01(\x03\x12\x1d\n\x15required_capabilities\x18\x0e \x03(\t\x12\x31\n\x0eupsert_aliases\x18\x0f \x03(\x0b\x32\x19.lumewarp.config.v1.Alias\x12\x16\n\x0eremove_aliases\x18\x10 \x03(\t\x12\x39\n\x12upsert_mcp_servers\x18\x11 \x03(\x0b\x32\x1d.lumewarp.config.v1.McpServer\x12\x1a\n\x12remove_mcp_servers\x18\x12 \x03(\t\x12\x37\n\x11upsert_a2a_agents\x18\x13 \x03(\x0b\x32\x1c.lumewarp.config.v1.A2aAgent\x12\x19\n\x11remove_a2a_agents\x18\x14 \x03(\t*\x89\x01\n\nPluginKind\x12\x1b\n\x17PLUGIN_KIND_UNSPECIFIED\x10\x00\x12\x1f\n\x1bPLUGIN_KIND_ROUTER_STRATEGY\x10\x01\x12\x1d\n\x19PLUGIN_KIND_UPSTREAM_AUTH\x10\x02\x12\x1e\n\x1aPLUGIN_KIND_A2A_MIDDLEWARE\x10\x03*\xa1\x01\n\x08NackCode\x12\x19\n\x15NACK_CODE_UNSPECIFIED\x10\x00\x12\x1b\n\x17NACK_CODE_BASE_MISMATCH\x10\x01\x12\x1c\n\x18NACK_CODE_INVALID_CONFIG\x10\x02\x12!\n\x1dNACK_CODE_UNSUPPORTED_FEATURE\x10\x03\x12\x1c\n\x18NACK_CODE_PERSIST_FAILED\x10\x04\x32\x63\n\rConfigService\x12R\n\x06Stream\x12\".lumewarp.config.v1.GatewayMessage\x1a .lumewarp.config.v1.ConfigUpdate(\x01\x30\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'lumewarp.config.v1.config_service_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_PLUGINKIND']._serialized_start=2746
-  _globals['_PLUGINKIND']._serialized_end=2883
-  _globals['_NACKCODE']._serialized_start=2886
-  _globals['_NACKCODE']._serialized_end=3047
+  _globals['_PLUGINKIND']._serialized_start=2744
+  _globals['_PLUGINKIND']._serialized_end=2881
+  _globals['_NACKCODE']._serialized_start=2884
+  _globals['_NACKCODE']._serialized_end=3045
   _globals['_GATEWAYMESSAGE']._serialized_start=99
   _globals['_GATEWAYMESSAGE']._serialized_end=354
   _globals['_HEALTHREPORT']._serialized_start=356
@@ -43,27 +43,27 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_TARGETHEALTH']._serialized_start=475
   _globals['_TARGETHEALTH']._serialized_end=520
   _globals['_HELLO']._serialized_start=523
-  _globals['_HELLO']._serialized_end=836
-  _globals['_SHAREDLIMITS']._serialized_start=838
-  _globals['_SHAREDLIMITS']._serialized_end=888
-  _globals['_PLUGINDESCRIPTOR']._serialized_start=891
-  _globals['_PLUGINDESCRIPTOR']._serialized_end=1143
-  _globals['_ROUTERSTRATEGYINFO']._serialized_start=1145
-  _globals['_ROUTERSTRATEGYINFO']._serialized_end=1229
-  _globals['_CATALOGREPORT']._serialized_start=1232
-  _globals['_CATALOGREPORT']._serialized_end=1360
-  _globals['_OBSERVEDDEFINITION']._serialized_start=1363
-  _globals['_OBSERVEDDEFINITION']._serialized_end=1600
-  _globals['_AGENTCARDREPORT']._serialized_start=1603
-  _globals['_AGENTCARDREPORT']._serialized_end=1739
-  _globals['_ACK']._serialized_start=1741
-  _globals['_ACK']._serialized_end=1763
-  _globals['_NACK']._serialized_start=1765
-  _globals['_NACK']._serialized_end=1870
-  _globals['_CONFIGUPDATE']._serialized_start=1873
-  _globals['_CONFIGUPDATE']._serialized_end=2010
-  _globals['_DELTA']._serialized_start=2013
-  _globals['_DELTA']._serialized_end=2743
-  _globals['_CONFIGSERVICE']._serialized_start=3049
-  _globals['_CONFIGSERVICE']._serialized_end=3148
+  _globals['_HELLO']._serialized_end=834
+  _globals['_SHAREDLIMITS']._serialized_start=836
+  _globals['_SHAREDLIMITS']._serialized_end=886
+  _globals['_PLUGINDESCRIPTOR']._serialized_start=889
+  _globals['_PLUGINDESCRIPTOR']._serialized_end=1141
+  _globals['_ROUTERSTRATEGYINFO']._serialized_start=1143
+  _globals['_ROUTERSTRATEGYINFO']._serialized_end=1227
+  _globals['_CATALOGREPORT']._serialized_start=1230
+  _globals['_CATALOGREPORT']._serialized_end=1358
+  _globals['_OBSERVEDDEFINITION']._serialized_start=1361
+  _globals['_OBSERVEDDEFINITION']._serialized_end=1598
+  _globals['_AGENTCARDREPORT']._serialized_start=1601
+  _globals['_AGENTCARDREPORT']._serialized_end=1737
+  _globals['_ACK']._serialized_start=1739
+  _globals['_ACK']._serialized_end=1761
+  _globals['_NACK']._serialized_start=1763
+  _globals['_NACK']._serialized_end=1868
+  _globals['_CONFIGUPDATE']._serialized_start=1871
+  _globals['_CONFIGUPDATE']._serialized_end=2008
+  _globals['_DELTA']._serialized_start=2011
+  _globals['_DELTA']._serialized_end=2741
+  _globals['_CONFIGSERVICE']._serialized_start=3047
+  _globals['_CONFIGSERVICE']._serialized_end=3146
 # @@protoc_insertion_point(module_scope)

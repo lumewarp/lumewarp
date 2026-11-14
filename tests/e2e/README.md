@@ -34,24 +34,24 @@ model's price, filter by every dimension and stay continuous across a rename. An
 OTLP sink proves a request is found by its `x-lumewarp-request-id`, with every attempt, without
 the prompt, the response or the key, and that `traceparent` sampled=0 does not erase it.
 
-## Shared rate limits across gateway instances
+## Shared rate limits across gateways
 
 `test_shared_limits.py` (collected by `scripts/e2e-core.sh` and `scripts/e2e-identity.sh`; no IdP) is the acceptance of
 Redis-backed shared limits (`docs/operations/gateway.md`, "Shared rate limits"): three real
-gateway processes of one gateway id, one token and one Redis namespace, all with
-`LUMEWARP_SHARED_LIMITS_SYNC_MS=20`. It proves a key's `rpm_limit` holds across the three
-(18 round-robin requests admit between 12 and the documented 12 + n, the rest 429 with
-`Retry-After`), and that `max_parallel` does too against a 1.5 s mock: a 12-request burst
-never holds more than 6 slots at once and the overflow is 429. Redis loss is simulated with
-a loopback TCP proxy the test closes: `lumewarp_shared_limits_fallback` turns 1 on every
-instance within 2 s, requests stay served and each instance counts for itself (30 requests,
-more than the shared 12, all succeed), the `connect` sync-error counter rises, and when the
-proxy reopens the metric returns to 0 and the key is limited again by the combined counts.
-A SIGKILLed instance that held all three parallel slots keeps the survivors at 429 until
-its in-flight fields go stale; they admit again after about 3 s (measured, asserted under
-4 s). `GET /gateways` shows the three instances with `shared_limits_enabled` and the
-namespace. In-flight slots are read from the documented Redis hash to measure the release
-time, never to produce the limit decision.
+gateway processes, one token and one Redis namespace, all with
+`LUMEWARP_SHARED_LIMITS_SYNC_MS=20`. Each process generates its own gateway id. It proves a
+key's `rpm_limit` holds across the three (18 round-robin requests admit between 12 and the
+documented 12 + n, the rest 429 with `Retry-After`), and that `max_parallel` does too
+against a 1.5 s mock: a 12-request burst never holds more than 6 slots at once and the
+overflow is 429. Redis loss is simulated with a loopback TCP proxy the test closes:
+`lumewarp_shared_limits_fallback` turns 1 on every gateway within 2 s, requests stay served
+and each gateway counts for itself (30 requests, more than the shared 12, all succeed), the
+`connect` sync-error counter rises, and when the proxy reopens the metric returns to 0 and
+the key is limited again by the combined counts. A SIGKILLed gateway that held all three
+parallel slots keeps the survivors at 429 until its in-flight fields go stale; they admit
+again after about 3 s (measured, asserted under 4 s). `GET /gateways` shows the three
+gateways with `shared_limits_enabled` and the namespace. In-flight slots are read from the
+documented Redis hash to measure the release time, never to produce the limit decision.
 
 The module skips with a clear reason when `E2E_REDIS_URL` is unset: no other gate needs a
 Redis. `scripts/e2e-core.sh` starts a throwaway `redis:7-alpine` on a free loopback port

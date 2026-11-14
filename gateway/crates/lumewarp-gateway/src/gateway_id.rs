@@ -1,12 +1,12 @@
 //! Identity of this gateway process.
 //!
-//! One gateway id may run as several processes behind a Service, all sharing
-//! its token; each is an *instance* and keeps its own config stream, version
-//! and status (docs/config-protocol.md, "Gateway instances"). The id is fixed
-//! at startup: a restarted process is a new instance, so whatever it left in
-//! the control plane (rows, counters) is never mistaken for this one.
+//! A gateway is one process: the id is fixed at startup and a restarted
+//! process is a new gateway, so whatever the previous process left in the
+//! control plane (rows, counters) is never mistaken for this one. Any number
+//! of gateways may share one token; the control plane attributes their
+//! sessions, usage and shared limits by this id.
 //!
-//! Format `<host>-<8 lowercase hex>`: the host part makes replicas tellable
+//! Format `<host>-<8 lowercase hex>`: the host part makes gateways tellable
 //! apart in a pod list, the random suffix keeps two processes on one host (or
 //! with no hostname) distinct.
 
@@ -14,15 +14,16 @@ use std::sync::OnceLock;
 
 use uuid::Uuid;
 
-/// The control plane's bound on `Hello.instance_id`, and the longest host part.
+/// The longest host part; the control plane bounds `Hello.gateway_id` at 100
+/// characters, which this leaves room for.
 const MAX_HOST_CHARS: usize = 60;
 const SUFFIX_HEX_CHARS: usize = 8;
 
-static INSTANCE_ID: OnceLock<String> = OnceLock::new();
+static GATEWAY_ID: OnceLock<String> = OnceLock::new();
 
-/// This process's instance id; computed once, on first use.
-pub fn instance_id() -> &'static str {
-    INSTANCE_ID.get_or_init(|| {
+/// This gateway's id; computed once, on first use.
+pub fn gateway_id() -> &'static str {
+    GATEWAY_ID.get_or_init(|| {
         let host = std::env::var("HOSTNAME").unwrap_or_default();
         format!("{}-{}", host_part(&host), suffix())
     })
@@ -45,8 +46,8 @@ fn host_part(host: &str) -> String {
 
 /// 8 lowercase hex characters of random bits: the *last* characters of a UUIDv7, which are
 /// `rand_b` (the first ones are its millisecond timestamp). Two processes on one host, or
-/// two processes that start within the same millisecond, therefore never share an instance
-/// id; with the leading hex they would, and two instances with the same id replace each
+/// two processes that start within the same millisecond, therefore never share a gateway
+/// id; with the leading hex they would, and two gateways with the same id replace each
 /// other's stream forever.
 fn suffix() -> String {
     let uuid = Uuid::now_v7().simple().to_string();
@@ -100,10 +101,11 @@ mod tests {
     }
 
     #[test]
-    fn the_instance_id_fits_the_control_plane_rule_and_never_changes() {
-        let id = instance_id();
-        assert_eq!(id, instance_id());
-        assert_eq!(id, instance_id(), "the id must be fixed at startup");
+    fn the_gateway_id_fits_the_control_plane_rule_and_never_changes() {
+        let id = gateway_id();
+        assert_eq!(id, gateway_id());
+        assert_eq!(id, gateway_id(), "the id must be fixed at startup");
+        assert!(id.len() <= 100, "{id}");
         assert!(id.len() <= MAX_HOST_CHARS + 1 + SUFFIX_HEX_CHARS);
         assert!(
             id.chars()

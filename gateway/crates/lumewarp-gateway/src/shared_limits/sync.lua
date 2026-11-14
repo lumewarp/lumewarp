@@ -1,9 +1,9 @@
--- Push this instance's absolute per-minute counts and return the view of the
--- other instances.
+-- Push this gateway's absolute per-minute counts and return the view of the
+-- other gateways.
 --
 -- KEYS: five per scope, in order: rpm previous-minute hash, rpm current-minute
 --       hash, tpm previous-minute hash, tpm current-minute hash, in-flight hash.
--- ARGV: instance id, scope count, then nine per scope:
+-- ARGV: gateway id, scope count, then nine per scope:
 --       write (1/0), refresh_ttl (1/0), use_rpm (1/0), use_tpm (1/0),
 --       rpm_prev, rpm_cur, tpm_prev, tpm_cur, in_flight.
 --
@@ -11,22 +11,22 @@
 -- counts are zero, which is what apply_sync expects for that dimension.
 --
 -- The counters are absolute counts, not deltas: HSET overwrites this
--- instance's field, so retrying a batch whose reply was lost can never
+-- gateway's field, so retrying a batch whose reply was lost can never
 -- double-count. `write` is 0 for a read-only entry (the scope only needs a
 -- fresh view). A field (or key) created by a write always gets its TTL
 -- immediately; the caller additionally asks for a periodic refresh at most
 -- every five seconds. A zero count is an HDEL, never a zero-valued field.
 --
 -- `in_flight` is always written (even 0) for every scope in the batch, so the
--- instance count covers every live instance that knows the scope. Stamps and
+-- gateway count covers every live gateway that knows the scope. Stamps and
 -- the 3 s staleness check use Redis's own clock, not the gateway's. A crashed
 -- gateway's slots free within that window.
 --
 -- Returns eight integers per scope: others' rpm_prev, rpm_cur, tpm_prev,
--- tpm_cur, rpm_instances, tpm_instances, others' in_flight,
--- in_flight_instances.
+-- tpm_cur, rpm_gateways, tpm_gateways, others' in_flight,
+-- in_flight_gateways.
 
-local instance = ARGV[1]
+local gateway = ARGV[1]
 local scopes = tonumber(ARGV[2])
 local out = {}
 local arg = 3
@@ -34,7 +34,7 @@ local arg = 3
 local clock = redis.call('TIME')
 local now_ms = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
 
--- One HGETALL per hash: the other instances' sum and the set of instances
+-- One HGETALL per hash: the other gateways' sum and the set of gateways
 -- with a positive count.
 local function scan(hash)
   local total = 0
@@ -45,7 +45,7 @@ local function scan(hash)
     local value = tonumber(fields[i + 1])
     if value and value > 0 then
       active[field] = true
-      if field ~= instance then
+      if field ~= gateway then
         total = total + value
       end
     end
@@ -70,8 +70,8 @@ end
 -- created here must never live without an expiry.
 local function set_count(hash, value)
   if value == 0 then
-    redis.call('HDEL', hash, instance)
-  elseif redis.call('HSET', hash, instance, value) == 1 then
+    redis.call('HDEL', hash, gateway)
+  elseif redis.call('HSET', hash, gateway, value) == 1 then
     redis.call('PEXPIRE', hash, 150000)
   end
 end
@@ -104,10 +104,10 @@ for s = 0, scopes - 1 do
       set_count(t_cur, tpm_cur)
     end
   end
-  redis.call('HSET', parallel, instance, tostring(in_flight) .. ':' .. tostring(now_ms))
-  -- A live instance writes its in-flight field on every sync; keeping the
+  redis.call('HSET', parallel, gateway, tostring(in_flight) .. ':' .. tostring(now_ms))
+  -- A live gateway writes its in-flight field on every sync; keeping the
   -- hash alive this way means one slow refresh can never make every
-  -- instance's slots disappear for an interval.
+  -- gateway's slots disappear for an interval.
   redis.call('PEXPIRE', parallel, 10000)
 
   if refresh_ttl == 1 then
@@ -118,7 +118,7 @@ for s = 0, scopes - 1 do
   end
 
   local others_parallel = 0
-  local instances = 0
+  local gateways = 0
   local fields = redis.call('HGETALL', parallel)
   for i = 1, #fields, 2 do
     local field = fields[i]
@@ -133,36 +133,36 @@ for s = 0, scopes - 1 do
     if not n or not stamped or (now_ms - stamped) > 3000 then
       redis.call('HDEL', parallel, field)
     else
-      if field ~= instance then
+      if field ~= gateway then
         others_parallel = others_parallel + n
       end
-      instances = instances + 1
+      gateways = gateways + 1
     end
   end
 
-  local rpm_prev_total, rpm_cur_total, rpm_instances = 0, 0, 0
+  local rpm_prev_total, rpm_cur_total, rpm_gateways = 0, 0, 0
   if use_rpm == 1 then
     local prev_active, cur_active
     rpm_prev_total, prev_active = scan(r_prev)
     rpm_cur_total, cur_active = scan(r_cur)
-    rpm_instances = union_count(prev_active, cur_active)
+    rpm_gateways = union_count(prev_active, cur_active)
   end
-  local tpm_prev_total, tpm_cur_total, tpm_instances = 0, 0, 0
+  local tpm_prev_total, tpm_cur_total, tpm_gateways = 0, 0, 0
   if use_tpm == 1 then
     local prev_active, cur_active
     tpm_prev_total, prev_active = scan(t_prev)
     tpm_cur_total, cur_active = scan(t_cur)
-    tpm_instances = union_count(prev_active, cur_active)
+    tpm_gateways = union_count(prev_active, cur_active)
   end
 
   out[#out + 1] = rpm_prev_total
   out[#out + 1] = rpm_cur_total
   out[#out + 1] = tpm_prev_total
   out[#out + 1] = tpm_cur_total
-  out[#out + 1] = rpm_instances
-  out[#out + 1] = tpm_instances
+  out[#out + 1] = rpm_gateways
+  out[#out + 1] = tpm_gateways
   out[#out + 1] = others_parallel
-  out[#out + 1] = instances
+  out[#out + 1] = gateways
 end
 
 return out

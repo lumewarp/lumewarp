@@ -977,7 +977,6 @@ pub struct ReporterConfig {
     pub endpoint: String,
     /// Gateway token, sent as `authorization: Bearer <token>`; never logged.
     pub token: String,
-    pub gateway_id: String,
     /// Queue capacity in events (default 100_000); full → drop + count.
     pub capacity: usize,
     /// Events per `Report` call (default 500).
@@ -1059,6 +1058,7 @@ async fn stopped(stop: &mut Option<oneshot::Receiver<TokioInstant>>) -> TokioIns
 struct Reporter {
     client: Option<UsageServiceClient<Channel>>,
     authorization: Option<MetadataValue<Ascii>>,
+    /// This process's generated id, sent in every `ReportRequest`.
     gateway_id: String,
     batch_max: usize,
     flush_interval: Duration,
@@ -1099,7 +1099,7 @@ impl Reporter {
         Self {
             client,
             authorization,
-            gateway_id: cfg.gateway_id.clone(),
+            gateway_id: crate::gateway_id::gateway_id().to_owned(),
             batch_max: cfg.batch_max.max(1),
             flush_interval: cfg.flush_interval,
             metrics,
@@ -2407,7 +2407,6 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         ReporterConfig {
             endpoint,
             token: "gw-token".into(),
-            gateway_id: "gw-1".into(),
             capacity,
             batch_max,
             flush_interval: flush,
@@ -2431,7 +2430,11 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         }
         let first = cp.next().await;
         assert_eq!(first.authorization.as_deref(), Some("Bearer gw-token"));
-        assert_eq!(first.request.gateway_id, "gw-1");
+        assert_eq!(
+            first.request.gateway_id,
+            crate::gateway_id::gateway_id(),
+            "usage is attributed to this process's generated id"
+        );
         assert_eq!(first.request.events.len(), 3);
         let started = Instant::now();
         let second = cp.next().await;

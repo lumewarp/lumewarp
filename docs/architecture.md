@@ -65,7 +65,7 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 5. 最後一份成功快照寫到本地磁碟，control plane 掛掉仍可重啟服務。
 6. 支援 canary 發布；回滾 = 重推舊版本號。
 
-反方向：用量、token、花費、稽核由 gateway 非同步批次送出（OTLP / NATS），MVP 寫入 Postgres，之後換 ClickHouse。限流計數在 gateway 本地累加，設定 Redis 時背景每 100 ms 與 Redis 對帳（見「跨 gateway 共享限流」）；預算由 control plane 從用量推導。
+反方向：用量、token、花費、稽核由 gateway 非同步批次送出（OTLP / NATS），MVP 寫入 Postgres，之後換 ClickHouse。限流計數在 gateway 本地累加，設定 Redis 時背景每 100 ms 與 Redis 對帳（見「跨 gateway 共享限流與多個 gateway」）；預算由 control plane 從用量推導。
 
 另有 standalone 模式：gateway 直接讀同格式 YAML，不需 control plane（GitOps、本機開發）。
 
@@ -125,7 +125,7 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
   - 沒有「最後一位 team admin」限制：安裝層管理員永遠在 team 之上，team 可以沒有 admin。
 - 安裝層角色管理：`GET /installation-admins` 列出角色，`PUT /installation-admins/{user_id}` 指派 `admin`，`DELETE /installation-admins/{user_id}` 移除 `admin`，`POST /installation-admins/transfer` 轉移 `proxy_admin`。任何安裝層管理員都能指派／移除 `admin`（含自己）；`proxy_admin` 不能透過指派或移除被降級或拔除，只能轉移；轉移只允許目前的 `proxy_admin` 或緊急 session。`proxy_admin` 帳號本身受保護：只有該帳號自己或緊急 session 能停用、刪除、改 email 或代發 PAT，其他安裝層管理員一律 403。指派與轉移要求目標至少已有一個 IdP identity（先登入過一次），否則回 409；這是因為新的 IdP identity 不能連結到已有安裝層角色的帳號，先給角色會讓該帳號永遠無法登入。每次角色變更寫 audit（`installation_admin.assign`／`remove`／`transfer`／`bootstrap`）。
 - 授權後端可換：內建用 `org_admins` 與 `team_members`；內附 `openfga` 與 `http` 後端，也可用 `lumewarp.authz` entry point 接外部系統。全部後端（含三個內建）都經同一個 entry point 載入，factory 可收 `AuthzContext`（settings、session factory、metrics）或零參數。後端只回答直接關係，單一 async 函式 `check(user_id, relation, resource) -> Decision`：`relation` 是 `admin`（org 或 team）或 `member`（只限 team），`resource` 是 `org:<uuid>` 或 `team:<uuid>`；安裝層角色永遠不問後端。`admin` 隱含 `member` 由後端保證；`member` 只代表直接成員，org 繼承只由 `RequestAuthz` 套用，team→org 一律讀 Postgres、不信任 payload。`ERROR`（後端不可用或逾時）不是 deny：管理 API 回 503，解析繼承權限時也一樣，不會變成空清單。`openfga` 可用 `LUMEWARP_OPENFGA_OBJECT_TYPES`／`LUMEWARP_OPENFGA_RELATIONS` 接既有 store 的不同 type／relation 名稱，Check、BatchCheck、ListObjects、ReadChanges 共用同一份對應；`changes()` 遇到無法對應到使用者的變更（userset、wildcard）改成要求全掃，不丟棄。
-- 用量與限流按 team 與 key owner 歸屬：member 的 scope id 是 `uuid5(team_id, user_id)`，service account 用其 id；限流 scope 為 `org:<id>`、`team:<id>`、`member:<id>`、`sa:<id>`、`key:<id>`，未設定的層不產生 scope。限流在 gateway 本機判斷；設定同一個 Redis 與 namespace 的 gateway 透過背景同步共享計數，沒有 Redis 或 Redis 不可用時每個行程各算一份（N 個 instance 最多 N 倍）。
+- 用量與限流按 team 與 key owner 歸屬：member 的 scope id 是 `uuid5(team_id, user_id)`，service account 用其 id；限流 scope 為 `org:<id>`、`team:<id>`、`member:<id>`、`sa:<id>`、`key:<id>`，未設定的層不產生 scope。限流在 gateway 本機判斷；設定同一個 Redis 與 namespace 的 gateway 透過背景同步共享計數，沒有 Redis 或 Redis 不可用時每個 gateway 各算一份（N 個 gateway 最多 N 倍）。
 - 預算：依 token／音訊時長與單價計費，達上限即拒絕。org 不存自己的月總額：花費是旗下所有 team（含已封存）當月 `usage_totals` 的加總，compiler 與 `/users/me` 都這樣算，因此不會與 team 數字漂移。只有設了預算的 org 才在 ingest 後檢查；首次超額以 `INSERT ... ON CONFLICT DO NOTHING` 寫入 `org_budget_windows`，audit 恰好一筆（`org_id`，`team_id` 為 NULL），下一次 compile 把旗下 key 轉成 `BUDGET_EXCEEDED`。調高或移除 org 預算會刪除當月的 window 列，下一次超額會再寫一次 audit 並重新 compile。並行批次可能互相看不到，超額判定最晚在下一次 ingest 或 compile 生效。
 
 ### Admin UI
@@ -137,7 +137,7 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 - 沒有獨立的 `/keys` 管理頁：整個 team 的 key 在 team 的 Keys 分頁。team admin 看得到並管理別人的 key 與 service account 的 key；member 的 Keys 分頁只列自己的 key。Members／Service accounts 分頁只對 team admin 掛載，member 不會對這些端點發請求。Service account 可由 team admin 停用與恢復；停用後它的 key 不進快照，恢復後未撤銷的 key 重新生效。建立 key 的 owner 選單不列已停用的 service account。
 - team admin 的 Settings 分頁把 team quota（模型、限流、預算）顯示為唯讀，能改名稱、member key 上限、member 預設限流（`member_*_default`）與每個 member 的例外政策；org admin 可以改 team quota。member 只看得到名稱與 member key 上限，沒有編輯按鈕。Teams 頁與 team 設定頁的刪除都是封存，確認對話框說明不可逆（撤銷 key、停用 service account、釋放名稱）；封存後 team 從列表與 org 明細消失，用量與 audit 歷史仍保留。
 - My keys 上方是自己所有 key 的單一表格（多個 team 時有 Team 欄與篩選），可建立、改名、改到期日、輪替（可選寬限）、暫停、恢復與撤銷；下方的 team 表每列一個 team（直接成員在前），以圖示 pill 顯示可用的 model／MCP server／A2A agent 數量、有效限流（含 org 與 team 預設）、本月剩餘預算與 key 數／上限，展開後列出可呼叫的 model（取交集後的實際清單，每個是型別圖示加名稱）、MCP server／tool、A2A agent、限流、預算與 key 上限和最長效期；只有一個 team 時預設展開。最下方是本月個人用量。
-- Key 的建立與編輯對話框（My keys 與 team 的 Keys 分頁共用）都有 `rpm_limit`、`tpm_limit`、`max_parallel`；表單以 key owner 的有效限額為上限並顯示提示，超過時伺服器回 422，訊息顯示在對應欄位。team admin 改他人 key 時上限取自 member 例外／team 預設再夾 team 政策（org 可能再調降，仍由伺服器把關）。所有編輯限流的地方都註明：使用同一個 Redis namespace 的 gateway 共享限流，否則每個 gateway instance 各算一份。
+- Key 的建立與編輯對話框（My keys 與 team 的 Keys 分頁共用）都有 `rpm_limit`、`tpm_limit`、`max_parallel`；表單以 key owner 的有效限額為上限並顯示提示，超過時伺服器回 422，訊息顯示在對應欄位。team admin 改他人 key 時上限取自 member 例外／team 預設再夾 team 政策（org 可能再調降，仍由伺服器把關）。所有編輯限流的地方都註明：使用同一個 Redis namespace 的 gateway 共享限流，否則每個 gateway 各算一份。
 - 存取變更：受保護頁面每次進入都重驗 `/users/me`。快取允許時頁面先掛上，背景重驗發現權限被收回就換成「沒有權限」；快取拒絕時先等重驗。用網址打開看不到的頁面只顯示說明，不對該 team 發請求。
 - 授權後端不可用時顯示「暫時無法確認、這不是拒絕」的狀態（`authz_unavailable`），管理 API 回 503；My keys 不會把它當成「沒有 team」。
 - 一次性 secret：建立或輪替 key、建立 PAT 與 gateway token 的 secret 由 root 的同一個對話框顯示，只有「I've saved it」能關（Esc、點擊外部、標頭的 X 都無效）。它在換頁、背景檢查失敗與 session 過期（401 轉到登入頁）後仍顯示，因為對話框在 router 與 guard 之上；登出會清掉，重新載入頁面則消失。secret 不進 query cache；mutation 快取裡只有不含 secret 的結果。
@@ -287,30 +287,32 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 
 **Gateway（`gateway/`）**
 
-- 新增 control-plane 模式：`--control-plane`、`--gateway-token-env`、`--state-dir`、`--scope`、`--gateway-id`、`--local-config`；standalone YAML 模式不變。
+- 新增 control-plane 模式：`--control-plane`、`--gateway-token-env`、`--state-dir`、`--scope`、`--local-config`；gateway id 由行程自己產生，沒有對應的旗標。standalone YAML 模式不變。
 - 開機先載入三種 plugin 目錄，再載入 `<state-dir>/snapshot.pb`（驗證 scope、長度與結尾 SHA-256）並立即服務，再背景連線；沒有可用快照時 `/v1/*` 與 `/readyz` 回 503，不會退回 open router。每次套用先持久化再 swap 再 ACK，重啟可回到最後 ACK 的版本。
 - MCP／A2A 端點（`/mcp`、`/mcp/servers/*`、`/a2a`、`/a2a/*`）與 LLM 端點共用同一個 listener；它們只讀設定快照與 `LUMEWARP_GATEWAY_ID_KEY`／`LUMEWARP_GATEWAY_PUBLIC_URL`，不碰資料庫或 control plane。
-- CP 模式一律要求 key；status／expiry／allowlist 與預算狀態照舊（401／403／429）。rpm、tpm、max_parallel 在本機判斷（rpm／tpm 為對齊牆鐘整分鐘的滑動窗口，max_parallel 為進行中請求數），設定 Redis 時跨 instance 共享，429 帶 `Retry-After`。
+- CP 模式一律要求 key；status／expiry／allowlist 與預算狀態照舊（401／403／429）。rpm、tpm、max_parallel 在本機判斷（rpm／tpm 為對齊牆鐘整分鐘的滑動窗口，max_parallel 為進行中請求數），設定 Redis 時跨 gateway 共享，429 帶 `Retry-After`。
 - 用量：串流在上游支援時注入 `stream_options.include_usage`，客戶端沒要求時剝除多出的 usage chunk；事件經有界佇列（100k）每 1 秒或 500 筆批次送出，滿了就丟並計數；token／spend 指標與 `model.price` 成本換算已接上。MCP／A2A 的請求也產生 usage event（`kind`、`target`、`method`、`tool`、`status`、duration），但不計成本、不進預算。
 - 指標：config stream 連線／版本／NACK code、usage 佇列與 capture 狀態、tokens／spend 皆已輸出；`/metrics` 仍在 admin listener。
 
 **部署**
 
-- `deploy/helm/lumewarp`：control plane 與 gateway 的 Deployment／Service、DB URL 與 gateway token 的既有 Secret 參照、`/readyz`＋`/healthz` probes、gateway 多副本（同一個 token 與 gateway id；預設 Deployment＋每個 pod 的 emptyDir，開啟持久化時改為 StatefulSet 每 pod 一個 PVC；選用 PDB 與 HPA）、選用的 Valkey（`redis.enabled`，供共享限流）、plugin 目錄的 volume 掛載（三個子目錄與 `LUMEWARP_PLUGIN_MEMORY_LIMIT_BYTES`、`LUMEWARP_GATEWAY_ID_KEY`、`LUMEWARP_GATEWAY_PUBLIC_URL`）、migration hook Job、可選 ServiceMonitor。
+- `deploy/helm/lumewarp`：control plane 與 gateway 的 Deployment／Service、DB URL 與 gateway token 的既有 Secret 參照、`/readyz`＋`/healthz` probes、gateway 多個 pod（同一個 token、每個 pod 各自產生 gateway id；預設 Deployment＋每個 pod 的 emptyDir，開啟持久化時改為 StatefulSet 每 pod 一個 PVC；選用 PDB 與 HPA）、選用的 Valkey（`redis.enabled`，供共享限流）、plugin 目錄的 volume 掛載（三個子目錄與 `LUMEWARP_PLUGIN_MEMORY_LIMIT_BYTES`、`LUMEWARP_GATEWAY_ID_KEY`、`LUMEWARP_GATEWAY_PUBLIC_URL`）、migration hook Job、可選 ServiceMonitor。
 - `deploy/dev/compose.yaml` 提供本機 Postgres 16。
 
 **已知限制**
 
-- 預算為 eventual；佇列滿或 gateway 重啟會遺失用量事件，進行中的串流不會因超額被切斷；月窗口固定為 UTC 日曆月。org 超額由推導花費判定，並行批次尚未互相可見時最多延後到下一次 ingest 或 compile。共享限流是近似值：兩次同步之間每個 instance 只能用剩餘額度的公平份額，超出約 n 個請求（instance 首次加入某 scope 時再加一個同步間隔的流量）；Redis 不可用時退回每個行程各算一份。
-- MCP／A2A 的已知邊界：聚合端點的 `GET /mcp` 回 405；聚合端點的反向 request（elicitation 等）與反向回應只在同一個 POST SSE 串流上，取消／進度通知的路由是 process-local；session 與 cursor 靠 `LUMEWARP_GATEWAY_ID_KEY` 跨 instance，換金鑰會讓未到期的 session 與 task id 失效。TOFU 在回報與快照傳播前可能讓兩台 gateway 短暫服務同一名稱的不同定義。A2A `ListTasks` 只支援 `passthrough` agent。plugin 沒有熱載入，換檔要重啟。
+- 預算為 eventual；佇列滿或 gateway 重啟會遺失用量事件，進行中的串流不會因超額被切斷；月窗口固定為 UTC 日曆月。org 超額由推導花費判定，並行批次尚未互相可見時最多延後到下一次 ingest 或 compile。共享限流是近似值：兩次同步之間每個 gateway 只能用剩餘額度的公平份額，超出約 n 個請求（gateway 首次加入某 scope 時再加一個同步間隔的流量）；Redis 不可用時退回每個 gateway 各算一份。
+- MCP／A2A 的已知邊界：聚合端點的 `GET /mcp` 回 405；聚合端點的反向 request（elicitation 等）與反向回應只在同一個 POST SSE 串流上，取消／進度通知的路由是 process-local；session 與 cursor 靠 `LUMEWARP_GATEWAY_ID_KEY` 跨 gateway，換金鑰會讓未到期的 session 與 task id 失效。TOFU 在回報與快照傳播前可能讓兩台 gateway 短暫服務同一名稱的不同定義。A2A `ListTasks` 只支援 `passthrough` agent。plugin 沒有熱載入，換檔要重啟。
 
-### 跨 gateway 共享限流與 gateway 副本
+### 跨 gateway 共享限流與多個 gateway
 
-- 一個 gateway id（一個 token）可以有多個 instance。每個行程開機時產生隨機 `instance_id`（`<hostname>-<8 hex>`），放在 `Hello`；control plane 以 `(scope, gateway_id, instance_id)` 管理 config stream 與 `gateway_sessions`，新連線只取代同一個 instance 的舊 stream。gateway 的狀態由已連線 instance 推導：套用版本取最低 ACK、任一 pending 即 pending、NACK 取已連線 instance 中比套用版本新的那一筆。任一 instance NACK 某版本，整個 gateway id 都隔離該版本（`gateway_quarantines`），之後才連上的 instance 也一樣。capability 與 plugin 必須每個已連線 instance 都回報才算可用。斷線的 instance 保留 24 小時供顯示後刪除。
-- 限流演算法：rpm、tpm 為對齊牆鐘整分鐘的滑動窗口計數（前一分鐘依剩餘比例加權＋本分鐘），tpm 仍在用量確定後才扣；max_parallel 為進行中請求數。每個計數分成「本機」與「其他 instance」兩部分。
-- 共享：設定 `LUMEWARP_SHARED_LIMITS_REDIS_URL` 時，背景工作每 `--shared-limits-sync-ms`（預設 100 ms，慢時自動加倍到 1 s）以一支 Lua 腳本把本機各 scope 每分鐘的絕對計數 `HSET` 到 Redis（重送不會重複計數）、寫入進行中請求數（以 Redis 的時間判斷 3 秒內是否新鮮），並讀回其他 instance 的總和與參與的 instance 數 n。兩次同步之間每個 instance 最多用 `ceil(剩餘額度 ÷ n)`。key 以 `{lw:<namespace>}` 為 hash tag，namespace 在 control-plane 模式預設為 scope。請求路徑不做任何 I/O。
-- Redis 不可用超過 1 秒時退回本機計數（每個行程各算一份，與 LiteLLM 相同），`/readyz` 不受影響，恢復後自動回到共享；`lumewarp_shared_limits_fallback` 與告警 `LumewarpSharedLimitsFallback` 反映這個狀態。沒有「Redis 不可用就拒絕」的模式。
-- Helm 可用 `redis.enabled` 部署一個不持久化的 Valkey，或以 `gateway.sharedLimits.redis.existingSecret` 指向外部 Redis。
+- 一個行程就是一個 gateway：開機時產生 `<hostname>-<8 hex>` 的 id 放在 `Hello.gateway_id`，固定到行程結束；重啟就是新的 gateway。token 只代表 scope，不綁定 id，任意數量的 gateway 可以共用。
+- control plane 以 `(scope, gateway_id)` 管理 config stream 與 `gateway_sessions`；同一個 id 的新連線取代舊 stream，斷線的列保留 24 小時後刪除。每個 gateway 有自己的 ACK／pending／NACK、capability、plugin 回報與 shared-limits 顯示；`GET /api/v1/gateways` 一行一個 gateway，已連線的在前。
+- 任一 gateway 以 `INVALID_CONFIG` NACK 某版本，整個 scope 都隔離該版本（`gateway_quarantines`），之後才連上的 gateway 也一樣；已在該版本上的 gateway 會保留到下一版。`UNSUPPORTED_FEATURE`（缺 plugin／capability）只影響送出 NACK 的那個 gateway：其他 gateway 照常收到並套用該版本，缺功能的 gateway 留在前一版，之後每個仍需要該功能的版本都會再 NACK。capability 與 plugin 必須每個已連線 gateway 都回報才算可用；target 只要任一已連線 gateway 回報不健康就算不健康。
+- 限流演算法：rpm、tpm 為對齊牆鐘整分鐘的滑動窗口計數（前一分鐘依剩餘比例加權＋本分鐘），tpm 仍在用量確定後才扣；max_parallel 為進行中請求數。每個計數分成「本機」與「其他 gateway」兩部分。
+- 共享：設定 `LUMEWARP_SHARED_LIMITS_REDIS_URL` 時，背景工作每 `--shared-limits-sync-ms`（預設 100 ms，慢時自動加倍到 1 s）以一支 Lua 腳本把本機各 scope 每分鐘的絕對計數 `HSET` 到 Redis（重送不會重複計數）、寫入進行中請求數（以 Redis 的時間判斷 3 秒內是否新鮮），並讀回其他 gateway 的總和與參與的 gateway 數 n。兩次同步之間每個 gateway 最多用 `ceil(剩餘額度 ÷ n)`。key 以 `{lw:<namespace>}` 為 hash tag，namespace 在 control-plane 模式預設為 scope；Redis 的欄位是各 gateway 的 id。請求路徑不做任何 I/O。
+- Redis 不可用超過 1 秒時退回本機計數（每個 gateway 各算一份，與 LiteLLM 相同），`/readyz` 不受影響，恢復後自動回到共享；`lumewarp_shared_limits_fallback` 與告警 `LumewarpSharedLimitsFallback` 反映這個狀態。沒有「Redis 不可用就拒絕」的模式。
+- Helm 可用 `redis.enabled` 部署一個不持久化的 Valkey，或以 `gateway.sharedLimits.redis.existingSecret` 指向外部 Redis。每個 pod 是一個 gateway；`gateway.replicaCount` 或 autoscaling 開幾個 pod，Gateways 頁就顯示幾個 gateway。
 
 ## 權限、路由與可觀測性
 
@@ -436,7 +438,7 @@ API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可
 
 MCP 與 A2A 代理、工具級 grant、定義審核（TOFU／manual／off）、Agent Card 改寫、A2A middleware 與三種 WASM plugin 已實作。刻意延後、這一期不做的：
 
-- MCP resources、subscriptions 與 `completion`；聚合端點的 `GET` 串流（回 405）與跨 instance 的取消／進度路由；人工核准高風險 tool；stdio sidecar（由部署方自行包裝）；MCP OAuth resource server 與代管上游使用者 token。
+- MCP resources、subscriptions 與 `completion`；聚合端點的 `GET` 串流（回 405）與跨 gateway 的取消／進度路由；人工核准高風險 tool；stdio sidecar（由部署方自行包裝）；MCP OAuth resource server 與代管上游使用者 token。
 - A2A gRPC／REST binding、push notification、Agent Card 簽章、上游使用者 token 代管；非 `passthrough` agent 的 `ListTasks`。
 - plugin 熱載入、plugin 簽章／來源驗證、跨 gateway 的 plugin 一致性檢查；plugin 沒有延遲預算，只有設定的 timeout。
 - MCP／A2A 的限流與預算（只有 `tools/call` 計入 key 的 RPM）。

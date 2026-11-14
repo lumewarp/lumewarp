@@ -15,8 +15,8 @@ routing back; the Gateways page shows which version each gateway runs.
   publication metadata is excluded from the content comparison.
 - Gateways get a full snapshot, then deltas; each update is applied, validated, persisted
   and swapped by the gateway before it ACKs. NACK `BASE_MISMATCH` triggers a full,
-  `INVALID_CONFIG`/`UNSUPPORTED_FEATURE` quarantines the version, `PERSIST_FAILED` retries.
-  Rollback restores the catalog by id (including MCP servers and A2A agents, archiving the
+  `INVALID_CONFIG` quarantines the version for the whole scope, `UNSUPPORTED_FEATURE` makes
+  only that gateway skip it, and `PERSIST_FAILED` retries.
 
 ## Rollback
 
@@ -31,60 +31,58 @@ as a router write.
 
 ![Config versions](/screenshots/config-versions.png)
 
-## Gateways and their tokens
+## Gateways and tokens
 
-A gateway authenticates to the control plane with a gateway token (`lwg-…`) bound to one
-gateway id. The first token comes from `lumewarp-control-plane bootstrap --gateway-id <id>`,
-which also creates the config scope; later ones are created with **New gateway token** on the
-Gateways page or with `POST /api/v1/gateways`. The secret is shown once and only its SHA-256
-hash is stored. A gateway id may have several tokens.
+A gateway is one process. It generates its id at startup (`<hostname>-<8 hex>`), sends it as
+`Hello.gateway_id`, and keeps it until it exits; a restart is a new gateway. The Gateways page
+has one row per process, connected first and then by id; a disconnected row stays for 24 hours
+and is then deleted. A reconnect of the same process replaces its previous stream.
 
-Tokens are managed on the gateway's page, not in the list. Revoking one there closes the
-config and usage streams that authenticated with it at once; other tokens of the same gateway
-id keep their own streams. The instance whose token was revoked keeps serving its last good
-config and cannot receive a new one until it connects with a valid token.
+A gateway token (`lwg-…`) authenticates the config scope, not a gateway id: any number of
+gateways may use one token. It has an optional label and is created by
+`lumewarp-control-plane bootstrap [--name <label>] [--scope <name>]` (which also creates the
+config scope), by **New gateway token** on the Gateways page, or by
+`POST /api/v1/gateway-tokens`. The secret is shown once and only its SHA-256 hash is stored.
+Revoking a token closes every config and usage stream that authenticated with it at once;
+each affected gateway keeps serving its last good config and cannot receive a new one until
+it reconnects with a valid token. The revoke response reports `connected_gateways: 0` because
+those streams are already closed; the Tokens tab counted them before revocation and its
+confirmation says how many will be disconnected.
 
-One gateway id can run several instances (replicas). Each instance has its own config stream
-and reports its own version, applied config and rate-limit setting; the Gateways page has one
-compact, monitoring-only row per gateway id.
+### The Gateways tab
 
-### The gateway list
+A warning above the table appears only when there is something to fix:
+
+- connected gateways run different build versions, each named with its version;
+- connected gateways disagree on shared limits, each named with its namespace or "per gateway";
+- a connected gateway has an outstanding NACK, with its code and reason;
+- the scope has a quarantined config version. The warning and the `quarantined vN` badge
+  appear only while that version is still the newest; a newer version supersedes them.
+
+Only an `INVALID_CONFIG` NACK quarantines a version; `UNSUPPORTED_FEATURE` stays on the
+NACKing gateway's row and does not withhold the version from the others.
 
 | Column | What it shows |
 | --- | --- |
-| Gateway | The id, linked to the gateway's page, with the build version(s) its connected instances reported underneath. |
-| Instances | "n/m instances connected", green when all are connected and amber when some are not. A gateway whose token exists but that has not connected yet reads "No instances yet". |
-| Config | The applied version plus at most one badge, in priority order: quarantined > NACK > pending > behind. The applied version is the lowest ACKed version among the connected instances (all known instances when none is connected), so a gateway only reads as up to date when all of them are. The NACK badge carries its code and reason as a tooltip. |
-| Rate limits | "Shared (namespace)" means every connected instance shares its rate-limit counters through Redis under that namespace; "Per instance" means none does; "Mixed" means the connected instances disagree on whether they share or on the namespace. |
-| Last seen | The latest status write from any instance. |
-| Health | "Needs attention" when the connected instances report different build versions, disagree on shared limits, or the gateway has an outstanding NACK or quarantined version. It is empty when none applies. |
+| Gateway | `Hello.gateway_id`, plain text. |
+| State | Connected or Disconnected; disconnected rows are dimmed. |
+| Version | The build version the gateway reported in its latest `Hello`. |
+| Config | The ACKed version plus at most one badge, in priority order: quarantined > NACK > pending > behind. The NACK badge names the version; the warning above gives its code and reason. A fresh gateway with no verified snapshot reads "—". |
+| Rate limits | "Per gateway", or "Shared (namespace)" when it shares counters through Redis ("Shared" alone when it reports no namespace). One gateway's setting only; connected gateways may disagree during a rollout. |
+| Token | The label of the token its latest `Hello` authenticated with, or the token prefix when it has no label. |
+| Last seen | Its latest status write. |
+| Peer | The network peer of its config stream. |
 
-The list has no expandable rows and no token actions; both live on the gateway's page. On
-narrow screens the less important columns are dropped, leaving Gateway and Instances.
+On narrow screens the less important columns are dropped. The empty state says that no
+gateways have connected yet and that a token connects one.
 
-![Gateways list](/screenshots/gateways.png)
+![Gateways](/screenshots/gateways.png)
 
-### The gateway page
+### The Tokens tab
 
-Selecting a gateway id opens its page. A warning above the summary appears only when there is
-something to fix. It states each problem in a sentence: the differing build versions, the
-instances that disagree on shared limits together with the namespaces in use, the instances
-that are out of step (below), the last NACK with its code and reason, and any quarantined
-version. An instance that reported no build version is not out of step for that alone.
-
-The summary shows the gateway's state, connected instances, build version(s), applied config
-(with "behind" or "pending"), the full rate-limit explanation, the capabilities reported by
-every connected instance, when it connected or disconnected, and when it was last seen.
-
-**Instances** is a table with visible headers: instance id, state, build version, applied
-config with any pending update or NACK, connected since, last seen and network peer. Connected
-instances sort first; disconnected ones are dimmed and stay listed for 24 hours. An **Out of
-step** warning marks an instance whose build version or shared-limits setting differs from the
-strict majority of the connected instances. When two values are equally common — for example,
-during a rolling upgrade — neither side is marked.
-
-**Tokens** lists each token of the gateway with its label, prefix, creation time, last use and
-status. **New token** opens a dialog with the gateway id already filled in, and **Revoke**
-asks for confirmation before closing the streams that use that token.
-
-![Gateway detail](/screenshots/gateway-detail.png)
+Columns: Label, Prefix, Created, Last used, Gateways, Status and Revoke. **Gateways** is how
+many gateways are connected with that token right now. Revoked tokens stay listed with their
+revocation time. **New gateway token** asks only for a label and shows the secret once.
+**Revoke** asks for confirmation, naming how many connected gateways it disconnects and that
+they keep serving their last good config. A revoked token's gateways cannot receive a new
+config until they reconnect with a valid token.

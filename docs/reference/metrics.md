@@ -38,7 +38,7 @@ the whole process, so counters are never reset by a config change.
 | `lumewarp_spend_total` | Counter | `team`; USD. |
 | `lumewarp_shared_limits_sync_duration_seconds` | Histogram | `result` (`success`, `error`); only with a shared-limits Redis. |
 | `lumewarp_shared_limits_sync_errors_total` | Counter | `reason` (`connect`, `timeout`, `script`). |
-| `lumewarp_shared_limits_fallback` | Gauge | None; `1` while the gateway counts limits per process because Redis is unreachable. |
+| `lumewarp_shared_limits_fallback` | Gauge | None; `1` while the gateway counts limits per gateway because Redis is unreachable. |
 | `lumewarp_shared_limits_last_sync_age_seconds` | Gauge | None; seconds since the last successful sync. |
 | `lumewarp_shared_limits_scopes` | Gauge | None; scopes in the last sync. |
 

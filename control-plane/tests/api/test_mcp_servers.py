@@ -84,7 +84,7 @@ async def gateway(committed: AsyncSession, api_scope: str) -> AsyncIterator:
 
     yield report
     await committed.rollback()
-    await committed.execute(delete(GatewayToken).where(GatewayToken.gateway_id.like(f"{PREFIX}%")))
+    await committed.execute(delete(GatewayToken).where(GatewayToken.name.like(f"{PREFIX}%")))
     await committed.execute(
         delete(GatewaySession).where(GatewaySession.gateway_id.like(f"{PREFIX}%"))
     )

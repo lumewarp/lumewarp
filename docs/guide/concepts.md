@@ -70,9 +70,9 @@ Each level can narrow what the level above allows:
 A key's **effective policy** is the result of the whole chain. Members see their own
 effective policy; they do not see the team's full policy.
 
-Rate limits are counted in each gateway process unless the gateways share a Redis and
-namespace (`--shared-limits-redis-url`); then one window is shared and the instances may
-over-admit by about their count, plus up to five sync intervals of traffic when an instance first
+Rate limits are counted in each gateway unless the gateways share a Redis and
+namespace (`--shared-limits-redis-url`); then one window is shared and the gateways may
+over-admit by about their count, plus up to five sync intervals of traffic when a gateway first
 joins the scope. A gateway that loses Redis falls back to counting for itself, which is
 the N-times behaviour again.
 

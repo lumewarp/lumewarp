@@ -18,7 +18,7 @@ uv sync
 (cd ../ui && pnpm install && pnpm check && pnpm build:cp)
 
 uv run lumewarp-control-plane migrate
-uv run lumewarp-control-plane bootstrap --gateway-id gw-local   # prints the lwg-... token once
+uv run lumewarp-control-plane bootstrap --name quickstart   # prints the lwg-... token once
 LUMEWARP_DEV_MODE=true LUMEWARP_BREAK_GLASS_PASSWORD=dev-break-glass \
   LUMEWARP_SESSION_COOKIE_SECURE=false \
   uv run lumewarp-control-plane serve
@@ -35,7 +35,7 @@ cd gateway
 export LUMEWARP_GATEWAY_TOKEN='lwg-...'
 cargo run --release -- --control-plane http://127.0.0.1:50051 \
   --gateway-token-env LUMEWARP_GATEWAY_TOKEN \
-  --state-dir /tmp/lumewarp-state --scope default --gateway-id gw-local
+  --state-dir /tmp/lumewarp-state --scope default
 ```
 
 The gateway is not ready until it has a first config version (`/v1/*` and the admin
@@ -84,7 +84,7 @@ settings, SSO, authorization backends, the catalog, plugins and operations, and
 The seeded demo API key is in `.dev/demo-key`. Postgres is at `127.0.0.1:55432`, with
 database, user and password all `lumewarp`.
 
-The stack runs two gateway instances of one gateway id, `gw-dev`: <http://127.0.0.1:4000/>
-(admin `127.0.0.1:9464`) and <http://127.0.0.1:4001/> (admin `127.0.0.1:9466`). They share
-rate limits through a Valkey at `127.0.0.1:56379`, without persistence
-([shared limits](../operations/gateway.md#shared-rate-limits)).
+The stack runs two gateways sharing one token, each with an id generated at startup:
+<http://127.0.0.1:4000/> (admin `127.0.0.1:9464`) and <http://127.0.0.1:4001/> (admin
+`127.0.0.1:9466`). They share rate limits through a Valkey at `127.0.0.1:56379`, without
+persistence ([shared limits](../operations/gateway.md#shared-rate-limits)).

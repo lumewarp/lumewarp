@@ -63,7 +63,7 @@ fn caller(rpm: u32, parallel: u32) -> Caller {
 }
 
 #[tokio::test]
-async fn memory_store_sums_the_other_instances() {
+async fn memory_store_sums_the_other_gateways() {
     let hub = MemoryHub::default();
     let a = hub.store("ns", "a");
     let b = hub.store("ns", "b");
@@ -75,8 +75,8 @@ async fn memory_store_sums_the_other_instances() {
     first.in_flight = 3;
     let views = a.sync(&[first.clone()]).await.unwrap();
     assert_eq!(views[0].rpm_cur, 0, "a sees no one else yet");
-    assert_eq!(views[0].rpm_instances, 1, "self counts for n");
-    assert_eq!(views[0].in_flight_instances, 1);
+    assert_eq!(views[0].rpm_gateways, 1, "self counts for n");
+    assert_eq!(views[0].in_flight_gateways, 1);
     assert_eq!(views[0].in_flight, 0, "self does not count as others");
 
     let mut second = counts("team:t", minute);
@@ -86,16 +86,16 @@ async fn memory_store_sums_the_other_instances() {
     let views = b.sync(&[second]).await.unwrap();
     assert_eq!((views[0].rpm_prev, views[0].rpm_cur), (0, 2));
     assert_eq!((views[0].tpm_prev, views[0].tpm_cur), (5, 0));
-    assert_eq!(views[0].rpm_instances, 2);
+    assert_eq!(views[0].rpm_gateways, 2);
     assert_eq!(views[0].in_flight, 3);
-    assert_eq!(views[0].in_flight_instances, 2);
+    assert_eq!(views[0].in_flight_gateways, 2);
 
     let mut read = counts("team:t", minute);
     read.write = false;
     read.refresh_ttl = false;
     let views = a.sync(&[read.clone()]).await.unwrap();
     assert_eq!((views[0].rpm_prev, views[0].rpm_cur), (1, 4));
-    assert_eq!(views[0].rpm_instances, 2);
+    assert_eq!(views[0].rpm_gateways, 2);
 
     // A resend with the same absolute counts overwrites, never adds.
     let views = a.sync(&[first]).await.unwrap();
@@ -105,7 +105,7 @@ async fn memory_store_sums_the_other_instances() {
     hub.advance(3_001);
     let views = a.sync(&[read]).await.unwrap();
     assert_eq!(views[0].in_flight, 0);
-    assert_eq!(views[0].in_flight_instances, 1, "only a is fresh");
+    assert_eq!(views[0].in_flight_gateways, 1, "only a is fresh");
 }
 
 #[tokio::test]
@@ -120,7 +120,7 @@ async fn namespaces_do_not_see_each_other() {
     second.rpm_cur = 1;
     let views = b.sync(&[second]).await.unwrap();
     assert_eq!(views[0].rpm_cur, 0, "the other namespace is invisible");
-    assert_eq!(views[0].rpm_instances, 1, "only b used it in ns-2");
+    assert_eq!(views[0].rpm_gateways, 1, "only b used it in ns-2");
 }
 
 #[tokio::test]
@@ -151,7 +151,7 @@ async fn a_failed_sync_keeps_the_absolute_counts_dirty() {
     registry.mark_synced(&retry);
 
     // The scope is now clean; it is still read-only while its count is in the
-    // window, so a joining instance is noticed, but nothing is written.
+    // window, so a joining gateway is noticed, but nothing is written.
     let after = registry.pending_sync();
     assert_eq!(after.len(), 1);
     assert!(!after[0].write, "a clean scope is not rewritten");

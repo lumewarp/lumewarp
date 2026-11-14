@@ -17,7 +17,7 @@ use crate::{
 #[derive(Debug, Default)]
 pub struct EnvOptions {
     /// `LUMEWARP_GATEWAY_ID_KEY`: seals the A2A task/context ids (and, later,
-    /// MCP session ids) so any instance can verify them without shared state.
+    /// MCP session ids) so any gateway can verify them without shared state.
     pub id_key: Option<a2a_ids::IdKey>,
     /// `LUMEWARP_GATEWAY_PUBLIC_URL`, trailing slashes stripped: the base a
     /// rewritten Agent Card points at (`<public_url>/a2a/<agent>`, L6). Never

@@ -267,10 +267,10 @@ also emit `org:<id>` and `member:<id>`/`sa:<id>`, one per level that sets a limi
 A key has at most four scopes; a snapshot with more is NACKed INVALID_CONFIG.
 Limiter state is
 keyed by scope id, so it survives reloads and a limit change applies in place, and it
-is local to one gateway instance unless the instances share a Redis and namespace
+is local to one gateway unless the gateways share a Redis and namespace
 (`--shared-limits-redis-url`), in which case they share one window and may over-admit by
-about the number of active instances plus up to five sync intervals of traffic when an instance
-first joins the scope; without Redis, N instances allow up to N times the limit.
+about the number of active gateways plus up to five sync intervals of traffic when a gateway
+first joins the scope; without Redis, N gateways allow up to N times the limit.
 `requests_per_minute` and `tokens_per_minute` are sliding-window counters on
 wall-clock minutes: the current and the previous minute count, with the previous one
 fading out as the minute elapses, so a burst is not followed by a second full burst at

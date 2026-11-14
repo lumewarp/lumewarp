@@ -29,7 +29,7 @@ from pathlib import Path
 import httpx
 import pytest
 import stack as stack_module
-from stack import GATEWAY_ID, ROOT, Proc, free_port, wait_for
+from stack import ROOT, Proc, free_port, wait_for
 
 # `scripts/e2e-a2a.sh` builds the A2A mock and the middleware fixtures and sets this
 # flag. A plain `scripts/e2e-core.sh` run collects this module but must not stand up a
@@ -112,10 +112,7 @@ def plugin_connected(stack, name: str) -> bool:
     items = stack.ok("GET", "/plugins", params={"kind": "a2a-middleware"})["items"]
     for item in items:
         if item["name"] == name:
-            return any(
-                support["gateway_id"] == GATEWAY_ID and support["connected"]
-                for support in item["gateways"]
-            )
+            return any(support["connected"] for support in item["gateways"])
     return False
 
 

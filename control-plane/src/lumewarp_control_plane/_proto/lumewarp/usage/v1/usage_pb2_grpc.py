@@ -29,8 +29,8 @@ class UsageServiceStub:
     """Gateway -> control plane usage reporting. The gateway batches events off the
     request path and reports them asynchronously; a failed report is retried
     from a bounded buffer and dropped (and counted) when the buffer is full.
-    Authenticated with the same gateway token as ConfigService; the control
-    plane ignores ReportRequest.gateway_id in favour of the token's identity.
+    Authenticated with the same gateway token as ConfigService; the token only
+    authenticates the scope, and usage is attributed to ReportRequest.gateway_id.
     """
 
     def __init__(self, channel):
@@ -50,15 +50,16 @@ class UsageServiceServicer:
     """Gateway -> control plane usage reporting. The gateway batches events off the
     request path and reports them asynchronously; a failed report is retried
     from a bounded buffer and dropped (and counted) when the buffer is full.
-    Authenticated with the same gateway token as ConfigService; the control
-    plane ignores ReportRequest.gateway_id in favour of the token's identity.
+    Authenticated with the same gateway token as ConfigService; the token only
+    authenticates the scope, and usage is attributed to ReportRequest.gateway_id.
     """
 
     def Report(self, request, context):
         """Validated per event: an invalid event is skipped and logged, the rest are
         durably accounted, and `accepted` counts what was kept (already seen
-        request_ids count as accepted). Only batch-level errors (gateway identity,
-        too many events) fail the call with INVALID_ARGUMENT, recording nothing.
+        request_ids count as accepted). Only batch-level errors (an empty or
+        invalid gateway id, too many events) fail the call with INVALID_ARGUMENT,
+        recording nothing.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -84,8 +85,8 @@ class UsageService:
     """Gateway -> control plane usage reporting. The gateway batches events off the
     request path and reports them asynchronously; a failed report is retried
     from a bounded buffer and dropped (and counted) when the buffer is full.
-    Authenticated with the same gateway token as ConfigService; the control
-    plane ignores ReportRequest.gateway_id in favour of the token's identity.
+    Authenticated with the same gateway token as ConfigService; the token only
+    authenticates the scope, and usage is attributed to ReportRequest.gateway_id.
     """
 
     @staticmethod

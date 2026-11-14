@@ -24,8 +24,8 @@ In control-plane mode a gateway serves only after it has a config version. `/rea
 admin listener answers 503 until then.
 
 - **First start, control plane unreachable**: there is no cached snapshot to boot from.
-  Check the `--control-plane` URL, and that the token in the named environment variable
-  belongs to this `--gateway-id`.
+  Check the `--control-plane` URL, and that the token in the named environment variable is
+  unrevoked and belongs to this `--scope`.
 - **Scope mismatch**: `--scope` must equal the control plane's `LUMEWARP_SCOPE`.
 - **Cached snapshot rejected**: a corrupt or wrong-scope file in `--state-dir` is never
   served; the next full snapshot replaces it.
@@ -34,8 +34,8 @@ admin listener answers 503 until then.
 
 - The Gateways page shows each gateway's acknowledged version and its last NACK.
 - `UNSUPPORTED_FEATURE`: the config uses something this gateway does not have, usually a
-  plugin missing from its plugin directory. Install the plugin and restart the gateway, or
-  remove the setting.
+  plugin missing from its plugin directory. Only this gateway skips the version; the others
+  may apply it. Install the plugin and restart the gateway, or remove the setting.
 - `INVALID_CONFIG` with a sealed upstream key: the gateway lacks `LUMEWARP_ENCRYPTION_KEY`,
   or its value differs from the control plane's.
 - `lumewarp_config_stream_connected` is 0: the gateway cannot reach the control plane's

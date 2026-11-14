@@ -53,7 +53,7 @@ export function Overview() {
         <Counter label="Active keys" value={dash(active)} />
         {perms.isInstallationAdmin && <Counter label="Routers" value={dash(routers.data?.length)} />}
         {perms.isInstallationAdmin && <Counter label="Config version" value={latest ? `v${latest}` : "…"} />}
-        {perms.isInstallationAdmin && <Counter label="Gateways connected" value={gateways.data ? `${gateways.data.filter((g) => g.connected).length} / ${gateways.data.length}` : "…"} />}
+        {perms.isInstallationAdmin && <Counter label="Gateways connected" value={gateways.data ? String(gateways.data.filter((g) => g.connected).length) : "…"} />}
       </div>
       {(teams.error || keys.error || (perms.isInstallationAdmin && routers.error)) && (
         <Alert variant="destructive" className="mt-4" data-testid="state-error">

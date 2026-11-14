@@ -1,9 +1,9 @@
 //! In-memory store for unit tests.
 //!
-//! It mirrors the Redis script's semantics (per-minute per-instance counts,
-//! instance counts, in-flight fields that go stale) without a server, and
+//! It mirrors the Redis script's semantics (per-minute per-gateway counts,
+//! gateway counts, in-flight fields that go stale) without a server, and
 //! shares state through a [`MemoryHub`] so several stores can act as several
-//! gateway instances.
+//! gateways.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -23,9 +23,9 @@ pub struct MemoryHub {
 
 #[derive(Default)]
 struct State {
-    /// `(namespace, scope, dimension, minute)` -> instance -> count.
+    /// `(namespace, scope, dimension, minute)` -> gateway -> count.
     counts: HashMap<(String, String, &'static str, u64), HashMap<String, i64>>,
-    /// `(namespace, scope)` -> instance -> `(in_flight, unix-ish ms)`.
+    /// `(namespace, scope)` -> gateway -> `(in_flight, unix-ish ms)`.
     in_flight: HashMap<(String, String), HashMap<String, (u32, u64)>>,
     /// The test clock; only in-flight freshness depends on it.
     now_ms: u64,
@@ -33,11 +33,11 @@ struct State {
 }
 
 impl MemoryHub {
-    pub fn store(&self, namespace: &str, instance: &str) -> MemoryStore {
+    pub fn store(&self, namespace: &str, gateway: &str) -> MemoryStore {
         MemoryStore {
             hub: self.clone(),
             namespace: namespace.to_owned(),
-            instance: instance.to_owned(),
+            gateway: gateway.to_owned(),
         }
     }
 
@@ -58,7 +58,7 @@ impl MemoryHub {
 pub struct MemoryStore {
     hub: MemoryHub,
     namespace: String,
-    instance: String,
+    gateway: String,
 }
 
 impl Store for MemoryStore {
@@ -93,7 +93,7 @@ impl MemoryStore {
                         .entry((self.namespace.clone(), scope.clone(), dimension, minute))
                         .or_default()
                         .insert(
-                            self.instance.clone(),
+                            self.gateway.clone(),
                             i64::try_from(value).unwrap_or(i64::MAX),
                         );
                 }
@@ -102,7 +102,7 @@ impl MemoryStore {
                 .in_flight
                 .entry((self.namespace.clone(), scope))
                 .or_default()
-                .insert(self.instance.clone(), (counts.in_flight, now));
+                .insert(self.gateway.clone(), (counts.in_flight, now));
         }
         let views = batch
             .iter()
@@ -121,7 +121,7 @@ impl MemoryStore {
                     .get(&(self.namespace.clone(), scope.clone(), dimension, minute))
                     .map(|per| {
                         per.iter()
-                            .filter(|(instance, count)| *instance != &self.instance && **count > 0)
+                            .filter(|(gateway, count)| *gateway != &self.gateway && **count > 0)
                             .fold(0u64, |total, (_, count)| {
                                 total.saturating_add(u64::try_from(*count).unwrap_or(0))
                             })
@@ -129,39 +129,39 @@ impl MemoryStore {
                     .unwrap_or(0)
             };
             let mut seen = HashSet::new();
-            let mut instances = 0u32;
+            let mut gateways = 0u32;
             for minute in [prev_minute, counts.minute] {
                 if let Some(per) =
                     state
                         .counts
                         .get(&(self.namespace.clone(), scope.clone(), dimension, minute))
                 {
-                    for (instance, count) in per {
-                        if *count > 0 && seen.insert(instance.clone()) {
-                            instances += 1;
+                    for (gateway, count) in per {
+                        if *count > 0 && seen.insert(gateway.clone()) {
+                            gateways += 1;
                         }
                     }
                 }
             }
-            (role(prev_minute), role(counts.minute), instances)
+            (role(prev_minute), role(counts.minute), gateways)
         };
-        let (rpm_prev, rpm_cur, rpm_instances) = totals("r");
-        let (tpm_prev, tpm_cur, tpm_instances) = totals("t");
+        let (rpm_prev, rpm_cur, rpm_gateways) = totals("r");
+        let (tpm_prev, tpm_cur, tpm_gateways) = totals("t");
 
         let mut in_flight = 0u32;
-        let mut in_flight_instances = 0u32;
+        let mut in_flight_gateways = 0u32;
         if let Some(per) = state
             .in_flight
             .get(&(self.namespace.clone(), scope.clone()))
         {
-            for (instance, (count, stamped)) in per {
+            for (gateway, (count, stamped)) in per {
                 if state.now_ms.saturating_sub(*stamped) > STALE_IN_FLIGHT_MS {
                     continue;
                 }
-                if instance != &self.instance {
+                if gateway != &self.gateway {
                     in_flight = in_flight.saturating_add(*count);
                 }
-                in_flight_instances += 1;
+                in_flight_gateways += 1;
             }
         }
         ScopeView {
@@ -171,10 +171,10 @@ impl MemoryStore {
             rpm_cur,
             tpm_prev,
             tpm_cur,
-            rpm_instances,
-            tpm_instances,
+            rpm_gateways,
+            tpm_gateways,
             in_flight,
-            in_flight_instances,
+            in_flight_gateways,
         }
     }
 }

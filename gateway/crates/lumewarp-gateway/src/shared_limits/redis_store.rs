@@ -25,7 +25,7 @@ use redis::{
 };
 use tokio::sync::{Mutex, Notify};
 
-use crate::instance;
+use crate::gateway_id;
 
 use super::{Error, ErrorKind, ScopeCounts, ScopeView, Store, SCOPES_PER_CHUNK};
 
@@ -36,7 +36,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 pub struct RedisStore {
     client: Client,
     namespace: String,
-    instance: String,
+    gateway: String,
     script_sha: String,
     /// The live manager and the generation it was created with, once the
     /// background connect succeeds.
@@ -57,17 +57,17 @@ pub struct RedisStore {
 
 impl RedisStore {
     /// Parses the URL; it does not connect, so a gateway can start while Redis
-    /// is down (it falls back to per-process limits until the first sync).
+    /// is down (it falls back to per-gateway limits until the first sync).
     pub fn new(redis_url: &str, namespace: &str) -> Result<Self, Error> {
-        Self::with_instance(redis_url, namespace, instance::instance_id())
+        Self::with_gateway(redis_url, namespace, gateway_id::gateway_id())
     }
 
-    /// The instance id is normally this process's; tests set it explicitly to
+    /// The gateway id is normally this process's; tests set it explicitly to
     /// act as several gateways in one process.
-    pub fn with_instance(
+    pub fn with_gateway(
         redis_url: &str,
         namespace: &str,
-        instance: impl Into<String>,
+        gateway: impl Into<String>,
     ) -> Result<Self, Error> {
         // The URL may carry a password; never echo it in an error.
         let client = Client::open(redis_url)
@@ -75,7 +75,7 @@ impl RedisStore {
         Ok(Self {
             client,
             namespace: namespace.to_owned(),
-            instance: instance.into(),
+            gateway: gateway.into(),
             script_sha: Script::new(SCRIPT).get_hash().to_owned(),
             connection: Arc::new(Mutex::new(None)),
             connected: Arc::new(AtomicBool::new(false)),
@@ -146,10 +146,10 @@ impl RedisStore {
                     rpm_cur: total(values[1]),
                     tpm_prev: total(values[2]),
                     tpm_cur: total(values[3]),
-                    rpm_instances: count(values[4]),
-                    tpm_instances: count(values[5]),
+                    rpm_gateways: count(values[4]),
+                    tpm_gateways: count(values[5]),
                     in_flight: count(values[6]),
-                    in_flight_instances: count(values[7]),
+                    in_flight_gateways: count(values[7]),
                 });
             }
         }
@@ -186,7 +186,7 @@ impl RedisStore {
                 command.arg(format!("{base}:t:{}", counts.minute));
                 command.arg(format!("{base}:p"));
             }
-            command.arg(&self.instance);
+            command.arg(&self.gateway);
             command.arg(chunk.len());
             for counts in chunk {
                 command.arg(u8::from(counts.write));
@@ -426,8 +426,8 @@ mod tests {
         let namespace = namespace();
         let minute = u64::try_from(clock::unix_ms() / 60_000).unwrap();
         let mut connection = command(&url).await;
-        let a = RedisStore::with_instance(&url, &namespace, "a").unwrap();
-        let b = RedisStore::with_instance(&url, &namespace, "b").unwrap();
+        let a = RedisStore::with_gateway(&url, &namespace, "a").unwrap();
+        let b = RedisStore::with_gateway(&url, &namespace, "b").unwrap();
         ready(&a).await;
         ready(&b).await;
 
@@ -437,9 +437,9 @@ mod tests {
         first.tpm_cur = 40;
         first.in_flight = 2;
         let views = a.sync(&[first.clone()]).await.unwrap();
-        assert_eq!(views[0].rpm_cur, 0, "no other instance yet");
-        assert_eq!(views[0].rpm_instances, 1, "self counts");
-        assert_eq!(views[0].in_flight_instances, 1);
+        assert_eq!(views[0].rpm_cur, 0, "no other gateway yet");
+        assert_eq!(views[0].rpm_gateways, 1, "self counts");
+        assert_eq!(views[0].in_flight_gateways, 1);
 
         let mut second = counts("team:t", minute);
         second.rpm_cur = 4;
@@ -450,12 +450,12 @@ mod tests {
         assert_eq!(
             (views[0].rpm_prev, views[0].rpm_cur),
             (2, 3),
-            "the other instance's counts"
+            "the other gateway's counts"
         );
         assert_eq!((views[0].tpm_prev, views[0].tpm_cur), (0, 40));
-        assert_eq!(views[0].rpm_instances, 2);
-        assert_eq!(views[0].in_flight, 2, "the other instance's slots");
-        assert_eq!(views[0].in_flight_instances, 2);
+        assert_eq!(views[0].rpm_gateways, 2);
+        assert_eq!(views[0].in_flight, 2, "the other gateway's slots");
+        assert_eq!(views[0].in_flight_gateways, 2);
 
         // Resending the same absolute counts overwrites, never adds.
         let mut repeat = first;
@@ -496,7 +496,7 @@ mod tests {
         read_only.refresh_ttl = false;
         let views = a.sync(&[read_only]).await.unwrap();
         assert_eq!(views[0].in_flight, 1, "only the fresh b slot");
-        assert_eq!(views[0].in_flight_instances, 2, "a and b, not stale");
+        assert_eq!(views[0].in_flight_gateways, 2, "a and b, not stale");
         let exists: i64 = redis::cmd("HEXISTS")
             .arg(format!("{base}:p"))
             .arg("stale")
@@ -526,7 +526,7 @@ mod tests {
         }
         let base = format!("{{lw:{namespace}}}:team:t");
 
-        let store = RedisStore::with_instance(&url, &namespace, "a").unwrap();
+        let store = RedisStore::with_gateway(&url, &namespace, "a").unwrap();
         ready(&store).await;
         let mut first = counts("team:t", minute);
         first.rpm_cur = 5;
@@ -558,7 +558,7 @@ mod tests {
         assert_eq!(exists, 0, "an unused dimension creates no key");
 
         // A zero count is an HDEL, not a zero-valued field or a new key.
-        let store = RedisStore::with_instance(&url, &namespace, "a").unwrap();
+        let store = RedisStore::with_gateway(&url, &namespace, "a").unwrap();
         ready(&store).await;
         let mut zero = counts("team:zero", minute);
         zero.rpm_cur = 0;
@@ -581,7 +581,7 @@ mod tests {
         };
         let namespace = namespace();
         let mut connection = command(&url).await;
-        let store = RedisStore::with_instance(&url, &namespace, "a").unwrap();
+        let store = RedisStore::with_gateway(&url, &namespace, "a").unwrap();
         ready(&store).await;
         let minute = u64::try_from(clock::unix_ms() / 60_000).unwrap();
         let mut first = counts("team:t", minute);
@@ -596,7 +596,7 @@ mod tests {
         let mut second = counts("team:t", minute);
         second.rpm_cur = 2;
         let views = store.sync(&[second]).await.expect("EVAL fallback");
-        assert_eq!(views[0].rpm_instances, 1);
+        assert_eq!(views[0].rpm_gateways, 1);
         // A later sync uses EVALSHA again because the fallback reloaded it.
         let mut third = counts("team:t", minute);
         third.rpm_cur = 3;
@@ -635,8 +635,8 @@ mod tests {
         let mut connection = command(&url).await;
         let registry_a = Registry::new();
         let registry_b = Registry::new();
-        let store_a = RedisStore::with_instance(&url, &namespace, "a").unwrap();
-        let store_b = RedisStore::with_instance(&url, &namespace, "b").unwrap();
+        let store_a = RedisStore::with_gateway(&url, &namespace, "a").unwrap();
+        let store_b = RedisStore::with_gateway(&url, &namespace, "b").unwrap();
         ready(&store_a).await;
         ready(&store_b).await;
         let key = Caller::Key(Arc::new(KeyContext {
@@ -681,7 +681,7 @@ mod tests {
         };
         let namespace = namespace();
         let mut connection = command(&url).await;
-        let store = RedisStore::with_instance(&url, &namespace, "timing").unwrap();
+        let store = RedisStore::with_gateway(&url, &namespace, "timing").unwrap();
         ready(&store).await;
         let minute = u64::try_from(clock::unix_ms() / 60_000).unwrap();
         let batch: Vec<_> = (0..10_000)

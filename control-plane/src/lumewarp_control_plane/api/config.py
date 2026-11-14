@@ -24,12 +24,12 @@ from lumewarp_control_plane.api.schemas import (
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.compiler.plugins import PluginRejected
 from lumewarp_control_plane.errors import not_found
-from lumewarp_control_plane.models import ConfigVersion
+from lumewarp_control_plane.models import ConfigVersion, GatewayQuarantine
 
 router = APIRouter(tags=["config"])
 
 
-def _out(row: ConfigVersion) -> ConfigVersionOut:
+def _out(row: ConfigVersion, quarantined_version: int | None) -> ConfigVersionOut:
     return ConfigVersionOut(
         scope=row.scope,
         version=row.version,
@@ -41,6 +41,7 @@ def _out(row: ConfigVersion) -> ConfigVersionOut:
         rollback_of_version=row.rollback_of_version,
         created_at=row.created_at,
         compacted_at=row.compacted_at,
+        quarantined=row.version == quarantined_version,
     )
 
 
@@ -56,8 +57,16 @@ async def list_config_versions(
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[ConfigVersionOut]:
-    """Compiled config versions, newest first. Requires an installation admin."""
+    """Compiled config versions, newest first. Requires an installation admin.
+
+    `quarantined` marks the version a gateway rejected; no gateway of the scope is sent it.
+    """
     await authz.require(Action.CONFIG_READ)
+    quarantined_version = await session.scalar(
+        select(GatewayQuarantine.quarantined_version).where(
+            GatewayQuarantine.scope == settings.scope
+        )
+    )
     stmt = (
         select(ConfigVersion)
         .where(ConfigVersion.scope == settings.scope)
@@ -68,7 +77,7 @@ async def list_config_versions(
     rows = list((await session.scalars(stmt.limit(limit + 1))).all())
     next_cursor = str(rows[limit - 1].version) if len(rows) > limit else None
     return Page[ConfigVersionOut](
-        items=[_out(row) for row in rows[:limit]], next_cursor=next_cursor
+        items=[_out(row, quarantined_version) for row in rows[:limit]], next_cursor=next_cursor
     )
 
 

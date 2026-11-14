@@ -164,7 +164,7 @@ groups:
         annotations:
           summary: "Gateway lost shared rate limits"
           description: "Gateway {{ $labels.instance }} has counted rate limits per process for 2 minutes."
-          runbook: "Check Redis reachability, credentials and the shared-limits namespace; limits are per instance until a successful sync resumes."
+          runbook: "Check Redis reachability, credentials and the shared-limits namespace; limits are per gateway until a successful sync resumes."
       # Any compile failure over two minutes blocks configuration changes.
       - alert: LumewarpCPCompileFailures
         expr: "increase(lumewarp_cp_compile_failures_total[5m]) > 0"

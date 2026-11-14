@@ -1847,16 +1847,17 @@ class ConfigOutbox(Base):
 
 
 class GatewayToken(Base):
-    """Gateway credential (`lwg-...`), bound to one gateway_id and scope. Hash only."""
+    """Gateway credential (`lwg-...`): a scope credential with a label, not bound to a
+    gateway id. Any number of gateways may authenticate with one token. Hash only.
+    """
 
     __tablename__ = "gateway_tokens"
-    __table_args__ = (_hash32("token_hash"), Index(None, "scope", "gateway_id"))
+    __table_args__ = (_hash32("token_hash"), Index(None, "scope"))
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     scope: Mapped[str] = mapped_column(
         ForeignKey("scopes.name", ondelete="RESTRICT"), nullable=False
     )
-    gateway_id: Mapped[str] = mapped_column(String(200), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False, server_default="")
     token_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
     display_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -1866,27 +1867,24 @@ class GatewayToken(Base):
 
 
 class GatewaySession(Base):
-    """Last known stream state per gateway *instance*, for status/UI. One gateway id may run
-    as several processes, each with its own stream; the gateway-level view is derived from
-    these rows (`api.gateways`). Authoritative ACK/pending state is in memory
-    (`grpc.SessionRegistry`); this row mirrors it. A row outlives its stream for
-    `GATEWAY_SESSION_RETENTION`, so a restarted instance is a new row and an offline one
-    stays visible for a day.
+    """Last known stream state per gateway process, for status/UI. A gateway is one
+    process: a restart is a new gateway id and a new row. Authoritative ACK/pending state
+    is in memory (`grpc.SessionRegistry`); this row mirrors it. A row outlives its stream
+    for `GATEWAY_SESSION_RETENTION`, so an offline gateway stays visible for a day.
     """
 
     __tablename__ = "gateway_sessions"
-    __table_args__ = (PrimaryKeyConstraint("scope", "gateway_id", "instance_id"),)
+    __table_args__ = (PrimaryKeyConstraint("scope", "gateway_id"),)
 
     scope: Mapped[str] = mapped_column(
         ForeignKey("scopes.name", ondelete="RESTRICT"), nullable=False
     )
-    gateway_id: Mapped[str] = mapped_column(String(200), nullable=False)
-    # Hello.instance_id: one process. `[A-Za-z0-9._-]`, at most 100 characters.
-    instance_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Hello.gateway_id: this process. `[A-Za-z0-9._-]`, at most 100 characters.
+    gateway_id: Mapped[str] = mapped_column(String(100), nullable=False)
     session_id: Mapped[uuid.UUID | None] = mapped_column()
-    # The token of the latest Hello. Another token of this gateway says nothing about it.
-    token_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("gateway_tokens.id", ondelete="SET NULL")
+    # The token of the latest Hello; revoking it closes this gateway's stream.
+    token_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("gateway_tokens.id", ondelete="CASCADE"), nullable=False
     )
     connected: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     gateway_version: Mapped[str] = mapped_column(String(100), nullable=False, server_default="")
@@ -1900,7 +1898,7 @@ class GatewaySession(Base):
     last_nack_version: Mapped[int | None] = mapped_column(BigInteger)
     last_nack_code: Mapped[str | None] = mapped_column(String(64))
     last_nack_reason: Mapped[str | None] = mapped_column(Text)
-    # Hello.shared_limits: display only. Quarantine is gateway-wide, in GatewayQuarantine.
+    # Hello.shared_limits: display only. Quarantine is scope-wide, in GatewayQuarantine.
     shared_limits_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
@@ -1920,47 +1918,40 @@ class GatewaySession(Base):
 
 
 class GatewayQuarantine(Base):
-    """A config version one instance of a gateway rejected: every instance of that gateway
-    id skips it (docs/config-protocol.md). Gateway-wide, so replicas never serve different
-    versions on purpose; it outlives the sessions, and a newer published version is tried
+    """A config version a gateway rejected as INVALID_CONFIG: no gateway in the scope is
+    sent it (docs/config-protocol.md). Every gateway gets the same snapshot, so the version is
+    withheld scope-wide; the row outlives sessions, and a newer published version is tried
     again from scratch.
     """
 
     __tablename__ = "gateway_quarantines"
-    __table_args__ = (PrimaryKeyConstraint("scope", "gateway_id"),)
+    __table_args__ = (PrimaryKeyConstraint("scope"),)
 
     scope: Mapped[str] = mapped_column(
         ForeignKey("scopes.name", ondelete="RESTRICT"), nullable=False
     )
-    gateway_id: Mapped[str] = mapped_column(String(200), nullable=False)
     quarantined_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at: Mapped[datetime] = _now()
 
 
 class GatewayPlugin(Base):
-    """A plugin a gateway instance reported in Hello. Untrusted data, kept so forms and
-    validation work while it is offline; `compiler.plugins.load_plugins` decides what still
-    counts. Keyed per instance: a plugin is available only if every connected instance
-    reports it.
+    """A plugin a gateway reported in Hello. Untrusted data, kept so forms and validation
+    work while it is offline; `compiler.plugins.load_plugins` decides what still counts.
+    Keyed per gateway: a plugin is available only if every connected gateway reports it.
     """
 
     __tablename__ = "gateway_plugins"
     __table_args__ = (
-        PrimaryKeyConstraint("scope", "gateway_id", "instance_id", "kind", "name"),
+        PrimaryKeyConstraint("scope", "gateway_id", "kind", "name"),
         ForeignKeyConstraint(
-            ["scope", "gateway_id", "instance_id"],
-            [
-                "gateway_sessions.scope",
-                "gateway_sessions.gateway_id",
-                "gateway_sessions.instance_id",
-            ],
+            ["scope", "gateway_id"],
+            ["gateway_sessions.scope", "gateway_sessions.gateway_id"],
             ondelete="CASCADE",
         ),
     )
 
     scope: Mapped[str] = mapped_column(String(128), nullable=False)
-    gateway_id: Mapped[str] = mapped_column(String(200), nullable=False)
-    instance_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    gateway_id: Mapped[str] = mapped_column(String(100), nullable=False)
     kind: Mapped[PluginKind] = mapped_column(_enum(PluginKind, "plugin_kind"), nullable=False)
     name: Mapped[str] = mapped_column(String(63), nullable=False)
     digest: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -2014,8 +2005,8 @@ class UsageEvent(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     request_id: Mapped[uuid.UUID] = mapped_column(nullable=False, unique=True)
-    # Identity from the gateway token, never from the payload.
-    gateway_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    # The reporting process (ReportRequest.gateway_id), never derived from the token.
+    gateway_id: Mapped[str] = mapped_column(String(100), nullable=False)
     # Completion time (UsageEvent.timestamp_unix_ms); budget windows use it.
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

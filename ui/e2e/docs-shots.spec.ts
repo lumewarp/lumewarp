@@ -49,27 +49,8 @@ test("manual screenshots", async ({ page, request, browser }) => {
   await expect(page.getByRole("button").first()).toBeVisible();
   await shot(page, "login");
 
-  // A member: their own keys, then the Playground.
-  const member = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
-  await signIn(member, MEMBER, "/my-keys");
-  await expect(member.getByTestId("team-search")).toBeVisible();
-  await member.getByTestId("team-search").getByRole("button", { name: "New key" }).click();
-  const form = member.getByRole("dialog", { name: "New key in search" });
-  await form.getByLabel("Name").fill("laptop");
-  await shot(member, "my-keys-create");
-  await form.getByRole("button", { name: "Create key" }).click();
-  const secret = member.getByRole("dialog", { name: "API key created" });
-  await expect(secret.getByTestId("secret-value")).toBeVisible();
-  await shot(member, "my-keys-secret");
-  await secret.getByRole("button", { name: /saved it/ }).click();
-  await expect(secret).toHaveCount(0);
-  await shot(member, "my-keys");
-  await member.goto("/playground");
-  await expect(member.getByRole("heading", { name: "Playground" })).toBeVisible();
-  await shot(member, "playground");
-  await member.close();
-
-  // The installation admin.
+  // The installation admin first: creating the member's key below publishes one more config
+  // version, and the Gateways picture is of the fleet as the fixture seeded it.
   await signIn(page, SHOTS_TOKEN, `/teams/${team.id}`);
   await expect(page.getByRole("heading", { name: "search", exact: true })).toBeVisible();
   await shot(page, "team");
@@ -90,14 +71,31 @@ test("manual screenshots", async ({ page, request, browser }) => {
   await shot(page, "audit");
   await page.goto("/gateways");
   await expect(page.getByRole("heading", { name: "Gateways", level: 1 })).toBeVisible();
-  await expect(page.getByTestId("instance-count-gw-1")).toHaveText("3/3 instances connected");
+  await expect(page.getByTestId("gateway-gw-a-7f3c1d2e")).toBeVisible();
+  const gatewayRow = page.getByRole("row").filter({ has: page.getByTestId("gateway-gw-a-7f3c1d2e") });
+  await expect(gatewayRow).toContainText(/v\d+/);
   await shot(page, "gateways");
-  await page.goto("/gateways/gw-1");
-  await expect(page.getByRole("heading", { name: "gw-1", level: 1 })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Instances", exact: true })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByTestId("instance-gw-1-1")).toBeVisible();
-  await shot(page, "gateway-detail");
   await page.goto("/config");
   await expect(page.getByRole("heading", { name: "Config versions" })).toBeVisible();
   await shot(page, "config-versions");
+
+  // A member: their own keys, then the Playground.
+  const member = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
+  await signIn(member, MEMBER, "/my-keys");
+  await expect(member.getByTestId("team-search")).toBeVisible();
+  await member.getByTestId("team-search").getByRole("button", { name: "New key" }).click();
+  const form = member.getByRole("dialog", { name: "New key in search" });
+  await form.getByLabel("Name").fill("laptop");
+  await shot(member, "my-keys-create");
+  await form.getByRole("button", { name: "Create key" }).click();
+  const secret = member.getByRole("dialog", { name: "API key created" });
+  await expect(secret.getByTestId("secret-value")).toBeVisible();
+  await shot(member, "my-keys-secret");
+  await secret.getByRole("button", { name: /saved it/ }).click();
+  await expect(secret).toHaveCount(0);
+  await shot(member, "my-keys");
+  await member.goto("/playground");
+  await expect(member.getByRole("heading", { name: "Playground" })).toBeVisible();
+  await shot(member, "playground");
+  await member.close();
 });

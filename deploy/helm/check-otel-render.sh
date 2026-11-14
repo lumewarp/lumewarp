@@ -18,7 +18,6 @@ else
 fi
 
 common=(
-  --set gateway.gatewayId=gw
   --set gateway.token.secretName=gw-token
   --set gateway.controlPlaneUrl=http://cp:50051
   --set controlPlane.enabled=false

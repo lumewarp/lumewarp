@@ -40,7 +40,8 @@ strategy declares, as reported by gateways in `Hello.plugins`, and against the c
 built-in manifest `compiler/builtin_plugins.json`, so built-ins work with no gateway connected.
 An unreported strategy or a schema failure is 422. A connected gateway lacking the strategy is
 422 unless the write has `force`, audited as `router.force_save`, because that gateway will NACK
-the version. Stored rows that no longer validate read `config_invalid: true` with
+the version and skip every version that references it; the other gateways still receive them.
+Stored rows that no longer validate read `config_invalid: true` with
 `config_problems` and are not modified. The same rule lives in
 `compiler.plugins.validate_plugin_params(session, kind, name, params, *, force)` and is what an
 MCP server's or A2A agent's auth plugin (kinds `upstream-auth` and `a2a-middleware`) uses. Full

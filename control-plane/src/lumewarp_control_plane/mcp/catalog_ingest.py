@@ -340,9 +340,9 @@ async def ingest_report(
     alternative (trusting whatever a report says) would let an old upstream's definitions
     be recorded against the current one. Bounded before this point (`grpc._MAX_CATALOG_*`)
     and again here; `gateway_id` is unused for the decision (any gateway's observation
-    counts the same) but documents the provenance; it is never stored on a definition.
+    counts the same) and is never stored on a definition.
     """
-    del gateway_id  # provenance is the authenticated stream, not a stored label
+    del gateway_id  # observations count the same from any gateway of the scope
     scope = scope or get_settings().scope
     now = now or datetime.now(UTC)
     result = IngestResult()

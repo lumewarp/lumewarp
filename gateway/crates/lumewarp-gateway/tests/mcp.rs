@@ -789,7 +789,7 @@ async fn a_cached_boot_publishes_the_staged_plugins_too() {
                 .args(["--gateway-token-env", "LUMEWARP_N1_TOKEN"])
                 .arg("--state-dir")
                 .arg(&state)
-                .args(["--scope", "scope-a", "--gateway-id", "gw-cached"])
+                .args(["--scope", "scope-a"])
                 .arg("--local-config")
                 .arg(&local)
                 .env("LUMEWARP_N1_TOKEN", "gw-token")

@@ -505,8 +505,8 @@ jobs:
       - name: Core e2e gate (Postgres + Redis + control plane + gateway + mock upstream)
         env:
           E2E_PG_URL: postgresql://lumewarp:lumewarp@127.0.0.1:55432/lumewarp
-          # tests/e2e/test_shared_limits.py: three instances of one gateway id share
-          # one namespace, Redis loss falls back to per-instance counting.
+          # tests/e2e/test_shared_limits.py: three gateways share one namespace;
+          # Redis loss falls back to per-gateway counting.
           E2E_REDIS_URL: redis://127.0.0.1:6379/0
         run: scripts/e2e-core.sh
 

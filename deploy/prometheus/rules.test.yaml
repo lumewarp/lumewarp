@@ -1546,7 +1546,7 @@
               "exp_annotations": {
                 "summary": "Gateway lost shared rate limits",
                 "description": "Gateway gw:9464 has counted rate limits per process for 2 minutes.",
-                "runbook": "Check Redis reachability, credentials and the shared-limits namespace; limits are per instance until a successful sync resumes."
+                "runbook": "Check Redis reachability, credentials and the shared-limits namespace; limits are per gateway until a successful sync resumes."
               }
             }
           ]

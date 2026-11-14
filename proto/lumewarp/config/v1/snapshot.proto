@@ -489,12 +489,12 @@ message RateLimitScope {
   RateLimit limit = 2;
 }
 
-// Enforced per gateway instance unless the instances share a Redis and
-// namespace (`--shared-limits-redis-url`), in which case they share one
-// window and may over-admit by about the number of active instances plus up to
-// five sync intervals of traffic when an instance first joins the scope. Zero =
-// unlimited for that dimension. tokens_per_minute is retrospective: it
-// rejects later requests once usage has been charged.
+// Enforced per gateway unless the gateways share a Redis and namespace
+// (`--shared-limits-redis-url`), in which case they share one window and may
+// over-admit by about the number of active gateways plus up to five sync
+// intervals of traffic when a gateway first joins the scope. Zero = unlimited
+// for that dimension. tokens_per_minute is retrospective: it rejects later
+// requests once usage has been charged.
 message RateLimit {
   uint32 requests_per_minute = 1;
   uint64 tokens_per_minute = 2;

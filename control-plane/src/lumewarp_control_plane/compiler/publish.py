@@ -47,9 +47,9 @@ log = logging.getLogger(__name__)
 # NOTIFY channel with payload "<scope>:<version>", sent on commit of a new version.
 PUBLISHED_CHANNEL = "lumewarp_config_published"
 SERIALIZATION_ATTEMPTS = 5
-# A disconnected gateway instance stays visible for a day, then its row goes (D10).
+# A disconnected gateway stays visible for a day, then its row goes (D10).
 GATEWAY_SESSION_RETENTION = timedelta(hours=24)
-# How often the compiler loop deletes expired instance rows; the work is a single statement.
+# How often the compiler loop deletes expired gateway rows; the work is a single statement.
 GATEWAY_SESSION_CLEANUP_SECONDS = 3600.0
 
 
@@ -428,10 +428,10 @@ async def compact_versions(session: AsyncSession, scope: str, *, retain: int | N
 async def delete_stale_gateway_sessions(
     session: AsyncSession, scope: str, *, now: datetime | None = None
 ) -> int:
-    """Delete the rows of instances disconnected for more than a day (D10).
+    """Delete the rows of gateways disconnected for more than a day (D10).
 
-    A row outlives its stream so an offline instance stays visible, but not forever: the
-    compiler loop calls this. The instance's plugin reports go with it (ON DELETE CASCADE).
+    A row outlives its stream so an offline gateway stays visible, but not forever: the
+    compiler loop calls this. The gateway's plugin reports go with it (ON DELETE CASCADE).
     """
     cutoff = (now or datetime.now(UTC)) - GATEWAY_SESSION_RETENTION
     result = await session.execute(
@@ -461,7 +461,7 @@ async def run_compiler_loop(
 
     After each publish, calls `on_published(scope, version)` (e.g.
     `SessionRegistry.notify_published`) and compacts old payloads. Once an hour it also
-    deletes gateway instance rows that have been disconnected for a day. Errors are logged
+    deletes gateway rows that have been disconnected for a day. Errors are logged
     and retried with backoff (up to 5 s); the loop only returns when stopped.
     """
     scope = scope or get_settings().scope
@@ -474,9 +474,9 @@ async def run_compiler_loop(
                 async with session_factory() as session, session.begin():
                     stale = await delete_stale_gateway_sessions(session, scope)
                 if stale:
-                    log.info("deleted %d stale gateway instance rows of scope %s", stale, scope)
+                    log.info("deleted %d stale gateway rows of scope %s", stale, scope)
             except Exception:
-                log.warning("gateway instance cleanup failed for scope %s", scope, exc_info=True)
+                log.warning("gateway cleanup failed for scope %s", scope, exc_info=True)
         try:
             version = await publish_pending(
                 session_factory,

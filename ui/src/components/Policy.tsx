@@ -105,9 +105,9 @@ export function PolicyFields({ values, errors, set, isTeam, team, parent }: Prop
       <PermissionPicker isTeam={isTeam} access={values.model_access} onAccess={(a) => set("model_access", a)} selected={values.allowed_models} onSelected={(names) => set("allowed_models", names)} scope={scope} error={errors.model_access ?? errors.allowed_models} />
       <McpGrants isTeam={isTeam} access={values.mcp_access} onAccess={(a) => set("mcp_access", a)} selected={values.mcp_servers} onSelected={(grants) => set("mcp_servers", grants)} scope={targets.mcp} error={errors.mcp_access ?? errors.mcp_servers} />
       <AgentGrants isTeam={isTeam} access={values.a2a_access} onAccess={(a) => set("a2a_access", a)} selected={values.a2a_agents} onSelected={(names) => set("a2a_agents", names)} scope={targets.agents} error={errors.a2a_access ?? errors.a2a_agents} />
-      <NumberField label="Requests per minute" value={values.rpm_limit} onChange={(v) => set("rpm_limit", v)} error={errors.rpm_limit} hint="Shared across gateways that use the same Redis namespace; otherwise counted per gateway instance." />
-      <NumberField label="Tokens per minute" value={values.tpm_limit} onChange={(v) => set("tpm_limit", v)} error={errors.tpm_limit} hint="Shared across gateways that use the same Redis namespace; otherwise counted per gateway instance." />
-      <NumberField label="Max parallel requests" value={values.max_parallel} onChange={(v) => set("max_parallel", v)} error={errors.max_parallel} hint="Shared across gateways that use the same Redis namespace; otherwise counted per gateway instance." />
+      <NumberField label="Requests per minute" value={values.rpm_limit} onChange={(v) => set("rpm_limit", v)} error={errors.rpm_limit} hint="Shared across gateways that use the same Redis namespace; otherwise counted per gateway." />
+      <NumberField label="Tokens per minute" value={values.tpm_limit} onChange={(v) => set("tpm_limit", v)} error={errors.tpm_limit} hint="Shared across gateways that use the same Redis namespace; otherwise counted per gateway." />
+      <NumberField label="Max parallel requests" value={values.max_parallel} onChange={(v) => set("max_parallel", v)} error={errors.max_parallel} hint="Shared across gateways that use the same Redis namespace; otherwise counted per gateway." />
       <NumberField label="Monthly budget (USD)" value={values.budget_usd} onChange={(v) => set("budget_usd", v)} error={errors.budget_usd} step="any" hint="Requests are blocked once spend reaches the budget." />
     </>
   );

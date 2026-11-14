@@ -1,95 +1,49 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 
-import { api } from "../api";
+import { api, type Gateway, type GatewayToken } from "../api";
 import { Badge, fmtDateTime, PageHeader } from "../components/Bits";
-import { FormDialog, required, TextField, useForm } from "../components/Form";
+import { ConfirmDialog } from "../components/Confirm";
+import { FormDialog, TextField, useForm } from "../components/Form";
 import { CreateButton } from "../components/RowActions";
 import { useShowSecret } from "../components/SecretProvider";
 import { DataTable } from "../components/Table";
-import { Badge as UiBadge } from "../components/ui/badge";
+import { Alert, AlertDescription } from "../components/ui/alert";
+import { Button } from "../components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { useMut } from "../hooks";
 import { runTokenSecretMutation } from "../lib/keySecret";
 
-export type Gateway = Awaited<ReturnType<typeof api.gateways>>[number];
-export type GwToken = Gateway["tokens"][number];
-export type Instance = Gateway["instances"][number];
+type Tab = "gateways" | "tokens";
+type BadgeTone = "danger" | "info" | "warn";
 
-interface LimitsState {
-  kind: "shared" | "per-instance" | "mixed" | "none";
-  namespace: string;
+export interface ConfigBadge {
+  tone: BadgeTone;
+  text: string;
 }
-
-/** How the connected instances of one gateway id share rate limits, and whether they disagree. */
-export function limitsState(instances: Instance[]): LimitsState {
-  const live = instances.filter((i) => i.connected);
-  if (!live.length) return { kind: "none", namespace: "" };
-  const on = live.filter((i) => i.shared_limits_enabled);
-  if (!on.length) return { kind: "per-instance", namespace: "" };
-  const spaces = new Set(on.map((i) => i.shared_limits_namespace));
-  if (on.length === live.length && spaces.size === 1) return { kind: "shared", namespace: [...spaces][0] };
-  return { kind: "mixed", namespace: [...spaces].map((s) => s || "no namespace reported").join(", ") };
-}
-
-/** The distinct build versions of the connected instances, sorted; empty while none is connected. */
-export function liveVersions(instances: Instance[]): string[] {
-  return [...new Set(instances.filter((i) => i.connected).map((i) => i.gateway_version).filter(Boolean))].sort();
-}
-
-function versionsDiffer(instances: Instance[]): boolean {
-  return liveVersions(instances).length > 1;
-}
-
-/** The value most instances share, when it is a strict majority; null on a tie. */
-function majority(values: string[]): string | null {
-  const counts = new Map<string, number>();
-  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
-  let winner: string | null = null;
-  let count = 0;
-  for (const [value, n] of counts) {
-    if (n > count) {
-      winner = value;
-      count = n;
-    }
-  }
-  return winner !== null && count * 2 > values.length ? winner : null;
-}
-
-const sharingKey = (instance: Instance) =>
-  instance.shared_limits_enabled ? `shared:${instance.shared_limits_namespace}` : "per-instance";
 
 /**
- * The connected instances whose build version or shared-limits setting differs from the majority. A tie has no
- * odd one out: during a rolling upgrade two versions may be equally common. Disconnected rows never count.
+ * The quarantined version still withheld: only the newest version is ever sent, so a quarantine
+ * superseded by a newer version no longer matters.
  */
-export function oddInstances(instances: Instance[]): Set<string> {
-  const live = instances.filter((i) => i.connected);
-  // An instance that reported no build version is not counted, the same as in liveVersions.
-  const version = majority(live.map((i) => i.gateway_version).filter(Boolean));
-  const sharing = majority(live.map(sharingKey));
-  const odd = new Set<string>();
-  for (const instance of live) {
-    if ((version !== null && !!instance.gateway_version && instance.gateway_version !== version) || (sharing !== null && sharingKey(instance) !== sharing)) {
-      odd.add(instance.instance_id);
-    }
-  }
-  return odd;
+export function quarantinedVersions(versions: { version: number; quarantined: boolean }[] | undefined): Set<number> {
+  const newest = (versions ?? []).reduce<{ version: number; quarantined: boolean } | undefined>(
+    (max, v) => (max === undefined || v.version > max.version ? v : max),
+    undefined,
+  );
+  return new Set(newest?.quarantined ? [newest.version] : []);
 }
 
-export interface ConfigStatus {
-  tone: "danger" | "info" | "warn";
-  text: string;
-  title?: string;
-}
-
-/** The one badge the list shows for a gateway's config, by priority: quarantined > NACK > pending > behind. */
-export function configStatus(g: Gateway, latest: number | undefined): ConfigStatus | null {
-  if (g.quarantined_version !== null) return { tone: "danger", text: `quarantined v${g.quarantined_version}` };
-  if (g.last_nack_version !== null) {
-    const detail = [g.last_nack_code, g.last_nack_reason].filter(Boolean).join(": ");
-    return { tone: "danger", text: `NACK v${g.last_nack_version}`, ...(detail ? { title: detail } : {}) };
-  }
+/**
+ * The one badge a row shows for its config, by priority: quarantined > NACK > pending > behind.
+ * A gateway is quarantined when the version it serves or last rejected is the scope's quarantined one.
+ */
+export function configBadge(g: Gateway, latest: number | undefined, quarantined: Set<number>): ConfigBadge | null {
+  const quarantinedVersion = [g.last_nack_version, g.acked_version].find(
+    (v): v is number => v !== null && quarantined.has(v),
+  );
+  if (quarantinedVersion !== undefined) return { tone: "danger", text: `quarantined v${quarantinedVersion}` };
+  if (g.last_nack_version !== null) return { tone: "danger", text: `NACK v${g.last_nack_version}` };
   if (g.pending_version !== null) return { tone: "info", text: `pending v${g.pending_version}` };
   if (g.acked_version !== null && latest !== undefined && g.acked_version < latest) {
     return { tone: "warn", text: `behind v${latest}` };
@@ -97,169 +51,190 @@ export function configStatus(g: Gateway, latest: number | undefined): ConfigStat
   return null;
 }
 
-/** Whether the list's Health column should flag this gateway. The detail page says what is wrong. */
-export function needsAttention(g: Gateway): boolean {
-  return (
-    versionsDiffer(g.instances) ||
-    limitsState(g.instances).kind === "mixed" ||
-    g.last_nack_version !== null ||
-    g.quarantined_version !== null
-  );
+function sharingLabel(g: Gateway): string {
+  if (!g.shared_limits_enabled) return "per gateway";
+  return g.shared_limits_namespace || "no namespace reported";
 }
 
-/** The problems the detail page spells out, one sentence each; empty when the fleet agrees and is healthy. */
-export function gatewayWarnings(g: Gateway): string[] {
+/**
+ * The problems the fleet has right now, one sentence each: connected gateways on different builds
+ * or shared-limits settings, each connected gateway's NACK, and the scope's quarantined version.
+ * Disconnected rows are history and never raise a warning.
+ */
+export function gatewayWarnings(rows: Gateway[], quarantined: Set<number>): string[] {
+  const live = rows.filter((g) => g.connected).sort((a, b) => a.gateway_id.localeCompare(b.gateway_id));
   const warnings: string[] = [];
-  const versions = liveVersions(g.instances);
-  if (versions.length > 1) warnings.push(`Versions differ: ${versions.join(", ")}.`);
-  const limits = limitsState(g.instances);
-  if (limits.kind === "mixed") {
-    warnings.push(`Instances disagree on shared limits${limits.namespace ? ` (${limits.namespace})` : ""}.`);
+  const versions = [...new Set(live.map((g) => g.gateway_version).filter(Boolean))];
+  if (versions.length > 1) {
+    const described = live
+      .filter((g) => g.gateway_version)
+      .map((g) => `${g.gateway_id} (${g.gateway_version})`)
+      .join(", ");
+    warnings.push(`Connected gateways run different versions: ${described}.`);
   }
-  const odd = [...oddInstances(g.instances)].sort();
-  if (odd.length) {
-    warnings.push(`Out of step with most connected instances (version or shared limits): ${odd.join(", ")}.`);
+  const sharing = [...new Set(live.map(sharingLabel))];
+  if (sharing.length > 1) {
+    const described = live.map((g) => `${g.gateway_id} (${sharingLabel(g)})`).join(", ");
+    warnings.push(`Connected gateways disagree on shared limits: ${described}.`);
   }
-  if (g.last_nack_version !== null) {
+  for (const g of live) {
+    if (g.last_nack_version === null) continue;
     const code = g.last_nack_code ? ` (${g.last_nack_code})` : "";
     const reason = g.last_nack_reason?.trim().replace(/\.+$/, "");
-    warnings.push(`Config v${g.last_nack_version} was NACKed${code}${reason ? `: ${reason}` : ""}.`);
+    warnings.push(`${g.gateway_id} NACKed config v${g.last_nack_version}${code}${reason ? `: ${reason}` : ""}.`);
   }
-  if (g.quarantined_version !== null) {
-    warnings.push(`Config v${g.quarantined_version} is quarantined for this gateway id.`);
+  for (const version of [...quarantined].sort((a, b) => a - b)) {
+    warnings.push(`Config v${version} is quarantined and withheld from every gateway in this scope.`);
   }
   return warnings;
 }
 
-/** The short label of the list's Rate limits column; the full explanation is on the detail page. */
-export function rateLimitsSummary(g: Gateway): { tone: "ok" | "muted" | "warn"; label: string } | null {
-  const state = limitsState(g.instances);
-  if (state.kind === "none") return null;
-  if (state.kind === "shared") return { tone: "ok", label: state.namespace ? `Shared (${state.namespace})` : "Shared" };
-  if (state.kind === "per-instance") return { tone: "muted", label: "Per instance" };
-  return { tone: "warn", label: "Mixed" };
-}
-
-/** The sentence behind a Shared or Mixed badge on the detail page; null when the badge says it all. */
-export function rateLimitsText(g: Gateway): string | null {
-  const state = limitsState(g.instances);
-  if (state.kind === "shared") {
-    return state.namespace ? `Connected instances share their counters in namespace ${state.namespace}.` : "Connected instances share their counters; no namespace is reported.";
-  }
-  if (state.kind === "mixed") {
-    const live = g.instances.filter((i) => i.connected);
-    const sharing = live.filter((i) => i.shared_limits_enabled);
-    if (sharing.length < live.length) return "Some connected instances share their counters and others count their own.";
-    const namespaces = [...new Set(sharing.map((i) => i.shared_limits_namespace || "no namespace reported"))];
-    return `Connected instances share their counters under different namespaces (${namespaces.join(", ")}).`;
-  }
-  return null;
-}
-
-function GatewayIdentity({ g }: { g: Gateway }) {
+function GatewayId({ g }: { g: Gateway }) {
   return (
-    <div className="flex min-w-0 flex-col">
-      <Link to="/gateways/$gatewayId" params={{ gatewayId: g.gateway_id }} data-testid={`gateway-link-${g.gateway_id}`} className="w-fit">
-        <strong className="[overflow-wrap:anywhere]">{g.gateway_id}</strong>
-      </Link>
-      {g.gateway_version && <span className="text-xs text-muted-foreground [overflow-wrap:anywhere]">{g.gateway_version}</span>}
-    </div>
-  );
-}
-
-function InstancesCount({ g }: { g: Gateway }) {
-  if (!g.instances.length) {
-    return (
-      <span className="text-muted-foreground" data-testid={`instance-count-${g.gateway_id}`}>
-        No instances yet
-      </span>
-    );
-  }
-  const live = g.instances.filter((i) => i.connected).length;
-  return (
-    <UiBadge variant={live === g.instances.length ? "ok" : "warn"} data-testid={`instance-count-${g.gateway_id}`}>
-      {live}/{g.instances.length} instances connected
-    </UiBadge>
-  );
-}
-
-function RateLimits({ g }: { g: Gateway }) {
-  const summary = rateLimitsSummary(g);
-  if (!summary) return <span className="text-muted-foreground">—</span>;
-  return <Badge tone={summary.tone}>{summary.label}</Badge>;
-}
-
-function ConfigStatus({ g, latest }: { g: Gateway; latest: number | undefined }) {
-  const status = configStatus(g, latest);
-  return (
-    <span className="inline-flex flex-wrap items-center gap-1.5">
-      {g.acked_version === null ? <span className="text-muted-foreground">—</span> : `v${g.acked_version}`}
-      {status && (
-        <UiBadge variant={status.tone} title={status.title}>
-          {status.text}
-        </UiBadge>
-      )}
+    <span className="whitespace-nowrap" data-testid={`gateway-${g.gateway_id}`}>
+      <code>{g.gateway_id}</code>
     </span>
   );
 }
 
-/**
- * The create-token dialog, shared by the list and a gateway's page: fixed id, or typed on the list. Callers give
- * it a new `key` on every opening, so each one starts from an empty form without a leftover error.
- */
-export function GatewayTokenDialog({ open, gatewayId, onClose, onCreated }: { open: boolean; gatewayId?: string; onClose: () => void; onCreated?: () => void }) {
-  const showSecret = useShowSecret();
-  const form = useForm({ gateway_id: gatewayId ?? "", name: "" }, { gateway_id: required("Gateway id") });
-  const create = useMut((values: { gateway_id: string; name: string }) =>
-    runTokenSecretMutation(() => api.createGatewayToken(values), (value) => showSecret({ value, title: "Gateway token created" })),
+function RateLimits({ g }: { g: Gateway }) {
+  if (!g.shared_limits_enabled) return <Badge tone="muted">Per gateway</Badge>;
+  return <Badge tone="ok">{g.shared_limits_namespace ? `Shared (${g.shared_limits_namespace})` : "Shared"}</Badge>;
+}
+
+function TokenName({ g }: { g: Gateway }) {
+  return g.token.name ? (
+    <span className="whitespace-nowrap">{g.token.name}</span>
+  ) : (
+    <code className="whitespace-nowrap text-muted-foreground">{g.token.display_prefix}…</code>
   );
+}
 
-  const submit = async () => {
-    if (!form.validate()) return false;
-    if (gatewayId) {
-      // A server error must stay visible: there is no editable field for it to attach to.
-      await create.mutateAsync({ gateway_id: gatewayId, name: form.values.name });
-      onCreated?.();
-      return;
-    }
-    return form.run(async () => {
-      await create.mutateAsync(form.values);
-      onCreated?.();
-    });
-  };
-
+function Config({ g, latest, quarantined }: { g: Gateway; latest: number | undefined; quarantined: Set<number> }) {
+  const badge = configBadge(g, latest, quarantined);
   return (
-    <FormDialog open={open} title="New gateway token" submitLabel="Create token" onClose={onClose} onSubmit={submit}>
-      {gatewayId ? (
-        <div className="flex flex-col gap-1">
-          <span className="text-sm font-semibold">Gateway id</span>
-          <code className="text-muted-foreground [overflow-wrap:anywhere]">{gatewayId}</code>
-        </div>
-      ) : (
-        <TextField
-          label="Gateway id"
-          value={form.values.gateway_id}
-          onChange={(value) => form.set("gateway_id", value)}
-          error={form.errors.gateway_id}
-          autoFocus
-        />
-      )}
-      <TextField
-        label="Label"
-        value={form.values.name}
-        onChange={(value) => form.set("name", value)}
-        autoFocus={!!gatewayId}
-      />
+    <span className="inline-flex flex-wrap items-center gap-1.5" data-testid={`config-${g.gateway_id}`}>
+      {g.acked_version === null ? <span className="text-muted-foreground">—</span> : `v${g.acked_version}`}
+      {badge && <Badge tone={badge.tone}>{badge.text}</Badge>}
+    </span>
+  );
+}
+
+function GatewayTokenDialog({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: () => void }) {
+  const showSecret = useShowSecret();
+  const form = useForm({ name: "" });
+  const create = useMut(() =>
+    runTokenSecretMutation(
+      () => api.createGatewayToken({ name: form.values.name }),
+      (value) => showSecret({ value, title: "Gateway token created" }),
+    ),
+  );
+  return (
+    <FormDialog
+      open={open}
+      title="New gateway token"
+      submitLabel="Create token"
+      onClose={onClose}
+      onSubmit={() =>
+        form.run(async () => {
+          await create.mutateAsync();
+          onCreated();
+        })
+      }
+    >
+      <TextField label="Label" value={form.values.name} onChange={(value) => form.set("name", value)} autoFocus />
     </FormDialog>
   );
 }
 
+function TokensTab({ rows, loading, error, onRetry }: { rows: GatewayToken[] | undefined; loading: boolean; error: Error | null; onRetry: () => void }) {
+  const [revoking, setRevoking] = useState<GatewayToken | null>(null);
+  const revoke = useMut((token: GatewayToken) => api.revokeGatewayToken(token.id), "Gateway token revoked");
+  const connected = revoking?.connected_gateways ?? 0;
+  const message = `Disconnects ${connected} connected gateway${connected === 1 ? "" : "s"}; ${connected === 1 ? "it keeps" : "they keep"} serving ${connected === 1 ? "its" : "their"} last good config.`;
+  return (
+    <>
+      <DataTable
+        rows={rows}
+        loading={loading}
+        error={error}
+        onRetry={onRetry}
+        rowKey={(t) => t.id}
+        empty="No gateway tokens yet."
+        columns={[
+          {
+            key: "label",
+            header: "Label",
+            sort: (a, b) => a.name.localeCompare(b.name),
+            cell: (t) => (t.name ? <strong className="[overflow-wrap:anywhere]">{t.name}</strong> : <span className="text-muted-foreground">—</span>),
+          },
+          { key: "prefix", header: "Prefix", cell: (t) => <code>{t.display_prefix}…</code> },
+          { key: "created", header: "Created", cell: (t) => fmtDateTime(t.created_at) },
+          { key: "used", header: "Last used", cell: (t) => (t.last_used_at ? fmtDateTime(t.last_used_at) : "—") },
+          {
+            key: "gateways",
+            header: "Gateways",
+            cell: (t) => <span data-testid={`token-gateways-${t.id}`}>{t.connected_gateways}</span>,
+          },
+          {
+            key: "status",
+            header: "Status",
+            cell: (t) =>
+              t.revoked_at ? (
+                <span className="inline-flex flex-wrap items-center gap-1.5">
+                  <Badge>Revoked</Badge>
+                  <span className="text-xs text-muted-foreground">{fmtDateTime(t.revoked_at)}</span>
+                </span>
+              ) : (
+                <Badge tone="ok">Active</Badge>
+              ),
+          },
+          {
+            key: "actions",
+            header: "",
+            align: "right",
+            cell: (t) =>
+              t.revoked_at ? null : (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  aria-label={`Revoke ${t.name || `${t.display_prefix}…`}`}
+                  onClick={() => setRevoking(t)}
+                >
+                  Revoke
+                </Button>
+              ),
+          },
+        ]}
+      />
+      <ConfirmDialog
+        open={!!revoking}
+        title="Revoke gateway token"
+        confirmLabel="Revoke"
+        message={message}
+        onConfirm={() => revoke.mutateAsync(revoking!)}
+        onClose={() => setRevoking(null)}
+      />
+    </>
+  );
+}
+
 export function Gateways() {
-  const list = useQuery({ queryKey: ["gateways"], queryFn: () => api.gateways(), refetchInterval: 10_000 });
+  const gateways = useQuery({ queryKey: ["gateways"], queryFn: () => api.gateways(), refetchInterval: 10_000 });
   const versions = useQuery({ queryKey: ["config-versions"], queryFn: () => api.configVersions() });
-  const latest = versions.data?.reduce((m, v) => Math.max(m, v.version), 0);
+  const tokens = useQuery({ queryKey: ["gateway-tokens"], queryFn: () => api.gatewayTokens(), refetchInterval: 10_000 });
+  const [tab, setTab] = useState<Tab>("gateways");
   const [creating, setCreating] = useState(false);
   const [opened, setOpened] = useState(0);
+
+  const latest = versions.data?.reduce((max, v) => Math.max(max, v.version), 0);
+  const quarantined = quarantinedVersions(versions.data);
+  const rows = gateways.data
+    ? [...gateways.data].sort((a, b) => Number(b.connected) - Number(a.connected) || a.gateway_id.localeCompare(b.gateway_id))
+    : undefined;
+  const warnings = gatewayWarnings(gateways.data ?? [], quarantined);
 
   return (
     <>
@@ -276,28 +251,64 @@ export function Gateways() {
           </CreateButton>
         }
       />
-      <DataTable
-        rows={list.data}
-        loading={list.isPending}
-        error={list.error}
-        onRetry={() => void list.refetch()}
-        rowKey={(r) => r.gateway_id}
-        empty="No gateways have registered yet. Create a token to connect one."
-        columns={[
-          { key: "id", header: "Gateway", sort: (a, b) => a.gateway_id.localeCompare(b.gateway_id), cell: (r) => <GatewayIdentity g={r} /> },
-          { key: "instances", header: "Instances", cell: (r) => <InstancesCount g={r} /> },
-          { key: "config", header: "Config", hideBelow: "sm", cell: (r) => <ConfigStatus g={r} latest={latest} /> },
-          { key: "limits", header: "Rate limits", hideBelow: "md", cell: (r) => <RateLimits g={r} /> },
-          { key: "seen", header: "Last seen", hideBelow: "lg", cell: (r) => (r.last_seen_at ? fmtDateTime(r.last_seen_at) : "—") },
-          {
-            key: "health",
-            header: "Health",
-            hideBelow: "md",
-            cell: (r) => (needsAttention(r) ? <Badge tone="warn">Needs attention</Badge> : null),
-          },
-        ]}
+      <Tabs value={tab} onValueChange={(value) => setTab(value as Tab)}>
+        <TabsList aria-label="Gateway sections" className="mb-4 max-w-full justify-start overflow-x-auto">
+          <TabsTrigger value="gateways" className="flex-none">
+            Gateways
+          </TabsTrigger>
+          <TabsTrigger value="tokens" className="flex-none">
+            Tokens
+          </TabsTrigger>
+        </TabsList>
+        <TabsContent value="gateways">
+          {warnings.length > 0 && (
+            <Alert variant="warn" className="mb-4" data-testid="gateway-warnings">
+              <AlertDescription>
+                <ul className="m-0 flex list-disc flex-col gap-1 pl-4">
+                  {warnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
+              </AlertDescription>
+            </Alert>
+          )}
+          <DataTable
+            rows={rows}
+            loading={gateways.isPending}
+            error={gateways.error}
+            onRetry={() => {
+              void gateways.refetch();
+              void versions.refetch();
+            }}
+            rowKey={(r) => r.gateway_id}
+            mutedRow={(r) => !r.connected}
+            empty="No gateways have connected yet. Create a token to connect one."
+            columns={[
+              { key: "id", header: "Gateway", sort: (a, b) => a.gateway_id.localeCompare(b.gateway_id), cell: (r) => <GatewayId g={r} /> },
+              {
+                key: "state",
+                header: "State",
+                cell: (r) => <Badge tone={r.connected ? "ok" : "muted"}>{r.connected ? "Connected" : "Disconnected"}</Badge>,
+              },
+              { key: "version", header: "Version", cell: (r) => (r.gateway_version ? <code className="whitespace-nowrap">{r.gateway_version}</code> : <span className="text-muted-foreground">—</span>) },
+              { key: "config", header: "Config", cell: (r) => <Config g={r} latest={latest} quarantined={quarantined} /> },
+              { key: "limits", header: "Rate limits", hideBelow: "md", cell: (r) => <RateLimits g={r} /> },
+              { key: "token", header: "Token", hideBelow: "md", cell: (r) => <TokenName g={r} /> },
+              { key: "seen", header: "Last seen", hideBelow: "lg", cell: (r) => <span className="whitespace-nowrap">{r.last_seen_at ? fmtDateTime(r.last_seen_at) : "—"}</span> },
+              { key: "peer", header: "Peer", hideBelow: "lg", cell: (r) => (r.peer ? <code className="[overflow-wrap:anywhere]">{r.peer}</code> : "—") },
+            ]}
+          />
+        </TabsContent>
+        <TabsContent value="tokens">
+          <TokensTab rows={tokens.data} loading={tokens.isPending} error={tokens.error} onRetry={() => void tokens.refetch()} />
+        </TabsContent>
+      </Tabs>
+      <GatewayTokenDialog
+        key={opened}
+        open={creating}
+        onClose={() => setCreating(false)}
+        onCreated={() => setTab("tokens")}
       />
-      <GatewayTokenDialog key={opened} open={creating} onClose={() => setCreating(false)} />
     </>
   );
 }

@@ -199,9 +199,6 @@ BY_MODEL: dict[tuple[str, str], str] = {
     ),
     ("TokenCreate", "name"): "A label for the token.",
     ("GatewayTokenCreate", "name"): "A label for the token.",
-    ("GatewayTokenCreate", "gateway_id"): (
-        "The gateway id the token is bound to. A gateway must present the same id."
-    ),
     ("RollbackCreate", "version"): "The config version to restore.",
     ("UpstreamCreate", "name"): "Unique upstream name.",
     ("UpstreamUpdate", "name"): "Unique upstream name.",

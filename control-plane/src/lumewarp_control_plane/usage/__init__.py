@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumewarp_control_plane import audit, outbox
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2
 from lumewarp_control_plane.db import SessionFactory
+from lumewarp_control_plane.ids import valid_gateway_id
 from lumewarp_control_plane.models import (
     ActorType,
     ApiKey,
@@ -538,14 +539,14 @@ async def ingest(
     key, a request id reused for different content within the batch or against a stored
     event) is skipped and logged, and never costs the rest of the batch. A duplicate request
     id with an identical payload is accepted without re-counting. Only batch-level problems
-    (gateway identity, batch size) reject the whole batch. Event timestamps, not receipt
-    time, select the UTC month.
+    (an invalid reporting gateway id, batch size) reject the whole batch. Event timestamps,
+    not receipt time, select the UTC month.
 
     If `skipped` is given, skipped events are added to it by bounded reason (`SKIP_REASONS`)
     for the caller to export once the transaction has committed.
     """
-    if not isinstance(gateway_id, str) or not gateway_id or len(gateway_id) > 200:
-        raise InvalidUsageBatch("invalid gateway identity")
+    if not isinstance(gateway_id, str) or not valid_gateway_id(gateway_id):
+        raise InvalidUsageBatch("invalid gateway id: 1..100 of [A-Za-z0-9._-]")
     maximum = (
         get_settings().max_usage_batch_events if max_batch_events is None else max_batch_events
     )

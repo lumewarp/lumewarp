@@ -57,8 +57,9 @@ async def enforce_org_budgets(
 ) -> bool:
     """Mark newly exceeded orgs for `window_start`; return whether one flipped this month.
 
-    `team_ids` are the teams whose totals this ingest changed; only their orgs are
-    checked. An org without a budget is never read. The event timestamp has already
+    `gateway_id` is the reporting process, used only as the audit actor. `team_ids` are the
+    teams whose totals this ingest changed; only their orgs are checked. An org without a
+    budget is never read. The event timestamp has already
     selected the window (`_add_totals`), so a late previous-month event is judged against
     its own month and never blocks the current one: it still records its window row and
     audit, but only a current-month crossing asks for a recompile.

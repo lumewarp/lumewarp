@@ -30,12 +30,12 @@ async def list_plugins(
         Query(description="Only this kind; omitted lists all three."),
     ] = None,
 ) -> Page[PluginOut]:
-    """The plugins a write may name, and which connected instances have each.
+    """The plugins a write may name, and which connected gateways have each.
 
-    A plugin counts only if every connected instance of a gateway id reports it: one entry
-    per instance in `gateways`, connected first; `missing_gateways` is what a forced save is
-    saving past. A schema the control plane cannot use is null, with the reason in
-    `schema_problems`: only the gateway's own `configure` validates those settings.
+    A plugin counts only if every connected gateway reports it: one entry per gateway in
+    `gateways`, connected first; `missing_gateways` is what a forced save is saving past. A
+    schema the control plane cannot use is null, with the reason in `schema_problems`: only
+    the gateway's own `configure` validates those settings.
     """
     await authz.require(Action.ROUTING_READ)
     registry = await load_plugins(session, settings.scope)
@@ -59,7 +59,6 @@ async def list_plugins(
                     gateways=[
                         PluginGatewayOut(
                             gateway_id=support.gateway_id,
-                            instance_id=support.instance_id,
                             connected=support.connected,
                             digest=support.digest,
                             seen_at=support.seen_at,

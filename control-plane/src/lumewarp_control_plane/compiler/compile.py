@@ -347,8 +347,8 @@ async def compile_scope(
     catalog_rows = select(Alias).order_by(Alias.name).execution_options(populate_existing=True)
     aliases = (await session.scalars(catalog_rows)).all()
     model_by_id = {d.id: d for d in models}
-    # A capability counts only if every connected instance of every gateway id reports it:
-    # a replica without it would NACK the version that needs it (docs/config-protocol.md).
+    # A capability counts only if every connected gateway reports it: one without it would
+    # NACK the version that needs it (docs/config-protocol.md).
     reported_capabilities = [
         set(caps)
         for caps in await session.scalars(

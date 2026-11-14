@@ -15,9 +15,9 @@
 #   DEV_OPENWEBUI=0           do not start Open WebUI
 #
 # Ports: UI 5173 (Vite, proxies /api to the CP), CP 8091 (+ gRPC 50051, metrics 9465),
-# gateway 4000 (+ admin 9464) and a second instance 4001 (+ admin 9466), mock upstream
+# gateway 4000 (+ admin 9464) and a second gateway 4001 (+ admin 9466), mock upstream
 # 9100, example MCP 9110, example A2A 9120, Open WebUI 3000, Valkey 56379.
-# Both gateways run as instances of one gateway id and share rate limits through Valkey.
+# Each gateway generates its own id; both share rate limits through Valkey.
 # An empty database gets a model `mock-local`, a router `demo` over it, an alias
 # `demo-latest` to the router, a team `demo` and one key; the key secret is kept in
 # .dev/demo-key. One with no MCP server or A2A agent gets `example` and `helper`,
@@ -36,7 +36,6 @@ authz="${DEV_AUTHZ:-builtin}"
 break_glass_password="${LUMEWARP_BREAK_GLASS_PASSWORD:-dev-break-glass}"
 admin_csrf=""
 tab_label="lumewarp-dev"
-gateway_id="gw-dev"
 cp_url="http://127.0.0.1:8091"
 ui_url="http://127.0.0.1:5173"
 openwebui="${DEV_OPENWEBUI:-1}"
@@ -120,7 +119,7 @@ prepare() {
   )
   local token
   token="$(cd "$root/control-plane" && uv run -q lumewarp-control-plane bootstrap \
-    --gateway-id "$gateway_id" 2>/dev/null)"
+    --name gw-dev 2>/dev/null)"
   {
     echo "export LUMEWARP_DEV_MODE=true"
     echo "export LUMEWARP_PLAYGROUND_GATEWAY_URL=http://127.0.0.1:4000"
@@ -137,7 +136,7 @@ prepare() {
     echo "export LUMEWARP_AUTH_PLUGIN_DIR=$root/gateway/target/plugins/auth"
     echo "export LUMEWARP_A2A_MIDDLEWARE_DIR=$root/gateway/target/plugins/a2a-middleware"
   } >>"$env"
-  # Listeners of each gateway instance (`--local-config`).
+  # Listeners of each gateway (`--local-config`).
   local n listen admin
   for n in 1 2; do
     listen=$((3999 + n)) admin=$((9462 + 2 * n))
@@ -208,7 +207,7 @@ run_service() { # mock | mcp | a2a | cp | gw | gw2 | ui
       wait_http "$cp_url/healthz" "control plane" # avoids connect-retry warnings at startup
       exec "$root/gateway/target/release/lumewarp" --control-plane http://127.0.0.1:50051 \
         --gateway-token-env LUMEWARP_GATEWAY_TOKEN --state-dir "$state/gateway$n" \
-        --scope default --gateway-id "$gateway_id" --local-config "$state/gateway$n.yaml"
+        --scope default --local-config "$state/gateway$n.yaml"
       ;;
     ui) exec pnpm --dir "$root/ui" dev --host 127.0.0.1 --port 5173 --strictPort ;;
     *) die "unknown service: $1" ;;
@@ -274,7 +273,7 @@ summary() { # stop hint
   Emergency login uses LUMEWARP_BREAK_GLASS_PASSWORD (development default configured).
   API       $cp_url/api/v1
   gateway   http://127.0.0.1:4000/v1 and http://127.0.0.1:4001/v1   (names: mock-local, demo, demo-latest)
-            two instances of $gateway_id sharing rate limits through Valkey 127.0.0.1:56379
+            two gateways sharing rate limits through Valkey 127.0.0.1:56379
   MCP       http://127.0.0.1:9110/mcp   (example upstream; control /_mock/)
   A2A       http://127.0.0.1:9120/a2a   (agent card /.well-known/agent-card.json)
   metrics   http://127.0.0.1:9464/metrics and :9466/metrics (gateways), http://127.0.0.1:9465/metrics (CP)

@@ -28,9 +28,7 @@ async def probe(target: str, token: str, gateway_id: str, timeout: float = 10.0)
             metadata=(("authorization", f"Bearer {token}"),)
         )
         await call.write(
-            cpb.GatewayMessage(
-                hello=cpb.Hello(gateway_id=gateway_id, instance_id="probe", gateway_version="probe")
-            )
+            cpb.GatewayMessage(hello=cpb.Hello(gateway_id=gateway_id, gateway_version="probe"))
         )
         update = await asyncio.wait_for(call.read(), timeout)
         if update.WhichOneof("update") != "full":

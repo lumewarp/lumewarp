@@ -1,10 +1,10 @@
-"""Shared rate limits with the real control plane, Redis and three gateway instances.
+"""Shared rate limits with the real control plane, Redis and three gateways.
 
 docs/operations/gateway.md, "Shared rate limits": a background sync pushes each
-instance's per-minute counts and in-flight gauge to one Redis namespace, so rpm,
-tpm and max_parallel hold across every instance of a gateway id instead of once
-per process. When Redis is unreachable an instance counts locally (N x), and a
-killed instance's parallel slots free after the 3 s staleness window.
+gateway's per-minute counts and in-flight gauge to one Redis namespace, so rpm,
+tpm and max_parallel hold across every gateway instead of once per process. When
+Redis is unreachable a gateway counts locally (N x), and a killed gateway's
+parallel slots free after the 3 s staleness window.
 
 These tests need a Redis. `scripts/e2e-core.sh` starts a throwaway
 `redis:7-alpine` with docker when `E2E_REDIS_URL` is unset and docker is
@@ -27,11 +27,11 @@ from stack import free_port, run_id, wait_for
 REDIS_URL = os.environ.get("E2E_REDIS_URL", "").strip()
 # The design's lower bound, so the tests also cover the fast sync path.
 SYNC_MS = 20
-INSTANCES = 3
+GATEWAYS = 3
 # The documented over-admission bound per window: the limit plus one share per
-# instance (limit + n), from rounding and from an instance that joined before
+# gateway (limit + n), from rounding and from an gateway that joined before
 # the others saw it.
-OVER_LIMIT = INSTANCES
+OVER_LIMIT = GATEWAYS
 
 pytestmark = pytest.mark.skipif(
     not REDIS_URL,
@@ -47,7 +47,7 @@ class RedisClient:
     """A tiny RESP client: PING and HGETALL are all these tests need.
 
     It is deliberately independent of the gateway: the tests read the in-flight
-    hash the design's sync script writes (and verify the instance is alive) and
+    hash the design's sync script writes (and verify the gateway is alive) and
     never touch Redis from the request path.
     """
 
@@ -243,14 +243,13 @@ def _publish_key_limits(stack, key, **limits) -> int:
 
 
 def _connected(stack) -> list[dict]:
-    status = stack.gateway_status() or {}
-    return [instance for instance in status.get("instances", []) if instance["connected"]]
+    return [gateway for gateway in stack.gateway_items() if gateway["connected"]]
 
 
-def _start_instances(stack, redis_url: str, namespace: str, tag: str) -> list:
-    """Three processes of one gateway id, one token, one Redis namespace."""
+def _start_gateways(stack, redis_url: str, namespace: str, tag: str) -> list:
+    """Three gateway processes, one token, one Redis namespace."""
     gateways = []
-    for index in range(1, INSTANCES + 1):
+    for index in range(1, GATEWAYS + 1):
         hostname = f"gw-{tag}-{index}"
         gateways.append(
             stack.start_gateway(
@@ -267,26 +266,26 @@ def _start_instances(stack, redis_url: str, namespace: str, tag: str) -> list:
     return gateways
 
 
-def _wait_instances(stack, namespace: str) -> list[dict]:
+def _wait_gateways(stack, namespace: str) -> list[dict]:
     def ready():
-        instances = _connected(stack)
-        return len(instances) == INSTANCES and all(
-            instance["shared_limits_enabled"] and instance["shared_limits_namespace"] == namespace
-            for instance in instances
+        gateways = _connected(stack)
+        return len(gateways) == GATEWAYS and all(
+            gateway["shared_limits_enabled"] and gateway["shared_limits_namespace"] == namespace
+            for gateway in gateways
         )
 
-    wait_for(ready, 20, f"{INSTANCES} connected instances sharing {namespace}")
+    wait_for(ready, 20, f"{GATEWAYS} connected gateways sharing {namespace}")
     return _connected(stack)
 
 
 def _wait_acked(stack, version: int) -> None:
     def acked():
-        instances = _connected(stack)
-        return len(instances) == INSTANCES and all(
-            (instance["acked_version"] or 0) >= version for instance in instances
+        gateways = _connected(stack)
+        return len(gateways) == GATEWAYS and all(
+            (gateway["acked_version"] or 0) >= version for gateway in gateways
         )
 
-    wait_for(acked, 20, f"{INSTANCES} instances ACKed a version >= {version}")
+    wait_for(acked, 20, f"{GATEWAYS} gateways ACKed a version >= {version}")
 
 
 def _wait_fallback(gateways, value: int, timeout: float, what: str) -> None:
@@ -329,43 +328,43 @@ def _retry_after(response) -> int:
 # Tests ---------------------------------------------------------------------------
 
 
-def test_rpm_limit_holds_across_three_instances(stack, redis):
-    """18 requests round-robin over three instances admit at most limit + n.
+def test_rpm_limit_holds_across_three_gateways(stack, redis):
+    """18 requests round-robin over three gateways admit at most limit + n.
 
     The gateways started by this test (and the following ones) are not the
-    stack's default gateway: one gateway id runs three processes with the same
-    token, each with its own state dir and instance id.
+    stack's default gateway: three processes share the token, each with its own
+    state dir and generated gateway id.
     """
     namespace = _namespace("rpm")
     seeded = stack.seed()
     version = _publish_key_limits(stack, seeded.a, rpm_limit=12)
-    gateways = _start_instances(stack, REDIS_URL, namespace, "rpm")
+    gateways = _start_gateways(stack, REDIS_URL, namespace, "rpm")
 
-    instances = _wait_instances(stack, namespace)
-    instance_ids = {instance["instance_id"] for instance in instances}
-    assert len(instance_ids) == INSTANCES, instance_ids
-    assert any(name.startswith("gw-rpm-1-") for name in instance_ids), instance_ids
-    assert any(name.startswith("gw-rpm-2-") for name in instance_ids), instance_ids
-    assert any(name.startswith("gw-rpm-3-") for name in instance_ids), instance_ids
-    for instance in instances:
-        assert instance["shared_limits_enabled"] is True
-        assert instance["shared_limits_namespace"] == namespace
+    rows = _wait_gateways(stack, namespace)
+    gateway_ids = {row["gateway_id"] for row in rows}
+    assert len(gateway_ids) == GATEWAYS, gateway_ids
+    assert any(name.startswith("gw-rpm-1-") for name in gateway_ids), gateway_ids
+    assert any(name.startswith("gw-rpm-2-") for name in gateway_ids), gateway_ids
+    assert any(name.startswith("gw-rpm-3-") for name in gateway_ids), gateway_ids
+    for row in rows:
+        assert row["shared_limits_enabled"] is True
+        assert row["shared_limits_namespace"] == namespace
     _wait_acked(stack, version)
     # The first successful sync clears the startup fallback, so both halves of
     # the counter are shared before the burst.
-    _wait_fallback(gateways, 0, 10, "shared mode on every instance")
+    _wait_fallback(gateways, 0, 10, "shared mode on every gateway")
 
     responses = []
     for index in range(18):
-        responses.append(gateways[index % INSTANCES].chat(seeded.a.secret))
-        # A sync between two requests of one instance keeps the views fresh;
+        responses.append(gateways[index % GATEWAYS].chat(seeded.a.secret))
+        # A sync between two requests of one gateway keeps the views fresh;
         # this is the documented steady state, not a stress test.
         time.sleep(0.02)
 
     admitted = [response for response in responses if response.status_code == 200]
     limited = [response for response in responses if response.status_code == 429]
     assert len(admitted) + len(limited) == len(responses)
-    print(f"rpm 12: {len(admitted)} of 18 admitted across 3 instances")
+    print(f"rpm 12: {len(admitted)} of 18 admitted across 3 gateways")
     assert 12 <= len(admitted) <= 12 + OVER_LIMIT, [response.status_code for response in responses]
     assert limited, "18 requests with a limit of 12 must hit the limit"
     for response in limited:
@@ -373,8 +372,8 @@ def test_rpm_limit_holds_across_three_instances(stack, redis):
         _retry_after(response)
 
 
-def test_max_parallel_holds_across_three_instances(stack, redis):
-    """Concurrent requests over three instances never exceed limit + n in flight."""
+def test_max_parallel_holds_across_three_gateways(stack, redis):
+    """Concurrent requests over three gateways never exceed limit + n in flight."""
     namespace = _namespace("parallel")
     seeded = stack.seed()
     slow_port = stack.start_mock("slow-parallel", latency_ms=1500)
@@ -403,25 +402,25 @@ def test_max_parallel_holds_across_three_instances(stack, redis):
         json={"name": "slow", "members": [{"model_id": model["id"]}]},
     )
     version = _publish_key_limits(stack, seeded.a, max_parallel=3)
-    gateways = _start_instances(stack, REDIS_URL, namespace, "parallel")
-    _wait_instances(stack, namespace)
+    gateways = _start_gateways(stack, REDIS_URL, namespace, "parallel")
+    _wait_gateways(stack, namespace)
     _wait_acked(stack, version)
-    _wait_fallback(gateways, 0, 10, "shared mode on every instance")
+    _wait_fallback(gateways, 0, 10, "shared mode on every gateway")
 
-    # One request per instance teaches all three the scope (every instance then
+    # One request per gateway teaches all three the scope (every gateway then
     # writes its in-flight entry on each sync), so the shares are divided by 3
     # before the measured burst.
-    with ThreadPoolExecutor(max_workers=INSTANCES) as pool:
+    with ThreadPoolExecutor(max_workers=GATEWAYS) as pool:
         warm = [pool.submit(gateway.chat, seeded.a.secret, model="slow") for gateway in gateways]
-        assert [future.result(timeout=10).status_code for future in warm] == [200] * INSTANCES
+        assert [future.result(timeout=10).status_code for future in warm] == [200] * GATEWAYS
 
-    # The warm-up requests held every slot, so each instance's last sync divided
+    # The warm-up requests held every slot, so each gateway's last sync divided
     # a full gauge: wait until they are all released and the next syncs have
     # redivided the headroom before measuring.
     scope = f"key:{seeded.a.id}"
     wait_for(
         lambda: (
-            len(_inflight(redis, namespace, scope)) == INSTANCES
+            len(_inflight(redis, namespace, scope)) == GATEWAYS
             and all(count == 0 for count in _inflight(redis, namespace, scope).values())
         ),
         5,
@@ -438,7 +437,7 @@ def test_max_parallel_holds_across_three_instances(stack, redis):
         lock = threading.Lock()
 
         def call(index: int) -> None:
-            gateway = gateways[index % INSTANCES]
+            gateway = gateways[index % GATEWAYS]
             barrier.wait()
             started = time.monotonic()
             response = gateway.chat(seeded.a.secret, model="slow")
@@ -497,7 +496,7 @@ def test_max_parallel_holds_across_three_instances(stack, redis):
     wait_for(admitted_again, 5, "a slot after the burst was released")
 
 
-def test_redis_outage_falls_back_to_per_instance_limits_and_recovers(stack, redis):
+def test_redis_outage_falls_back_to_per_gateway_limits_and_recovers(stack, redis):
     """Redis down: fallback metric, N x limits; Redis back: sharing resumes."""
     namespace = _namespace("fallback")
     seeded = stack.seed()
@@ -506,16 +505,16 @@ def test_redis_outage_falls_back_to_per_instance_limits_and_recovers(stack, redi
     proxy = RedisProxy(parts.hostname or "127.0.0.1", parts.port or 6379)
     try:
         database = parts.path or "/0"
-        gateways = _start_instances(
+        gateways = _start_gateways(
             stack, f"redis://127.0.0.1:{proxy.port}{database}", namespace, "fallback"
         )
-        _wait_instances(stack, namespace)
+        _wait_gateways(stack, namespace)
         _wait_acked(stack, version)
-        _wait_fallback(gateways, 0, 10, "shared mode on every instance")
+        _wait_fallback(gateways, 0, 10, "shared mode on every gateway")
 
         proxy.close()
         closed_at = time.monotonic()
-        _wait_fallback(gateways, 1, 5, "fallback on every instance")
+        _wait_fallback(gateways, 1, 5, "fallback on every gateway")
         entered = time.monotonic() - closed_at
         print(f"fallback entered {entered:.2f}s after Redis became unreachable")
         # The task enters fallback after 1 s without a successful sync.
@@ -528,10 +527,10 @@ def test_redis_outage_falls_back_to_per_instance_limits_and_recovers(stack, redi
             for gateway in gateways
         ), "a refused connection must be counted as a connect error"
 
-        # Each instance counts alone at the full limit: 10 per instance, so all
+        # Each gateway counts alone at the full limit: 10 per gateway, so all
         # 30 requests are served even though the shared limit is 12.
         statuses = [
-            gateways[index % INSTANCES].chat(seeded.a.secret).status_code for index in range(30)
+            gateways[index % GATEWAYS].chat(seeded.a.secret).status_code for index in range(30)
         ]
         assert statuses == [200] * 30, statuses
 
@@ -539,7 +538,7 @@ def test_redis_outage_falls_back_to_per_instance_limits_and_recovers(stack, redi
         _wait_fallback(gateways, 0, 5, "shared mode after Redis returned")
 
         # The counts admitted in fallback are now in Redis, so the whole key is
-        # over its limit again: every instance answers 429, not 200.
+        # over its limit again: every gateway answers 429, not 200.
         def all_limited() -> bool:
             return all(gateway.chat(seeded.a.secret).status_code == 429 for gateway in gateways)
 
@@ -549,7 +548,7 @@ def test_redis_outage_falls_back_to_per_instance_limits_and_recovers(stack, redi
         proxy.close()
 
 
-def test_killed_instance_frees_its_parallel_slots(stack, redis, request):
+def test_killed_gateway_frees_its_parallel_slots(stack, redis, request):
     """SIGKILL with slots held: the others admit again after the 3 s stale window."""
     namespace = _namespace("kill")
     seeded = stack.seed()
@@ -579,46 +578,40 @@ def test_killed_instance_frees_its_parallel_slots(stack, redis, request):
         json={"name": "slow", "members": [{"model_id": model["id"]}]},
     )
     version = _publish_key_limits(stack, seeded.a, max_parallel=3)
-    gateways = _start_instances(stack, REDIS_URL, namespace, "kill")
+    gateways = _start_gateways(stack, REDIS_URL, namespace, "kill")
     victim, survivor = gateways[0], gateways[1]
-    instances = _wait_instances(stack, namespace)
+    rows = _wait_gateways(stack, namespace)
     _wait_acked(stack, version)
-    _wait_fallback(gateways, 0, 10, "shared mode on every instance")
+    _wait_fallback(gateways, 0, 10, "shared mode on every gateway")
     victim_id = next(
-        instance["instance_id"]
-        for instance in instances
-        if instance["instance_id"].startswith("gw-kill-1-")
+        row["gateway_id"] for row in rows if row["gateway_id"].startswith("gw-kill-1-")
     )
     survivor_id = next(
-        instance["instance_id"]
-        for instance in instances
-        if instance["instance_id"].startswith("gw-kill-2-")
+        row["gateway_id"] for row in rows if row["gateway_id"].startswith("gw-kill-2-")
     )
     third_id = next(
-        instance["instance_id"]
-        for instance in instances
-        if instance["instance_id"].startswith("gw-kill-3-")
+        row["gateway_id"] for row in rows if row["gateway_id"].startswith("gw-kill-3-")
     )
 
-    # One slow request per instance: every instance's 20 ms sync catches the
+    # One slow request per gateway: every gateway's 20 ms sync catches the
     # in-flight slot, so all three learn the scope and keep publishing their
     # entry (including zero) from then on. A fast warm-up can miss every sync
-    # window and leave an instance outside the shared gauge.
-    with ThreadPoolExecutor(max_workers=INSTANCES) as pool:
+    # window and leave a gateway outside the shared gauge.
+    with ThreadPoolExecutor(max_workers=GATEWAYS) as pool:
         warm = [pool.submit(gateway.chat, seeded.a.secret, model="slow") for gateway in gateways]
-        assert [future.result(timeout=15).status_code for future in warm] == [200] * INSTANCES
+        assert [future.result(timeout=15).status_code for future in warm] == [200] * GATEWAYS
     scope = f"key:{seeded.a.id}"
     wait_for(
         lambda: set(_inflight(redis, namespace, scope)) == {victim_id, survivor_id, third_id},
         5,
-        "every instance publishes its in-flight entry",
+        "every gateway publishes its in-flight entry",
         interval=0.02,
     )
     # The warm-up held every slot, so the last sync divided zero headroom: give
     # the sync task a few intervals to divide it again before taking the slots.
     time.sleep(3 * SYNC_MS / 1000)
 
-    # Take the slots one at a time: one instance may take one slot per sync
+    # Take the slots one at a time: one gateway may take one slot per sync
     # (its share is the headroom divided by three), so three requests fired at
     # once would leave two rejected. Each admitted request holds for 5 s.
     held = ThreadPoolExecutor(max_workers=3)
@@ -709,10 +702,10 @@ def test_killed_instance_frees_its_parallel_slots(stack, redis, request):
         except Exception:  # noqa: BLE001, S110 - the point is that it did not answer
             pass
         else:
-            raise AssertionError("a request to the killed instance completed")
+            raise AssertionError("a request to the killed gateway completed")
 
     wait_for(
         lambda: len(_connected(stack)) == 2,
         15,
-        "the control plane dropped the killed instance",
+        "the control plane dropped the killed gateway",
     )

@@ -32,7 +32,8 @@ class ConfigServiceStub:
     At most one update per stream is un-ACKed at a time. ACK means the version
     is validated, durably persisted and active. See docs/config-protocol.md.
     The gateway authenticates with `authorization: Bearer <gateway token>`
-    metadata; the token is bound to a gateway id and scope by the control plane.
+    metadata; the token authenticates its scope, and any number of gateways may
+    use one token.
     """
 
     def __init__(self, channel):
@@ -55,7 +56,8 @@ class ConfigServiceServicer:
     At most one update per stream is un-ACKed at a time. ACK means the version
     is validated, durably persisted and active. See docs/config-protocol.md.
     The gateway authenticates with `authorization: Bearer <gateway token>`
-    metadata; the token is bound to a gateway id and scope by the control plane.
+    metadata; the token authenticates its scope, and any number of gateways may
+    use one token.
     """
 
     def Stream(self, request_iterator, context):
@@ -90,7 +92,8 @@ class ConfigService:
     At most one update per stream is un-ACKed at a time. ACK means the version
     is validated, durably persisted and active. See docs/config-protocol.md.
     The gateway authenticates with `authorization: Bearer <gateway token>`
-    metadata; the token is bound to a gateway id and scope by the control plane.
+    metadata; the token authenticates its scope, and any number of gateways may
+    use one token.
     """
 
     @staticmethod

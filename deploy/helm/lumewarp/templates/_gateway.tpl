@@ -7,9 +7,9 @@ missed in the other:
                             per pod from a volumeClaimTemplate, so a restarted pod keeps
                             its cached snapshot
 
-Every replica is the same gateway: they share one token and one gateway id, and the control
-plane lists them as instances of that gateway. Rate limits are counted per instance unless
-they share a Redis (redis.enabled or gateway.sharedLimits.redis.existingSecret).
+Every pod is a gateway: each process generates its own id at startup and they share one
+token. Rate limits are counted per gateway unless they share a Redis (redis.enabled or
+gateway.sharedLimits.redis.existingSecret).
 
 Usage: include "lumewarp.gateway.workload" (dict "root" $ "kind" "Deployment")
 */}}
@@ -22,7 +22,6 @@ Usage: include "lumewarp.gateway.workload" (dict "root" $ "kind" "Deployment")
 {{- $autoscaling := $values.autoscaling -}}
 {{- $sharedLimits := $values.sharedLimits -}}
 {{- $valkey := $root.Values.redis -}}
-{{- $gatewayId := required "gateway.gatewayId is required: it must equal the gateway id the token was issued for" $values.gatewayId -}}
 {{- if and $valkey.enabled $sharedLimits.redis.existingSecret -}}
 {{- fail "redis.enabled and gateway.sharedLimits.redis.existingSecret are mutually exclusive: the bundled Valkey and an external Redis URL cannot both configure the gateway" -}}
 {{- end -}}
@@ -146,7 +145,6 @@ spec:
             - --gateway-token-env={{ required "gateway.tokenEnvVar is required" $values.tokenEnvVar }}
             - --state-dir={{ $values.stateDir.path }}
             - --scope=$(LUMEWARP_SCOPE)
-            - --gateway-id={{ $gatewayId }}
             - --local-config=/etc/lumewarp/config.yaml
             {{- with $values.extraArgs }}
             {{- toYaml . | nindent 12 }}

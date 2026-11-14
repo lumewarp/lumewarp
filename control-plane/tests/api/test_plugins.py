@@ -61,7 +61,7 @@ async def report(committed: AsyncSession, api_scope: str) -> AsyncIterator:
 
     yield report_as
     await committed.rollback()
-    await committed.execute(delete(GatewayToken).where(GatewayToken.gateway_id.like(f"{PREFIX}%")))
+    await committed.execute(delete(GatewayToken).where(GatewayToken.name.like(f"{PREFIX}%")))
     await committed.execute(
         delete(GatewaySession).where(GatewaySession.gateway_id.like(f"{PREFIX}%"))
     )
@@ -325,7 +325,6 @@ async def test_revoking_the_reporting_token_ends_the_report_whatever_other_token
     committed.add(
         GatewayToken(
             scope=api_scope,
-            gateway_id=f"{PREFIX}two-tokens",
             name="unused",
             token_hash=other.hash,
             display_prefix=other.display_prefix,
@@ -351,7 +350,6 @@ async def test_a_report_of_another_token_is_ignored_when_that_token_is_revoked(
     second = generate_secret(SecretKind.GATEWAY_TOKEN)
     token = GatewayToken(
         scope=api_scope,
-        gateway_id=f"{PREFIX}handover",
         name="second",
         token_hash=second.hash,
         display_prefix=second.display_prefix,
@@ -595,18 +593,21 @@ async def test_validate_plugin_params_needs_force_for_a_gateway_lacking_it(
         )
 
 
-async def test_a_plugin_needs_every_connected_instance_of_a_gateway(client, report):
-    """Replicas of one gateway id: one lacking the strategy would NACK every version using it."""
+async def test_a_plugin_needs_every_connected_gateway(client, report):
+    """One gateway lacking the strategy would NACK every version using it."""
     name = _name()
-    await report("replica", {name: FAILOVER}, connected=True, instance_id="pod-1")
-    await report("replica", {}, connected=True, instance_id="pod-2", capabilities=[])
+    await report("has-it", {name: FAILOVER}, connected=True)
+    await report("lacks-it", {}, connected=True, capabilities=[])
     item = _strategy(client, name)
-    assert item["missing_gateways"] == [f"{PREFIX}replica"]
+    assert item["missing_gateways"] == [f"{PREFIX}lacks-it"]
     _422(_create(client, name), "force")
-    assert {g["instance_id"] for g in item["gateways"]} == {"pod-1"}
+    assert {g["gateway_id"] for g in item["gateways"]} == {f"{PREFIX}has-it"}
 
-    await report("replica", {name: FAILOVER}, connected=True, instance_id="pod-2")
+    await report("lacks-it", {name: FAILOVER}, connected=True)
     item = _strategy(client, name)
     assert item["missing_gateways"] == []
-    assert {g["instance_id"] for g in item["gateways"]} == {"pod-1", "pod-2"}
+    assert {g["gateway_id"] for g in item["gateways"]} == {
+        f"{PREFIX}has-it",
+        f"{PREFIX}lacks-it",
+    }
     assert _create(client, name).status_code == 201

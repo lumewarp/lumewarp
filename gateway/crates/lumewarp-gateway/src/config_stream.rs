@@ -24,7 +24,7 @@ use tonic::{
 };
 
 use crate::{
-    catalog, instance,
+    catalog, gateway_id,
     router::RoutingTable,
     runtime::Runtime,
     server,
@@ -45,10 +45,9 @@ pub struct StreamConfig {
     pub url: String,
     /// Read from the environment by the caller; never persisted or logged.
     pub token: String,
-    pub gateway_id: String,
     pub scope: String,
     pub state_dir: PathBuf,
-    /// `Some` when this instance shares its limiter through Redis; reported in
+    /// `Some` when this gateway shares its limiter through Redis; reported in
     /// `Hello.shared_limits` for the Gateways page.
     pub shared_limits_namespace: Option<String>,
 }
@@ -89,7 +88,7 @@ pub fn spawn(
         .map_err(|_| anyhow::anyhow!("gateway token is not a valid header value"))?;
     let mut bearer = bearer;
     bearer.set_sensitive(true);
-    tracing::info!(instance_id = instance::instance_id(), "gateway instance");
+    tracing::info!(gateway_id = gateway_id::gateway_id(), "gateway process");
     let client = Client {
         endpoint,
         bearer,
@@ -160,7 +159,7 @@ impl Client {
         let have = self.current.version;
         tx.send(GatewayMessage {
             msg: Some(Msg::Hello(Hello {
-                gateway_id: self.config.gateway_id.clone(),
+                gateway_id: gateway_id::gateway_id().to_owned(),
                 have_version: have,
                 gateway_version: env!("CARGO_PKG_VERSION").into(),
                 supported_capabilities: snapshot::supported_capabilities(),
@@ -176,7 +175,6 @@ impl Client {
                 },
                 plugins: self.plugins.clone(),
                 plugin_abi: lumewarp_plugin_host::ABI,
-                instance_id: instance::instance_id().to_owned(),
                 shared_limits: Some(SharedLimits {
                     enabled: self.config.shared_limits_namespace.is_some(),
                     namespace: self
@@ -542,7 +540,6 @@ mod tests {
             let config = StreamConfig {
                 url: format!("http://{addr}"),
                 token: "gw-token".into(),
-                gateway_id: "gw-catalog".into(),
                 scope: "scope-a".into(),
                 state_dir: dir.path().to_owned(),
                 shared_limits_namespace: None,
@@ -563,7 +560,12 @@ mod tests {
                 .await
                 .unwrap()
                 .expect("fake control plane accepted no stream");
-            assert!(matches!(conn.recv().await, Msg::Hello(_)));
+            match conn.recv().await {
+                Msg::Hello(hello) => {
+                    assert_eq!(hello.gateway_id, crate::gateway_id::gateway_id())
+                }
+                other => panic!("expected Hello, got {other:?}"),
+            }
             conn.send(full(1, "scope-a"));
             match conn.recv().await {
                 Msg::Ack(ack) => assert_eq!(ack.version, 1),
@@ -626,7 +628,6 @@ mod tests {
             let config = StreamConfig {
                 url: format!("http://{addr}"),
                 token: "gw-token".into(),
-                gateway_id: "gw-shared".into(),
                 scope: "scope-a".into(),
                 state_dir: dir.path().to_owned(),
                 shared_limits_namespace: Some("team-ns".into()),

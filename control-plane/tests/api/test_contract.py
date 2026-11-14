@@ -71,6 +71,7 @@ EXPECTED_OPERATION_IDS = {
     "listConfigVersions",
     "listModels",
     "listGateways",
+    "listGatewayTokens",
     "listOrgs",
     "listOrgAdmins",
     "listInstallationAdmins",
