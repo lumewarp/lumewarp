@@ -83,3 +83,8 @@ settings, SSO, authorization backends, the catalog, plugins and operations, and
 
 The seeded demo API key is in `.dev/demo-key`. Postgres is at `127.0.0.1:55432`, with
 database, user and password all `lumewarp`.
+
+The stack runs two gateway instances of one gateway id, `gw-dev`: <http://127.0.0.1:4000/>
+(admin `127.0.0.1:9464`) and <http://127.0.0.1:4001/> (admin `127.0.0.1:9466`). They share
+rate limits through a Valkey at `127.0.0.1:56379`, without persistence
+([shared limits](../operations/gateway.md#shared-rate-limits)).

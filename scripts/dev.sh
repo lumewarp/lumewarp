@@ -5,7 +5,7 @@
 #   scripts/dev.sh tab        inside herdr: open a `lumewarp-dev` tab, one pane per service
 #   scripts/dev.sh all        everything in this terminal with prefixed logs; Ctrl+C stops it
 #   scripts/dev.sh stop       close the herdr tab (containers keep running)
-#   scripts/dev.sh run <svc>  run one service in the foreground (mock, mcp, a2a, cp, gw, ui)
+#   scripts/dev.sh run <svc>  run one service in the foreground (mock, mcp, a2a, cp, gw, gw2, ui)
 #
 # `make dev` picks `tab` inside herdr and `all` elsewhere.
 #
@@ -15,8 +15,9 @@
 #   DEV_OPENWEBUI=0           do not start Open WebUI
 #
 # Ports: UI 5173 (Vite, proxies /api to the CP), CP 8091 (+ gRPC 50051, metrics 9465),
-# gateway 4000 (+ admin 9464), mock upstream 9100, example MCP 9110, example A2A 9120,
-# Open WebUI 3000.
+# gateway 4000 (+ admin 9464) and a second instance 4001 (+ admin 9466), mock upstream
+# 9100, example MCP 9110, example A2A 9120, Open WebUI 3000, Valkey 56379.
+# Both gateways run as instances of one gateway id and share rate limits through Valkey.
 # An empty database gets a model `mock-local`, a router `demo` over it, an alias
 # `demo-latest` to the router, a team `demo` and one key; the key secret is kept in
 # .dev/demo-key. One with no MCP server or A2A agent gets `example` and `helper`,
@@ -61,7 +62,7 @@ dev_tab() { # prints the tab id of an open dev tab, if any
 
 # Containers, builds, migrations and a gateway token; writes .dev/env for `run`.
 prepare() {
-  local ports=(4000 5173 8091 9100 9110 9120 9464 9465 50051)
+  local ports=(4000 4001 5173 8091 9100 9110 9120 9464 9465 9466 50051)
   if [[ $openwebui == 1 ]]; then
     # A previous run's container is replaced below; drop it before checking the port.
     docker rm -f "$openwebui_name" >/dev/null 2>&1 || true
@@ -77,8 +78,9 @@ prepare() {
   : >"$env"
   chmod 600 "$env"
 
-  log "starting dev Postgres"
+  log "starting dev Postgres and Valkey"
   "$root/scripts/dev-db.sh" up
+  docker compose -f "$root/deploy/dev/compose.yaml" up -d --wait redis
   if [[ $sso == 1 ]]; then
     log "starting Keycloak and OpenFGA"
     "$root/scripts/dev-idp.sh" up | grep '^export ' >>"$env"
@@ -130,10 +132,18 @@ prepare() {
     # Without an id key the gateway answers 503 on /mcp and /a2a.
     echo "export LUMEWARP_GATEWAY_ID_KEY=ZGV2LW9ubHktbHVtZXdhcnAtZ2F0ZXdheS1pZC1rZXktMDEyMzQ1Njc4OQ=="
     echo "export LUMEWARP_GATEWAY_PUBLIC_URL=http://127.0.0.1:4000"
+    echo "export LUMEWARP_SHARED_LIMITS_REDIS_URL=redis://127.0.0.1:56379/0"
     echo "export LUMEWARP_ROUTER_PLUGIN_DIR=$root/gateway/target/plugins/router"
     echo "export LUMEWARP_AUTH_PLUGIN_DIR=$root/gateway/target/plugins/auth"
     echo "export LUMEWARP_A2A_MIDDLEWARE_DIR=$root/gateway/target/plugins/a2a-middleware"
   } >>"$env"
+  # Listeners of each gateway instance (`--local-config`).
+  local n listen admin
+  for n in 1 2; do
+    listen=$((3999 + n)) admin=$((9462 + 2 * n))
+    printf "server:\n  listen: '127.0.0.1:%s'\n  admin_listen: '127.0.0.1:%s'\n" \
+      "$listen" "$admin" >"$state/gateway$n.yaml"
+  done
 
   if [[ ! -d $root/ui/node_modules ]]; then
     log "installing UI dependencies"
@@ -184,7 +194,7 @@ openwebui_up() {
     -v lumewarp-dev-openwebui:/app/backend/data "$openwebui_image" >/dev/null
 }
 
-run_service() { # mock | mcp | a2a | cp | gw | ui
+run_service() { # mock | mcp | a2a | cp | gw | gw2 | ui
   # shellcheck source=/dev/null
   source "$state/env"
   case "$1" in
@@ -192,11 +202,13 @@ run_service() { # mock | mcp | a2a | cp | gw | ui
     mcp) exec "$root/bench/mock-upstream/target/release/mcp-a2a-mock" mcp --listen 127.0.0.1:9110 ;;
     a2a) exec "$root/bench/mock-upstream/target/release/mcp-a2a-mock" a2a --listen 127.0.0.1:9120 ;;
     cp) cd "$root/control-plane" && exec uv run lumewarp-control-plane serve ;;
-    gw)
+    gw | gw2)
+      local n=1
+      [[ $1 == gw2 ]] && n=2
       wait_http "$cp_url/healthz" "control plane" # avoids connect-retry warnings at startup
       exec "$root/gateway/target/release/lumewarp" --control-plane http://127.0.0.1:50051 \
-        --gateway-token-env LUMEWARP_GATEWAY_TOKEN --state-dir "$state/gateway" \
-        --scope default --gateway-id "$gateway_id"
+        --gateway-token-env LUMEWARP_GATEWAY_TOKEN --state-dir "$state/gateway$n" \
+        --scope default --gateway-id "$gateway_id" --local-config "$state/gateway$n.yaml"
       ;;
     ui) exec pnpm --dir "$root/ui" dev --host 127.0.0.1 --port 5173 --strictPort ;;
     *) die "unknown service: $1" ;;
@@ -241,6 +253,7 @@ seed() {
 
 summary() { # stop hint
   wait_http "http://127.0.0.1:9464/readyz" "gateway"
+  wait_http "http://127.0.0.1:9466/readyz" "second gateway"
   wait_http "$ui_url" "UI"
   wait_http "http://127.0.0.1:9110/_mock/headers" "example MCP server"
   wait_http "http://127.0.0.1:9120/health" "example A2A agent"
@@ -260,10 +273,11 @@ summary() { # stop hint
   UI        $ui_url   (SSO: alice/bob/carol; alice becomes proxy_admin on first login)
   Emergency login uses LUMEWARP_BREAK_GLASS_PASSWORD (development default configured).
   API       $cp_url/api/v1
-  gateway   http://127.0.0.1:4000/v1   (names: mock-local, demo, demo-latest)
+  gateway   http://127.0.0.1:4000/v1 and http://127.0.0.1:4001/v1   (names: mock-local, demo, demo-latest)
+            two instances of $gateway_id sharing rate limits through Valkey 127.0.0.1:56379
   MCP       http://127.0.0.1:9110/mcp   (example upstream; control /_mock/)
   A2A       http://127.0.0.1:9120/a2a   (agent card /.well-known/agent-card.json)
-  metrics   http://127.0.0.1:9464/metrics (gateway), http://127.0.0.1:9465/metrics (CP)
+  metrics   http://127.0.0.1:9464/metrics and :9466/metrics (gateways), http://127.0.0.1:9465/metrics (CP)
   Demo API key is stored in .dev/demo-key (not printed).
 $webui
   $1
@@ -278,7 +292,7 @@ case "${1:-all}" in
   all)
     prepare
     trap 'trap - EXIT INT TERM; log stopping; kill 0 2>/dev/null || true' EXIT INT TERM
-    for svc in mock mcp a2a cp gw ui; do
+    for svc in mock mcp a2a cp gw gw2 ui; do
       ("$self" run "$svc" 2>&1 | sed -u "s/^/[$svc] /") &
     done
     seed
@@ -305,7 +319,7 @@ case "${1:-all}" in
       exit 0
     fi
     prepare
-    # Layout: this pane (setup + summary) | cp | gw on the right; mock and ui below this one.
+    # Layout: this pane (setup + summary) | cp, gw, gw2 on the right; mock and ui below this one.
     split() { # pane, direction, service -> new pane id
       local id
       id="$(herdr pane split "$1" --direction "$2" --no-focus --cwd "$root" \
@@ -315,7 +329,8 @@ case "${1:-all}" in
     }
     me="$HERDR_PANE_ID"
     cp_pane="$(split "$me" right cp)"
-    split "$cp_pane" down gw >/dev/null
+    gw_pane="$(split "$cp_pane" down gw)"
+    split "$gw_pane" down gw2 >/dev/null
     mock_pane="$(split "$me" down mock)"
     ui_pane="$(split "$mock_pane" right ui)"
     mcp_pane="$(split "$ui_pane" down mcp)"

@@ -1,6 +1,6 @@
 # Local development dependencies for Lumewarp.
-# Postgres listens on 127.0.0.1:55432 so it never collides with another
-# project's database on 5432.
+# Postgres listens on 127.0.0.1:55432 and Valkey on 127.0.0.1:56379 so they never
+# collide with another project's on 5432 or 6379.
 name: lumewarp-dev
 
 services:
@@ -16,6 +16,19 @@ services:
       - lumewarp-pg:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lumewarp -d lumewarp"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Shared rate limits between the dev gateways (LUMEWARP_SHARED_LIMITS_REDIS_URL).
+  # No persistence: the counts only cover the current minute.
+  redis:
+    image: valkey/valkey:8.1.11-alpine
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:56379:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 2s
       timeout: 3s
       retries: 30
