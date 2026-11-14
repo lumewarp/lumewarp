@@ -5,17 +5,22 @@ package lumewarp.usage.v1;
 // Gateway -> control plane usage reporting. The gateway batches events off the
 // request path and reports them asynchronously; a failed report is retried
 // from a bounded buffer and dropped (and counted) when the buffer is full.
-// Authenticated with the same gateway token as ConfigService; the control
-// plane ignores ReportRequest.gateway_id in favour of the token's identity.
+// Authenticated with the same gateway token as ConfigService; the token only
+// authenticates the scope, and usage is attributed to ReportRequest.gateway_id.
 service UsageService {
   // Validated per event: an invalid event is skipped and logged, the rest are
   // durably accounted, and `accepted` counts what was kept (already seen
-  // request_ids count as accepted). Only batch-level errors (gateway identity,
-  // too many events) fail the call with INVALID_ARGUMENT, recording nothing.
+  // request_ids count as accepted). Only batch-level errors (an empty or
+  // invalid gateway id, too many events) fail the call with INVALID_ARGUMENT,
+  // recording nothing.
   rpc Report(ReportRequest) returns (ReportResponse);
 }
 
 message ReportRequest {
+  // The reporting gateway's id: the same value as its Hello.gateway_id,
+  // 1..100 of [A-Za-z0-9._-]. Usage is attributed to it; the token only
+  // authenticates the scope. Empty or invalid fails the whole batch with
+  // INVALID_ARGUMENT.
   string gateway_id = 1;
   repeated UsageEvent events = 2;
 }

@@ -529,7 +529,7 @@ function TeamDetails({ team, atCap }: { team: Team; atCap: boolean }) {
       <Fact label="A2A agents">
         <AgentAccess team={team} />
       </Fact>
-      <Fact label="Rate limits" hint="Counted per gateway instance.">
+      <Fact label="Rate limits" hint="Shared across gateways that use the same Redis namespace; otherwise counted per gateway.">
         {rateLimits(team)}
       </Fact>
       <Fact label="Remaining budget" hint="The remaining amount is capped by org, team and personal budgets for the current month.">

@@ -709,7 +709,7 @@ async def test_usage_report_metrics_count_committed_events(
     monkeypatch.setattr(
         grpc_module,
         "_identity",
-        lambda: grpc_module.GatewayIdentity(uuid7(), "gateway-a", scope_name),
+        lambda: grpc_module.GatewayIdentity(uuid7(), scope_name),
     )
 
     class Aborted(Exception):

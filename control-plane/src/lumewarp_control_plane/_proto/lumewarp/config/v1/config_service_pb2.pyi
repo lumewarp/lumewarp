@@ -63,7 +63,7 @@ class TargetHealth(_message.Message):
     def __init__(self, name: _Optional[str] = ..., healthy: _Optional[bool] = ...) -> None: ...
 
 class Hello(_message.Message):
-    __slots__ = ("gateway_id", "have_version", "gateway_version", "supported_capabilities", "scope", "have_digest", "plugins", "plugin_abi")
+    __slots__ = ("gateway_id", "have_version", "gateway_version", "supported_capabilities", "scope", "have_digest", "plugins", "plugin_abi", "shared_limits")
     GATEWAY_ID_FIELD_NUMBER: _ClassVar[int]
     HAVE_VERSION_FIELD_NUMBER: _ClassVar[int]
     GATEWAY_VERSION_FIELD_NUMBER: _ClassVar[int]
@@ -72,6 +72,7 @@ class Hello(_message.Message):
     HAVE_DIGEST_FIELD_NUMBER: _ClassVar[int]
     PLUGINS_FIELD_NUMBER: _ClassVar[int]
     PLUGIN_ABI_FIELD_NUMBER: _ClassVar[int]
+    SHARED_LIMITS_FIELD_NUMBER: _ClassVar[int]
     gateway_id: str
     have_version: int
     gateway_version: str
@@ -80,7 +81,16 @@ class Hello(_message.Message):
     have_digest: bytes
     plugins: _containers.RepeatedCompositeFieldContainer[PluginDescriptor]
     plugin_abi: int
-    def __init__(self, gateway_id: _Optional[str] = ..., have_version: _Optional[int] = ..., gateway_version: _Optional[str] = ..., supported_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ..., have_digest: _Optional[bytes] = ..., plugins: _Optional[_Iterable[_Union[PluginDescriptor, _Mapping]]] = ..., plugin_abi: _Optional[int] = ...) -> None: ...
+    shared_limits: SharedLimits
+    def __init__(self, gateway_id: _Optional[str] = ..., have_version: _Optional[int] = ..., gateway_version: _Optional[str] = ..., supported_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ..., have_digest: _Optional[bytes] = ..., plugins: _Optional[_Iterable[_Union[PluginDescriptor, _Mapping]]] = ..., plugin_abi: _Optional[int] = ..., shared_limits: _Optional[_Union[SharedLimits, _Mapping]] = ...) -> None: ...
+
+class SharedLimits(_message.Message):
+    __slots__ = ("enabled", "namespace")
+    ENABLED_FIELD_NUMBER: _ClassVar[int]
+    NAMESPACE_FIELD_NUMBER: _ClassVar[int]
+    enabled: bool
+    namespace: str
+    def __init__(self, enabled: _Optional[bool] = ..., namespace: _Optional[str] = ...) -> None: ...
 
 class PluginDescriptor(_message.Message):
     __slots__ = ("kind", "name", "title", "description", "builtin", "params_schema_json", "router", "wasm_sha256", "digest")

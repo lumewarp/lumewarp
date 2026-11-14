@@ -32,9 +32,10 @@ async def list_plugins(
 ) -> Page[PluginOut]:
     """The plugins a write may name, and which connected gateways have each.
 
-    Connected gateways come first in `gateways`; `missing_gateways` is what a forced save is
-    saving past. A schema the control plane cannot use is null, with the reason in
-    `schema_problems`: only the gateway's own `configure` validates those settings.
+    A plugin counts only if every connected gateway reports it: one entry per gateway in
+    `gateways`, connected first; `missing_gateways` is what a forced save is saving past. A
+    schema the control plane cannot use is null, with the reason in `schema_problems`: only
+    the gateway's own `configure` validates those settings.
     """
     await authz.require(Action.ROUTING_READ)
     registry = await load_plugins(session, settings.scope)

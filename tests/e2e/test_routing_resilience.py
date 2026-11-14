@@ -110,7 +110,7 @@ def test_alias_and_direct_model_through_the_control_plane(stack):
 
 def _offline_gateway_with(stack, strategy: str) -> None:
     gateway = "offline-with-strategy"
-    token = stack.ok("POST", "/gateways", json={"gateway_id": gateway})["token"]["id"]
+    token = stack.ok("POST", "/gateway-tokens", json={"name": gateway})["token"]["id"]
     pg(
         stack.dsn,
         "INSERT INTO gateway_sessions (scope, gateway_id, token_id, connected, last_seen_at)"

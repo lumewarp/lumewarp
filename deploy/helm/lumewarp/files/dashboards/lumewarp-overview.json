@@ -3,7 +3,7 @@
   "title": "Lumewarp / Overview",
   "description": "Traffic and accounting follow team/requested filters. Histograms have no team label; overhead and upstream errors have no requested label. Spend is team-only.",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "tags": [
     "lumewarp",
@@ -634,6 +634,94 @@
             "uid": "${datasource}"
           },
           "legendFormat": "{{model}} {{kind}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Shared rate limits (Redis)",
+      "description": "Fallback to per-process counting, sync p99 and sync errors; these series exist only on gateways with a shared-limits Redis.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "lumewarp_shared_limits_fallback{namespace=~\"${namespace:regex}\"}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "fallback",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(lumewarp_shared_limits_sync_duration_seconds_bucket{namespace=~\"${namespace:regex}\",result=\"success\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "sync p99",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(lumewarp_shared_limits_sync_errors_total{namespace=~\"${namespace:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "errors/s",
           "range": true
         }
       ]

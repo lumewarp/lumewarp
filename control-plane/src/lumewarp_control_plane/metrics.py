@@ -97,7 +97,7 @@ class Metrics:
         )
         self.gateway_sessions = Gauge(
             "lumewarp_cp_gateway_sessions",
-            "Connected gateway config-stream sessions.",
+            "Connected gateway config-stream sessions, one per gateway process.",
             registry=r,
         )
         self.gateway_acks = Counter(

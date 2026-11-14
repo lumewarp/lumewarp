@@ -33,7 +33,6 @@ ROOT = Path(__file__).resolve().parents[2]
 BREAK_GLASS_PASSWORD = "e2e-break-glass-password"
 ENCRYPTION_KEY = "e2e-lumewarp-encryption-key-0123456789abcdef"
 SCOPE = "e2e"
-GATEWAY_ID = "gw-e2e"
 FORBIDDEN_PORTS = {9000, 5432, 8080, 8081}
 
 
@@ -285,12 +284,21 @@ class Proc:
         return self.log.read_text(errors="replace") if self.log.exists() else ""
 
 
+def gateway_host(env: dict[str, str]) -> str:
+    """The host part of the id `gateway_id.rs` derives from HOSTNAME."""
+    cleaned = "".join(
+        char
+        for char in env.get("HOSTNAME", "")
+        if (char.isascii() and char.isalnum()) or char in "._-"
+    )[:60]
+    return cleaned or "local"
+
+
 class Gateway:
     def __init__(
         self,
         stack: "Stack",
         state_dir: Path,
-        gateway_id: str,
         token: str,
         tag: str,
         extra_env: dict[str, str] | None = None,
@@ -312,6 +320,9 @@ class Gateway:
         }
         env.pop("OTEL_EXPORTER_OTLP_ENDPOINT", None)
         env.update(extra_env or {})
+        # The process generates `<host>-<8 hex>` at startup; tests find its row by this
+        # prefix (HOSTNAME is test-controlled where a test needs one).
+        self.prefix = f"{gateway_host(env)}-"
         self.proc = Proc(
             tag,
             [
@@ -324,8 +335,6 @@ class Gateway:
                 str(state_dir),
                 "--scope",
                 SCOPE,
-                "--gateway-id",
-                gateway_id,
                 "--local-config",
                 str(local),
             ],
@@ -337,6 +346,16 @@ class Gateway:
 
     def url(self, path: str) -> str:
         return f"http://127.0.0.1:{self.port}{path}"
+
+    def status(self) -> dict | None:
+        """This process's row: the connected one, else its most recent disconnected row."""
+        rows = [
+            row
+            for row in self.stack.gateway_items()
+            if row["gateway_id"].startswith(self.prefix)
+        ]
+        connected = [row for row in rows if row["connected"]]
+        return max(connected or rows, key=lambda row: row["last_seen_at"] or "") if rows else None
 
     def wait_listening(self) -> None:
         def up():
@@ -474,7 +493,7 @@ class Stack:
         pg(PG_DSN, f'CREATE DATABASE "{self.db_name}"')
         self.db_created = True
         self._run_cli("migrate")
-        out = self._run_cli("bootstrap", "--gateway-id", GATEWAY_ID, "--scope", SCOPE)
+        out = self._run_cli("bootstrap", "--name", "e2e", "--scope", SCOPE)
         self.gateway_token = out.strip().splitlines()[-1]
         assert self.gateway_token.startswith("lwg-"), out
         record_secret(self.gateway_token, "gateway token")
@@ -531,8 +550,11 @@ class Stack:
         record_secret(self.admin.cookies.get(COOKIE_NAME), "Lumewarp session cookie")
         record_response_secrets(info, "GET /session", endpoint="/session")
 
-    def start_mock(self, tag: str, *args: str) -> int:
-        """Start another mock upstream (e.g. with fault injection); returns its port."""
+    def start_mock(self, tag: str, *args: str, latency_ms: int = 5) -> int:
+        """Start another mock upstream (e.g. with fault injection); returns its port.
+
+        `latency_ms` replaces the 5 ms default so a test can hold a request open.
+        """
         port = free_port()
         proc = Proc(
             tag,
@@ -541,7 +563,7 @@ class Stack:
                 "--listen",
                 f"127.0.0.1:{port}",
                 "--latency-ms",
-                "5",
+                str(latency_ms),
                 *args,
             ],
             self.base_env,
@@ -574,7 +596,6 @@ class Stack:
         gw = Gateway(
             self,
             state_dir or self.dir / "state",
-            GATEWAY_ID,
             self.gateway_token,
             tag,
             extra_env,
@@ -751,11 +772,18 @@ class Stack:
     def usage_rows(self) -> list[asyncpg.Record]:
         return pg(self.dsn, "SELECT * FROM usage_events ORDER BY id")
 
-    def gateway_status(self, gateway_id: str = GATEWAY_ID) -> dict | None:
-        for item in self.ok("GET", "/gateways")["items"]:
-            if item["gateway_id"] == gateway_id:
-                return item
-        return None
+    def gateway_items(self) -> list[dict]:
+        """One row per gateway process, connected first (the flat fleet API)."""
+        return self.ok("GET", "/gateways", params={"limit": 500})["items"]
+
+    def gateway_status(self, gateway: Gateway | None = None) -> dict | None:
+        """The status row of one gateway, or of the most recently started one."""
+        if gateway is not None:
+            return gateway.status()
+        if self.gateways:
+            return self.gateways[-1].status()
+        rows = self.gateway_items()
+        return rows[0] if rows else None
 
     def wait_key_count(self, count: int) -> None:
         """Publishing is asynchronous (outbox + compiler loop): wait until a version has them."""

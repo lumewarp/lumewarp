@@ -279,7 +279,7 @@ keys:
             .args(["--gateway-token-env", TOKEN_ENV])
             .arg("--state-dir")
             .arg(state)
-            .args(["--scope", SCOPE, "--gateway-id", "gw-otel"])
+            .args(["--scope", SCOPE])
             .arg("--local-config")
             .arg(local)
             .env(TOKEN_ENV, "gw-secret");

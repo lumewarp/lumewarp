@@ -1,6 +1,6 @@
 mod common;
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use common::*;
@@ -75,15 +75,44 @@ async fn first_event(response: Response<Incoming>) -> Incoming {
     body
 }
 
+fn unix_ms() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before the epoch")
+            .as_millis(),
+    )
+    .expect("system clock out of range")
+}
+
+/// The wall-clock minute the limiter counts in.
+fn minute_now() -> u64 {
+    unix_ms() / 60_000
+}
+
+/// What the sliding limiter answers once the current minute's window is full:
+/// the wait to the next wall-clock minute, plus the ~60 ms it takes for the
+/// previous window to fade one count under the limit.
+fn boundary_retry_after(now_ms: u64) -> u64 {
+    (60_060u64.saturating_sub(now_ms % 60_000))
+        .div_ceil(1000)
+        .clamp(1, 60)
+}
+
 #[tokio::test]
-async fn rpm_exhaustion_and_refill() {
+async fn rpm_exhaustion_and_retry_after() {
     let mock = Mock::start(Behavior::Json).await;
     let extra = yaml(
         "  []\n",
-        &[("rpm", ", rate_limits: {requests_per_minute: 120}")],
+        &[
+            ("rpm", ", rate_limits: {requests_per_minute: 120}"),
+            ("free", ""),
+        ],
     );
     let gateway = start(&mock, &extra).await;
-    // Burst capacity is the full minute's allowance, refilled at 2/s.
+    let started_minute = minute_now();
+    // The sliding window allows one full minute's allowance, however fast the
+    // requests arrive.
     let mut admitted = 0;
     let limited = loop {
         let (code, retry, body) = status(&gateway, "rpm").await;
@@ -95,12 +124,38 @@ async fn rpm_exhaustion_and_refill() {
     };
     assert!((120..=125).contains(&admitted), "admitted {admitted}");
     assert_eq!(limited.0, 429);
-    assert_eq!(limited.1.as_deref(), Some("1"));
     assert_eq!(limited.2["error"]["code"], "rate_limit_exceeded");
     assert_eq!(limited.2["error"]["type"], "rate_limit_error");
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    assert_eq!(status(&gateway, "rpm").await.0, 200, "refilled");
-    assert_eq!(status(&gateway, "rpm").await.0, 429);
+    let retry: u64 = limited
+        .1
+        .as_deref()
+        .expect("Retry-After on a rate-limit rejection")
+        .parse()
+        .expect("Retry-After is a whole number of seconds");
+    assert!((1..=60).contains(&retry), "Retry-After {retry}");
+
+    // Another key without a limit is unaffected.
+    assert_eq!(status(&gateway, "free").await.0, 200);
+
+    // Away from a minute boundary the burst filled the current window, so the
+    // answer is the wait to the next boundary, not a per-request refill. Skip
+    // the exact check when the burst straddled a boundary or the clock is
+    // within 2 s of one, where the limiter's 5 ms clock could disagree. Two
+    // seconds of slack cover the requests' own latency and a delayed clock
+    // tick; the result is still tens of seconds away from a GCRA refill.
+    let now = unix_ms();
+    if minute_now() == started_minute && (2_000..58_000).contains(&(now % 60_000)) {
+        let expected = boundary_retry_after(now);
+        assert!(
+            retry.abs_diff(expected) <= 2,
+            "Retry-After {retry}, expected about {expected}"
+        );
+        // The window stays closed inside the same minute; it does not
+        // trickle back per request. Recovery as the previous minute ages is
+        // covered deterministically by
+        // ratelimit::tests::sliding_window_ages_the_previous_minute.
+        assert_eq!(status(&gateway, "rpm").await.0, 429);
+    }
 }
 
 #[tokio::test]

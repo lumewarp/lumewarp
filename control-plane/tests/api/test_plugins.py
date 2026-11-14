@@ -61,7 +61,7 @@ async def report(committed: AsyncSession, api_scope: str) -> AsyncIterator:
 
     yield report_as
     await committed.rollback()
-    await committed.execute(delete(GatewayToken).where(GatewayToken.gateway_id.like(f"{PREFIX}%")))
+    await committed.execute(delete(GatewayToken).where(GatewayToken.name.like(f"{PREFIX}%")))
     await committed.execute(
         delete(GatewaySession).where(GatewaySession.gateway_id.like(f"{PREFIX}%"))
     )
@@ -325,7 +325,6 @@ async def test_revoking_the_reporting_token_ends_the_report_whatever_other_token
     committed.add(
         GatewayToken(
             scope=api_scope,
-            gateway_id=f"{PREFIX}two-tokens",
             name="unused",
             token_hash=other.hash,
             display_prefix=other.display_prefix,
@@ -351,7 +350,6 @@ async def test_a_report_of_another_token_is_ignored_when_that_token_is_revoked(
     second = generate_secret(SecretKind.GATEWAY_TOKEN)
     token = GatewayToken(
         scope=api_scope,
-        gateway_id=f"{PREFIX}handover",
         name="second",
         token_hash=second.hash,
         display_prefix=second.display_prefix,
@@ -593,3 +591,23 @@ async def test_validate_plugin_params_needs_force_for_a_gateway_lacking_it(
         await validate_plugin_params(
             committed, PluginKind.UPSTREAM_AUTH, name, {"ttl_ms": 0}, force=True, scope=api_scope
         )
+
+
+async def test_a_plugin_needs_every_connected_gateway(client, report):
+    """One gateway lacking the strategy would NACK every version using it."""
+    name = _name()
+    await report("has-it", {name: FAILOVER}, connected=True)
+    await report("lacks-it", {}, connected=True, capabilities=[])
+    item = _strategy(client, name)
+    assert item["missing_gateways"] == [f"{PREFIX}lacks-it"]
+    _422(_create(client, name), "force")
+    assert {g["gateway_id"] for g in item["gateways"]} == {f"{PREFIX}has-it"}
+
+    await report("lacks-it", {name: FAILOVER}, connected=True)
+    item = _strategy(client, name)
+    assert item["missing_gateways"] == []
+    assert {g["gateway_id"] for g in item["gateways"]} == {
+        f"{PREFIX}has-it",
+        f"{PREFIX}lacks-it",
+    }
+    assert _create(client, name).status_code == 201

@@ -37,8 +37,8 @@ A key can be limited in requests per minute, tokens per minute and concurrent re
 four levels: its org, its team, its owner and the key itself. The lowest value applies. The
 Admin UI's **My keys** page shows your effective limits.
 
-Limits are counted in each gateway process. If your installation runs several gateways, the
-total you can reach is higher than the configured number.
+Limits are counted in each gateway. If the installation runs several gateways without a
+shared Redis, the total you can reach is higher than the configured number.
 
 ## Budgets
 

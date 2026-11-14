@@ -1,0 +1,3 @@
+{{- if and .Values.gateway.enabled .Values.gateway.stateDir.persistence.enabled }}
+{{- include "lumewarp.gateway.workload" (dict "root" . "kind" "StatefulSet") }}
+{{- end }}

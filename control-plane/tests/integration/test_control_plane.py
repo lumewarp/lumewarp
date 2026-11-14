@@ -175,8 +175,8 @@ async def test_end_to_end(cp: ControlPlane) -> None:
             f"/teams/{team['id']}/keys", {"name": "k2", "service_account_id": account["id"]}
         )
     )["key"]
-    tok_a = (await cp.post("/gateways", {"gateway_id": "gw-a"}))["secret"]
-    tok_b = (await cp.post("/gateways", {"gateway_id": "gw-b"}))["secret"]
+    token = (await cp.post("/gateway-tokens", {"name": "itest"}))["secret"]
+    tok_a = tok_b = token
 
     # Gateway A: first update is a full snapshot; it converges on both keys.
     a = Gateway(cp.grpc_target, tok_a, "gw-a")
@@ -254,7 +254,7 @@ async def test_end_to_end(cp: ControlPlane) -> None:
         assert {g["gateway_id"] for g in r.json()["items"] if g["connected"]} == {"gw-a", "gw-b"}
 
         # The standalone probe (used for manual checks) sees the same version.
-        probe_token = (await cp.post("/gateways", {"gateway_id": "probe"}))["secret"]
+        probe_token = (await cp.post("/gateway-tokens", {"name": "probe"}))["secret"]
         version, keys = await probe(cp.grpc_target, probe_token, "probe")
         assert (version, keys) == (a.snapshot.version, len(a.snapshot.api_keys))
 

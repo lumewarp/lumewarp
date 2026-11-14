@@ -36,8 +36,15 @@ the whole process, so counters are never reset by a config change.
 | `lumewarp_usage_capture_total` | Counter | `state` (`unspecified`, `reported`, `missing`, `partial`, `invalid`); metering gaps. |
 | `lumewarp_tokens_total` | Counter | `requested`, `team`, `direction` (`input`/`output`) |
 | `lumewarp_spend_total` | Counter | `team`; USD. |
+| `lumewarp_shared_limits_sync_duration_seconds` | Histogram | `result` (`success`, `error`); only with a shared-limits Redis. |
+| `lumewarp_shared_limits_sync_errors_total` | Counter | `reason` (`connect`, `timeout`, `script`). |
+| `lumewarp_shared_limits_fallback` | Gauge | None; `1` while the gateway counts limits per gateway because Redis is unreachable. |
+| `lumewarp_shared_limits_last_sync_age_seconds` | Gauge | None; seconds since the last successful sync. |
+| `lumewarp_shared_limits_scopes` | Gauge | None; scopes in the last sync. |
 
-The config-stream series move in control-plane mode; `lumewarp_config_info` is
+The `lumewarp_shared_limits_*` series exist only when
+`--shared-limits-redis-url` is set and carry no scope or key labels. The config-stream
+series move in control-plane mode; `lumewarp_config_info` is
 set only in standalone mode. Usage event counters and queue depth move in
 control-plane mode. Token and spend series move in both modes whenever the
 upstream reports usage; control-plane mode forces stream usage where the

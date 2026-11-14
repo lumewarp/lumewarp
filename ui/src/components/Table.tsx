@@ -31,6 +31,8 @@ interface Props<T> {
   onRetry?: () => void;
   empty?: ReactNode;
   pageSize?: number;
+  /** Mute a row, for example a disconnected resource. */
+  mutedRow?: (row: T) => boolean;
   /** Server-side paging (a cursor API): replaces the client-side pages, and the footer always shows. */
   paging?: Paging;
 }
@@ -66,7 +68,7 @@ export function TablePagination(props: Paging) {
   );
 }
 
-export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, empty = "Nothing here yet.", pageSize = 10, paging }: Props<T>) {
+export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, empty = "Nothing here yet.", pageSize = 10, mutedRow, paging }: Props<T>) {
   const [sort, setSort] = useState<{ key: string; dir: 1 | -1 } | null>(null);
   const [page, setPage] = useState(0);
 
@@ -138,7 +140,7 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
           </TableHeader>
           <TableBody>
             {visible.map((row) => (
-              <TableRow key={rowKey(row)}>
+              <TableRow key={rowKey(row)} className={mutedRow?.(row) ? "text-muted-foreground" : undefined}>
                 {columns.map((c) => (
                   <TableCell key={c.key} className={cn(c.align === "right" && "text-right tabular-nums", c.hideBelow && HIDE[c.hideBelow])}>
                     {c.cell(row)}

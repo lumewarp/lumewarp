@@ -86,8 +86,18 @@ usage/rate-limit scope id is `member_scope_id = uuid5(team_id, user_id)`; it is 
 removing and re-adding a member keeps the same total and bucket. A service account uses
 its own id. Rate-limit scopes are `org:<org_id>`, `team:<team_id>`,
 `member:<member_scope_id>`, `sa:<service_account_id>` and `key:<key_id>`; a level that sets
-no limit emits no scope. Rate limits are counted per gateway process: N gateway instances
-allow up to N times the configured limit, by design.
+no limit emits no scope. Rate limits are counted per gateway unless the gateways
+share a Redis and namespace (`--shared-limits-redis-url`): then the gateways share one
+window and may over-admit by about the number of active gateways, plus up to five
+sync intervals of traffic when a gateway first joins the scope; without Redis, N gateways
+allow up to N times the configured limit. `requests_per_minute` and
+`tokens_per_minute` use a sliding window on wall-clock minutes: the current and the
+previous minute count, with the previous one fading out as the minute elapses, so a
+burst is not followed by a second full burst at the next minute boundary.
+`max_parallel_requests` counts requests in flight and releases the slot when the response
+body ends, errors or is dropped. `tokens_per_minute` is charged after usage is known, so it
+blocks later requests instead of rejecting the one that produced the tokens. A
+rejection is 429 `rate_limit_exceeded` with `Retry-After`.
 
 ## Org budgets
 

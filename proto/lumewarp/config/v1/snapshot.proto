@@ -288,6 +288,8 @@ message TrafficSplit {
 }
 
 enum StickyBy {
+  // Not sticky: a real choice, not an unset value, so it keeps its name.
+  // buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
   STICKY_BY_NONE = 0;
   // Hash of the sticky_header value; requests without it are not sticky.
   STICKY_BY_HEADER = 1;
@@ -487,9 +489,12 @@ message RateLimitScope {
   RateLimit limit = 2;
 }
 
-// Enforced per gateway instance (N gateways => up to N x the limit).
-// Zero = unlimited for that dimension. tokens_per_minute is retrospective:
-// it rejects later requests once usage has been charged.
+// Enforced per gateway unless the gateways share a Redis and namespace
+// (`--shared-limits-redis-url`), in which case they share one window and may
+// over-admit by about the number of active gateways plus up to five sync
+// intervals of traffic when a gateway first joins the scope. Zero = unlimited
+// for that dimension. tokens_per_minute is retrospective: it rejects later
+// requests once usage has been charged.
 message RateLimit {
   uint32 requests_per_minute = 1;
   uint64 tokens_per_minute = 2;

@@ -84,7 +84,6 @@ def _bootstrap(settings: Settings, args: argparse.Namespace) -> None:
                 new = generate_secret(SecretKind.GATEWAY_TOKEN)
                 token = GatewayToken(
                     scope=scope,
-                    gateway_id=args.gateway_id,
                     name=args.name or "",
                     token_hash=new.hash,
                     display_prefix=new.display_prefix,
@@ -98,14 +97,14 @@ def _bootstrap(settings: Settings, args: argparse.Namespace) -> None:
                     resource_id=token.id,
                     actor_type=ActorType.SYSTEM,
                     actor_id="bootstrap",
-                    details={"gateway_id": args.gateway_id, "scope": scope},
+                    details={"name": token.name},
                 )
             return new.secret
         finally:
             await engine.dispose()
 
     secret = asyncio.run(run())
-    print(f"scope {scope!r} ready; gateway token for {args.gateway_id!r}:", file=sys.stderr)
+    print(f"scope {scope!r} ready; gateway token {args.name or ''!r}:", file=sys.stderr)
     print(secret)
 
 
@@ -127,10 +126,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--output", help="write to a file instead of stdout")
 
     p = sub.add_parser(
-        "bootstrap", help="create the config scope and print a new gateway token (once)"
+        "bootstrap",
+        help=(
+            "create the config scope and print a new gateway token (once); any number of"
+            " gateways may use it"
+        ),
     )
-    p.add_argument("--gateway-id", required=True)
-    p.add_argument("--name", help="label for the token")
+    p.add_argument("--name", default="", help="label for the token")
     p.add_argument("--scope", help="default: LUMEWARP_SCOPE")
     return parser
 

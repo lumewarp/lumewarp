@@ -96,10 +96,10 @@ CASES = [
     ("catalog.list", "GET", "/catalog", None, ANY),
     ("gateways.list", "GET", "/gateways", None, INSTALLATION),
     (
-        "gateways.create",
+        "gateway_tokens.create",
         "POST",
-        "/gateways",
-        {"gateway_id": "gw-{mark}"},
+        "/gateway-tokens",
+        {"name": "gw-{mark}"},
         (201, 403, 403, 403, 201),
     ),
     ("config.list", "GET", "/config/versions", None, INSTALLATION),

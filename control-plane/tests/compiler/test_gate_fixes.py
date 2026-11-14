@@ -24,10 +24,12 @@ from lumewarp_control_plane.models import (
     ConfigOutbox,
     ConfigVersion,
     GatewaySession,
+    GatewayToken,
     KeyLifecycle,
     Model,
     Upstream,
 )
+from lumewarp_control_plane.security import SecretKind, generate_secret
 from tests import factories
 from tests.compiler.helpers import (
     OCT,
@@ -39,6 +41,20 @@ from tests.compiler.helpers import (
     seed_scope,
     touch,
 )
+
+
+async def _add_gateway(session, gateway_id: str, **values) -> None:
+    """A gateway row with the token its Hello authenticated with."""
+    secret = generate_secret(SecretKind.GATEWAY_TOKEN)
+    token = GatewayToken(
+        scope=SCOPE,
+        name=gateway_id,
+        token_hash=secret.hash,
+        display_prefix=secret.display_prefix,
+    )
+    session.add(token)
+    await session.flush()
+    session.add(GatewaySession(scope=SCOPE, gateway_id=gateway_id, token_id=token.id, **values))
 
 
 async def _outbox(factory) -> list[str]:
@@ -267,7 +283,7 @@ async def test_compaction_reads_pins_and_updates_in_one_statement(factory) -> No
     async with factory() as s, s.begin():
         for v in range(1, 5):
             await store_version(s, SCOPE, pb.Snapshot(scope=SCOPE), version=v, source_revision=v)
-        s.add(GatewaySession(scope=SCOPE, gateway_id="a", connected=True, acked_version=3))
+        await _add_gateway(s, "a", connected=True, acked_version=3)
     async with factory() as s, s.begin():
         real_execute, statements = s.execute, []
 
@@ -296,7 +312,7 @@ async def test_compaction_sees_sessions_committed_before_the_statement(factory) 
     async with factory() as s, s.begin():
         await s.execute(select(1))  # transaction already running
         async with factory() as other, other.begin():
-            other.add(GatewaySession(scope=SCOPE, gateway_id="b", connected=True, acked_version=1))
+            await _add_gateway(other, "b", connected=True, acked_version=1)
         assert await compact_versions(s, SCOPE, retain=1) == 2  # 2 and 3 go, 1 is pinned
     async with factory() as s:
         row = await s.get(ConfigVersion, (SCOPE, 1))

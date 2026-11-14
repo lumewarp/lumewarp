@@ -17,7 +17,7 @@ use crate::{
 #[derive(Debug, Default)]
 pub struct EnvOptions {
     /// `LUMEWARP_GATEWAY_ID_KEY`: seals the A2A task/context ids (and, later,
-    /// MCP session ids) so any instance can verify them without shared state.
+    /// MCP session ids) so any gateway can verify them without shared state.
     pub id_key: Option<a2a_ids::IdKey>,
     /// `LUMEWARP_GATEWAY_PUBLIC_URL`, trailing slashes stripped: the base a
     /// rewritten Agent Card points at (`<public_url>/a2a/<agent>`, L6). Never
@@ -120,10 +120,11 @@ impl Runtime {
         Self::with_usage(Arc::new(Metrics::new()), UsageSink::disabled())
     }
 
-    /// Standalone from a real process: the same, plus [`EnvOptions::from_env`].
-    pub fn from_env() -> Arc<Self> {
+    /// Standalone with shared limits: registers the Redis-sync metrics when a
+    /// Redis URL is configured (the task itself is spawned by `main`).
+    pub fn from_env_shared_limits(shared_limits: bool) -> Arc<Self> {
         Self::with_usage_and_env(
-            Arc::new(Metrics::new()),
+            Arc::new(Metrics::with_shared_limits(shared_limits)),
             UsageSink::disabled(),
             EnvOptions::from_env(),
         )

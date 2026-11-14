@@ -995,9 +995,10 @@ export interface paths {
          * List Plugins
          * @description The plugins a write may name, and which connected gateways have each.
          *
-         *     Connected gateways come first in `gateways`; `missing_gateways` is what a forced save is
-         *     saving past. A schema the control plane cannot use is null, with the reason in
-         *     `schema_problems`: only the gateway's own `configure` validates those settings.
+         *     A plugin counts only if every connected gateway reports it: one entry per gateway in
+         *     `gateways`, connected first; `missing_gateways` is what a forced save is saving past. A
+         *     schema the control plane cannot use is null, with the reason in `schema_problems`: only
+         *     the gateway's own `configure` validates those settings.
          */
         get: operations["listPlugins"];
         put?: never;
@@ -1288,15 +1289,40 @@ export interface paths {
         };
         /**
          * List Gateways
-         * @description Gateways with their tokens and the config version each last acknowledged. Requires an
-         *     installation admin.
+         * @description One row per gateway process, connected ones first and then by gateway id.
+         *
+         *     Requires an installation admin. A disconnected gateway stays visible for 24 h after its
+         *     stream ended. Each row names the token its latest Hello authenticated with.
          */
         get: operations["listGateways"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/gateway-tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Gateway Tokens
+         * @description Gateway tokens of the config scope, newest first, with their connected gateway count.
+         *
+         *     Requires an installation admin. A revoked token stays listed.
+         */
+        get: operations["listGatewayTokens"];
+        put?: never;
         /**
          * Create Gateway Token
-         * @description Create a gateway token (`lwg-…`) bound to one gateway id. The secret is in this response
-         *     only. Requires an installation admin.
+         * @description Create a gateway token (`lwg-…`) with a label. It is not bound to a gateway id, so any
+         *     number of gateways may use it. The secret is in this response only. Requires an
+         *     installation admin.
          */
         post: operations["createGatewayToken"];
         delete?: never;
@@ -1305,7 +1331,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/gateways/{gateway_id}/tokens/{token_id}/revoke": {
+    "/api/v1/gateway-tokens/{token_id}/revoke": {
         parameters: {
             query?: never;
             header?: never;
@@ -1316,8 +1342,8 @@ export interface paths {
         put?: never;
         /**
          * Revoke Gateway Token
-         * @description Requires an installation admin. The gateway's open config and usage streams are closed at
-         *     once.
+         * @description Revoke a gateway token. Every config and usage stream authenticated with it is closed
+         *     at once; other tokens are unaffected. Requires an installation admin.
          */
         post: operations["revokeGatewayToken"];
         delete?: never;
@@ -1336,6 +1362,8 @@ export interface paths {
         /**
          * List Config Versions
          * @description Compiled config versions, newest first. Requires an installation admin.
+         *
+         *     `quarantined` marks the version a gateway rejected; no gateway of the scope is sent it.
          */
         get: operations["listConfigVersions"];
         put?: never;
@@ -1845,6 +1873,11 @@ export interface components {
             created_at: string;
             /** Compacted At */
             compacted_at: string | null;
+            /**
+             * Quarantined
+             * @description A gateway rejected this version, so it is withheld from the whole scope.
+             */
+            quarantined: boolean;
         };
         /** EffectiveModelOut */
         EffectiveModelOut: {
@@ -1866,44 +1899,91 @@ export interface components {
             /** Message */
             message: string;
         };
-        /** GatewayOut */
+        /**
+         * GatewayOut
+         * @description One gateway process: its config stream, version and status.
+         */
         GatewayOut: {
-            /** Gateway Id */
+            /**
+             * Gateway Id
+             * @description `Hello.gateway_id`: the process, stable for its lifetime.
+             */
             gateway_id: string;
-            /** Connected */
+            /**
+             * Connected
+             * @description Its config stream is open.
+             */
             connected: boolean;
-            /** Gateway Version */
+            /**
+             * Peer
+             * @description gRPC peer of the stream, as the control plane sees it.
+             */
+            peer: string | null;
+            /**
+             * Gateway Version
+             * @description The gateway build it reported in Hello.
+             */
             gateway_version: string;
-            /** Capabilities */
+            /**
+             * Capabilities
+             * @description Capabilities its latest Hello advertises.
+             */
             capabilities: string[];
-            /** Acked Version */
+            /**
+             * Acked Version
+             * @description Config version it ACKed last, or the version its Hello proved it holds; null until one of those (a fresh gateway with no snapshot stays null).
+             */
             acked_version: number | null;
-            /** Pending Version */
+            /**
+             * Pending Version
+             * @description Version sent and not yet answered; null when it is up to date.
+             */
             pending_version: number | null;
-            /** Last Nack Version */
+            /**
+             * Last Nack Version
+             * @description Version it NACKed last; null after it ACKs one.
+             */
             last_nack_version: number | null;
-            /** Last Nack Code */
+            /**
+             * Last Nack Code
+             * @description The NACK code it sent for that version.
+             */
             last_nack_code: string | null;
-            /** Last Nack Reason */
+            /**
+             * Last Nack Reason
+             * @description The control plane's reading of that code.
+             */
             last_nack_reason: string | null;
-            /** Quarantined Version */
-            quarantined_version: number | null;
-            /** Connected At */
+            /**
+             * Connected At
+             * @description When this stream connected.
+             */
             connected_at: string | null;
-            /** Disconnected At */
+            /**
+             * Disconnected At
+             * @description When the stream ended; null while connected.
+             */
             disconnected_at: string | null;
-            /** Last Seen At */
+            /**
+             * Last Seen At
+             * @description Last status write of this gateway.
+             */
             last_seen_at: string | null;
-            /** Tokens */
-            tokens: components["schemas"]["GatewayTokenOut"][];
+            /**
+             * Shared Limits Enabled
+             * @description `Hello.shared_limits.enabled`: it shares rate-limit counters.
+             */
+            shared_limits_enabled: boolean;
+            /**
+             * Shared Limits Namespace
+             * @description `Hello.shared_limits.namespace`; empty while sharing is off.
+             */
+            shared_limits_namespace: string;
+            /** @description The token its latest Hello authenticated with. */
+            token: components["schemas"]["GatewayTokenRef"];
         };
         /** GatewayTokenCreate */
         GatewayTokenCreate: {
-            /**
-             * Gateway Id
-             * @description The gateway id the token is bound to. A gateway must present the same id.
-             */
-            gateway_id: string;
             /**
              * Name
              * @description A label for the token.
@@ -1924,8 +2004,6 @@ export interface components {
              * Format: uuid
              */
             id: string;
-            /** Gateway Id */
-            gateway_id: string;
             /** Name */
             name: string;
             /** Display Prefix */
@@ -1939,6 +2017,26 @@ export interface components {
             last_used_at: string | null;
             /** Revoked At */
             revoked_at: string | null;
+            /**
+             * Connected Gateways
+             * @description Gateways connected with this token right now.
+             */
+            connected_gateways: number;
+        };
+        /**
+         * GatewayTokenRef
+         * @description The token a gateway's latest Hello authenticated with: enough to name it in the UI.
+         */
+        GatewayTokenRef: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /** Display Prefix */
+            display_prefix: string;
         };
         /**
          * HealthCheckIn
@@ -2043,7 +2141,7 @@ export interface components {
             name: string;
             /**
              * Expires At
-             * @description When the key stops authenticating: in the future, with a timezone. null = no expiry. A member's key is bounded by the team's `max_member_key_lifetime_seconds`.
+             * @description When the key stops authenticating: in the future, with a timezone. null = no expiry, except that a member's key gets the team's `max_member_key_lifetime_seconds` as its expiry and may not outlive it.
              */
             expires_at?: string | null;
             /**
@@ -3357,6 +3455,13 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
+        /** Page[GatewayTokenOut] */
+        Page_GatewayTokenOut_: {
+            /** Items */
+            items: components["schemas"]["GatewayTokenOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
         /** Page[InstallationAdminOut] */
         Page_InstallationAdminOut_: {
             /** Items */
@@ -3516,7 +3621,10 @@ export interface components {
         };
         /** PluginGatewayOut */
         PluginGatewayOut: {
-            /** Gateway Id */
+            /**
+             * Gateway Id
+             * @description Hello.gateway_id of the gateway that reported it.
+             */
             gateway_id: string;
             /** Connected */
             connected: boolean;
@@ -11085,6 +11193,74 @@ export interface operations {
             };
         };
     };
+    listGatewayTokens: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_GatewayTokenOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     createGatewayToken: {
         parameters: {
             query?: never;
@@ -11159,7 +11335,6 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                gateway_id: string;
                 token_id: string;
             };
             cookie?: never;

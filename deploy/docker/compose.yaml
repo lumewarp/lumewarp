@@ -59,13 +59,14 @@ services:
       - --gateway-token-env=LUMEWARP_GATEWAY_TOKEN
       - --state-dir=/var/lib/lumewarp/state
       - --scope=default
-      - --gateway-id=${LUMEWARP_GATEWAY_ID:-gw-1}
       - --local-config=/etc/lumewarp/local.yaml
     environment:
       LUMEWARP_GATEWAY_TOKEN: ${LUMEWARP_GATEWAY_TOKEN:-}
       LUMEWARP_ENCRYPTION_KEY: ${LUMEWARP_ENCRYPTION_KEY:-}
       LUMEWARP_GATEWAY_ID_KEY: ${LUMEWARP_GATEWAY_ID_KEY:-}
       LUMEWARP_GATEWAY_PUBLIC_URL: ${LUMEWARP_GATEWAY_PUBLIC_URL:-}
+      # Only useful with a Redis and more than one gateway; see env.example.
+      LUMEWARP_SHARED_LIMITS_REDIS_URL: ${LUMEWARP_SHARED_LIMITS_REDIS_URL:-}
     volumes:
       - ./gateway.yaml:/etc/lumewarp/local.yaml:ro
       # The last good snapshot: the gateway boots and serves from it while the

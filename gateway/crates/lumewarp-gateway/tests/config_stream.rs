@@ -130,21 +130,21 @@ struct Gw {
 }
 
 impl Gw {
-    fn spawn(control_plane: &str, state: &Path, work: &Path, id: &str) -> Self {
-        Self::spawn_with_env(control_plane, state, work, id, &[])
+    fn spawn(control_plane: &str, state: &Path, work: &Path, name: &str) -> Self {
+        Self::spawn_with_env(control_plane, state, work, name, &[])
     }
 
     fn spawn_with_env(
         control_plane: &str,
         state: &Path,
         work: &Path,
-        id: &str,
+        name: &str,
         vars: &[(&str, &str)],
     ) -> Self {
         let listen = StdListener::bind("127.0.0.1:0").unwrap();
         let admin = StdListener::bind("127.0.0.1:0").unwrap();
         let (addr, admin_addr) = (listen.local_addr().unwrap(), admin.local_addr().unwrap());
-        let local = work.join(format!("{id}.yaml"));
+        let local = work.join(format!("{name}.yaml"));
         std::fs::write(
             &local,
             format!("server:\n  listen: '{addr}'\n  admin_listen: '{admin_addr}'\n"),
@@ -156,7 +156,7 @@ impl Gw {
             .args(["--gateway-token-env", TOKEN_ENV])
             .arg("--state-dir")
             .arg(state)
-            .args(["--scope", SCOPE, "--gateway-id", id])
+            .args(["--scope", SCOPE])
             .arg("--local-config")
             .arg(local)
             .env(TOKEN_ENV, "gw-token")
@@ -233,6 +233,25 @@ impl Drop for Gw {
     }
 }
 
+/// The generated `<host>-<8 lowercase hex>` id from `Hello.gateway_id`.
+fn assert_generated_gateway_id(id: &str) {
+    assert!(!id.is_empty() && id.len() <= 100, "{id}");
+    assert!(
+        id.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
+        "{id}"
+    );
+    let (host, suffix) = id.rsplit_once('-').expect("a host and a suffix");
+    assert!(!host.is_empty(), "{id}");
+    assert_eq!(suffix.len(), 8, "{id}");
+    assert!(
+        suffix
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+        "{id}"
+    );
+}
+
 async fn hello(conn: &mut Conn) -> lumewarp_proto::config::v1::Hello {
     match conn.recv().await.msg {
         Some(Msg::Hello(hello)) => hello,
@@ -287,7 +306,7 @@ async fn full_then_delta_with_durable_acks() {
     let mut conn = cp.accept().await;
     assert_eq!(conn.authorization.as_deref(), Some("Bearer gw-token"));
     let hello = hello(&mut conn).await;
-    assert_eq!(hello.gateway_id, "gw-1");
+    assert_generated_gateway_id(&hello.gateway_id);
     assert_eq!(hello.have_version, 0);
     assert!(hello.have_digest.is_empty());
     assert_eq!(hello.scope, "");

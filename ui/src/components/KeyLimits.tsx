@@ -60,7 +60,7 @@ export function KeyLimitFields({
         value={values.rpm_limit}
         onChange={(v) => set("rpm_limit", v)}
         error={errors.rpm_limit}
-        hint="Rate limits are counted per gateway instance."
+        hint="Shared across gateways that use the same Redis namespace; otherwise counted per gateway."
         note={limitNote(cap, cap?.rpm_limit, capNote)}
       />
       <NumberField
@@ -68,7 +68,7 @@ export function KeyLimitFields({
         value={values.tpm_limit}
         onChange={(v) => set("tpm_limit", v)}
         error={errors.tpm_limit}
-        hint="Rate limits are counted per gateway instance."
+        hint="Shared across gateways that use the same Redis namespace; otherwise counted per gateway."
         note={limitNote(cap, cap?.tpm_limit, capNote)}
       />
       <NumberField
@@ -76,7 +76,7 @@ export function KeyLimitFields({
         value={values.max_parallel}
         onChange={(v) => set("max_parallel", v)}
         error={errors.max_parallel}
-        hint="Limits are counted per gateway instance."
+        hint="Shared across gateways that use the same Redis namespace; otherwise counted per gateway."
         note={limitNote(cap, cap?.max_parallel, capNote)}
       />
     </>

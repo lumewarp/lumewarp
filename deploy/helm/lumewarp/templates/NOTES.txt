@@ -19,25 +19,37 @@ Control plane
 {{- end }}
 
 {{- if .Values.gateway.enabled }}
+{{- $kind := ternary "StatefulSet" "Deployment" .Values.gateway.stateDir.persistence.enabled }}
+{{- $kubectlKind := ternary "statefulset" "deploy" .Values.gateway.stateDir.persistence.enabled }}
 
 Gateway
   API:       http://{{ include "lumewarp.gateway.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.gateway.service.port }}/v1
   Metrics:   http://{{ include "lumewarp.gateway.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.gateway.service.adminPort }}/metrics
+  {{- if .Values.redis.enabled }}
+  Limits:    rpm, tpm and max_parallel are counted across every gateway that shares the
+             bundled Valkey ({{ include "lumewarp.redis.name" . }}).
+  {{- else if .Values.gateway.sharedLimits.redis.existingSecret }}
+  Limits:    rpm, tpm and max_parallel are counted across every gateway that shares the
+             Redis in Secret {{ .Values.gateway.sharedLimits.redis.existingSecret | quote }}.
+  {{- else }}
+  Limits:    rpm, tpm and max_parallel are counted per gateway. With more than one
+             replica, set redis.enabled=true (or gateway.sharedLimits.redis.existingSecret)
+             to share them.
+  {{- end }}
 
   The gateway needs a token created by the control plane (`lwg-...`) in Secret
   {{ .Values.gateway.token.secretName | quote }} key {{ .Values.gateway.token.key | quote }}.
-  The token must be issued for gateway id {{ .Values.gateway.gatewayId | quote }}; this
-  release runs one gateway replica (one token per gateway id, multi-replica is deferred).
+  Every pod is its own gateway (its id is generated at startup); all pods share the token.
   {{- if .Values.controlPlane.enabled }}
-  If the pod is waiting, create the Secret and restart the Deployment:
+  If the pod is waiting, create the Secret and restart the {{ $kind }}:
     kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "lumewarp.controlPlane.name" . }} -- \
-      python -m lumewarp_control_plane bootstrap --gateway-id {{ .Values.gateway.gatewayId | quote }}
+      python -m lumewarp_control_plane bootstrap --name {{ include "lumewarp.gateway.name" . | quote }}
     kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.gateway.token.secretName }} \
       --from-literal={{ .Values.gateway.token.key }}="<the printed lwg-... token>"
-    kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ include "lumewarp.gateway.name" . }}
+    kubectl -n {{ .Release.Namespace }} rollout restart {{ $kubectlKind }}/{{ include "lumewarp.gateway.name" . }}
   {{- else }}
-  Create that Secret from a token issued for {{ .Values.gateway.gatewayId | quote }} by the
-  external control plane, then restart the Deployment if needed.
+  Create that Secret from a token issued by the external control plane, then restart the
+  {{ $kind }} if needed.
   {{- end }}
 {{- else }}
 

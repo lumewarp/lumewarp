@@ -63,11 +63,11 @@ answers `"status":"ready"` once the database, migrations and background tasks ar
 ## 3. Create the gateway token and start the gateway
 
 ```sh
-docker compose run --rm control-plane bootstrap --gateway-id gw-1
+docker compose run --rm control-plane bootstrap --name gateway
 ```
 
-The `lwg-…` token is printed once. Put it in `.env` as `LUMEWARP_GATEWAY_TOKEN` (and keep
-`LUMEWARP_GATEWAY_ID=gw-1`: a token is bound to the id it was issued for), then:
+The `lwg-…` token is printed once. Put it in `.env` as `LUMEWARP_GATEWAY_TOKEN`; the gateway
+generates its own id at startup, then:
 
 ```sh
 docker compose --profile gateway up -d
@@ -105,7 +105,7 @@ from [Sign-in and authorization](./identity.md) to `.env`, with
 | Task | How |
 | --- | --- |
 | Logs | `docker compose --profile gateway logs -f gateway control-plane` |
-| Another gateway token | `docker compose run --rm control-plane bootstrap --gateway-id <id>`, or **Gateways → New gateway token** in the Admin UI |
+| Another gateway token | `docker compose run --rm control-plane bootstrap --name <label>`, or **Gateways → New gateway token** in the Admin UI |
 | MCP and A2A | Set `LUMEWARP_GATEWAY_ID_KEY` (`openssl rand -base64 32`) and `LUMEWARP_GATEWAY_PUBLIC_URL` in `.env` |
 | WASM plugins | Mount a directory into the gateway and set `LUMEWARP_ROUTER_PLUGIN_DIR`, `LUMEWARP_AUTH_PLUGIN_DIR` and `LUMEWARP_A2A_MIDDLEWARE_DIR` ([Gateway plugins](../plugins.md#loading)); plugin secrets are `LUMEWARP_PLUGIN_SECRET_*` variables |
 | Metrics | Scrape `127.0.0.1:9464/metrics` and `127.0.0.1:9465/metrics` ([Metrics, alerts and tracing](./observability.md)) |

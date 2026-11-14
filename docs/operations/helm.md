@@ -1,10 +1,10 @@
 # Deploy with Helm
 
 The chart in [`deploy/helm/lumewarp`](https://github.com/lumewarp/lumewarp/tree/main/deploy/helm/lumewarp)
-deploys the control plane and one gateway on Kubernetes. Each release also publishes it as
-`oci://ghcr.io/lumewarp/charts/lumewarp`, versioned like the images. For one host without
-Kubernetes, see [Deploy with Docker](./docker.md); for what the parts are, see
-[Deploy](./index.md).
+deploys the control plane and a gateway (one replica or many) on Kubernetes. Each release
+also publishes it as `oci://ghcr.io/lumewarp/charts/lumewarp`, versioned like the images.
+For one host without Kubernetes, see [Deploy with Docker](./docker.md); for what the parts
+are, see [Deploy](./index.md).
 
 ## Prerequisites
 
@@ -39,9 +39,9 @@ VERSION=0.1.0
 ```
 
 The control plane creates gateway tokens itself, so a fresh install has no gateway token
-yet. A token is bound to one gateway id. The example uses `gw-1`; the chart's
-`gateway.gatewayId` defaults to `gw-1`, and the two must match (or both use the id you
-chose). Install the control plane first, bootstrap a token, then enable the gateway:
+yet. A token is a scope credential with a label, not bound to a gateway id; any number of
+gateway pods may share it. Install the control plane first, bootstrap a token, then enable
+the gateway:
 
 ```sh
 helm install lumewarp "$CHART" --version "$VERSION" -n lumewarp \
@@ -49,19 +49,18 @@ helm install lumewarp "$CHART" --version "$VERSION" -n lumewarp \
 
 # Optional: the pre-install hook Job ran `migrate`. Create a gateway token:
 kubectl -n lumewarp exec deploy/lumewarp-control-plane -- \
-  python -m lumewarp_control_plane bootstrap --gateway-id gw-1
+  python -m lumewarp_control_plane bootstrap --name lumewarp-gateway
 
 kubectl -n lumewarp create secret generic lumewarp-gateway \
   --from-literal=token='lwg-...'
 
 helm upgrade lumewarp "$CHART" --version "$VERSION" -n lumewarp \
-  --reuse-values --set gateway.enabled=true --set gateway.gatewayId=gw-1
+  --reuse-values --set gateway.enabled=true
 ```
 
-The gateway Deployment runs one replica: a token identifies one gateway, so do not
-scale it. If you need more gateway instances, deploy another release (normally in a
-separate namespace, or with `controlPlane.enabled=false`) with its own `gateway.gatewayId`
-and token.
+The gateway runs one replica by default. `gateway.replicaCount` raises that: every replica
+uses the same token and is its own gateway, with an id generated at startup, so every pod
+loads the snapshot and serves the same models ([Gateway replicas](#gateway-replicas)).
 
 Installation admins are stored in Postgres: the first verified login whose email matches
 `controlPlane.initialAdminEmail` becomes the proxy_admin, who can then assign other admins (and
@@ -84,9 +83,12 @@ pods start.
 | Control-plane Deployment | One replica. Runs the HTTP API + UI, gRPC ConfigService/UsageService, compiler loop and monthly rollover. `strategy: Recreate`. |
 | Control-plane Service | `http` (8091), `grpc` (50051) and `metrics` (9465, Prometheus `/metrics`; only with `controlPlane.metrics.enabled`) ports. |
 | Migration Job | Helm `pre-install,pre-upgrade` hook running `python -m lumewarp_control_plane migrate` with the database Secret. |
-| Gateway Deployment | One replica. The token is bound to `gateway.gatewayId`; boots from its state volume, then follows the config stream; `/readyz` stays 503 until a snapshot is loaded. |
+| Gateway Deployment | One replica by default. Each pod is a gateway with an id generated at startup; all pods share the token. Boots from its state volume, then follows the config stream; `/readyz` stays 503 until a snapshot is loaded. |
+| Gateway StatefulSet | Instead of the Deployment when `gateway.stateDir.persistence.enabled`: same pod, one ReadWriteOnce claim per pod from a `volumeClaimTemplate`. |
 | Gateway Service | `http` (4000) and `admin` (9464, `/metrics` + `/readyz`) ports. |
-| Gateway state PVC | Only when `gateway.stateDir.persistence.enabled=true`; otherwise an `emptyDir` per pod. |
+| Gateway headless Service | Only with persistence: the governing Service of the StatefulSet (`clusterIP: None`). |
+| Gateway PodDisruptionBudget / HorizontalPodAutoscaler | Optional, `gateway.podDisruptionBudget` and `gateway.autoscaling`; see [Gateway replicas](#gateway-replicas). |
+| Valkey Deployment, Service and Secret | Only when `redis.enabled`: shared rate limits across gateways; see [Shared rate limits](#shared-rate-limits). |
 | ServiceMonitors | Optional: one for the gateway admin port, one for the control-plane `metrics` port. Requires the Prometheus Operator CRDs. |
 
 Readiness/liveness:
@@ -96,6 +98,148 @@ Readiness/liveness:
 - Gateway: `/readyz` on the admin port requires a loaded snapshot; `/healthz` stays
   healthy during a control-plane outage so Kubernetes does not restart a gateway that is
   correctly serving its cached config.
+
+## Gateway replicas
+
+`gateway.replicaCount` sets how many gateway processes serve the deployment; with
+autoscaling the HorizontalPodAutoscaler chooses the number. Every pod is its own gateway:
+it generates `<hostname>-<8 hex>` at startup and sends it as `Hello.gateway_id`, so the
+Admin UI's Gateways page has one row per pod, connected first. All pods share the token in
+`gateway.token.secretName` and keep their own generated id. A restart or a new pod is a new
+gateway, and the old row stays listed for 24 hours after it disconnects. The
+Service load balances across the live pods, and a rolling update adds new gateways instead
+of reusing an identity.
+
+Three consequences:
+
+- **Rate limits count per gateway by default.** Without a shared Redis a key's rpm, tpm and
+  max_parallel apply to each pod, so three gateways admit up to three times the limit.
+  Configure [shared rate limits](#shared-rate-limits) to count them once.
+- **A fresh pod may be unready.** With the default state directory a new pod has no cached
+  snapshot and `/readyz` answers 503 until the control plane sends one, while the other
+  gateways keep serving.
+- **Rejections have two scopes.** A gateway that NACKs `INVALID_CONFIG` quarantines the
+  version for the whole scope, including gateways that start later; one that NACKs
+  `UNSUPPORTED_FEATURE` skips only that version, while the others apply it. A gateway that
+  already applied a version keeps it until the next one. During a rolling upgrade the
+  old-build pods can keep an older config and NACK every version that needs the new build,
+  so finish the rollout before publishing such a config.
+
+### State volume
+
+`gateway.stateDir.persistence.enabled=false` (the default) renders the gateway as a Deployment
+whose state directory is a per-pod `emptyDir`. Setting it to `true` renders a StatefulSet with
+a `volumeClaimTemplate` instead: one ReadWriteOnce claim per pod, `size` and `storageClass`
+from the values, created by the chart, so every pod keeps its cached snapshot across
+restarts. The StatefulSet needs a governing headless Service (`lumewarp-gateway-headless`),
+which the chart adds and which exposes `http` only, so Prometheus does not discover every pod a
+second time; clients keep calling the regular Service. There is no `existingClaim` option: one
+claim cannot serve several pods, and the chart refuses the value.
+
+Kubernetes treats a StatefulSet's claim template as immutable: `gateway.stateDir.persistence.size`,
+`.storageClass` and `.annotations` are fixed once the StatefulSet exists, and changing them makes
+the next `helm upgrade` fail with `updates to statefulset spec ... are forbidden`. To change one,
+delete the StatefulSet while leaving its pods and claims alone, then upgrade:
+
+```sh
+kubectl -n lumewarp delete statefulset lumewarp-gateway --cascade=orphan
+helm upgrade lumewarp "$CHART" --version "$VERSION" -n lumewarp \
+  --reuse-values --set gateway.stateDir.persistence.size=5Gi
+```
+
+The upgrade recreates the StatefulSet with the new template and adopts the running pods.
+Existing claims keep their size — edit each one if the StorageClass allows expansion
+(`state-lumewarp-gateway-<ordinal>`), or delete it and let its pod recreate it — and only
+newly created pods get the new template.
+
+Switching persistence on a live release changes the kind: Helm deletes the object it no longer
+renders (the Deployment when persistence is turned on, the StatefulSet and its headless Service
+when it is turned off) and creates the other, so the pods restart once. Claims created from the
+`volumeClaimTemplate` are not part of the release and stay behind; delete them when they are no
+longer needed. Upgrading a release that used the old single `lumewarp-gateway-state` PVC
+deletes that PVC (the old template had no keep policy), which costs one cold boot per gateway
+pod. A pod removed from a StatefulSet — scaled down, or in the middle of a rollout that shrinks
+it — leaves its claim behind too.
+
+### Autoscaling and disruptions
+
+`gateway.autoscaling.enabled` renders an `autoscaling/v2` HorizontalPodAutoscaler and drops
+the fixed replica count from the workload. It targets CPU utilization against
+`gateway.resources.requests.cpu`, between `minReplicas` and `maxReplicas`, so it needs
+metrics-server; with no CPU request it never scales.
+
+`gateway.podDisruptionBudget.enabled` renders a `PodDisruptionBudget` with `minAvailable` or
+`maxUnavailable`. It is only rendered when the gateway can have more than one pod
+(`replicaCount > 1` or autoscaling on), because a budget over a single pod only blocks node
+drains.
+
+## Shared rate limits
+
+The gateway decides admission locally and never calls Redis on the request path: it syncs its
+counts with the other gateways in the background. rpm, tpm and max_parallel are counted per
+gateway unless the gateways share a Redis, so several gateway pods need one to honour a
+key's limit once. A gateway keeps serving when Redis is unreachable; it falls back to
+counting for itself, which makes the limits per gateway again until the sync recovers. The
+`lumewarp_shared_limits_*` metrics and the `LumewarpSharedLimitsFallback` alert show both
+([Observability](./observability.md)).
+
+### Bundled Valkey
+
+`redis.enabled=true` adds one Valkey (Redis protocol, BSD-licensed) to the release: a
+ClusterIP Service on 6379, a Deployment of a pinned image, and a Secret with its password. It
+keeps nothing on disk — every key the limiter writes expires within 150 s, so a restart only
+costs a short fallback window — runs as the image's non-root user with a read-only root
+filesystem, and answers `ping` for its probes. The gateway receives
+`LUMEWARP_SHARED_LIMITS_REDIS_URL` built from that Service and the password, interpolated by
+the kubelet from a `secretKeyRef`, so the password never appears in a manifest.
+
+With `redis.auth.existingSecret` unset the chart creates the password Secret itself, once,
+with a random 32-character password, and reuses it on every upgrade (`lookup`). `helm
+template` has no cluster to ask and renders a new one each time. A password supplied through
+`redis.auth.existingSecret` (or `gateway.sharedLimits.redis.existingSecret`) must be
+URL-safe (no `@ : / % # ?`), because the chart interpolates it into the Redis URL. To supply
+your own password,
+set `redis.auth.existingSecret` and `existingSecretKey`: the value is the password alone,
+without a URL around it, and it must be URL-safe because the gateway receives it inside a
+`redis://` URL.
+
+Valkey writes the password to a config file on its ephemeral `/data` volume at startup and runs
+`valkey-server` from it, so the password is never an argument of the server process. The pods
+read it once, at startup: after rotating the password Secret, restart the Valkey pod and the
+gateway pods (`kubectl rollout restart deploy/<release>-lumewarp-redis` and
+`deploy/<release>-lumewarp-gateway`, or `statefulset/` when persistence is on), otherwise they
+keep using the old password until something restarts them.
+
+### An existing Redis
+
+To use a Redis you run yourself, managed or in another namespace, create a Secret with the
+full URL (`rediss://` for TLS) and point the gateway at it:
+
+```sh
+kubectl -n lumewarp create secret generic lumewarp-redis-url \
+  --from-literal=url='redis://:password@redis.example:6379/0'
+```
+
+```yaml
+gateway:
+  sharedLimits:
+    redis:
+      existingSecret: lumewarp-redis-url   # key: url
+    syncMs: 100          # optional, 10-1000; the gateway default is 100
+    namespace: default   # optional; the config scope by default
+```
+
+`redis.enabled` and `gateway.sharedLimits.redis.existingSecret` are mutually exclusive: a
+release with both fails to render.
+
+### Several releases on one Redis
+
+One release can hold the gateway replicas and their Valkey; a gateway-only release elsewhere
+(another cluster, `controlPlane.enabled=false`, `gateway.controlPlaneUrl` set) points at the
+same Redis with `gateway.sharedLimits.redis.existingSecret`. Every gateway that should share
+counts needs the same Redis and the same `gateway.sharedLimits.namespace`, which is the
+config scope unless it is set. Router state — health, circuit breakers, latency — stays local
+to each gateway.
 
 ## Upstream API keys
 
@@ -266,16 +410,20 @@ Common values (see [`values.yaml`](https://github.com/lumewarp/lumewarp/blob/mai
 | `controlPlane.grpcTls.enabled` | `false` | Serve gateway gRPC over TLS from a Secret. |
 | `controlPlane.migrate.enabled` | `true` | Run the migration hook Job. |
 | `gateway.enabled` | `true` | Deploy the gateway. |
-| `gateway.replicaCount` | `1` | Must stay 1; one token per gateway id. |
+| `gateway.replicaCount` | `1` | Gateway pods; each pod is a separate gateway with an id generated at startup. They share the token and count rate limits per gateway unless a Redis is shared. Ignored when autoscaling is on. |
+| `gateway.autoscaling.enabled` / `.minReplicas` / `.maxReplicas` / `.targetCPUUtilizationPercentage` | `false` / `2` / `5` / `80` | HPA on CPU utilization over `gateway.resources.requests.cpu`; when enabled the workload has no fixed replica count. |
+| `gateway.podDisruptionBudget.enabled` / `.minAvailable` / `.maxUnavailable` | `false` / `1` / empty | `PodDisruptionBudget`; set one of the two, and it is only rendered when the gateway can have more than one pod. |
 | `gateway.image.repository` / `.tag` | `ghcr.io/lumewarp/lumewarp-gateway` / chart appVersion | Gateway image. |
-| `gateway.token.secretName` / `.key` | `lumewarp-gateway` / `token` | Existing Secret with a control-plane-created gateway token. |
+| `gateway.token.secretName` / `.key` | `lumewarp-gateway` / `token` | Existing Secret with a control-plane-created gateway token; any number of gateways may use it. |
 | `gateway.controlPlaneUrl` | empty | Defaults to the control-plane Service gRPC URL in this namespace. |
 | `gateway.scope` | empty | Defaults to `controlPlane.scope`. |
-| `gateway.gatewayId` | `gw-1` | Required; must equal the gateway id the token was issued for. It is never derived from the pod name. |
 | `gateway.podSecurityContext` | UID/GID/fsGroup `65532`, `runAsNonRoot: true` | Matches the gateway image so emptyDir/PVC mounts are writable. Override only for a custom image with another UID/GID. |
 | `gateway.stateDir.path` | `/var/lib/lumewarp` | Snapshot directory. |
-| `gateway.stateDir.persistence.enabled` | `false` | Use a RWO PVC instead of `emptyDir`. |
-| `gateway.stateDir.persistence.existingClaim` | empty | Use an existing RWO claim; it must be used by this single replica only. |
+| `gateway.stateDir.persistence.enabled` | `false` | `false` = Deployment with a per-pod `emptyDir`; `true` = StatefulSet with one ReadWriteOnce claim per pod. |
+| `gateway.stateDir.persistence.size` / `.storageClass` / `.annotations` | `1Gi` / default class / `{}` | The claim of each pod when persistence is on. |
+| `gateway.sharedLimits.redis.existingSecret` / `.existingSecretKey` | unset / `url` | Existing Secret with the full `redis://` or `rediss://` URL; mutually exclusive with `redis.enabled`. |
+| `gateway.sharedLimits.syncMs` | `""` | `LUMEWARP_SHARED_LIMITS_SYNC_MS`, 10–1000; empty leaves the gateway default of 100. |
+| `gateway.sharedLimits.namespace` | `""` | `LUMEWARP_SHARED_LIMITS_NAMESPACE`: Redis key namespace; empty uses the config scope. Gateways that share counts must agree. |
 | `gateway.server.*` | see values | `server:` block of the gateway's local YAML (listeners/timeouts). `adminListen` must be reachable by probes. |
 | `gateway.plugins.volume` | `{}` | Existing volume with the WASM components, as a Kubernetes volume source; empty loads no plugins and sets no directory variable. |
 | `gateway.plugins.mountPath` / `.dirs` | `/etc/lumewarp/plugins` / `router`, `auth`, `a2a-middleware` | Mount point and the subdirectory each kind reads. |
@@ -285,24 +433,41 @@ Common values (see [`values.yaml`](https://github.com/lumewarp/lumewarp/blob/mai
 | `gateway.idKey.secretName` / `.key` | unset / `gateway-id-key` | Existing Secret with `LUMEWARP_GATEWAY_ID_KEY` (base64, ≥32 bytes); shared by every gateway of the installation. |
 | `serviceMonitor.enabled` | `false` | Render ServiceMonitors for the gateway admin port and the control-plane metrics port (each only if that component and its metrics are enabled). |
 | `serviceMonitor.labels` | `{}` | Extra labels so your Prometheus selects the ServiceMonitor. |
+| `redis.enabled` | `false` | Deploy one Valkey in the release for shared rate limits. |
+| `redis.image.repository` / `.tag` | `valkey/valkey` / `8.1.11-alpine` | Pinned Valkey image. |
+| `redis.auth.existingSecret` / `.existingSecretKey` | unset / `password` | Existing Secret holding the server password (URL-safe, password only); unset means the chart creates one once with a random value. |
+| `redis.service.port` | `6379` | Service and container port. |
+| `redis.resources` | `30m` CPU / `64Mi` | Requests of the Valkey pod. |
 
-All pods honour `nodeSelector`, `tolerations`, `affinity`, `resources`,
-`podSecurityContext`, `securityContext`, `extraEnv` and `extraArgs` (per component), plus
-global `imagePullSecrets`, `nameOverride`, `fullnameOverride` and `commonLabels`.
+All pods honour `nodeSelector`, `tolerations`, `affinity`, `podSecurityContext`,
+`securityContext` and `resources` (per component, the Valkey included). The control plane and
+the gateway also take `extraEnv` and `extraArgs`. Global `imagePullSecrets`, `nameOverride`,
+`fullnameOverride` and `commonLabels` apply to every object.
 
 ## Checking the chart
 
+`deploy/helm/check.sh` lints the chart and renders a matrix of value sets — defaults,
+replicas, autoscaling, persistence, the bundled Valkey, an external Redis, and combinations —
+asserting the resulting kinds, replica counts, volume claims and environment variables, and
+that a rejected combination fails. It uses `helm` from `PATH` or the `alpine/helm` image
+through docker:
+
 ```sh
-helm lint deploy/helm/lumewarp
+bash deploy/helm/check.sh
+```
+
+By hand:
+
+```sh
+helm lint deploy/helm/lumewarp --strict
 helm template lumewarp deploy/helm/lumewarp -n lumewarp \
   --set controlPlane.databaseUrl.secretName=db \
-  --set gateway.gatewayId=gw-1 \
   --set gateway.token.secretName=gw
 
-# Expected to fail: one token is bound to one gateway id; multi-replica gateways are
-# deferred.
+# Expected to fail: the bundled Valkey and an external Redis URL are exclusive.
 helm template lumewarp deploy/helm/lumewarp -n lumewarp \
-  --set gateway.replicaCount=2
+  --set redis.enabled=true \
+  --set gateway.sharedLimits.redis.existingSecret=redis-url
 ```
 
 `kubectl port-forward svc/lumewarp-control-plane 8091:8091` reaches the UI/API; probe the

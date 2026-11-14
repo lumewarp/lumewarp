@@ -112,6 +112,21 @@ injects its span context upstream. With OTel disabled, there is no extraction /
 injection, just header passthrough. Exporter creation and export work are absent
 when the enable switch is unset.
 
+## Shared-limits sync
+
+A gateway started with `--shared-limits-redis-url` adds five series, with no scope or
+key labels: `lumewarp_shared_limits_fallback` (`1` while it counts per gateway),
+`lumewarp_shared_limits_sync_duration_seconds{result="success"|"error"}`,
+`lumewarp_shared_limits_sync_errors_total{reason="connect"|"timeout"|"script"}`,
+`lumewarp_shared_limits_last_sync_age_seconds` and `lumewarp_shared_limits_scopes`. They
+do not exist without a URL. A failed sync and a sync slower than the interval also open
+a `shared_limits_sync` span with the result, reason, namespace, scope count and elapsed
+milliseconds, so a trace shows whether Redis or the gateway is slow.
+`LumewarpSharedLimitsFallback` warns after two minutes in fallback: check Redis
+reachability, credentials and the namespace, then the sync error reason. While the
+alert fires the limits are per gateway, so N gateways allow up to N times the configured
+rate.
+
 ## Alert rules and Grafana dashboards
 
 Enable the bundled observability resources independently:
@@ -146,9 +161,10 @@ Operational defaults and response steps are documented beside each alert in
 for 10 minutes, TTFT p99 >5 s for 10 minutes, and queue >80,000 of the fixed
 100,000-event capacity. The MCP and A2A alerts cover plugin trap/timeout share,
 upstream 502/504 share per server and agent, MCP definitions stored as pending
-(the review backlog) and discarded catalog reports. Tune TTFT, vLLM queue depth and
-backlog limits against production baselines. Overhead's alert threshold is not the
-benchmark target.
+(the review backlog) and discarded catalog reports. The shared-limits fallback alert
+covers gateways whose Redis sync has been down for two minutes. Tune TTFT, vLLM queue
+depth and backlog limits against production baselines. Overhead's alert threshold is
+not the benchmark target.
 
 Preserve the `namespace`, `job` and `instance` scrape labels. Version comparison
 assumes one control-plane installation per namespace (no cross-installation joins).

@@ -20,12 +20,14 @@ from lumewarp_control_plane.models import (
     ConfigVersion,
     ConfigVersionKind,
     GatewaySession,
+    GatewayToken,
     KeyLifecycle,
     Model,
     OutboxStatus,
     Router,
     Team,
 )
+from lumewarp_control_plane.security import SecretKind, generate_secret
 from tests.compiler.helpers import (
     SCOPE,
     add_hierarchy,
@@ -37,6 +39,19 @@ from tests.compiler.helpers import (
     touch,
 )
 from tests.factories import make_key, make_team, make_user
+
+
+async def _gateway_token(session) -> GatewayToken:
+    secret = generate_secret(SecretKind.GATEWAY_TOKEN)
+    token = GatewayToken(
+        scope=SCOPE,
+        name="test",
+        token_hash=secret.hash,
+        display_prefix=secret.display_prefix,
+    )
+    session.add(token)
+    await session.flush()
+    return token
 
 
 async def publish(factory, **kw):
@@ -333,9 +348,11 @@ async def test_compaction(factory) -> None:
     async with factory() as s, s.begin():
         for v in range(1, 61):
             await store_version(s, SCOPE, pb.Snapshot(scope=SCOPE), version=v, source_revision=v)
-        s.add(GatewaySession(scope=SCOPE, gateway_id="a", connected=True,
+        token = await _gateway_token(s)
+        s.add(GatewaySession(scope=SCOPE, gateway_id="a", token_id=token.id, connected=True,
                              acked_version=3, pending_version=5))  # fmt: skip
-        s.add(GatewaySession(scope=SCOPE, gateway_id="b", connected=True, hello_have_version=7))
+        s.add(GatewaySession(scope=SCOPE, gateway_id="b", token_id=token.id, connected=True,
+                             hello_have_version=7))  # fmt: skip
     async with factory() as s, s.begin():
         assert await compact_versions(s, SCOPE, retain=50) == 10 - 3
     vs = {v.version: v for v in await versions(factory)}
@@ -360,10 +377,12 @@ async def test_compaction_releases_disconnected_or_removed_gateway(factory, remo
     async with factory() as s, s.begin():
         for v in range(1, 5):
             await store_version(s, SCOPE, pb.Snapshot(scope=SCOPE), version=v, source_revision=v)
+        token = await _gateway_token(s)
         s.add(
             GatewaySession(
                 scope=SCOPE,
                 gateway_id="gone",
+                token_id=token.id,
                 connected=True,
                 hello_have_version=1,
                 acked_version=2,

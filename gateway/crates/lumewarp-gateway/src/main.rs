@@ -6,6 +6,7 @@ mod catalog;
 mod config_stream;
 mod endpoint;
 mod error;
+mod gateway_id;
 mod grants;
 mod health;
 mod mcp;
@@ -24,6 +25,7 @@ mod router;
 mod runtime;
 mod sealed;
 mod server;
+mod shared_limits;
 mod snapshot;
 mod targets;
 mod telemetry;
@@ -105,7 +107,7 @@ struct Args {
         long,
         short,
         env = "LUMEWARP_CONFIG",
-        conflicts_with_all = ["control_plane", "gateway_token_env", "state_dir", "scope", "gateway_id", "local_config"],
+        conflicts_with_all = ["control_plane", "gateway_token_env", "state_dir", "scope", "local_config"],
         required_unless_present = "control_plane"
     )]
     config: Option<PathBuf>,
@@ -121,12 +123,25 @@ struct Args {
     /// Control-plane scope this gateway serves.
     #[arg(long)]
     scope: Option<String>,
-    /// Identity presented to the control plane.
-    #[arg(long, default_value = "gateway")]
-    gateway_id: String,
     /// YAML with only `server:` settings (listen, admin, timeouts).
     #[arg(long)]
     local_config: Option<PathBuf>,
+    /// Redis URL (`redis://` or `rediss://`) for sharing rate-limit counters
+    /// between gateways. Empty = per-gateway limits.
+    #[arg(long, env = "LUMEWARP_SHARED_LIMITS_REDIS_URL", hide_env_values = true)]
+    shared_limits_redis_url: Option<String>,
+    /// Shared-limits sync interval in milliseconds (10-1000, default 100).
+    #[arg(
+        long,
+        env = "LUMEWARP_SHARED_LIMITS_SYNC_MS",
+        default_value_t = shared_limits::SYNC_MS_DEFAULT,
+        value_parser = clap::value_parser!(u64).range(shared_limits::SYNC_MS_MIN..=shared_limits::SYNC_MS_MAX)
+    )]
+    shared_limits_sync_ms: u64,
+    /// Redis key namespace for shared limits. Defaults to `--scope` in
+    /// control-plane mode; required with a URL in standalone mode.
+    #[arg(long, env = "LUMEWARP_SHARED_LIMITS_NAMESPACE")]
+    shared_limits_namespace: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -175,11 +190,12 @@ fn activated(
 /// Standalone mode: the YAML is the whole configuration.
 fn standalone(
     path: &std::path::Path,
+    shared_limits: bool,
 ) -> anyhow::Result<(LocalSettings, server::Snapshot, Arc<runtime::Runtime>)> {
     let yaml =
         std::fs::read_to_string(path).with_context(|| format!("loading {}", path.display()))?;
     let (settings, snapshot) = Config::parse(&yaml)?;
-    let runtime = runtime::Runtime::from_env();
+    let runtime = runtime::Runtime::from_env_shared_limits(shared_limits);
     let routing_table = activated(router::RoutingTable::compile(
         &snapshot,
         AuthMode::standalone(&snapshot),
@@ -212,11 +228,24 @@ async fn main() -> anyhow::Result<()> {
     if let Some(Command::Plugins { json }) = args.command {
         return list_strategies(json);
     }
+    // A malformed URL or a missing standalone namespace is a startup error; an
+    // unreachable Redis is not (the task starts in fallback).
+    let default_namespace = if args.control_plane.is_some() {
+        args.scope.as_deref()
+    } else {
+        None
+    };
+    let shared_limits = shared_limits::Config::from_args(
+        args.shared_limits_redis_url.as_deref(),
+        args.shared_limits_sync_ms,
+        args.shared_limits_namespace.as_deref(),
+        default_namespace,
+    )?;
     let telemetry = tokio::task::spawn_blocking(telemetry::init).await??;
     let mut stream = None;
     let mut reporter = None;
     let (settings, snapshot, runtime) = match (&args.config, &args.control_plane) {
-        (Some(path), _) => standalone(path)?,
+        (Some(path), _) => standalone(path, shared_limits.is_some())?,
         (None, Some(url)) => {
             let env_name = args
                 .gateway_token_env
@@ -237,12 +266,13 @@ async fn main() -> anyhow::Result<()> {
                 None => Config::from_yaml("{}")?.into_parts()?.0,
             };
 
-            let metrics = Arc::new(metrics::Metrics::new());
+            let metrics = Arc::new(metrics::Metrics::with_shared_limits(
+                shared_limits.is_some(),
+            ));
             let (sink, handle) = usage::spawn_reporter(
                 usage::ReporterConfig {
                     endpoint: url.clone(),
                     token: token.clone(),
-                    gateway_id: args.gateway_id.clone(),
                     capacity: usage::ReporterConfig::DEFAULT_CAPACITY,
                     batch_max: usage::ReporterConfig::DEFAULT_BATCH_MAX,
                     flush_interval: usage::ReporterConfig::DEFAULT_FLUSH_INTERVAL,
@@ -289,9 +319,11 @@ async fn main() -> anyhow::Result<()> {
                 config_stream::StreamConfig {
                     url: url.clone(),
                     token,
-                    gateway_id: args.gateway_id.clone(),
                     scope,
                     state_dir,
+                    shared_limits_namespace: shared_limits
+                        .as_ref()
+                        .map(|config| config.namespace.clone()),
                 },
                 current,
                 digest,
@@ -303,7 +335,14 @@ async fn main() -> anyhow::Result<()> {
         }
         (None, None) => unreachable!("clap requires --config or --control-plane"),
     };
+    let shared_sync = match &shared_limits {
+        Some(config) => Some(shared_limits::spawn(runtime.clone(), config.clone())?),
+        None => None,
+    };
     let result = server::serve(&settings, snapshot, runtime, telemetry.is_some()).await;
+    if let Some(task) = shared_sync {
+        task.abort();
+    }
     if let Some(stream) = stream {
         stream.abort();
     }

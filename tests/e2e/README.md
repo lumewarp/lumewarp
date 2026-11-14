@@ -5,15 +5,17 @@ Real processes on ephemeral ports: Postgres database (created and dropped per te
 control-plane mode. No separate project: the tests run in the control-plane's uv environment
 (they use its `httpx`, `asyncpg` and security helpers).
 
-    scripts/e2e-core.sh          # builds binaries, starts dev Postgres if needed, runs pytest
+    scripts/e2e-core.sh          # builds binaries, starts dev Postgres/Redis if needed, runs pytest
     scripts/check-all.sh         # every check, then the e2e gate
 
 Environment: `E2E_PG_URL` (server DSN, default dev Postgres 127.0.0.1:55432), `E2E_PROFILE`
-(`debug`|`release` gateway), `E2E_GATEWAY_BIN`, `E2E_MOCK_BIN`. `scripts/e2e-core.sh` builds the
-WASM router plugins with `gateway/plugins/build.sh` into `gateway/target/plugins/router`; the
-strategy tests (`test_strategy_plugin.py`, `test_strategy_cheapest_first.py`) start their own
-gateway with `LUMEWARP_ROUTER_PLUGIN_DIR` pointing there, so no special gateway build is needed.
-Failing tests print every process log.
+(`debug`|`release` gateway), `E2E_GATEWAY_BIN`, `E2E_MOCK_BIN`, `E2E_REDIS_URL` (Redis for the
+shared-limits gate, `test_shared_limits.py`; `scripts/e2e-core.sh` starts a throwaway
+`redis:7-alpine` with docker when it is unset, and the CI `e2e` job has a `redis:7` service).
+`scripts/e2e-core.sh` builds the WASM router plugins with `gateway/plugins/build.sh` into
+`gateway/target/plugins/router`; the strategy tests (`test_strategy_plugin.py`,
+`test_strategy_cheapest_first.py`) start their own gateway with `LUMEWARP_ROUTER_PLUGIN_DIR`
+pointing there, so no special gateway build is needed. Failing tests print every process log.
 
 `test_routing_resilience.py` (collected by `scripts/e2e-core.sh` and `scripts/e2e-identity.sh`; no IdP) configures
 routing resilience over the admin API against a second mock started with `--fail-every 1` (always 503)
@@ -31,6 +33,30 @@ intact; usage rows record the served model, alias, router, fallback, attempts an
 model's price, filter by every dimension and stay continuous across a rename. An in-process
 OTLP sink proves a request is found by its `x-lumewarp-request-id`, with every attempt, without
 the prompt, the response or the key, and that `traceparent` sampled=0 does not erase it.
+
+## Shared rate limits across gateways
+
+`test_shared_limits.py` (collected by `scripts/e2e-core.sh` and `scripts/e2e-identity.sh`; no IdP) is the acceptance of
+Redis-backed shared limits (`docs/operations/gateway.md`, "Shared rate limits"): three real
+gateway processes, one token and one Redis namespace, all with
+`LUMEWARP_SHARED_LIMITS_SYNC_MS=20`. Each process generates its own gateway id. It proves a
+key's `rpm_limit` holds across the three (18 round-robin requests admit between 12 and the
+documented 12 + n, the rest 429 with `Retry-After`), and that `max_parallel` does too
+against a 1.5 s mock: a 12-request burst never holds more than 6 slots at once and the
+overflow is 429. Redis loss is simulated with a loopback TCP proxy the test closes:
+`lumewarp_shared_limits_fallback` turns 1 on every gateway within 2 s, requests stay served
+and each gateway counts for itself (30 requests, more than the shared 12, all succeed), the
+`connect` sync-error counter rises, and when the proxy reopens the metric returns to 0 and
+the key is limited again by the combined counts. A SIGKILLed gateway that held all three
+parallel slots keeps the survivors at 429 until its in-flight fields go stale; they admit
+again after about 3 s (measured, asserted under 4 s). `GET /gateways` shows the three
+gateways with `shared_limits_enabled` and the namespace. In-flight slots are read from the
+documented Redis hash to measure the release time, never to produce the limit decision.
+
+The module skips with a clear reason when `E2E_REDIS_URL` is unset: no other gate needs a
+Redis. `scripts/e2e-core.sh` starts a throwaway `redis:7-alpine` on a free loopback port
+when docker is available and removes it on exit; CI supplies a `redis:7` service and sets
+the variable.
 
 ## Identity: real OIDC and authorization gate
 

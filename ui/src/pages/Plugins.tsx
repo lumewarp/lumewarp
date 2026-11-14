@@ -21,17 +21,17 @@ const KINDS: { kind: PluginKind; title: string }[] = [
 ];
 
 export function Plugins() {
-  const plugins = usePlugins();
+  const plugins = usePlugins(undefined, true, 10_000);
   const rows = plugins.data ?? [];
 
-  // Every gateway any plugin mentions, so "which gateways have it" has a denominator.
-  const gateways = useMemo(() => {
+  // Every connected gateway any plugin mentions, so "which gateways have it" has a denominator.
+  const total = useMemo(() => {
     const all = new Set<string>();
     for (const p of rows) {
-      for (const g of p.gateways) all.add(g.gateway_id);
+      for (const g of p.gateways) if (g.connected) all.add(g.gateway_id);
       for (const g of p.missing_gateways) all.add(g);
     }
-    return [...all].sort();
+    return all.size;
   }, [rows]);
 
   const header = <PageHeader title="Plugins" hint="A gateway loads the built-ins and every .wasm file in its plugin directories at startup and reports them; there is nothing to upload here." />;
@@ -108,7 +108,7 @@ export function Plugins() {
                 key: "gateways",
                 header: "Gateways",
                 align: "right",
-                cell: (p) => <Gateways p={p} total={gateways.length} />,
+                cell: (p) => <Gateways p={p} total={total} />,
               },
             ]}
           />
@@ -141,19 +141,29 @@ function Settings({ p }: { p: Plugin }) {
 
 /** Which gateways have it, and which connected ones do not (they would reject a config that uses it). */
 function Gateways({ p, total }: { p: Plugin; total: number }) {
+  // A gateway is one process: one entry per connected gateway that reports the plugin.
+  const supported = p.gateways.filter((g) => g.connected).map((g) => g.gateway_id);
   if (!total) return <span className="text-muted-foreground">—</span>;
   return (
     <div className="flex flex-col items-end gap-1">
       <Badge tone={p.missing_gateways.length ? "warn" : "ok"}>
-        {p.gateways.length} / {total}
+        {supported.length} / {total}
       </Badge>
-      {p.gateways.map((g) => (
-        <code key={g.gateway_id} className="whitespace-nowrap text-xs text-muted-foreground">
-          {g.gateway_id}
+      {supported.map((id) => (
+        <code key={id} className="whitespace-nowrap text-xs text-muted-foreground" data-testid={`plugin-gateway-${id}`}>
+          {id}
         </code>
       ))}
       {p.missing_gateways.length > 0 && (
-        <span className="text-xs text-destructive [overflow-wrap:anywhere]">missing: {p.missing_gateways.join(", ")}</span>
+        <span className="text-xs text-destructive [overflow-wrap:anywhere]">
+          missing:{" "}
+          {p.missing_gateways.map((id, n) => (
+            <span key={id}>
+              {n > 0 && ", "}
+              <code data-testid={`plugin-missing-${id}`}>{id}</code>
+            </span>
+          ))}
+        </span>
       )}
     </div>
   );

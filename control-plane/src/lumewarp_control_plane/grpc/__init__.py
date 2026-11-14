@@ -2,6 +2,9 @@
 
 Config/usage wire semantics are normative in ``docs/config-protocol.md``. The registry is
 process-local for coordination; ``gateway_sessions`` is a status mirror, never session truth.
+A gateway is one process, named by ``Hello.gateway_id``; a reconnect of that id replaces its
+old stream. Quarantine is per scope: every gateway receives the same snapshot, so a version
+one gateway rejected is not sent to any gateway in the scope.
 """
 
 from __future__ import annotations
@@ -36,10 +39,15 @@ from lumewarp_control_plane.compiler.plugins import (
     replace_gateway_plugins,
 )
 from lumewarp_control_plane.db import SessionFactory
-from lumewarp_control_plane.ids import uuid7
+from lumewarp_control_plane.ids import uuid7, valid_gateway_id
 from lumewarp_control_plane.mcp import catalog_ingest
 from lumewarp_control_plane.metrics import DISCARD, Metrics
-from lumewarp_control_plane.models import ConfigVersion, GatewaySession, GatewayToken
+from lumewarp_control_plane.models import (
+    ConfigVersion,
+    GatewayQuarantine,
+    GatewaySession,
+    GatewayToken,
+)
 from lumewarp_control_plane.security import SecretKind, hash_secret, parse_bearer, secret_kind
 from lumewarp_control_plane.settings import Settings
 from lumewarp_control_plane.usage import InvalidUsageBatch, ingest
@@ -66,8 +74,9 @@ _KEEPALIVE_TIMEOUT_MS = 20_000
 
 @dataclass(frozen=True)
 class GatewayIdentity:
+    """What a gateway token authenticates: its scope, never a gateway id."""
+
     token_id: uuid.UUID
-    gateway_id: str
     scope: str
 
 
@@ -88,7 +97,7 @@ async def authenticate_gateway(
     ).scalar_one_or_none()
     if row is None:
         return None
-    return GatewayIdentity(token_id=row.id, gateway_id=row.gateway_id, scope=row.scope)
+    return GatewayIdentity(token_id=row.id, scope=row.scope)
 
 
 _identity_var: contextvars.ContextVar[GatewayIdentity | None] = contextvars.ContextVar(
@@ -210,6 +219,8 @@ _MAX_MODEL_NAME = 400
 @dataclass
 class _StreamState:
     identity: GatewayIdentity
+    # Hello.gateway_id: one process, its own stream and status row.
+    gateway_id: str
     session_id: uuid.UUID
     hello_version: int
     hello_digest: bytes
@@ -218,15 +229,23 @@ class _StreamState:
     capabilities: list[str]
     peer: str | None
     connected_at: datetime
+    shared_limits_enabled: bool = False
+    shared_limits_namespace: str = ""
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     # Last version the gateway reported or ACKed; status only, never a delta base by itself.
+    # It is only mirrored once the Hello version is verified or the first ACK arrives (F7).
     acked_version: int = 0
     # (version, digest) the gateway is known to hold with this control plane's content: the
     # Hello's version once its digest is verified, then each ACKed version. None means the
     # next update must be full (no Hello match, BASE_MISMATCH, or a full not yet ACKed).
     base: tuple[int, bytes] | None = None
     hello_checked: bool = False
+    # True once the Hello's digest matched a stored version: only then is `hello_version` a
+    # version this control plane can vouch for, and only then may it be shown as ACKed.
+    hello_verified: bool = False
     pending: _PendingUpdate | None = None
+    # Versions any gateway in this scope rejected. Nothing is sent while the desired version
+    # is in here; a newer publish is tried again.
     quarantined_versions: set[int] = field(default_factory=set)
     last_nack_version: int | None = None
     last_nack_code: str | None = None
@@ -241,8 +260,8 @@ class _StreamState:
         return self.identity.scope
 
     @property
-    def gateway_id(self) -> str:
-        return self.identity.gateway_id
+    def key(self) -> tuple[str, str]:
+        return (self.identity.scope, self.gateway_id)
 
     def close(self, code: grpc.StatusCode, details: str) -> None:
         if self.closed is None:
@@ -256,9 +275,11 @@ _UpdateKey = tuple[str, int, bytes, tuple[int, bytes] | None]
 class SessionRegistry:
     """Track one active ACK/pending state machine per ``(scope, gateway_id)``.
 
-    It also caches parsed snapshots and built updates keyed by ``(scope, version, digest)``
-    (plus the delta base), so N gateways moving between the same versions cost one payload
-    load and one diff.
+    A new connection with the same gateway id replaces its previous stream. Quarantine is
+    per scope: every gateway receives the same snapshot, so one rejection withholds the
+    version from all of them. It also caches parsed snapshots and built updates keyed by
+    ``(scope, version, digest)`` (plus the delta base), so N gateways moving between the same
+    versions cost one payload load and one diff.
     """
 
     def __init__(
@@ -267,6 +288,10 @@ class SessionRegistry:
         self.session_factory = session_factory
         self.metrics = metrics
         self._sessions: dict[tuple[str, str], _StreamState] = {}
+        # Scope-wide quarantine learned in this process, by scope. It closes the window
+        # between a NACK and the row a connecting Hello reads: the version is added here
+        # before its transaction commits, and `stream` merges it under `_lock`.
+        self._quarantines: dict[str, set[int]] = {}
         self._lock = asyncio.Lock()
         self._build_lock = asyncio.Lock()
         self._snapshots: OrderedDict[tuple[str, int, bytes], snapshot_pb2.Snapshot] = OrderedDict()
@@ -289,6 +314,19 @@ class SessionRegistry:
         for state in tuple(self._sessions.values()):
             if state.scope == scope:
                 state.wake.set()
+
+    def quarantine(self, scope: str, version: int) -> None:
+        """Every live gateway in this scope skips `version` from now on.
+
+        The caller persists it in the same transaction as the gateway row it mirrors
+        (`_mirror(quarantine=...)`), so a gateway that connects later starts with it too.
+        The in-process set is also merged into a Hello that is still being read when this
+        runs, before its transaction could have seen the row.
+        """
+        self._quarantines.setdefault(scope, set()).add(version)
+        for state in tuple(self._sessions.values()):
+            if state.scope == scope:
+                state.quarantined_versions.add(version)
 
     def close_token(self, token_id: uuid.UUID) -> int:
         """End every live stream authenticated with ``token_id`` (PERMISSION_DENIED).
@@ -389,16 +427,27 @@ class SessionRegistry:
         *,
         disconnected: bool = False,
         reported: list[ReportedPlugin] | None = None,
+        quarantine: int | None = None,
     ) -> None:
-        """Upsert the status row unless a newer session owns it. With `reported`, also replace
-        the gateway's descriptors in the same transaction, under the row lock the upsert took,
-        so a stale Hello never overwrites them and readers never see half a Hello.
+        """Upsert the status row of this gateway unless a newer session owns it. With
+        `reported`, also replace the gateway's descriptors in the same transaction, under the
+        row lock the upsert took, so a stale Hello never overwrites them and readers never see
+        half a Hello. With `quarantine`, also record a scope-wide quarantine: a version one
+        gateway rejected is withheld from every gateway of the scope.
         """
         if self.session_factory is None:
             return
         now = datetime.now(UTC)
         pending = state.pending
-        acked = state.acked_version if state.acked_version <= 2**63 - 1 else None
+        # A version is only known to be the control plane's content once the Hello digest was
+        # verified or an ACK arrived; a fresh gateway claims 0 and that must not read as
+        # "applied version 0" (F7).
+        acked = (
+            state.acked_version
+            if state.acked_version <= 2**63 - 1
+            and (state.hello_verified or state.acked_version != state.hello_version)
+            else None
+        )
         values = {
             "scope": state.scope,
             "gateway_id": state.gateway_id,
@@ -414,7 +463,8 @@ class SessionRegistry:
             "last_nack_version": state.last_nack_version,
             "last_nack_code": state.last_nack_code,
             "last_nack_reason": state.last_nack_reason,
-            "quarantined_version": max(state.quarantined_versions, default=None),
+            "shared_limits_enabled": state.shared_limits_enabled,
+            "shared_limits_namespace": state.shared_limits_namespace,
             "connected_at": state.connected_at,
             "disconnected_at": now if disconnected else None,
             "last_seen_at": now,
@@ -434,6 +484,24 @@ class SessionRegistry:
             where=GatewaySession.session_id <= stmt.excluded.session_id,
         )
         async with self.session_factory() as session, session.begin():
+            if quarantine is not None:
+                record = pg_insert(GatewayQuarantine).values(
+                    scope=state.scope,
+                    quarantined_version=quarantine,
+                    updated_at=now,
+                )
+                await session.execute(
+                    record.on_conflict_do_update(
+                        index_elements=[GatewayQuarantine.scope],
+                        set_={
+                            "quarantined_version": func.greatest(
+                                GatewayQuarantine.quarantined_version,
+                                record.excluded.quarantined_version,
+                            ),
+                            "updated_at": now,
+                        },
+                    )
+                )
             owner = await session.scalar(stmt.returning(GatewaySession.session_id))
             if owner is None or reported is None:
                 return
@@ -490,22 +558,34 @@ class SessionRegistry:
         last_nack_reason = None
         previous_session = None
         stored_capabilities: list[str] = []
+        gateway_id = hello.gateway_id
+        # NACKs this process knows about, even ones whose transaction is not visible to the
+        # row read below; merged again under `_lock` when the session registers.
+        quarantine.update(self._quarantines.get(identity.scope, ()))
         if self.session_factory is not None:
             async with self.session_factory() as session:
-                previous = await session.get(GatewaySession, (identity.scope, identity.gateway_id))
+                previous = await session.get(GatewaySession, (identity.scope, gateway_id))
                 if previous is not None:
-                    if previous.quarantined_version is not None:
-                        quarantine.add(previous.quarantined_version)
                     last_nack_version = previous.last_nack_version
                     last_nack_code = previous.last_nack_code
                     last_nack_reason = previous.last_nack_reason
                     previous_session = previous.session_id
                     stored_capabilities = list(previous.capabilities)
+                # Scope-wide: every gateway receives the same snapshot, so one rejection
+                # withholds the version from all of them.
+                quarantined = await session.scalar(
+                    select(GatewayQuarantine.quarantined_version).where(
+                        GatewayQuarantine.scope == identity.scope
+                    )
+                )
+                if quarantined is not None:
+                    quarantine.add(quarantined)
         # Before anything slow: the id is this connection's place in line.
         session_id = self._next_session_id(previous_session)
         normalized = await self._normalize_hello(hello, stored_capabilities)
         state = _StreamState(
             identity=identity,
+            gateway_id=gateway_id,
             session_id=session_id,
             hello_version=hello.have_version,
             hello_digest=bytes(hello.have_digest),
@@ -514,24 +594,31 @@ class SessionRegistry:
             capabilities=normalized.capabilities,
             peer=peer,
             connected_at=datetime.now(UTC),
+            shared_limits_enabled=hello.shared_limits.enabled,
+            shared_limits_namespace=hello.shared_limits.namespace[:200],
             acked_version=hello.have_version,
             quarantined_versions=quarantine,
             last_nack_version=last_nack_version,
             last_nack_code=last_nack_code,
             last_nack_reason=last_nack_reason,
         )
-        key = (identity.scope, identity.gateway_id)
+        key = state.key
         async with self._lock:
+            # A NACK that lands while this Hello is being read (after the row above was
+            # loaded, before this session is registered) is not in that row: merge the
+            # in-process quarantine here, under the lock that registers the session. Without
+            # it this gateway could be sent a version another gateway already rejected.
+            state.quarantined_versions.update(self._quarantines.get(state.scope, ()))
             old = self._sessions.get(key)
             if old is not None and old.session_id > state.session_id:
                 # A newer connection overtook this one while its Hello was being read.
                 state.close(grpc.StatusCode.UNAVAILABLE, "gateway stream replaced")
             elif old is not None:
-                # Replicas must not share a gateway_id/token: they would evict each other.
+                # The same gateway id reconnected; this is its new stream.
                 log.warning(
                     "gateway %s/%s reconnected; replacing its previous stream (peer %s -> %s)",
                     identity.scope,
-                    identity.gateway_id,
+                    gateway_id,
                     old.peer,
                     peer,
                 )
@@ -591,6 +678,10 @@ async def _desired_update(
                 )
                 if stored is not None and bytes(stored) == state.hello_digest:
                     state.base = (state.hello_version, state.hello_digest)
+                    state.hello_verified = True
+                    # The row was mirrored before this check; an up-to-date gateway gets no
+                    # update, so show its verified version now instead of never.
+                    await registry._mirror(state)
         base = state.base
         if base == (version, digest):
             return None
@@ -647,12 +738,13 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
         if first.WhichOneof("msg") != "hello":
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "first message must be Hello")
         hello = first.hello
-        if hello.gateway_id != identity.gateway_id:
+        if not valid_gateway_id(hello.gateway_id):
             await context.abort(
-                grpc.StatusCode.PERMISSION_DENIED, "gateway_id does not match token"
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "Hello.gateway_id is required: 1..100 of [A-Za-z0-9._-]",
             )
 
-        async with self.registry.stream(identity, hello, context.peer()) as state:
+        async with self.registry.stream(identity, hello, peer_address(context.peer())) as state:
             update = await _desired_update(
                 state, self.settings, self.session_factory, self.registry
             )
@@ -807,14 +899,21 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
             state.acked_version = reply.have_version
             state.base = None
             state.pending = None
-        elif code in (
-            config_service_pb2.NACK_CODE_INVALID_CONFIG,
-            config_service_pb2.NACK_CODE_UNSUPPORTED_FEATURE,
-        ):
+        elif code == config_service_pb2.NACK_CODE_INVALID_CONFIG:
             # The gateway keeps its previous version, so a delta base (if any) still holds;
-            # after a NACKed full, base is already None.
+            # after a NACKed full, base is already None. Every gateway of the scope skips
+            # the version: they all receive the same snapshot, so it is invalid for all.
+            self.registry.quarantine(state.scope, pending.version)
+            state.pending = None
+            await self.registry._mirror(state, quarantine=pending.version)
+            return
+        elif code == config_service_pb2.NACK_CODE_UNSUPPORTED_FEATURE:
+            # A missing plugin or capability is this gateway's own: only this stream skips
+            # the version, and the other gateways of the scope still receive it.
             state.quarantined_versions.add(pending.version)
             state.pending = None
+            await self.registry._mirror(state)
+            return
         else:
             pending.retry_at = time.monotonic() + pending.retry_delay
             pending.retry_delay = min(pending.retry_delay * 2, _RETRY_MAX_SECONDS)
@@ -849,16 +948,18 @@ class _UsageService(usage_pb2_grpc.UsageServiceServicer):
         identity = _identity()
         if identity is None:
             await context.abort(grpc.StatusCode.PERMISSION_DENIED, "invalid gateway credentials")
-        if request.gateway_id != identity.gateway_id:
+        # The token authenticates the scope; attribution is the reporting process's own id.
+        if not valid_gateway_id(request.gateway_id):
             await context.abort(
-                grpc.StatusCode.PERMISSION_DENIED, "gateway_id does not match token"
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "ReportRequest.gateway_id is required: 1..100 of [A-Za-z0-9._-]",
             )
         skipped: Counter[str] = Counter()
         try:
             async with self.session_factory() as session, session.begin():
                 accepted = await ingest(
                     session,
-                    identity.gateway_id,
+                    request.gateway_id,
                     request.events,
                     scope_name=identity.scope,
                     max_batch_events=self.settings.max_usage_batch_events,
@@ -959,3 +1060,14 @@ def registry_for(server: grpc.aio.Server) -> SessionRegistry | None:
 def bound_port(server: grpc.aio.Server) -> int | None:
     """Return the port selected by ``serve`` when grpc_bind used port 0."""
     return getattr(server, "bound_port", _server_ports.get(id(server)))
+
+
+def peer_address(peer: str | None) -> str | None:
+    """`ipv4:10.0.0.1:5000` / `ipv6:[::1]:5000` from gRPC as the bare address and port;
+    other forms (`unix:...`) stay as they are."""
+    if not peer:
+        return None
+    for prefix in ("ipv4:", "ipv6:"):
+        if peer.startswith(prefix):
+            return peer[len(prefix) :]
+    return peer

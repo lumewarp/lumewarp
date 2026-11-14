@@ -9,6 +9,10 @@
 #   E2E_PG_URL   server DSN (postgresql://user:pass@host:port/db); the tests create and drop
 #                their own lumewarp_e2e_* databases there. Default: the dev Postgres on
 #                127.0.0.1:55432, started with scripts/dev-db.sh up if it is not reachable.
+#   E2E_REDIS_URL  Redis for the shared-limits gate (tests/e2e/test_shared_limits.py).
+#                When unset and docker is available, a throwaway redis:7-alpine is
+#                started on a free loopback port and removed on exit; without docker
+#                the gate skips itself.
 #   E2E_PROFILE  gateway build profile: debug (default) or release.
 set -euo pipefail
 
@@ -19,6 +23,9 @@ export E2E_PG_URL="${E2E_PG_URL:-postgresql://lumewarp:lumewarp@127.0.0.1:55432/
 run_dir="$(mktemp -d "${TMPDIR:-/tmp}/lumewarp-e2e-run.XXXXXX")"
 export E2E_RUN_DIR="$run_dir"
 touch "$run_dir/pids" "$run_dir/dbs"
+# The throwaway Redis, when this run started one. Empty means "use the caller's
+# E2E_REDIS_URL" or "no docker": the shared-limits test skips itself.
+redis_container=""
 
 # Every disposable database is scanned with pg_dump before it is dropped (per stack, in
 # tests/e2e/stack.py::teardown, so this covers per-test databases too). The secrets the
@@ -47,6 +54,11 @@ cleanup() {
   while read -r pid; do
     [[ -n "$pid" ]] && kill -KILL -- "-$pid" 2>/dev/null || true
   done <"$run_dir/pids"
+  # The shared-limits Redis is this run's, so it goes with it. A detached Redis never
+  # stops on its own, so this is its only removal (--rm then drops the stopped container).
+  if [[ -n "$redis_container" ]]; then
+    docker rm --force "$redis_container" >/dev/null 2>&1 || true
+  fi
   # After the tests and before the reaper drops anything: prove no plaintext credential
   # reached the database. Scans leftovers from a hard kill (and databases matching this
   # run's names that no test registered) and verifies every database the run created has
@@ -86,6 +98,40 @@ trap "exit 143" TERM
 
 if [[ "$E2E_PG_URL" == *"127.0.0.1:55432"* ]] && ! (exec 3<>/dev/tcp/127.0.0.1/55432) 2>/dev/null; then
   "$root/scripts/dev-db.sh" up
+fi
+
+# The shared-limits gate needs a Redis. Point the run at the caller's with
+# E2E_REDIS_URL, or borrow docker for a throwaway one; a test that needs it
+# skips with a clear reason when neither exists.
+if [[ -z "${E2E_REDIS_URL:-}" ]] && command -v docker >/dev/null 2>&1; then
+  redis_port="$(python3 -I - <<'PY'
+import socket
+
+with socket.socket() as probe:
+    probe.bind(("127.0.0.1", 0))
+    print(probe.getsockname()[1])
+PY
+)"
+  if redis_container="$(docker run --detach --rm \
+      --publish "127.0.0.1:$redis_port:6379" redis:7-alpine 2>/dev/null)"; then
+    for _ in $(seq 1 100); do
+      if docker exec "$redis_container" redis-cli ping 2>/dev/null | grep -q PONG; then
+        export E2E_REDIS_URL="redis://127.0.0.1:$redis_port/0"
+        break
+      fi
+      sleep 0.1
+    done
+    if [[ -z "${E2E_REDIS_URL:-}" ]]; then
+      echo "warning: the shared-limits Redis did not become ready; the gate will skip" >&2
+      docker rm --force "$redis_container" >/dev/null 2>&1 || true
+      redis_container=""
+    else
+      echo "== Redis for shared limits on 127.0.0.1:$redis_port"
+    fi
+  else
+    echo "warning: could not start redis:7-alpine; the shared-limits gate will skip" >&2
+    redis_container=""
+  fi
 fi
 
 echo "== build WASM router plugins"

@@ -227,6 +227,19 @@ jobs:
     defaults:
       run:
         working-directory: gateway
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # Exercises the gated Redis integration tests inside `cargo test`.
+      LUMEWARP_TEST_REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -433,6 +446,8 @@ jobs:
           input: proto
           breaking: false
           push: false
+          # The workflow token cannot comment on the PR; failures show as annotations.
+          pr_comment: false
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
@@ -468,6 +483,15 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -478,9 +502,12 @@ jobs:
             bench/mock-upstream
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --locked --project control-plane
-      - name: Core e2e gate (Postgres + control plane + gateway + mock upstream)
+      - name: Core e2e gate (Postgres + Redis + control plane + gateway + mock upstream)
         env:
           E2E_PG_URL: postgresql://lumewarp:lumewarp@127.0.0.1:55432/lumewarp
+          # tests/e2e/test_shared_limits.py: three gateways share one namespace;
+          # Redis loss falls back to per-gateway counting.
+          E2E_REDIS_URL: redis://127.0.0.1:6379/0
         run: scripts/e2e-core.sh
 
   load-e2e:

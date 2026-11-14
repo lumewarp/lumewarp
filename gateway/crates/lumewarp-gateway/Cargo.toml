@@ -50,6 +50,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 memchr.workspace = true
+redis = { version = "0.32.7", default-features = false, features = ["connection-manager", "script", "tokio-rustls-comp", "tls-rustls-webpki-roots"] }
 
 [dev-dependencies]
 utoipa.workspace = true

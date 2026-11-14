@@ -266,13 +266,20 @@ per-key `RateLimitScope`s (team scope first, then key scope); the control plane 
 also emit `org:<id>` and `member:<id>`/`sa:<id>`, one per level that sets a limit.
 A key has at most four scopes; a snapshot with more is NACKed INVALID_CONFIG.
 Limiter state is
-keyed by scope id, so it survives reloads, and it is local to one gateway
-instance (N instances allow up to N times the limit). A request acquires all of
-its scopes or none: `requests_per_minute` and `max_parallel_requests` are checked
-before forwarding (`max_parallel` is held until the response body ends, errors or
-is dropped); `tokens_per_minute` is charged after usage is known and blocks later
-requests in the same window. A rejection is 429 `rate_limit_exceeded` with
-`Retry-After`.
+keyed by scope id, so it survives reloads and a limit change applies in place, and it
+is local to one gateway unless the gateways share a Redis and namespace
+(`--shared-limits-redis-url`), in which case they share one window and may over-admit by
+about the number of active gateways plus up to five sync intervals of traffic when a gateway
+first joins the scope; without Redis, N gateways allow up to N times the limit.
+`requests_per_minute` and `tokens_per_minute` are sliding-window counters on
+wall-clock minutes: the current and the previous minute count, with the previous one
+fading out as the minute elapses, so a burst is not followed by a second full burst at
+the next minute boundary. `max_parallel_requests` is an in-flight gauge: a request
+holds its slots until the response body ends, errors or is dropped. A request
+acquires all of its scopes or none: requests-per-minute and parallel slots are
+checked before forwarding; `tokens_per_minute` is charged after usage is known and
+blocks later requests while the window stays full. A rejection is 429
+`rate_limit_exceeded` with `Retry-After` (1–60 s).
 
 ## Routing
 

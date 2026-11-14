@@ -404,7 +404,8 @@ def test_churn_under_load(stack):
     # advisory lock. This scenario only compiles mutations (no rollback publications).
     assert revisions == sorted(set(revisions)), "source_revision not strictly increasing"
     assert status["acked_version"] == versions[-1]["version"], status
-    assert status["quarantined_version"] is None and status["last_nack_code"] is None, status
+    assert status["last_nack_code"] is None, status
+    assert not pg(stack.dsn, "SELECT 1 FROM gateway_quarantines WHERE scope = $1", SCOPE)
     assert_accounting(report)
     assert report["usage_dropped"] == 0
     assert report["config_stream_resets"] == 0, "config stream dropped under steady CP"

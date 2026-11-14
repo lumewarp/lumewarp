@@ -99,6 +99,7 @@ def config_yaml(listen: int, keys: list[tuple[str, list[str]]]) -> str:
         "  - name: mock-model",
         "    upstream: mock",
         "    upstream_model: mock",
+        "    type: llm",
         "routers:",
         "  - name: mock",
         "    members:",

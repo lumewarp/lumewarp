@@ -373,7 +373,7 @@ impl Gateway {
             .args(["--gateway-token-env", TOKEN_ENV])
             .arg("--state-dir")
             .arg(dir.join("state"))
-            .args(["--scope", SCOPE, "--gateway-id", "gw-usage"])
+            .args(["--scope", SCOPE])
             .arg("--local-config")
             .arg(&local)
             .env(TOKEN_ENV, "gw-secret")

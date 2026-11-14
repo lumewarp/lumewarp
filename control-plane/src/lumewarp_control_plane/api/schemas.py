@@ -1216,7 +1216,7 @@ class RouterOut(ReadModel):
 
 
 class PluginGatewayOut(ReadModel):
-    gateway_id: str
+    gateway_id: str = Field(description="Hello.gateway_id of the gateway that reported it.")
     connected: bool
     digest: str | None = Field(description="Null when known only from its capabilities.")
     seen_at: datetime | None
@@ -1570,18 +1570,25 @@ class AuditOut(ReadModel):
 
 
 class GatewayTokenCreate(ApiModel):
-    gateway_id: str = Field(min_length=1, max_length=200)
     name: str = Field(default="", max_length=200)
+
+
+class GatewayTokenRef(ReadModel):
+    """The token a gateway's latest Hello authenticated with: enough to name it in the UI."""
+
+    id: uuid.UUID
+    name: str
+    display_prefix: str
 
 
 class GatewayTokenOut(ReadModel):
     id: uuid.UUID
-    gateway_id: str
     name: str
     display_prefix: str
     created_at: datetime
     last_used_at: datetime | None
     revoked_at: datetime | None
+    connected_gateways: int = Field(description="Gateways connected with this token right now.")
 
 
 class GatewayTokenCreated(ApiModel):
@@ -1590,20 +1597,39 @@ class GatewayTokenCreated(ApiModel):
 
 
 class GatewayOut(ApiModel):
-    gateway_id: str
-    connected: bool
-    gateway_version: str
-    capabilities: list[str]
-    acked_version: int | None
-    pending_version: int | None
-    last_nack_version: int | None
-    last_nack_code: str | None
-    last_nack_reason: str | None
-    quarantined_version: int | None
-    connected_at: datetime | None
-    disconnected_at: datetime | None
-    last_seen_at: datetime | None
-    tokens: list[GatewayTokenOut]
+    """One gateway process: its config stream, version and status."""
+
+    gateway_id: str = Field(description="`Hello.gateway_id`: the process, stable for its lifetime.")
+    connected: bool = Field(description="Its config stream is open.")
+    peer: str | None = Field(description="gRPC peer of the stream, as the control plane sees it.")
+    gateway_version: str = Field(description="The gateway build it reported in Hello.")
+    capabilities: list[str] = Field(description="Capabilities its latest Hello advertises.")
+    acked_version: int | None = Field(
+        description=(
+            "Config version it ACKed last, or the version its Hello proved it holds; null until"
+            " one of those (a fresh gateway with no snapshot stays null)."
+        )
+    )
+    pending_version: int | None = Field(
+        description="Version sent and not yet answered; null when it is up to date."
+    )
+    last_nack_version: int | None = Field(
+        description="Version it NACKed last; null after it ACKs one."
+    )
+    last_nack_code: str | None = Field(description="The NACK code it sent for that version.")
+    last_nack_reason: str | None = Field(description="The control plane's reading of that code.")
+    connected_at: datetime | None = Field(description="When this stream connected.")
+    disconnected_at: datetime | None = Field(
+        description="When the stream ended; null while connected."
+    )
+    last_seen_at: datetime | None = Field(description="Last status write of this gateway.")
+    shared_limits_enabled: bool = Field(
+        description="`Hello.shared_limits.enabled`: it shares rate-limit counters."
+    )
+    shared_limits_namespace: str = Field(
+        description="`Hello.shared_limits.namespace`; empty while sharing is off."
+    )
+    token: GatewayTokenRef = Field(description="The token its latest Hello authenticated with.")
 
 
 class ConfigVersionOut(ApiModel):
@@ -1617,6 +1643,9 @@ class ConfigVersionOut(ApiModel):
     rollback_of_version: int | None
     created_at: datetime
     compacted_at: datetime | None
+    quarantined: bool = Field(
+        description="A gateway rejected this version, so it is withheld from the whole scope."
+    )
 
 
 class RollbackCreate(ApiModel):

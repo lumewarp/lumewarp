@@ -96,38 +96,62 @@ async def test_gateways_are_scoped(client, committed, api_scope) -> None:
     secret = generate_secret(SecretKind.GATEWAY_TOKEN)
     foreign_token = GatewayToken(
         scope=other_scope,
-        gateway_id=foreign_id,
         name="foreign",
         token_hash=secret.hash,
         display_prefix=secret.display_prefix,
     )
     committed.add(foreign_token)
-    committed.add(GatewaySession(scope=other_scope, gateway_id=foreign_id, connected=True))
+    await committed.flush()
+    committed.add(
+        GatewaySession(
+            scope=other_scope,
+            gateway_id=foreign_id,
+            token_id=foreign_token.id,
+            connected=True,
+        )
+    )
     await committed.commit()
 
     listed = client.get(f"{API}/gateways?limit=500", headers=ADMIN_AUTH).json()["items"]
     assert foreign_id not in {item["gateway_id"] for item in listed}
-    revoke = client.post(
-        f"{API}/gateways/{foreign_id}/tokens/{foreign_token.id}/revoke", headers=ADMIN_AUTH
-    )
+    foreign_tokens = client.get(f"{API}/gateway-tokens?limit=500", headers=ADMIN_AUTH)
+    assert foreign_token.id not in {item["id"] for item in foreign_tokens.json()["items"]}
+    revoke = client.post(f"{API}/gateway-tokens/{foreign_token.id}/revoke", headers=ADMIN_AUTH)
     assert revoke.status_code == 404
 
-    # Pagination happens in the database and walks every gateway exactly once.
+    # Pagination walks every gateway exactly once, connected first then by gateway id.
     ids = [f"gw-page-{suffix()}" for _ in range(3)]
+    token = client.post(f"{API}/gateway-tokens", json={"name": "paging"}, headers=ADMIN_AUTH)
+    assert token.status_code == 201
+    token_id = token.json()["token"]["id"]
     for gateway_id in ids:
-        assert _post(client, "/gateways", gateway_id=gateway_id).status_code == 201
+        committed.add(
+            GatewaySession(
+                scope=api_scope,
+                gateway_id=gateway_id,
+                token_id=token_id,
+                connected=False,
+            )
+        )
+    await committed.commit()
+
     seen: list[str] = []
+    states: list[bool] = []
     cursor = None
     while True:
         url = f"{API}/gateways?limit=2" + (f"&cursor={cursor}" if cursor else "")
         page = client.get(url, headers=ADMIN_AUTH).json()
         seen.extend(item["gateway_id"] for item in page["items"])
+        states.extend(item["connected"] for item in page["items"])
         cursor = page["next_cursor"]
         if cursor is None:
             break
     assert len(seen) == len(set(seen))
     assert set(ids) <= set(seen)
-    assert seen == sorted(seen)
+    assert states == sorted(states, reverse=True)
+    for group in (True, False):
+        group_ids = [g for g, state in zip(seen, states, strict=True) if state is group]
+        assert group_ids == sorted(group_ids)
 
 
 # ------------------------------------------------------------------------------ S5

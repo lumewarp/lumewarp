@@ -350,57 +350,75 @@ def plugin_descriptors() -> dict[str, dict]:
 
 
 async def seed_gateways(url: str) -> None:
-    """Two connected gateways that report the plugins the specs use. Done after the server is up:
-    serving marks every stored gateway disconnected, and only connected gateways make a plugin
-    "missing"."""
-    from sqlalchemy import select
+    """The specs' fleet: two connected gateways, each using its own token and sharing a Redis
+    namespace, plus one disconnected gateway on the primary token. Only the primary token's
+    gateway reports the plugins the specs use. Done after the server is up: serving marks every
+    stored gateway disconnected, and only connected gateways make a plugin "missing"."""
+    from sqlalchemy import func, select
     from sqlalchemy.ext.asyncio import AsyncSession
+    from lumewarp_control_plane.models import ConfigVersion
 
     now = datetime.now(UTC)
     engine = create_async_engine(url)
     try:
         async with AsyncSession(engine) as session, session.begin():
-            token_a = await session.scalar(select(GatewayToken).where(GatewayToken.gateway_id == "e2e-gw"))
+            token_a = await session.scalar(select(GatewayToken).where(GatewayToken.name == "primary"))
             assert token_a is not None
-            token_b = GatewayToken(
-                scope=token_a.scope,
-                gateway_id="e2e-gw-b",
-                name="b",
-                token_hash=uuid.uuid4().bytes * 2,
-                display_prefix="lwg-e2eb",
-            )
-            session.add(token_b)
-            await session.flush()
+            token_a.display_prefix = "lwg-e2ea"
+            token_b = await session.scalar(select(GatewayToken).where(GatewayToken.name == "secondary"))
+            if token_b is None:
+                token_b = GatewayToken(
+                    scope=token_a.scope,
+                    name="secondary",
+                    token_hash=uuid.uuid4().bytes * 2,
+                    display_prefix="lwg-e2eb",
+                )
+                session.add(token_b)
+                await session.flush()
+            latest = await session.scalar(select(func.max(ConfigVersion.version))) or 1
             descriptors = plugin_descriptors()
-            for token in (token_a, token_b):
-                names = [n for n, d in descriptors.items() if token is token_a or n not in ONLY_ON_A]
+            # (token, gateway id, connected, shared limits, build)
+            fleet = [
+                (token_a, "e2e-gw", True, True, "e2e"),
+                (token_b, "e2e-gw-b", True, True, "e2e"),
+                (token_a, "e2e-gw-old", False, False, "e2e-old"),
+            ]
+            for n, (token, gateway_id, connected, shared, version) in enumerate(fleet):
+                names = [name for name in descriptors if token is token_a or name not in ONLY_ON_A]
                 capabilities = [
                     *BUILTIN_CAPABILITIES,
-                    *[f"strategy:{n}" for n in names if descriptors[n]["kind"] == "router-strategy"],
-                    *[f"auth:{n}" for n in names if descriptors[n]["kind"] == "upstream-auth"],
-                    *[f"a2a_middleware:{n}" for n in names if descriptors[n]["kind"] == "a2a-middleware"],
+                    *[f"strategy:{name}" for name in names if descriptors[name]["kind"] == "router-strategy"],
+                    *[f"auth:{name}" for name in names if descriptors[name]["kind"] == "upstream-auth"],
+                    *[f"a2a_middleware:{name}" for name in names if descriptors[name]["kind"] == "a2a-middleware"],
                 ]
                 session.add(
                     GatewaySession(
                         scope=token.scope,
-                        gateway_id=token.gateway_id,
+                        gateway_id=gateway_id,
                         token_id=token.id,
-                        connected=True,
-                        gateway_version="e2e",
+                        connected=connected,
+                        gateway_version=version,
                         capabilities=capabilities,
-                        connected_at=now,
-                        last_seen_at=now,
+                        peer=f"10.0.0.{10 + n}:50051" if connected else None,
+                        acked_version=latest if connected else max(1, latest - 1),
+                        connected_at=now - timedelta(hours=n),
+                        disconnected_at=None if connected else now - timedelta(hours=1),
+                        last_seen_at=now if connected else now - timedelta(hours=1),
+                        shared_limits_enabled=shared,
+                        shared_limits_namespace="prod" if shared else "",
                     )
                 )
             await session.flush()
-            for token in (token_a, token_b):
+            for token, gateway_id, connected, _, _ in fleet:
+                if not connected:
+                    continue
                 for name, descriptor in descriptors.items():
                     if token is not token_a and name in ONLY_ON_A:
                         continue
                     session.add(
                         GatewayPlugin(
                             scope=token.scope,
-                            gateway_id=token.gateway_id,
+                            gateway_id=gateway_id,
                             kind=PluginKind(descriptor["kind"]),
                             name=name,
                             digest="e2e" + name.replace("_", "")[:20],
@@ -545,10 +563,51 @@ async def seed_usage(url: str) -> None:
         await engine.dispose()
 
 
+async def published_version(url: str) -> int:
+    """Wait until the compiler has drained the outbox, then return the newest config version.
+
+    A catalog write commits a pending outbox row; the compiler loop publishes the version in
+    the background. A fixture that ACKed the first version would otherwise show every page as
+    "behind" while the later versions land. Polling the pending count is the observable state,
+    not a fixed delay."""
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from lumewarp_control_plane.models import ConfigOutbox, ConfigVersion, OutboxStatus, Scope
+
+    engine = create_async_engine(url)
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            async with AsyncSession(engine) as session:
+                pending = await session.scalar(
+                    select(func.count()).where(ConfigOutbox.status == OutboxStatus.PENDING)
+                )
+                latest = (
+                    await session.execute(
+                        select(ConfigVersion.version, ConfigVersion.source_revision)
+                        .order_by(ConfigVersion.version.desc())
+                        .limit(1)
+                    )
+                ).first()
+                source_revision = await session.scalar(select(func.max(Scope.source_revision)))
+                # A version exists for every committed mutation: no pending outbox row and the
+                # newest version covers the scope's current source revision.
+                if (
+                    not pending
+                    and latest is not None
+                    and latest.source_revision >= (source_revision or 0)
+                ):
+                    return latest.version
+            await asyncio.sleep(0.05)
+        raise RuntimeError("the config compiler did not drain its outbox")
+    finally:
+        await engine.dispose()
+
+
 async def seed_docs(url: str) -> None:
     """The manual's screenshots (docs-shots.spec.ts) instead of the specs' fixtures: one org and
-    team, a vLLM upstream with three models and a router, one connected gateway with the
-    built-in plugins only, and two weeks of traffic on those models."""
+    team, a vLLM upstream with three models and a router, three connected gateways on one
+    token sharing a namespace, and two weeks of traffic on those models."""
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -591,6 +650,7 @@ async def seed_docs(url: str) -> None:
         },
     )
 
+    latest = await published_version(url)
     now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     engine = create_async_engine(url)
     try:
@@ -607,20 +667,30 @@ async def seed_docs(url: str) -> None:
                 user = await session.scalar(select(User).where(User.email == email))
                 user.display_name, user.email = display_name, shown
             session.add(InstallationAdmin(user_id=uuid.UUID(users[SHOTS_EMAIL]), role=InstallationRole.PROXY_ADMIN))
-            token = await session.scalar(select(GatewayToken).where(GatewayToken.gateway_id == "gw-1"))
+            token = await session.scalar(select(GatewayToken).where(GatewayToken.name == "primary"))
             assert token is not None
-            session.add(
-                GatewaySession(
-                    scope=token.scope,
-                    gateway_id=token.gateway_id,
-                    token_id=token.id,
-                    connected=True,
-                    gateway_version="0.1.0",
-                    capabilities=BUILTIN_CAPABILITIES,
-                    connected_at=now - timedelta(days=2),
-                    last_seen_at=datetime.now(UTC),
+            token.name = "production"
+            token.display_prefix = "lwg-docs"
+            token.last_used_at = datetime.now(UTC)
+            gateway_ids = ["gw-a-7f3c1d2e", "gw-a-9b1e4c6a", "gw-a-2d8f5b0c"]
+            # Three gateway processes on one token, sharing rate limits through one Redis namespace.
+            for n, gateway_id in enumerate(gateway_ids, start=1):
+                session.add(
+                    GatewaySession(
+                        scope=token.scope,
+                        gateway_id=gateway_id,
+                        token_id=token.id,
+                        connected=True,
+                        gateway_version="0.1.0",
+                        capabilities=BUILTIN_CAPABILITIES,
+                        peer=f"10.42.0.{10 + n}:51234",
+                        acked_version=latest,
+                        shared_limits_enabled=True,
+                        shared_limits_namespace="prod",
+                        connected_at=now - timedelta(days=2, hours=n),
+                        last_seen_at=datetime.now(UTC),
+                    )
                 )
-            )
             owner, key = uuid.UUID(users[MEMBER_EMAIL]), uuid.uuid4()
             for day in range(14):
                 weekday = (now - timedelta(days=day)).weekday() < 5
@@ -636,7 +706,7 @@ async def seed_docs(url: str) -> None:
                         session.add(
                             UsageEvent(
                                 request_id=uuid.uuid4(),
-                                gateway_id="gw-1",
+                                gateway_id=gateway_ids[0],
                                 ts=ts,
                                 started_at=ts - timedelta(seconds=2),
                                 key_id=key,
@@ -660,7 +730,7 @@ async def seed_docs(url: str) -> None:
                                 cost_nano_usd=prompt * 200 + completion * 600,
                                 cost_known=True,
                                 duration_ms=900 if completion else 80,
-                                config_version=1,
+                                config_version=latest,
                                 usage_state=UsageState.REPORTED,
                                 outcome=RequestOutcome.COMPLETED,
                             )
@@ -705,7 +775,7 @@ def main() -> None:
     server: subprocess.Popen[bytes] | None = None
     try:
         cp("migrate", env=env)
-        cp("bootstrap", "--gateway-id", "gw-1" if DOCS else "e2e-gw", env=env)
+        cp("bootstrap", "--name", "primary", env=env)
         asyncio.run(seed_users(url))
         server = subprocess.Popen(
             [sys.executable, "-m", "lumewarp_control_plane", "serve"], env=env
@@ -714,6 +784,9 @@ def main() -> None:
         if DOCS:
             asyncio.run(seed_docs(url))
         else:
+            # Gateways first: plugin support must be there before a spec can open a form that
+            # names a plugin. seed_usage publishes the catalogue, and its versions are later
+            # than the sessions' initial ACK; the rows stay usable and no warning depends on it.
             asyncio.run(seed_gateways(url))
             asyncio.run(seed_usage(url))
         signal.signal(signal.SIGTERM, lambda *_: server and server.terminate())

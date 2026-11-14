@@ -345,7 +345,7 @@ def upgrade() -> None:
         "usage_events",
         sa.Column("id", sa.BigInteger(), sa.Identity(always=False), nullable=False),
         sa.Column("request_id", sa.Uuid(), nullable=False),
-        sa.Column("gateway_id", sa.String(length=200), nullable=False),
+        sa.Column("gateway_id", sa.String(length=100), nullable=False),
         sa.Column("ts", sa.DateTime(timezone=True), nullable=False),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
@@ -686,7 +686,6 @@ def upgrade() -> None:
         "gateway_tokens",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("scope", sa.String(length=128), nullable=False),
-        sa.Column("gateway_id", sa.String(length=200), nullable=False),
         sa.Column("name", sa.String(length=200), server_default="", nullable=False),
         sa.Column("token_hash", sa.LargeBinary(), nullable=False),
         sa.Column("display_prefix", sa.String(length=32), nullable=False),
@@ -710,9 +709,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id", name=op.f("pk_gateway_tokens")),
         sa.UniqueConstraint("token_hash", name=op.f("uq_gateway_tokens_token_hash")),
     )
-    op.create_index(
-        op.f("ix_gateway_tokens_scope"), "gateway_tokens", ["scope", "gateway_id"], unique=False
-    )
+    op.create_index(op.f("ix_gateway_tokens_scope"), "gateway_tokens", ["scope"], unique=False)
     op.create_table(
         "installation_admins",
         sa.Column("user_id", sa.Uuid(), nullable=False),
@@ -1222,9 +1219,9 @@ def upgrade() -> None:
     op.create_table(
         "gateway_sessions",
         sa.Column("scope", sa.String(length=128), nullable=False),
-        sa.Column("gateway_id", sa.String(length=200), nullable=False),
+        sa.Column("gateway_id", sa.String(length=100), nullable=False),
         sa.Column("session_id", sa.Uuid(), nullable=True),
-        sa.Column("token_id", sa.Uuid(), nullable=True),
+        sa.Column("token_id", sa.Uuid(), nullable=False),
         sa.Column("connected", sa.Boolean(), server_default="false", nullable=False),
         sa.Column("gateway_version", sa.String(length=100), server_default="", nullable=False),
         sa.Column(
@@ -1240,7 +1237,10 @@ def upgrade() -> None:
         sa.Column("last_nack_version", sa.BigInteger(), nullable=True),
         sa.Column("last_nack_code", sa.String(length=64), nullable=True),
         sa.Column("last_nack_reason", sa.Text(), nullable=True),
-        sa.Column("quarantined_version", sa.BigInteger(), nullable=True),
+        sa.Column("shared_limits_enabled", sa.Boolean(), server_default="false", nullable=False),
+        sa.Column(
+            "shared_limits_namespace", sa.String(length=200), server_default="", nullable=False
+        ),
         sa.Column("connected_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("disconnected_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=True),
@@ -1266,9 +1266,27 @@ def upgrade() -> None:
             ["token_id"],
             ["gateway_tokens.id"],
             name=op.f("fk_gateway_sessions_token_id_gateway_tokens"),
-            ondelete="SET NULL",
+            ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("scope", "gateway_id", name=op.f("pk_gateway_sessions")),
+    )
+    op.create_table(
+        "gateway_quarantines",
+        sa.Column("scope", sa.String(length=128), nullable=False),
+        sa.Column("quarantined_version", sa.BigInteger(), nullable=False),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["scope"],
+            ["scopes.name"],
+            name=op.f("fk_gateway_quarantines_scope_scopes"),
+            ondelete="RESTRICT",
+        ),
+        sa.PrimaryKeyConstraint("scope", name=op.f("pk_gateway_quarantines")),
     )
     op.create_table(
         "member_policies",
@@ -1708,7 +1726,7 @@ def upgrade() -> None:
     op.create_table(
         "gateway_plugins",
         sa.Column("scope", sa.String(length=128), nullable=False),
-        sa.Column("gateway_id", sa.String(length=200), nullable=False),
+        sa.Column("gateway_id", sa.String(length=100), nullable=False),
         sa.Column(
             "kind",
             sa.Enum(
@@ -1740,7 +1758,11 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint(
-            "scope", "gateway_id", "kind", "name", name=op.f("pk_gateway_plugins")
+            "scope",
+            "gateway_id",
+            "kind",
+            "name",
+            name=op.f("pk_gateway_plugins"),
         ),
     )
     op.create_table(
@@ -2304,6 +2326,7 @@ def downgrade() -> None:
     op.drop_table("router_fallbacks")
     op.drop_index(op.f("ix_member_policies_user_id"), table_name="member_policies")
     op.drop_table("member_policies")
+    op.drop_table("gateway_quarantines")
     op.drop_table("gateway_sessions")
     op.drop_index(op.f("ix_user_sessions_user_id"), table_name="user_sessions")
     op.drop_table("user_sessions")

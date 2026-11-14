@@ -26,6 +26,9 @@ export type Alias = Schemas["AliasOut"];
 /** A gateway plugin of any kind; its title, description and schema are untrusted gateway data. */
 export type Plugin = Schemas["PluginOut"];
 export type PluginKind = Schemas["PluginKind"];
+/** One gateway process and the token its latest Hello used. */
+export type Gateway = Schemas["GatewayOut"];
+export type GatewayToken = Schemas["GatewayTokenOut"];
 export type McpServer = Schemas["McpServerOut"];
 export type McpDefinition = Schemas["McpDefinitionOut"];
 export type McpDefinitionState = Schemas["McpDefinitionState"];
@@ -229,9 +232,10 @@ export const api = {
     listAll((c) => unwrap(client.GET("/api/v1/audit", { params: { query: { ...query, ...q(c) } } }))),
 
   gateways: () => listAll((c) => unwrap(client.GET("/api/v1/gateways", { params: { query: q(c) } }))),
-  createGatewayToken: (body: Schemas["GatewayTokenCreate"]) => unwrap(client.POST("/api/v1/gateways", { body })),
-  revokeGatewayToken: (gatewayId: string, tokenId: string) =>
-    unwrap(client.POST("/api/v1/gateways/{gateway_id}/tokens/{token_id}/revoke", { params: { path: { gateway_id: gatewayId, token_id: tokenId } } })),
+  gatewayTokens: () => listAll((c) => unwrap(client.GET("/api/v1/gateway-tokens", { params: { query: q(c) } }))),
+  createGatewayToken: (body: Schemas["GatewayTokenCreate"]) => unwrap(client.POST("/api/v1/gateway-tokens", { body })),
+  revokeGatewayToken: (tokenId: string) =>
+    unwrap(client.POST("/api/v1/gateway-tokens/{token_id}/revoke", { params: { path: { token_id: tokenId } } })),
 
   configVersions: () => listAll((c) => unwrap(client.GET("/api/v1/config/versions", { params: { query: q(c) } }))),
   rollback: (version: number, force = false) => unwrap(client.POST("/api/v1/config/rollback", { body: force ? { version, force } : { version } })),

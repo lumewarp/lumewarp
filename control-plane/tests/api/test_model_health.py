@@ -11,7 +11,8 @@ import pytest
 from sqlalchemy import delete
 
 from lumewarp_control_plane import upstream_client
-from lumewarp_control_plane.models import GatewaySession
+from lumewarp_control_plane.models import GatewaySession, GatewayToken
+from lumewarp_control_plane.security import SecretKind, generate_secret
 from tests.api.helpers import ADMIN_AUTH, suffix
 
 KEY = "sk-chat-check-secret-7719"
@@ -87,10 +88,20 @@ async def clean_sessions(committed, api_settings):
 
 async def _report(committed, scope, gateway_id, health, *, connected=True) -> None:
     now = datetime.now(UTC)
+    secret = generate_secret(SecretKind.GATEWAY_TOKEN)
+    token = GatewayToken(
+        scope=scope,
+        name=gateway_id,
+        token_hash=secret.hash,
+        display_prefix=secret.display_prefix,
+    )
+    committed.add(token)
+    await committed.flush()
     committed.add(
         GatewaySession(
             scope=scope,
             gateway_id=gateway_id,
+            token_id=token.id,
             session_id=uuid.uuid4(),
             connected=connected,
             model_health=health,

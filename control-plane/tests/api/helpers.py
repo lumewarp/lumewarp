@@ -167,9 +167,10 @@ async def report_plugins(
     """A gateway as Hello leaves it: a new token, the session and the reports of its Hello.
     Returns the token.
 
-    A key names a router strategy by name, or any plugin by `(kind, name)`; the value is
-    (params schema, member schema), each a dict or the raw text a gateway sends, and the
-    member schema is a router strategy's.
+    A call with an existing `gateway_id` replaces that gateway's session and reports, as a
+    reconnect does. A key names a router strategy by name, or any plugin by `(kind, name)`;
+    the value is (params schema, member schema), each a dict or the raw text a gateway sends,
+    and the member schema is a router strategy's.
     """
     import hashlib
     import json
@@ -207,7 +208,6 @@ async def report_plugins(
     secret = generate_secret(SecretKind.GATEWAY_TOKEN)
     token = GatewayToken(
         scope=scope,
-        gateway_id=gateway_id,
         name=gateway_id,
         token_hash=secret.hash,
         display_prefix=secret.display_prefix,

@@ -222,10 +222,13 @@ async fn client_cancel_before_headers_records_499_not_500() {
     let _ = pending.await;
     let mut cancelled = PUBLIC.to_vec();
     cancelled.push(("status", "499"));
+    // The 499 is recorded when the request's observation drops and the in-flight slot
+    // is released by its own guard, so wait for both rather than read one after the other.
     let after = wait_metrics(&gateway, |m| {
         m.value("lumewarp_requests_total", &cancelled)
             - before.value("lumewarp_requests_total", &cancelled)
             == 1.0
+            && m.value("lumewarp_in_flight_requests", &[("model", "d0")]) == 0.0
     })
     .await;
     assert_eq!(

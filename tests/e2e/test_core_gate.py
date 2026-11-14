@@ -5,7 +5,7 @@ import uuid
 
 import httpx
 import pytest
-from stack import GATEWAY_ID, pg, wait_for
+from stack import pg, wait_for
 
 
 def sse_ok(resp: httpx.Response) -> bool:
@@ -250,10 +250,9 @@ def test_org_rate_limit_decrease_blocks_at_the_lower_value(stack):
     ].values()
     stack.ok("PATCH", f"/orgs/{org_id}", json={"rpm_limit": 1000})
     gw = stack.start_gateway()
-    assert gw.chat(seeded.a.secret).status_code == 200
-    # Let the 1000-rpm bucket drain so the lower rate starts from an empty bucket.
-    time.sleep(0.2)
 
+    # No request runs before the decrease: the org window starts empty, so exactly two
+    # of the three requests below fit. (A request under the old limit would count.)
     stack.ok("PATCH", f"/orgs/{org_id}", json={"rpm_limit": 2})
     version = stack.current_version()
     wait_for(lambda: stack.current_version() > version, 10, "a new config version")
@@ -278,8 +277,8 @@ def test_authz_denials(stack):
     assert r.status_code == 403, (r.status_code, r.text)
     fake = "00000000-0000-0000-0000-000000000000"
     for pat in (admin, member):
-        assert stack.api("POST", "/gateways", pat, json={"gateway_id": "evil"}).status_code == 403
-        r = stack.api("POST", f"/gateways/{GATEWAY_ID}/tokens/{fake}/revoke", pat)
+        assert stack.api("POST", "/gateway-tokens", pat, json={"name": "evil"}).status_code == 403
+        r = stack.api("POST", f"/gateway-tokens/{fake}/revoke", pat)
         assert r.status_code == 403, (r.status_code, r.text)
         denied = stack.api("POST", "/teams", pat, json={"name": "evil", "org_id": stack.org_id})
         assert denied.status_code == 404, (denied.status_code, denied.text)
@@ -288,7 +287,7 @@ def test_authz_denials(stack):
         == 201
     )
     assert stack.api("GET", "/users/me", admin).status_code == 200
-    assert stack.api("POST", "/gateways", "lwp-garbage").status_code == 401
+    assert stack.api("POST", "/gateway-tokens", "lwp-garbage").status_code == 401
 
     # A key limited to other models cannot use "mock" through the gateway.
     up = stack.ok("GET", "/upstreams")["items"][0]
@@ -323,8 +322,8 @@ def test_gateway_token_revoke_closes_stream(stack):
     stack.seed()
     gw = stack.start_gateway()
     wait_for(lambda: (stack.gateway_status() or {}).get("connected"), 10, "connected")
-    token = stack.gateway_status()["tokens"][0]
-    stack.ok("POST", f"/gateways/{token['gateway_id']}/tokens/{token['id']}/revoke")
+    token = stack.gateway_status()["token"]
+    stack.ok("POST", f"/gateway-tokens/{token['id']}/revoke")
     wait_for(
         lambda: gw.metric("lumewarp_config_stream_connected") == 0.0,
         10,

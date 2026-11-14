@@ -74,6 +74,38 @@ app.kubernetes.io/component: gateway
 {{- end }}
 
 {{/*
+The headless Service that governs the gateway StatefulSet (gateway.stateDir.persistence).
+*/}}
+{{- define "lumewarp.gateway.headlessServiceName" -}}
+{{- printf "%s-headless" (include "lumewarp.gateway.name" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "lumewarp.redis.name" -}}
+{{- printf "%s-redis" (include "lumewarp.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "lumewarp.redis.labels" -}}
+{{ include "lumewarp.labels" . }}
+app.kubernetes.io/component: redis
+{{- end }}
+
+{{- define "lumewarp.redis.selectorLabels" -}}
+{{ include "lumewarp.selectorLabels" . }}
+app.kubernetes.io/component: redis
+{{- end }}
+
+{{/*
+The Secret holding the Valkey password: the one the chart creates, or redis.auth.existingSecret.
+*/}}
+{{- define "lumewarp.redis.secretName" -}}
+{{- default (include "lumewarp.redis.name" .) .Values.redis.auth.existingSecret }}
+{{- end }}
+
+{{- define "lumewarp.redis.secretKey" -}}
+{{- default "password" .Values.redis.auth.existingSecretKey }}
+{{- end }}
+
+{{/*
 The control-plane image reference.
 */}}
 {{- define "lumewarp.controlPlane.image" -}}

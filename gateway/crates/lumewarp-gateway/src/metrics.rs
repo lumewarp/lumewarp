@@ -251,6 +251,24 @@ struct PluginResultLabels {
     plugin: String,
     result: &'static str,
 }
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct SharedLimitsResultLabels {
+    result: &'static str,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct SharedLimitsReasonLabels {
+    reason: &'static str,
+}
+
+/// The Redis-sync series, registered only when shared limits are configured
+/// (`Metrics::with_shared_limits`).
+struct SharedLimitsMetrics {
+    sync_duration: Family<SharedLimitsResultLabels, Histogram>,
+    sync_errors: Family<SharedLimitsReasonLabels, Counter>,
+    fallback: Gauge,
+    last_sync_age: Gauge<f64, AtomicU64>,
+    scopes: Gauge,
+}
 
 /// `lumewarp_plugin_calls_total` and `lumewarp_plugin_duration_seconds` for one
 /// (kind, plugin): fetch once when the plugin is loaded, record per call.
@@ -468,10 +486,17 @@ pub struct Metrics {
     catalog_drops: Family<CatalogDropLabels, Counter>,
     plugin_calls: Family<PluginResultLabels, Counter>,
     plugin_durations: Family<PluginLabels, Histogram>,
+    shared_limits: Option<SharedLimitsMetrics>,
 }
 
 impl Metrics {
     pub fn new() -> Self {
+        Self::with_shared_limits(false)
+    }
+
+    /// Registers the Redis shared-limits series only when a URL is configured;
+    /// otherwise none of the `lumewarp_shared_limits_*` series exist.
+    pub fn with_shared_limits(shared_limits: bool) -> Self {
         let mut registry = Registry::default();
         let requests = Family::default();
         let durations = Family::new_with_constructor(duration_histogram as fn() -> Histogram);
@@ -732,6 +757,53 @@ impl Metrics {
             "Spend in USD computed from model prices",
             spend.clone(),
         );
+        let shared_limits = shared_limits.then(|| {
+            let sync_duration = Family::<SharedLimitsResultLabels, Histogram>::new_with_constructor(
+                duration_histogram as fn() -> Histogram,
+            );
+            let sync_errors = Family::<SharedLimitsReasonLabels, Counter>::default();
+            for result in ["success", "error"] {
+                drop(sync_duration.get_or_create(&SharedLimitsResultLabels { result }));
+            }
+            for reason in ["connect", "timeout", "script"] {
+                drop(sync_errors.get_or_create(&SharedLimitsReasonLabels { reason }));
+            }
+            let fallback = Gauge::default();
+            let last_sync_age = Gauge::<f64, AtomicU64>::default();
+            let scopes = Gauge::default();
+            registry.register(
+                "lumewarp_shared_limits_sync_duration_seconds",
+                "Time to one shared-limits sync with Redis, by result",
+                sync_duration.clone(),
+            );
+            registry.register(
+                "lumewarp_shared_limits_sync_errors",
+                "Failed shared-limits syncs by reason",
+                sync_errors.clone(),
+            );
+            registry.register(
+                "lumewarp_shared_limits_fallback",
+                "1 while shared limits are in local fallback (never registered without Redis)",
+                fallback.clone(),
+            );
+            registry.register(
+                "lumewarp_shared_limits_last_sync_age_seconds",
+                "Seconds since the last successful shared-limits sync",
+                last_sync_age.clone(),
+            );
+            registry.register(
+                "lumewarp_shared_limits_scopes",
+                "Scopes in the last shared-limits sync",
+                scopes.clone(),
+            );
+            SharedLimitsMetrics {
+                sync_duration,
+                sync_errors,
+                fallback,
+                last_sync_age,
+                scopes,
+            }
+        });
         Self {
             registry,
             label_ids: Mutex::new(HashMap::from([("".into(), 0)])),
@@ -777,6 +849,45 @@ impl Metrics {
             catalog_drops,
             plugin_calls,
             plugin_durations,
+            shared_limits,
+        }
+    }
+
+    /// Records one shared-limits sync; `result` is `success` or `error`.
+    pub fn shared_limits_sync(&self, elapsed: Duration, result: &'static str) {
+        if let Some(shared) = &self.shared_limits {
+            shared
+                .sync_duration
+                .get_or_create(&SharedLimitsResultLabels { result })
+                .observe(elapsed.as_secs_f64());
+        }
+    }
+
+    /// Counts a failed sync; `reason` is `connect`, `timeout` or `script`.
+    pub fn shared_limits_sync_error(&self, reason: &'static str) {
+        if let Some(shared) = &self.shared_limits {
+            shared
+                .sync_errors
+                .get_or_create(&SharedLimitsReasonLabels { reason })
+                .inc();
+        }
+    }
+
+    pub fn shared_limits_fallback(&self, fallback: bool) {
+        if let Some(shared) = &self.shared_limits {
+            shared.fallback.set(i64::from(fallback));
+        }
+    }
+
+    pub fn shared_limits_last_sync_age(&self, age: Duration) {
+        if let Some(shared) = &self.shared_limits {
+            shared.last_sync_age.set(age.as_secs_f64());
+        }
+    }
+
+    pub fn shared_limits_scopes(&self, scopes: usize) {
+        if let Some(shared) = &self.shared_limits {
+            shared.scopes.set(i64::try_from(scopes).unwrap_or(i64::MAX));
         }
     }
 

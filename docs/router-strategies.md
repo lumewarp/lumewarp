@@ -122,14 +122,14 @@ There is deliberately no prompt or body interface.
 | Situation | What a router write gets |
 |---|---|
 | No gateway reports it and it is not built in | 422. `force` does not help. |
-| A connected gateway lacks it | 422 listing them. `force: true` saves and writes the audit action `router.force_save`. That gateway will NACK the whole version, so it stops receiving every config change, key revocations included, until it is upgraded or the router changes. |
+| A connected gateway lacks it | 422 listing them. `force: true` saves and writes the audit action `router.force_save`. Each gateway without it NACKs `UNSUPPORTED_FEATURE` and skips every version that references the strategy, key revocations included, until it is upgraded or the router changes; the other gateways keep receiving them. |
 | Gateways with different schemas (rolling upgrade) | Must pass every connected gateway's schema. Forms show the newest connected one. |
 | No gateway connected | Built-ins validate against the manifest committed with the control plane; custom ones against the most recent report. |
 | Stored settings fail a schema after an upgrade | The router reads `config_invalid: true` with `config_problems`. The data is not altered. Writes that do not touch strategy, params, members or splits still save. |
 
 A rollback restores routers from an old version, but the gateways are today's, so every restored router meets the same rules, with the same `force` and the same audit. A rejection is a 422 and changes nothing.
 
-A gateway counts while the token of its latest `Hello` is unrevoked and it is connected or was seen in the last 30 days. A report counts while the token that made it is unrevoked; another token of the same gateway keeps nothing alive, and counts from its own `Hello` on. A connected gateway has what its latest `Hello` lists, an offline one what it last reported. Each `Hello` replaces the reports under the gateway's session row lock, and a reader sees one `Hello`, never parts of two.
+The unit is the gateway: one process named by `Hello.gateway_id`, and any number may share a token. A gateway counts while the token of its latest `Hello` is unrevoked and it is connected or was disconnected less than 24 h ago, when its row is deleted. A report counts while the token that made it is unrevoked. A connected gateway has what its latest `Hello` lists, an offline one what it last reported. A strategy is available only while every connected gateway reports it. Each `Hello` replaces the gateway's reports under its session row lock, and a reader sees one `Hello`, never parts of two.
 
 Each gateway counts for at most 128 strategies, descriptors first, then `strategy:<name>` capabilities, with names as in `register!`. The rest of a `Hello` is ignored, logged and counted in `lumewarp_cp_gateway_plugins_ignored_total`; the stream stays up.
 
@@ -212,7 +212,7 @@ The control plane applies the same credential rule to such a field, whatever els
 
    `plugins` lists the built-ins and every loaded component; `--json` prints the descriptor array the gateway reports in `Hello`. The gateway never reloads a directory: a replaced file needs a process restart. A file that does not implement the router world, declares another kind, reuses a name or has an invalid manifest refuses startup.
 
-5. Deploy the component to every gateway before a router names it. A gateway without it NACKs every version that references it, and the control plane refuses a write that names it unless the write is forced.
+5. Deploy the component to every gateway before a router names it. A gateway without it NACKs every version that references it and skips those versions; the control plane refuses a write that names it unless the write is forced.
 
 6. `bash gateway/plugins/build.sh` builds the committed examples (`priority-failover`, `cheapest-first`) into `gateway/target/plugins/router/`; `LUMEWARP_ROUTER_PLUGIN_DIR=gateway/target/plugins/router` is enough for a local gateway.
 

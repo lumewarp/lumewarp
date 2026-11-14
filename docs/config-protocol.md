@@ -7,7 +7,7 @@ Normative rules for `lumewarp.config.v1.ConfigService` and `lumewarp.usage.v1.Us
 - **Scope**: one control-plane installation (`Snapshot.scope`). A gateway is configured with exactly one scope and never applies or boots from a snapshot of another scope.
 - **Version**: strictly increasing per scope. Every published version has an immutable, complete `Snapshot` payload stored by the control plane.
 - **Desired version**: the latest published version for the scope.
-- **ACKed version**: per gateway session, the last version the gateway confirmed.
+- **ACKed version**: per gateway (one process, one stream), the last version it confirmed.
 
 ## Control plane: publishing
 
@@ -22,8 +22,9 @@ Normative rules for `lumewarp.config.v1.ConfigService` and `lumewarp.usage.v1.Us
 
 ```
 gateway                                   control plane
-  |-- Hello{gateway_id, have_version, scope, supported_capabilities, plugins, plugin_abi} -->
-  |                                       authenticate token; bind gateway_id
+  |-- Hello{gateway_id, have_version, scope,
+  |         supported_capabilities, plugins, plugin_abi, shared_limits} -->
+  |                                       authenticate token; bind the scope and gateway_id
   |<-- full(desired) or delta(have_version -> desired) ---------------
   |   apply privately, persist, swap
   |-- Ack{version} or Nack{version, code, have_version} ------------->
@@ -34,18 +35,34 @@ gateway                                   control plane
 - The base of a delta is always the session's ACKed version (or Hello.have_version before the first ACK) — never a global "last sent" version.
 - The first update after Hello is a delta only when `Hello.scope` matches, `have_version` is retained, `have_version <= desired` and `Hello.have_digest` equals the stored digest of `have_version`; otherwise full. Until the first ACK after a full, the session has **no** delta base (a NACKed full is never followed by a delta).
 - Digest = `config_versions.digest` (sha256 of the control plane's serialized payload). It is sent as `ConfigUpdate.target_digest`; the gateway treats it as opaque, persists it with the snapshot and echoes it in `Hello.have_digest` (serialization is not byte-identical across languages, so the gateway never recomputes it). `have_version > desired` (control plane restored from backup) → full.
+
 - `Hello.plugins` lists a `PluginDescriptor` per plugin the gateway has: built-ins and the WASM components loaded from its three plugin directories at startup. A descriptor carries the kind (`router-strategy`, `upstream-auth`, `a2a-middleware`), name, title, description, `builtin`, the params JSON Schema, the router-only `uses_weight`/`needs`/member schema, the component's `wasm_sha256` (empty for built-ins) and a `digest` that changes whenever any other field does. `Hello.plugin_abi` is the WIT package major version the gateway hosts (1). The list is untrusted and only informs the API and UI, which validate writes against its schemas: nothing in it can end the stream, and it does not gate snapshots, which `supported_capabilities` and the gateway's own `configure` still do. [Gateway plugins](plugins.md) has the manifest and schema rules.
   - Normalized off the event loop: at most 128 plugins per kind per gateway, descriptors first, then that kind's capabilities, names matching `^[a-z][a-z0-9_]{0,62}$`; each schema capped at 16 KiB and restricted to a subset, or dropped. The rest is ignored, logged and counted in `lumewarp_cp_gateway_plugins_ignored_total`. Other capabilities are capped at 64, of at most 128 characters each. The session's stored capabilities list every kept plugin.
   - The status row and the stored descriptors change in one transaction, under that row's lock, and only for the session owning the row. Session ids move forward, so a slower older connection neither overwrites a newer one's report nor replaces its stream: it ends with `UNAVAILABLE`. A reader sees one Hello, never parts of two.
-  - A Hello replaces all the gateway reported before. A gateway counts while the token of its latest Hello is unrevoked and it is connected or was seen in the last 30 days; a report counts while the token that made it is unrevoked. A connected gateway has what its latest Hello lists, an offline one what it last reported.
+  - A Hello replaces all that gateway reported before. A gateway counts while the token of its latest Hello is unrevoked and it is connected or was disconnected less than 24 h ago (its row is deleted then); a report counts while the token that made it is unrevoked. A connected gateway has what its latest Hello lists, an offline one what it last reported.
 - ACK/NACK must name the session's pending version; anything else is a protocol error and the control plane closes the stream.
 - NACK handling:
   - `BASE_MISMATCH` → send full(desired).
-  - `INVALID_CONFIG` / `UNSUPPORTED_FEATURE` → quarantine that version for that gateway; do not resend it. Send again only when a newer version is published. Surface it in gateway status and metrics.
+  - `INVALID_CONFIG` → quarantine that version for the whole scope: no gateway in it is sent the version, and a gateway connecting later starts with the quarantine. Do not resend it; send again only when a newer version is published. Surface it in gateway status and metrics. A gateway that had already been sent the version before the NACK may still ACK it and keeps it until the next version; quarantine applies from the NACK on.
+  - `UNSUPPORTED_FEATURE` → only this gateway skips the version; the other gateways in the scope still receive it. It keeps its previous config and NACKs each later version that needs the missing plugin or capability. Surface it on that gateway's row.
   - `PERSIST_FAILED` → retry the same version with exponential backoff (1 s → 60 s).
 - ACK timeout: 30 s, then the control plane closes the stream; the gateway reconnects with backoff (0.5 s → 30 s, full jitter).
 - Keepalive: the gateway sends an HTTP/2 PING every 30 s, also while the stream is idle, and drops the connection if no ACK arrives within 10 s. The control plane must accept pings without data at least every 10 s (`grpc.http2.min_ping_interval_without_data_ms`, `grpc.keepalive_permit_without_calls`); gRPC core's default (5 min) answers them with GOAWAY `too_many_pings` and resets the stream every few minutes. The control plane pings every 60 s (20 s timeout) to notice gateways that vanished. Any L7 proxy between them must allow the same ping rate.
 - Delta semantics: upserts replace the whole entity by key (name / key_id / team id); removes delete by key; MCP servers and A2A agents are keyed by name, and removing one drops its grants from the next compile; `created_at_unix_ms` and `required_capabilities` replace the target metadata. Removing an entity that does not exist is not an error. A delta whose result fails validation is NACKed `INVALID_CONFIG`.
+
+### Gateway sessions
+
+A gateway is one process. At startup it generates its id (`<hostname>-<8 hex>`) and sends it as `Hello.gateway_id`; the id is fixed for the process lifetime, and a restart is a new gateway. The token only authenticates the scope: any number of gateways may use one token, and no id is bound to it.
+
+- `Hello.gateway_id` is required in control-plane mode: 1–100 of `[A-Za-z0-9._-]`; empty or otherwise malformed is `INVALID_ARGUMENT`. The control plane keys the session by `(scope, gateway_id)`. A new connection with the same id replaces the previous stream; a stale connection ends with `UNAVAILABLE`.
+- `Hello.shared_limits { enabled, namespace }` says whether the gateway shares its rate-limit counters and under which namespace. It is display only: the control plane shows it on the Gateways page and derives no behaviour from it. Connected gateways may disagree during a rollout; the API shows each value.
+- Each gateway has its own ACKed version, pending update, last NACK, capabilities and plugin reports. `GET /api/v1/gateways` has one row per gateway, connected first; a disconnected row stays for 24 h and is then deleted with its plugin reports.
+- A capability or plugin counts as available only if **every** connected gateway reports it; otherwise the version needing it would be NACKed by the gateways that lack it, so the compiler warns and a save needs `force`.
+- A target (upstream or model) counts as unhealthy if **any** connected gateway reports it unhealthy: one gateway that cannot reach it takes it out of rotation for the scope.
+- `INVALID_CONFIG` quarantine is per scope: a NACK from any gateway withholds that version from every gateway in the scope, including one that connects later. A gateway that already applied the version keeps it until the next one.
+- `UNSUPPORTED_FEATURE` is per gateway: only the gateway that lacks the plugin or capability skips the version; the others apply it. It keeps its previous config and NACKs later versions that still need it.
+- During a rolling upgrade, a gateway still on the old build can therefore serve an older config than the new-build gateways. Publish a config that needs the new build only when every gateway can apply it; the old-build gateways stay on their previous config until the rollout finishes or the requirement goes away.
+
 
 ## Catalog reports
 
@@ -328,6 +345,7 @@ swaps; scrapers, like probes, are diffed only after a snapshot is accepted.
 
 ## Usage reporting and attribution
 
+- The report carries the reporting gateway's own id (`ReportRequest.gateway_id`), the same value as its `Hello.gateway_id`: 1–100 of `[A-Za-z0-9._-]`. The token only authenticates the scope; the control plane attributes the events to this id. An empty or invalid id fails the whole batch with `INVALID_ARGUMENT`.
 - Usage is attributed to the key's team and to the key's owner (a team member or a service
   account). The event's `team_id` must match the key; the owner is read from the key, never
   from the event. There is no project level.
@@ -340,10 +358,10 @@ swaps; scrapers, like probes, are diffed only after a snapshot is accepted.
 - A key has at most four rate-limit scopes, one per level that sets a limit:
   `org:<org_id>`, `team:<team_id>`, `member:<member_scope_id>` and
   `sa:<service_account_id>`, plus `key:<key_id>`. Every key of the same scope id shares that
-  bucket within a gateway process. Control plane and gateway reject a fifth scope.
+  bucket within a gateway. Control plane and gateway reject a fifth scope.
 - Events are produced off the request path into a bounded queue (default 100k events). Batches go out every 1 s or at 500 events. Failed reports retry with backoff from the same queue; when the queue is full, new events are dropped and `lumewarp_usage_events_dropped_total` increments.
 - `request_id` is a UUIDv7 generated by the gateway at request start and reused for retries.
-- `Report` validates per event and is idempotent (`ON CONFLICT (request_id) DO NOTHING`). An invalid event (malformed field, unknown or mismatched key hierarchy, a `request_id` reused for different content) is skipped and logged by the control plane; the rest of the batch is recorded and `ReportResponse.accepted` counts what was kept, so one bad event never drops billable usage. Only batch-level errors (gateway identity, more than the configured maximum events) fail the call with `INVALID_ARGUMENT`. Per new event the control plane adds the cost once to the team total and once to the owner total for the event's UTC calendar month, in the same transaction, then evaluates budgets.
+- `Report` validates per event and is idempotent (`ON CONFLICT (request_id) DO NOTHING`). An invalid event (malformed field, unknown or mismatched key hierarchy, a `request_id` reused for different content) is skipped and logged by the control plane; the rest of the batch is recorded and `ReportResponse.accepted` counts what was kept, so one bad event never drops billable usage. Only batch-level errors (an empty or invalid gateway id, more than the configured maximum events) fail the call with `INVALID_ARGUMENT`. Per new event the control plane adds the cost once to the team total and once to the owner total for the event's UTC calendar month, in the same transaction, then evaluates budgets.
 - `requested` and `model` are required except for `REQUEST_OUTCOME_REJECTED` events: a request rejected at authentication has no requested name yet (the body is not read; this is the only case where `requested` is empty), and one rejected by policy or for an unknown name (403/404/429) has no selected model. They are stored as empty strings.
 - `requested` is the name the client sent, kept even when it does not exist, cut to 400 bytes on a character boundary with NUL replaced. `model` is the model that finally served the request. `alias` and `router` say how the request got there:
 

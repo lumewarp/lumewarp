@@ -17,7 +17,7 @@ installation is not supported.
 | Listener | Default | Serves |
 | --- | --- | --- |
 | HTTP | `127.0.0.1:8091` | Admin UI at `/`, REST at `/api/v1`, `/docs` and `/openapi.json`, `/healthz` and `/readyz` |
-| gRPC | `127.0.0.1:50051` | `lumewarp.config.v1.ConfigService`, `lumewarp.usage.v1.UsageService`, `grpc.health.v1.Health` |
+| gRPC | `127.0.0.1:50051` | `lumewarp.config.v1.ConfigService`, `lumewarp.usage.v1.UsageService`, `grpc.health.v1.Health`. Every gateway holds one stream; any number of gateways may connect with the same token ([protocol](../config-protocol.md#gateway-sessions)). |
 | Metrics | `127.0.0.1:9465` | Prometheus text format on any path (`/metrics`); see [Metrics](../reference/metrics.md). `LUMEWARP_METRICS_BIND=""` disables it. |
 
 All listeners are plaintext unless `LUMEWARP_GRPC_TLS_CERT_FILE` and
@@ -48,7 +48,7 @@ it off the public admin ingress.
 | `serve` | HTTP API + Admin UI (uvicorn, one worker), gRPC servers and background loops. `--http-bind` / `--grpc-bind` override the env settings. |
 | `migrate [REV]` / `migrate --downgrade REV` | Apply or roll back Alembic migrations (default `head`). |
 | `openapi [-o FILE]` | Print the OpenAPI document; builds the app without connecting to the database. |
-| `bootstrap --gateway-id ID [--name N] [--scope S]` | Create the config scope row and a `lwg-...` gateway token; the secret goes to stdout once. |
+| `bootstrap [--name N] [--scope S]` | Create the config scope row and an optionally labeled `lwg-...` gateway token; the secret goes to stdout once. |
 | `hash-password` | Read a password from stdin (or prompt for it) and print its argon2id hash for `LUMEWARP_BREAK_GLASS_PASSWORD_HASH`. |
 
 The console script is `lumewarp-control-plane`; `python -m lumewarp_control_plane` is

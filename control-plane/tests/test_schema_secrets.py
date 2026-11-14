@@ -73,6 +73,9 @@ CLASSIFIED: dict[tuple[str, str], ColumnClass] = {
     ("config_versions", "scope"): ColumnClass.PUBLIC,
     ("gateway_sessions", "gateway_id"): ColumnClass.PUBLIC,
     ("gateway_sessions", "gateway_version"): ColumnClass.PUBLIC,
+    # The shared-limits namespace a gateway reports: a label, never a credential.
+    ("gateway_sessions", "shared_limits_namespace"): ColumnClass.PUBLIC,
+    ("gateway_quarantines", "scope"): ColumnClass.PUBLIC,
     ("gateway_sessions", "last_nack_code"): ColumnClass.PUBLIC,
     ("gateway_sessions", "last_nack_reason"): ColumnClass.PUBLIC,
     ("gateway_sessions", "peer"): ColumnClass.PUBLIC,
@@ -88,7 +91,6 @@ CLASSIFIED: dict[tuple[str, str], ColumnClass] = {
     ("usage_events", "target"): ColumnClass.PUBLIC,
     ("usage_events", "tool"): ColumnClass.PUBLIC,
     ("gateway_tokens", "display_prefix"): ColumnClass.PUBLIC,
-    ("gateway_tokens", "gateway_id"): ColumnClass.PUBLIC,
     ("gateway_tokens", "name"): ColumnClass.PUBLIC,
     ("gateway_tokens", "scope"): ColumnClass.PUBLIC,
     ("models", "kind"): ColumnClass.PUBLIC,

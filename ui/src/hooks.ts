@@ -193,8 +193,8 @@ export const useAliases = () => useQuery({ queryKey: ["aliases"], queryFn: () =>
 export const useRouters = () => useQuery({ queryKey: ["routers"], queryFn: () => api.routers(), structuralSharing: false });
 export const useUpstreams = () => useQuery({ queryKey: ["upstreams"], queryFn: () => api.upstreams() });
 // A plugin's title, description and settings schema are gateway data and may hold a `__proto__` key.
-export const usePlugins = (kind?: PluginKind, enabled = true) =>
-  useQuery({ queryKey: ["plugins", kind ?? "all"], queryFn: () => api.plugins(kind), structuralSharing: false, enabled });
+export const usePlugins = (kind?: PluginKind, enabled = true, refetchInterval?: number) =>
+  useQuery({ queryKey: ["plugins", kind ?? "all"], queryFn: () => api.plugins(kind), structuralSharing: false, enabled, refetchInterval });
 export const useStrategies = () => usePlugins("router-strategy");
 export const useCatalog = (enabled = true) => useQuery({ queryKey: ["catalog"], queryFn: () => api.catalog(), enabled });
 export const useMcpServers = () => useQuery({ queryKey: ["mcp-servers"], queryFn: () => api.mcpServers() });

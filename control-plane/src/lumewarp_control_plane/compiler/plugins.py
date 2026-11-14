@@ -646,11 +646,13 @@ async def replace_gateway_plugins(
     reported: list[ReportedPlugin],
     now: datetime,
 ) -> None:
-    """What a gateway reports replaces all it reported before; a changed digest updates. The
-    caller holds the gateway's session row lock and has checked that this Hello still owns it.
+    """What a gateway reports replaces all it reported before; a changed digest updates.
+    The caller holds the gateway's session row lock and has checked that this Hello still
+    owns it.
     """
     stale = delete(GatewayPlugin).where(
-        GatewayPlugin.scope == scope, GatewayPlugin.gateway_id == gateway_id
+        GatewayPlugin.scope == scope,
+        GatewayPlugin.gateway_id == gateway_id,
     )
     if reported:
         stale = stale.where(
@@ -700,6 +702,7 @@ async def replace_gateway_plugins(
 @dataclass(frozen=True)
 class GatewaySupport:
     gateway_id: str
+    # One entry per gateway: a plugin counts only if every connected gateway reports it.
     connected: bool
     seen_at: datetime | None
     digest: str | None
@@ -711,6 +714,7 @@ class GatewaySupport:
 class PluginRegistry:
     """The plugins of a scope that count at one moment. Read-only snapshot of the tables."""
 
+    # Connected gateway ids, for `missing`.
     connected: list[str] = field(default_factory=list)
     _support: dict[tuple[PluginKind, str], list[GatewaySupport]] = field(default_factory=dict)
 
@@ -729,16 +733,16 @@ class PluginRegistry:
         return name in BUILTIN_PLUGINS[kind] or bool(self.support(kind, name))
 
     def missing(self, kind: PluginKind, name: str) -> list[str]:
-        """Connected gateways that lack it: they would NACK every version using it."""
-        have = {s.gateway_id for s in self.support(kind, name)}
-        return [gateway for gateway in self.connected if gateway not in have]
+        """Connected gateway ids that lack it: they would NACK every version using it."""
+        have = {s.gateway_id for s in self.support(kind, name) if s.connected}
+        return sorted(set(self.connected) - have)
 
     def _reported(self, kind: PluginKind, name: str) -> list[dict[str, Any]]:
         return [s.descriptor for s in self.support(kind, name) if s.descriptor is not None]
 
     def validating(self, kind: PluginKind, name: str) -> list[dict[str, Any]]:
-        """Descriptors settings must pass: all connected gateways' (rolling upgrades); with
-        none connected, the manifest for a built-in or the newest report otherwise.
+        """Descriptors settings must pass: every connected gateway's (rolling upgrades);
+        with none connected, the manifest for a built-in or the newest report otherwise.
         """
         live = [
             s.descriptor
@@ -778,10 +782,11 @@ class PluginRegistry:
 async def load_plugins(
     session: AsyncSession, scope: str, *, now: datetime | None = None
 ) -> PluginRegistry:
-    """A gateway counts while the token of its latest Hello is unrevoked and it is connected or
-    was seen within 30 days; a report counts while its own token is unrevoked. One statement,
-    so this sees one snapshot: never a Hello's capabilities with another Hello's reports. It
-    takes no lock, so any caller's lock order is safe.
+    """A gateway counts while the token of its latest Hello is unrevoked and it is connected
+    or was seen within 30 days (rows older than 24 h are deleted, so an offline gateway
+    usually disappears sooner); a report counts while its own token is unrevoked. One
+    statement, so this sees one snapshot: never a Hello's capabilities with another Hello's
+    reports. It takes no lock, so any caller's lock order is safe.
     """
     cutoff = (now or datetime.now(UTC)) - GATEWAY_RETENTION
     unrevoked = select(GatewayToken.id).where(GatewayToken.revoked_at.is_(None))
@@ -821,7 +826,8 @@ async def load_plugins(
     for gateway_id, gateway in gateways.items():
         reported = reports.get(gateway_id, {})
         for kind in PLUGIN_KINDS:
-            # A connected gateway says what it has now; an offline one, what it last reported.
+            # A connected gateway says what it has now; an offline one, what it last
+            # reported.
             if gateway.connected:
                 names, _ = bounded_plugin_names(_capability_names(gateway.capabilities, kind))
             else:
@@ -843,7 +849,9 @@ async def load_plugins(
     for entries in support.values():
         entries.sort(key=lambda s: (s.connected, s.seen_at or oldest), reverse=True)
     return PluginRegistry(
-        connected=sorted(g.gateway_id for g in gateways.values() if g.connected),
+        connected=sorted(
+            gateway_id for gateway_id, gateway in gateways.items() if gateway.connected
+        ),
         _support=support,
     )
 

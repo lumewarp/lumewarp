@@ -129,12 +129,12 @@ A write is a router, an MCP server or an A2A agent that names a plugin. Every pa
 | Situation | What the write gets |
 | --- | --- |
 | No gateway reports it and it is not built in | 422. `force` does not help. |
-| A connected gateway lacks it | 422 listing them. `force: true` saves and audits a forced save naming the missing gateways. That gateway NACKs the whole version, so it stops receiving every config change, key revocations included, until it is upgraded or the reference to the plugin goes away. |
+| A connected gateway lacks it | 422 listing them. `force: true` saves and audits a forced save naming the missing gateways. Each such gateway NACKs `UNSUPPORTED_FEATURE` and skips every version that references the plugin, key revocations included, until it is upgraded or the reference goes away; the other gateways keep receiving them. |
 | Gateways with different schemas (rolling upgrade) | The settings must pass every connected gateway's schema. Forms show the newest connected one. |
 | No gateway connected | Built-ins validate against the descriptors committed with the control plane; other plugins against the most recent report from any gateway. |
 | Stored settings fail a schema after an upgrade | The entity reads `config_invalid: true` with `config_problems`. The data is not altered, and writes that do not touch the plugin or its settings still save. |
 
-Which gateways count: a gateway counts while the token of its latest `Hello` is unrevoked and it is connected or was seen in the last 30 days. A connected gateway has what its latest `Hello` lists; an offline one what it last reported. A report counts while the token that made it is unrevoked. Each `Hello` replaces the reports under the gateway's session row lock, and a reader sees one `Hello`, never parts of two.
+Which gateways count: a gateway is one process, named by `Hello.gateway_id`; any number may share a token. It counts while the token of its latest `Hello` is unrevoked and it is connected or was disconnected less than 24 h ago, when its row is deleted; a connected gateway has what its latest `Hello` lists, an offline one what it last reported. A plugin or capability is available only while every connected gateway reports it. A report counts while the token that made it is unrevoked. Each `Hello` replaces the gateway's reports under its session row lock, and a reader sees one `Hello`, never parts of two.
 
 Each gateway counts for at most 128 plugins per kind: descriptors first, then that kind's capabilities, with the names above. The rest of a `Hello` is ignored, logged and counted by the control plane; the stream stays up.
 
