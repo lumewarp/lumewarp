@@ -26,6 +26,7 @@ const AliasEditPage = lazy(() => import("./pages/AliasEdit").then((module) => ({
 const RouterEditPage = lazy(() => import("./pages/RouterEdit").then((module) => ({ default: module.RouterEdit })));
 const AliasesPage = lazy(() => import("./pages/Aliases").then((module) => ({ default: module.Aliases })));
 const GatewaysPage = lazy(() => import("./pages/Gateways").then((module) => ({ default: module.Gateways })));
+const GatewayDetailPage = lazy(() => import("./pages/GatewayDetail").then((module) => ({ default: module.GatewayDetail })));
 const ConfigPage = lazy(() => import("./pages/Config").then((module) => ({ default: module.Config })));
 const UsersPage = lazy(() => import("./pages/Users").then((module) => ({ default: module.Users })));
 const AuditPage = lazy(() => import("./pages/Audit").then((module) => ({ default: module.Audit })));
@@ -193,6 +194,7 @@ const routeTree = rootRoute.addChildren([
     page("/usage", Usage),
     page("/audit", () => <AuditPage />, "teamAdmin"),
     page("/gateways", () => <GatewaysPage />, "installationAdmin"),
+    page("/gateways/$gatewayId", () => <GatewayDetailPage />, "installationAdmin"),
     page("/config", () => <ConfigPage />, "installationAdmin"),
     page("/settings", suspended(() => <SettingsPage />)),
   ]),

@@ -89,10 +89,14 @@ test("manual screenshots", async ({ page, request, browser }) => {
   await expect(page.getByRole("heading", { name: "Audit log" })).toBeVisible();
   await shot(page, "audit");
   await page.goto("/gateways");
-  await expect(page.getByRole("heading").first()).toBeVisible();
-  await page.getByRole("button", { name: "Show instances of gw-1", exact: true }).click();
-  await expect(page.getByTestId("instances-gw-1")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Gateways", level: 1 })).toBeVisible();
+  await expect(page.getByTestId("instance-count-gw-1")).toHaveText("3/3 instances connected");
   await shot(page, "gateways");
+  await page.goto("/gateways/gw-1");
+  await expect(page.getByRole("heading", { name: "gw-1", level: 1 })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Instances", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByTestId("instance-gw-1-1")).toBeVisible();
+  await shot(page, "gateway-detail");
   await page.goto("/config");
   await expect(page.getByRole("heading", { name: "Config versions" })).toBeVisible();
   await shot(page, "config-versions");

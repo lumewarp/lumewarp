@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { useMemo } from "react";
 
 import { api } from "../api";
@@ -159,13 +160,30 @@ function Gateways({ p, total, instances, unknown }: { p: Plugin; total: number; 
       </Badge>
       {groups.map(([id, n]) => (
         <code key={id} className="whitespace-nowrap text-xs text-muted-foreground">
-          {id}
+          <Link
+            to="/gateways/$gatewayId"
+            params={{ gatewayId: id }}
+            className="text-muted-foreground underline underline-offset-2 hover:text-foreground"
+            data-testid={`plugin-gateway-${id}`}
+          >
+            {id}
+          </Link>
           {instances[id] !== undefined && n < instances[id] && <span data-testid={`partial-${id}`}> ({n}/{instances[id]} instances)</span>}
         </code>
       ))}
       {unknown && <span className="text-xs text-muted-foreground" data-testid="instances-unknown">Instance counts unavailable</span>}
       {p.missing_gateways.length > 0 && (
-        <span className="text-xs text-destructive [overflow-wrap:anywhere]">missing: {p.missing_gateways.join(", ")}</span>
+        <span className="text-xs text-destructive [overflow-wrap:anywhere]">
+          missing:{" "}
+          {p.missing_gateways.map((id, n) => (
+            <span key={id}>
+              {n > 0 && ", "}
+              <Link to="/gateways/$gatewayId" params={{ gatewayId: id }} className="text-destructive underline underline-offset-2">
+                {id}
+              </Link>
+            </span>
+          ))}
+        </span>
       )}
     </div>
   );
