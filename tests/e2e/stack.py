@@ -192,12 +192,18 @@ PG_DSN = os.environ.get(
 )
 
 
+# Ports this process has handed out. The kernel may return a just-closed ephemeral
+# port again, so two calls in a row (listen and admin_listen) could otherwise collide.
+_HANDED_OUT: set[int] = set()
+
+
 def free_port() -> int:
     while True:
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        if port not in FORBIDDEN_PORTS:
+        if port not in FORBIDDEN_PORTS and port not in _HANDED_OUT:
+            _HANDED_OUT.add(port)
             return port
 
 
