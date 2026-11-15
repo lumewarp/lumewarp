@@ -307,12 +307,15 @@ export function Requests() {
           },
           {
             key: "tokens",
-            header: "Tokens in / out",
+            header: "Tokens",
             align: "right",
             hideBelow: "sm",
             cell: (row) => (
-              <span className="whitespace-nowrap">
-                {row.prompt_tokens.toLocaleString()} / {row.completion_tokens.toLocaleString()}
+              <span className="whitespace-nowrap" title="Total (input + output)">
+                {(row.prompt_tokens + row.completion_tokens).toLocaleString()}
+                <span className="text-muted-foreground">
+                  {" "}({row.prompt_tokens.toLocaleString()}+{row.completion_tokens.toLocaleString()})
+                </span>
               </span>
             ),
           },

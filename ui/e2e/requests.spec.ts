@@ -33,7 +33,7 @@ test("lists requests newest first, renders the name chain, and defaults to LLM f
   expect(query.get("to")).toBeNull();
   await expect(page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Requests", exact: true })).toBeVisible();
 
-  for (const header of ["Date", "Requested", "Resolved", "Key", "Tokens in / out", "Cost"]) {
+  for (const header of ["Date", "Requested", "Resolved", "Key", "Tokens", "Cost"]) {
     await expect(page.getByRole("columnheader", { name: header, exact: true })).toBeVisible();
   }
 
@@ -151,6 +151,7 @@ test("follows next_cursor and shows the Playground attribution", async ({ page }
 
   await page.goto("/requests");
   await expect(chain(page).filter({ hasText: "first-page" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "15 (10+5)", exact: true })).toBeVisible();
   const nextPage = page.waitForRequest((request) => new URL(request.url()).searchParams.get("cursor") === "page-2");
   await page.getByRole("button", { name: "Next page" }).click();
   await nextPage;

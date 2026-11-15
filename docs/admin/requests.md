@@ -8,7 +8,7 @@ aggregates the same events; the audit log records administrative changes only.
 The page shows one row per request: **Date**, **Requested** (the name the client called),
 **Resolved** (the model that served it; hover for the alias, router, fallback and upstream
 it went through, and a badge shows the outcome of a request that did not complete),
-**Key** (with a Playground badge when sent from the Playground), **Tokens in / out** and
+**Key** (with a Playground badge when sent from the Playground), **Tokens** (total, with input + output in brackets) and
 **Cost**. The filter bar holds the range, team, key, requested and resolved names; the
 other filters are under **More filters**. The copy button next to the date copies the
 request id.
