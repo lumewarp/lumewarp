@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { confirmDialog, pick, SHOTS, shot } from "./helpers";
+import { confirmDialog, expectKeyPill, pick, SHOTS, shot } from "./helpers";
 import {
   Admin,
   daysFromNow,
@@ -55,6 +55,7 @@ test("a regular member lands on My keys and sees only their teams and own keys",
   await expect(page).toHaveURL(/\/my-keys$/);
   await expect(page.getByRole("heading", { name: "My keys", level: 1 })).toBeVisible();
   await expect((await myKeyRow(page, "s8-mine", "s8-viewer-key"))).toBeVisible();
+  await expectKeyPill(page, page.getByTestId("my-keys"), "s8-viewer-key", ["s8-mine", "lw", /[0-9a-f]{8}-[0-9a-f]{4}-/]);
   await expect(page.getByTestId("my-keys")).not.toContainText("s8-other-key");
   await expect(page.getByTestId("team-s8-elsewhere")).toHaveCount(0);
   await expect(page.getByText("s8-hidden-key")).toHaveCount(0);
@@ -179,7 +180,7 @@ test("rotate with a one hour grace, then with no grace", async ({ page, browser 
   await signIn(page, VIEWER);
 
   const row = (await myKeyRow(page, "s8-keys", "s8-rotate-key"));
-  await expect(row.locator("code")).toHaveText(`${created.key.display_prefix}…`);
+  await expectKeyPill(page, row, "s8-rotate-key", ["s8-keys", `${created.key.display_prefix}…`, created.key.id]);
 
   await row.getByRole("button", { name: "Rotate" }).click();
   const first = page.getByRole("dialog", { name: /^Rotate/ });
@@ -399,15 +400,17 @@ test("phone: two same-name keys stay identifiable, including the rotate and revo
   await page.setViewportSize({ width: 390, height: 844 });
 
   await myKeyRow(page, "s8-phone", "production");
-  const row = (prefix: string) => page.getByTestId("my-keys").getByRole("row").filter({ hasText: prefix });
-  const firstRow = row(first.key.display_prefix);
-  const secondRow = row(second.key.display_prefix);
-  await expect(firstRow).toBeVisible();
-  await expect(secondRow).toBeVisible();
-  await expect(firstRow.getByText(first.key.display_prefix, { exact: false })).toBeVisible();
-  await expect(secondRow.getByText(second.key.display_prefix, { exact: false })).toBeVisible();
   const firstDay = await page.evaluate((iso) => new Date(iso).toLocaleDateString(), firstExpires);
   const secondDay = await page.evaluate((iso) => new Date(iso).toLocaleDateString(), secondExpires);
+  // The pills share a name; the expiry on the row and the prefix in each pill's tooltip tell the keys apart.
+  const row = (day: string) =>
+    page.getByTestId("my-keys").getByRole("row").filter({ has: page.getByTestId("phone-expiry").filter({ hasText: day }) });
+  const firstRow = row(firstDay);
+  const secondRow = row(secondDay);
+  await expect(firstRow).toBeVisible();
+  await expect(secondRow).toBeVisible();
+  await expectKeyPill(page, firstRow, "production", [`${first.key.display_prefix}…`, first.key.id]);
+  await expectKeyPill(page, secondRow, "production", [`${second.key.display_prefix}…`, second.key.id]);
   await expect(firstRow.getByTestId("phone-expiry")).toBeVisible();
   await expect(firstRow.getByTestId("phone-expiry")).toContainText(firstDay);
   await expect(secondRow.getByTestId("phone-expiry")).toBeVisible();
@@ -521,6 +524,47 @@ test("a team admin's own keys rotate and revoke; the team page lists every key",
   await page.getByRole("tab", { name: "Keys" }).click();
   await expect(rowOf(page, "s8-admin-other")).toBeVisible();
   await expect(rowOf(page, "s8-admin-key")).toBeVisible();
+  await expectKeyPill(page, rowOf(page, "s8-admin-other"), "s8-admin-other", ["s8-admin", "lw", /[0-9a-f]{8}-[0-9a-f]{4}-/]);
+});
+
+test("a team admin sees service-account keys in My keys and a member does not", async ({ page }) => {
+  const team = await admin.ensureTeam("s8-sa-keys");
+  await admin.putMember(team.id, TEAM_ADMIN_EMAIL, "admin");
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  const account = await admin.post<{ id: string; name: string }>(`/teams/${team.id}/service-accounts`, { name: "s8-bot" });
+  const created = await admin.post<{ key: { id: string; display_prefix: string } }>(`/teams/${team.id}/keys`, {
+    name: "s8-sa-key",
+    service_account_id: account.id,
+  });
+
+  await signIn(page, TEAM_ADMIN, "/my-keys");
+  const section = page.getByTestId("service-account-keys");
+  await expect(section).toBeVisible();
+  await expect(section.getByRole("cell", { name: "s8-sa-keys", exact: true })).toBeVisible();
+  await expect(section.getByText("s8-bot", { exact: true })).toBeVisible();
+  const row = section.getByRole("row").filter({ hasText: "s8-sa-key" });
+  await expect(row).toBeVisible();
+  await expectKeyPill(page, row, "s8-sa-key", ["s8-sa-keys", "s8-bot", `${created.key.display_prefix}…`, created.key.id]);
+
+  // The five-column table still fits a phone; only its less important columns are hidden.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(section).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 1280, height: 800 });
+
+  // The row actions are the team Keys tab's: a rotate shows the new secret once.
+  await row.getByRole("button", { name: "Rotate" }).click();
+  const rotate = page.getByRole("dialog", { name: /^Rotate/ });
+  await rotate.getByRole("button", { name: "Rotate key" }).click();
+  const secret = page.getByRole("dialog", { name: "API key rotated" });
+  await expect(secret.getByTestId("secret-value")).toHaveText(/^lw-/);
+  await secret.getByRole("button", { name: /saved it/ }).click();
+
+  // A plain member is not an administrator: the section and the key never appear.
+  await signIn(page, VIEWER, "/my-keys");
+  await expect(page.getByTestId("service-account-keys")).toHaveCount(0);
+  await expect(page.getByText("s8-sa-key")).toHaveCount(0);
+  await expect(page.getByText("s8-bot", { exact: true })).toHaveCount(0);
 });
 
 test("a team admin sets the member key limits from the team settings", async ({ page, request }) => {

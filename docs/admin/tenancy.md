@@ -26,8 +26,9 @@ accounts) → keys. This page describes each level; limits and budgets along the
   in one transaction it locks the config scope, sets `deleted_at`, revokes every key of
   the team (including the rotation-grace hash), deactivates its service accounts and
   frees the name, which is unique only among live teams. Archived teams stay in the
-  database for usage and audit (`GET /usage?team_id=`, `GET /audit?team_id=`, the org
-  usage summary) but every write path and every team-scoped read answers 404.
+  database for usage, the request log and audit (`GET /usage?team_id=`,
+  `GET /requests?team_id=`, `GET /audit?team_id=`, the org usage summary) but every
+  write path and every team-scoped read answers 404.
 - **Team member**: a user in a team with role `admin` or `member`. The member's own
   exception policy and grants live in `member_policies`, keyed by `(team_id, user_id)` and
   deliberately independent of `team_members`: an external authorization backend has no

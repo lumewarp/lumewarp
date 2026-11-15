@@ -11,9 +11,9 @@ Five roles; each level inherits the administration of the level below it.
 | --- | --- | --- |
 | `proxy_admin` | `installation_admins`, one row | Everything (upstreams, routing, gateways, config, users, orgs, installation roles). Only this account or break-glass can transfer the role, or deactivate, delete, change the email of or mint a PAT for it. |
 | `admin` | `installation_admins`, any number | The same installation-level management, except demoting or removing the `proxy_admin` or touching that account; assigns and removes other admins. |
-| org admin | `admin` on `org:<id>` (`org_admins`) | Creates and archives the org's teams, sets their models, limits, parallelism and budget, assigns team admins, manages members, service accounts and any key in them, reads the org's usage and audit. The org policy itself is read-only. |
-| team admin | `admin` on `team:<id>` (`team_members.role=admin`) | Team name, member key limits, member defaults and per-member exceptions, service accounts, any key in the team, members, team usage and audit. Cannot change the team's models, limits or budget. |
-| member | `member` on `team:<id>` (`team_members.role=member`) | Reads the team's basic record and catalog names, creates and manages their own keys within their effective limits, sees their own usage. |
+| org admin | `admin` on `org:<id>` (`org_admins`) | Creates and archives the org's teams, sets their models, limits, parallelism and budget, assigns team admins, manages members, service accounts and any key in them, reads the org's usage, request log and audit. The org policy itself is read-only. |
+| team admin | `admin` on `team:<id>` (`team_members.role=admin`) | Team name, member key limits, member defaults and per-member exceptions, service accounts, any key in the team, members, team usage, request log and audit. Cannot change the team's models, limits or budget. |
+| member | `member` on `team:<id>` (`team_members.role=member`) | Reads the team's basic record and catalog names, creates and manages their own keys within their effective limits, sees their own usage and requests. |
 
 ## How a request is authorized
 
@@ -54,7 +54,7 @@ bootstrap is audited as `installation_admin.bootstrap`.
 
 An *org admin* holds `admin` on one org (`org_admins` rows for the built-in backend). Its teams
 are administered by inheritance: it reads every team of the org (with the whole-team policy
-view), reads their members, service accounts, keys, usage and audit, changes their settings,
+view), reads their members, service accounts, keys, usage, request log and audit, changes their settings,
 sets their quota and assigns their team admins. It never reaches another org, and it does not
 become a team *member*, yet it may own keys in those teams (`keys.owners`): a user may own keys
 in a team as a direct member, an installation admin or an admin of the team's org. No row is

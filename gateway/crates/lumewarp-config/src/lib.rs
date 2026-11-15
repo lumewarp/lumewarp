@@ -154,6 +154,10 @@ pub struct Upstream {
     pub circuit_breaker: Option<CircuitBreaker>,
     #[serde(default)]
     pub metrics_url: String,
+    /// WASM `upstream-auth` plugin for this upstream. Only a plugin; the
+    /// built-ins and `api_key_env` are the other, mutually exclusive, way.
+    #[serde(default)]
+    pub auth: Option<UpstreamAuth>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -931,6 +935,7 @@ impl Config {
                     open_ms: c.open_ms,
                 }),
                 metrics_url: u.metrics_url.clone(),
+                auth: wire_auth(&u.auth),
             })
             .collect();
         let models = self
@@ -1207,9 +1212,10 @@ impl Config {
                 }
                 let mut plugins = Vec::new();
                 for auth in self
-                    .mcp_servers
+                    .upstreams
                     .iter()
-                    .map(|s| s.auth.as_ref())
+                    .map(|u| u.auth.as_ref())
+                    .chain(self.mcp_servers.iter().map(|s| s.auth.as_ref()))
                     .chain(self.a2a_agents.iter().map(|a| a.auth.as_ref()))
                     .flatten()
                 {
@@ -1435,6 +1441,34 @@ aliases:
         ] {
             assert!(Config::parse(removed).is_err(), "{removed}");
         }
+    }
+
+    #[test]
+    fn upstream_auth_is_wired_as_a_plugin_capability() {
+        let (_, s) = Config::parse(
+            r#"
+upstreams:
+  - {name: u, kind: vllm, base_url: 'http://x/v1', auth: {plugin: hmac_signature, params: {skew: 5}, timeout_ms: 250}}
+models:
+  - {type: llm, name: m, upstream: u, upstream_model: actual}
+"#,
+        )
+        .unwrap();
+        let plugin = s.upstreams[0]
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.plugin.as_ref())
+            .expect("auth plugin");
+        assert_eq!(plugin.plugin, "hmac_signature");
+        assert_eq!(plugin.params_json, r#"{"skew":5}"#);
+        assert_eq!(plugin.timeout_ms, 250);
+        assert_eq!(s.required_capabilities, ["auth:hmac_signature"]);
+        // Builtins are MCP/A2A-only for an upstream; snapshot validation refuses
+        // them. The loader still parses the shared shape.
+        assert!(Config::parse(
+            "upstreams:\n  - {name: u, kind: vllm, base_url: 'http://x/v1', auth: {plugin: none}}\n"
+        )
+        .is_ok());
     }
 
     #[test]

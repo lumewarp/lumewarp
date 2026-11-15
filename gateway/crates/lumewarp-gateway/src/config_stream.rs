@@ -13,7 +13,7 @@ use lumewarp_config::AuthMode;
 use lumewarp_proto::config::v1::{
     config_service_client::ConfigServiceClient, config_update::Update, gateway_message::Msg, Ack,
     CatalogReport, ConfigUpdate, GatewayMessage, HealthReport, Hello, Nack, NackCode,
-    PluginDescriptor, SharedLimits, Snapshot, TargetHealth,
+    PluginDescriptor, ProbeRequest, SharedLimits, Snapshot, TargetHealth,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::ReceiverStream;
@@ -217,6 +217,12 @@ impl Client {
                 update = inbound.message() => {
                     let Some(update) = update? else { break };
                     received = true;
+                    // A probe is not a config version: answer it with
+                    // ProbeResult on the same stream, never ACK/NACK.
+                    if let Some(Update::Probe(request)) = &update.update {
+                        self.spawn_probe(request.clone(), tx.clone());
+                        continue;
+                    }
                     let reply = self.handle(update).await;
                     let acked = matches!(reply.msg, Some(Msg::Ack(_)));
                     if tx.send(reply).await.is_err() {
@@ -271,6 +277,33 @@ impl Client {
         Ok(received)
     }
 
+    /// Runs one probe against the snapshot active when the request arrived,
+    /// off the config loop, and queues its answer. A closed or full stream
+    /// drops the answer; the control plane then times the probe out.
+    fn spawn_probe(&self, request: ProbeRequest, tx: mpsc::Sender<GatewayMessage>) {
+        let snapshot = self.current.clone();
+        let runtime = self.runtime.clone();
+        tokio::spawn(async move {
+            // The control plane waits at most PROBE_DEADLINE; the whole probe,
+            // the auth plugin call included, is bounded by it so a slow plugin
+            // or a long upstream timeout never leaves a task running unseen.
+            let result = match tokio::time::timeout(
+                crate::probe::PROBE_DEADLINE,
+                crate::probe::run_probe(&snapshot, &runtime, &request),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => crate::probe::timed_out(&request),
+            };
+            let _ = tx
+                .send(GatewayMessage {
+                    msg: Some(Msg::ProbeResult(result)),
+                })
+                .await;
+        });
+    }
+
     fn health_report(&self) -> GatewayMessage {
         let (upstreams, models) = self.runtime.health.probed();
         let wire = |probed: Vec<(String, bool)>| {
@@ -306,6 +339,8 @@ impl Client {
         let version = match &update.update {
             Some(Update::Full(full)) => full.version,
             Some(Update::Delta(delta)) => delta.version,
+            // Intercepted by the session loop; never applied.
+            Some(Update::Probe(_)) => 0,
             None => 0,
         };
         let target_digest = update.target_digest.clone();
@@ -401,7 +436,10 @@ mod tests {
             pin::Pin,
             task::{Context, Poll},
         };
-        use tokio::sync::mpsc;
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            sync::mpsc,
+        };
         use tokio_stream::{wrappers::TcpListenerStream, Stream};
         use tonic::{
             codegen::{http, BoxFuture, Service},
@@ -616,6 +654,161 @@ mod tests {
             assert_eq!(report.cards.len(), 1);
             assert_eq!(report.cards[0].agent_id, "id-a1");
             assert_eq!(report.cards[0].config_version, 1);
+            handle.abort();
+        }
+
+        #[tokio::test]
+        async fn a_probe_request_is_answered_and_never_acked() {
+            // A local upstream that answers every request and reports its bytes.
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let http_addr = listener.local_addr().unwrap();
+            let (seen, mut seen_rx) = mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let seen = seen.clone();
+                    tokio::spawn(async move {
+                        let mut buffer = [0u8; 8192];
+                        let Ok(read) = socket.read(&mut buffer).await else {
+                            return;
+                        };
+                        let _ = seen.send(String::from_utf8_lossy(&buffer[..read]).to_string());
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                            )
+                            .await;
+                    });
+                }
+            });
+
+            let (addr, mut conns) = fake_cp().await;
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = Runtime::new();
+            let slot: server::Snapshot = Arc::new(arc_swap::ArcSwapOption::empty());
+            let config = StreamConfig {
+                url: format!("http://{addr}"),
+                token: "gw-token".into(),
+                scope: "scope-a".into(),
+                state_dir: dir.path().to_owned(),
+                shared_limits_namespace: None,
+            };
+            let handle = spawn(
+                config,
+                Snapshot {
+                    scope: "scope-a".into(),
+                    ..Default::default()
+                },
+                Vec::new(),
+                false,
+                slot,
+                runtime,
+            )
+            .unwrap();
+            let mut conn = tokio::time::timeout(Duration::from_secs(5), conns.recv())
+                .await
+                .unwrap()
+                .expect("fake control plane accepted no stream");
+            match conn.recv().await {
+                Msg::Hello(_) => {}
+                other => panic!("expected Hello, got {other:?}"),
+            }
+
+            // Unknown upstream: answered, not NACKed.
+            conn.send(ConfigUpdate {
+                update: Some(Update::Probe(ProbeRequest {
+                    request_id: "missing".into(),
+                    upstream: "nope".into(),
+                    model: String::new(),
+                })),
+                ..Default::default()
+            });
+            match conn.recv().await {
+                Msg::ProbeResult(result) => {
+                    assert_eq!(result.request_id, "missing");
+                    assert!(!result.ok);
+                    assert_eq!(result.status, 0);
+                    assert_eq!(result.error_class, "not_found");
+                }
+                other => panic!("expected ProbeResult, got {other:?}"),
+            }
+
+            // A known upstream: the gateway actually probes it.
+            conn.send(ConfigUpdate {
+                target_digest: vec![1],
+                update: Some(Update::Full(Snapshot {
+                    version: 1,
+                    scope: "scope-a".into(),
+                    upstreams: vec![lumewarp_proto::config::v1::Upstream {
+                        name: "u".into(),
+                        kind: lumewarp_proto::config::v1::UpstreamKind::Vllm as i32,
+                        base_url: format!("http://{http_addr}/v1"),
+                        ..Default::default()
+                    }],
+                    models: vec![lumewarp_proto::config::v1::Model {
+                        name: "m".into(),
+                        upstream: "u".into(),
+                        upstream_model: "actual".into(),
+                        r#type: lumewarp_proto::config::v1::ModelType::Llm as i32,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })),
+            });
+            match conn.recv().await {
+                Msg::Ack(ack) => assert_eq!(ack.version, 1),
+                other => panic!("expected Ack, got {other:?}"),
+            }
+            conn.send(ConfigUpdate {
+                update: Some(Update::Probe(ProbeRequest {
+                    request_id: "ok".into(),
+                    upstream: "u".into(),
+                    model: String::new(),
+                })),
+                ..Default::default()
+            });
+            match conn.recv().await {
+                Msg::ProbeResult(result) => {
+                    assert_eq!(result.request_id, "ok");
+                    assert!(result.ok, "{result:?}");
+                    assert_eq!(result.status, 200);
+                    assert_eq!(result.error_class, "");
+                }
+                other => panic!("expected ProbeResult, got {other:?}"),
+            }
+            let request = tokio::time::timeout(Duration::from_secs(5), seen_rx.recv())
+                .await
+                .unwrap()
+                .expect("upstream saw the probe");
+            assert!(request.starts_with("GET /v1/models "), "{request}");
+
+            // A model probe runs the type's synthetic body through its endpoint.
+            conn.send(ConfigUpdate {
+                update: Some(Update::Probe(ProbeRequest {
+                    request_id: "model".into(),
+                    upstream: "u".into(),
+                    model: "m".into(),
+                })),
+                ..Default::default()
+            });
+            match conn.recv().await {
+                Msg::ProbeResult(result) => {
+                    assert_eq!(result.request_id, "model");
+                    assert!(result.ok, "{result:?}");
+                }
+                other => panic!("expected ProbeResult, got {other:?}"),
+            }
+            let request = tokio::time::timeout(Duration::from_secs(5), seen_rx.recv())
+                .await
+                .unwrap()
+                .expect("upstream saw the model probe");
+            assert!(
+                request.starts_with("POST /v1/chat/completions "),
+                "{request}"
+            );
+            assert!(request.contains("1 + 1 = ?"), "{request}");
             handle.abort();
         }
 

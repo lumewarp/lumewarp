@@ -22,7 +22,7 @@ features:
     details: Authentication, endpoints, errors and limits, as a client sees them.
     link: /using/
   - title: You manage a team or an org
-    details: Members, keys, limits and budgets, models and routers, usage and audit.
+    details: Members, keys, limits and budgets, models and routers, usage, requests and audit.
     link: /admin/
   - title: You run Lumewarp
     details: Install, settings, sign-in, metrics and alerts, upgrades and troubleshooting.

@@ -20,6 +20,7 @@ from tests.factories import (
     make_key,
     make_member,
     make_model,
+    make_org,
     make_router,
     make_service_account,
     make_team,
@@ -40,7 +41,8 @@ def query(client, headers=ADMIN_AUTH, **params):
 
 
 async def test_grouping_filters_and_cursor_pagination(client, committed) -> None:
-    team = await make_team(committed)
+    org = await make_org(committed)
+    team = await make_team(committed, org=org)
     user, _ = await user_with_token(committed)
     account = await make_service_account(committed, team)
     user_key = await make_key(committed, team, user)
@@ -76,6 +78,27 @@ async def test_grouping_filters_and_cursor_pagination(client, committed) -> None
         ("user", str(user.id)): 4,
         ("service_account", str(account.id)): 1,
     }
+    by_key = query(client, group_by="key", team_id=str(team.id))
+    assert by_key.status_code == 200, by_key.text
+    key_rows = {row["key"]["id"]: row["key"] for row in by_key.json()["items"]}
+    assert key_rows[str(sa_key.id)] == {
+        "id": str(sa_key.id),
+        "name": sa_key.name,
+        "display_prefix": sa_key.display_prefix,
+        "team_id": str(team.id),
+        "team_name": team.name,
+        "org_id": str(org.id),
+        "org_name": org.name,
+        "owner_kind": "service_account",
+        "user_id": None,
+        "service_account_id": str(account.id),
+        "service_account_name": account.name,
+        "lifecycle": "active",
+    }
+    assert key_rows[str(user_key.id)]["owner_kind"] == "user"
+    assert key_rows[str(user_key.id)]["service_account_name"] is None
+    # The key dimension is the only grouping that carries a ref.
+    assert all(row["key"] is None for row in rows)
     for filters, models in (
         ({"user_id": str(user.id)}, {"alpha", "beta"}),
         ({"service_account_id": str(account.id)}, {"gamma"}),

@@ -617,6 +617,9 @@ async def seed_docs(url: str) -> None:
     users = {u["email"]: u["id"] for u in api.call("GET", "/users?limit=200")["items"]}
     api.call("PUT", f"/teams/{team['id']}/members/{users[MEMBER_EMAIL]}", {"role": "member"})
     api.call("PUT", f"/teams/{team['id']}/members/{users[TEAM_ADMIN_EMAIL]}", {"role": "admin"})
+    # The traffic below comes from one service-account key, so the request log shows a key name.
+    ingest = api.call("POST", f"/teams/{team['id']}/service-accounts", {"name": "search-ingest"})
+    ingest_key = api.call("POST", f"/teams/{team['id']}/keys", {"name": "prod-ingest", "service_account_id": ingest["id"]})["key"]
     upstream = api.call("POST", "/upstreams", {"name": "vllm-gpu-a", "kind": "vllm", "base_url": "http://vllm-gpu-a.internal:8000/v1"})
     prices = {"price_input_nano_usd_per_mtok": 200_000_000, "price_output_nano_usd_per_mtok": 600_000_000}
     model = {
@@ -691,7 +694,7 @@ async def seed_docs(url: str) -> None:
                         last_seen_at=datetime.now(UTC),
                     )
                 )
-            owner, key = uuid.UUID(users[MEMBER_EMAIL]), uuid.uuid4()
+            owner, key = uuid.UUID(ingest["id"]), uuid.UUID(ingest_key["id"])
             for day in range(14):
                 weekday = (now - timedelta(days=day)).weekday() < 5
                 for name, endpoint, requests in [
@@ -711,7 +714,7 @@ async def seed_docs(url: str) -> None:
                                 started_at=ts - timedelta(seconds=2),
                                 key_id=key,
                                 team_id=uuid.UUID(team["id"]),
-                                owner_kind=KeyOwnerKind.USER,
+                                owner_kind=KeyOwnerKind.SERVICE_ACCOUNT,
                                 owner_id=owner,
                                 requested="chat" if endpoint == "chat_completions" else name,
                                 model=name,

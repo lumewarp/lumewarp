@@ -143,7 +143,7 @@ async function signInAsAdmin(page: Page, request: APIRequestContext) {
 
 async function setRange(page: Page, from: string, to: string) {
   await page.getByLabel("From").fill(from);
-  await page.getByLabel("To (inclusive)").fill(to);
+  await page.getByLabel("To", { exact: true }).fill(to);
   await expect(page.getByLabel("From")).toHaveValue(from);
 }
 
@@ -602,7 +602,7 @@ test("dates: clearing a field is not a crash, and an impossible range is the API
   await expect(daySlots(page).first()).toBeVisible();
 
   await page.getByLabel("From").fill("");
-  await page.getByLabel("To (inclusive)").fill("");
+  await page.getByLabel("To", { exact: true }).fill("");
   await expect(chart(page).getByTestId("usage-chart-empty")).toHaveText("Choose a date range.");
   expect(errors).toEqual([]);
   await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();

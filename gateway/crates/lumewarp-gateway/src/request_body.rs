@@ -12,6 +12,17 @@ pub struct RequestBody {
     remaining: u64,
 }
 impl RequestBody {
+    /// The exact bytes that will go upstream. Copies them; an auth plugin that
+    /// declared `needs_body` opts into that cost, and the body is not copied
+    /// on any other path.
+    pub fn to_bytes(&self) -> Bytes {
+        let mut out = Vec::with_capacity(usize::try_from(self.remaining).unwrap_or(0));
+        for chunk in self.chunks.iter().flatten() {
+            out.extend_from_slice(chunk);
+        }
+        Bytes::from(out)
+    }
+
     pub fn spliced(before: Bytes, replacement: Bytes, after: Bytes) -> Self {
         Self {
             remaining: (before.len() + replacement.len() + after.len()) as u64,

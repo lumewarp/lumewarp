@@ -20,14 +20,15 @@ routing back; the Gateways page shows which version each gateway runs.
 
 ## Rollback
 
-Rollback restores models, aliases, routers, MCP servers and A2A agents by id from the
-version's `catalog_state`, recreating deleted items under their old id, and re-publishes that
-version's routing as a new version. An MCP server or A2A agent absent from the state is
+Rollback restores upstreams, models, aliases, routers, MCP servers and A2A agents by id from
+the version's `catalog_state`, recreating deleted items under their old id, and re-publishes
+that version's routing as a new version. An MCP server or A2A agent absent from the state is
 archived rather than deleted, so its definitions and grants survive; reviewed definition
 states are not captured, so a rollback never re-decides a definition. Grants are not routing
 config: grants on a deleted catalog item do not come back. Keys, teams and policies come
-from current state, so a revoked key stays revoked. It goes through the same plugin checks
-as a router write.
+from current state, so a revoked key stays revoked. Routers, MCP servers and A2A agents go through the same plugin checks
+as a write; an upstream's auth plugin is restored as stored, so a gateway lacking it NACKs
+the version.
 
 ![Config versions](/screenshots/config-versions.png)
 

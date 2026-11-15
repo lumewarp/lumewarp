@@ -5,13 +5,17 @@ import { fmtDateTime, PageHeader } from "../components/Bits";
 import { TextField } from "../components/Form";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { DataTable } from "../components/Table";
-import { Card } from "../components/ui/card";
+import { FilterBar } from "../components/FilterBar";
 import { useCan, useNames, useOrgLayer, useTeams } from "../hooks";
+import { dayStart, shiftDay } from "../lib/days";
+import { KeyPill } from "../components/KeyPill";
 
 export function Audit() {
   const [action, setAction] = useState("");
   const [teamId, setTeamId] = useState("");
   const [orgId, setOrgId] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
   const perms = useCan();
   const teams = useTeams();
   // The org layer (the filter and the Org column) is hidden for a single-org installation.
@@ -21,14 +25,26 @@ export function Audit() {
   const administered = (teams.data ?? []).filter((team) => perms.teamAdmin(team.id));
   const teamName = useNames(administered);
   const q = useQuery({
-    queryKey: ["audit", action, teamId, orgId],
+    queryKey: ["audit", action, teamId, orgId, from, to],
     queryFn: () =>
-      api.audit({ action: action.trim() || undefined, team_id: teamId || undefined, org_id: orgId || undefined }),
+      api.audit({
+        action: action.trim() || undefined,
+        team_id: teamId || undefined,
+        org_id: orgId || undefined,
+        // The range is inclusive on screen and exclusive at its end, as on Usage and Requests.
+        from: from ? dayStart(from) || undefined : undefined,
+        to: to ? dayStart(shiftDay(to, 1)) || undefined : undefined,
+      }),
   });
   return (
     <>
       <PageHeader title="Audit log" />
-      <Card className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3 p-4 shadow-none">
+      <FilterBar
+        testId="audit-filters"
+        className={showOrg ? "lg:grid-cols-[10rem_10rem_repeat(3,minmax(0,1fr))]" : "lg:grid-cols-[10rem_10rem_repeat(2,minmax(0,1fr))]"}
+      >
+        <TextField label="From" type="date" value={from} onChange={setFrom} hint="Empty has no start." />
+        <TextField label="To" type="date" value={to} onChange={setTo} hint="Inclusive; empty ends now." />
         {showOrg && (
           <ComboboxField
             label="Org"
@@ -43,8 +59,8 @@ export function Audit() {
           onChange={setTeamId}
           options={[{ value: "", label: "All teams" }, ...administered.map((team) => ({ value: team.id, label: team.name }))]}
         />
-        <TextField label="Action" value={action} onChange={setAction} placeholder="e.g. key.create" />
-      </Card>
+        <TextField label="Action" value={action} onChange={setAction} placeholder="Any action" />
+      </FilterBar>
       <DataTable
         rows={q.data}
         loading={q.isPending || teams.isPending}
@@ -58,7 +74,7 @@ export function Audit() {
           ...(showOrg ? [{ key: "org", header: "Org", cell: (r: { org_id: string | null }) => orgName(r.org_id) }] : []),
           { key: "actor", header: "Actor", cell: (r) => (<><span>{r.actor_type}</span> <code className="text-muted-foreground">{r.actor_id?.slice(0, 8)}</code></>) },
           { key: "action", header: "Action", sort: (a, b) => a.action.localeCompare(b.action), cell: (r) => <code>{r.action}</code> },
-          { key: "resource", header: "Resource", cell: (r) => (<>{r.resource_type} <code className="text-muted-foreground">{r.resource_id?.slice(0, 8)}</code></>) },
+          { key: "resource", header: "Resource", cell: (r) => (r.resource_type === "key" ? <KeyPill keyRef={r.key} fallbackId={r.resource_id} /> : <>{r.resource_type} <code className="text-muted-foreground">{r.resource_id?.slice(0, 8)}</code></>) },
           { key: "details", header: "Details", cell: (r) => <code className="text-muted-foreground">{Object.keys(r.details).length ? JSON.stringify(r.details) : ""}</code> },
         ]}
       />

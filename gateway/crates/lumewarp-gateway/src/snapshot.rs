@@ -38,6 +38,8 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     "strategy:vllm_load",
     "mcp",
     "a2a",
+    // One-off ProbeRequest over the config stream (gateway-side Test now).
+    "upstream_probe",
 ];
 
 /// The strategy of a pool that came from a `Model`, not a `Router`.
@@ -276,6 +278,7 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             true,
             &format!("upstream {:?} stream_usage_mode", u.name),
         )?;
+        crate::targets::check_upstream_auth(u)?;
     }
     let models = unique(snapshot.models.iter().map(|d| d.name.as_str()), "model")?;
     for d in &snapshot.models {
@@ -676,6 +679,9 @@ fn merge<T>(
 pub fn apply(base: &Snapshot, update: ConfigUpdate) -> Result<Snapshot, ApplyError> {
     match update.update {
         None => Err(ApplyError::invalid("empty config update")),
+        // The config stream intercepts probes before `apply`; reaching here is
+        // a bug in the caller, never a configuration version.
+        Some(Update::Probe(_)) => Err(ApplyError::invalid("probe request is not a config update")),
         Some(Update::Full(full)) => {
             if !base.scope.is_empty() && full.scope != base.scope {
                 return Err(ApplyError::invalid(
@@ -1093,7 +1099,7 @@ pub(crate) mod tests {
                         ..Default::default()
                     });
                 }
-                "strategy:least_in_flight" | "rotation_grace" => continue,
+                "strategy:least_in_flight" | "rotation_grace" | "upstream_probe" => continue,
                 strategy => {
                     r.strategy = strategy.strip_prefix("strategy:").unwrap().into();
                     s.required_capabilities.clear();
@@ -1655,6 +1661,69 @@ pub(crate) mod tests {
             vec!["strategy:weighted".into(), "strategy:lowest_latency".into()];
         validate(&s, SUPPORTED_CAPABILITIES).unwrap();
         assert_code(validate(&s, &[]), NackCode::UnsupportedFeature);
+    }
+
+    #[test]
+    fn upstream_auth_is_a_wasm_plugin_that_excludes_api_keys() {
+        let plugin = |name: &str, params: &str| pb::UpstreamAuth {
+            plugin: Some(pb::PluginRef {
+                plugin: name.into(),
+                params_json: params.into(),
+                timeout_ms: 0,
+            }),
+            secret_ref: String::new(),
+            secret_ciphertext: Vec::new(),
+        };
+        let caps = [
+            "strategy:weighted",
+            "auth:hmac_signature",
+            "auth:none",
+            "auth:static_bearer",
+            "auth:passthrough",
+        ];
+        let mut s = base();
+        s.upstreams[0].auth = Some(plugin("hmac_signature", r#"{"skew":5}"#));
+        let error = validate(&s, &caps).unwrap_err();
+        assert_eq!(
+            error.code,
+            NackCode::InvalidConfig,
+            "needs the capability: {error}"
+        );
+        s.required_capabilities.push("auth:hmac_signature".into());
+        validate(&s, &caps).unwrap();
+        assert!(crate::targets::capabilities(&s).contains(&"auth:hmac_signature".to_owned()));
+        // Built-ins are MCP/A2A-only; a static bearer is api_key_*.
+        for builtin in ["none", "static_bearer", "passthrough"] {
+            let mut s = base();
+            s.upstreams[0].auth = Some(plugin(builtin, ""));
+            s.required_capabilities.push(format!("auth:{builtin}"));
+            let error = validate(&s, &caps).unwrap_err();
+            assert_eq!(error.code, NackCode::InvalidConfig, "{builtin}: {error}");
+        }
+        // A static bearer and a plugin cannot both be configured.
+        let mut s = base();
+        s.upstreams[0].api_key_ref = "LUMEWARP_TEST_KEY".into();
+        s.upstreams[0].auth = Some(plugin("hmac_signature", ""));
+        s.required_capabilities.push("auth:hmac_signature".into());
+        let error = validate(&s, &caps).unwrap_err();
+        assert_eq!(
+            error.code,
+            NackCode::InvalidConfig,
+            "mutually exclusive: {error}"
+        );
+        // Secrets belong to MCP/A2A auth, not an LLM upstream plugin.
+        let mut s = base();
+        s.upstreams[0].auth = Some(pb::UpstreamAuth {
+            secret_ref: "SOME_ENV".into(),
+            ..plugin("hmac_signature", "")
+        });
+        s.required_capabilities.push("auth:hmac_signature".into());
+        let error = validate(&s, &caps).unwrap_err();
+        assert_eq!(
+            error.code,
+            NackCode::InvalidConfig,
+            "no secret_ref: {error}"
+        );
     }
 
     #[test]

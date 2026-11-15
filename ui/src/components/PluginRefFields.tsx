@@ -65,13 +65,16 @@ interface Props {
   onChange: (value: PluginRefValue) => void;
   errors?: Record<string, string>;
   allowNone?: boolean;
+  /** Hide the built-ins: the target takes only a WASM plugin (an LLM upstream's credential). */
+  wasmOnly?: boolean;
   /** A JSON editor problem, or null once the text parses again. */
   onProblem?: (message: string | null) => void;
 }
 
-export function PluginRefFields({ kind, value, onChange, errors = {}, allowNone = false, onProblem }: Props) {
+export function PluginRefFields({ kind, value, onChange, errors = {}, allowNone = false, wasmOnly = false, onProblem }: Props) {
   const plugins = usePlugins(kind);
   const listed = plugins.data;
+  const allowed = useMemo(() => (listed ?? []).filter((p) => !wasmOnly || !p.builtin), [listed, wasmOnly]);
   const current = useMemo(() => listed?.find((p) => p.name === value.plugin), [listed, value.plugin]);
   const schema = useMemo(() => parseSchema(current?.params_schema), [current]);
   const params = isObject(value.params) ? value.params : {};
@@ -81,13 +84,13 @@ export function PluginRefFields({ kind, value, onChange, errors = {}, allowNone 
   const options = useMemo(
     () => [
       ...(allowNone ? [{ value: NO_PLUGIN, label: "None" }] : []),
-      ...(listed ?? []).map((p) => ({ value: p.name, label: strategyTitle(p) })),
+      ...allowed.map((p) => ({ value: p.name, label: strategyTitle(p) })),
       // A name no gateway reports any more stays visible instead of silently becoming the first option.
-      ...(value.plugin !== NO_PLUGIN && !listed?.some((p) => p.name === value.plugin)
-        ? [{ value: value.plugin, label: `${value.plugin} (not reported by any gateway)` }]
+      ...(value.plugin !== NO_PLUGIN && !allowed.some((p) => p.name === value.plugin)
+        ? [{ value: value.plugin, label: `${value.plugin} (not available for this target)` }]
         : []),
     ],
-    [allowNone, listed, value.plugin],
+    [allowNone, allowed, value.plugin],
   );
 
   const set = (patch: Partial<PluginRefValue>) => onChange({ ...value, ...patch });

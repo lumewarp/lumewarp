@@ -21,8 +21,9 @@ from lumewarp_control_plane.models import (
     AuditLog,
     CatalogName,
     KeyLifecycle,
-    MemberPolicy,
-    ModelAccess,
+    PlaygroundRequest,
+    ServiceAccount,
+    TeamRole,
 )
 from tests.api.conftest import TEST_ENCRYPTION_KEY
 from tests.api.helpers import auth, user_with_token
@@ -31,6 +32,8 @@ from tests.factories import (
     make_key,
     make_member,
     make_model,
+    make_org,
+    make_org_admin,
     make_service_account,
     make_team,
 )
@@ -63,11 +66,11 @@ def test_fixed_token_vector():
     )
 
 
-async def setup_keys(committed):
+async def setup_keys(committed, *, role: TeamRole = TeamRole.MEMBER):
     team = await make_team(committed)
     user, pat = await user_with_token(committed)
     other, _ = await user_with_token(committed)
-    await make_member(committed, team, user)
+    await make_member(committed, team, user, role=role)
     await make_member(committed, team, other)
     cookie = await sessions.create_session(committed, user.id, 3600)
     own = await make_key(committed, team, user)
@@ -119,54 +122,179 @@ async def test_own_keys_only_and_disabled(client, committed):
     assert response.json()["error"]["code"] == "playground_disabled"
 
 
-@pytest.mark.parametrize("model", ["private prompt", "x" * 257, None, 123, {"prompt": "secret"}])
-async def test_audit_rejects_untrusted_model(client, committed, monkeypatch, model):
-    own, _, headers, _ = await setup_keys(committed)
-    client.app.state.settings.playground_gateway_url = "http://gateway:4000"
-    # Even a real catalog name over 256 chars must not enter the audit.
-    if isinstance(model, str) and len(model) > 256:
-        await make_model(committed, name=model)
-        await committed.commit()
-    mock_gateway(client, monkeypatch, lambda request: httpx.Response(200, stream=SSEStream()))
+async def test_team_admin_sees_and_uses_service_account_key(client, committed, monkeypatch):
+    own, excluded, headers, _ = await setup_keys(committed, role=TeamRole.ADMIN)
+    foreign, service, *_ = excluded
+    account = await committed.get(ServiceAccount, service.service_account_id)
+    assert account is not None
+
+    body = client.get("/api/v1/playground", headers=headers).json()
+    by_id = {key["id"]: key for key in body["keys"]}
+    assert set(by_id) == {str(own.id), str(service.id)}
+    assert by_id[str(own.id)]["owner_kind"] == "user"
+    assert by_id[str(own.id)]["service_account_name"] is None
+    assert by_id[str(service.id)]["owner_kind"] == "service_account"
+    assert by_id[str(service.id)]["service_account_name"] == account.name
+
+    # A team admin still cannot act as another member's user key.
     response = client.post(
         "/api/v1/playground/v1/chat/completions",
-        headers={**headers, "x-lumewarp-act-as": str(own.id)},
-        json={"model": model},
+        headers={**headers, "x-lumewarp-act-as": str(foreign.id)},
+        json={},
+    )
+    assert response.status_code == 404
+    assert response.json()["error"]["message"] == "key not found"
+
+    client.app.state.settings.playground_gateway_url = "http://gateway:4000"
+    request_id = uuid.uuid4()
+
+    def gateway(request):
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "text/event-stream",
+                "x-lumewarp-request-id": str(request_id),
+            },
+            stream=SSEStream(),
+        )
+
+    mock_gateway(client, monkeypatch, gateway)
+    response = client.post(
+        "/api/v1/playground/v1/chat/completions",
+        headers={**headers, "x-lumewarp-act-as": str(service.id)},
+        json={"model": "mock"},
     )
     assert response.status_code == 200
     row = await committed.scalar(
-        select(AuditLog).where(
-            AuditLog.action == "playground.request", AuditLog.resource_id == str(own.id)
-        )
+        select(PlaygroundRequest).where(PlaygroundRequest.request_id == request_id)
     )
-    assert row.details == {"key_id": str(own.id), "model": None}
+    assert row.user_id == own.user_id
+    assert row.key_id == service.id
 
 
-@pytest.mark.parametrize("allowed", [True, False])
-async def test_audit_checks_effective_policy_and_length_boundary(
-    client, committed, monkeypatch, allowed
+async def test_org_admin_inherits_service_account_key(client, committed, monkeypatch):
+    org = await make_org(committed)
+    team = await make_team(committed, org=org)
+    foreign_team = await make_team(committed)
+    admin, _ = await user_with_token(committed)
+    await make_org_admin(committed, org, admin)
+    account = await make_service_account(committed, team, name="org-worker")
+    key = await make_key(committed, team, account)
+    foreign_account = await make_service_account(committed, foreign_team)
+    foreign_key = await make_key(committed, foreign_team, foreign_account)
+    cookie = await sessions.create_session(committed, admin.id, 3600)
+    await committed.commit()
+    headers = auth("session:" + cookie)
+
+    body = client.get("/api/v1/playground", headers=headers).json()
+    by_id = {entry["id"]: entry for entry in body["keys"]}
+    assert set(by_id) == {str(key.id)}
+    assert by_id[str(key.id)]["owner_kind"] == "service_account"
+    assert by_id[str(key.id)]["service_account_name"] == "org-worker"
+    assert by_id[str(key.id)]["org_id"] == str(org.id)
+    assert by_id[str(key.id)]["org_name"] == org.name
+    assert str(foreign_key.id) not in by_id
+
+    response = client.post(
+        "/api/v1/playground/v1/chat/completions",
+        headers={**headers, "x-lumewarp-act-as": str(foreign_key.id)},
+        json={},
+    )
+    assert response.status_code == 404
+    assert response.json()["error"]["message"] == "key not found"
+
+    client.app.state.settings.playground_gateway_url = "http://gateway:4000"
+    request_id = uuid.uuid4()
+
+    def gateway(request):
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "text/event-stream",
+                "x-lumewarp-request-id": str(request_id),
+            },
+            stream=SSEStream(),
+        )
+
+    mock_gateway(client, monkeypatch, gateway)
+    response = client.post(
+        "/api/v1/playground/v1/chat/completions",
+        headers={**headers, "x-lumewarp-act-as": str(key.id)},
+        json={"model": "mock"},
+    )
+    assert response.status_code == 200
+    row = await committed.scalar(
+        select(PlaygroundRequest).where(PlaygroundRequest.request_id == request_id)
+    )
+    assert row.user_id == admin.id
+    assert row.key_id == key.id
+
+
+async def test_inactive_service_account_keys_are_hidden_and_refused(client, committed):
+    team = await make_team(committed)
+    archived = await make_team(committed)
+    admin, _ = await user_with_token(committed)
+    await make_member(committed, team, admin, role=TeamRole.ADMIN)
+    await make_member(committed, archived, admin, role=TeamRole.ADMIN)
+
+    visible_account = await make_service_account(committed, team, name="visible-worker")
+    visible = await make_key(committed, team, visible_account)
+    deactivated_account = await make_service_account(committed, team, name="deactivated-worker")
+    deactivated = await make_key(committed, team, deactivated_account)
+    deactivated_account.deactivated_at = datetime.now(UTC)
+    active_account = await make_service_account(committed, team, name="active-worker")
+    now = datetime.now(UTC)
+    revoked = await make_key(
+        committed, team, active_account, lifecycle=KeyLifecycle.REVOKED, revoked_at=now
+    )
+    expired = await make_key(committed, team, active_account, expires_at=now - timedelta(seconds=1))
+    archived_account = await make_service_account(committed, archived, name="archived-worker")
+    archived_key = await make_key(committed, archived, archived_account)
+    archived.deleted_at = now
+    cookie = await sessions.create_session(committed, admin.id, 3600)
+    await committed.commit()
+    headers = auth("session:" + cookie)
+
+    body = client.get("/api/v1/playground", headers=headers).json()
+    by_id = {entry["id"]: entry for entry in body["keys"]}
+    assert set(by_id) == {str(visible.id)}
+    assert by_id[str(visible.id)]["service_account_name"] == "visible-worker"
+
+    for key in (deactivated, revoked, expired, archived_key):
+        response = client.post(
+            "/api/v1/playground/v1/chat/completions",
+            headers={**headers, "x-lumewarp-act-as": str(key.id)},
+            json={},
+        )
+        assert response.status_code == 404, response.text
+        assert response.json()["error"]["message"] == "key not found"
+
+
+@pytest.mark.parametrize("request_id", [None, "not-a-request-id"])
+async def test_missing_or_invalid_request_id_still_succeeds(
+    client, committed, monkeypatch, request_id
 ):
     own, _, headers, _ = await setup_keys(committed)
-    model = await make_model(committed, name="m" * 255 + str(allowed)[0])
-    if not allowed:
-        committed.add(
-            MemberPolicy(team_id=own.team_id, user_id=own.user_id, model_access=ModelAccess.LIST)
-        )
-    await committed.commit()
     client.app.state.settings.playground_gateway_url = "http://gateway:4000"
-    mock_gateway(client, monkeypatch, lambda request: httpx.Response(200, stream=SSEStream()))
+    upstream_headers = {"content-type": "text/event-stream"}
+    if request_id is not None:
+        upstream_headers["x-lumewarp-request-id"] = request_id
+    mock_gateway(
+        client,
+        monkeypatch,
+        lambda request: httpx.Response(200, headers=upstream_headers, stream=SSEStream()),
+    )
     response = client.post(
         "/api/v1/playground/v1/chat/completions",
         headers={**headers, "x-lumewarp-act-as": str(own.id)},
-        json={"model": model.name},
+        json={"model": "mock"},
     )
     assert response.status_code == 200
-    row = await committed.scalar(
-        select(AuditLog).where(
-            AuditLog.action == "playground.request", AuditLog.resource_id == str(own.id)
-        )
+    assert response.content == b'data: {"choices": []}\n\ndata: [DONE]\n\n'
+    assert (
+        await committed.scalar(select(PlaygroundRequest).where(PlaygroundRequest.key_id == own.id))
+        is None
     )
-    assert row.details["model"] == (model.name if allowed else None)
 
 
 @pytest.mark.parametrize("code", ["invalid_api_key", "other_auth_error"])
@@ -221,7 +349,7 @@ class SSEStream(httpx.AsyncByteStream):
         yield b"data: [DONE]\n\n"
 
 
-async def test_proxy_streams_and_audits(client, committed, monkeypatch):
+async def test_proxy_streams_and_records_request(client, committed, monkeypatch):
     own, _, headers, _ = await setup_keys(committed)
     client.app.state.settings.playground_gateway_url = "http://gateway:4000"
     model = await make_model(committed)
@@ -231,6 +359,7 @@ async def test_proxy_streams_and_audits(client, committed, monkeypatch):
     )
 
     body = body.replace(b'"model":"mock"', ('"model":"' + model.name + '"').encode())
+    request_id = uuid.uuid4()
 
     def gateway(request):
         assert str(request.url) == "http://gateway:4000/v1/chat/completions"
@@ -254,7 +383,7 @@ async def test_proxy_streams_and_audits(client, committed, monkeypatch):
             201,
             headers={
                 "content-type": "text/event-stream",
-                "x-lumewarp-request-id": "request-123",
+                "x-lumewarp-request-id": str(request_id),
             },
             stream=SSEStream(),
         )
@@ -268,13 +397,18 @@ async def test_proxy_streams_and_audits(client, committed, monkeypatch):
     assert response.status_code == 201
     assert response.content == b'data: {"choices": []}\n\ndata: [DONE]\n\n'
     assert response.headers["content-type"] == "text/event-stream"
-    assert response.headers["x-lumewarp-request-id"] == "request-123"
+    assert response.headers["x-lumewarp-request-id"] == str(request_id)
     row = await committed.scalar(
+        select(PlaygroundRequest).where(PlaygroundRequest.request_id == request_id)
+    )
+    assert row.user_id == own.user_id
+    assert row.key_id == own.id
+    audit_row = await committed.scalar(
         select(AuditLog).where(
             AuditLog.action == "playground.request", AuditLog.resource_id == str(own.id)
         )
     )
-    assert row.details == {"key_id": str(own.id), "model": model.name}
+    assert audit_row is None
     assert not client.app.state.playground_client.is_closed
 
 
@@ -285,11 +419,7 @@ async def test_body_limit_and_unreachable(client, committed, monkeypatch):
     path = "/api/v1/playground/v1/chat/completions"
     assert client.post(path, headers=headers, content=b"x" * (1024 * 1024 + 1)).status_code == 413
     assert (
-        await committed.scalar(
-            select(AuditLog).where(
-                AuditLog.action == "playground.request", AuditLog.resource_id == str(own.id)
-            )
-        )
+        await committed.scalar(select(PlaygroundRequest).where(PlaygroundRequest.key_id == own.id))
         is None
     )
 
@@ -301,11 +431,9 @@ async def test_body_limit_and_unreachable(client, committed, monkeypatch):
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "playground_gateway_unreachable"
     row = await committed.scalar(
-        select(AuditLog).where(
-            AuditLog.action == "playground.request", AuditLog.resource_id == str(own.id)
-        )
+        select(PlaygroundRequest).where(PlaygroundRequest.key_id == own.id)
     )
-    assert row.details == {"key_id": str(own.id), "model": None}
+    assert row is None
     assert not client.app.state.playground_client.is_closed
 
 

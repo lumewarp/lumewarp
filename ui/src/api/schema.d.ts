@@ -422,8 +422,10 @@ export interface paths {
         };
         /**
          * List Own Keys
-         * @description The caller's own keys across every team. Empty for a break-glass session, which is not a
-         *     user.
+         * @description The caller's own keys across every team. With `include_service_accounts` it also lists
+         *     the service-account keys of the live teams the caller administers (a team admin, or an org
+         *     or installation admin by inheritance); a plain member still sees only their own keys.
+         *     Empty for a break-glass session, which is not a user.
          */
         get: operations["listOwnKeys"];
         put?: never;
@@ -443,8 +445,9 @@ export interface paths {
         };
         /**
          * Get Playground
-         * @description The caller's usable keys and the `llm` names each may call, for the Admin UI Playground.
-         *     Requires a browser session; a personal access token answers 401.
+         * @description The caller's usable keys, their own plus service-account keys of teams they administer,
+         *     and the `llm` names each may call, for the Admin UI Playground. Requires a browser session;
+         *     a personal access token answers 401.
          */
         get: operations["getPlayground"];
         put?: never;
@@ -466,10 +469,11 @@ export interface paths {
         put?: never;
         /**
          * Chat Completions
-         * @description Forward a chat completion to the gateway as one of the caller's own keys, named by
-         *     its id in the `X-Lumewarp-Act-As` header. The body and the response, streamed or not, are the
-         *     gateway's `/v1/chat/completions`. Requires a browser session, accepts `llm` names only and
-         *     at most 1 MiB, and answers 503 `playground_disabled` when no gateway URL is configured.
+         * @description Forward a chat completion to the gateway as one of the caller's own keys, or as a
+         *     service-account key of a team they administer, named by its id in the `X-Lumewarp-Act-As`
+         *     header. The body and the response, streamed or not, are the gateway's
+         *     `/v1/chat/completions`. Requires a browser session, accepts `llm` names only and at most
+         *     1 MiB, and answers 503 `playground_disabled` when no gateway URL is configured.
          */
         post: operations["playgroundChatCompletions"];
         delete?: never;
@@ -494,7 +498,8 @@ export interface paths {
         /**
          * Create Upstream
          * @description Create an upstream, an OpenAI-compatible endpoint. Requires an installation admin. The API
-         *     key is stored encrypted or as an environment reference and is never returned.
+         *     key is stored encrypted or as an environment reference and is never returned. `auth`
+         *     names a WASM upstream-auth plugin instead, and cannot be combined with an API key.
          */
         post: operations["createUpstream"];
         delete?: never;
@@ -570,6 +575,30 @@ export interface paths {
          *     stored.
          */
         post: operations["testUpstream"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/upstreams/{upstream_id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Saved Upstream
+         * @description Probe a saved upstream now with the configuration in the database. Without a WASM
+         *     auth plugin the control plane calls it directly; with one, a gateway connected to this
+         *     control-plane process that advertises `upstream_probe` and reports the plugin runs it,
+         *     using the snapshot it currently serves. No such gateway is 409 `no_gateway_for_plugin`,
+         *     and no answer in time is 504 `probe_timeout`.
+         */
+        post: operations["testSavedUpstream"];
         delete?: never;
         options?: never;
         head?: never;
@@ -670,6 +699,30 @@ export interface paths {
          *     Reflects the control plane's network, not each gateway's.
          */
         post: operations["testModel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{model_id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Saved Model
+         * @description Probe a saved model now with the configuration in the database. Without a WASM auth
+         *     plugin on its upstream the control plane calls the typed endpoint directly; with one, a
+         *     gateway connected to this control-plane process that advertises `upstream_probe` and
+         *     reports the plugin runs it. No such gateway is 409 `no_gateway_for_plugin`, no answer in
+         *     time is 504 `probe_timeout`, and the reply is never returned (the gateway sends no body).
+         */
+        post: operations["testSavedModel"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1257,6 +1310,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Requests
+         * @description One row per gateway request, newest first: the name the client called and where it
+         *     landed (`requested` -> `alias` -> `router` -> `model` -> `upstream`), with status,
+         *     tokens, cost and duration. No prompt or response content is stored; look the request
+         *     up in OTel by `request_id`.
+         *
+         *     The default range is the last 24 hours and the default kind is `llm`; MCP and A2A rows
+         *     need an explicit `kind`. The permission scope is `/usage`'s: a plain member sees their
+         *     own user-owned keys only, a team admin (inherited org admin included) their teams, and
+         *     an installation admin everything. An out-of-scope `team_id` or `key_id` answers exactly
+         *     as it does on `/usage` (404 or 403). `playground_user_id` is set when the request came
+         *     from the Admin UI Playground.
+         */
+        get: operations["listRequests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/audit": {
         parameters: {
             query?: never;
@@ -1758,6 +1841,8 @@ export interface components {
             resource_type: string;
             /** Resource Id */
             resource_id: string | null;
+            /** @description For a `resource_type` of `key`: the key's ref; null for other resources and when its row no longer exists. */
+            key?: components["schemas"]["KeyRefOut"] | null;
             /** Team Id */
             team_id: string | null;
             /** Org Id */
@@ -2228,12 +2313,95 @@ export interface components {
             updated_at: string;
             /** Owner Active */
             owner_active: boolean | null;
+            /** Service Account Name */
+            service_account_name: string | null;
+            /**
+             * Team Name
+             * @description The name of the team the key belongs to.
+             */
+            team_name: string;
+            /**
+             * Org Id
+             * @description The id of the team's org.
+             */
+            org_id: string | null;
+            /**
+             * Org Name
+             * @description The name of the team's org.
+             */
+            org_name: string | null;
         };
         /**
          * KeyOwnerKind
          * @enum {string}
          */
         KeyOwnerKind: "user" | "service_account";
+        /**
+         * KeyRefOut
+         * @description One key named the same way wherever the API shows it.
+         *
+         *     The team and org names come from the key's own rows, so they are only ever returned
+         *     alongside a key the caller may already see. `org_id` and `org_name` are nullable
+         *     because the org is an outer join, not because a live team can lack one.
+         */
+        KeyRefOut: {
+            /**
+             * Id
+             * Format: uuid
+             * @description The key's public id, the same as `key_id`.
+             */
+            id: string;
+            /**
+             * Name
+             * @description The key's current name.
+             */
+            name: string;
+            /**
+             * Display Prefix
+             * @description The start of the secret (`lw-...`); never the secret itself.
+             */
+            display_prefix: string;
+            /**
+             * Team Id
+             * Format: uuid
+             * @description The team the key belongs to.
+             */
+            team_id: string;
+            /**
+             * Team Name
+             * @description That team's name.
+             */
+            team_name: string;
+            /**
+             * Org Id
+             * @description The team's org id, when it resolves.
+             */
+            org_id: string | null;
+            /**
+             * Org Name
+             * @description The team's org name, when it resolves.
+             */
+            org_name: string | null;
+            /** @description `user` or `service_account`. */
+            owner_kind: components["schemas"]["KeyOwnerKind"];
+            /**
+             * User Id
+             * @description The owning user; null for a service account's key.
+             */
+            user_id: string | null;
+            /**
+             * Service Account Id
+             * @description The owning service account; null for a user's key.
+             */
+            service_account_id: string | null;
+            /**
+             * Service Account Name
+             * @description That service account's name; null for a user's key.
+             */
+            service_account_name: string | null;
+            /** @description `active`, `suspended` or `revoked`. */
+            lifecycle: components["schemas"]["KeyLifecycle"];
+        };
         /**
          * KeyRotate
          * @description Optional body of `rotateKey`. Grace 0 replaces the secret immediately.
@@ -3105,13 +3273,14 @@ export interface components {
         ModelTestOut: {
             /**
              * Credential
+             * @description How the credential was obtained: a WASM auth plugin, the saved upstream's stored key, the control plane's env var (or missing there), or none.
              * @enum {string}
              */
-            credential: "stored" | "env" | "env_unset" | "none";
+            credential: "plugin" | "stored" | "env" | "env_unset" | "none";
             probe: components["schemas"]["ProbeOut"];
             /**
              * Reply
-             * @description The start of the model's answer (at most 200 characters), on success.
+             * @description The start of the model's answer (at most 200 characters), on success; null when a gateway ran the probe, since no response body leaves it.
              */
             reply: string | null;
         };
@@ -3525,6 +3694,13 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
+        /** Page[RequestOut] */
+        Page_RequestOut_: {
+            /** Items */
+            items: components["schemas"]["RequestOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
         /** Page[RouterOut] */
         Page_RouterOut_: {
             /** Items */
@@ -3592,8 +3768,22 @@ export interface components {
             team_id: string;
             /** Team Name */
             team_name: string;
+            /**
+             * Org Id
+             * Format: uuid
+             * @description The id of the team's org.
+             */
+            org_id: string;
+            /**
+             * Org Name
+             * @description The name of the team's org.
+             */
+            org_name: string;
             /** Models */
             models: string[];
+            owner_kind: components["schemas"]["KeyOwnerKind"];
+            /** Service Account Name */
+            service_account_name: string | null;
         };
         /** PlaygroundOut */
         PlaygroundOut: {
@@ -3829,6 +4019,88 @@ export interface components {
             /** Default Level */
             default_level: string | null;
         };
+        /**
+         * RequestOut
+         * @description One gateway request: the name the client called and where it landed.
+         */
+        RequestOut: {
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            request_id: string;
+            /**
+             * Ts
+             * Format: date-time
+             */
+            ts: string;
+            kind: components["schemas"]["TrafficKind"];
+            /** Endpoint */
+            endpoint: string;
+            /** Requested */
+            requested: string;
+            /** Alias */
+            alias: string;
+            /** Alias Id */
+            alias_id?: string | null;
+            /** Router */
+            router: string;
+            /** Router Id */
+            router_id?: string | null;
+            /** Fallback */
+            fallback: boolean;
+            /** Model */
+            model: string;
+            /** Model Id */
+            model_id?: string | null;
+            /** Upstream */
+            upstream: string;
+            /** Upstream Model */
+            upstream_model: string;
+            /** Attempts */
+            attempts: number;
+            /** Status */
+            status: number;
+            outcome: components["schemas"]["RequestOutcome"];
+            /** Stream */
+            stream: boolean;
+            /** Prompt Tokens */
+            prompt_tokens: number;
+            /** Completion Tokens */
+            completion_tokens: number;
+            /** Audio Ms */
+            audio_ms: number;
+            /** Cost Nano Usd */
+            cost_nano_usd: number;
+            usage_state: components["schemas"]["UsageState"];
+            /** Duration Ms */
+            duration_ms: number;
+            /**
+             * Key Id
+             * Format: uuid
+             */
+            key_id: string;
+            /** @description The key as it is now; null when its row no longer exists. */
+            key?: components["schemas"]["KeyRefOut"] | null;
+            /**
+             * Team Id
+             * Format: uuid
+             */
+            team_id: string;
+            owner_kind: components["schemas"]["KeyOwnerKind"];
+            /**
+             * Owner Id
+             * Format: uuid
+             */
+            owner_id: string;
+            /** Playground User Id */
+            playground_user_id?: string | null;
+        };
+        /**
+         * RequestOutcome
+         * @enum {string}
+         */
+        RequestOutcome: "unspecified" | "completed" | "client_cancelled" | "upstream_error" | "rejected";
         /**
          * RetryPolicyIn
          * @description Retries happen only before any response byte reached the client.
@@ -4656,6 +4928,35 @@ export interface components {
             /** Members */
             members: components["schemas"]["RouterMemberOut"][];
         };
+        /**
+         * UpstreamAuthIn
+         * @description Outbound credentials from a WASM `upstream-auth` plugin (proto `UpstreamAuth`).
+         *
+         *     Only a WASM plugin is valid on an LLM upstream: a static bearer is `api_key_ref` or
+         *     `api_key`, and the MCP/A2A built-ins (`none`, `static_bearer`, `passthrough`) are
+         *     refused. The plugin reads its own secrets from the gateway environment, so this shape
+         *     carries settings only.
+         */
+        UpstreamAuthIn: {
+            /**
+             * Plugin
+             * @description A WASM upstream-auth plugin listed by `GET /plugins`; the MCP/A2A built-ins are not valid here.
+             */
+            plugin: string;
+            /**
+             * Params
+             * @description Strategy-defined settings.
+             */
+            params?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Timeout Ms
+             * @description WASM plugin only: how long one call may run, in ms; 0 = the gateway default (60 s).
+             * @default 0
+             */
+            timeout_ms: number;
+        };
         /** UpstreamCreate */
         UpstreamCreate: {
             /**
@@ -4685,6 +4986,8 @@ export interface components {
              * @description Bearer token, stored sealed with LUMEWARP_ENCRYPTION_KEY and never returned. Mutually exclusive with api_key_ref.
              */
             api_key?: string | null;
+            /** @description A WASM upstream-auth plugin that supplies the outbound credential; null = use `api_key` or `api_key_ref`. */
+            auth?: components["schemas"]["UpstreamAuthIn"] | null;
             /**
              * Timeout Ms
              * @description Time allowed until the upstream's response headers arrive, in ms; 0 = the gateway default (600000). It does not limit the response body or a stream.
@@ -4705,6 +5008,11 @@ export interface components {
              * @description Prometheus endpoint scraped for `vllm_load` routers; null = `base_url` without a trailing `/v1`, plus `/metrics`.
              */
             metrics_url?: string | null;
+            /**
+             * Force
+             * @description Save although connected gateways lack the plugin; they will NACK.
+             */
+            force?: boolean;
         };
         /**
          * UpstreamKind
@@ -4752,6 +5060,8 @@ export interface components {
              * @description A sealed api_key is stored (its value is never returned).
              */
             api_key_set: boolean;
+            /** @description The WASM upstream-auth plugin; null = none. */
+            auth?: components["schemas"]["PluginRefOut"] | null;
             /** Timeout Ms */
             timeout_ms: number;
             stream_usage_mode: components["schemas"]["StreamUsageMode"];
@@ -4799,6 +5109,8 @@ export interface components {
              * @description Name of an environment variable on the gateway that holds the upstream bearer token. Mutually exclusive with `api_key`.
              */
             api_key_ref?: string | null;
+            /** @description A WASM auth plugin named by the form; it cannot be probed from the control plane, so save the upstream first and test it from there. */
+            auth?: components["schemas"]["UpstreamAuthIn"] | null;
             /**
              * Upstream Id
              * @description A saved upstream: its stored key is used when no other is given, and the result is kept on it when the form matches it.
@@ -4814,10 +5126,10 @@ export interface components {
         UpstreamTestOut: {
             /**
              * Credential
-             * @description The bearer token used: typed in the form, the saved upstream's stored key, the control plane's own env var, that env var missing here, or none.
+             * @description How the credential was obtained: a WASM auth plugin, typed in the form, the saved upstream's stored key, the control plane's own env var (or missing here), or none.
              * @enum {string}
              */
-            credential: "entered" | "stored" | "env" | "env_unset" | "none";
+            credential: "plugin" | "entered" | "stored" | "env" | "env_unset" | "none";
             probe: components["schemas"]["ProbeOut"];
         };
         /**
@@ -4854,6 +5166,8 @@ export interface components {
              * @description Bearer token, stored sealed with LUMEWARP_ENCRYPTION_KEY and never returned. Mutually exclusive with api_key_ref.
              */
             api_key?: string | null;
+            /** @description Replace the outbound auth with a WASM upstream-auth plugin; null removes it and leaves no credential. Mutually exclusive with `api_key` and `api_key_ref`. */
+            auth?: components["schemas"]["UpstreamAuthIn"] | null;
             /**
              * Timeout Ms
              * @description Time allowed until the upstream's response headers arrive, in ms; 0 = the gateway default (600000). It does not limit the response body or a stream.
@@ -4870,6 +5184,11 @@ export interface components {
              * @description Prometheus endpoint scraped for `vllm_load` routers; null = `base_url` without a trailing `/v1`, plus `/metrics`.
              */
             metrics_url?: string | null;
+            /**
+             * Force
+             * @description Save although connected gateways lack the plugin; they will NACK.
+             */
+            force?: boolean;
         };
         /**
          * UsageNameOut
@@ -4946,6 +5265,8 @@ export interface components {
             owner_id?: string | null;
             /** Key Id */
             key_id?: string | null;
+            /** @description The key when `key` is in `group_by`; null otherwise. */
+            key?: components["schemas"]["KeyRefOut"] | null;
             /** Requests */
             requests: number;
             /** Prompt Tokens */
@@ -4969,6 +5290,11 @@ export interface components {
              */
             total_duration_ms: number;
         };
+        /**
+         * UsageState
+         * @enum {string}
+         */
+        UsageState: "unspecified" | "reported" | "missing" | "partial" | "invalid";
         /** UserCreate */
         UserCreate: {
             /**
@@ -7149,6 +7475,8 @@ export interface operations {
     listOwnKeys: {
         parameters: {
             query?: {
+                /** @description Also list the service-account keys of every live team the caller administers, including by org or installation inheritance. */
+                include_service_accounts?: boolean;
                 limit?: number;
                 cursor?: string | null;
             };
@@ -7821,6 +8149,73 @@ export interface operations {
             };
         };
     };
+    testSavedUpstream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                upstream_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpstreamTestOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     listCatalog: {
         parameters: {
             query?: {
@@ -8241,6 +8636,73 @@ export interface operations {
                 "application/json": components["schemas"]["ModelTestIn"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelTestOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    testSavedModel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -11000,6 +11462,103 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Page_UsageRowOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listRequests: {
+        parameters: {
+            query?: {
+                /** @description Gateway protocol; `llm` by default. MCP and A2A rows need `mcp` or `a2a`. */
+                kind?: components["schemas"]["TrafficKind"];
+                /** @description Only requests of this team. */
+                team_id?: string | null;
+                /** @description Only requests made with this key. */
+                key_id?: string | null;
+                /** @description Only requests whose key is owned by this user; requires `team_id`. */
+                user_id?: string | null;
+                /** @description Only requests whose key is owned by this service account; requires `team_id`. */
+                service_account_id?: string | null;
+                /** @description Only requests that called this name. */
+                requested?: string | null;
+                /** @description Only requests served by this model name. */
+                model?: string | null;
+                /** @description Only requests that went through this alias name. */
+                alias?: string | null;
+                /** @description Only requests that went through this router name. */
+                router?: string | null;
+                /** @description Only responses with this HTTP status. */
+                status?: number | null;
+                /** @description Only requests with this outcome. */
+                outcome?: components["schemas"]["RequestOutcome"] | null;
+                /** @description Only the request with this gateway request id. */
+                request_id?: string | null;
+                /** @description Start of the range (inclusive); defaults to 24 hours ago. */
+                from?: string | null;
+                /** @description End of the range (exclusive); defaults to now. */
+                to?: string | null;
+                limit?: number;
+                /** @description Opaque cursor from the previous page's `next_cursor`. */
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_RequestOut_"];
                 };
             };
             /** @description Missing or invalid credentials */

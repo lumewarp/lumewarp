@@ -269,6 +269,13 @@ def upgrade() -> None:
         sa.Column("base_url", sa.Text(), nullable=False),
         sa.Column("api_key_ref", sa.String(length=200), nullable=True),
         sa.Column("api_key_ciphertext", sa.LargeBinary(), nullable=True),
+        sa.Column("auth_plugin", sa.String(length=63), nullable=True),
+        sa.Column(
+            "auth_params",
+            postgresql.JSONB(none_as_null=True, astext_type=sa.Text()),
+            nullable=True,
+        ),
+        sa.Column("auth_timeout_ms", sa.Integer(), server_default="0", nullable=False),
         sa.Column("timeout_ms", sa.Integer(), server_default="0", nullable=False),
         sa.Column(
             "stream_usage_mode",
@@ -317,6 +324,11 @@ def upgrade() -> None:
             "api_key_ref IS NULL OR api_key_ciphertext IS NULL",
             name=op.f("ck_upstreams_one_api_key_source"),
         ),
+        sa.CheckConstraint(
+            "auth_plugin IS NULL OR (api_key_ref IS NULL AND api_key_ciphertext IS NULL)",
+            name=op.f("ck_upstreams_auth_plugin_excludes_api_key"),
+        ),
+        sa.CheckConstraint("auth_timeout_ms >= 0", name=op.f("ck_upstreams_auth_timeout_nonneg")),
         sa.CheckConstraint(
             "(circuit_failure_threshold IS NULL OR circuit_failure_threshold > 0) AND (circuit_open_ms IS NULL OR circuit_open_ms > 0)",
             name=op.f("ck_upstreams_circuit_breaker_positive"),
@@ -536,6 +548,31 @@ def upgrade() -> None:
     )
     op.create_index(
         "uq_users_email_lower", "users", [sa.literal_column("lower(email)")], unique=True
+    )
+    op.create_table(
+        "playground_requests",
+        sa.Column("request_id", sa.Uuid(), nullable=False),
+        sa.Column("user_id", sa.Uuid(), nullable=False),
+        sa.Column("key_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "ts",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name=op.f("fk_playground_requests_user_id_users"),
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("request_id", name=op.f("pk_playground_requests")),
+    )
+    op.create_index(
+        "ix_playground_requests_user_ts",
+        "playground_requests",
+        ["user_id", "ts"],
+        unique=False,
     )
     op.create_table(
         "aliases",
@@ -2365,6 +2402,8 @@ def downgrade() -> None:
     op.drop_table("config_outbox")
     op.drop_index(op.f("ix_aliases_target_name_id"), table_name="aliases")
     op.drop_table("aliases")
+    op.drop_index("ix_playground_requests_user_ts", table_name="playground_requests")
+    op.drop_table("playground_requests")
     op.drop_index("uq_users_email_lower", table_name="users")
     op.drop_table("users")
     op.drop_table("usage_totals")

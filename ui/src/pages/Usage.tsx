@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { api, type UsageQuery, type UsageRow } from "../api";
 import { Badge, fmtNumber as n, fmtUsd, PageHeader, TypeBadge } from "../components/Bits";
+import { FilterBar } from "../components/FilterBar";
 import { SelectField, TextField } from "../components/Form";
 import { UsageChart } from "../components/UsageChart";
 import { Card } from "../components/ui/card";
@@ -10,8 +12,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs"
 import { DataTable, type Column } from "../components/Table";
 import { dayStart, isoDay, shiftDay } from "../lib/days";
 import { MODEL_TYPES, type ModelType } from "../lib/modelType";
+import type { RequestsSearch } from "../lib/requests";
 import { useUsageMetric } from "../lib/usageMetric";
 import { useCan, useCatalog, useMe, useModels, useNames, useTeamDirectory, useTeams } from "../hooks";
+import { ENDPOINTS, endpointLabel } from "../lib/endpoints";
+import { KeyPill } from "../components/KeyPill";
 
 /** `value`, once it has stopped changing for `ms`: typed filters do not query on every keystroke. */
 function useDebounced<T>(value: T, ms: number): T {
@@ -56,18 +61,6 @@ const A2A_GROUPS = [
   { value: "target", label: "Agent" },
 ];
 
-/** The gateway's endpoint labels, as the usage API filters them. */
-const ENDPOINTS = [
-  { value: "chat_completions", label: "Chat completions" },
-  { value: "completions", label: "Completions" },
-  { value: "responses", label: "Responses" },
-  { value: "embeddings", label: "Embeddings" },
-  { value: "audio_transcriptions", label: "Audio transcriptions" },
-  { value: "audio_translations", label: "Audio translations" },
-  { value: "decisions", label: "Decisions" },
-  { value: "systemone", label: "SystemOne" },
-];
-const endpointLabel = (value: string | null | undefined) => ENDPOINTS.find((e) => e.value === value)?.label ?? value ?? "—";
 /** Audio is stored in milliseconds and read in seconds. */
 const fmtSeconds = (ms: number) => (ms / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 });
 
@@ -99,7 +92,7 @@ function RangeFields({ range, teams }: { range: RangeProps; teams: { id: string;
   return (
     <>
       <TextField label="From" type="date" value={range.from} onChange={range.onFrom} />
-      <TextField label="To (inclusive)" type="date" value={range.to} onChange={range.onTo} />
+      <TextField label="To" type="date" value={range.to} onChange={range.onTo} hint="Inclusive." />
       <ComboboxField
         label="Team"
         value={range.teamId}
@@ -345,22 +338,51 @@ function LlmUsage({ range }: { range: RangeProps }) {
     ],
     team: [{ key: "team", header: "Team", cell: (row) => teamName(row.team_id) }],
     owner: [{ key: "owner", header: "Owner", cell: (row) => ownerLabel(row.owner_kind, row.owner_id) }],
-    key: [{ key: "key", header: "API key", cell: (row) => row.key_id?.slice(0, 8) ?? "—" }],
+    key: [{ key: "key", header: "API key", cell: (row) => (row.key_id ? <KeyPill keyRef={row.key} fallbackId={row.key_id} /> : "—") }],
   };
   const peak = Math.max(1, ...(query.data ?? []).map((r) => r.total_tokens));
+  // The same names, key and range the row was grouped by, so Requests opens on the matching rows.
+  const requestsSearchFor = (row: Row): RequestsSearch => ({
+    kind: "llm",
+    from: range.from,
+    to: range.to,
+    team_id: row.team_id ?? (range.teamId || undefined),
+    key_id: row.key_id ?? undefined,
+    requested: row.requested || undefined,
+    model: row.model || undefined,
+    alias: row.alias || undefined,
+    router: row.router || undefined,
+  });
 
   return (
     <>
-      <Card className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3 p-4">
+      <FilterBar
+        testId="usage-filters"
+        className="lg:grid-cols-[10rem_10rem_repeat(3,minmax(0,1fr))_auto]"
+        more={{
+          active: [upstreamText, alias, router, endpoint, modelType].filter(Boolean).length,
+          onClear: () => {
+            setUpstreamText("");
+            setAlias(ANY);
+            setRouter(ANY);
+            setEndpoint(ANY);
+            setModelType("");
+          },
+          children: (
+            <>
+              <ComboboxField free label="Upstream model" hint="Any name, including one no model uses any more." placeholder="All upstream models" value={upstreamText} onChange={setUpstreamText} options={upstreamSuggestions.map((name) => ({ value: name, label: name }))} />
+              <ComboboxField label="Alias" value={alias} onChange={setAlias} options={provenanceOptions("alias")} />
+              <ComboboxField label="Router" value={router} onChange={setRouter} options={provenanceOptions("router")} />
+              <ComboboxField label="Endpoint" value={endpoint} onChange={setEndpoint} options={[{ value: ANY, label: "All endpoints" }, ...ENDPOINTS]} />
+              <SelectField label="Model type" value={modelType} onChange={(x) => setModelType(x as ModelType | "")} options={[{ value: "", label: "All types" }, ...MODEL_TYPES]} />
+            </>
+          ),
+        }}
+      >
         <RangeFields range={range} teams={teams.data} />
         <ComboboxField label="Model" value={model} onChange={setModel} options={[{ value: ANY, label: "All models" }, ...names("model").map((name) => ({ value: name, label: name }))]} />
-        <ComboboxField free label="Upstream model" hint="Any name, including one no model uses any more." placeholder="All upstream models" value={upstreamText} onChange={setUpstreamText} options={upstreamSuggestions.map((name) => ({ value: name, label: name }))} />
-        <ComboboxField label="Alias" value={alias} onChange={setAlias} options={provenanceOptions("alias")} />
-        <ComboboxField label="Router" value={router} onChange={setRouter} options={provenanceOptions("router")} />
-        <ComboboxField label="Endpoint" value={endpoint} onChange={setEndpoint} options={[{ value: ANY, label: "All endpoints" }, ...ENDPOINTS]} />
-        <SelectField label="Model type" value={modelType} onChange={(x) => setModelType(x as ModelType | "")} options={[{ value: "", label: "All types" }, ...MODEL_TYPES]} />
         <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={GROUPS} />
-      </Card>
+      </FilterBar>
       <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
         <Stat label="Requests" value={n(total.requests)} />
         {total.audio > 0 && <Stat label="Audio (seconds)" value={fmtSeconds(total.audio)} />}
@@ -411,6 +433,15 @@ function LlmUsage({ range }: { range: RangeProps }) {
           { key: "completion", header: "Completion", align: "right", hideBelow: "md", cell: (row) => n(row.completion_tokens) },
           ...(total.audio > 0 ? [{ key: "audio", header: "Audio (s)", align: "right" as const, hideBelow: "md" as const, sort: (a: Row, b: Row) => a.audio_ms - b.audio_ms, cell: (row: Row) => (row.audio_ms ? fmtSeconds(row.audio_ms) : <span className="text-muted-foreground">—</span>) }] : []),
           { key: "cost", header: "Cost", align: "right", sort: (a, b) => a.cost_nano_usd - b.cost_nano_usd, cell: (row) => fmtUsd(row.cost_nano_usd) },
+          {
+            key: "requests",
+            header: "Log",
+            cell: (row) => (
+              <Link to="/requests" search={requestsSearchFor(row)} className="font-medium whitespace-nowrap">
+                View
+              </Link>
+            ),
+          },
         ]}
       />
     </>
@@ -479,10 +510,10 @@ function TrafficUsage({ kind, range }: { kind: "mcp" | "a2a"; range: RangeProps 
   const dims = groupBy.split(",");
   return (
     <>
-      <Card className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3 p-4">
+      <FilterBar testId="usage-filters" className="lg:grid-cols-[10rem_10rem_repeat(2,minmax(0,1fr))]">
         <RangeFields range={range} teams={teams.data} />
         <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={groups} />
-      </Card>
+      </FilterBar>
       <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
         <Stat label="Requests" value={n(total.requests)} />
         <Stat label="Errors" value={n(total.errors)} />

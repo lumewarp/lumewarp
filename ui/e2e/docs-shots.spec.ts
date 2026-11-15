@@ -66,6 +66,17 @@ test("manual screenshots", async ({ page, request, browser }) => {
   await page.goto("/usage");
   await expect(page.getByRole("heading", { name: "Usage" })).toBeVisible();
   await shot(page, "usage");
+  // The seeded traffic spans two weeks; the page defaults to 24 hours, which may be an empty window.
+  const to = new Date().toISOString().slice(0, 10);
+  const from = new Date(Date.now() - 14 * 86_400_000).toISOString().slice(0, 10);
+  await page.goto(`/requests?from=${from}&to=${to}`);
+  await expect(page.getByRole("heading", { name: "Requests" })).toBeVisible();
+  await expect(page.getByTestId("request-chain").first()).toBeVisible();
+  await shot(page, "requests");
+  await page.getByTestId("request-requested").getByText("chat", { exact: true }).first().click();
+  await expect(page.getByTestId("request-timeline")).toBeVisible();
+  await shot(page, "request-detail");
+  await page.keyboard.press("Escape");
   await page.goto("/audit");
   await expect(page.getByRole("heading", { name: "Audit log" })).toBeVisible();
   await shot(page, "audit");

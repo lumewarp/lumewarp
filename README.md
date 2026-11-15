@@ -24,7 +24,7 @@ The manual is published at <https://lumewarp.github.io/lumewarp/> (source in [`d
 | [Getting started](docs/guide/index.md) | What Lumewarp is, concepts, the two quick starts. |
 | [Calling the gateway](docs/using/index.md) | Endpoints, errors, MCP and A2A, for client authors. |
 | [Your keys](docs/self-service/index.md) | Self-service keys and the Playground. |
-| [Administration](docs/admin/index.md) | Roles, teams, keys and limits, the catalog, routers, usage and audit. |
+| [Administration](docs/admin/index.md) | Roles, teams, keys and limits, the catalog, routers, usage, requests and audit. |
 | [Operations](docs/operations/index.md) | Deploying with [Helm](docs/operations/helm.md) or [Docker](docs/operations/docker.md), configuring and observing the control plane and the gateway. |
 | [Extending](docs/extending/index.md) | Gateway WASM plugins, control-plane Python plugins, the plugin development skill. |
 | [Reference](docs/reference/control-plane-api.md) | Both OpenAPI documents, gateway YAML, errors, metrics. |

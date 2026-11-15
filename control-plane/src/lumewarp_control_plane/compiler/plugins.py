@@ -963,12 +963,19 @@ def audit_target_forced(
     missing: list[str],
     principal: Principal | None,
 ) -> None:
-    """Record a forced save of an MCP server or A2A agent's plugin, audited like a router's."""
+    """Record a forced save of an upstream, MCP server or A2A agent's plugin, audited like a
+    router's. `kind` is `upstream`, `mcp_server` or `a2a_agent`."""
     if not missing:
         return
     audit.record(
         session,
-        action=("mcp_server.force_save" if kind == "mcp_server" else "a2a_agent.force_save"),
+        action=(
+            "upstream.force_save"
+            if kind == "upstream"
+            else "mcp_server.force_save"
+            if kind == "mcp_server"
+            else "a2a_agent.force_save"
+        ),
         resource_type=kind,
         resource_id=resource_id,
         principal=principal,

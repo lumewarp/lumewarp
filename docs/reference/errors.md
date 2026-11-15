@@ -44,6 +44,7 @@ Every non-2xx response of the management API is:
 | 409 | `conflict` | The current state does not allow the change. |
 | 409 | `managed_externally` | Memberships belong to the authorization backend. |
 | 409 | `model_type_in_use` | A model's type cannot change while a router uses it. |
+| 409 | `no_gateway_for_plugin` | A saved Test now for an upstream or model with a WASM auth plugin found no connected gateway on this control-plane process that advertises `upstream_probe` and the plugin. |
 | 422 | `validation_error` | A field is invalid; the message names it. |
 | 422 | `invalid_next` | The login's `next` is not a same-site relative path. |
 | 429 | `rate_limited` | Too many key writes or login attempts; see `Retry-After`. |
@@ -51,6 +52,8 @@ Every non-2xx response of the management API is:
 | 503 | `playground_disabled` | No gateway URL is configured for the Playground. |
 | 502 | `playground_gateway_unreachable` | The Playground could not reach the gateway. |
 | 502 | `upstream_unavailable` | An upstream or MCP server the control plane was asked to query (Test now, model list, Discover now) could not be reached. |
+| 502 | `probe_gateway_gone` | The gateway running a saved Test now disconnected before it answered. |
+| 504 | `probe_timeout` | A gateway did not answer a saved Test now within the upstream timeout, capped at 15 s. |
 | 503 | `sso_unconfigured` | OIDC login was requested but no issuer is configured. |
 
 The [control plane API](./control-plane-api.md) lists the statuses of each operation.

@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { signIn, VIEWER } from "./selfService";
+import { control } from "./helpers";
+import { signIn, TEAM_ADMIN, VIEWER } from "./selfService";
 
 /*
  * The Playground page against the real control plane for the session, with the playground API mocked: the
@@ -14,6 +15,19 @@ const KEY = {
   team_id: "22222222-2222-4222-8222-222222222222",
   team_name: "pg-team",
   models: ["gpt-a", "gpt-b"],
+  owner_kind: "user",
+  service_account_name: null,
+};
+
+const SA_KEY = {
+  id: "33333333-3333-4333-8333-333333333333",
+  name: "pg-sa-key",
+  display_prefix: "lw_sa01",
+  team_id: KEY.team_id,
+  team_name: KEY.team_name,
+  models: ["gpt-a"],
+  owner_kind: "service_account",
+  service_account_name: "pg-bot",
 };
 
 const sse = (...chunks: object[]) => chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
@@ -104,6 +118,34 @@ test("sends the act-as and CSRF headers, streams text and shows the request id a
 
   await page.getByRole("button", { name: "Clear" }).click();
   await expect(page.getByTestId("turn-assistant")).toHaveCount(0);
+});
+
+test("groups own and service-account keys and chats as the chosen service-account key", async ({ page }) => {
+  await mockInfo(page, { enabled: true, keys: [KEY, SA_KEY] });
+  let actAs: string | undefined;
+  await page.route("**/api/v1/playground/v1/chat/completions", async (route) => {
+    actAs = route.request().headers()["x-lumewarp-act-as"];
+    await route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body: sse(delta({ content: "ok" })) });
+  });
+  await signIn(page, TEAM_ADMIN, "/playground");
+
+  const picker = await control(page, "Key");
+  await expect(picker.getByTestId("key-pill")).toContainText("pg-key");
+  await picker.click();
+  const popupId = await picker.getAttribute("aria-controls");
+  expect(popupId).toBeTruthy();
+  const popup = page.locator(`[id="${popupId}"]`);
+  await expect(popup.getByText("My keys", { exact: true })).toBeVisible();
+  await expect(popup.getByText("Service accounts", { exact: true })).toBeVisible();
+  const option = page.getByRole("option", { name: "pg-sa-key pg-team / pg-bot", exact: true });
+  await expect(option).toBeVisible();
+  await option.click();
+  await expect(picker.getByTestId("key-pill")).toContainText("pg-sa-key");
+
+  await page.getByLabel("Message").fill("Hi");
+  await page.getByLabel("Message").press("Enter");
+  await expect(page.getByTestId("assistant-text")).toHaveText("ok");
+  expect(actAs).toBe(SA_KEY.id);
 });
 
 test("shows a gateway error inline in the transcript", async ({ page }) => {

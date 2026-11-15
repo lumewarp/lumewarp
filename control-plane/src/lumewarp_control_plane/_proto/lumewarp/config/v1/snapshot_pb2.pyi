@@ -135,7 +135,7 @@ class Snapshot(_message.Message):
     def __init__(self, version: _Optional[int] = ..., upstreams: _Optional[_Iterable[_Union[Upstream, _Mapping]]] = ..., models: _Optional[_Iterable[_Union[Model, _Mapping]]] = ..., routers: _Optional[_Iterable[_Union[Router, _Mapping]]] = ..., api_keys: _Optional[_Iterable[_Union[ApiKey, _Mapping]]] = ..., teams: _Optional[_Iterable[_Union[Team, _Mapping]]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ..., aliases: _Optional[_Iterable[_Union[Alias, _Mapping]]] = ..., mcp_servers: _Optional[_Iterable[_Union[McpServer, _Mapping]]] = ..., a2a_agents: _Optional[_Iterable[_Union[A2aAgent, _Mapping]]] = ...) -> None: ...
 
 class Upstream(_message.Message):
-    __slots__ = ("name", "kind", "base_url", "api_key_ref", "timeout_ms", "stream_usage_mode", "health_check", "circuit_breaker", "metrics_url", "api_key_ciphertext")
+    __slots__ = ("name", "kind", "base_url", "api_key_ref", "timeout_ms", "stream_usage_mode", "health_check", "circuit_breaker", "metrics_url", "api_key_ciphertext", "auth")
     NAME_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
     BASE_URL_FIELD_NUMBER: _ClassVar[int]
@@ -146,6 +146,7 @@ class Upstream(_message.Message):
     CIRCUIT_BREAKER_FIELD_NUMBER: _ClassVar[int]
     METRICS_URL_FIELD_NUMBER: _ClassVar[int]
     API_KEY_CIPHERTEXT_FIELD_NUMBER: _ClassVar[int]
+    AUTH_FIELD_NUMBER: _ClassVar[int]
     name: str
     kind: UpstreamKind
     base_url: str
@@ -156,7 +157,8 @@ class Upstream(_message.Message):
     circuit_breaker: CircuitBreaker
     metrics_url: str
     api_key_ciphertext: bytes
-    def __init__(self, name: _Optional[str] = ..., kind: _Optional[_Union[UpstreamKind, str]] = ..., base_url: _Optional[str] = ..., api_key_ref: _Optional[str] = ..., timeout_ms: _Optional[int] = ..., stream_usage_mode: _Optional[_Union[StreamUsageMode, str]] = ..., health_check: _Optional[_Union[HealthCheck, _Mapping]] = ..., circuit_breaker: _Optional[_Union[CircuitBreaker, _Mapping]] = ..., metrics_url: _Optional[str] = ..., api_key_ciphertext: _Optional[bytes] = ...) -> None: ...
+    auth: UpstreamAuth
+    def __init__(self, name: _Optional[str] = ..., kind: _Optional[_Union[UpstreamKind, str]] = ..., base_url: _Optional[str] = ..., api_key_ref: _Optional[str] = ..., timeout_ms: _Optional[int] = ..., stream_usage_mode: _Optional[_Union[StreamUsageMode, str]] = ..., health_check: _Optional[_Union[HealthCheck, _Mapping]] = ..., circuit_breaker: _Optional[_Union[CircuitBreaker, _Mapping]] = ..., metrics_url: _Optional[str] = ..., api_key_ciphertext: _Optional[bytes] = ..., auth: _Optional[_Union[UpstreamAuth, _Mapping]] = ...) -> None: ...
 
 class HealthCheck(_message.Message):
     __slots__ = ("url", "interval_ms", "timeout_ms", "unhealthy_threshold", "healthy_threshold")

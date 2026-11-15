@@ -10,6 +10,7 @@ import {
   History,
   KeyRound,
   LayoutDashboard,
+  ListOrdered,
   LogOut,
   Menu,
   MessageSquare,
@@ -92,6 +93,7 @@ const NAV: { group: string | null; items: NavItem[] }[] = [
     group: "Activity",
     items: [
       { to: "/usage", label: "Usage", icon: BarChart3 },
+      { to: "/requests", label: "Requests", icon: ListOrdered },
       { to: "/audit", label: "Audit log", icon: ScrollText, access: "teamAdmin" },
     ],
   },

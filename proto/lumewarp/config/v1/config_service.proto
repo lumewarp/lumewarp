@@ -28,7 +28,40 @@ message GatewayMessage {
     HealthReport health = 4;
     // Any time after Hello; not a reply to an update.
     CatalogReport catalog = 5;
+    // Answer to a ProbeRequest; never carries an upstream response body.
+    ProbeResult probe_result = 6;
   }
+}
+
+// A one-off probe of an upstream or model, executed against the gateway's
+// current snapshot because the control plane cannot run WASM auth plugins. The
+// control plane correlates the answer by request_id and may send it to any
+// gateway that advertises the `upstream_probe` capability. A request is not a
+// configuration version: the gateway never ACKs it.
+message ProbeRequest {
+  // Caller-chosen, unique while the request is outstanding.
+  string request_id = 1;
+  // Upstream.name in the snapshot.
+  string upstream = 2;
+  // Model.name to probe through its typed endpoint; empty probes the upstream
+  // itself with GET <base_url>/models.
+  string model = 3;
+}
+
+message ProbeResult {
+  string request_id = 1;
+  // True for a 2xx answer.
+  bool ok = 2;
+  // Upstream HTTP status; 0 when no response was received.
+  uint32 status = 3;
+  // Time to the response headers, or to the failure.
+  uint32 latency_ms = 4;
+  // Empty on a 2xx. Otherwise a fixed class: not_found (unknown upstream),
+  // not_found_model (unknown model or a model on another upstream), config
+  // (the auth plugin cannot be configured), auth (the plugin failed or its
+  // headers were refused), connect, timeout, protocol, or upstream_status
+  // (a non-2xx answer; `status` carries it).
+  string error_class = 5;
 }
 
 // Probe state of every upstream with a health check and every model with a chat
@@ -206,6 +239,10 @@ message ConfigUpdate {
   oneof update {
     Snapshot full = 1;
     Delta delta = 2;
+    // A one-off probe, not a configuration update. It reuses this server
+    // message so a gateway that is already connected needs no second RPC; the
+    // gateway answers with ProbeResult and never ACK/NACKs it.
+    ProbeRequest probe = 4;
   }
   // Control plane's digest of the resulting snapshot version (opaque to the
   // gateway: stored next to the snapshot and echoed in Hello.have_digest).

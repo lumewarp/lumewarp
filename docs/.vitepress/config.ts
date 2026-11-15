@@ -39,6 +39,7 @@ const sidebar = [
       { text: "Routers", link: "/admin/routers" },
       { text: "MCP servers and A2A agents", link: "/admin/mcp-a2a" },
       { text: "Usage and audit", link: "/admin/usage-and-audit" },
+      { text: "Requests", link: "/admin/requests" },
       { text: "Config versions and gateways", link: "/admin/config-and-gateways" },
     ],
   },

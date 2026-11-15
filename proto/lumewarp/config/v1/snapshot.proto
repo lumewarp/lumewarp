@@ -56,6 +56,11 @@ message Upstream {
   // snapshot, never per request. At most one of this and api_key_ref is set.
   // Capability "encrypted_api_key".
   bytes api_key_ciphertext = 10;
+  // Outbound credentials from a WASM `upstream-auth` plugin. Only a plugin is
+  // allowed here: the built-ins none, static_bearer and passthrough are refused
+  // (a static bearer is api_key_ref/api_key_ciphertext). At most one of this and
+  // api_key_ref/api_key_ciphertext is set. Required capability "auth:<plugin>".
+  UpstreamAuth auth = 11;
 }
 
 // GET <url> every interval; 2xx within timeout = success.
@@ -395,10 +400,12 @@ message PluginRef {
   uint32 timeout_ms = 3;
 }
 
-// How the gateway authenticates to an MCP server or A2A agent. Required
-// capability "auth:<plugin>". Built-ins: "none", "static_bearer",
-// "passthrough" (forward the client's Authorization header unchanged).
-// Anything else is a WASM upstream-auth plugin.
+// How the gateway authenticates to an MCP server, an A2A agent or an LLM
+// upstream. Required capability "auth:<plugin>". Built-ins for MCP servers and
+// A2A agents: "none", "static_bearer", "passthrough" (forward the client's
+// Authorization header unchanged). Anything else is a WASM upstream-auth
+// plugin. An Upstream accepts only a WASM plugin; secret_ref and
+// secret_ciphertext stay MCP/A2A-only.
 message UpstreamAuth {
   PluginRef plugin = 1;
   // static_bearer only: env var holding the token. At most one of this and

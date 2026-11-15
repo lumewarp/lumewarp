@@ -6,6 +6,7 @@ import { getCsrfToken } from "./auth";
 import { Layout } from "./components/Layout";
 import { Alert, AlertDescription } from "./components/ui/alert";
 import { useCan, useMe, type Access } from "./hooks";
+import { requestsSearch } from "./lib/requests";
 import { AuthzTemporary, CheckFailed, PageBoundary, PageLoading, RequireAccess, RequireOrgRead, RequireTeamRead } from "./pages/Access";
 import { Login } from "./pages/Login";
 import { MyKeys } from "./pages/MyKeys";
@@ -29,6 +30,7 @@ const GatewaysPage = lazy(() => import("./pages/Gateways").then((module) => ({ d
 const ConfigPage = lazy(() => import("./pages/Config").then((module) => ({ default: module.Config })));
 const UsersPage = lazy(() => import("./pages/Users").then((module) => ({ default: module.Users })));
 const AuditPage = lazy(() => import("./pages/Audit").then((module) => ({ default: module.Audit })));
+const RequestsPage = lazy(() => import("./pages/Requests").then((module) => ({ default: module.Requests })));
 const TeamsPage = lazy(() => import("./pages/Teams").then((module) => ({ default: module.Teams })));
 const OrgsPage = lazy(() => import("./pages/Orgs").then((module) => ({ default: module.Orgs })));
 const OrgDetailPage = lazy(() => import("./pages/Orgs").then((module) => ({ default: module.OrgDetail })));
@@ -143,6 +145,13 @@ const teamDetailRoute = createRoute({
   component: TeamDetailRoute,
 });
 
+const requestsRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/requests",
+  validateSearch: requestsSearch,
+  component: suspended(() => <RequestsPage />),
+});
+
 const SuspendedOrgDetail = suspended(() => <OrgDetailPage />);
 
 function OrgDetailRoute() {
@@ -191,6 +200,7 @@ const routeTree = rootRoute.addChildren([
     page("/a2a-agents/new", () => <A2aAgentEditPage />, "installationAdmin"),
     page("/a2a-agents/$id", () => <A2aAgentEditPage />, "installationAdmin"),
     page("/usage", Usage),
+    requestsRoute,
     page("/audit", () => <AuditPage />, "teamAdmin"),
     page("/gateways", () => <GatewaysPage />, "installationAdmin"),
     page("/config", () => <ConfigPage />, "installationAdmin"),

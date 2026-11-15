@@ -13,11 +13,13 @@ import httpx
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import and_, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import Response, StreamingResponse
 
-from lumewarp_control_plane import audit
 from lumewarp_control_plane.api.common import SessionDep, SettingsDep
 from lumewarp_control_plane.api.keys import _live_team_or_404, _owner_effective
 from lumewarp_control_plane.authz import Action, Authz
@@ -29,6 +31,9 @@ from lumewarp_control_plane.models import (
     KeyLifecycle,
     KeyOwnerKind,
     Model,
+    Org,
+    PlaygroundRequest,
+    ServiceAccount,
     Team,
 )
 from lumewarp_control_plane.security import PrincipalKind
@@ -53,7 +58,11 @@ class PlaygroundKey(BaseModel):
     display_prefix: str
     team_id: uuid.UUID
     team_name: str
+    org_id: uuid.UUID = Field(description="The id of the team's org.")
+    org_name: str = Field(description="The name of the team's org.")
     models: list[str]
+    owner_kind: KeyOwnerKind
+    service_account_name: str | None
 
 
 class PlaygroundReasoning(BaseModel):
@@ -123,27 +132,82 @@ def _usable(key: ApiKey) -> bool:
     )
 
 
+async def _record_request(
+    session: AsyncSession,
+    raw_request_id: str | None,
+    user_id: uuid.UUID | None,
+    key_id: uuid.UUID,
+) -> None:
+    """Attribute a Playground call to its user once the gateway's headers have arrived.
+
+    The gateway names the request; a missing or malformed id is skipped. Writing this side
+    table never fails a call that already reached the gateway.
+    """
+    if raw_request_id is None:
+        log.debug("gateway response has no x-lumewarp-request-id; attribution skipped")
+        return
+    try:
+        request_id = uuid.UUID(raw_request_id)
+    except ValueError:
+        log.debug("gateway response has an invalid x-lumewarp-request-id; attribution skipped")
+        return
+    if user_id is None:
+        log.debug("Playground session has no user; attribution skipped")
+        return
+    try:
+        await session.execute(
+            pg_insert(PlaygroundRequest)
+            .values(request_id=request_id, user_id=user_id, key_id=key_id)
+            .on_conflict_do_nothing(index_elements=["request_id"])
+        )
+        await session.commit()
+    except SQLAlchemyError:
+        await session.rollback()
+        log.warning("failed to record the Playground request", exc_info=True)
+
+
 @router.get("/playground", operation_id="getPlayground")
 async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDep) -> PlaygroundOut:
-    """The caller's usable keys and the `llm` names each may call, for the Admin UI Playground.
-    Requires a browser session; a personal access token answers 401.
+    """The caller's usable keys, their own plus service-account keys of teams they administer,
+    and the `llm` names each may call, for the Admin UI Playground. Requires a browser session;
+    a personal access token answers 401.
     """
     _session_only(authz)
-    keys = []
-    rows = await session.scalars(
-        select(ApiKey).where(
-            ApiKey.user_id == authz.user_id, ApiKey.owner_kind == KeyOwnerKind.USER
+    live_team_ids = list(await session.scalars(select(Team.id).where(Team.deleted_at.is_(None))))
+    # Direct team admins plus org and installation inheritance, in one batched check.
+    administered = await authz.admin_teams(live_team_ids)
+    administered_team_ids = live_team_ids if administered is None else list(administered)
+    rows = (
+        await session.execute(
+            select(ApiKey, ServiceAccount.name, Team, Org.name)
+            .join(Team, Team.id == ApiKey.team_id)
+            .join(Org, Org.id == Team.org_id)
+            .outerjoin(ServiceAccount, ServiceAccount.id == ApiKey.service_account_id)
+            .where(
+                Team.deleted_at.is_(None),
+                or_(
+                    and_(
+                        ApiKey.owner_kind == KeyOwnerKind.USER,
+                        ApiKey.user_id == authz.user_id,
+                    ),
+                    and_(
+                        ApiKey.owner_kind == KeyOwnerKind.SERVICE_ACCOUNT,
+                        ApiKey.team_id.in_(administered_team_ids),
+                        ServiceAccount.deactivated_at.is_(None),
+                    ),
+                ),
+            )
+            .order_by(ApiKey.id)
         )
-    )
+    ).all()
+    keys = []
     llm_names = await _llm_names(session)
-    for key in rows:
+    for key, account_name, team, org_name in rows:
         if not _usable(key):
             continue
-        # Archived teams retain their keys for historical usage.
-        team = await session.get(Team, key.team_id)
-        if team is None or team.deleted_at is not None:
-            continue
-        if not await authz.allowed(Action.KEY_MANAGE_OWN, team.id):
+        if key.owner_kind is KeyOwnerKind.USER and not await authz.allowed(
+            Action.KEY_MANAGE_OWN, team.id
+        ):
             continue
         effective = await _owner_effective(session, team, key)
         models = sorted(llm_names) if effective.models is None else sorted(effective.models)
@@ -154,7 +218,11 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
                 display_prefix=key.display_prefix,
                 team_id=team.id,
                 team_name=team.name,
+                org_id=team.org_id,
+                org_name=org_name,
                 models=sorted(set(models) & llm_names),
+                owner_kind=key.owner_kind,
+                service_account_name=account_name,
             )
         )
     callable_names = {name for key in keys for name in key.models}
@@ -187,10 +255,11 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
 async def chat_completions(
     request: Request, authz: Authz, session: SessionDep, settings: SettingsDep
 ) -> Response:
-    """Forward a chat completion to the gateway as one of the caller's own keys, named by
-    its id in the `X-Lumewarp-Act-As` header. The body and the response, streamed or not, are the
-    gateway's `/v1/chat/completions`. Requires a browser session, accepts `llm` names only and
-    at most 1 MiB, and answers 503 `playground_disabled` when no gateway URL is configured.
+    """Forward a chat completion to the gateway as one of the caller's own keys, or as a
+    service-account key of a team they administer, named by its id in the `X-Lumewarp-Act-As`
+    header. The body and the response, streamed or not, are the gateway's
+    `/v1/chat/completions`. Requires a browser session, accepts `llm` names only and at most
+    1 MiB, and answers 503 `playground_disabled` when no gateway URL is configured.
     """
     _session_only(authz)
     try:
@@ -198,15 +267,26 @@ async def chat_completions(
     except ValueError:
         raise HTTPException(404, "key not found") from None
     key = await session.get(ApiKey, key_id)
-    if (
-        key is None
-        or key.owner_kind is not KeyOwnerKind.USER
-        or key.user_id != authz.user_id
-        or not _usable(key)
-    ):
+    if key is None or not _usable(key):
         raise HTTPException(404, "key not found")
-    team = await _live_team_or_404(session, key.team_id)
-    if not await authz.allowed(Action.KEY_MANAGE_OWN, key.team_id):
+    if key.owner_kind is KeyOwnerKind.USER:
+        if key.user_id != authz.user_id:
+            raise HTTPException(404, "key not found")
+        team = await _live_team_or_404(session, key.team_id)
+        if not await authz.allowed(Action.KEY_MANAGE_OWN, key.team_id):
+            raise HTTPException(404, "key not found")
+    elif key.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT:
+        team = await _live_team_or_404(session, key.team_id)
+        account = (
+            await session.get(ServiceAccount, key.service_account_id)
+            if key.service_account_id is not None
+            else None
+        )
+        if account is None or not account.is_active:
+            raise HTTPException(404, "key not found")
+        if not await authz.allowed(Action.KEY_MANAGE_ANY, key.team_id):
+            raise HTTPException(404, "key not found")
+    else:
         raise HTTPException(404, "key not found")
     if not settings.playground_gateway_url or not settings.encryption_key:
         raise ApiError(503, "playground_disabled", "Playground is not configured")
@@ -220,7 +300,6 @@ async def chat_completions(
     except (ValueError, UnicodeDecodeError):
         raise HTTPException(400, "invalid JSON body") from None
     model = payload.get("model") if isinstance(payload, dict) else None
-    audited_model = None
     if isinstance(model, str):
         effective = await _owner_effective(session, team, key)
         allowed = (
@@ -234,16 +313,8 @@ async def chat_completions(
 
             if await called_name_type(session, model) != "llm":
                 raise ApiError(400, "model_type_mismatch", "Playground supports only llm models")
-            audited_model = model if len(model) <= 256 else None
-    audit.record(
-        session,
-        action="playground.request",
-        resource_type="key",
-        resource_id=key.id,
-        principal=authz.principal,
-        team_id=key.team_id,
-        details={"key_id": key.id, "model": audited_model},
-    )
+    # Close the read transaction before the gateway call: the response body is streamed and
+    # must not hold a database connection.
     await session.commit()
     token = mint_token(
         settings.encryption_key.get_secret_value(), key.id, time.time_ns() // 1_000_000 + 60_000
@@ -265,6 +336,10 @@ async def chat_completions(
         )
     except httpx.RequestError:
         raise ApiError(502, "playground_gateway_unreachable", "gateway unreachable") from None
+
+    await _record_request(
+        session, upstream.headers.get("x-lumewarp-request-id"), authz.user_id, key.id
+    )
 
     chunks = upstream.aiter_raw()
     prefix: list[bytes] = []

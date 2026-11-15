@@ -8,7 +8,10 @@
 //! `configure`, so `Params` does not declare it.
 //!
 //! The result does not depend on the request, so it is cached for the token's
-//! lifetime minus a margin (the gateway caps any value at one hour).
+//! lifetime minus a margin (the gateway caps any value at one hour). This also
+//! means it does not declare `needs_body: true`: for LLM traffic the gateway
+//! leaves the request body empty, so no large payload is copied into the
+//! sandbox. A plugin that signs the body must declare it.
 
 use lumewarp_plugin_sdk::{
     auth::lumewarp::plugin::host, auth_types, register, serde_json, Authenticator, ConfigError,

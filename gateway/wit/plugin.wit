@@ -8,10 +8,17 @@ interface types {
   //   {"abi": 1, "kind": "router-strategy" | "upstream-auth" | "a2a-middleware",
   //    "name": "...", "title": "...", "description": "...",
   //    "params_schema": {...},
+  //    "needs_body": bool,                       // upstream-auth only
   //    "router": {"uses_weight": bool, "needs": ["latency", "vllm_load"],
   //               "member_schema": {...}}}        // router strategies only
   // The gateway calls it once at load; a manifest whose kind does not match
   // the directory, or whose name is taken, stops the gateway from starting.
+  //
+  // `needs_body` defaults to false. An upstream-auth plugin that signs or
+  // inspects the request body must set it to true: for LLM traffic the
+  // gateway then passes the body to `authorize`; otherwise `body` is empty to
+  // avoid copying large payloads (for example transcription multipart) into
+  // the sandbox. MCP and A2A traffic always carries the body.
   type manifest-json = string;
 
   // Settings are JSON objects already checked against params_schema by the
@@ -130,11 +137,12 @@ interface upstream-auth {
   enum traffic {
     mcp,
     a2a,
+    llm,
   }
 
   record target-info {
     traffic: traffic,
-    // McpServer.name or A2aAgent.name.
+    // McpServer.name, A2aAgent.name or (for llm) Upstream.name.
     name: string,
     url: string,
     params-json: string,
@@ -142,7 +150,8 @@ interface upstream-auth {
 
   // The request about to be sent upstream. Credentials from the client
   // (authorization, x-lumewarp-key, cookie, proxy-authorization) are never
-  // included.
+  // included. For llm traffic `body` is empty unless the manifest sets
+  // `needs_body`; MCP and A2A always carry it.
   record outbound-request {
     method: string,
     url: string,

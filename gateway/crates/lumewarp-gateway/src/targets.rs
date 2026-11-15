@@ -453,6 +453,7 @@ impl Targets {
 
 /// Capabilities these entities require: `mcp`, `a2a`, and one `auth:<plugin>`
 /// or `a2a_middleware:<plugin>` per plugin they name, sorted and deduplicated.
+/// LLM upstreams contribute `auth:<plugin>` too.
 /// The caller feeds each of them to the `require(used, cap)` check in
 /// `snapshot::validate`.
 pub fn capabilities(snapshot: &Snapshot) -> Vec<String> {
@@ -462,6 +463,11 @@ pub fn capabilities(snapshot: &Snapshot) -> Vec<String> {
     }
     if !snapshot.a2a_agents.is_empty() {
         caps.push("a2a".to_owned());
+    }
+    for upstream in &snapshot.upstreams {
+        if let Some(plugin) = upstream.auth.as_ref().and_then(|auth| auth.plugin.as_ref()) {
+            caps.push(format!("auth:{}", plugin.plugin));
+        }
     }
     for server in &snapshot.mcp_servers {
         if let Some(plugin) = server.auth.as_ref().and_then(|auth| auth.plugin.as_ref()) {
@@ -688,6 +694,52 @@ fn check_auth(auth: Option<&pb::UpstreamAuth>, what: &str) -> Result<(), ApplyEr
         }
     }
     Ok(())
+}
+
+/// Validates an LLM `Upstream.auth`: only a WASM `upstream-auth` plugin is
+/// allowed, never a built-in, and never together with `api_key_ref` or
+/// `api_key_ciphertext`. Pure: no environment and no secrets.
+pub fn check_upstream_auth(upstream: &pb::Upstream) -> Result<(), ApplyError> {
+    let what = format!("upstream {:?}", upstream.name);
+    let Some(auth) = &upstream.auth else {
+        return Ok(());
+    };
+    if !upstream.api_key_ref.is_empty() || !upstream.api_key_ciphertext.is_empty() {
+        return Err(invalid(format!(
+            "{what} sets both auth and api_key_ref/api_key_ciphertext"
+        )));
+    }
+    compile_llm_auth(Some(auth), &what)?;
+    Ok(())
+}
+
+/// Compiles `Upstream.auth` into a plugin instance, refusing the built-ins and
+/// secrets that belong to MCP/A2A targets.
+pub fn compile_llm_auth(
+    auth: Option<&pb::UpstreamAuth>,
+    what: &str,
+) -> Result<Option<Plugin>, ApplyError> {
+    let Some(auth) = auth else {
+        return Ok(None);
+    };
+    let plugin = auth
+        .plugin
+        .as_ref()
+        .ok_or_else(|| invalid(format!("{what} auth has no plugin")))?;
+    check_plugin_name(&plugin.plugin, what)?;
+    if BUILTIN_AUTH.contains(&plugin.plugin.as_str()) {
+        return Err(invalid(format!(
+            "{what} auth plugin {:?} is not allowed for an LLM upstream; use a WASM upstream-auth plugin",
+            plugin.plugin
+        )));
+    }
+    if !auth.secret_ref.is_empty() || !auth.secret_ciphertext.is_empty() {
+        return Err(invalid(format!(
+            "{what} auth plugin {:?} cannot use secret_ref or secret_ciphertext",
+            plugin.plugin
+        )));
+    }
+    compile_plugin(plugin, what).map(Some)
 }
 
 fn compile_auth(
@@ -1699,6 +1751,32 @@ mod tests {
             ]
         );
         assert!(capabilities(&snapshot(vec![], vec![])).is_empty());
+    }
+
+    #[test]
+    fn llm_auth_compiles_only_a_wasm_plugin() {
+        let auth = |name: &str| UpstreamAuth {
+            plugin: Some(PluginRef {
+                plugin: name.into(),
+                params_json: r#"{"skew":5}"#.into(),
+                timeout_ms: 250,
+            }),
+            secret_ref: String::new(),
+            secret_ciphertext: Vec::new(),
+        };
+        let plugin = compile_llm_auth(Some(&auth("hmac_signature")), "upstream")
+            .unwrap()
+            .expect("a plugin");
+        assert_eq!(plugin.name.as_ref(), "hmac_signature");
+        assert_eq!(plugin.params_json.as_ref(), r#"{"skew":5}"#);
+        assert_eq!(plugin.timeout, Duration::from_millis(250));
+        assert!(compile_llm_auth(None, "upstream").unwrap().is_none());
+        for builtin in ["none", "static_bearer", "passthrough"] {
+            assert!(compile_llm_auth(Some(&auth(builtin)), "upstream").is_err());
+        }
+        let mut secret = auth("hmac_signature");
+        secret.secret_ref = "SOME_ENV".into();
+        assert!(compile_llm_auth(Some(&secret), "upstream").is_err());
     }
 
     #[test]

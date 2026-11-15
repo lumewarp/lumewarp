@@ -184,7 +184,8 @@ export function useNames(rows: { id: string; name: string }[] | undefined) {
   return (id: string | null | undefined) => (id ? (map.get(id) ?? id.slice(0, 8)) : "—");
 }
 
-export const useOwnKeys = () => useQuery({ queryKey: ["own-keys"], queryFn: () => api.ownKeys() });
+export const useOwnKeys = (includeServiceAccounts = false) =>
+  useQuery({ queryKey: ["own-keys", includeServiceAccounts], queryFn: () => api.ownKeys(includeServiceAccounts) });
 
 export const useModels = (enabled = true) =>
   useQuery({ queryKey: ["models"], queryFn: () => api.models(), enabled });

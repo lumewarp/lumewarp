@@ -35,6 +35,10 @@ interface Props<T> {
   mutedRow?: (row: T) => boolean;
   /** Server-side paging (a cursor API): replaces the client-side pages, and the footer always shows. */
   paging?: Paging;
+  /** Open a row's details on click; a cell should also hold a button doing the same for the keyboard. */
+  onRowClick?: (row: T) => void;
+  /** The row whose details are open, highlighted. */
+  selectedKey?: string;
 }
 
 export interface Paging {
@@ -68,7 +72,7 @@ export function TablePagination(props: Paging) {
   );
 }
 
-export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, empty = "Nothing here yet.", pageSize = 10, mutedRow, paging }: Props<T>) {
+export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, empty = "Nothing here yet.", pageSize = 10, mutedRow, paging, onRowClick, selectedKey }: Props<T>) {
   const [sort, setSort] = useState<{ key: string; dir: 1 | -1 } | null>(null);
   const [page, setPage] = useState(0);
 
@@ -140,7 +144,12 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
           </TableHeader>
           <TableBody>
             {visible.map((row) => (
-              <TableRow key={rowKey(row)} className={mutedRow?.(row) ? "text-muted-foreground" : undefined}>
+              <TableRow
+                key={rowKey(row)}
+                className={cn(mutedRow?.(row) ? "text-muted-foreground" : undefined, onRowClick ? "cursor-pointer" : undefined)}
+                data-state={selectedKey !== undefined && rowKey(row) === selectedKey ? "selected" : undefined}
+                onClick={onRowClick ? () => onRowClick(row) : undefined}
+              >
                 {columns.map((c) => (
                   <TableCell key={c.key} className={cn(c.align === "right" && "text-right tabular-nums", c.hideBelow && HIDE[c.hideBelow])}>
                     {c.cell(row)}

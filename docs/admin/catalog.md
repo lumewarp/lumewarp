@@ -23,6 +23,29 @@ need `ROUTING_MANAGE`. Every write is audited and enqueues a recompile. A name t
 deleted (409, listing who references it); deleting a name deletes the grants on it, with an
 audit row. See [the architecture notes](../architecture.md#模型目錄已實作) for the reasoning.
 
+## Credentials
+
+An upstream sends one credential, chosen when you create it:
+
+- **API key**: `api_key_ref`, the name of a gateway environment variable, or `api_key`,
+  entered in the API or UI and stored sealed. The two are alternatives.
+- **Auth plugin**: `auth: {plugin, params, timeout_ms}`, a WASM `upstream-auth` plugin.
+  Only a WASM plugin is accepted here; the built-ins `none`, `static_bearer` and
+  `passthrough` are for MCP servers and A2A agents, and a static bearer on an LLM upstream
+  is the API key fields. It cannot be combined with an API key.
+
+`params` are validated against the schema the gateways report for the plugin and are
+stored in the snapshot and the audit trail: never put a secret there; the plugin reads
+secrets from the gateway's `LUMEWARP_PLUGIN_SECRET_*`. Saving with a connected gateway that
+does not report the plugin is 422 unless the write has `force`; a forced save is audited as
+`upstream.force_save`, and that gateway NACKs every version that uses the plugin. The
+plugin needs capability `auth:<plugin>` on the gateways that should apply the version. It
+runs for every attempt (retries and fallbacks included), health checks, vLLM metric
+scrapes and saved Test now; `cache-ms` keeps a cached result out of the sandbox. An attempt
+whose plugin fails moves on to the router's retry and fallbacks; with none left the client
+gets 502 `upstream_auth_failed`, recorded in the request log as a 502. Full contract:
+[gateway plugins](../plugins.md#upstream-auth).
+
 ## Renames
 
 `PATCH` with `name` works on all three kinds and references are by id, so
@@ -49,6 +72,36 @@ subset of its team's.
 when empty). Every router member, split member and fallback must share one type.
 Changing a referenced model's type returns 409 `model_type_in_use`.
 
+## Test now
+
+Without an auth plugin, **Test now** probes the form as it stands from the control plane:
+`POST /upstreams/test` and `POST /models/test` work before you save, and a key typed into
+the form is used once and not stored.
+
+With an auth plugin, the control plane cannot run the plugin, so save first (the form
+disables Test now until then). `POST /upstreams/{id}/test` and `POST /models/{id}/test`
+send a probe over the config stream to a connected gateway that advertises
+`upstream_probe` and the upstream's plugin; the gateway runs it against the snapshot it
+currently serves. The response reports `credential: "plugin"`; a model probe returns no
+reply body.
+
+- No such gateway: 409 `no_gateway_for_plugin`.
+- No answer within the upstream's timeout, capped at 15 s: 504 `probe_timeout`.
+- The gateway disconnects first: 502 `probe_gateway_gone`.
+
+The gateway probes its current snapshot, so right after a save it may answer `not_found`,
+`not_found_model` or `config` until it applies the new version; retry. Such an answer is shown but not stored as the
+upstream's or model's Test now result. The gateway bounds the whole probe, plugin call
+included, to 15 s. Only gateways connected to the control-plane
+process serving the request are candidates, so with more than one replica a request can
+answer 409 even while another replica holds a capable gateway. `GET
+/upstreams/{id}/models` calls the upstream directly and does not run the plugin; use a
+saved upstream Test now with no model to check `/models` through a gateway instead.
+
+Periodic `chat_check` and Test now probe each type's endpoint: LLM sends a chat
+completion, embedding `input: "ping"`, decision a predicate question, and transcription a
+generated silent WAV multipart upload. JSON probes apply `default_body`.
+
 ## Prices
 
 Prices use integer nano-USD: `price_input_nano_usd_per_mtok`,
@@ -62,8 +115,6 @@ neither; embedding accepts input only, optionally with zero output. Transcriptio
 accepts a complete token pair, an audio price, both, or neither (unknown); a partial
 token pair is never allowed. Audio pricing is transcription-only; reasoning and
 `max_output_tokens` are LLM-only, and transcription cannot set `default_body`.
-Periodic `chat_check` and Test now probe each type's endpoint, including generated
-silent WAV multipart uploads for transcription. JSON probes apply `default_body`.
 
 Usage stores `audio_ms` and supports `endpoint` and historical, endpoint-derived
 `model_type` dimensions and filters; MCP/A2A have no model type. `/users/me` retains

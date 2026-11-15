@@ -43,6 +43,7 @@ pub const CODES: &[Code] = &[
     code(429, "rate_limit_exceeded", Scope::Any, "A rate limit of the key, its owner, team or org is exhausted; `Retry-After` gives the seconds to wait."),
     code(500, "metrics_error", Scope::Admin, "The metrics could not be encoded."),
     code(502, "upstream_error", Scope::Llm, "The upstream could not be reached or answered with a broken response, after any retries and fallbacks."),
+    code(502, "upstream_auth_failed", Scope::Llm, "The upstream's WASM auth plugin failed, timed out, trapped or returned a header the gateway must not send, after any retries and fallbacks."),
     code(502, "invalid_agent_card", Scope::A2a, "The agent's card is not a JSON object."),
     code(503, "not_ready", Scope::Any, "The gateway has no config snapshot yet."),
     code(503, "upstream_unavailable", Scope::Llm, "The model's circuit breaker is open and its recovery trial is already in progress."),

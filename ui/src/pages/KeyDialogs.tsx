@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 
-import { api, type Key } from "../api";
+import { api, type Key, type Schemas } from "../api";
 import { SecretOnce } from "../components/Bits";
 import { Dialog } from "../components/Dialog";
-import { SelectField } from "../components/Form";
+import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
+import { KeyLimitFields, keyLimitsBody, keyLimitsFrom, type KeyLimitCap, type KeyLimitValues } from "../components/KeyLimits";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
-import { useCan, useSecretMut } from "../hooks";
-import { refusalText, rotationConfirmation } from "./keyText";
+import { useCan, useMut, useSecretMut } from "../hooks";
+import { expiryFromDay, fmtLifetime, lastExpiryDay, localDayOf, refusalText, rotationConfirmation } from "./keyText";
 
 /** The secret is in a dialog's children only while `secret` is set; closing drops it from React state. */
 export function SecretDialog({
@@ -40,6 +41,67 @@ export function SecretDialog({
         </>
       )}
     </Dialog>
+  );
+}
+
+type EditValues = KeyLimitValues & { name: string; expires: string };
+
+/**
+ * Editing an existing key, shared by the team Keys tab and the service-account table on My keys.
+ * `lifetime` is the team's member-key cap, or null/undefined for a service-account key.
+ */
+export function KeyEditDialog({
+  target,
+  lifetime,
+  cap,
+  capNote,
+  requiredExpiry = false,
+  onClose,
+}: {
+  target: Key;
+  lifetime?: number | null;
+  /** The owner's effective limits, when the page knows them. */
+  cap?: KeyLimitCap;
+  capNote?: string;
+  /** The team sets a member-key lifetime, so clearing the field is refused. */
+  requiredExpiry?: boolean;
+  onClose: () => void;
+}) {
+  const initialExpiry = localDayOf(target.expires_at);
+  const initial: EditValues = { name: target.name, expires: initialExpiry, ...keyLimitsFrom(target) };
+  const form = useForm<EditValues>(initial, { name: required("Name") });
+  const update = useMut((values: EditValues) => {
+    const body: Schemas["KeyUpdate"] = { name: values.name.trim(), ...keyLimitsBody(values) };
+    if (values.expires !== initialExpiry) body.expires_at = expiryFromDay(values.expires);
+    return api.updateKey(target.id, body);
+  }, "Key saved");
+  const max = lifetime === null || lifetime === undefined ? undefined : lastExpiryDay(lifetime);
+  const close = () => {
+    form.reset(initial);
+    onClose();
+  };
+  const submit = async () => {
+    if (!form.validate()) return false;
+    return form.run(() => update.mutateAsync(form.values), { expires_at: "expires" });
+  };
+  return (
+    <FormDialog open title={`Edit “${target.name}” (${target.display_prefix}…)`} submitLabel="Save" onClose={close} onSubmit={submit}>
+      <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} error={form.errors.name} autoFocus />
+      <TextField
+        label="Expires"
+        type="date"
+        value={form.values.expires}
+        max={max}
+        onChange={(value) => form.set("expires", value)}
+        error={form.errors.expires}
+        note={
+          lifetime === null || lifetime === undefined
+            ? "Empty means the key never expires."
+            : `${requiredExpiry ? "Required. " : ""}This team limits member keys to ${fmtLifetime(lifetime)}; the latest day is ${max}.`
+        }
+      />
+      <KeyLimitFields values={form.values} errors={form.errors} set={form.set} cap={cap} capNote={capNote} />
+    </FormDialog>
   );
 }
 

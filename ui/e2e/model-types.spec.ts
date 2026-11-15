@@ -1,6 +1,6 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
-import { optionNames, pick } from "./helpers";
+import { moreFilters, optionNames, pick } from "./helpers";
 
 /*
  * Model types: the type select on the model page decides which settings show, the list filters by type,
@@ -172,12 +172,14 @@ test("a router offers only models of its type, and aliases and the list show it"
 test("usage groups and filters by endpoint and model type", async ({ page, request }) => {
   await signIn(page, request, "/usage");
   const sent = page.waitForRequest((r) => r.url().includes("/api/v1/usage") && r.url().includes("group_by=endpoint") && r.url().includes("model_type=embedding"));
+  await moreFilters(page);
   await pick(page, "Model type", "Embedding");
   await pick(page, "Group by", "Endpoint");
   expect(new URL((await sent).url()).searchParams.get("endpoint")).toBeNull();
   await expect(page.getByRole("combobox", { name: "Group by" })).toHaveText("Endpoint");
 
   const filtered = page.waitForRequest((r) => r.url().includes("/api/v1/usage") && r.url().includes("endpoint=audio_transcriptions"));
+  await moreFilters(page);
   await pick(page, "Endpoint", "Audio transcriptions");
   await filtered;
   await pick(page, "Group by", "Model type");

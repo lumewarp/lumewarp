@@ -56,7 +56,7 @@ These are configured per model and explain behavior that differs between names:
 - Send `Authorization: Bearer lw-…`. It is replaced by the upstream's own credential; your
   key never reaches the upstream.
 - Every response carries **`x-lumewarp-request-id`**. Quote it when you ask about a request:
-  usage and traces are stored under it.
+  usage, the request log and traces are stored under it.
 - `openai-organization` and `openai-project` are removed in both directions, as are
   `set-cookie` on responses and hop-by-hop headers. Other headers pass through.
 - If a router is sticky by header, send the header your administrator named to stay on the

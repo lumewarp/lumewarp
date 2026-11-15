@@ -116,6 +116,9 @@ CLASSIFIED: dict[tuple[str, str], ColumnClass] = {
     ("service_accounts", "name"): ColumnClass.PUBLIC,
     ("teams", "name"): ColumnClass.PUBLIC,
     ("upstreams", "api_key_ref"): ColumnClass.ENV_REF,
+    # A WASM upstream-auth plugin: its settings are configuration, never a credential.
+    ("upstreams", "auth_params"): ColumnClass.CONFIG,
+    ("upstreams", "auth_plugin"): ColumnClass.PUBLIC,
     ("upstreams", "base_url"): ColumnClass.PUBLIC,
     ("upstreams", "health_url"): ColumnClass.PUBLIC,
     # The API and compiler refuse userinfo and query strings, so it cannot carry a credential.

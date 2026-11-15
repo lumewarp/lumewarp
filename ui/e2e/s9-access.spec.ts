@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { confirmDialog, dialog } from "./helpers";
+import { confirmDialog, dialog, expectKeyPill } from "./helpers";
 import {
   Admin,
   MEMBER_EMAIL,
@@ -75,7 +75,11 @@ test("a 403 from a permission-dependent read revalidates /users/me", async ({ pa
   page.on("request", (request) => {
     if (new URL(request.url()).pathname === "/api/v1/users/me") meRequests++;
   });
+  // The invalidation must happen after the initial me load settles: a 403 while that request is
+  // still in flight marks the query stale but cannot start a second fetch for it.
+  const meLoaded = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/users/me" && response.status() === 200);
   await signIn(page, TEAM_ADMIN, "/usage");
+  await meLoaded;
   await expect.poll(() => meRequests).toBe(1);
   await page.route("**/api/v1/usage?*", (route) =>
     route.fulfill({
@@ -220,7 +224,7 @@ test("the team key panel still rotates and revokes another member's key", async 
   await page.getByRole("tab", { name: "Keys" }).click();
   const row = rowOf(page, "s9-other-key");
   await expect(row).toBeVisible();
-  await expect(row.locator("code")).toHaveText(`${created.key.display_prefix}…`);
+  await expectKeyPill(page, row, "s9-other-key", ["s9-panel", `${created.key.display_prefix}…`, created.key.id]);
   await row.getByRole("button", { name: "Rotate" }).click();
   const secret = page.getByRole("dialog", { name: "API key rotated" });
   await expect(secret.getByTestId("secret-value")).toHaveText(/^lw-/);

@@ -1,6 +1,6 @@
 # Gateway plugins
 
-A plugin is a WebAssembly component that changes one behaviour of the data plane: which member of a router serves a request, how the gateway authenticates to an MCP server or an A2A agent, or what an A2A request or response contains. It is loaded from a directory at startup, so shipping one is a file and a restart, not a gateway build; the Rust SDK targets `wasm32-wasip2`. `gateway/wit/plugin.wit` fixes the function signatures; this page is the reference for writing a plugin and for the host that runs it.
+A plugin is a WebAssembly component that changes one behaviour of the data plane: which member of a router serves a request, how the gateway authenticates to an MCP server, an A2A agent or an LLM upstream, or what an A2A request or response contains. It is loaded from a directory at startup, so shipping one is a file and a restart, not a gateway build; the Rust SDK targets `wasm32-wasip2`. `gateway/wit/plugin.wit` fixes the function signatures; this page is the reference for writing a plugin and for the host that runs it.
 
 Built-ins are native code inside the gateway, reported as plugins so the control plane and the UI handle them the same way.
 
@@ -12,11 +12,13 @@ Built-ins are native code inside the gateway, reported as plugins so the control
 | `upstream-auth` | `lumewarp:plugin/auth@1.0.0` | `LUMEWARP_AUTH_PLUGIN_DIR` | `auth:<name>` | `none`, `static_bearer`, `passthrough` |
 | `a2a-middleware` | `lumewarp:plugin/middleware@1.0.0` | `LUMEWARP_A2A_MIDDLEWARE_DIR` | `a2a_middleware:<name>` | none |
 
-One file is one plugin: it implements exactly one world and exports `manifest()`. A name is configuration — a router stores it in `strategy`, an MCP server or A2A agent in `auth.plugin` and `middleware.plugin` — so renaming or repurposing one is a breaking change.
+For `upstream-auth`, the built-ins exist only for MCP servers and A2A agents. An LLM upstream accepts only a WASM plugin; a static bearer there is the upstream's API key field.
+
+One file is one plugin: it implements exactly one world and exports `manifest()`. A name is configuration — a router stores it in `strategy`, an MCP server, A2A agent or LLM upstream in `auth.plugin`, and an A2A agent also in `middleware.plugin` — so renaming or repurposing one is a breaking change.
 
 The gateway advertises `strategy:<name>`, `auth:<name>` or `a2a_middleware:<name>` for every plugin it has, built-ins included. The gateway also advertises `mcp` and `a2a`: a snapshot that carries an MCP server requires `mcp`, and one that carries an A2A agent requires `a2a`. Requiring a capability the gateway does not advertise is NACKed `UNSUPPORTED_FEATURE`; using a field without its capability is `INVALID_CONFIG`. See "Routing capabilities" in [config-protocol.md](config-protocol.md).
 
-A router strategy runs on the LLM request path, so the four built-in strategies are dispatched inline; an LLM request reaches WebAssembly only when a router names a WASM strategy. Traffic splits, retries, fallbacks, stickiness and circuit breakers belong to the gateway, never to a strategy.
+A router strategy runs on the LLM request path, so the four built-in strategies are dispatched inline; an LLM request reaches WebAssembly when a router names a WASM strategy or its upstream has a WASM auth plugin whose result is not cached. Traffic splits, retries, fallbacks, stickiness and circuit breakers belong to the gateway, never to a strategy.
 
 ## MCP and A2A endpoints
 
@@ -61,7 +63,7 @@ There is no hot reload. The files are read once, so replacing a plugin means wri
 
 `lumewarp plugins` prints the numeric proto kind, name and title of every plugin the process would have, built-ins included; `--json` prints the descriptor array it reports in `Hello`. It reads the directories without contacting the control plane, so it is the check to run against a candidate file set before deploying.
 
-Standalone YAML and a snapshot name plugins by the same names: `routers[].strategy` for a router, and the plugin reference in an MCP server's auth or an A2A agent's middleware. The same load-time checks apply in both modes.
+Standalone YAML and a snapshot name plugins by the same names: `routers[].strategy` for a router, and the plugin reference in an MCP server's auth, an A2A agent's middleware or an LLM upstream's auth. The same load-time checks apply in both modes.
 
 ## The manifest
 
@@ -109,6 +111,7 @@ Standalone YAML and a snapshot name plugins by the same names: `routers[].strate
 | `name` | `^[a-z][a-z0-9_]{0,62}$`, unique within the kind, built-ins included. The suffix of the capability. |
 | `title`, `description` | Shown in the UI, as plain text. `title` is at most 200 characters, `description` at most 2000, and neither may contain control characters; a manifest over either refuses to load. |
 | `params_schema` | JSON Schema of the settings `configure` receives: `Router.params_json` for a router strategy, `PluginRef.params_json` for the other two kinds. At most 16 KiB, inside the subset below. |
+| `needs_body` | `upstream-auth` only: whether `authorize` receives the LLM request body. Defaults to `false`, which sends an empty body for LLM traffic; MCP and A2A always carry it. |
 | `router` | Router strategies only; absent for the other kinds. |
 | `router.uses_weight` | Whether member weights matter. `false` hides them in the UI; the gateway keeps them either way. |
 | `router.needs` | Gateway signals the strategy reads: `latency`, `vllm_load`. Static, so it is known without configuring anything. |
@@ -124,15 +127,17 @@ The Rust SDK builds this object from `register!` and `schemars`, so a manifest c
 
 ### Control-plane validation
 
-A write is a router, an MCP server or an A2A agent that names a plugin. Every path that saves one — and a rollback, which restores stored ones — applies the same rule, for all three kinds:
+A write is a router, an MCP server, an A2A agent or an LLM upstream that names a plugin. Every save path applies the same rule:
 
 | Situation | What the write gets |
 | --- | --- |
 | No gateway reports it and it is not built in | 422. `force` does not help. |
-| A connected gateway lacks it | 422 listing them. `force: true` saves and audits a forced save naming the missing gateways. Each such gateway NACKs `UNSUPPORTED_FEATURE` and skips every version that references the plugin, key revocations included, until it is upgraded or the reference goes away; the other gateways keep receiving them. |
+| A connected gateway lacks it | 422 listing them. `force: true` saves and audits a forced save naming the missing gateways (`router.force_save`, `upstream.force_save`, `mcp_server.force_save` or `a2a_agent.force_save`). Each such gateway NACKs `UNSUPPORTED_FEATURE` and skips every version that references the plugin, key revocations included, until it is upgraded or the reference goes away; the other gateways keep receiving them. |
 | Gateways with different schemas (rolling upgrade) | The settings must pass every connected gateway's schema. Forms show the newest connected one. |
 | No gateway connected | Built-ins validate against the descriptors committed with the control plane; other plugins against the most recent report from any gateway. |
-| Stored settings fail a schema after an upgrade | The entity reads `config_invalid: true` with `config_problems`. The data is not altered, and writes that do not touch the plugin or its settings still save. |
+| Stored settings fail a schema after an upgrade | For a router, MCP server or A2A agent, the entity reads `config_invalid: true` with `config_problems`; the data is not altered, and writes that do not touch the plugin or its settings still save. An LLM upstream has no such field: the gateway's `configure` refuses that version. |
+
+A rollback re-checks restored routers, MCP servers and A2A agents; it restores an LLM upstream's plugin without re-checking it, so a gateway lacking the plugin NACKs that version.
 
 Which gateways count: a gateway is one process, named by `Hello.gateway_id`; any number may share a token. It counts while the token of its latest `Hello` is unrevoked and it is connected or was disconnected less than 24 h ago, when its row is deleted; a connected gateway has what its latest `Hello` lists, an offline one what it last reported. A plugin or capability is available only while every connected gateway reports it. A report counts while the token that made it is unrevoked. Each `Hello` replaces the gateway's reports under its session row lock, and a reader sees one `Hello`, never parts of two.
 
@@ -169,7 +174,7 @@ Plugins run as wasmtime components. Instances are pooled: a call checks one out,
 
 A request-path plugin call is cancelled by its configured timeout or when the request goes away. The timeout defaults to 60 s and is set per use; there is no fixed request-path limit in code other than that default. WASM calls run asynchronously and yield through the epoch mechanism, so a slow plugin delays only the request that called it and never occupies a tokio worker. An infinite loop therefore holds that request until the timeout expires or its client disconnects. Slowness is visible in `lumewarp_plugin_duration_seconds`, not as an error result.
 
-The timeout is configured like an LLM route's: `Router.plugin_timeout_ms` for a WASM router strategy, and `PluginRef.timeout_ms` for an MCP server's or A2A agent's `auth` and for an A2A agent's `middleware`; `0` means 60 s. Built-in plugins ignore it, and the UI exposes the field on each form. These are plugin call timeouts, not the MCP server's or A2A agent's `timeout_ms` (the upstream HTTP request timeout). The async call is wrapped in a timeout; when it expires the in-flight call is dropped, that Store is discarded, and the call is counted `timeout`. Waiting for a pool instance counts towards the timeout. An auth plugin's `http-fetch` runs inside the auth call's timeout.
+The timeout is configured like an LLM route's: `Router.plugin_timeout_ms` for a WASM router strategy, `PluginRef.timeout_ms` for an MCP server's or A2A agent's `auth` and for an A2A agent's `middleware`, and `Upstream.auth.plugin.timeout_ms` for an LLM upstream; `0` means 60 s. Built-in plugins ignore it, and the UI exposes the field on each form. These are plugin call timeouts, not the MCP server's, A2A agent's or upstream's `timeout_ms` (the upstream HTTP request timeout). The async call is wrapped in a timeout; when it expires the in-flight call is dropped, that Store is discarded, and the call is counted `timeout`. Waiting for a pool instance counts towards the timeout. An auth plugin's `http-fetch` runs inside the auth call's timeout.
 
 Each instance is capped at 32 MiB of memory. All plugin instances together share a process-wide budget, 1 GiB by default, set with `LUMEWARP_PLUGIN_MEMORY_LIMIT_BYTES`; the Store limits also bound table elements, tables and instances, and an over-limit `table.grow` returns -1. The number of idle instances is bounded, and one target's pool may run at most a quarter of the calls the budget admits, so a stuck plugin cannot take that gate from the others.
 
@@ -184,7 +189,7 @@ Failure behaves per kind:
 | Kind | A trap | A timeout | An error |
 | --- | --- | --- | --- |
 | `router-strategy` | Treated as `pick` returning `none`: the request takes the gateway's fall-through paths. | Same fall-through as a trap. | A `pick` cannot return an error. |
-| `upstream-auth` | The client gets 502 and the call counts as an auth failure. | The client gets 504. | An `Err` from `authorize`, or a header the gateway refuses, gets 502 and counts as an auth failure. |
+| `upstream-auth` | 502 and an auth failure. An LLM upstream answers 502 `upstream_auth_failed`. | MCP/A2A: 504. An LLM upstream answers 502 `upstream_auth_failed`. | 502 and an auth failure; an LLM upstream uses `upstream_auth_failed`. |
 | `a2a-middleware` | The client gets 502; when the response stream is already under way, its last event is a JSON-RPC error instead. | The client gets 504; when the response stream is already under way, its last event is a JSON-RPC error instead. | The hook's `rpc-error`, or a result the gateway refuses, is sent as a JSON-RPC error; on a stream already under way, as its last event. |
 
 A breaker pauses a plugin after consecutive trap, error or timeout results; while it is open, a router `pick` does not run and takes the fall-through paths.
@@ -197,6 +202,8 @@ Calls are counted and timed:
 | `lumewarp_plugin_duration_seconds{kind,plugin}` | Histogram of the same calls, in seconds; a slow plugin is visible here. |
 
 `manifest` and `configure` run at startup or when a version is applied and are not counted in these metrics. Built-ins run inline and are not counted. No label carries a key, team or request, so cardinality is fixed by the loaded plugins. Request-path calls also appear under the request's span in a trace.
+
+LLM upstream auth also has `lumewarp_upstream_auth_total{upstream,result}` (`ok`, `cached`, `plugin`, `timeout`, `trap`, `header` or `configure`) and the `upstream_auth` span with `upstream`, `plugin`, `method`, `result` and `cached`. `cached` is a cache hit that did not enter the sandbox; `ok` is a WASM call that answered. The plugin call and duration metrics cover the WASM calls.
 
 ## Router strategies
 
@@ -222,22 +229,30 @@ The control plane applies the same credential rule to such a field. There is del
 
 ## Upstream auth
 
-An upstream-auth plugin produces the headers the gateway sends to one MCP server (`McpServer.auth`) or one A2A agent (`A2aAgent.auth`). LLM upstreams are not involved: they keep `api_key_ref` or a sealed key.
+An upstream-auth plugin produces the headers the gateway sends to one MCP server (`McpServer.auth`), one A2A agent (`A2aAgent.auth`) or one LLM upstream (`Upstream.auth`). An LLM upstream accepts only a WASM plugin: `none`, `static_bearer` and `passthrough` are MCP/A2A-only there, and a static bearer stays `api_key_ref` or the sealed API key.
 
-Every outbound request is prepared by one header policy. The gateway removes the client's `X-Lumewarp-Key`, `Cookie` and `Proxy-Authorization`. It removes `Authorization` too, unless the selected built-in is `passthrough`, which forwards it unchanged. A WASM plugin therefore starts from a request with no client credentials and returns headers that are added, replacing same-named ones. A returned header that is hop-by-hop, or is `Host`, `Content-Length`, `Cookie`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `A2A-Version`, `Last-Event-ID` or starts with `X-Lumewarp-`, is refused: the call counts as an auth failure and the client gets 502.
+The WIT package remains `lumewarp:plugin@1.0.0`; `traffic` is `mcp`, `a2a` or `llm`. Rebuild a component against this WIT to serve LLM traffic, and restart the gateway after replacing the file.
 
-| Built-in | Behaviour |
+Every outbound request is prepared by one header policy. The gateway removes the client's `X-Lumewarp-Key`, `Cookie` and `Proxy-Authorization`. It removes `Authorization` too, unless the selected built-in is `passthrough` (MCP/A2A only), which forwards it unchanged. A WASM plugin therefore starts from a request with no client credentials and returns headers that are added, replacing same-named ones. A returned header that is hop-by-hop, or is `Host`, `Content-Length`, `Cookie`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `A2A-Version`, `Last-Event-ID` or starts with `X-Lumewarp-`, is refused: the call counts as an auth failure and the client gets 502.
+
+| Built-in (MCP/A2A only) | Behaviour |
 | --- | --- |
 | `none` | Adds no credential header. |
 | `static_bearer` | Sends `Authorization: Bearer <token>`, from `UpstreamAuth.secret_ref` (the name of a gateway environment variable) or `UpstreamAuth.secret_ciphertext` (sealed like `Upstream.api_key_ciphertext`, HKDF info `lumewarp/upstream-auth-secret/v1`). The ciphertext is opened when the snapshot is applied, never per request. |
 | `passthrough` | Forwards the client's `Authorization` unchanged, so the upstream sees the user's own token. Its result is never cached. |
 
+On an LLM upstream only a WASM plugin is allowed. Its `configure` receives the upstream's `base_url`; `authorize` is called for each attempt with the request's method, the actual endpoint URL, the request headers and, when the manifest sets `needs_body`, the exact body. Retries and fallbacks authorize the upstream each attempt targets. Upstream health checks and vLLM metric scrapes call it with `GET` and an empty body; a model `chat_check` or a model saved Test now passes its typed probe body when the manifest sets `needs_body`.
+
 A WASM plugin is configured once per target, not once per request; a `configure` error refuses the version, as for a router strategy. `authorize` is called for a request whose headers are not cached. It returns the headers to add — replacing same-named ones — and `cache-ms`:
 
-- The cache key is the traffic (`mcp` or `a2a`), the target id (`McpServer.id` or `A2aAgent.id`) and the digest of the plugin's settings. Applying a snapshot with different settings is a new key; deleting the target drops its entries.
-- `cache-ms` bounds how long the gateway reuses the result without calling `authorize` again. `0` means do not cache, and is required whenever the result depends on the request — a body signature, for instance. The gateway caps the value at one hour. Nothing renews an entry, so a rotation or a revocation upstream is not noticed until it expires: keep the value as short as the exchange costs.
+- The cache key is the traffic (`mcp`, `a2a` or `llm`), the target identity (`McpServer.id`, `A2aAgent.id`, or the LLM upstream's name; an upstream has no separate id) and the digest of the plugin's settings. Applying a snapshot with different settings is a new key; deleting the target drops its entries.
+- `cache-ms` bounds how long the gateway reuses the result without calling `authorize` again. `0` means do not cache, and is required whenever the result depends on the request — a body signature, for instance. For LLM traffic the body is available only when the manifest sets `needs_body`. The gateway caps the value at one hour. Nothing renews an entry, so a rotation or a revocation upstream is not noticed until it expires: keep the value as short as the exchange costs.
 
-The call timeout is `McpServer.auth.plugin.timeout_ms` or `A2aAgent.auth.plugin.timeout_ms` (0 = 60 s; built-in auth plugins ignore it). It is not the server's or agent's `timeout_ms`, which bounds the upstream HTTP request.
+The call timeout is `McpServer.auth.plugin.timeout_ms`, `A2aAgent.auth.plugin.timeout_ms` or `Upstream.auth.plugin.timeout_ms` (0 = 60 s; built-in auth plugins ignore it). It is not the server's, agent's or upstream's `timeout_ms`, which bounds the upstream HTTP request.
+
+On an LLM upstream a configure failure, plugin error, trap, timeout or refused header fails that attempt without contacting the upstream. The router's retry and fallbacks then apply as for a connect error, but the failure gives the model no circuit-breaker verdict or latency sample: the plugin failed, not the model. When no attempt is left, the client gets the earlier attempt's response if one was kept, otherwise 502 `upstream_auth_failed`, and the request is recorded in usage and the request log as a 502 `upstream_error`. Health checks and metric scrapes treat the same failure as a failed probe.
+
+The plugin's headers are sent to every URL the gateway calls for the upstream: `base_url`, and also `health_check.url` and `metrics_url` when they point elsewhere, as the static API key is. Do not point those at a host that must not see the credential.
 
 The `host` interface, for this kind only:
 
@@ -434,6 +449,7 @@ Each kind has one configuration trait and one behaviour trait:
 | `name`, `title`, `description` | The manifest fields, with the name rules above. |
 | `uses_weight`, `needs` | Router strategies only: the manifest's `router` metadata. Both may be omitted, which means `false` and `Needs::default()`. |
 | `params` | The type `configure` receives, and what `params_schema` comes from. `lumewarp_plugin_sdk::NoParams` when there are none. |
+| `needs_body` | `upstream-auth` only: the manifest's `needs_body`; true when `authorize` reads the LLM request body. Omitted means false. |
 | `member_params` | Router strategies only: the per-member type, and what `member_schema` comes from. |
 | `strategy` / `authenticator` / `middleware` | The type implementing the kind's trait. |
 
@@ -445,6 +461,7 @@ lumewarp_plugin_sdk::register! {
     name: "hmac_signature",
     title: "HMAC signature",
     description: "Sign each upstream request with a shared secret (x-hmac-signature).",
+    needs_body: true,
     params: Params,
     authenticator: HmacSignature,
 }
@@ -469,7 +486,7 @@ lumewarp_plugin_sdk::register! {
 | `gateway/plugins/router/cheapest-first` | `router-strategy`; Python-derived pick table |
 | `gateway/plugins/router/loop-test` | `router-strategy`; always loops, for the timeout test |
 | `gateway/plugins/router/misbehave-test` | `router-strategy`; answers an ineligible index or hangs in `configure`, for host tests |
-| `gateway/plugins/auth/hmac-signature` | `upstream-auth`; signs each request with `x-hmac-signature`, secret from `secret()` |
+| `gateway/plugins/auth/hmac-signature` | `upstream-auth`; signs each request with `x-hmac-signature`, secret from `secret()`, `needs_body: true`; serves MCP, A2A and LLM upstreams |
 | `gateway/plugins/auth/noop-test` | `upstream-auth`; returns no headers |
 | `gateway/plugins/auth/fixture` | `upstream-auth`; cache, `http-fetch`, `secret`, error and timeout modes |
 | `gateway/plugins/a2a-middleware/noop-test` | `a2a-middleware`; passes bodies through |

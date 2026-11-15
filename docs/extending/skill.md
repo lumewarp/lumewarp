@@ -13,7 +13,7 @@ builds and passes its tests in a repository of your own.
 | --- | --- |
 | `SKILL.md` | The workflow: choose the extension point (and what no plugin can do), copy a template, implement, test, build, verify the load, install. |
 | `templates/router-strategy` | A router strategy with per-router and per-member settings, tests through the gateway's own configuration path, and a standalone YAML to send a request through it. |
-| `templates/upstream-auth` | OAuth 2.0 client credentials for an MCP server or A2A agent: `http-fetch`, `secret()` and a cached bearer token. |
+| `templates/upstream-auth` | OAuth 2.0 client credentials for an MCP server, A2A agent or LLM upstream: `http-fetch`, `secret()` and a cached bearer token. |
 | `templates/a2a-middleware` | Stamps a metadata value into A2A message requests. |
 | `templates/rust-toolchain.toml` | Adds the `wasm32-wasip2` target; copy it next to a WASM template's `Cargo.toml`. |
 | `templates/python-auth` | A `lumewarp.auth` plugin that admits only listed email domains. |

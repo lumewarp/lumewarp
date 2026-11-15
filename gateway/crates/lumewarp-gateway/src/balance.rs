@@ -18,11 +18,11 @@ use std::{
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Limited};
-use hyper::{header::HeaderValue, Request, Uri};
+use hyper::{header::HeaderValue, HeaderMap, Method, Request, Uri};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use tokio::task::JoinHandle;
 
-use crate::{metrics::Metrics, proxy::UpstreamClient, ratelimit::clock};
+use crate::{metrics::Metrics, proxy::UpstreamClient, ratelimit::clock, upstream_auth::LlmAuth};
 
 /// EWMA weight of a new sample: `new = old + (sample - old) / EWMA_DIVISOR`.
 const EWMA_DIVISOR: u64 = 5;
@@ -156,6 +156,9 @@ pub struct Scrape {
     pub upstream: String,
     pub uri: Uri,
     pub authorization: Option<HeaderValue>,
+    /// WASM outbound auth for the upstream; mutually exclusive with
+    /// `authorization` (the request is refused at apply time).
+    pub auth: Option<LlmAuth>,
     /// (upstream_model, load) of each model on this upstream.
     pub targets: Vec<(String, Arc<VllmLoad>)>,
     pub failures: Counter,
@@ -168,6 +171,7 @@ impl Scrape {
         self.upstream == other.upstream
             && self.uri == other.uri
             && self.authorization == other.authorization
+            && self.auth == other.auth
             && self.targets.len() == other.targets.len()
             && self
                 .targets
@@ -280,8 +284,31 @@ impl Drop for Registry {
 }
 
 async fn fetch(client: &UpstreamClient, scrape: &Scrape) -> Option<String> {
+    let mut headers = HeaderMap::new();
+    if let Some(auth) = &scrape.auth {
+        match crate::upstream_auth::authorize_llm(
+            auth,
+            &scrape.uri,
+            &Method::GET,
+            &[],
+            &mut headers,
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(failure) => {
+                tracing::debug!(
+                    upstream = %scrape.upstream,
+                    kind = failure.label(),
+                    "vllm metrics scrape auth failed"
+                );
+                return None;
+            }
+        }
+    }
     let mut request = Request::new(crate::request_body::RequestBody::from(Bytes::new()));
     *request.uri_mut() = scrape.uri.clone();
+    *request.headers_mut() = headers;
     if let Some(value) = &scrape.authorization {
         request
             .headers_mut()
@@ -567,6 +594,7 @@ vllm:kv_cache_usage_perc{model_name="nan"} NaN
             upstream: "u".into(),
             uri: "http://x/metrics".parse().unwrap(),
             authorization: None,
+            auth: None,
             targets: vec![("llama".into(), llama.clone()), ("x".into(), other.clone())],
             failures: Counter::default(),
         };

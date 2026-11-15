@@ -46,7 +46,8 @@ TABLES = (*ENTITY_TABLES, *EDGE_TABLES, *TARGET_TABLES)
 # 4: targets carry `config_revision` (CatalogReport provenance). An older sidecar's column
 # set no longer matches, so it is refused explicitly rather than half-restored.
 # 5: models carry an explicit model_type and audio pricing.
-FORMAT_VERSION = 5
+# 6: upstreams carry their WASM auth columns (auth_plugin/auth_params/auth_timeout_ms).
+FORMAT_VERSION = 6
 
 
 def _encode(value: Any) -> Any:

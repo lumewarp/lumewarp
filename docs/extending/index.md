@@ -6,7 +6,7 @@ has to be made.
 | You want to | Extension point | Runs in | Written in |
 | --- | --- | --- | --- |
 | Choose which member model serves a request | [Router strategy](../router-strategies.md) | Gateway, on the request path | Rust → WASM |
-| Compute the credential sent to an MCP server or A2A agent | [Upstream auth](../plugins.md#upstream-auth) | Gateway | Rust → WASM |
+| Compute the credential sent to an MCP server, A2A agent or LLM upstream | [Upstream auth](../plugins.md#upstream-auth) | Gateway | Rust → WASM |
 | Inspect or change A2A messages | [A2A middleware](../plugins.md#a2a-middleware) | Gateway | Rust → WASM |
 | Decide who a signed-in identity is | [`lumewarp.auth`](./python-plugins.md) | Control plane | Python |
 | Answer "is this user an admin or member of this team?" from your own system | [`lumewarp.authz`](./python-plugins.md#writing-an-authorization-backend) | Control plane | Python |

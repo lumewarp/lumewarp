@@ -316,7 +316,7 @@ name them `LUMEWARP_PLUGIN_SECRET_<NAME>`: an `upstream-auth` component reads th
 them per plugin, so put the plugin name in the key. No credential belongs in plugin
 settings: those are stored in the snapshot and the audit trail.
 
-Deploy the component to every gateway before a router, MCP server or A2A agent names it. A
+Deploy the component to every gateway before a router, MCP server, A2A agent or LLM upstream names it. A
 gateway without it NACKs every version that references it — key revocations included —
 until it is restarted with the file present.
 

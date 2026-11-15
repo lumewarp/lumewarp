@@ -9,7 +9,14 @@ from lumewarp_control_plane.authz import Authorizer, Decision, Relation
 from lumewarp_control_plane.models import ApiKey, KeyLifecycle, TeamRole
 from lumewarp_control_plane.security import hash_secret
 from tests.api.helpers import ADMIN_AUTH, auth, user_with_token
-from tests.factories import make_key, make_member, make_service_account, make_team, make_user
+from tests.factories import (
+    make_key,
+    make_member,
+    make_org,
+    make_service_account,
+    make_team,
+    make_user,
+)
 
 
 async def test_member_creates_and_manages_only_own_key(client, committed) -> None:
@@ -537,3 +544,44 @@ async def test_own_key_list_includes_active_owner_status(client, committed) -> N
     assert [(row["id"], row["owner_active"]) for row in response.json()["items"]] == [
         (str(key.id), True)
     ]
+
+
+async def test_every_key_response_names_its_team_and_org(client, committed) -> None:
+    org = await make_org(committed)
+    team = await make_team(committed, org=org)
+    account = await make_service_account(committed, team, name="named-worker")
+    await committed.commit()
+    expected = (team.name, str(org.id), org.name)
+
+    def assert_named(key: dict) -> None:
+        assert (key["team_name"], key["org_id"], key["org_name"]) == expected
+
+    path = f"/api/v1/teams/{team.id}/keys"
+    created = client.post(
+        path,
+        json={"name": "named", "service_account_id": str(account.id)},
+        headers=ADMIN_AUTH,
+    )
+    assert created.status_code == 201, created.text
+    key_id = created.json()["key"]["id"]
+    assert_named(created.json()["key"])
+
+    read = client.get(f"/api/v1/keys/{key_id}", headers=ADMIN_AUTH)
+    assert read.status_code == 200, read.text
+    assert_named(read.json())
+
+    listed = client.get(path, headers=ADMIN_AUTH)
+    assert listed.status_code == 200, listed.text
+    assert_named(next(row for row in listed.json()["items"] if row["id"] == key_id))
+
+    patched = client.patch(f"/api/v1/keys/{key_id}", json={"name": "renamed"}, headers=ADMIN_AUTH)
+    assert patched.status_code == 200, patched.text
+    assert_named(patched.json())
+
+    rotated = client.post(f"/api/v1/keys/{key_id}/rotate", headers=ADMIN_AUTH)
+    assert rotated.status_code == 200, rotated.text
+    assert_named(rotated.json()["key"])
+
+    revoked = client.post(f"/api/v1/keys/{key_id}/revoke", headers=ADMIN_AUTH)
+    assert revoked.status_code == 200, revoked.text
+    assert_named(revoked.json())

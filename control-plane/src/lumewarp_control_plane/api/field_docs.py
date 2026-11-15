@@ -206,6 +206,19 @@ BY_MODEL: dict[tuple[str, str], str] = {
         "Time allowed until the upstream's response headers arrive, in ms; 0 = the gateway"
         " default (600000). It does not limit the response body or a stream."
     ),
+    ("UpstreamCreate", "auth"): (
+        "A WASM upstream-auth plugin that supplies the outbound credential; null = use"
+        " `api_key` or `api_key_ref`."
+    ),
+    ("UpstreamUpdate", "auth"): (
+        "Replace the outbound auth with a WASM upstream-auth plugin; null removes it and"
+        " leaves no credential. Mutually exclusive with `api_key` and `api_key_ref`."
+    ),
+    ("UpstreamAuthIn", "plugin"): (
+        "A WASM upstream-auth plugin listed by `GET /plugins`; the MCP/A2A built-ins are"
+        " not valid here."
+    ),
+    ("UpstreamAuthIn", "timeout_ms"): _PLUGIN_TIMEOUT,
     ("UpstreamUpdate", "timeout_ms"): (
         "Time allowed until the upstream's response headers arrive, in ms; 0 = the gateway"
         " default (600000). It does not limit the response body or a stream."

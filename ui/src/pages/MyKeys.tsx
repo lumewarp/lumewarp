@@ -2,12 +2,12 @@ import { useQuery } from "@tanstack/react-query";
 import { BanIcon, BotIcon, BoxesIcon, CableIcon, ChevronDownIcon, ChevronRightIcon, PauseIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
-import { api, type Key, type Me, type Schemas } from "../api";
+import { api, type Key, type Me } from "../api";
 import { Badge, fmtDate, fmtUsd, InheritedBadge, KeyBadge, ModelPill, PageHeader, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { IconAction } from "../components/RowActions";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
-import { blankKeyLimits, KeyLimitFields, keyLimitsBody, keyLimitsFrom, type KeyLimitValues } from "../components/KeyLimits";
+import { blankKeyLimits, KeyLimitFields, keyLimitsBody, type KeyLimitValues } from "../components/KeyLimits";
 import { DataTable } from "../components/Table";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge as UiBadge } from "../components/ui/badge";
@@ -19,16 +19,16 @@ import { HelpTip } from "../components/ui/help-tip";
 import { useAction, useCan, useMe, useMut, useOwnKeys, useSecretMut } from "../hooks";
 import { useShowSecret } from "../components/SecretProvider";
 import { AuthzTemporary, BreakGlassNoKeys, CheckFailed, PageLoading } from "./Access";
-import { RotateKeyDialog } from "./KeyDialogs";
+import { KeyEditDialog, RotateKeyDialog } from "./KeyDialogs";
 import {
   expiryFromDay,
   fmtLifetime,
   lastExpiryDay,
-  localDayOf,
   refusalText,
   rotationNote,
   rotationRowNote,
 } from "./keyText";
+import { KeyPill } from "../components/KeyPill";
 
 type Team = Me["teams"][number];
 
@@ -38,7 +38,8 @@ type Team = Me["teams"][number];
  */
 export function MyKeys() {
   const me = useMe();
-  const keys = useOwnKeys();
+  const administered = (me.data?.teams ?? []).filter((team) => team.role === "admin");
+  const keys = useOwnKeys(administered.length > 0);
   const [creating, setCreating] = useState<{ team: Team | null } | null>(null);
   const showSecret = useShowSecret();
   if (me.isPending) return <PageLoading label="Loading your access…" />;
@@ -74,6 +75,15 @@ export function MyKeys() {
             error={keys.error}
             onRetry={() => void keys.refetch()}
           />
+          {administered.length > 0 && (
+            <ServiceAccountKeys
+              teams={administered}
+              keys={keys.data}
+              loading={keys.isPending}
+              error={keys.error}
+              onRetry={() => void keys.refetch()}
+            />
+          )}
           <TeamsTable teams={teams} onNewKey={(team) => setCreating({ team })} />
           {me.data?.user_id && <MyUsage teams={teams} userId={me.data.user_id} />}
           <CreateKeyDialog
@@ -273,8 +283,10 @@ function KeysTable({
   const multiple = teams.length > 1;
   // Keys of a team the caller can no longer see (archived, or access lost) are not listed.
   // Newest first, so a key just made or rotated is on the first page.
-  const own = keys?.filter((key) => byId.has(key.team_id) && (!teamFilter || key.team_id === teamFilter)).sort((a, b) => b.created_at.localeCompare(a.created_at));
-  const withKeys = teams.filter((team) => keys?.some((key) => key.team_id === team.team_id));
+  const own = keys
+    ?.filter((key) => key.owner_kind === "user" && byId.has(key.team_id) && (!teamFilter || key.team_id === teamFilter))
+    .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  const withKeys = teams.filter((team) => keys?.some((key) => key.owner_kind === "user" && key.team_id === team.team_id));
   const editingTeam = editing ? byId.get(editing.team_id) : undefined;
   return (
     <section className="mb-6" aria-label="Keys" data-testid="my-keys">
@@ -302,10 +314,9 @@ function KeysTable({
             sort: (a, b) => a.name.localeCompare(b.name),
             cell: (key) => (
               <>
-                <strong className="[overflow-wrap:anywhere]">{key.name}</strong>{" "}
-                <span className="block text-xs text-muted-foreground sm:ml-1 sm:inline sm:text-sm">
-                  <code className="[overflow-wrap:anywhere]">{key.display_prefix}…</code>
-                  <span className="sm:hidden" data-testid="phone-expiry"> · expires {fmtDate(key.expires_at)}</span>
+                <KeyPill keyRef={key} owner={key.owner_kind === "service_account" ? undefined : "You"} />
+                <span className="block text-xs text-muted-foreground sm:hidden" data-testid="phone-expiry">
+                  <code className="[overflow-wrap:anywhere]">{key.display_prefix}…</code> · expires {fmtDate(key.expires_at)}
                 </span>
               </>
             ),
@@ -375,7 +386,13 @@ function KeysTable({
         ]}
       />
       {editing && editingTeam && (
-        <EditKeyDialog key={editing.id} team={editingTeam} target={editing} onClose={() => setEditing(null)} />
+        <KeyEditDialog
+          key={editing.id}
+          target={editing}
+          lifetime={editingTeam.key_limits.max_member_key_lifetime_seconds}
+          cap={editingTeam.limits}
+          onClose={() => setEditing(null)}
+        />
       )}
       <RotateKeyDialog
         target={rotating}
@@ -661,59 +678,147 @@ function CreateKeyDialog({
   );
 }
 
-type EditValues = KeyLimitValues & { name: string; expires: string };
-
-function EditKeyDialog({ team, target, onClose }: { team: Team; target: Key; onClose: () => void }) {
-  const initialExpiry = localDayOf(target.expires_at);
-  const initial: EditValues = { name: target.name, expires: initialExpiry, ...keyLimitsFrom(target) };
-  const form = useForm<EditValues>(initial, { name: required("Name") });
-  const update = useMut((values: EditValues) => {
-    const body: Schemas["KeyUpdate"] = { name: values.name.trim(), ...keyLimitsBody(values) };
-    if (values.expires !== initialExpiry) {
-      body.expires_at = expiryFromDay(values.expires);
-    }
-    return api.updateKey(target.id, body);
-  }, "Key saved");
-  const lifetime = team.key_limits.max_member_key_lifetime_seconds;
-  const max = lifetime === null ? undefined : lastExpiryDay(lifetime);
-  const close = () => {
-    form.reset(initial);
-    onClose();
-  };
-  const submit = async () => {
-    if (!form.validate()) return false;
-    return form.run(() => update.mutateAsync(form.values), { expires_at: "expires" });
-  };
+/**
+ * The service-account keys of the teams this caller administers, with the row actions of the team
+ * Keys tab: edit, rotate, suspend/resume and revoke, through the same dialogs and endpoints.
+ */
+function ServiceAccountKeys({
+  teams,
+  keys,
+  loading,
+  error,
+  onRetry,
+}: {
+  teams: Team[];
+  keys: Key[] | undefined;
+  loading: boolean;
+  error: Error | null;
+  onRetry: () => void;
+}) {
+  const perms = useCan();
+  const showSecret = useShowSecret();
+  const [editing, setEditing] = useState<Key | null>(null);
+  const [rotating, setRotating] = useState<Key | null>(null);
+  const [revoking, setRevoking] = useState<Key | null>(null);
+  const setLifecycle = useAction(
+    ({ key, lifecycle }: { key: Key; lifecycle: "active" | "suspended" }) =>
+      api.updateKey(key.id, { lifecycle }),
+    "Key updated",
+  );
+  const revoke = useMut((key: Key) => api.revokeKey(key.id), "Key revoked");
+  const byId = new Map(teams.map((team) => [team.team_id, team]));
+  const rows = keys
+    ?.filter((key) => key.owner_kind === "service_account" && byId.has(key.team_id))
+    .sort(
+      (a, b) =>
+        (byId.get(a.team_id)?.team_name ?? "").localeCompare(byId.get(b.team_id)?.team_name ?? "") ||
+        (a.service_account_name ?? "").localeCompare(b.service_account_name ?? "") ||
+        b.created_at.localeCompare(a.created_at),
+    );
   return (
-    <FormDialog
-      open
-      title={`Edit “${target.name}” (${target.display_prefix}…)`}
-      submitLabel="Save"
-      onClose={close}
-      onSubmit={submit}
-    >
-      <TextField
-        label="Name"
-        value={form.values.name}
-        onChange={(value) => form.set("name", value)}
-        error={form.errors.name}
-        autoFocus
+    <section className="mb-6" aria-labelledby="sa-keys-title" data-testid="service-account-keys">
+      <div className="mb-3 flex items-center gap-1">
+        <h2 id="sa-keys-title" className="m-0">
+          Service account keys
+        </h2>
+        <HelpTip label="Service account keys" text="Keys of service accounts in the teams you administer." />
+      </div>
+      <DataTable
+        rows={rows}
+        loading={loading}
+        error={error}
+        onRetry={onRetry}
+        rowKey={(key) => key.id}
+        empty="No service-account keys in the teams you administer."
+        columns={[
+          {
+            key: "team",
+            header: "Team",
+            sort: (a, b) => (byId.get(a.team_id)?.team_name ?? "").localeCompare(byId.get(b.team_id)?.team_name ?? ""),
+            cell: (key) => <span className="[overflow-wrap:anywhere]">{byId.get(key.team_id)?.team_name ?? "—"}</span>,
+          },
+          {
+            key: "account",
+            header: "Service account",
+            cell: (key) => <span className="[overflow-wrap:anywhere]">{key.service_account_name ?? key.service_account_id?.slice(0, 8) ?? "—"}</span>,
+          },
+          {
+            key: "name",
+            header: "Name",
+            sort: (a, b) => a.name.localeCompare(b.name),
+            cell: (key) => (
+              <>
+                <KeyPill keyRef={key} />
+                <code className="block text-xs text-muted-foreground sm:hidden">{key.display_prefix}…</code>
+              </>
+            ),
+          },
+          {
+            key: "state",
+            header: "State",
+            cell: (key) => {
+              const note = rotationRowNote(key, perms.canResumeKey(key));
+              return (
+                <span className="flex flex-col gap-0.5 [overflow-wrap:anywhere]">
+                  <span>
+                    <KeyBadge k={key} />
+                    <SuspendedReason reason={key.suspended_reason} />
+                  </span>
+                  {note && <span className="text-xs text-muted-foreground">{note}</span>}
+                </span>
+              );
+            },
+          },
+          { key: "expires", header: "Expires", hideBelow: "sm", cell: (key) => fmtDate(key.expires_at) },
+          {
+            key: "actions",
+            header: "",
+            cell: (key) => {
+              if (key.lifecycle === "revoked") return <span className="text-muted-foreground">—</span>;
+              const canManage = perms.canManageKey(key);
+              const suspended = key.lifecycle === "suspended";
+              const canResume = suspended && perms.canResumeKey(key);
+              return (
+                <div className="flex justify-end gap-0.5 whitespace-nowrap">
+                  <IconAction label="Edit" icon={PencilIcon} disabled={!canManage} onClick={() => setEditing(key)} />
+                  <IconAction label="Rotate" icon={RefreshCwIcon} disabled={!canManage} onClick={() => setRotating(key)} />
+                  <IconAction
+                    label={suspended ? "Resume" : "Suspend"}
+                    icon={suspended ? PlayIcon : PauseIcon}
+                    disabled={suspended ? !canResume : !canManage}
+                    onClick={() => void setLifecycle({ key, lifecycle: suspended ? "active" : "suspended" })}
+                  />
+                  <IconAction
+                    label="Revoke"
+                    icon={BanIcon}
+                    className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                    disabled={!canManage}
+                    onClick={() => setRevoking(key)}
+                  />
+                </div>
+              );
+            },
+          },
+        ]}
       />
-      <TextField
-        label="Expires"
-        type="date"
-        value={form.values.expires}
-        max={max}
-        onChange={(value) => form.set("expires", value)}
-        error={form.errors.expires}
-        note={
-          lifetime === null
-            ? "Empty means the key never expires."
-            : `This team limits member keys to ${fmtLifetime(lifetime)}; the latest day is ${max}.`
-        }
+      {editing && <KeyEditDialog target={editing} onClose={() => setEditing(null)} />}
+      <RotateKeyDialog
+        target={rotating}
+        onClose={() => setRotating(null)}
+        onRotated={(value, key) => {
+          setRotating(null);
+          showSecret({ value, title: "API key rotated", note: rotationNote(key, perms.canResumeKey(key)) });
+        }}
       />
-      <KeyLimitFields values={form.values} errors={form.errors} set={form.set} cap={team.limits} />
-    </FormDialog>
+      <ConfirmDialog
+        open={!!revoking}
+        title="Revoke key"
+        confirmLabel="Revoke"
+        message={`Revoke “${revoking?.name}” (${revoking?.display_prefix}…)? Requests using it stop working immediately. This cannot be undone.`}
+        onConfirm={() => revoke.mutateAsync(revoking!)}
+        onClose={() => setRevoking(null)}
+      />
+    </section>
   );
 }
 
