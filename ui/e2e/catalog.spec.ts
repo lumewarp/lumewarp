@@ -3,7 +3,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { confirmDialog, dialog, ensureOrg, optionNames, pick } from "./helpers";
+import { confirmDialog, dialog, ensureOrg, moreFilters, optionNames, pick } from "./helpers";
 import { teamDetails } from "./selfService";
 
 /*
@@ -635,10 +635,14 @@ test("usage: grouped by model by default, with how each request was reached, and
   await expect(row(page, "use/b")).toBeVisible();
   await expect(row(page, "use/a")).toHaveCount(0);
   await pick(page, "Model", "All models");
+  await moreFilters(page);
   await page.getByLabel("Upstream model", { exact: true }).fill("Other/UseC");
   await expect(row(page, "use/c")).toBeVisible();
   await expect(row(page, "use/a")).toHaveCount(0);
   await page.getByLabel("Upstream model", { exact: true }).fill("");
+  // Clearing the box opens its suggestions over the next field; Escape closes only them.
+  await page.getByLabel("Upstream model", { exact: true }).press("Escape");
+  await moreFilters(page);
   await pick(page, "Alias", "None (no alias)");
   await expect(row(page, "use/c")).toBeVisible();
   await expect(row(page, "use/a")).toHaveCount(0);
@@ -1067,6 +1071,7 @@ test("usage filters: a catalog name is never a mode, whatever it is called", asy
     return query(req.url());
   };
 
+  await moreFilters(page);
   for (const [alias, id] of [["none", aliasNone.id], ["__none__", aliasMarker.id]]) {
     const q = await next(() => pick(page, "Alias", alias), (p) => p.has("alias_id"));
     expect(q.get("alias_id")).toBe(id);
@@ -1087,6 +1092,7 @@ test("usage filters: a catalog name is never a mode, whatever it is called", asy
 
 test("usage: the upstream model is a text filter, so a name nothing maps to any more still filters", async ({ page, request }) => {
   await signIn(page, request, "/usage");
+  await moreFilters(page);
   const box = page.getByLabel("Upstream model", { exact: true });
   // The catalog only suggests.
   await box.click();

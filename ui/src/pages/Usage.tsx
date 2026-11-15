@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { api, type UsageQuery, type UsageRow } from "../api";
 import { Badge, fmtNumber as n, fmtUsd, PageHeader, TypeBadge } from "../components/Bits";
+import { FilterBar } from "../components/FilterBar";
 import { SelectField, TextField } from "../components/Form";
 import { UsageChart } from "../components/UsageChart";
 import { Card } from "../components/ui/card";
@@ -91,7 +92,7 @@ function RangeFields({ range, teams }: { range: RangeProps; teams: { id: string;
   return (
     <>
       <TextField label="From" type="date" value={range.from} onChange={range.onFrom} />
-      <TextField label="To (inclusive)" type="date" value={range.to} onChange={range.onTo} />
+      <TextField label="To" type="date" value={range.to} onChange={range.onTo} hint="Inclusive." />
       <ComboboxField
         label="Team"
         value={range.teamId}
@@ -355,16 +356,33 @@ function LlmUsage({ range }: { range: RangeProps }) {
 
   return (
     <>
-      <Card className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3 p-4">
+      <FilterBar
+        testId="usage-filters"
+        className="lg:grid-cols-[10rem_10rem_repeat(3,minmax(0,1fr))_auto]"
+        more={{
+          active: [upstreamText, alias, router, endpoint, modelType].filter(Boolean).length,
+          onClear: () => {
+            setUpstreamText("");
+            setAlias(ANY);
+            setRouter(ANY);
+            setEndpoint(ANY);
+            setModelType("");
+          },
+          children: (
+            <>
+              <ComboboxField free label="Upstream model" hint="Any name, including one no model uses any more." placeholder="All upstream models" value={upstreamText} onChange={setUpstreamText} options={upstreamSuggestions.map((name) => ({ value: name, label: name }))} />
+              <ComboboxField label="Alias" value={alias} onChange={setAlias} options={provenanceOptions("alias")} />
+              <ComboboxField label="Router" value={router} onChange={setRouter} options={provenanceOptions("router")} />
+              <ComboboxField label="Endpoint" value={endpoint} onChange={setEndpoint} options={[{ value: ANY, label: "All endpoints" }, ...ENDPOINTS]} />
+              <SelectField label="Model type" value={modelType} onChange={(x) => setModelType(x as ModelType | "")} options={[{ value: "", label: "All types" }, ...MODEL_TYPES]} />
+            </>
+          ),
+        }}
+      >
         <RangeFields range={range} teams={teams.data} />
         <ComboboxField label="Model" value={model} onChange={setModel} options={[{ value: ANY, label: "All models" }, ...names("model").map((name) => ({ value: name, label: name }))]} />
-        <ComboboxField free label="Upstream model" hint="Any name, including one no model uses any more." placeholder="All upstream models" value={upstreamText} onChange={setUpstreamText} options={upstreamSuggestions.map((name) => ({ value: name, label: name }))} />
-        <ComboboxField label="Alias" value={alias} onChange={setAlias} options={provenanceOptions("alias")} />
-        <ComboboxField label="Router" value={router} onChange={setRouter} options={provenanceOptions("router")} />
-        <ComboboxField label="Endpoint" value={endpoint} onChange={setEndpoint} options={[{ value: ANY, label: "All endpoints" }, ...ENDPOINTS]} />
-        <SelectField label="Model type" value={modelType} onChange={(x) => setModelType(x as ModelType | "")} options={[{ value: "", label: "All types" }, ...MODEL_TYPES]} />
         <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={GROUPS} />
-      </Card>
+      </FilterBar>
       <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
         <Stat label="Requests" value={n(total.requests)} />
         {total.audio > 0 && <Stat label="Audio (seconds)" value={fmtSeconds(total.audio)} />}
@@ -492,10 +510,10 @@ function TrafficUsage({ kind, range }: { kind: "mcp" | "a2a"; range: RangeProps 
   const dims = groupBy.split(",");
   return (
     <>
-      <Card className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3 p-4">
+      <FilterBar testId="usage-filters" className="lg:grid-cols-[10rem_10rem_repeat(2,minmax(0,1fr))]">
         <RangeFields range={range} teams={teams.data} />
         <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={groups} />
-      </Card>
+      </FilterBar>
       <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
         <Stat label="Requests" value={n(total.requests)} />
         <Stat label="Errors" value={n(total.errors)} />

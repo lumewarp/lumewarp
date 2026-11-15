@@ -13,6 +13,11 @@ sees the team's; an org admin its org's teams; an installation admin everything.
 
 ![Usage by day, by model](/screenshots/usage.png)
 
+The filter bar matches the one on Requests: the range (both days inclusive), team, model and
+**Group by** on one row, and upstream model, alias, router, endpoint and model type under
+**More filters**, whose button counts the ones set. The MCP and A2A tabs have the range, team
+and **Group by** only.
+
 Grouped by **API key**, each key is a pill; hover or focus it for its org, team, owner or
 service account (when known), prefix and id. `GET /api/v1/usage` rows grouped by
 `key` carry `key` in the same shape as the request log's `key`.
@@ -46,7 +51,8 @@ Usage is stored in Postgres; ClickHouse is later. While the control plane is dow
 
 The audit log records administrative changes only. A model request, including one sent
 from the Playground, is not an audit entry; it appears in [Requests](./requests.md)
-instead. Every management mutation writes an `audit_log` row in the same transaction. Reads are scoped: an
+instead. The page filters by range (empty means no bound; the end day is inclusive), org,
+team and action, in the same filter bar as Usage and Requests. Every management mutation writes an `audit_log` row in the same transaction. Reads are scoped: an
 installation admin sees everything (including rows without a team and rows of archived teams), a
 team admin sees the rows of the teams they administer (filtered or not), an org admin additionally
 sees its org-level events (`org_id` set, `team_id` NULL: org policy, org admins, org budget) and

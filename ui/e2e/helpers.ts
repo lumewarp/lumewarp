@@ -142,3 +142,10 @@ export async function keyPrefix(page: Page, scope: Locator): Promise<string> {
   expect(text).toMatch(/^lw.*…$/);
   return text;
 }
+
+/** Open the filter bar's More filters popover on an Activity page, if it is not open already. */
+export async function moreFilters(page: Page) {
+  const button = page.getByRole("button", { name: /More filters/ });
+  if ((await button.getAttribute("aria-expanded")) !== "true") await button.click();
+  await expect(button).toHaveAttribute("aria-expanded", "true");
+}

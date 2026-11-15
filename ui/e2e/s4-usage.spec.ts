@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { optionNames, pick } from "./helpers";
+import { moreFilters, optionNames, pick } from "./helpers";
 
 /*
  * Usage filters on the shared ComboboxField: the free-text mode of Upstream model (typed text is the value,
@@ -19,6 +19,8 @@ test.beforeEach(async ({ page, request }) => {
     .toBeGreaterThan(0);
   await page.goto("/usage");
   await expect(page.getByRole("heading", { name: "Usage" })).toBeVisible();
+  // Upstream model, Alias and Router are under More filters.
+  await moreFilters(page);
 });
 
 const upstream = (page: Page) => page.getByRole("combobox", { name: "Upstream model", exact: true });
@@ -97,6 +99,7 @@ for (const [where, width] of [["desktop", 1280], ["390 px", 390]] as const) {
       await route.fulfill({ response, json: { ...body, items: [...body.items, ...extra] } });
     });
     await page.reload();
+    await moreFilters(page);
     const box = upstream(page);
     await box.fill("Long/");
     const options = page.getByRole("option");
@@ -125,6 +128,7 @@ for (const [where, width] of [["desktop", 1280], ["390 px", 390]] as const) {
 
 test("usage filters: Team, Model, Alias and Router are searchable comboboxes that keep their 'all' row", async ({ page }) => {
   for (const [label, all] of [["Team", "All teams"], ["Model", "All models"], ["Alias", "Any"], ["Router", "Any"]] as const) {
+    if (label === "Alias" || label === "Router") await moreFilters(page);
     await expect(page.getByRole("combobox", { name: label, exact: true })).toHaveText(all);
     expect((await optionNames(page, label))[0]).toBe(all);
   }

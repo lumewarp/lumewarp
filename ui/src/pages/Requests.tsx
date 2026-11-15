@@ -1,17 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSearch } from "@tanstack/react-router";
-import { CheckIcon, CopyIcon, SlidersHorizontalIcon } from "lucide-react";
+import { CheckIcon, CopyIcon } from "lucide-react";
 import { useState, type MouseEvent } from "react";
 
 import { api, type RequestRow, type RequestsQuery, type Schemas } from "../api";
 import { Badge, fmtUsd, PageHeader } from "../components/Bits";
 import { NumberField, SelectField, TextField } from "../components/Form";
+import { FilterBar } from "../components/FilterBar";
 import { DataTable } from "../components/Table";
 import { Button } from "../components/ui/button";
-import { Badge as UiBadge } from "../components/ui/badge";
-import { Card } from "../components/ui/card";
 import { ComboboxField } from "../components/ui/combobox-field";
-import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { useCan, useCatalog, useMe, useNames, useTeamDirectory, useTeams } from "../hooks";
 import { dayStart, shiftDay } from "../lib/days";
 import type { RequestsSearch } from "../lib/requests";
@@ -203,7 +201,27 @@ export function Requests() {
   return (
     <>
       <PageHeader title="Requests" hint="No prompt or response content is stored; copy a request id to look it up in OTel." />
-      <Card className="mb-4 grid grid-cols-2 items-end gap-2 p-3 shadow-none sm:grid-cols-3 lg:grid-cols-[10rem_10rem_repeat(4,minmax(0,1fr))_auto]" data-testid="request-filters">
+      <FilterBar
+        testId="request-filters"
+        className="lg:grid-cols-[10rem_10rem_repeat(4,minmax(0,1fr))_auto]"
+        more={{
+          active: extraActive,
+          onClear: clearExtra,
+          children: (
+            <>
+              <SelectField label="Kind" value={filters.kind} onChange={(value) => change({ kind: value as Schemas["TrafficKind"] })} options={KINDS} />
+              {ownersEnabled && <ComboboxField label="Owner" value={filters.owner} onChange={(value) => change({ owner: value })} options={ownerOptions} />}
+              <ComboboxField free label="Alias" value={filters.alias} onChange={(value) => change({ alias: String(value) })} options={names("alias").map((name) => ({ value: name, label: name }))} placeholder="Any alias" />
+              <ComboboxField free label="Router" value={filters.router} onChange={(value) => change({ router: String(value) })} options={names("router").map((name) => ({ value: name, label: name }))} placeholder="Any router" />
+              <div className="grid grid-cols-2 gap-3">
+                <NumberField label="Status" value={filters.status} onChange={(value) => change({ status: value })} min={100} placeholder="Any" />
+                <SelectField label="Outcome" value={filters.outcome} onChange={(value) => change({ outcome: value as Filters["outcome"] })} options={OUTCOMES} />
+              </div>
+              <TextField label="Request id" value={filters.requestId} onChange={(value) => change({ requestId: value })} placeholder="Full request id" />
+            </>
+          ),
+        }}
+      >
         <TextField label="From" type="date" value={filters.from} onChange={(value) => change({ from: value })} hint="Empty starts 24 hours ago." />
         <TextField label="To" type="date" value={filters.to} onChange={(value) => change({ to: value })} hint="Inclusive; empty ends now." />
         <ComboboxField
@@ -222,30 +240,7 @@ export function Requests() {
         />
         <ComboboxField free label="Requested" value={filters.requested} onChange={(value) => change({ requested: String(value) })} options={requestedNames.map((name) => ({ value: name, label: name }))} placeholder="Any name" />
         <ComboboxField free label="Resolved" value={filters.model} onChange={(value) => change({ model: String(value) })} options={names("model").map((name) => ({ value: name, label: name }))} placeholder="Any model" />
-        <Popover>
-          <PopoverTrigger asChild>
-            <Button variant="outline" className="col-span-2 sm:col-span-1">
-              <SlidersHorizontalIcon aria-hidden="true" />
-              More filters
-              {extraActive > 0 && <UiBadge variant="secondary">{extraActive}</UiBadge>}
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent align="end" className="grid w-80 gap-3">
-            <SelectField label="Kind" value={filters.kind} onChange={(value) => change({ kind: value as Schemas["TrafficKind"] })} options={KINDS} />
-            {ownersEnabled && <ComboboxField label="Owner" value={filters.owner} onChange={(value) => change({ owner: value })} options={ownerOptions} />}
-            <ComboboxField free label="Alias" value={filters.alias} onChange={(value) => change({ alias: String(value) })} options={names("alias").map((name) => ({ value: name, label: name }))} placeholder="Any alias" />
-            <ComboboxField free label="Router" value={filters.router} onChange={(value) => change({ router: String(value) })} options={names("router").map((name) => ({ value: name, label: name }))} placeholder="Any router" />
-            <div className="grid grid-cols-2 gap-3">
-              <NumberField label="Status" value={filters.status} onChange={(value) => change({ status: value })} min={100} placeholder="Any" />
-              <SelectField label="Outcome" value={filters.outcome} onChange={(value) => change({ outcome: value as Filters["outcome"] })} options={OUTCOMES} />
-            </div>
-            <TextField label="Request id" value={filters.requestId} onChange={(value) => change({ requestId: value })} placeholder="Full request id" />
-            <Button variant="ghost" size="sm" onClick={clearExtra} disabled={extraActive === 0}>
-              Clear these filters
-            </Button>
-          </PopoverContent>
-        </Popover>
-      </Card>
+      </FilterBar>
       <DataTable
         rows={query.data?.items}
         loading={query.isPending || teams.isPending || (directoryEnabled && directory.isPending)}
