@@ -275,6 +275,16 @@ export function Requests() {
             ),
           },
           {
+            key: "status",
+            header: "Status",
+            cell: (row) => (
+              <span className="flex flex-wrap items-center gap-1" data-testid="request-status">
+                <StatusBadge status={row.status} />
+                {row.outcome !== "completed" && <Badge tone={OUTCOME_TONE[row.outcome]}>{outcomeLabel(row.outcome)}</Badge>}
+              </span>
+            ),
+          },
+          {
             key: "requested",
             header: "Requested",
             cell: (row) => (
@@ -293,16 +303,6 @@ export function Requests() {
             ),
           },
           { key: "resolved", header: "Resolved", cell: (row) => <Resolved row={row} /> },
-          {
-            key: "status",
-            header: "Status",
-            cell: (row) => (
-              <span className="flex flex-wrap items-center gap-1" data-testid="request-status">
-                <StatusBadge status={row.status} />
-                {row.outcome !== "completed" && <Badge tone={OUTCOME_TONE[row.outcome]}>{outcomeLabel(row.outcome)}</Badge>}
-              </span>
-            ),
-          },
           {
             key: "key",
             header: "Key",

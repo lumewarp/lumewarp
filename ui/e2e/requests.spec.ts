@@ -33,9 +33,7 @@ test("lists requests newest first, renders the name chain, and defaults to LLM f
   expect(query.get("to")).toBeNull();
   await expect(page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Requests", exact: true })).toBeVisible();
 
-  for (const header of ["Date", "Requested", "Resolved", "Status", "Key", "Tokens", "Cost"]) {
-    await expect(page.getByRole("columnheader", { name: header, exact: true })).toBeVisible();
-  }
+  await expect(page.getByRole("columnheader")).toHaveText(["Date", "Status", "Requested", "Resolved", "Key", "Tokens", "Cost"]);
 
   // Resolved shows the serving model and nothing on hover; the route it took is in the detail sheet.
   await expect(chain(page).filter({ hasText: "use/a" }).first()).toBeVisible();

@@ -5,9 +5,9 @@ aggregates the same events; the audit log records administrative changes only.
 
 ![The Requests page](/screenshots/requests.png)
 
-The page shows one row per request: **Date**, **Requested** (the name the client called),
-**Resolved** (the model that served it), **Status** (the HTTP status, green for 2xx, amber
-for 4xx and red for 5xx, with the outcome when the request did not complete),
+The page shows one row per request: **Date**, **Status** (the HTTP status, green for 2xx,
+amber for 4xx and red for 5xx, with the outcome when the request did not complete),
+**Requested** (the name the client called), **Resolved** (the model that served it),
 **Key** (a pill with the key name; hover or focus it for the org, team, owner (or service
 account), `lw-` prefix and id),
 **Tokens** (total, with input + output in brackets) and **Cost**. The filter bar holds the
