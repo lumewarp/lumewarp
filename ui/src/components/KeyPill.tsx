@@ -1,4 +1,4 @@
-import { KeyRoundIcon } from "lucide-react";
+import { BotIcon, KeyRoundIcon, UserIcon } from "lucide-react";
 
 import { Badge } from "./ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
@@ -14,19 +14,9 @@ export type KeyLike = {
   service_account_name?: string | null;
 };
 
-function Row({ term, value, mono }: { term: string; value?: string | null; mono?: boolean }) {
-  if (!value) return null;
-  return (
-    <>
-      <dt className="text-background/60">{term}</dt>
-      <dd className={mono ? "font-mono [overflow-wrap:anywhere]" : "[overflow-wrap:anywhere]"}>{value}</dd>
-    </>
-  );
-}
-
 /**
- * Every API key shown in the Admin UI: a pill with the key name; hovering or focusing it lists org, team,
- * owner, name, prefix and id. A null `keyRef` is a key whose row is gone; `fallbackId` is all that is left.
+ * Every API key shown in the Admin UI: a pill with the key name. Hovering or focusing it shows two lines:
+ * where the key lives (org › team · owner or service account), then the `lw-` prefix and the id. A null `keyRef` is a key whose row is gone; `fallbackId` is all that is left.
  */
 export function KeyPill({
   keyRef,
@@ -56,25 +46,36 @@ export function KeyPill({
   return (
     <Tooltip>
       <TooltipTrigger asChild>{pill}</TooltipTrigger>
-      <TooltipContent className="max-w-[min(20rem,calc(100vw-2rem))]">
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-left">
+      <TooltipContent className="max-w-[min(24rem,calc(100vw-2rem))]">
+        <div className="grid gap-1 text-left">
           {keyRef ? (
-            <>
-              <Row term="Org" value={keyRef.org_name} />
-              <Row term="Team" value={keyRef.team_name} />
-              {keyRef.service_account_name ? (
-                <Row term="Service account" value={keyRef.service_account_name} />
-              ) : (
-                <Row term="Owner" value={owner} />
+            <div className="flex flex-wrap items-center gap-x-1.5 [overflow-wrap:anywhere]">
+              {keyRef.org_name && <span className="text-background/60">{keyRef.org_name} ›</span>}
+              <span className="font-semibold">{keyRef.team_name ?? "No team"}</span>
+              {(keyRef.service_account_name || owner) && (
+                <span className="inline-flex items-center gap-1 text-background/80">
+                  <span aria-hidden="true" className="text-background/40">·</span>
+                  {keyRef.service_account_name ? (
+                    <BotIcon aria-label="Service account" className="size-3" />
+                  ) : (
+                    <UserIcon aria-label="Owner" className="size-3" />
+                  )}
+                  {keyRef.service_account_name ?? owner}
+                </span>
               )}
-              <Row term="Name" value={keyRef.name} />
-              <Row term="Prefix" value={keyRef.display_prefix ? `${keyRef.display_prefix}…` : null} mono />
-              <Row term="Id" value={keyRef.id} mono />
-            </>
+            </div>
           ) : (
-            <Row term="Id" value={fallbackId} mono />
+            <div className="font-semibold">This key no longer exists</div>
           )}
-        </dl>
+          <div className="flex flex-wrap items-baseline gap-x-2 font-mono [overflow-wrap:anywhere]">
+            {keyRef?.display_prefix && (
+              <span className="font-semibold" data-testid="key-pill-prefix">
+                {keyRef.display_prefix}…
+              </span>
+            )}
+            <span className="text-[0.6875rem] text-background/60">{keyRef?.id ?? fallbackId}</span>
+          </div>
+        </div>
       </TooltipContent>
     </Tooltip>
   );

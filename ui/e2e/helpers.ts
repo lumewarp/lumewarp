@@ -134,9 +134,10 @@ export async function keyPrefix(page: Page, scope: Locator): Promise<string> {
   await pill.evaluate((el) => (el as HTMLElement).blur());
   await pill.focus();
   const tip = page.locator('[role="tooltip"][data-state$="open"]');
-  await expect(tip).toContainText("Prefix");
-  // The value next to the "Prefix" term, not a match over the whole tooltip (a team name may contain "lw").
-  const text = ((await tip.locator("dt", { hasText: /^Prefix$/ }).locator("xpath=following-sibling::dd[1]").textContent()) ?? "").trim();
+  // The prefix element itself, not a match over the whole tooltip (a team name may contain "lw").
+  const prefix = tip.getByTestId("key-pill-prefix");
+  await expect(prefix).toHaveText(/^lw.*…$/);
+  const text = ((await prefix.textContent()) ?? "").trim();
   await page.keyboard.press("Escape");
   expect(text).toMatch(/^lw.*…$/);
   return text;
