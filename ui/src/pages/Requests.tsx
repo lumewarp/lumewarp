@@ -308,14 +308,7 @@ export function Requests() {
             header: "Key",
             hideBelow: "sm",
             cell: (row) => (
-              <span className="flex flex-wrap items-center gap-1">
-                <KeyPill keyRef={row.key} fallbackId={row.key_id} owner={row.owner_kind === "user" ? ownerLabel(row) : undefined} />
-                {row.playground_user_id && (
-                  <span data-testid="playground-badge">
-                    <Badge tone="info">Playground</Badge>
-                  </span>
-                )}
-              </span>
+              <KeyPill keyRef={row.key} fallbackId={row.key_id} owner={row.owner_kind === "user" ? ownerLabel(row) : undefined} />
             ),
           },
           {

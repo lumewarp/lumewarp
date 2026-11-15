@@ -14,7 +14,7 @@ belong to. A new user starts with no team: a team admin has to add you first.
 - what is left of this month's budget;
 - how many keys you may have, and how long a key may live;
 - the keys you own, each as a pill (hover or focus it for its org, team, owner (or
-  service account), name, prefix and id).
+  service account), prefix and id).
 
 If you administer a team (as its team admin, or as an org or installation admin), a
 **Service account keys** table below your own keys lists the keys owned by that team's

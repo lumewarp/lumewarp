@@ -14,7 +14,7 @@ sees the team's; an org admin its org's teams; an installation admin everything.
 ![Usage by day, by model](/screenshots/usage.png)
 
 Grouped by **API key**, each key is a pill; hover or focus it for its org, team, owner or
-service account (when known), name, prefix and id. `GET /api/v1/usage` rows grouped by
+service account (when known), prefix and id. `GET /api/v1/usage` rows grouped by
 `key` carry `key` in the same shape as the request log's `key`.
 
 An event records the name the client called, the model that served it, the alias, router

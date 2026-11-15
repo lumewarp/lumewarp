@@ -9,7 +9,7 @@ The page shows one row per request: **Date**, **Requested** (the name the client
 **Resolved** (the model that served it), **Status** (the HTTP status, green for 2xx, amber
 for 4xx and red for 5xx, with the outcome when the request did not complete),
 **Key** (a pill with the key name; hover or focus it for the org, team, owner (or service
-account), name, `lw-` prefix and id, with a Playground badge when sent from the Playground),
+account), `lw-` prefix and id),
 **Tokens** (total, with input + output in brackets) and **Cost**. The filter bar holds the
 range, team, key, requested and resolved names; the other filters are under **More
 filters**. The copy button next to the date copies the request id.
@@ -77,7 +77,7 @@ missing here too. A standalone gateway has no request log.
 ## Playground
 
 A request sent from the Admin UI Playground carries `playground_user_id`, the signed-in
-user who sent it. The attribution comes from the gateway's `x-lumewarp-request-id`
+user who sent it, shown under **Sender** in the request's details. The attribution comes from the gateway's `x-lumewarp-request-id`
 response header; a response without a valid one has no Playground user. Playground calls
 are not audit entries.
 

@@ -180,8 +180,8 @@ test("follows next_cursor and shows the Playground attribution", async ({ page }
   await page.getByRole("button", { name: "Next page" }).click();
   await nextPage;
   await expect(chain(page).filter({ hasText: "second-page" })).toBeVisible();
-  await expect(page.getByTestId("playground-badge")).toContainText("Playground");
-  // A row click opens the same sheet; it names who sent the request from the Playground.
+  // The table carries no Playground badge; a row click opens the sheet, which names who sent it from the Playground.
+  await expect(page.getByRole("table")).not.toContainText("Playground");
   await page.getByRole("cell", { name: "15 (10+5)", exact: true }).click();
   await expect(page.getByTestId("request-detail-playground")).toContainText("Sent by");
   await expect(page.getByTestId("request-detail")).toContainText("15 (10 in + 5 out)");
