@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { streamText, type ModelMessage } from "ai";
-import { ArrowDownIcon, ArrowUpIcon, BrainIcon, ChevronDownIcon, ChevronRightIcon, CircleHelpIcon, ClockIcon, GaugeIcon, HashIcon, SendIcon, SigmaIcon, SquareIcon, TimerIcon, TriangleAlertIcon, Trash2Icon, type LucideIcon } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, BrainIcon, ChevronDownIcon, ChevronRightIcon, CircleHelpIcon, KeyRoundIcon, ClockIcon, GaugeIcon, HashIcon, SendIcon, SigmaIcon, SquareIcon, TimerIcon, TriangleAlertIcon, Trash2Icon, type LucideIcon } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -9,6 +9,7 @@ import remarkGfm from "remark-gfm";
 import { api, type Schemas } from "../api";
 import { playgroundProvider, type PlaygroundKey, type ResponseInfo } from "../api/playground";
 import { PageHeader } from "../components/Bits";
+import { KeyPill } from "../components/KeyPill";
 import { Field, SelectField } from "../components/Form";
 import { JsonEditor } from "../components/SchemaForm";
 import { Alert, AlertDescription } from "../components/ui/alert";
@@ -115,17 +116,20 @@ function KeySelect({ keys, value, onChange }: { keys: PlaygroundKey[]; value: st
   const accounts = keys.filter((key) => key.owner_kind === "service_account");
   const item = (key: PlaygroundKey) => (
     <SelectItem key={key.id} value={key.id}>
-      {key.owner_kind === "service_account"
-        ? `${key.team_name} / ${key.service_account_name ?? "service account"} / ${key.name}`
-        : `${key.name} · ${key.team_name}`}
+      <KeyRoundIcon aria-hidden="true" className="size-3.5 text-muted-foreground" />
+      {key.name}
+      <span className="text-muted-foreground">
+        {key.owner_kind === "service_account" ? `${key.team_name} / ${key.service_account_name ?? "service account"}` : key.team_name}
+      </span>
     </SelectItem>
   );
+  const selected = keys.find((key) => key.id === value);
   return (
     <Field label="Key" hint="The request is limited and metered as this key.">
       {(p) => (
         <Select value={value} onValueChange={onChange}>
           <SelectTrigger {...p} className="w-full min-w-0">
-            <SelectValue />
+            <SelectValue>{selected && <KeyPill keyRef={selected} tooltip={false} />}</SelectValue>
           </SelectTrigger>
           <SelectContent position="popper">
             {mine.length > 0 && (

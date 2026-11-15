@@ -130,17 +130,17 @@ test("groups own and service-account keys and chats as the chosen service-accoun
   await signIn(page, TEAM_ADMIN, "/playground");
 
   const picker = await control(page, "Key");
-  await expect(picker).toContainText("pg-key · pg-team");
+  await expect(picker.getByTestId("key-pill")).toContainText("pg-key");
   await picker.click();
   const popupId = await picker.getAttribute("aria-controls");
   expect(popupId).toBeTruthy();
   const popup = page.locator(`[id="${popupId}"]`);
   await expect(popup.getByText("My keys", { exact: true })).toBeVisible();
   await expect(popup.getByText("Service accounts", { exact: true })).toBeVisible();
-  const option = page.getByRole("option", { name: "pg-team / pg-bot / pg-sa-key", exact: true });
+  const option = page.getByRole("option", { name: "pg-sa-key pg-team / pg-bot", exact: true });
   await expect(option).toBeVisible();
   await option.click();
-  await expect(picker).toContainText("pg-team / pg-bot / pg-sa-key");
+  await expect(picker.getByTestId("key-pill")).toContainText("pg-sa-key");
 
   await page.getByLabel("Message").fill("Hi");
   await page.getByLabel("Message").press("Enter");

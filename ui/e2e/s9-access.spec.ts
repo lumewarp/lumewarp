@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { confirmDialog, dialog } from "./helpers";
+import { confirmDialog, dialog, expectKeyPill } from "./helpers";
 import {
   Admin,
   MEMBER_EMAIL,
@@ -224,7 +224,7 @@ test("the team key panel still rotates and revokes another member's key", async 
   await page.getByRole("tab", { name: "Keys" }).click();
   const row = rowOf(page, "s9-other-key");
   await expect(row).toBeVisible();
-  await expect(row.locator("code")).toHaveText(`${created.key.display_prefix}…`);
+  await expectKeyPill(page, row, "s9-other-key", ["s9-panel", `${created.key.display_prefix}…`, created.key.id]);
   await row.getByRole("button", { name: "Rotate" }).click();
   const secret = page.getByRole("dialog", { name: "API key rotated" });
   await expect(secret.getByTestId("secret-value")).toHaveText(/^lw-/);

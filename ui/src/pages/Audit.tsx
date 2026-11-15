@@ -7,6 +7,7 @@ import { ComboboxField } from "../components/ui/combobox-field";
 import { DataTable } from "../components/Table";
 import { Card } from "../components/ui/card";
 import { useCan, useNames, useOrgLayer, useTeams } from "../hooks";
+import { KeyPill } from "../components/KeyPill";
 
 export function Audit() {
   const [action, setAction] = useState("");
@@ -58,7 +59,7 @@ export function Audit() {
           ...(showOrg ? [{ key: "org", header: "Org", cell: (r: { org_id: string | null }) => orgName(r.org_id) }] : []),
           { key: "actor", header: "Actor", cell: (r) => (<><span>{r.actor_type}</span> <code className="text-muted-foreground">{r.actor_id?.slice(0, 8)}</code></>) },
           { key: "action", header: "Action", sort: (a, b) => a.action.localeCompare(b.action), cell: (r) => <code>{r.action}</code> },
-          { key: "resource", header: "Resource", cell: (r) => (<>{r.resource_type} <code className="text-muted-foreground">{r.resource_id?.slice(0, 8)}</code></>) },
+          { key: "resource", header: "Resource", cell: (r) => (r.resource_type === "key" ? <KeyPill keyRef={r.key} fallbackId={r.resource_id} /> : <>{r.resource_type} <code className="text-muted-foreground">{r.resource_id?.slice(0, 8)}</code></>) },
           { key: "details", header: "Details", cell: (r) => <code className="text-muted-foreground">{Object.keys(r.details).length ? JSON.stringify(r.details) : ""}</code> },
         ]}
       />

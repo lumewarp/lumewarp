@@ -471,6 +471,36 @@ class KeyRotate(ApiModel):
     grace_seconds: int = Field(default=0, ge=0, le=MAX_ROTATION_GRACE_SECONDS)
 
 
+class KeyRefOut(ReadModel):
+    """One key named the same way wherever the API shows it.
+
+    The team and org names come from the key's own rows, so they are only ever returned
+    alongside a key the caller may already see. `org_id` and `org_name` are nullable
+    because the org is an outer join, not because a live team can lack one.
+    """
+
+    id: uuid.UUID = Field(description="The key's public id, the same as `key_id`.")
+    name: str = Field(description="The key's current name.")
+    display_prefix: str = Field(
+        description="The start of the secret (`lw-...`); never the secret itself."
+    )
+    team_id: uuid.UUID = Field(description="The team the key belongs to.")
+    team_name: str = Field(description="That team's name.")
+    org_id: uuid.UUID | None = Field(description="The team's org id, when it resolves.")
+    org_name: str | None = Field(description="The team's org name, when it resolves.")
+    owner_kind: KeyOwnerKind = Field(description="`user` or `service_account`.")
+    user_id: uuid.UUID | None = Field(
+        description="The owning user; null for a service account's key."
+    )
+    service_account_id: uuid.UUID | None = Field(
+        description="The owning service account; null for a user's key."
+    )
+    service_account_name: str | None = Field(
+        description="That service account's name; null for a user's key."
+    )
+    lifecycle: KeyLifecycle = Field(description="`active`, `suspended` or `revoked`.")
+
+
 class KeyOut(ReadModel):
     id: uuid.UUID
     team_id: uuid.UUID
@@ -1562,6 +1592,9 @@ class UsageRowOut(ApiModel):
     owner_kind: KeyOwnerKind | None = None
     owner_id: uuid.UUID | None = None
     key_id: uuid.UUID | None = None
+    key: KeyRefOut | None = Field(
+        default=None, description="The key when `key` is in `group_by`; null otherwise."
+    )
     requests: int
     prompt_tokens: int
     completion_tokens: int
@@ -1615,6 +1648,13 @@ class AuditOut(ReadModel):
     action: str
     resource_type: str
     resource_id: str | None
+    key: KeyRefOut | None = Field(
+        default=None,
+        description=(
+            "For a `resource_type` of `key`: the key's ref; null for other resources and"
+            " when its row no longer exists."
+        ),
+    )
     team_id: uuid.UUID | None
     org_id: uuid.UUID | None
     details: dict[str, Any]

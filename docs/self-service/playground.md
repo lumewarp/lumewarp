@@ -6,9 +6,9 @@ a client with that key gets: the same names, limits, budget and usage records.
 
 ![The Playground](/screenshots/playground.png)
 
-- Pick one of your active keys, or a service-account key of a team you administer.
-  Service-account keys are grouped separately and labelled with their team and service
-  account. Only `llm` names are listed.
+- Pick one of your active keys, or a service-account key of a team you administer. The
+  selected key is a pill; the list groups service-account keys and labels every item with
+  its team (and a service-account key with its account). Only `llm` names are listed.
 - The request body is editable as JSON, so any field the upstream supports can be tried.
 - After each reply the Playground shows the time to the first token and the tokens per
   second.

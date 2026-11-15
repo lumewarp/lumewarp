@@ -13,6 +13,10 @@ sees the team's; an org admin its org's teams; an installation admin everything.
 
 ![Usage by day, by model](/screenshots/usage.png)
 
+Grouped by **API key**, each key is a pill; hover or focus it for its org, team, owner or
+service account (when known), name, prefix and id. `GET /api/v1/usage` rows grouped by
+`key` carry `key` in the same shape as the request log's `key`.
+
 An event records the name the client called, the model that served it, the alias, router
 and fallback it went through, the number of attempts, tokens, audio duration and cost.
 Prompts and responses are never recorded. The same events back the
@@ -57,3 +61,6 @@ suite, and `tests/test_schema_secrets.py` fails when a new Text/String/JSONB col
 classified as non-secret.
 
 ![The audit log](/screenshots/audit.png)
+
+A key resource is shown as the same key pill; other resource types keep their type and a
+short id. `GET /api/v1/audit` entries with `resource_type: "key"` carry `key`.

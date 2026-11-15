@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
+from pydantic import Field
 from sqlalchemy import and_, or_, select, tuple_
 
 from lumewarp_control_plane.api.common import (
@@ -28,11 +29,11 @@ from lumewarp_control_plane.api.common import (
     ensure_range,
     validation_error,
 )
+from lumewarp_control_plane.api.key_refs import KeyRefOut, key_refs
 from lumewarp_control_plane.api.schemas import Page, ReadModel
 from lumewarp_control_plane.api.usage import _check_scope_filters
 from lumewarp_control_plane.authz import Authz
 from lumewarp_control_plane.models import (
-    ApiKey,
     CatalogKind,
     CatalogName,
     KeyOwnerKind,
@@ -84,10 +85,9 @@ class RequestOut(ReadModel):
     usage_state: UsageState
     duration_ms: int
     key_id: uuid.UUID
-    # The key's current name; None when the key row no longer exists.
-    key_name: str | None = None
-    # The key's display prefix (the start of its secret); None when the key row is gone.
-    key_prefix: str | None = None
+    key: KeyRefOut | None = Field(
+        default=None, description="The key as it is now; null when its row no longer exists."
+    )
     team_id: uuid.UUID
     owner_kind: KeyOwnerKind
     owner_id: uuid.UUID
@@ -270,9 +270,8 @@ async def list_requests(
         )
 
     stmt = (
-        select(UsageEvent, PlaygroundRequest.user_id, ApiKey.name, ApiKey.display_prefix)
+        select(UsageEvent, PlaygroundRequest.user_id)
         .outerjoin(PlaygroundRequest, PlaygroundRequest.request_id == UsageEvent.request_id)
-        .outerjoin(ApiKey, ApiKey.id == UsageEvent.key_id)
         .where(*filters)
         .order_by(UsageEvent.ts.desc(), UsageEvent.request_id.desc())
     )
@@ -286,6 +285,10 @@ async def list_requests(
     if len(rows) > limit:
         last_event = rows[limit - 1][0]
         next_cursor = _encode_cursor(last_event.ts, last_event.request_id)
+    page_rows = rows[:limit]
+    # One query for the page's key refs, never one per row. A key row that is gone leaves
+    # `key` null while `key_id` keeps pointing at it.
+    refs = await key_refs(session, [event.key_id for event, _ in page_rows])
     items = [
         RequestOut(
             request_id=event.request_id,
@@ -313,13 +316,12 @@ async def list_requests(
             usage_state=event.usage_state,
             duration_ms=event.duration_ms,
             key_id=event.key_id,
-            key_name=key_name,
-            key_prefix=key_prefix,
+            key=refs.get(event.key_id),
             team_id=event.team_id,
             owner_kind=event.owner_kind,
             owner_id=event.owner_id,
             playground_user_id=playground_user_id,
         )
-        for event, playground_user_id, key_name, key_prefix in rows[:limit]
+        for event, playground_user_id in page_rows
     ]
     return Page[RequestOut](items=items, next_cursor=next_cursor)

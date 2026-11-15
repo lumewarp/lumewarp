@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { confirmDialog, dialog, pick, shot } from "./helpers";
+import { confirmDialog, dialog, keyPrefix, pick, shot } from "./helpers";
 import { myKeyRow } from "./selfService";
 
 const BREAK_GLASS = "e2e-break-glass-password";
@@ -434,7 +434,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   const personalRow = viewerPage.locator("tr", { hasText: "personal-key" });
   await expect(personalRow).toContainText("viewer@e2e.test");
   await expect(personalRow).toContainText("Active");
-  const oldPrefix = await personalRow.locator("code").textContent();
+  const oldPrefix = await keyPrefix(viewerPage, personalRow);
 
   await viewerPage.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "My keys" }).click();
   await expect(viewerPage.getByRole("heading", { name: "My keys" })).toBeVisible();
@@ -465,7 +465,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   const rotatedSecret = (await dialog(viewerPage).getByTestId("secret-value").textContent()) ?? "";
   expect(rotatedSecret).toMatch(/^lw-/);
   await dialog(viewerPage).getByRole("button", { name: /saved it/ }).click();
-  await expect(viewerPage.locator("tr", { hasText: "personal-key" }).locator("code")).not.toHaveText(oldPrefix ?? "");
+  await expect.poll(() => keyPrefix(viewerPage, viewerPage.locator("tr", { hasText: "personal-key" }))).not.toBe(oldPrefix);
   await personalRow.getByRole("button", { name: "Revoke" }).click();
   await confirmDialog(viewerPage).getByRole("button", { name: "Revoke" }).click();
   await expect(viewerPage.locator("tr", { hasText: "personal-key" }).getByText("Revoked")).toBeVisible();

@@ -105,3 +105,39 @@ export async function deleteTeams(request: APIRequestContext, headers: Record<st
   }
   return [];
 }
+/**
+ * Assert that `scope` holds a key pill named `name`, and that hovering and then keyboard-focusing it opens a
+ * tooltip with the team, the `lw-` prefix and the id. `parts` are the strings the tooltip must contain.
+ */
+export async function expectKeyPill(page: Page, scope: Page | Locator, name: string, parts: (string | RegExp)[]) {
+  const pill = scope.getByTestId("key-pill").filter({ hasText: name }).first();
+  await expect(pill).toBeVisible();
+  await expect(pill).toHaveText(name);
+  const tip = page.locator('[role="tooltip"][data-state$="open"]');
+  await page.mouse.move(0, 0);
+  await pill.hover();
+  for (const part of parts) await expect(tip).toContainText(part);
+  await page.keyboard.press("Escape");
+  await page.mouse.move(0, 0);
+  await expect(page.locator('[role="tooltip"]')).toHaveCount(0);
+  await pill.evaluate((el) => (el as HTMLElement).blur());
+  await pill.focus();
+  await expect(pill).toBeFocused();
+  for (const part of parts) await expect(tip).toContainText(part);
+  await page.keyboard.press("Escape");
+}
+
+/** The `lw-…` prefix a row's key pill shows in its tooltip. */
+export async function keyPrefix(page: Page, scope: Locator): Promise<string> {
+  const pill = scope.getByTestId("key-pill").first();
+  await pill.blur();
+  await pill.evaluate((el) => (el as HTMLElement).blur());
+  await pill.focus();
+  const tip = page.locator('[role="tooltip"][data-state$="open"]');
+  await expect(tip).toContainText("Prefix");
+  // The value next to the "Prefix" term, not a match over the whole tooltip (a team name may contain "lw").
+  const text = ((await tip.locator("dt", { hasText: /^Prefix$/ }).locator("xpath=following-sibling::dd[1]").textContent()) ?? "").trim();
+  await page.keyboard.press("Escape");
+  expect(text).toMatch(/^lw.*…$/);
+  return text;
+}

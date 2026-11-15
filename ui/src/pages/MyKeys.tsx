@@ -28,6 +28,7 @@ import {
   rotationNote,
   rotationRowNote,
 } from "./keyText";
+import { KeyPill } from "../components/KeyPill";
 
 type Team = Me["teams"][number];
 
@@ -313,10 +314,9 @@ function KeysTable({
             sort: (a, b) => a.name.localeCompare(b.name),
             cell: (key) => (
               <>
-                <strong className="[overflow-wrap:anywhere]">{key.name}</strong>{" "}
-                <span className="block text-xs text-muted-foreground sm:ml-1 sm:inline sm:text-sm">
-                  <code className="[overflow-wrap:anywhere]">{key.display_prefix}…</code>
-                  <span className="sm:hidden" data-testid="phone-expiry"> · expires {fmtDate(key.expires_at)}</span>
+                <KeyPill keyRef={key} owner={key.owner_kind === "service_account" ? undefined : "You"} />
+                <span className="block text-xs text-muted-foreground sm:hidden" data-testid="phone-expiry">
+                  <code className="[overflow-wrap:anywhere]">{key.display_prefix}…</code> · expires {fmtDate(key.expires_at)}
                 </span>
               </>
             ),
@@ -748,8 +748,8 @@ function ServiceAccountKeys({
             sort: (a, b) => a.name.localeCompare(b.name),
             cell: (key) => (
               <>
-                <strong className="[overflow-wrap:anywhere]">{key.name}</strong>{" "}
-                <code className="text-muted-foreground">{key.display_prefix}…</code>
+                <KeyPill keyRef={key} />
+                <code className="block text-xs text-muted-foreground sm:hidden">{key.display_prefix}…</code>
               </>
             ),
           },

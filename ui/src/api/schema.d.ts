@@ -1841,6 +1841,8 @@ export interface components {
             resource_type: string;
             /** Resource Id */
             resource_id: string | null;
+            /** @description For a `resource_type` of `key`: the key's ref; null for other resources and when its row no longer exists. */
+            key?: components["schemas"]["KeyRefOut"] | null;
             /** Team Id */
             team_id: string | null;
             /** Org Id */
@@ -2313,12 +2315,93 @@ export interface components {
             owner_active: boolean | null;
             /** Service Account Name */
             service_account_name: string | null;
+            /**
+             * Team Name
+             * @description The name of the team the key belongs to.
+             */
+            team_name: string;
+            /**
+             * Org Id
+             * @description The id of the team's org.
+             */
+            org_id: string | null;
+            /**
+             * Org Name
+             * @description The name of the team's org.
+             */
+            org_name: string | null;
         };
         /**
          * KeyOwnerKind
          * @enum {string}
          */
         KeyOwnerKind: "user" | "service_account";
+        /**
+         * KeyRefOut
+         * @description One key named the same way wherever the API shows it.
+         *
+         *     The team and org names come from the key's own rows, so they are only ever returned
+         *     alongside a key the caller may already see. `org_id` and `org_name` are nullable
+         *     because the org is an outer join, not because a live team can lack one.
+         */
+        KeyRefOut: {
+            /**
+             * Id
+             * Format: uuid
+             * @description The key's public id, the same as `key_id`.
+             */
+            id: string;
+            /**
+             * Name
+             * @description The key's current name.
+             */
+            name: string;
+            /**
+             * Display Prefix
+             * @description The start of the secret (`lw-...`); never the secret itself.
+             */
+            display_prefix: string;
+            /**
+             * Team Id
+             * Format: uuid
+             * @description The team the key belongs to.
+             */
+            team_id: string;
+            /**
+             * Team Name
+             * @description That team's name.
+             */
+            team_name: string;
+            /**
+             * Org Id
+             * @description The team's org id, when it resolves.
+             */
+            org_id: string | null;
+            /**
+             * Org Name
+             * @description The team's org name, when it resolves.
+             */
+            org_name: string | null;
+            /** @description `user` or `service_account`. */
+            owner_kind: components["schemas"]["KeyOwnerKind"];
+            /**
+             * User Id
+             * @description The owning user; null for a service account's key.
+             */
+            user_id: string | null;
+            /**
+             * Service Account Id
+             * @description The owning service account; null for a user's key.
+             */
+            service_account_id: string | null;
+            /**
+             * Service Account Name
+             * @description That service account's name; null for a user's key.
+             */
+            service_account_name: string | null;
+            /** @description `active`, `suspended` or `revoked`. */
+            lifecycle: components["schemas"]["KeyLifecycle"];
+        };
         /**
          * KeyRotate
          * @description Optional body of `rotateKey`. Grace 0 replaces the secret immediately.
@@ -3685,6 +3768,17 @@ export interface components {
             team_id: string;
             /** Team Name */
             team_name: string;
+            /**
+             * Org Id
+             * Format: uuid
+             * @description The id of the team's org.
+             */
+            org_id: string;
+            /**
+             * Org Name
+             * @description The name of the team's org.
+             */
+            org_name: string;
             /** Models */
             models: string[];
             owner_kind: components["schemas"]["KeyOwnerKind"];
@@ -3986,10 +4080,8 @@ export interface components {
              * Format: uuid
              */
             key_id: string;
-            /** Key Name */
-            key_name?: string | null;
-            /** Key Prefix */
-            key_prefix?: string | null;
+            /** @description The key as it is now; null when its row no longer exists. */
+            key?: components["schemas"]["KeyRefOut"] | null;
             /**
              * Team Id
              * Format: uuid
@@ -5173,6 +5265,8 @@ export interface components {
             owner_id?: string | null;
             /** Key Id */
             key_id?: string | null;
+            /** @description The key when `key` is in `group_by`; null otherwise. */
+            key?: components["schemas"]["KeyRefOut"] | null;
             /** Requests */
             requests: number;
             /** Prompt Tokens */

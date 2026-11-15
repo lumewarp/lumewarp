@@ -191,6 +191,8 @@ async def test_org_admin_inherits_service_account_key(client, committed, monkeyp
     assert set(by_id) == {str(key.id)}
     assert by_id[str(key.id)]["owner_kind"] == "service_account"
     assert by_id[str(key.id)]["service_account_name"] == "org-worker"
+    assert by_id[str(key.id)]["org_id"] == str(org.id)
+    assert by_id[str(key.id)]["org_name"] == org.name
     assert str(foreign_key.id) not in by_id
 
     response = client.post(

@@ -7,10 +7,11 @@ aggregates the same events; the audit log records administrative changes only.
 
 The page shows one row per request: **Date**, **Requested** (the name the client called),
 **Resolved** (the model that served it, with a badge for a request that did not complete),
-**Key** (its name and `lw-` display prefix, with a Playground badge when sent from the Playground), **Tokens** (total, with
-input + output in brackets) and **Cost**. The filter bar holds the range, team, key,
-requested and resolved names; the other filters are under **More filters**. The copy button
-next to the date copies the request id.
+**Key** (a pill with the key name; hover or focus it for the org, team, owner (or service
+account), name, `lw-` prefix and id, with a Playground badge when sent from the Playground),
+**Tokens** (total, with input + output in brackets) and **Cost**. The filter bar holds the
+range, team, key, requested and resolved names; the other filters are under **More
+filters**. The copy button next to the date copies the request id.
 
 ## Request details
 
@@ -23,7 +24,7 @@ Click a row to open its details beside the log.
 `requested` → `alias` → `router` → (`fallback`) → `model` → `upstream`/`upstream_model` → response
 
 - **Received** is the name the client sent, kept even when it does not exist, with the
-  endpoint, the key and whether the response was streamed.
+  endpoint, the key pill and whether the response was streamed.
 - **Alias**, **Router** and **Fallback** appear only when the name was resolved through them.
 - **Model** is the model that served the request; **Upstream** is the upstream and its model
   name used by the final attempt, with the number of attempts when there were retries.
@@ -32,8 +33,8 @@ Click a row to open its details beside the log.
 
 A step the request never reached is left out, so a request rejected before routing shows
 only **Received** and **Response**. **Usage** shows the tokens, audio duration, cost and whether the upstream
-reported usage; **Sender** shows the key, team, owner, who sent it from the Playground, and
-the request id.
+reported usage; **Sender** shows the key pill, team, owner, who sent it from the Playground,
+and the request id.
 
 No prompt, response or header content is stored. To see the per-attempt detail of one
 request, copy its `request_id` and look it up in
@@ -57,6 +58,11 @@ request, copy its `request_id` and look it up in
 
 Rows are ordered by the usage event's timestamp (`ts`) and `request_id`, newest first,
 and paginated with a keyset cursor, so a page stays stable while new requests arrive.
+
+Each row carries `key_id` and `key`, the shared key reference (`id`, `name`,
+`display_prefix`, `team_id`, `team_name`, `org_id`, `org_name`, `owner_kind`, `user_id`,
+`service_account_id`, `service_account_name`, `lifecycle`). `key` is null when the key row
+no longer exists; `key_id` remains and the UI shows **Deleted key**.
 
 The permission scope is `/usage`'s: a plain member sees requests made with their own
 user-owned keys, a team admin every key in the teams they administer (including by org or

@@ -13,7 +13,7 @@ import httpx
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
@@ -31,6 +31,7 @@ from lumewarp_control_plane.models import (
     KeyLifecycle,
     KeyOwnerKind,
     Model,
+    Org,
     PlaygroundRequest,
     ServiceAccount,
     Team,
@@ -57,6 +58,8 @@ class PlaygroundKey(BaseModel):
     display_prefix: str
     team_id: uuid.UUID
     team_name: str
+    org_id: uuid.UUID = Field(description="The id of the team's org.")
+    org_name: str = Field(description="The name of the team's org.")
     models: list[str]
     owner_kind: KeyOwnerKind
     service_account_name: str | None
@@ -176,8 +179,9 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
     administered_team_ids = live_team_ids if administered is None else list(administered)
     rows = (
         await session.execute(
-            select(ApiKey, ServiceAccount.name, Team)
+            select(ApiKey, ServiceAccount.name, Team, Org.name)
             .join(Team, Team.id == ApiKey.team_id)
+            .join(Org, Org.id == Team.org_id)
             .outerjoin(ServiceAccount, ServiceAccount.id == ApiKey.service_account_id)
             .where(
                 Team.deleted_at.is_(None),
@@ -198,7 +202,7 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
     ).all()
     keys = []
     llm_names = await _llm_names(session)
-    for key, account_name, team in rows:
+    for key, account_name, team, org_name in rows:
         if not _usable(key):
             continue
         if key.owner_kind is KeyOwnerKind.USER and not await authz.allowed(
@@ -214,6 +218,8 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
                 display_prefix=key.display_prefix,
                 team_id=team.id,
                 team_name=team.name,
+                org_id=team.org_id,
+                org_name=org_name,
                 models=sorted(set(models) & llm_names),
                 owner_kind=key.owner_kind,
                 service_account_name=account_name,

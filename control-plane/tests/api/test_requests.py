@@ -4,6 +4,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from lumewarp_control_plane.models import (
+    ApiKey,
     OrgAdmin,
     PlaygroundRequest,
     RequestOutcome,
@@ -305,8 +306,75 @@ async def test_playground_user_is_joined_by_request_id(client, committed) -> Non
     by_name = {row["requested"]: row for row in rows}
     assert by_name["played"]["playground_user_id"] == str(user.id)
     assert by_name["plain"]["playground_user_id"] is None
-    assert by_name["plain"]["key_name"] == key.name
-    assert by_name["plain"]["key_prefix"] == key.display_prefix
+    assert by_name["plain"]["key"]["id"] == str(key.id)
+    assert by_name["plain"]["key"]["name"] == key.name
+    assert by_name["plain"]["key"]["display_prefix"] == key.display_prefix
     # The installation admin sees the same join.
     admin_row = items(client, ADMIN_AUTH, request_id=str(played.request_id))[0]
     assert admin_row["playground_user_id"] == str(user.id)
+
+
+async def test_live_key_ref_names_team_org_and_service_account(client, committed) -> None:
+    org = await make_org(committed)
+    team = await make_team(committed, org=org)
+    account = await make_service_account(committed, team, name="ref-worker")
+    key = await make_key(committed, team, account)
+    committed.add(usage_event(key, ts=TS, requested="ref"))
+    await committed.commit()
+
+    (row,) = items(client, team_id=str(team.id))
+    assert row["key"] == {
+        "id": str(key.id),
+        "name": key.name,
+        "display_prefix": key.display_prefix,
+        "team_id": str(team.id),
+        "team_name": team.name,
+        "org_id": str(org.id),
+        "org_name": org.name,
+        "owner_kind": "service_account",
+        "user_id": None,
+        "service_account_id": str(account.id),
+        "service_account_name": "ref-worker",
+        "lifecycle": "active",
+    }
+
+
+async def test_member_sees_names_only_for_keys_they_can_list(client, committed) -> None:
+    org = await make_org(committed)
+    team = await make_team(committed, org=org)
+    member, token = await user_with_token(committed)
+    colleague, _ = await user_with_token(committed)
+    await make_member(committed, team, member)
+    await make_member(committed, team, colleague)
+    own = await make_key(committed, team, member)
+    foreign = await make_key(committed, team, colleague)
+    committed.add_all(
+        [
+            usage_event(own, ts=TS, requested="own"),
+            usage_event(foreign, ts=TS, requested="foreign"),
+        ]
+    )
+    await committed.commit()
+
+    rows = items(client, auth(token), team_id=str(team.id))
+    assert [row["requested"] for row in rows] == ["own"]
+    ref = rows[0]["key"]
+    assert (ref["team_name"], ref["org_id"], ref["org_name"]) == (
+        team.name,
+        str(org.id),
+        org.name,
+    )
+
+
+async def test_deleted_key_answers_a_null_ref(client, committed) -> None:
+    team = await make_team(committed)
+    key = await make_key(committed, team, await make_user(committed))
+    committed.add(usage_event(key, ts=TS, requested="gone"))
+    await committed.commit()
+    assert items(client, team_id=str(team.id))[0]["key"]["id"] == str(key.id)
+
+    await committed.delete(await committed.get(ApiKey, key.id))
+    await committed.commit()
+    (row,) = items(client, team_id=str(team.id))
+    assert row["key_id"] == str(key.id)
+    assert row["key"] is None

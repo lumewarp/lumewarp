@@ -15,6 +15,7 @@ import type { RequestsSearch } from "../lib/requests";
 import { useUsageMetric } from "../lib/usageMetric";
 import { useCan, useCatalog, useMe, useModels, useNames, useTeamDirectory, useTeams } from "../hooks";
 import { ENDPOINTS, endpointLabel } from "../lib/endpoints";
+import { KeyPill } from "../components/KeyPill";
 
 /** `value`, once it has stopped changing for `ms`: typed filters do not query on every keystroke. */
 function useDebounced<T>(value: T, ms: number): T {
@@ -336,7 +337,7 @@ function LlmUsage({ range }: { range: RangeProps }) {
     ],
     team: [{ key: "team", header: "Team", cell: (row) => teamName(row.team_id) }],
     owner: [{ key: "owner", header: "Owner", cell: (row) => ownerLabel(row.owner_kind, row.owner_id) }],
-    key: [{ key: "key", header: "API key", cell: (row) => row.key_id?.slice(0, 8) ?? "—" }],
+    key: [{ key: "key", header: "API key", cell: (row) => (row.key_id ? <KeyPill keyRef={row.key} fallbackId={row.key_id} /> : "—") }],
   };
   const peak = Math.max(1, ...(query.data ?? []).map((r) => r.total_tokens));
   // The same names, key and range the row was grouped by, so Requests opens on the matching rows.

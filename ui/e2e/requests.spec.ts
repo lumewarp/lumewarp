@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { pick } from "./helpers";
+import { expectKeyPill, pick } from "./helpers";
 
 /*
  * The request log against the real control plane: serve.py's seed_usage puts traffic through a direct
@@ -117,6 +117,7 @@ test("filters send the names, status, outcome, kind and request id to the API", 
 
 test("follows next_cursor and shows the Playground attribution", async ({ page }) => {
   let seq = 0;
+  const KEY_ID = "11111111-1111-4111-8111-111111111111";
   const uid = () => `00000000-0000-4000-8000-${String(++seq).padStart(12, "0")}`;
   const row = (requested: string, playgroundUserId: string | null = null) => ({
     request_id: uid(),
@@ -143,9 +144,21 @@ test("follows next_cursor and shows the Playground attribution", async ({ page }
     cost_nano_usd: 1000,
     usage_state: "reported",
     duration_ms: 12,
-    key_id: uid(),
-    key_name: "ci-runner",
-    key_prefix: "lw-3fa9c2",
+    key_id: KEY_ID,
+    key: {
+      id: KEY_ID,
+      name: "ci-runner",
+      display_prefix: "lw-3fa9c2",
+      team_id: uid(),
+      team_name: "Platform",
+      org_id: null,
+      org_name: null,
+      owner_kind: "user",
+      user_id: null,
+      service_account_id: null,
+      service_account_name: null,
+      lifecycle: "active",
+    },
     team_id: uid(),
     owner_kind: "user",
     owner_id: uid(),
@@ -161,7 +174,7 @@ test("follows next_cursor and shows the Playground attribution", async ({ page }
   await page.goto("/requests");
   await expect(chain(page).filter({ hasText: "first-page" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "15 (10+5)", exact: true })).toBeVisible();
-  await expect(page.getByRole("cell", { name: "ci-runner lw-3fa9c2…", exact: true })).toBeVisible();
+  await expectKeyPill(page, page.getByRole("table"), "ci-runner", ["Platform", "lw-3fa9c2…", KEY_ID]);
   const nextPage = page.waitForRequest((request) => new URL(request.url()).searchParams.get("cursor") === "page-2");
   await page.getByRole("button", { name: "Next page" }).click();
   await nextPage;

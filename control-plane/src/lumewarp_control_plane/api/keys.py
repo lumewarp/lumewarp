@@ -16,6 +16,7 @@ from math import ceil
 from typing import Annotated
 
 from fastapi import APIRouter, Query, Request, status
+from pydantic import Field
 from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +36,7 @@ from lumewarp_control_plane.api.common import (
     parse_uuid_cursor,
     validation_error,
 )
+from lumewarp_control_plane.api.key_refs import key_refs
 from lumewarp_control_plane.api.openapi import RATE_LIMITED
 from lumewarp_control_plane.api.policy import (
     owner_effective_of,
@@ -64,6 +66,7 @@ from lumewarp_control_plane.models import (
     KeyLifecycle,
     KeyOwnerKind,
     MemberPolicy,
+    Org,
     ServiceAccount,
     Team,
     User,
@@ -283,71 +286,82 @@ class KeyOut(KeyOutBase):
     owner_active: bool | None
     # The service account's name for an SA-owned key; None for a user's key.
     service_account_name: str | None
+    team_name: str = Field(description="The name of the team the key belongs to.")
+    org_id: uuid.UUID | None = Field(description="The id of the team's org.")
+    org_name: str | None = Field(description="The name of the team's org.")
 
 
 class KeyCreated(KeyCreatedBase):
     key: KeyOut
 
 
-def _key_out(key: ApiKey, active: bool | None, account_name: str | None) -> KeyOut:
+def _key_out(
+    key: ApiKey,
+    active: bool | None,
+    account_name: str | None,
+    team_name: str,
+    org_id: uuid.UUID | None,
+    org_name: str | None,
+) -> KeyOut:
     return KeyOut(
         **KeyOutBase.model_validate(key).model_dump(),
         owner_active=active,
         service_account_name=account_name,
+        team_name=team_name,
+        org_id=org_id,
+        org_name=org_name,
     )
 
 
 async def _out(session: AsyncSession, key: ApiKey) -> KeyOut:
     active = None
-    account_name = None
     if key.owner_kind is KeyOwnerKind.USER:
         active = await session.scalar(select(User.is_active).where(User.id == key.user_id))
-    elif key.service_account_id is not None:
-        account_name = await session.scalar(
-            select(ServiceAccount.name).where(ServiceAccount.id == key.service_account_id)
-        )
-    return _key_out(key, active, account_name)
+    ref = (await key_refs(session, [key.id]))[key.id]
+    return _key_out(
+        key,
+        active,
+        ref.service_account_name,
+        ref.team_name,
+        ref.org_id,
+        ref.org_name,
+    )
 
 
 async def _page(
     session: AsyncSession, stmt: Select[tuple[ApiKey]], limit: int, cursor: str | None
 ) -> Page[KeyOut]:
-    stmt = stmt.add_columns(User.is_active).outerjoin(User, User.id == ApiKey.user_id)
+    # The team, org and service-account names are joined into the page query itself: the
+    # key list stays one data query at every page size, never one query per row.
+    stmt = (
+        stmt.add_columns(
+            User.is_active,
+            Team.name,
+            Team.org_id,
+            Org.name,
+            ServiceAccount.name,
+        )
+        .outerjoin(User, User.id == ApiKey.user_id)
+        .join(Team, Team.id == ApiKey.team_id)
+        .outerjoin(Org, Org.id == Team.org_id)
+        .outerjoin(ServiceAccount, ServiceAccount.id == ApiKey.service_account_id)
+    )
     if cursor is not None:
         stmt = stmt.where(ApiKey.id > parse_uuid_cursor(cursor))
     rows = (await session.execute(stmt.limit(limit + 1))).all()
     next_cursor = str(rows[limit - 1][0].id) if len(rows) > limit else None
     page_rows = rows[:limit]
-    # One query for the whole page's service-account names, never one per key.
-    account_ids = {
-        key.service_account_id
-        for key, _ in page_rows
-        if key.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT and key.service_account_id is not None
-    }
-    names = (
-        {
-            account_id: name
-            for account_id, name in (
-                await session.execute(
-                    select(ServiceAccount.id, ServiceAccount.name).where(
-                        ServiceAccount.id.in_(account_ids)
-                    )
-                )
-            ).all()
-        }
-        if account_ids
-        else {}
-    )
     return Page[KeyOut](
         items=[
             _key_out(
                 key,
                 active,
-                names.get(key.service_account_id)
-                if key.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT
-                else None,
+                account_name,
+                team_name,
+                org_id,
+                org_name,
             )
-            for key, active in page_rows
+            for key, active, team_name, org_id, org_name, account_name in page_rows
         ],
         next_cursor=next_cursor,
     )

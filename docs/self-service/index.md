@@ -13,12 +13,13 @@ belong to. A new user starts with no team: a team admin has to add you first.
 - your effective limits: requests per minute, tokens per minute and concurrent requests;
 - what is left of this month's budget;
 - how many keys you may have, and how long a key may live;
-- the keys you own.
+- the keys you own, each as a pill (hover or focus it for its org, team, owner (or
+  service account), name, prefix and id).
 
 If you administer a team (as its team admin, or as an org or installation admin), a
 **Service account keys** table below your own keys lists the keys owned by that team's
-service accounts. Its actions are the same as the team's **Keys** tab. A plain member does
-not see this table.
+service accounts, using the same pill. Its actions are the same as the team's **Keys**
+tab. A plain member does not see this table.
 
 These are *your* effective values: the team's policy narrowed by your own. A member does
 not see the team's full policy.

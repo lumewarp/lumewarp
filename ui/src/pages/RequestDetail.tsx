@@ -3,23 +3,13 @@ import type { ReactNode } from "react";
 
 import type { RequestRow, Schemas } from "../api";
 import { Badge, fmtUsd } from "../components/Bits";
+import { KeyPill } from "../components/KeyPill";
 import { DescriptionDetails, DescriptionList, DescriptionTerm } from "../components/ui/description-list";
 import { HelpTip } from "../components/ui/help-tip";
 import { Separator } from "../components/ui/separator";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "../components/ui/sheet";
 import { endpointLabel } from "../lib/endpoints";
 import { cn } from "../lib/utils";
-
-/** A request's key: its name and its `lw…` display prefix, or a short id once the key is gone. */
-export function KeyName({ row }: { row: RequestRow }) {
-  if (!row.key_name) return <span className="[overflow-wrap:anywhere]">{row.key_id.slice(0, 8)}…</span>;
-  return (
-    <span className="inline-flex flex-wrap items-baseline gap-x-1.5">
-      <span className="[overflow-wrap:anywhere]">{row.key_name}</span>
-      {row.key_prefix && <code className="text-xs text-muted-foreground" data-testid="request-key-prefix">{row.key_prefix}…</code>}
-    </span>
-  );
-}
 
 type Tone = "ok" | "warn" | "danger" | "muted" | "info";
 
@@ -71,7 +61,7 @@ function steps(row: RequestRow): Step[] {
       name: row.requested || "—",
       detail: (
         <>
-          {row.endpoint ? endpointLabel(row.endpoint) : row.kind.toUpperCase()} · <KeyName row={row} />
+          {row.endpoint ? endpointLabel(row.endpoint) : row.kind.toUpperCase()} · <KeyPill keyRef={row.key} fallbackId={row.key_id} />
           {row.stream ? " · streaming" : ""}
         </>
       ),
@@ -200,7 +190,7 @@ export function RequestDetail({ row, onClose, team, owner, playgroundUser, reque
                 <DescriptionList>
                   <DescriptionTerm>Key</DescriptionTerm>
                   <DescriptionDetails>
-                    <KeyName row={row} />
+                    <KeyPill keyRef={row.key} fallbackId={row.key_id} owner={row.owner_kind === "user" ? owner : undefined} />
                   </DescriptionDetails>
                   <DescriptionTerm>Team</DescriptionTerm>
                   <DescriptionDetails className="[overflow-wrap:anywhere]">{team}</DescriptionDetails>

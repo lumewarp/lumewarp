@@ -26,6 +26,7 @@ from lumewarp_control_plane.api.common import (
     parse_int_cursor,
     validation_error,
 )
+from lumewarp_control_plane.api.key_refs import key_refs
 from lumewarp_control_plane.api.schemas import AuditOut, Page
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import forbidden, not_found
@@ -116,7 +117,21 @@ async def list_audit(
         stmt = stmt.where(AuditLog.id < parse_int_cursor(cursor))
     rows = list((await session.scalars(stmt.limit(limit + 1))).all())
     next_cursor = str(rows[limit - 1].id) if len(rows) > limit else None
-    return Page[AuditOut](
-        items=[AuditOut.model_validate(row) for row in rows[:limit]],
-        next_cursor=next_cursor,
-    )
+    page_rows = rows[:limit]
+    # A key row is the only resource this page can name; resolve the page's refs in one
+    # query. A malformed or stale resource_id leaves that row's `key` null.
+    key_ids: dict[int, uuid.UUID] = {}
+    for row in page_rows:
+        if row.resource_type == "key" and row.resource_id is not None:
+            try:
+                key_ids[row.id] = uuid.UUID(row.resource_id)
+            except ValueError:
+                continue
+    refs = await key_refs(session, key_ids.values())
+    items = []
+    for row in page_rows:
+        item = AuditOut.model_validate(row)
+        if row.id in key_ids:
+            item.key = refs.get(key_ids[row.id])
+        items.append(item)
+    return Page[AuditOut](items=items, next_cursor=next_cursor)

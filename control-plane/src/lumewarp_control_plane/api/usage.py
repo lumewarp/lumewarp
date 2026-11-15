@@ -40,6 +40,7 @@ from lumewarp_control_plane.api.common import (
     month_start,
     validation_error,
 )
+from lumewarp_control_plane.api.key_refs import key_refs
 from lumewarp_control_plane.api.schemas import Page, UsageRowOut
 from lumewarp_control_plane.authz import Authz
 from lumewarp_control_plane.errors import not_found
@@ -406,8 +407,12 @@ async def _events_page(
                 for name in names
             ]
         )
+    page_rows = rows[:limit]
+    # The key dimension is the only grouped shape that carries an id; resolve the whole
+    # page's refs in one query and leave `key` null for every other shape.
+    refs = await key_refs(session, [row.get("key") for row in page_rows])
     items = []
-    for row in rows[:limit]:
+    for row in page_rows:
         provenance = {}
         for name in kinds:
             entries = sorted(
@@ -437,6 +442,7 @@ async def _events_page(
                 owner_kind=row.get("owner_kind"),
                 owner_id=row.get("owner_id"),
                 key_id=row.get("key"),
+                key=refs.get(row.get("key")),
                 **{name: int(row[name]) for name in _AMOUNTS},
                 total_tokens=int(row["prompt_tokens"]) + int(row["completion_tokens"]),
             )

@@ -5,11 +5,12 @@ import uuid
 
 from lumewarp_control_plane.models import TeamRole
 from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
-from tests.factories import make_member, make_team
+from tests.factories import make_member, make_org, make_team
 
 
 async def test_audit_visibility_filters_pagination_and_redaction(client, committed) -> None:
-    team = await make_team(committed)
+    org = await make_org(committed)
+    team = await make_team(committed, org=org)
     other = await make_team(committed)
     user, token = await user_with_token(committed)
     await make_member(committed, team, user, role=TeamRole.ADMIN)
@@ -53,8 +54,24 @@ async def test_audit_visibility_filters_pagination_and_redaction(client, committ
     filtered = client.get("/api/v1/audit", params=filters, headers=auth(token))
     assert filtered.status_code == 200
     assert len(filtered.json()["items"]) == 1
-    assert filtered.json()["items"][0]["org_id"] == str(team.org_id)
-    assert secret not in json.dumps(filtered.json()["items"][0]["details"])
+    item = filtered.json()["items"][0]
+    assert item["org_id"] == str(team.org_id)
+    # The ref is the key as it is now, not the name recorded in the audit row.
+    assert item["key"] == {
+        "id": key_id,
+        "name": "renamed",
+        "display_prefix": created.json()["key"]["display_prefix"],
+        "team_id": str(team.id),
+        "team_name": team.name,
+        "org_id": str(org.id),
+        "org_name": org.name,
+        "owner_kind": "user",
+        "user_id": str(user.id),
+        "service_account_id": None,
+        "service_account_name": None,
+        "lifecycle": "active",
+    }
+    assert secret not in json.dumps(item["details"])
     first = client.get(
         "/api/v1/audit", params={"team_id": str(team.id), "limit": 1}, headers=auth(token)
     ).json()
@@ -74,6 +91,8 @@ async def test_audit_visibility_filters_pagination_and_redaction(client, committ
     all_rows = client.get("/api/v1/audit?limit=500", headers=ADMIN_AUTH).json()["items"]
     assert any(r["team_id"] is None for r in all_rows)
     assert any(r["team_id"] == str(other.id) for r in all_rows)
+    # Only a key resource carries a key ref.
+    assert all(r["key"] is None for r in all_rows if r["resource_type"] != "key")
     assert client.get("/api/v1/audit?cursor=nope", headers=auth(token)).status_code == 422
 
 

@@ -21,6 +21,7 @@ import { useShowSecret } from "../components/SecretProvider";
 import { useToast } from "../components/Toast";
 import { KeyEditDialog } from "./KeyDialogs";
 import { expiryFromDay, fmtLifetime, lastExpiryDay } from "./keyText";
+import { KeyPill } from "../components/KeyPill";
 
 const TABS = [
   { id: "members", label: "Members" },
@@ -630,7 +631,12 @@ function KeysPanel({ team }: { team: TeamAny }) {
         rowKey={(key) => key.id}
         empty="No keys in this team."
         columns={[
-          { key: "name", header: "Name", sort: (a, b) => a.name.localeCompare(b.name), cell: (key) => <><strong>{key.name}</strong> <code className="text-muted-foreground">{key.display_prefix}…</code></> },
+          { key: "name", header: "Name", sort: (a, b) => a.name.localeCompare(b.name), cell: (key) => (
+            <>
+              <KeyPill keyRef={key} owner={key.owner_kind === "service_account" ? undefined : ownerName(key)} />
+              <code className="block text-xs text-muted-foreground sm:hidden">{key.display_prefix}…</code>
+            </>
+          ) },
           { key: "owner", header: "Owner", cell: (key) => <>{key.owner_kind === "service_account" ? "Service account: " : ""}{ownerName(key)}</> },
           { key: "lifecycle", header: "Lifecycle", cell: (key) => <><KeyBadge k={key} /><SuspendedReason reason={key.suspended_reason} /></> },
           { key: "expires", header: "Expires", cell: (key) => fmtDate(key.expires_at) },
@@ -756,7 +762,7 @@ function TeamUsage({ team }: { team: TeamAny }) {
           { key: "date", header: "Date", cell: (row) => row.date ?? "—" },
           { key: "requested", header: "Requested", cell: (row) => row.requested ?? "—" },
           { key: "owner", header: "Owner", cell: (row) => ownerName(row.owner_kind, row.owner_id) },
-          { key: "key", header: "Key", cell: (row) => row.key_id?.slice(0, 8) ?? "—" },
+          { key: "key", header: "Key", cell: (row) => (row.key_id ? <KeyPill keyRef={row.key} fallbackId={row.key_id} /> : "—") },
           { key: "requests", header: "Requests", align: "right", cell: (row) => row.requests.toLocaleString() },
           { key: "tokens", header: "Tokens", align: "right", cell: (row) => row.total_tokens.toLocaleString() },
           { key: "cost", header: "Cost", align: "right", cell: (row) => fmtUsd(row.cost_nano_usd) },
