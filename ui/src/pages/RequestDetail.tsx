@@ -26,6 +26,15 @@ export const outcomeLabel = (outcome: Schemas["RequestOutcome"]) => {
   return label.charAt(0).toUpperCase() + label.slice(1);
 };
 
+/** An HTTP status coloured by its class: 2xx ok, 4xx a client problem, 5xx a server one. */
+export const statusTone = (status: number): Tone =>
+  status >= 500 ? "danger" : status >= 400 ? "warn" : status >= 200 && status < 300 ? "ok" : "muted";
+
+/** The response's HTTP status as a coloured badge, or "No status" when none was sent. */
+export function StatusBadge({ status }: { status: number }) {
+  return status ? <Badge tone={statusTone(status)}>{status}</Badge> : <span className="text-muted-foreground">No status</span>;
+}
+
 const USAGE_STATE: Record<Schemas["UsageState"], string> = {
   reported: "Reported by the upstream",
   partial: "Partial: the stream ended before the usage report",
@@ -91,7 +100,8 @@ function steps(row: RequestRow): Step[] {
     label: "Response",
     name: (
       <span className="inline-flex flex-wrap items-center gap-1">
-        {row.status ? `HTTP ${row.status}` : "No status"}
+        {row.status ? "HTTP" : null}
+        <StatusBadge status={row.status} />
         <Badge tone={OUTCOME_TONE[row.outcome]}>{outcomeLabel(row.outcome)}</Badge>
       </span>
     ),

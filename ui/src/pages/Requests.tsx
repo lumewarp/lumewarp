@@ -16,7 +16,7 @@ import { useCan, useCatalog, useMe, useNames, useTeamDirectory, useTeams } from 
 import { dayStart, shiftDay } from "../lib/days";
 import type { RequestsSearch } from "../lib/requests";
 import { localDayOf } from "./keyText";
-import { OUTCOME_TONE, outcomeLabel, RequestDetail } from "./RequestDetail";
+import { OUTCOME_TONE, outcomeLabel, RequestDetail, StatusBadge } from "./RequestDetail";
 import { KeyPill } from "../components/KeyPill";
 
 const KINDS: { value: Schemas["TrafficKind"]; label: string }[] = [
@@ -271,10 +271,7 @@ export function Requests() {
             key: "date",
             header: "Date",
             cell: (row) => (
-              <span className="inline-flex items-center gap-1 whitespace-nowrap text-muted-foreground">
-                {fmtWhen(row.ts)}
-                <RequestId id={row.request_id} />
-              </span>
+              <span className="whitespace-nowrap text-muted-foreground">{fmtWhen(row.ts)}</span>
             ),
           },
           {
@@ -296,6 +293,16 @@ export function Requests() {
             ),
           },
           { key: "resolved", header: "Resolved", cell: (row) => <Resolved row={row} /> },
+          {
+            key: "status",
+            header: "Status",
+            cell: (row) => (
+              <span className="flex flex-wrap items-center gap-1" data-testid="request-status">
+                <StatusBadge status={row.status} />
+                {row.outcome !== "completed" && <Badge tone={OUTCOME_TONE[row.outcome]}>{outcomeLabel(row.outcome)}</Badge>}
+              </span>
+            ),
+          },
           {
             key: "key",
             header: "Key",
@@ -346,25 +353,18 @@ export function Requests() {
 }
 
 /**
- * The name the request resolved to: the model that served it. How it got there is in the detail
- * sheet; a request that did not complete shows its outcome.
+ * The name the request resolved to: the model that served it. How it got there is in the detail sheet.
  */
 function Resolved({ row }: { row: RequestRow }) {
   return (
     <span className="flex flex-wrap items-center gap-1" data-testid="request-chain">
       <span className="[overflow-wrap:anywhere]">{row.model || "—"}</span>
       {row.fallback && <Badge tone="warn">fallback</Badge>}
-      {row.outcome !== "completed" && (
-        <Badge tone={OUTCOME_TONE[row.outcome]}>
-          {outcomeLabel(row.outcome)}
-          {row.status ? ` ${row.status}` : ""}
-        </Badge>
-      )}
     </span>
   );
 }
 
-/** The gateway request id, short on screen and copyable for an OTel lookup. */
+/** Copies the gateway request id for an OTel lookup; shown in the detail sheet. */
 function RequestId({ id }: { id: string }) {
   const [copied, setCopied] = useState(false);
   const copy = async (event: MouseEvent) => {

@@ -6,7 +6,8 @@ aggregates the same events; the audit log records administrative changes only.
 ![The Requests page](/screenshots/requests.png)
 
 The page shows one row per request: **Date**, **Requested** (the name the client called),
-**Resolved** (the model that served it, with a badge for a request that did not complete),
+**Resolved** (the model that served it), **Status** (the HTTP status, green for 2xx, amber
+for 4xx and red for 5xx, with the outcome when the request did not complete),
 **Key** (a pill with the key name; hover or focus it for the org, team, owner (or service
 account), name, `lw-` prefix and id, with a Playground badge when sent from the Playground),
 **Tokens** (total, with input + output in brackets) and **Cost**. The filter bar holds the
@@ -34,7 +35,7 @@ Click a row to open its details beside the log.
 A step the request never reached is left out, so a request rejected before routing shows
 only **Received** and **Response**. **Usage** shows the tokens, audio duration, cost and whether the upstream
 reported usage; **Sender** shows the key pill, team, owner, who sent it from the Playground,
-and the request id.
+and the request id with a copy button.
 
 No prompt, response or header content is stored. To see the per-attempt detail of one
 request, copy its `request_id` and look it up in

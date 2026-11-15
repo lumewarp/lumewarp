@@ -33,7 +33,7 @@ test("lists requests newest first, renders the name chain, and defaults to LLM f
   expect(query.get("to")).toBeNull();
   await expect(page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Requests", exact: true })).toBeVisible();
 
-  for (const header of ["Date", "Requested", "Resolved", "Key", "Tokens", "Cost"]) {
+  for (const header of ["Date", "Requested", "Resolved", "Status", "Key", "Tokens", "Cost"]) {
     await expect(page.getByRole("columnheader", { name: header, exact: true })).toBeVisible();
   }
 
@@ -45,7 +45,7 @@ test("lists requests newest first, renders the name chain, and defaults to LLM f
   const detail = page.getByTestId("request-detail");
   await expect(detail.getByRole("heading", { name: "use-alias" })).toBeVisible();
   const timeline = detail.getByTestId("request-timeline");
-  await expect(timeline.locator("li")).toHaveText([/Received\s*use-alias/, /Alias\s*use-alias/, /Router\s*use-router/, /Model\s*use\/[ab]/, /Upstream\s*use-up.*Qwen\/UseA/, /Response\s*HTTP 200/]);
+  await expect(timeline.locator("li")).toHaveText([/Received\s*use-alias/, /Alias\s*use-alias/, /Router\s*use-router/, /Model\s*use\/[ab]/, /Upstream\s*use-up.*Qwen\/UseA/, /Response\s*HTTP\s*200/]);
   await expect(detail).toContainText("Request id");
   await page.keyboard.press("Escape");
   await expect(detail).toBeHidden();
@@ -56,8 +56,9 @@ test("lists requests newest first, renders the name chain, and defaults to LLM f
   await expect(timeline.locator("li[data-step=model]")).toContainText("use/c");
   await page.keyboard.press("Escape");
 
-  await expect(page.getByRole("button", { name: "Copy request id", exact: true }).first()).toBeVisible();
-  await expect(page.getByTestId("request-chain").first()).toBeVisible();
+  // The table has no copy button; the request id is copied from the detail sheet. Status is a coloured badge.
+  await expect(page.getByRole("table").getByRole("button", { name: "Copy request id" })).toHaveCount(0);
+  await expect(page.getByTestId("request-status").first()).toContainText("200");
 });
 
 test("filters send the names, status, outcome, kind and request id to the API", async ({ page, request }) => {
