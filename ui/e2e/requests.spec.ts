@@ -144,6 +144,8 @@ test("follows next_cursor and shows the Playground attribution", async ({ page }
     usage_state: "reported",
     duration_ms: 12,
     key_id: uid(),
+    key_name: "ci-runner",
+    key_prefix: "lw-3fa9c2",
     team_id: uid(),
     owner_kind: "user",
     owner_id: uid(),
@@ -159,6 +161,7 @@ test("follows next_cursor and shows the Playground attribution", async ({ page }
   await page.goto("/requests");
   await expect(chain(page).filter({ hasText: "first-page" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "15 (10+5)", exact: true })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "ci-runner lw-3fa9c2…", exact: true })).toBeVisible();
   const nextPage = page.waitForRequest((request) => new URL(request.url()).searchParams.get("cursor") === "page-2");
   await page.getByRole("button", { name: "Next page" }).click();
   await nextPage;

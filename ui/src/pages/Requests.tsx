@@ -16,7 +16,7 @@ import { useCan, useCatalog, useMe, useNames, useTeamDirectory, useTeams } from 
 import { dayStart, shiftDay } from "../lib/days";
 import type { RequestsSearch } from "../lib/requests";
 import { localDayOf } from "./keyText";
-import { OUTCOME_TONE, outcomeLabel, RequestDetail } from "./RequestDetail";
+import { KeyName, OUTCOME_TONE, outcomeLabel, RequestDetail } from "./RequestDetail";
 
 const KINDS: { value: Schemas["TrafficKind"]; label: string }[] = [
   { value: "llm", label: "LLM" },
@@ -301,7 +301,7 @@ export function Requests() {
             hideBelow: "sm",
             cell: (row) => (
               <span className="flex flex-wrap items-center gap-1">
-                <span className="[overflow-wrap:anywhere]">{row.key_name ?? `${row.key_id.slice(0, 8)}…`}</span>
+                <KeyName row={row} />
                 {row.playground_user_id && (
                   <span data-testid="playground-badge">
                     <Badge tone="info">Playground</Badge>

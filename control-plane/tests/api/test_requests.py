@@ -306,6 +306,7 @@ async def test_playground_user_is_joined_by_request_id(client, committed) -> Non
     assert by_name["played"]["playground_user_id"] == str(user.id)
     assert by_name["plain"]["playground_user_id"] is None
     assert by_name["plain"]["key_name"] == key.name
+    assert by_name["plain"]["key_prefix"] == key.display_prefix
     # The installation admin sees the same join.
     admin_row = items(client, ADMIN_AUTH, request_id=str(played.request_id))[0]
     assert admin_row["playground_user_id"] == str(user.id)

@@ -10,6 +10,17 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { endpointLabel } from "../lib/endpoints";
 import { cn } from "../lib/utils";
 
+/** A request's key: its name and its `lw…` display prefix, or a short id once the key is gone. */
+export function KeyName({ row }: { row: RequestRow }) {
+  if (!row.key_name) return <span className="[overflow-wrap:anywhere]">{row.key_id.slice(0, 8)}…</span>;
+  return (
+    <span className="inline-flex flex-wrap items-baseline gap-x-1.5">
+      <span className="[overflow-wrap:anywhere]">{row.key_name}</span>
+      {row.key_prefix && <code className="text-xs text-muted-foreground" data-testid="request-key-prefix">{row.key_prefix}…</code>}
+    </span>
+  );
+}
+
 type Tone = "ok" | "warn" | "danger" | "muted" | "info";
 
 export const OUTCOME_TONE: Record<Schemas["RequestOutcome"], Tone> = {
@@ -51,7 +62,7 @@ interface Step {
 }
 
 /** The route a request took, in order; a step the request never reached is left out. */
-function steps(row: RequestRow, keyLabel: string): Step[] {
+function steps(row: RequestRow): Step[] {
   const out: Step[] = [
     {
       key: "received",
@@ -60,7 +71,7 @@ function steps(row: RequestRow, keyLabel: string): Step[] {
       name: row.requested || "—",
       detail: (
         <>
-          {row.endpoint ? endpointLabel(row.endpoint) : row.kind.toUpperCase()} · {keyLabel}
+          {row.endpoint ? endpointLabel(row.endpoint) : row.kind.toUpperCase()} · <KeyName row={row} />
           {row.stream ? " · streaming" : ""}
         </>
       ),
@@ -136,7 +147,6 @@ interface Props {
 
 /** One request's details beside the log: the route it took, then who sent it and what it cost. */
 export function RequestDetail({ row, onClose, team, owner, playgroundUser, requestId }: Props) {
-  const keyLabel = row ? (row.key_name ?? `${row.key_id.slice(0, 8)}…`) : "";
   return (
     <Sheet open={!!row} onOpenChange={(open) => !open && onClose()}>
       <SheetContent
@@ -160,7 +170,7 @@ export function RequestDetail({ row, onClose, team, owner, playgroundUser, reque
                   Route
                   <HelpTip text="Per-attempt details are in OTel under this request id; prompts and responses are never stored." />
                 </h3>
-                <Timeline items={steps(row, keyLabel)} />
+                <Timeline items={steps(row)} />
               </section>
               <Separator />
               <section aria-labelledby="request-usage" className="grid gap-3">
@@ -189,7 +199,9 @@ export function RequestDetail({ row, onClose, team, owner, playgroundUser, reque
                 <h3 id="request-sender" className="m-0 text-sm font-semibold">Sender</h3>
                 <DescriptionList>
                   <DescriptionTerm>Key</DescriptionTerm>
-                  <DescriptionDetails className="[overflow-wrap:anywhere]">{keyLabel}</DescriptionDetails>
+                  <DescriptionDetails>
+                    <KeyName row={row} />
+                  </DescriptionDetails>
                   <DescriptionTerm>Team</DescriptionTerm>
                   <DescriptionDetails className="[overflow-wrap:anywhere]">{team}</DescriptionDetails>
                   <DescriptionTerm>{row.owner_kind === "service_account" ? "Service account" : "Owner"}</DescriptionTerm>

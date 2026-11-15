@@ -3988,6 +3988,8 @@ export interface components {
             key_id: string;
             /** Key Name */
             key_name?: string | null;
+            /** Key Prefix */
+            key_prefix?: string | null;
             /**
              * Team Id
              * Format: uuid

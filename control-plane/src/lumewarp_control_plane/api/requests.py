@@ -86,6 +86,8 @@ class RequestOut(ReadModel):
     key_id: uuid.UUID
     # The key's current name; None when the key row no longer exists.
     key_name: str | None = None
+    # The key's display prefix (the start of its secret); None when the key row is gone.
+    key_prefix: str | None = None
     team_id: uuid.UUID
     owner_kind: KeyOwnerKind
     owner_id: uuid.UUID
@@ -268,7 +270,7 @@ async def list_requests(
         )
 
     stmt = (
-        select(UsageEvent, PlaygroundRequest.user_id, ApiKey.name)
+        select(UsageEvent, PlaygroundRequest.user_id, ApiKey.name, ApiKey.display_prefix)
         .outerjoin(PlaygroundRequest, PlaygroundRequest.request_id == UsageEvent.request_id)
         .outerjoin(ApiKey, ApiKey.id == UsageEvent.key_id)
         .where(*filters)
@@ -312,11 +314,12 @@ async def list_requests(
             duration_ms=event.duration_ms,
             key_id=event.key_id,
             key_name=key_name,
+            key_prefix=key_prefix,
             team_id=event.team_id,
             owner_kind=event.owner_kind,
             owner_id=event.owner_id,
             playground_user_id=playground_user_id,
         )
-        for event, playground_user_id, key_name in rows[:limit]
+        for event, playground_user_id, key_name, key_prefix in rows[:limit]
     ]
     return Page[RequestOut](items=items, next_cursor=next_cursor)
