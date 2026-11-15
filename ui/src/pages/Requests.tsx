@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSearch } from "@tanstack/react-router";
-import { ArrowRightIcon, CheckIcon, CopyIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useState } from "react";
 
 import { api, type RequestRow, type RequestsQuery, type Schemas } from "../api";
@@ -8,8 +8,10 @@ import { Badge, fmtUsd, PageHeader } from "../components/Bits";
 import { NumberField, SelectField, TextField } from "../components/Form";
 import { DataTable } from "../components/Table";
 import { Button } from "../components/ui/button";
+import { Badge as UiBadge } from "../components/ui/badge";
 import { Card } from "../components/ui/card";
 import { ComboboxField } from "../components/ui/combobox-field";
+import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { useCan, useCatalog, useMe, useNames, useTeamDirectory, useTeams } from "../hooks";
 import { dayStart, shiftDay } from "../lib/days";
 import type { RequestsSearch } from "../lib/requests";
@@ -40,7 +42,7 @@ const TONE: Record<Schemas["RequestOutcome"], "ok" | "warn" | "danger" | "muted"
 
 const outcomeLabel = (outcome: Schemas["RequestOutcome"]) => OUTCOMES.find((item) => item.value === outcome)?.label ?? outcome.replaceAll("_", " ");
 
-/** A short local timestamp; the table's main column is the name chain, not the date. */
+/** A short local timestamp. */
 const fmtWhen = (iso: string) => new Date(iso).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
 
 interface Filters {
@@ -193,11 +195,24 @@ export function Requests() {
   const personName = (id: string) =>
     id === me.data?.user_id ? (me.data.email ?? "You") : directoryEnabled ? memberName(id) : id.slice(0, 8);
 
+  const extraActive = [
+    filters.kind !== "llm",
+    !!filters.owner,
+    !!filters.alias,
+    !!filters.router,
+    filters.status !== null,
+    !!filters.outcome,
+    !!filters.requestId,
+  ].filter(Boolean).length;
+  const clearExtra = () =>
+    change({ kind: "llm", owner: "", alias: "", router: "", status: null, outcome: "", requestId: "" });
+
   return (
     <>
       <PageHeader title="Requests" hint="No prompt or response content is stored; copy a request id to look it up in OTel." />
-      <Card className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3 p-4 shadow-none">
-        <SelectField label="Kind" value={filters.kind} onChange={(value) => change({ kind: value as Schemas["TrafficKind"] })} options={KINDS} />
+      <Card className="mb-4 grid grid-cols-2 items-end gap-2 p-3 shadow-none sm:grid-cols-3 lg:grid-cols-[10rem_10rem_repeat(4,minmax(0,1fr))_auto]" data-testid="request-filters">
+        <TextField label="From" type="date" value={filters.from} onChange={(value) => change({ from: value })} hint="Empty starts 24 hours ago." />
+        <TextField label="To" type="date" value={filters.to} onChange={(value) => change({ to: value })} hint="Inclusive; empty ends now." />
         <ComboboxField
           label="Team"
           value={filters.teamId}
@@ -210,18 +225,33 @@ export function Requests() {
           onChange={(value) => change({ keyId: value })}
           options={keyOptions}
           disabled={!filters.teamId}
-          note={!filters.teamId ? "Choose a team first." : keys.isPending ? "Loading keys…" : undefined}
+          placeholder={!filters.teamId ? "Choose a team first" : undefined}
         />
-        {ownersEnabled && <ComboboxField label="Owner" value={filters.owner} onChange={(value) => change({ owner: value })} options={ownerOptions} />}
         <ComboboxField free label="Requested" value={filters.requested} onChange={(value) => change({ requested: String(value) })} options={requestedNames.map((name) => ({ value: name, label: name }))} placeholder="Any name" />
-        <ComboboxField free label="Model" value={filters.model} onChange={(value) => change({ model: String(value) })} options={names("model").map((name) => ({ value: name, label: name }))} placeholder="Any model" />
-        <ComboboxField free label="Alias" value={filters.alias} onChange={(value) => change({ alias: String(value) })} options={names("alias").map((name) => ({ value: name, label: name }))} placeholder="Any alias" />
-        <ComboboxField free label="Router" value={filters.router} onChange={(value) => change({ router: String(value) })} options={names("router").map((name) => ({ value: name, label: name }))} placeholder="Any router" />
-        <NumberField label="Status" value={filters.status} onChange={(value) => change({ status: value })} min={100} placeholder="Any status" />
-        <SelectField label="Outcome" value={filters.outcome} onChange={(value) => change({ outcome: value as Filters["outcome"] })} options={OUTCOMES} />
-        <TextField label="From" type="date" value={filters.from} onChange={(value) => change({ from: value })} note="Empty starts 24 hours ago." />
-        <TextField label="To (inclusive)" type="date" value={filters.to} onChange={(value) => change({ to: value })} note="Empty ends now." />
-        <TextField label="Request id" value={filters.requestId} onChange={(value) => change({ requestId: value })} placeholder="Full request id" hint="The id shown under the time of a request." />
+        <ComboboxField free label="Resolved" value={filters.model} onChange={(value) => change({ model: String(value) })} options={names("model").map((name) => ({ value: name, label: name }))} placeholder="Any model" />
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant="outline" className="col-span-2 sm:col-span-1">
+              <SlidersHorizontalIcon aria-hidden="true" />
+              More filters
+              {extraActive > 0 && <UiBadge variant="secondary">{extraActive}</UiBadge>}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="grid w-80 gap-3">
+            <SelectField label="Kind" value={filters.kind} onChange={(value) => change({ kind: value as Schemas["TrafficKind"] })} options={KINDS} />
+            {ownersEnabled && <ComboboxField label="Owner" value={filters.owner} onChange={(value) => change({ owner: value })} options={ownerOptions} />}
+            <ComboboxField free label="Alias" value={filters.alias} onChange={(value) => change({ alias: String(value) })} options={names("alias").map((name) => ({ value: name, label: name }))} placeholder="Any alias" />
+            <ComboboxField free label="Router" value={filters.router} onChange={(value) => change({ router: String(value) })} options={names("router").map((name) => ({ value: name, label: name }))} placeholder="Any router" />
+            <div className="grid grid-cols-2 gap-3">
+              <NumberField label="Status" value={filters.status} onChange={(value) => change({ status: value })} min={100} placeholder="Any" />
+              <SelectField label="Outcome" value={filters.outcome} onChange={(value) => change({ outcome: value as Filters["outcome"] })} options={OUTCOMES} />
+            </div>
+            <TextField label="Request id" value={filters.requestId} onChange={(value) => change({ requestId: value })} placeholder="Full request id" />
+            <Button variant="ghost" size="sm" onClick={clearExtra} disabled={extraActive === 0}>
+              Clear these filters
+            </Button>
+          </PopoverContent>
+        </Popover>
       </Card>
       <DataTable
         rows={query.data?.items}
@@ -242,55 +272,47 @@ export function Requests() {
               : undefined,
         }}
         columns={[
-          { key: "chain", header: "Called → Served", cell: (row) => <Chain row={row} /> },
           {
-            key: "when",
-            header: "When",
-            hideBelow: "md",
+            key: "date",
+            header: "Date",
             cell: (row) => (
-              <span className="flex flex-col gap-0.5 text-xs text-muted-foreground">
-                <span className="whitespace-nowrap">{fmtWhen(row.ts)}</span>
+              <span className="inline-flex items-center gap-1 whitespace-nowrap text-muted-foreground">
+                {fmtWhen(row.ts)}
                 <RequestId id={row.request_id} />
               </span>
             ),
           },
           {
-            key: "status",
-            header: "Status",
+            key: "requested",
+            header: "Requested",
+            cell: (row) => <strong className="[overflow-wrap:anywhere]" data-testid="request-requested">{row.requested || row.endpoint || "—"}</strong>,
+          },
+          { key: "resolved", header: "Resolved", cell: (row) => <Resolved row={row} /> },
+          {
+            key: "key",
+            header: "Key",
+            hideBelow: "sm",
             cell: (row) => (
-              <span className="flex flex-col items-start gap-0.5">
-                <Badge tone={TONE[row.outcome]}>{outcomeLabel(row.outcome)}</Badge>
-                <span className="text-xs text-muted-foreground tabular-nums">HTTP {row.status}</span>
+              <span className="flex flex-wrap items-center gap-1">
+                <span className="[overflow-wrap:anywhere]" title={`${teamName(row.team_id)} · ${ownerLabel(row)}`}>
+                  {row.key_name ?? `${row.key_id.slice(0, 8)}…`}
+                </span>
                 {row.playground_user_id && (
-                  <span className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground" data-testid="playground-badge">
+                  <span data-testid="playground-badge" title={`Sent from the Playground by ${personName(row.playground_user_id)}`}>
                     <Badge tone="info">Playground</Badge>
-                    {personName(row.playground_user_id)}
                   </span>
                 )}
               </span>
             ),
           },
           {
-            key: "traffic",
-            header: "Traffic",
-            hideBelow: "sm",
-            cell: (row) => (
-              <span className="flex flex-col gap-0.5 text-muted-foreground">
-                <span>
-                  {row.attempts} {row.attempts === 1 ? "attempt" : "attempts"}
-                </span>
-                <span>{row.stream ? "Streamed" : "Buffered"}</span>
-              </span>
-            ),
-          },
-          {
             key: "tokens",
-            header: "Tokens",
+            header: "Tokens in / out",
             align: "right",
             hideBelow: "sm",
             cell: (row) => (
-              <span title={`${row.prompt_tokens.toLocaleString()} prompt + ${row.completion_tokens.toLocaleString()} completion`}>
-                {(row.prompt_tokens + row.completion_tokens).toLocaleString()}
+              <span className="whitespace-nowrap">
+                {row.prompt_tokens.toLocaleString()} / {row.completion_tokens.toLocaleString()}
               </span>
             ),
           },
@@ -304,66 +326,35 @@ export function Requests() {
               </span>
             ),
           },
-          {
-            key: "attribution",
-            header: "Attribution",
-            hideBelow: "md",
-            cell: (row) => (
-              <span className="flex flex-col gap-0.5 text-xs">
-                <span className="font-medium whitespace-nowrap">{teamName(row.team_id)}</span>
-                <span className="[overflow-wrap:anywhere]" title={ownerLabel(row)}>
-                  {ownerLabel(row)}
-                </span>
-                <code className="text-muted-foreground" title={row.key_id}>
-                  {row.key_id.slice(0, 8)}…
-                </code>
-              </span>
-            ),
-          },
         ]}
       />
     </>
   );
 }
 
-/** The name chain: what the client called, any alias/router, then the model and upstream that served it. */
-function Chain({ row }: { row: RequestRow }) {
-  const arrow = <ArrowRightIcon className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />;
-  const called = row.requested || row.endpoint || "—";
-  const served = row.model || "—";
-  const step = (label: string, value: string) => (
-    <span className="inline-flex min-w-0 items-center gap-0.5">
-      <span className="text-xs text-muted-foreground">{label}</span>
-      <span className="[overflow-wrap:anywhere]">{value}</span>
-    </span>
-  );
+/**
+ * The name the request resolved to: the model that served it. How it got there (alias, router,
+ * fallback, upstream) is in the tooltip; a request that did not complete shows its outcome.
+ */
+function Resolved({ row }: { row: RequestRow }) {
+  const path = [
+    row.alias && `alias ${row.alias}`,
+    row.router && `router ${row.router}`,
+    row.fallback && "fallback",
+    row.upstream && `${row.upstream}/${row.upstream_model || "—"}`,
+  ].filter(Boolean).join(" → ");
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1 text-sm" data-testid="request-chain">
-      <strong className="[overflow-wrap:anywhere]">{called}</strong>
-      {row.alias && (
-        <>
-          {arrow}
-          {step("alias:", row.alias)}
-        </>
-      )}
-      {row.router && (
-        <>
-          {arrow}
-          {step("router:", row.router)}
-        </>
-      )}
+    <span className="flex flex-wrap items-center gap-1" data-testid="request-chain" title={path || undefined}>
+      <span className="[overflow-wrap:anywhere]">{row.model || "—"}</span>
       {row.fallback && <Badge tone="warn">fallback</Badge>}
-      {arrow}
-      <strong className="[overflow-wrap:anywhere]">{served}</strong>
-      {row.upstream && (
-        <span className="inline-flex min-w-0 items-baseline gap-1 text-xs text-muted-foreground">
-          @
-          <code className="[overflow-wrap:anywhere]">
-            {row.upstream}/{row.upstream_model || "—"}
-          </code>
-        </span>
+      {row.outcome !== "completed" && (
+        <Badge tone={TONE[row.outcome]}>
+          {outcomeLabel(row.outcome)}
+          {row.status ? ` ${row.status}` : ""}
+        </Badge>
       )}
-    </div>
+      <span className="sr-only">{path}</span>
+    </span>
   );
 }
 
@@ -379,10 +370,7 @@ function RequestId({ id }: { id: string }) {
     }
   };
   return (
-    <span className="inline-flex items-center gap-1">
-      <code className="text-xs text-muted-foreground" title={id}>
-        {id.slice(0, 8)}…
-      </code>
+    <span className="inline-flex items-center">
       <Button
         type="button"
         variant="ghost"

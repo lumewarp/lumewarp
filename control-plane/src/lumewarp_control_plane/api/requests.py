@@ -32,6 +32,7 @@ from lumewarp_control_plane.api.schemas import Page, ReadModel
 from lumewarp_control_plane.api.usage import _check_scope_filters
 from lumewarp_control_plane.authz import Authz
 from lumewarp_control_plane.models import (
+    ApiKey,
     CatalogKind,
     CatalogName,
     KeyOwnerKind,
@@ -83,6 +84,8 @@ class RequestOut(ReadModel):
     usage_state: UsageState
     duration_ms: int
     key_id: uuid.UUID
+    # The key's current name; None when the key row no longer exists.
+    key_name: str | None = None
     team_id: uuid.UUID
     owner_kind: KeyOwnerKind
     owner_id: uuid.UUID
@@ -265,8 +268,9 @@ async def list_requests(
         )
 
     stmt = (
-        select(UsageEvent, PlaygroundRequest.user_id)
+        select(UsageEvent, PlaygroundRequest.user_id, ApiKey.name)
         .outerjoin(PlaygroundRequest, PlaygroundRequest.request_id == UsageEvent.request_id)
+        .outerjoin(ApiKey, ApiKey.id == UsageEvent.key_id)
         .where(*filters)
         .order_by(UsageEvent.ts.desc(), UsageEvent.request_id.desc())
     )
@@ -307,11 +311,12 @@ async def list_requests(
             usage_state=event.usage_state,
             duration_ms=event.duration_ms,
             key_id=event.key_id,
+            key_name=key_name,
             team_id=event.team_id,
             owner_kind=event.owner_kind,
             owner_id=event.owner_id,
             playground_user_id=playground_user_id,
         )
-        for event, playground_user_id in rows[:limit]
+        for event, playground_user_id, key_name in rows[:limit]
     ]
     return Page[RequestOut](items=items, next_cursor=next_cursor)

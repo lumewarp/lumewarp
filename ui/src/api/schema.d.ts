@@ -3986,6 +3986,8 @@ export interface components {
              * Format: uuid
              */
             key_id: string;
+            /** Key Name */
+            key_name?: string | null;
             /**
              * Team Id
              * Format: uuid

@@ -11,6 +11,7 @@ import { pick } from "./helpers";
 const BREAK_GLASS = "e2e-break-glass-password";
 
 const chain = (page: Page) => page.getByTestId("request-chain");
+const moreFilters = (page: Page) => page.getByRole("button", { name: /More filters/ }).click();
 
 test.beforeEach(async ({ page, request }) => {
   const response = await request.post("/api/v1/session/break-glass", { data: { password: BREAK_GLASS } });
@@ -32,15 +33,21 @@ test("lists requests newest first, renders the name chain, and defaults to LLM f
   expect(query.get("to")).toBeNull();
   await expect(page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Requests", exact: true })).toBeVisible();
 
-  const viaAliasAndRouter = chain(page).filter({ hasText: "use/a" }).filter({ hasText: "alias:use-alias" }).first();
-  await expect(viaAliasAndRouter).toContainText("alias:use-alias");
-  await expect(viaAliasAndRouter).toContainText("router:use-router");
+  for (const header of ["Date", "Requested", "Resolved", "Key", "Tokens in / out", "Cost"]) {
+    await expect(page.getByRole("columnheader", { name: header, exact: true })).toBeVisible();
+  }
+
+  // Resolved shows the serving model; the alias, router and upstream it went through are its tooltip.
+  const viaAliasAndRouter = chain(page).filter({ hasText: "use/a" }).filter({ hasText: "alias use-alias" }).first();
+  await expect(viaAliasAndRouter).toContainText("router use-router");
   await expect(viaAliasAndRouter).toContainText("use-up/Qwen/UseA");
+  await expect(viaAliasAndRouter).toHaveAttribute("title", /alias use-alias → router use-router/);
 
   const directAlias = chain(page).filter({ hasText: "use-direct" }).first();
-  await expect(directAlias).toContainText("alias:use-direct");
-  await expect(directAlias).not.toContainText("router:");
+  await expect(directAlias).toContainText("alias use-direct");
+  await expect(directAlias).not.toContainText("router ");
   await expect(directAlias).toContainText("use/c");
+  await expect(page.getByTestId("request-requested").getByText("use-direct", { exact: true }).first()).toBeVisible();
 
   await expect(page.getByRole("button", { name: "Copy request id", exact: true }).first()).toBeVisible();
   await expect(page.getByTestId("request-chain").first()).toBeVisible();
@@ -49,8 +56,8 @@ test("lists requests newest first, renders the name chain, and defaults to LLM f
 test("filters send the names, status, outcome, kind and request id to the API", async ({ page, request }) => {
   await page.goto("/requests");
   await expect(page.getByRole("heading", { name: "Requests", level: 1 })).toBeVisible();
+  await moreFilters(page);
   await expect(page.getByRole("combobox", { name: "Kind", exact: true })).toHaveText("LLM");
-  await expect(page.getByText("Empty starts 24 hours ago.")).toBeVisible();
 
   const [kindRequest] = await Promise.all([
     page.waitForRequest((r) => new URL(r.url()).searchParams.get("kind") === "mcp"),
@@ -58,15 +65,17 @@ test("filters send the names, status, outcome, kind and request id to the API", 
   ]);
   expect(new URL(kindRequest.url()).searchParams.get("kind")).toBe("mcp");
   await pick(page, "Kind", "LLM");
+  await page.keyboard.press("Escape");
 
   const [modelResponse] = await Promise.all([
     page.waitForResponse((r) => new URL(r.url()).pathname === "/api/v1/requests" && new URL(r.url()).searchParams.get("model") === "use/a"),
-    page.getByRole("combobox", { name: "Model", exact: true }).fill("use/a"),
+    page.getByRole("combobox", { name: "Resolved", exact: true }).fill("use/a"),
   ]);
   expect(modelResponse.ok()).toBe(true);
   await expect(chain(page).filter({ hasText: "use/b" })).toHaveCount(0);
 
-  await page.getByRole("combobox", { name: "Model", exact: true }).fill("");
+  await page.getByRole("combobox", { name: "Resolved", exact: true }).fill("");
+  await moreFilters(page);
   const [aliasResponse] = await Promise.all([
     page.waitForResponse((r) => new URL(r.url()).pathname === "/api/v1/requests" && new URL(r.url()).searchParams.get("alias") === "use-direct"),
     page.getByRole("combobox", { name: "Alias", exact: true }).fill("use-direct"),
@@ -87,7 +96,6 @@ test("filters send the names, status, outcome, kind and request id to the API", 
   expect(new URL(statusRequest.url()).searchParams.get("status")).toBe("200");
 
   // The id filter is the last one; the earlier name filters would otherwise narrow the same row away.
-  await page.getByRole("combobox", { name: "Model", exact: true }).fill("");
   await page.getByRole("combobox", { name: "Alias", exact: true }).fill("");
   const listed = (await (await request.get("/api/v1/requests?kind=llm&model=use%2Fa&limit=1")).json()) as { items: { request_id: string }[] };
   const id = listed.items[0]!.request_id;
@@ -159,7 +167,7 @@ test("Requests stays usable at 390 px and in dark mode", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Requests", level: 1 })).toBeVisible();
   await expect(chain(page).first()).toBeVisible();
   await expect(page.locator("html")).toHaveClass(/dark/);
-  await expect(page.getByRole("columnheader", { name: "When", exact: true })).toBeHidden();
+  await expect(page.getByRole("columnheader", { name: "Key", exact: true })).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
@@ -176,5 +184,5 @@ test("Usage rows open Requests with the same names and range", async ({ page }) 
   await view.click();
   await expect(page.getByRole("heading", { name: "Requests", level: 1 })).toBeVisible();
   await expect(page.getByLabel("From")).toHaveValue(/^\d{4}-\d{2}-\d{2}$/);
-  await expect(page.getByLabel("To (inclusive)")).toHaveValue(/^\d{4}-\d{2}-\d{2}$/);
+  await expect(page.getByLabel("To", { exact: true })).toHaveValue(/^\d{4}-\d{2}-\d{2}$/);
 });
