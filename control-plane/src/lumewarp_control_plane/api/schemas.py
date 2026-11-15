@@ -25,6 +25,7 @@ from pydantic import (
 
 from lumewarp_control_plane.api import field_docs
 from lumewarp_control_plane.compiler.validate import (
+    BUILTIN_AUTH,
     DEFAULT_BODY_RESERVED_KEYS,
     body_object_problem,
     card_url_problem,
@@ -570,6 +571,14 @@ class CircuitBreakerOut(ReadModel):
     open_ms: int | None
 
 
+def _force_field() -> Any:
+    # default_factory: an OpenAPI `default` would make it required in the generated UI client.
+    return Field(
+        default_factory=lambda: False,
+        description="Save although connected gateways lack the plugin; they will NACK.",
+    )
+
+
 _API_KEY_DOC = (
     "Bearer token, stored sealed with LUMEWARP_ENCRYPTION_KEY and never returned. "
     "Mutually exclusive with api_key_ref."
@@ -595,6 +604,31 @@ def _health_url(value: str | None) -> str | None:
     return value
 
 
+class UpstreamAuthIn(ApiModel):
+    """Outbound credentials from a WASM `upstream-auth` plugin (proto `UpstreamAuth`).
+
+    Only a WASM plugin is valid on an LLM upstream: a static bearer is `api_key_ref` or
+    `api_key`, and the MCP/A2A built-ins (`none`, `static_bearer`, `passthrough`) are
+    refused. The plugin reads its own secrets from the gateway environment, so this shape
+    carries settings only.
+    """
+
+    plugin: AuthPluginName
+    params: Params = Field(default_factory=dict)
+    # WASM plugin only: how long one call may run; 0 = the gateway default (60 s).
+    timeout_ms: int = Field(default=0, ge=0, le=INT32_MAX)
+
+    @field_validator("plugin")
+    @classmethod
+    def _wasm_plugin(cls, value: str) -> str:
+        if value in BUILTIN_AUTH:
+            raise ValueError(
+                "must be a WASM upstream-auth plugin; on an LLM upstream a static bearer is"
+                " api_key or api_key_ref"
+            )
+        return value
+
+
 class UpstreamCreate(ApiModel):
     health_url: str | None = Field(default=None, max_length=2000)
 
@@ -606,11 +640,13 @@ class UpstreamCreate(ApiModel):
     api_key: SecretStr | None = Field(
         default=None, min_length=1, max_length=4096, description=_API_KEY_DOC
     )
+    auth: UpstreamAuthIn | None = None
     timeout_ms: int = Field(default=0, ge=0)
     stream_usage_mode: StreamUsageMode = StreamUsageMode.INCLUDE_USAGE
     health_check: HealthCheckIn | None = None
     circuit_breaker: CircuitBreakerIn | None = None
     metrics_url: str | None = Field(default=None, max_length=2000)
+    force: bool = _force_field()
 
     @field_validator("base_url")
     @classmethod
@@ -633,9 +669,11 @@ class UpstreamCreate(ApiModel):
         return _metrics_url(value)
 
     @model_validator(mode="after")
-    def _one_key_source(self) -> UpstreamCreate:
+    def _one_credential(self) -> UpstreamCreate:
         if self.api_key is not None and self.api_key_ref is not None:
             raise ValueError("set api_key or api_key_ref, not both")
+        if self.auth is not None and (self.api_key is not None or self.api_key_ref is not None):
+            raise ValueError("set auth or an API key, not both")
         return self
 
 
@@ -656,11 +694,13 @@ class UpstreamUpdate(ApiModel):
     api_key: SecretStr | None = Field(
         default=None, min_length=1, max_length=4096, description=_API_KEY_DOC
     )
+    auth: UpstreamAuthIn | None = None
     timeout_ms: int | None = Field(default=None, ge=0)
     stream_usage_mode: StreamUsageMode | None = None
     health_check: HealthCheckIn | None = None
     circuit_breaker: CircuitBreakerIn | None = None
     metrics_url: str | None = Field(default=None, max_length=2000)
+    force: bool = _force_field()
 
     @field_validator("base_url")
     @classmethod
@@ -683,9 +723,11 @@ class UpstreamUpdate(ApiModel):
         return _metrics_url(value)
 
     @model_validator(mode="after")
-    def _one_key_source(self) -> UpstreamUpdate:
+    def _one_credential(self) -> UpstreamUpdate:
         if self.api_key is not None and self.api_key_ref is not None:
             raise ValueError("set api_key or api_key_ref, not both")
+        if self.auth is not None and (self.api_key is not None or self.api_key_ref is not None):
+            raise ValueError("set auth or an API key, not both")
         return self
 
 
@@ -703,6 +745,14 @@ def _probe(row: Any) -> ProbeResultOut | None:
     return ProbeResultOut(at=row.probe_at, ok=row.probe_ok, ok_at=row.probe_ok_at)
 
 
+class PluginRefOut(ReadModel):
+    plugin: str
+    params: dict[str, Any]
+    timeout_ms: int = Field(
+        description="One plugin call's timeout in ms; 0 = the gateway's 60 s default."
+    )
+
+
 class UpstreamOut(ReadModel):
     health_url: str | None
     id: uuid.UUID
@@ -712,6 +762,9 @@ class UpstreamOut(ReadModel):
     api_key_ref: str | None
     api_key_set: bool = Field(
         description="A sealed api_key is stored (its value is never returned)."
+    )
+    auth: PluginRefOut | None = Field(
+        default=None, description="The WASM upstream-auth plugin; null = none."
     )
     timeout_ms: int
     stream_usage_mode: StreamUsageMode
@@ -757,6 +810,15 @@ class UpstreamOut(ReadModel):
             "base_url": data.base_url,
             "api_key_ref": data.api_key_ref,
             "api_key_set": data.api_key_ciphertext is not None,
+            "auth": (
+                PluginRefOut(
+                    plugin=data.auth_plugin,
+                    params=data.auth_params or {},
+                    timeout_ms=data.auth_timeout_ms,
+                )
+                if data.auth_plugin is not None
+                else None
+            ),
             "timeout_ms": data.timeout_ms,
             "stream_usage_mode": data.stream_usage_mode,
             "health_url": data.health_url,
@@ -1134,14 +1196,6 @@ Splits = Annotated[list[TrafficSplitIn], AfterValidator(_check_splits)]
 
 
 StrategyName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")]
-
-
-def _force_field() -> Any:
-    # default_factory: an OpenAPI `default` would make it required in the generated UI client.
-    return Field(
-        default_factory=lambda: False,
-        description="Save although connected gateways lack the plugin; they will NACK.",
-    )
 
 
 class RouterCreate(ApiModel):
@@ -1697,6 +1751,13 @@ class UpstreamTestIn(ApiModel):
         description="A key typed in the form; used once, never stored.",
     )
     api_key_ref: str | None = Field(default=None, max_length=200)
+    auth: UpstreamAuthIn | None = Field(
+        default=None,
+        description=(
+            "A WASM auth plugin named by the form; it cannot be probed from the control"
+            " plane, so save the upstream first and test it from there."
+        ),
+    )
     upstream_id: uuid.UUID | None = Field(
         default=None,
         description=(
@@ -1724,9 +1785,11 @@ class UpstreamTestIn(ApiModel):
     _check_health_url = field_validator("health_url")(_health_url)
 
     @model_validator(mode="after")
-    def _one_key_source(self) -> UpstreamTestIn:
+    def _one_credential(self) -> UpstreamTestIn:
         if self.api_key is not None and self.api_key_ref is not None:
             raise ValueError("set api_key or api_key_ref, not both")
+        if self.auth is not None and (self.api_key is not None or self.api_key_ref is not None):
+            raise ValueError("set auth or an API key, not both")
         return self
 
 
@@ -1756,18 +1819,27 @@ class ModelTestIn(ApiModel):
 
 
 class ModelTestOut(ReadModel):
-    credential: Literal["stored", "env", "env_unset", "none"]
+    credential: Literal["plugin", "stored", "env", "env_unset", "none"] = Field(
+        description=(
+            "How the credential was obtained: a WASM auth plugin, the saved upstream's"
+            " stored key, the control plane's env var (or missing there), or none."
+        )
+    )
     probe: ProbeOut
     reply: str | None = Field(
-        description="The start of the model's answer (at most 200 characters), on success."
+        description=(
+            "The start of the model's answer (at most 200 characters), on success; null"
+            " when a gateway ran the probe, since no response body leaves it."
+        )
     )
 
 
 class UpstreamTestOut(ReadModel):
-    credential: Literal["entered", "stored", "env", "env_unset", "none"] = Field(
+    credential: Literal["plugin", "entered", "stored", "env", "env_unset", "none"] = Field(
         description=(
-            "The bearer token used: typed in the form, the saved upstream's stored key, the"
-            " control plane's own env var, that env var missing here, or none."
+            "How the credential was obtained: a WASM auth plugin, typed in the form, the"
+            " saved upstream's stored key, the control plane's own env var (or missing"
+            " here), or none."
         )
     )
     probe: ProbeOut
@@ -1870,14 +1942,6 @@ class PluginRefIn(ApiModel):
     params: Params = Field(default_factory=dict)
     # WASM plugin only: how long one call may run; 0 = the gateway default (60 s).
     timeout_ms: int = Field(default=0, ge=0, le=INT32_MAX)
-
-
-class PluginRefOut(ReadModel):
-    plugin: str
-    params: dict[str, Any]
-    timeout_ms: int = Field(
-        description="One plugin call's timeout in ms; 0 = the gateway's 60 s default."
-    )
 
 
 class McpServerCreate(ApiModel):

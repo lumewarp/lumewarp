@@ -821,7 +821,13 @@ class Upstream(TimestampMixin, Base):
         CheckConstraint(
             "api_key_ref IS NULL OR api_key_ciphertext IS NULL", name="one_api_key_source"
         ),
+        # An LLM upstream takes a static bearer or a WASM auth plugin, never both.
+        CheckConstraint(
+            "auth_plugin IS NULL OR (api_key_ref IS NULL AND api_key_ciphertext IS NULL)",
+            name="auth_plugin_excludes_api_key",
+        ),
         CheckConstraint("timeout_ms >= 0", name="timeout_nonneg"),
+        CheckConstraint("auth_timeout_ms >= 0", name="auth_timeout_nonneg"),
         # Health check: interval/timeout NULL = no active probing; the other settings
         # only exist together with them.
         CheckConstraint(
@@ -863,6 +869,17 @@ class Upstream(TimestampMixin, Base):
     # The bearer token itself, sealed with LUMEWARP_ENCRYPTION_KEY (sealing.py); never
     # returned by the API. At most one of this and api_key_ref.
     api_key_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
+    # A WASM `upstream-auth` plugin that supplies the outbound credential. NULL = none:
+    # the built-ins none/static_bearer/passthrough are MCP/A2A-only, and a static bearer
+    # here is api_key_ref/api_key_ciphertext. Mutually exclusive with those two.
+    auth_plugin: Mapped[str | None] = mapped_column(String(63))
+    # Plugin settings: a JSON object, at most 16 KiB. Never a credential.
+    auth_params: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    # How long one call to the auth plugin may run (proto PluginRef.timeout_ms).
+    # 0 = 60 s.
+    auth_timeout_ms: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     # 0 = gateway default.
     timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     stream_usage_mode: Mapped[StreamUsageMode] = mapped_column(
@@ -2064,6 +2081,28 @@ class UsageEvent(Base):
     outcome: Mapped[RequestOutcome] = mapped_column(
         _enum(RequestOutcome, "request_outcome"), nullable=False
     )
+
+
+class PlaygroundRequest(Base):
+    """A request the Admin UI Playground sent through the gateway.
+
+    `usage_events` already stores the request itself; this side table only says which user
+    drove a key, so `GET /requests` can show it. `request_id` is the gateway's
+    `x-lumewarp-request-id`. No FK on `key_id`: like usage itself, this is a log row and a
+    key is revoked rather than deleted. `ON DELETE CASCADE` on the user: deleting an
+    account removes its Playground attribution (the usage row remains), and the column is
+    NOT NULL so SET NULL is not an option.
+    """
+
+    __tablename__ = "playground_requests"
+    __table_args__ = (Index("ix_playground_requests_user_ts", "user_id", "ts"),)
+
+    request_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    key_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    ts: Mapped[datetime] = _now()
 
 
 class OrgBudgetWindow(Base):

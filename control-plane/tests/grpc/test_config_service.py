@@ -28,7 +28,15 @@ from lumewarp_control_plane.compiler.plugins import (
 )
 from lumewarp_control_plane.compiler.publish import compact_versions
 from lumewarp_control_plane.db import SessionFactory, create_session_factory
-from lumewarp_control_plane.grpc import bound_port, peer_address, registry_for, serve
+from lumewarp_control_plane.grpc import (
+    ProbeGatewayGone,
+    ProbeTimeout,
+    ProbeUnavailable,
+    bound_port,
+    peer_address,
+    registry_for,
+    serve,
+)
 from lumewarp_control_plane.ids import uuid7
 from lumewarp_control_plane.models import (
     ConfigVersion,
@@ -2164,3 +2172,135 @@ async def test_usage_is_attributed_to_the_reporting_gateway(
 )
 def test_peer_is_stored_without_the_grpc_address_family(raw, shown):
     assert peer_address(raw) == shown
+
+
+PROBE_PLUGIN = "hmac_signature"
+PROBE_SCHEMA = json.dumps(
+    {
+        "type": "object",
+        "properties": {"ttl_ms": {"type": "integer"}},
+        "additionalProperties": False,
+    }
+)
+
+
+def _probe_plugin() -> cpb.PluginDescriptor:
+    return cpb.PluginDescriptor(
+        kind=cpb.PLUGIN_KIND_UPSTREAM_AUTH,
+        name=PROBE_PLUGIN,
+        params_schema_json=PROBE_SCHEMA,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_probe_request_reaches_a_capable_gateway_and_its_result_resolves(
+    session_factory: SessionFactory,
+):
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    call = await _open_stream(
+        stub,
+        tokens["gateway-a"],
+        "gateway-a",
+        scope=scope,
+        plugins=(_probe_plugin(),),
+        capabilities=("upstream_probe",),
+    )
+    try:
+        assert (await asyncio.wait_for(call.read(), 2)).WhichOneof("update") == "full"
+        registry = registry_for(server)
+        assert registry is not None
+        pending = asyncio.create_task(
+            registry.probe(scope, PROBE_PLUGIN, "vllm", "dep", timeout_seconds=5)
+        )
+        update = await asyncio.wait_for(call.read(), 2)
+        assert update.WhichOneof("update") == "probe"
+        assert (update.probe.upstream, update.probe.model) == ("vllm", "dep")
+        assert update.probe.request_id
+        await call.write(
+            cpb.GatewayMessage(
+                probe_result=cpb.ProbeResult(
+                    request_id=update.probe.request_id, ok=True, status=200, latency_ms=9
+                )
+            )
+        )
+        result = await asyncio.wait_for(pending, 2)
+        assert (result.ok, result.status, result.latency_ms) == (True, 200, 9)
+        assert result.request_id == update.probe.request_id
+    finally:
+        call.cancel()
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.asyncio
+async def test_no_capable_gateway_is_probe_unavailable(session_factory: SessionFactory):
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    # It reports the plugin but cannot run a probe.
+    call = await _open_stream(
+        stub, tokens["gateway-a"], "gateway-a", scope=scope, plugins=(_probe_plugin(),)
+    )
+    try:
+        assert (await asyncio.wait_for(call.read(), 2)).WhichOneof("update") == "full"
+        registry = registry_for(server)
+        assert registry is not None
+        with pytest.raises(ProbeUnavailable):
+            await registry.probe(scope, PROBE_PLUGIN, "vllm", "", timeout_seconds=1)
+    finally:
+        call.cancel()
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.asyncio
+async def test_an_unanswered_probe_times_out(session_factory: SessionFactory):
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    call = await _open_stream(
+        stub,
+        tokens["gateway-a"],
+        "gateway-a",
+        scope=scope,
+        plugins=(_probe_plugin(),),
+        capabilities=("upstream_probe",),
+    )
+    try:
+        assert (await asyncio.wait_for(call.read(), 2)).WhichOneof("update") == "full"
+        registry = registry_for(server)
+        assert registry is not None
+        with pytest.raises(ProbeTimeout):
+            await registry.probe(scope, PROBE_PLUGIN, "vllm", "", timeout_seconds=0.05)
+    finally:
+        call.cancel()
+        await channel.close()
+        await server.stop(0)
+
+
+@pytest.mark.asyncio
+async def test_a_disconnect_cleans_up_a_pending_probe(session_factory: SessionFactory):
+    scope, tokens = await _seed(session_factory)
+    server, channel, stub = await _start(session_factory, scope)
+    call = await _open_stream(
+        stub,
+        tokens["gateway-a"],
+        "gateway-a",
+        scope=scope,
+        plugins=(_probe_plugin(),),
+        capabilities=("upstream_probe",),
+    )
+    try:
+        assert (await asyncio.wait_for(call.read(), 2)).WhichOneof("update") == "full"
+        registry = registry_for(server)
+        assert registry is not None
+        pending = asyncio.create_task(
+            registry.probe(scope, PROBE_PLUGIN, "vllm", "", timeout_seconds=10)
+        )
+        request = await asyncio.wait_for(call.read(), 2)
+        assert request.WhichOneof("update") == "probe"
+        call.cancel()
+        with pytest.raises(ProbeGatewayGone):
+            await asyncio.wait_for(pending, 3)
+    finally:
+        await channel.close()
+        await server.stop(0)

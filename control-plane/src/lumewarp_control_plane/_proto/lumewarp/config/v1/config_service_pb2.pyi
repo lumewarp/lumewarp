@@ -33,18 +33,44 @@ NACK_CODE_UNSUPPORTED_FEATURE: NackCode
 NACK_CODE_PERSIST_FAILED: NackCode
 
 class GatewayMessage(_message.Message):
-    __slots__ = ("hello", "ack", "nack", "health", "catalog")
+    __slots__ = ("hello", "ack", "nack", "health", "catalog", "probe_result")
     HELLO_FIELD_NUMBER: _ClassVar[int]
     ACK_FIELD_NUMBER: _ClassVar[int]
     NACK_FIELD_NUMBER: _ClassVar[int]
     HEALTH_FIELD_NUMBER: _ClassVar[int]
     CATALOG_FIELD_NUMBER: _ClassVar[int]
+    PROBE_RESULT_FIELD_NUMBER: _ClassVar[int]
     hello: Hello
     ack: Ack
     nack: Nack
     health: HealthReport
     catalog: CatalogReport
-    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., ack: _Optional[_Union[Ack, _Mapping]] = ..., nack: _Optional[_Union[Nack, _Mapping]] = ..., health: _Optional[_Union[HealthReport, _Mapping]] = ..., catalog: _Optional[_Union[CatalogReport, _Mapping]] = ...) -> None: ...
+    probe_result: ProbeResult
+    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., ack: _Optional[_Union[Ack, _Mapping]] = ..., nack: _Optional[_Union[Nack, _Mapping]] = ..., health: _Optional[_Union[HealthReport, _Mapping]] = ..., catalog: _Optional[_Union[CatalogReport, _Mapping]] = ..., probe_result: _Optional[_Union[ProbeResult, _Mapping]] = ...) -> None: ...
+
+class ProbeRequest(_message.Message):
+    __slots__ = ("request_id", "upstream", "model")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    UPSTREAM_FIELD_NUMBER: _ClassVar[int]
+    MODEL_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    upstream: str
+    model: str
+    def __init__(self, request_id: _Optional[str] = ..., upstream: _Optional[str] = ..., model: _Optional[str] = ...) -> None: ...
+
+class ProbeResult(_message.Message):
+    __slots__ = ("request_id", "ok", "status", "latency_ms", "error_class")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    OK_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    LATENCY_MS_FIELD_NUMBER: _ClassVar[int]
+    ERROR_CLASS_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    ok: bool
+    status: int
+    latency_ms: int
+    error_class: str
+    def __init__(self, request_id: _Optional[str] = ..., ok: _Optional[bool] = ..., status: _Optional[int] = ..., latency_ms: _Optional[int] = ..., error_class: _Optional[str] = ...) -> None: ...
 
 class HealthReport(_message.Message):
     __slots__ = ("upstreams", "models")
@@ -189,14 +215,16 @@ class Nack(_message.Message):
     def __init__(self, version: _Optional[int] = ..., reason: _Optional[str] = ..., have_version: _Optional[int] = ..., code: _Optional[_Union[NackCode, str]] = ...) -> None: ...
 
 class ConfigUpdate(_message.Message):
-    __slots__ = ("full", "delta", "target_digest")
+    __slots__ = ("full", "delta", "probe", "target_digest")
     FULL_FIELD_NUMBER: _ClassVar[int]
     DELTA_FIELD_NUMBER: _ClassVar[int]
+    PROBE_FIELD_NUMBER: _ClassVar[int]
     TARGET_DIGEST_FIELD_NUMBER: _ClassVar[int]
     full: _snapshot_pb2.Snapshot
     delta: Delta
+    probe: ProbeRequest
     target_digest: bytes
-    def __init__(self, full: _Optional[_Union[_snapshot_pb2.Snapshot, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., target_digest: _Optional[bytes] = ...) -> None: ...
+    def __init__(self, full: _Optional[_Union[_snapshot_pb2.Snapshot, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., probe: _Optional[_Union[ProbeRequest, _Mapping]] = ..., target_digest: _Optional[bytes] = ...) -> None: ...
 
 class Delta(_message.Message):
     __slots__ = ("base_version", "version", "upsert_upstreams", "remove_upstreams", "upsert_models", "remove_models", "upsert_routers", "remove_routers", "upsert_api_keys", "remove_api_keys", "upsert_teams", "remove_teams", "created_at_unix_ms", "required_capabilities", "upsert_aliases", "remove_aliases", "upsert_mcp_servers", "remove_mcp_servers", "upsert_a2a_agents", "remove_a2a_agents")

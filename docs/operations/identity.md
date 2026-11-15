@@ -23,7 +23,8 @@ Three token types, stored only as SHA-256 hashes, and two kinds of cookie sessio
 
 The bearer scheme accepts PATs only. Nothing else authenticates to the admin API. No
 credential is stored in plaintext: the OIDC nonce and PKCE verifier live only in the
-encrypted login cookie, and an upstream stores only its `api_key_ref` name.
+encrypted login cookie, and an upstream stores only its `api_key_ref` name, a sealed key,
+or a WASM auth plugin's non-secret settings.
 
 Installation admins live in Postgres (`installation_admins`). The first verified login whose
 email matches `LUMEWARP_INITIAL_ADMIN_EMAIL` becomes the `proxy_admin`; break-glass can create

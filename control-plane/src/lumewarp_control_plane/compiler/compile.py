@@ -408,6 +408,18 @@ async def compile_scope(
             timeout_ms=u.timeout_ms,
             stream_usage_mode=STREAM_USAGE_MODE[u.stream_usage_mode],
         )
+        # Only a WASM plugin is emitted: a static bearer stays api_key_ref/ciphertext. An
+        # upstream without one adds no field, so its bytes are unchanged.
+        if u.auth_plugin is not None:
+            up.auth.CopyFrom(
+                pb.UpstreamAuth(
+                    plugin=pb.PluginRef(
+                        plugin=u.auth_plugin,
+                        params_json=_params_json(u.auth_params or {}),
+                        timeout_ms=u.auth_timeout_ms,
+                    )
+                )
+            )
         if u.health_check_interval_ms is not None:
             up.health_check.CopyFrom(
                 pb.HealthCheck(

@@ -9,13 +9,14 @@ import remarkGfm from "remark-gfm";
 import { api, type Schemas } from "../api";
 import { playgroundProvider, type PlaygroundKey, type ResponseInfo } from "../api/playground";
 import { PageHeader } from "../components/Bits";
-import { SelectField } from "../components/Form";
+import { Field, SelectField } from "../components/Form";
 import { JsonEditor } from "../components/SchemaForm";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/ui/empty";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
 import { Textarea } from "../components/ui/textarea";
 import { useMe } from "../hooks";
@@ -97,7 +98,7 @@ export function Playground() {
           <EmptyHeader>
             <EmptyTitle>No usable key</EmptyTitle>
             <EmptyDescription>
-              The playground uses one of your own active keys. Create one in <Link to="/my-keys">My keys</Link>.
+              The playground uses an active key of yours or of a service account you administer. Create one in <Link to="/my-keys">My keys</Link>.
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -105,6 +106,44 @@ export function Playground() {
         <Chat keys={info.data.keys} reasoning={info.data.reasoning ?? {}} />
       )}
     </div>
+  );
+}
+
+/** The keys one may act as, grouped by who owns them; service-account keys name their team and account. */
+function KeySelect({ keys, value, onChange }: { keys: PlaygroundKey[]; value: string; onChange: (id: string) => void }) {
+  const mine = keys.filter((key) => key.owner_kind !== "service_account");
+  const accounts = keys.filter((key) => key.owner_kind === "service_account");
+  const item = (key: PlaygroundKey) => (
+    <SelectItem key={key.id} value={key.id}>
+      {key.owner_kind === "service_account"
+        ? `${key.team_name} / ${key.service_account_name ?? "service account"} / ${key.name}`
+        : `${key.name} · ${key.team_name}`}
+    </SelectItem>
+  );
+  return (
+    <Field label="Key" hint="The request is limited and metered as this key.">
+      {(p) => (
+        <Select value={value} onValueChange={onChange}>
+          <SelectTrigger {...p} className="w-full min-w-0">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent position="popper">
+            {mine.length > 0 && (
+              <SelectGroup>
+                <SelectLabel>My keys</SelectLabel>
+                {mine.map(item)}
+              </SelectGroup>
+            )}
+            {accounts.length > 0 && (
+              <SelectGroup>
+                <SelectLabel>Service accounts</SelectLabel>
+                {accounts.map(item)}
+              </SelectGroup>
+            )}
+          </SelectContent>
+        </Select>
+      )}
+    </Field>
   );
 }
 
@@ -242,13 +281,7 @@ function Chat({ keys, reasoning }: { keys: PlaygroundKey[]; reasoning: Record<st
   return (
     <div className="grid min-h-0 min-w-0 flex-1 gap-4 lg:grid-cols-[22rem_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)]">
       <Card className="min-h-0 gap-4 overflow-y-auto p-4" data-testid="playground-settings">
-        <SelectField
-          label="Key"
-          hint="One of your own keys; the request is limited and metered as that key."
-          value={keyId}
-          onChange={chooseKey}
-          options={keys.map((k) => ({ value: k.id, label: `${k.name} · ${k.team_name}` }))}
-        />
+        <KeySelect keys={keys} value={keyId} onChange={chooseKey} />
         <ComboboxField
           label="Model"
           value={model}

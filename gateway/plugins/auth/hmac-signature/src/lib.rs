@@ -125,6 +125,8 @@ register! {
     name: "hmac_signature",
     title: "HMAC signature",
     description: "Sign each upstream request with a shared secret (x-hmac-signature).",
+    // The signature covers the body, including LLM request bodies.
+    needs_body: true,
     params: Params,
     authenticator: HmacSignature,
 }

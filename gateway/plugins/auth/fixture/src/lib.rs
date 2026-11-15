@@ -105,6 +105,9 @@ impl Authenticator for Fixture {
         request: auth_types::OutboundRequest,
     ) -> Result<auth_types::AuthResult, String> {
         let call = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+        // Proves how much of the body the gateway passed (empty for LLM
+        // traffic when the manifest does not declare `needs_body`).
+        let body_len = request.body.len();
         let mut result = auth_types::AuthResult {
             headers: Vec::new(),
             cache_ms: self.params.cache_ms,
@@ -159,6 +162,9 @@ impl Authenticator for Fixture {
             },
             _ => unreachable!("configure checked the mode"),
         }
+        result
+            .headers
+            .push(("x-body-len".to_owned(), body_len.to_string().into_bytes()));
         Ok(result)
     }
 }

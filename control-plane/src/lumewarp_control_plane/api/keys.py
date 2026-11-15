@@ -13,9 +13,10 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from math import ceil
+from typing import Annotated
 
-from fastapi import APIRouter, Request, status
-from sqlalchemy import Select, func, select
+from fastapi import APIRouter, Query, Request, status
+from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import audit
@@ -280,19 +281,32 @@ def _enforce_rotation_lifetime(team: Team, row: ApiKey) -> None:
 
 class KeyOut(KeyOutBase):
     owner_active: bool | None
+    # The service account's name for an SA-owned key; None for a user's key.
+    service_account_name: str | None
 
 
 class KeyCreated(KeyCreatedBase):
     key: KeyOut
 
 
-async def _out(session: AsyncSession, key: ApiKey) -> KeyOut:
-    active = (
-        await session.scalar(select(User.is_active).where(User.id == key.user_id))
-        if key.owner_kind is KeyOwnerKind.USER
-        else None
+def _key_out(key: ApiKey, active: bool | None, account_name: str | None) -> KeyOut:
+    return KeyOut(
+        **KeyOutBase.model_validate(key).model_dump(),
+        owner_active=active,
+        service_account_name=account_name,
     )
-    return KeyOut(**KeyOutBase.model_validate(key).model_dump(), owner_active=active)
+
+
+async def _out(session: AsyncSession, key: ApiKey) -> KeyOut:
+    active = None
+    account_name = None
+    if key.owner_kind is KeyOwnerKind.USER:
+        active = await session.scalar(select(User.is_active).where(User.id == key.user_id))
+    elif key.service_account_id is not None:
+        account_name = await session.scalar(
+            select(ServiceAccount.name).where(ServiceAccount.id == key.service_account_id)
+        )
+    return _key_out(key, active, account_name)
 
 
 async def _page(
@@ -303,10 +317,37 @@ async def _page(
         stmt = stmt.where(ApiKey.id > parse_uuid_cursor(cursor))
     rows = (await session.execute(stmt.limit(limit + 1))).all()
     next_cursor = str(rows[limit - 1][0].id) if len(rows) > limit else None
+    page_rows = rows[:limit]
+    # One query for the whole page's service-account names, never one per key.
+    account_ids = {
+        key.service_account_id
+        for key, _ in page_rows
+        if key.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT and key.service_account_id is not None
+    }
+    names = (
+        {
+            account_id: name
+            for account_id, name in (
+                await session.execute(
+                    select(ServiceAccount.id, ServiceAccount.name).where(
+                        ServiceAccount.id.in_(account_ids)
+                    )
+                )
+            ).all()
+        }
+        if account_ids
+        else {}
+    )
     return Page[KeyOut](
         items=[
-            KeyOut(**KeyOutBase.model_validate(key).model_dump(), owner_active=active)
-            for key, active in rows[:limit]
+            _key_out(
+                key,
+                active,
+                names.get(key.service_account_id)
+                if key.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT
+                else None,
+            )
+            for key, active in page_rows
         ],
         next_cursor=next_cursor,
     )
@@ -699,17 +740,43 @@ async def rotate_key(
 async def list_own_keys(
     authz: Authz,
     session: SessionDep,
+    include_service_accounts: Annotated[
+        bool,
+        Query(
+            description=(
+                "Also list the service-account keys of every live team the caller administers,"
+                " including by org or installation inheritance."
+            )
+        ),
+    ] = False,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[KeyOut]:
-    """The caller's own keys across every team. Empty for a break-glass session, which is not a
-    user.
+    """The caller's own keys across every team. With `include_service_accounts` it also lists
+    the service-account keys of the live teams the caller administers (a team admin, or an org
+    or installation admin by inheritance); a plain member still sees only their own keys.
+    Empty for a break-glass session, which is not a user.
     """
     if authz.user_id is None:
         return Page[KeyOut](items=[], next_cursor=None)
-    stmt = (
-        select(ApiKey)
-        .where(ApiKey.owner_kind == KeyOwnerKind.USER, ApiKey.user_id == authz.user_id)
-        .order_by(ApiKey.id)
-    )
-    return await _page(session, stmt, limit, cursor)
+    own = and_(ApiKey.owner_kind == KeyOwnerKind.USER, ApiKey.user_id == authz.user_id)
+    if not include_service_accounts:
+        stmt = select(ApiKey).where(own)
+    else:
+        live_team_ids = list(
+            await session.scalars(select(Team.id).where(Team.deleted_at.is_(None)))
+        )
+        # Same team set as `/users/me`: direct team admins plus org and installation
+        # inheritance. Restricting to live teams also hides an archived team's SA keys.
+        administered = await authz.admin_teams(live_team_ids)
+        team_ids = live_team_ids if administered is None else list(administered)
+        stmt = select(ApiKey).where(
+            or_(
+                own,
+                and_(
+                    ApiKey.owner_kind == KeyOwnerKind.SERVICE_ACCOUNT,
+                    ApiKey.team_id.in_(team_ids),
+                ),
+            )
+        )
+    return await _page(session, stmt.order_by(ApiKey.id), limit, cursor)

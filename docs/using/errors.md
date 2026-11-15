@@ -28,6 +28,7 @@ Every response, of either kind, carries `x-lumewarp-request-id`.
 | 404 `model_not_found` | Nothing has that name. | Check the spelling against `GET /v1/models`. |
 | 429 `rate_limit_exceeded` | A requests-per-minute, tokens-per-minute or concurrency limit is used up. | Wait `Retry-After` seconds, then retry. |
 | 429 `insufficient_quota` | The month's budget is spent. | Do not retry; ask for a higher budget. |
+| 502 `upstream_auth_failed` | The upstream's outbound auth plugin failed, timed out or returned a header the gateway refuses, on the last attempt left after retries and fallbacks. | Not a client error; retrying usually does not help. Give the operator the `x-lumewarp-request-id`. |
 | 502, 504 | The upstream failed or timed out after the gateway's own retries. | Retry with backoff. |
 | 503 | The gateway has no configuration yet, or the model is recovering from failures. | Retry with backoff. |
 

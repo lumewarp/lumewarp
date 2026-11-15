@@ -48,6 +48,23 @@ pub async fn bounded<T>(future: impl Future<Output = T>) -> T {
         .expect("test operation exceeded 5 seconds")
 }
 
+/// The built components under `gateway/target/plugins/<kind>`, or `None` when
+/// `plugins/build.sh` has not run (the caller should skip).
+pub fn plugin_dir(kind: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/plugins")
+        .join(kind);
+    path.is_dir().then_some(path)
+}
+
+/// The `--tests` fixtures under `gateway/target/plugins-test/<kind>`.
+pub fn plugin_test_dir(kind: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/plugins-test")
+        .join(kind);
+    path.is_dir().then_some(path)
+}
+
 pub fn client() -> TestClient {
     let mut connector = HttpConnector::new();
     connector.set_nodelay(true);
@@ -309,6 +326,76 @@ impl Gateway {
             "llm",
         )
         .await
+    }
+
+    /// Builds a gateway from a complete standalone YAML body (the listener and
+    /// admin listener are prepended) and extra environment variables. Used by
+    /// tests that need options the fixed `upstreams:` shape does not express.
+    pub async fn start_from_yaml(yaml: String, envs: &[(&str, &str)]) -> Self {
+        let listen = StdListener::bind("127.0.0.1:0").unwrap();
+        let admin = StdListener::bind("127.0.0.1:0").unwrap();
+        let addr = listen.local_addr().unwrap();
+        let admin_addr = admin.local_addr().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "lumewarp-yaml-test-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let config = dir.join("config.yaml");
+        std::fs::write(
+            &config,
+            format!("server:\n  listen: '{addr}'\n  admin_listen: '{admin_addr}'\n{yaml}"),
+        )
+        .unwrap();
+        let stdout = std::fs::File::create(dir.join("stdout.log")).unwrap();
+        let stderr = std::fs::File::create(dir.join("stderr.log")).unwrap();
+        drop(listen);
+        drop(admin);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_lumewarp"));
+        command
+            .arg("--config")
+            .arg(config)
+            .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+            .env("RUST_LOG", "error")
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
+        for &(name, value) in envs {
+            command.env(name, value);
+        }
+        let child = command.spawn().unwrap();
+        let mut gateway = Self {
+            addr,
+            admin_addr,
+            child,
+            client: client(),
+            dir,
+        };
+        let ready = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(status) = gateway.child.try_wait().unwrap() {
+                    panic!("gateway exited {status}: {}", gateway.logs());
+                }
+                let request = Request::builder()
+                    .uri(format!("http://{addr}/healthz"))
+                    .body(Full::new(Bytes::new()))
+                    .unwrap();
+                if let Ok(response) = gateway.client.request(request).await {
+                    if response.status() == 200 {
+                        bytes(response).await;
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            ready.is_ok(),
+            "gateway startup timed out: {}",
+            gateway.logs()
+        );
+        gateway
     }
 
     pub async fn start_with_type(

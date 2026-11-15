@@ -239,6 +239,8 @@ def capabilities_used(snap: pb.Snapshot) -> list[str]:
             used.add("vllm_load")
         if u.api_key_ciphertext:
             used.add("encrypted_api_key")
+        if u.HasField("auth") and u.auth.HasField("plugin"):
+            used.add(f"auth:{u.auth.plugin.plugin}")
     for d in snap.models:
         if d.type != pb.MODEL_TYPE_LLM:
             used.add("model_types")
@@ -306,6 +308,30 @@ def _auth_problem(auth: pb.UpstreamAuth, what: str) -> str | None:
             return f"{what} static_bearer needs secret_ref or secret_ciphertext"
     elif auth.secret_ref or auth.secret_ciphertext:
         return f"{what} auth {plugin.plugin!r} takes no secret"
+    return None
+
+
+def _upstream_auth_problem(upstream: pb.Upstream) -> str | None:
+    """`targets.rs::check_upstream_auth`: only a WASM plugin, and no static bearer."""
+    what = f"upstream {upstream.name!r}"
+    auth = upstream.auth
+    if upstream.api_key_ref or upstream.api_key_ciphertext:
+        return f"{what} sets both auth and an API key"
+    if not auth.HasField("plugin"):
+        return f"{what} auth has no plugin"
+    if auth.secret_ref or auth.secret_ciphertext:
+        return f"{what} auth takes no secret; a static bearer is api_key_ref/api_key_ciphertext"
+    plugin = auth.plugin.plugin
+    if plugin in BUILTIN_AUTH:
+        return (
+            f"{what} auth {plugin!r} is a built-in; an LLM upstream takes only a WASM"
+            " upstream-auth plugin"
+        )
+    if auth.plugin.timeout_ms > MAX_TARGET_TIMEOUT_MS:
+        return f"{what} auth plugin_timeout_ms is too large"
+    params = _params_object(auth.plugin.params_json, f"{what} auth params")
+    if problem := target_plugin_problem(PluginKind.UPSTREAM_AUTH, plugin, params):
+        return f"{what} auth {problem}"
     return None
 
 
@@ -503,6 +529,9 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
             raise SnapshotInvalid(f"upstream {u.name!r} metrics_url {problem}")
         if u.api_key_ref and u.api_key_ciphertext:
             raise SnapshotInvalid(f"upstream {u.name!r} sets both api_key_ref and a sealed key")
+        if u.HasField("auth"):
+            if problem := _upstream_auth_problem(u):
+                raise SnapshotInvalid(problem)
 
     models = _unique([d.name for d in snap.models], "model")
     for d in snap.models:

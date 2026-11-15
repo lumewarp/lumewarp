@@ -1,5 +1,9 @@
 # Usage and audit
 
+Usage aggregates gateway requests; [Requests](./requests.md) lists them one by one, and the
+audit log records administrative changes. Usage and Requests come from the same recorded
+usage events; audit answers a different question.
+
 ## Usage
 
 Every request a gateway finishes becomes one usage event, reported to the control plane
@@ -11,7 +15,9 @@ sees the team's; an org admin its org's teams; an installation admin everything.
 
 An event records the name the client called, the model that served it, the alias, router
 and fallback it went through, the number of attempts, tokens, audio duration and cost.
-Prompts and responses are never recorded. To look at one request in detail, use its
+Prompts and responses are never recorded. The same events back the
+[request log](./requests.md), which lists one row per request with the full
+name-resolution chain; to look at one request's per-attempt detail, use its
 `x-lumewarp-request-id` in your tracing backend
 ([Metrics, alerts and tracing](../operations/observability.md)).
 
@@ -34,7 +40,9 @@ Usage is stored in Postgres; ClickHouse is later. While the control plane is dow
 
 ## Audit
 
-Every mutation writes an `audit_log` row in the same transaction. Reads are scoped: an
+The audit log records administrative changes only. A model request, including one sent
+from the Playground, is not an audit entry; it appears in [Requests](./requests.md)
+instead. Every management mutation writes an `audit_log` row in the same transaction. Reads are scoped: an
 installation admin sees everything (including rows without a team and rows of archived teams), a
 team admin sees the rows of the teams they administer (filtered or not), an org admin additionally
 sees its org-level events (`org_id` set, `team_id` NULL: org policy, org admins, org budget) and

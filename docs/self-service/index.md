@@ -15,6 +15,11 @@ belong to. A new user starts with no team: a team admin has to add you first.
 - how many keys you may have, and how long a key may live;
 - the keys you own.
 
+If you administer a team (as its team admin, or as an org or installation admin), a
+**Service account keys** table below your own keys lists the keys owned by that team's
+service accounts. Its actions are the same as the team's **Keys** tab. A plain member does
+not see this table.
+
 These are *your* effective values: the team's policy narrowed by your own. A member does
 not see the team's full policy.
 

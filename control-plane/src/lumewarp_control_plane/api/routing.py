@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Request, Response, status
 from pydantic import SecretStr
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +54,7 @@ from lumewarp_control_plane.api.schemas import (
     RouterUpdate,
     TrafficSplitIn,
     TrafficSplitOut,
+    UpstreamAuthIn,
     UpstreamCreate,
     UpstreamModelInfoOut,
     UpstreamModelsOut,
@@ -68,6 +69,7 @@ from lumewarp_control_plane.compiler.plugins import (
     PluginRegistry,
     PluginRejected,
     audit_forced,
+    audit_target_forced,
     load_plugins,
     member_settings,
     params_problem,
@@ -75,6 +77,13 @@ from lumewarp_control_plane.compiler.plugins import (
     validate_plugin_params,
 )
 from lumewarp_control_plane.errors import ApiError, not_found
+from lumewarp_control_plane.grpc import (
+    ProbeGatewayGone,
+    ProbeTimeout,
+    ProbeUnavailable,
+    SessionRegistry,
+    registry_for,
+)
 from lumewarp_control_plane.model_types import catalog_types
 from lumewarp_control_plane.models import (
     Alias,
@@ -156,6 +165,61 @@ def _sealed_api_key(settings: Settings, api_key: SecretStr) -> bytes:
         ) from exc
 
 
+def _upstream_auth_columns(auth: UpstreamAuthIn | None) -> dict[str, Any]:
+    """The stored auth columns of a create, or of a PATCH that replaces the auth."""
+    if auth is None:
+        return {"auth_plugin": None, "auth_params": None, "auth_timeout_ms": 0}
+    return {
+        "auth_plugin": auth.plugin,
+        "auth_params": auth.params,
+        "auth_timeout_ms": auth.timeout_ms,
+    }
+
+
+async def _validate_upstream_auth(
+    session: AsyncSession, settings: Settings, auth: UpstreamAuthIn, *, force: bool
+) -> list[str]:
+    """422 unless connected gateways can serve the plugin; returns what `force` saved past."""
+    try:
+        return await validate_plugin_params(
+            session,
+            PluginKind.UPSTREAM_AUTH,
+            auth.plugin,
+            auth.params,
+            force=force,
+            scope=settings.scope,
+        )
+    except PluginRejected as exc:
+        raise validation_error(f"auth.{exc.field}", exc.message) from exc
+
+
+def _audit_upstream_forced(
+    session: AsyncSession, authz: Any, row: Upstream, missing: list[str]
+) -> None:
+    """`upstream.force_save` when `force` saved past gateways lacking the plugin."""
+    if row.auth_plugin is None:
+        return
+    audit_target_forced(
+        session,
+        kind="upstream",
+        resource_id=row.id,
+        name=row.name,
+        plugin=row.auth_plugin,
+        missing=missing,
+        principal=authz.principal,
+    )
+
+
+def _one_upstream_credential(row: Upstream) -> None:
+    """A WASM plugin and a static bearer are mutually exclusive, stored state included."""
+    if row.auth_plugin is not None and (
+        row.api_key_ref is not None or row.api_key_ciphertext is not None
+    ):
+        raise validation_error(
+            "auth", "a WASM auth plugin and an API key are mutually exclusive; clear the other"
+        )
+
+
 async def _reports(session: AsyncSession, settings: Settings, column) -> list[dict]:
     """The latest health reports of the connected gateways (one column of them)."""
     return list(
@@ -180,7 +244,107 @@ _PROBE_CLEARED = {"probe_at": None, "probe_ok": None, "probe_ok_at": None}
 
 def _upstream_probed(row: Upstream) -> tuple:
     """What an upstream's Test now depends on; a change makes its result stale."""
-    return (row.base_url, row.health_url, row.api_key_ref, row.api_key_ciphertext)
+    return (
+        row.base_url,
+        row.health_url,
+        row.api_key_ref,
+        row.api_key_ciphertext,
+        row.auth_plugin,
+        row.auth_params,
+        row.auth_timeout_ms,
+    )
+
+
+def _upstream_probe_conditions(row: Upstream) -> list:
+    """Restate the probed settings so a row changed while the probe ran is left alone."""
+    return [
+        Upstream.id == row.id,
+        Upstream.base_url == row.base_url,
+        Upstream.health_url.is_not_distinct_from(row.health_url),
+        Upstream.api_key_ref.is_not_distinct_from(row.api_key_ref),
+        Upstream.api_key_ciphertext.is_not_distinct_from(row.api_key_ciphertext),
+        Upstream.auth_plugin.is_not_distinct_from(row.auth_plugin),
+        Upstream.auth_params.is_not_distinct_from(row.auth_params),
+        Upstream.auth_timeout_ms == row.auth_timeout_ms,
+    ]
+
+
+# How long a gateway probe may take: the upstream's own timeout, capped at 15 s.
+MAX_PROBE_SECONDS = 15.0
+_MODEL_PROBE_SUFFIX = {
+    "llm": "/chat/completions",
+    "embedding": "/embeddings",
+    "transcription": "/audio/transcriptions",
+    "decision": "/decisions",
+}
+
+
+def _probe_timeout_seconds(row: Upstream) -> float:
+    """The upstream timeout (0 = the gateway's 10-minute default) or 15 s, whichever is less."""
+    configured = row.timeout_ms / 1000 if row.timeout_ms else MAX_PROBE_SECONDS
+    return min(configured, MAX_PROBE_SECONDS)
+
+
+def _model_probe_url(upstream: Upstream, model_type: str) -> str:
+    return f"{upstream.base_url.rstrip('/')}{_MODEL_PROBE_SUFFIX[model_type]}"
+
+
+async def _gateway_probe(
+    request: Request,
+    settings: Settings,
+    upstream: Upstream,
+    *,
+    model: str,
+    url: str,
+) -> ProbeOut:
+    """Ask a connected gateway to run the probe; map its fixed classes onto `ProbeOut`."""
+    # The registry of the gRPC server that this process's lifespan started (app.state.runtime), so
+    # the probe goes to a gateway whose stream this process holds.
+    runtime = getattr(request.app.state, "runtime", None)
+    server = getattr(runtime, "grpc_server", None)
+    registry: SessionRegistry | None = registry_for(server) if server is not None else None
+    if registry is None:
+        raise ApiError(
+            409,
+            "no_gateway_for_plugin",
+            "no gateway is connected to this control-plane process to run the probe",
+        )
+    try:
+        result = await registry.probe(
+            settings.scope,
+            upstream.auth_plugin,
+            upstream.name,
+            model,
+            timeout_seconds=_probe_timeout_seconds(upstream),
+        )
+    except ProbeUnavailable as exc:
+        raise ApiError(409, "no_gateway_for_plugin", str(exc)) from None
+    except ProbeTimeout as exc:
+        raise ApiError(504, "probe_timeout", str(exc)) from None
+    except ProbeGatewayGone as exc:
+        raise ApiError(502, "probe_gateway_gone", str(exc)) from None
+    return ProbeOut(
+        url=url,
+        ok=result.ok,
+        status=result.status or None,
+        latency_ms=result.latency_ms,
+        # `upstream_status` already carries its status; the other classes are fixed text.
+        error=(
+            None
+            if result.ok or result.error_class in ("", "upstream_status")
+            else result.error_class
+        ),
+    )
+
+
+# Gateway probe classes that describe the gateway's snapshot, not the upstream: the
+# gateway has not applied the saved version yet (or refused it). Such a result is
+# returned to the caller but never stored as the row's Test now result.
+_SNAPSHOT_CLASSES = frozenset({"not_found", "not_found_model", "config"})
+
+
+def _recordable(credential: str, probe: ProbeOut) -> bool:
+    return not (credential == "plugin" and probe.error in _SNAPSHOT_CLASSES)
 
 
 def _model_probed(row: Model) -> tuple:
@@ -561,11 +725,15 @@ async def create_upstream(
     settings: SettingsDep,
 ) -> UpstreamOut:
     """Create an upstream, an OpenAI-compatible endpoint. Requires an installation admin. The API
-    key is stored encrypted or as an environment reference and is never returned.
+    key is stored encrypted or as an environment reference and is never returned. `auth`
+    names a WASM upstream-auth plugin instead, and cannot be combined with an API key.
     """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         await lock_scope(session, settings)
+        forced: list[str] = []
+        if body.auth is not None:
+            forced = await _validate_upstream_auth(session, settings, body.auth, force=body.force)
         row = Upstream(
             name=body.name,
             kind=body.kind,
@@ -574,6 +742,7 @@ async def create_upstream(
             api_key_ciphertext=(
                 _sealed_api_key(settings, body.api_key) if body.api_key is not None else None
             ),
+            **_upstream_auth_columns(body.auth),
             timeout_ms=body.timeout_ms,
             stream_usage_mode=body.stream_usage_mode,
             metrics_url=body.metrics_url,
@@ -594,8 +763,10 @@ async def create_upstream(
                 "name": row.name,
                 "base_url": row.base_url,
                 "credential_stored": row.api_key_ciphertext is not None,
+                "auth_plugin": row.auth_plugin,
             },
         )
+        _audit_upstream_forced(session, authz, row, forced)
         await enqueue_recompile(session, settings, "api.upstream.create")
     return (await _upstreams_out(session, settings, [row]))[0]
 
@@ -645,6 +816,20 @@ async def test_upstream(
     stored.
     """
     await authz.require(Action.ROUTING_MANAGE)
+    if body.auth is not None:
+        raise validation_error(
+            "auth",
+            "a WASM auth plugin cannot be probed from the control plane; save the upstream"
+            " first and use its saved Test now",
+        )
+    saved = await session.get(Upstream, body.upstream_id) if body.upstream_id else None
+    if body.upstream_id is not None and saved is None:
+        raise not_found("upstream not found")
+    if saved is not None and saved.auth_plugin is not None:
+        raise validation_error(
+            "upstream_id",
+            "the saved upstream uses a WASM auth plugin; test it from the saved upstream",
+        )
     token: str | None = None
     credential = "none"
     if body.api_key is not None:
@@ -652,13 +837,11 @@ async def test_upstream(
     elif body.api_key_ref is not None:
         token = os.environ.get(body.api_key_ref) or None
         credential = "env" if token else "env_unset"
-    elif body.upstream_id is not None:
-        row = await session.get(Upstream, body.upstream_id)
-        if row is None:
-            raise not_found("upstream not found")
-        if row.api_key_ciphertext is not None:
+    elif saved is not None:
+        token = None
+        if saved.api_key_ciphertext is not None:
             try:
-                token = upstream_client.bearer(settings, row)
+                token = upstream_client.bearer(settings, saved)
             except upstream_client.UpstreamCallFailed as exc:
                 raise ApiError(502, "upstream_unavailable", str(exc)) from None
             credential = "stored"
@@ -676,6 +859,57 @@ async def test_upstream(
             probe.ok,
         )
     return UpstreamTestOut(credential=credential, probe=ProbeOut(**vars(probe)))
+
+
+@router.post(
+    "/upstreams/{upstream_id}/test",
+    response_model=UpstreamTestOut,
+    operation_id="testSavedUpstream",
+)
+async def test_saved_upstream(
+    upstream_id: uuid.UUID,
+    request: Request,
+    authz: Authz,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> UpstreamTestOut:
+    """Probe a saved upstream now with the configuration in the database. Without a WASM
+    auth plugin the control plane calls it directly; with one, a gateway connected to this
+    control-plane process that advertises `upstream_probe` and reports the plugin runs it,
+    using the snapshot it currently serves. No such gateway is 409 `no_gateway_for_plugin`,
+    and no answer in time is 504 `probe_timeout`.
+    """
+    await authz.require(Action.ROUTING_MANAGE)
+    row = await session.get(Upstream, upstream_id)
+    if row is None:
+        raise not_found("upstream not found")
+    credential = "none"
+    if row.auth_plugin is not None:
+        probe = await _gateway_probe(
+            request,
+            settings,
+            row,
+            model="",
+            url=f"{row.base_url.rstrip('/')}/models",
+        )
+        credential = "plugin"
+    else:
+        token: str | None = None
+        if row.api_key_ciphertext is not None or row.api_key_ref:
+            try:
+                token = upstream_client.bearer(settings, row)
+            except upstream_client.UpstreamCallFailed as exc:
+                raise ApiError(502, "upstream_unavailable", str(exc)) from None
+            if row.api_key_ciphertext is not None:
+                credential = "stored"
+            else:
+                credential = "env" if token else "env_unset"
+        probe = ProbeOut(
+            **vars(await upstream_client.test_upstream(row.base_url, row.health_url, token))
+        )
+    if _recordable(credential, probe):
+        await _record_probe(session, Upstream, _upstream_probe_conditions(row), probe.ok)
+    return UpstreamTestOut(credential=credential, probe=probe)
 
 
 @router.patch("/upstreams/{upstream_id}", response_model=UpstreamOut, operation_id="updateUpstream")
@@ -710,6 +944,15 @@ async def update_upstream(
             )
             if body.api_key is not None:
                 row.api_key_ref = None
+        forced: list[str] = []
+        if "auth" in body.model_fields_set:
+            if body.auth is not None:
+                forced = await _validate_upstream_auth(
+                    session, settings, body.auth, force=body.force
+                )
+            for name, value in _upstream_auth_columns(body.auth).items():
+                setattr(row, name, value)
+        _one_upstream_credential(row)
         if "health_url" in body.model_fields_set:
             row.health_url = body.health_url
         if "metrics_url" in body.model_fields_set:
@@ -737,10 +980,14 @@ async def update_upstream(
             principal=authz.principal,
             details={
                 "name": row.name,
-                "changes": body.model_dump(exclude_unset=True, exclude={"api_key"}, mode="json"),
-                "credential_changed": "api_key" in body.model_fields_set,
+                "changes": body.model_dump(
+                    exclude_unset=True, exclude={"api_key", "force"}, mode="json"
+                ),
+                "credential_changed": "api_key" in body.model_fields_set
+                or "auth" in body.model_fields_set,
             },
         )
+        _audit_upstream_forced(session, authz, row, forced)
         await enqueue_recompile(session, settings, "api.upstream.update")
     return (await _upstreams_out(session, settings, [row]))[0]
 
@@ -903,6 +1150,11 @@ async def test_model(
     upstream = await session.get(Upstream, body.upstream_id)
     if upstream is None:
         raise validation_error("upstream_id", "unknown upstream")
+    if upstream.auth_plugin is not None:
+        raise validation_error(
+            "upstream_id",
+            "the upstream uses a WASM auth plugin; save the model first and use its saved Test now",
+        )
     credential = "none"
     try:
         token = upstream_client.bearer(settings, upstream)
@@ -929,6 +1181,75 @@ async def test_model(
             probe.ok,
         )
     return ModelTestOut(credential=credential, probe=ProbeOut(**vars(probe)), reply=reply)
+
+
+@router.post(
+    "/models/{model_id}/test",
+    response_model=ModelTestOut,
+    operation_id="testSavedModel",
+)
+async def test_saved_model(
+    model_id: uuid.UUID,
+    request: Request,
+    authz: Authz,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> ModelTestOut:
+    """Probe a saved model now with the configuration in the database. Without a WASM auth
+    plugin on its upstream the control plane calls the typed endpoint directly; with one, a
+    gateway connected to this control-plane process that advertises `upstream_probe` and
+    reports the plugin runs it. No such gateway is 409 `no_gateway_for_plugin`, no answer in
+    time is 504 `probe_timeout`, and the reply is never returned (the gateway sends no body).
+    """
+    await authz.require(Action.ROUTING_MANAGE)
+    row = await session.get(Model, model_id)
+    if row is None:
+        raise not_found("model not found")
+    upstream = await session.get(Upstream, row.upstream_id)
+    if upstream is None:
+        raise not_found("upstream not found")
+    reply: str | None = None
+    if upstream.auth_plugin is not None:
+        probe = await _gateway_probe(
+            request,
+            settings,
+            upstream,
+            model=row.name,
+            url=_model_probe_url(upstream, row.model_type),
+        )
+        credential = "plugin"
+    else:
+        credential = "none"
+        try:
+            token = upstream_client.bearer(settings, upstream)
+        except upstream_client.UpstreamCallFailed as exc:
+            raise ApiError(502, "upstream_unavailable", str(exc)) from None
+        if upstream.api_key_ciphertext is not None:
+            credential = "stored"
+        elif upstream.api_key_ref:
+            credential = "env" if token else "env_unset"
+        outcome, reply = await upstream_client.chat_check(
+            upstream.base_url,
+            token,
+            row.upstream_model,
+            row.default_body,
+            row.model_type,
+        )
+        probe = ProbeOut(**vars(outcome))
+    if _recordable(credential, probe):
+        await _record_probe(
+            session,
+            Model,
+            [
+                Model.name_id == row.id,
+                Model.upstream_id == row.upstream_id,
+                Model.upstream_model == row.upstream_model,
+                Model.model_type == row.model_type,
+                Model.default_body.is_not_distinct_from(row.default_body),
+            ],
+            probe.ok,
+        )
+    return ModelTestOut(credential=credential, probe=probe, reply=reply)
 
 
 @router.patch(

@@ -120,6 +120,18 @@ pub const PLUGIN_KINDS: [&str; 4] = [
 #[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
 pub const PLUGIN_RESULTS: [&str; 4] = ["ok", "error", "timeout", "trap"];
 
+/// `lumewarp_upstream_auth_total{result}`. `cached` means the gateway reused a
+/// plugin result without entering the sandbox; `ok` means a WASM call answered.
+pub const UPSTREAM_AUTH_RESULTS: [&str; 7] = [
+    "ok",
+    "cached",
+    "plugin",
+    "timeout",
+    "trap",
+    "header",
+    "configure",
+];
+
 /// `lumewarp_mcp_catalog_reports_dropped_total{reason}`.
 #[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
 pub const CATALOG_DROP_REASONS: [&str; 3] = ["oversized", "pending_limit", "invalid"];
@@ -249,6 +261,11 @@ struct PluginLabels {
 struct PluginResultLabels {
     kind: &'static str,
     plugin: String,
+    result: &'static str,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct UpstreamAuthLabels {
+    upstream: String,
     result: &'static str,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -486,6 +503,7 @@ pub struct Metrics {
     catalog_drops: Family<CatalogDropLabels, Counter>,
     plugin_calls: Family<PluginResultLabels, Counter>,
     plugin_durations: Family<PluginLabels, Histogram>,
+    upstream_auth: Family<UpstreamAuthLabels, Counter>,
     shared_limits: Option<SharedLimitsMetrics>,
 }
 
@@ -747,6 +765,12 @@ impl Metrics {
             "Plugin call duration by kind and plugin",
             plugin_durations.clone(),
         );
+        let upstream_auth = Family::default();
+        registry.register(
+            "lumewarp_upstream_auth",
+            "LLM upstream auth decisions by upstream and result (ok = WASM call, cached = no sandbox entry)",
+            upstream_auth.clone(),
+        );
         registry.register(
             "lumewarp_tokens",
             "Upstream-reported tokens by requested name, team and direction",
@@ -849,6 +873,7 @@ impl Metrics {
             catalog_drops,
             plugin_calls,
             plugin_durations,
+            upstream_auth,
             shared_limits,
         }
     }
@@ -1300,6 +1325,20 @@ impl Metrics {
                 })
                 .clone(),
         }
+    }
+
+    /// One `lumewarp_upstream_auth_total` counter per [`UPSTREAM_AUTH_RESULTS`]
+    /// entry for this upstream. Called while compiling a snapshot, so an LLM
+    /// attempt only indexes the array.
+    pub fn upstream_auth_handles(&self, upstream: &str) -> [Counter; UPSTREAM_AUTH_RESULTS.len()] {
+        UPSTREAM_AUTH_RESULTS.map(|result| {
+            self.upstream_auth
+                .get_or_create(&UpstreamAuthLabels {
+                    upstream: upstream.into(),
+                    result,
+                })
+                .clone()
+        })
     }
 
     pub fn encode(&self, in_flight: &InFlightRegistry) -> Result<String, std::fmt::Error> {

@@ -16,6 +16,7 @@ the whole process, so counters are never reset by a config change.
 | `lumewarp_ttft_seconds` | Histogram | `requested`, `model` |
 | `lumewarp_upstream_errors_total` | Counter | `model`, `kind` |
 | `lumewarp_upstream_attempts_total` | Counter | `requested`, `model`, `outcome`: `success`, `retryable_status`, `connect_error`, `timeout`, `circuit_open`, `non_retryable` |
+| `lumewarp_upstream_auth_total` | Counter | `upstream`, `result`: `ok`, `cached`, `plugin`, `timeout`, `trap`, `header`, `configure`; LLM upstream auth decisions. `ok` is a WASM call that answered, `cached` a cache hit that did not enter the sandbox. |
 | `lumewarp_fallbacks_total` | Counter | `router`, `model` |
 | `lumewarp_retries_budget_exhausted_total` | Counter | `router` |
 | `lumewarp_upstream_circuit_state` | Gauge | `model`; 0 closed, 1 half-open, 2 open |
@@ -72,6 +73,9 @@ Label semantics:
   (response headers), or `stream` (upstream body failure, including non-stream
   response bodies). A truncated 200 response increments `kind="stream"` while
   its request counter still records 200.
+- `upstream` in `lumewarp_upstream_auth_total` is the configured upstream name;
+  `result` is the auth decision class. The matching `upstream_auth` span carries
+  `upstream`, `plugin`, `method`, `result` and `cached`.
 - No API-key labels exist. In-flight gauges read the process-lifetime model
   counters at scrape time.
 

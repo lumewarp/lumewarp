@@ -25,6 +25,7 @@ from lumewarp_control_plane.api import (
     orgs,
     playground,
     plugins,
+    requests,
     routing,
     service_accounts,
     session,
@@ -61,6 +62,7 @@ router.include_router(plugins.router)
 router.include_router(users.router)
 router.include_router(installation_admins.router)
 router.include_router(usage.router)
+router.include_router(requests.router)
 router.include_router(audit.router)
 router.include_router(gateways.router)
 router.include_router(config.router)

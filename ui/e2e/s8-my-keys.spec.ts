@@ -523,6 +523,46 @@ test("a team admin's own keys rotate and revoke; the team page lists every key",
   await expect(rowOf(page, "s8-admin-key")).toBeVisible();
 });
 
+test("a team admin sees service-account keys in My keys and a member does not", async ({ page }) => {
+  const team = await admin.ensureTeam("s8-sa-keys");
+  await admin.putMember(team.id, TEAM_ADMIN_EMAIL, "admin");
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  const account = await admin.post<{ id: string; name: string }>(`/teams/${team.id}/service-accounts`, { name: "s8-bot" });
+  const created = await admin.post<{ key: { id: string; display_prefix: string } }>(`/teams/${team.id}/keys`, {
+    name: "s8-sa-key",
+    service_account_id: account.id,
+  });
+
+  await signIn(page, TEAM_ADMIN, "/my-keys");
+  const section = page.getByTestId("service-account-keys");
+  await expect(section).toBeVisible();
+  await expect(section.getByRole("cell", { name: "s8-sa-keys", exact: true })).toBeVisible();
+  await expect(section.getByText("s8-bot", { exact: true })).toBeVisible();
+  const row = section.getByRole("row").filter({ hasText: "s8-sa-key" });
+  await expect(row).toBeVisible();
+  await expect(row.locator("code")).toHaveText(`${created.key.display_prefix}…`);
+
+  // The five-column table still fits a phone; only its less important columns are hidden.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(section).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 1280, height: 800 });
+
+  // The row actions are the team Keys tab's: a rotate shows the new secret once.
+  await row.getByRole("button", { name: "Rotate" }).click();
+  const rotate = page.getByRole("dialog", { name: /^Rotate/ });
+  await rotate.getByRole("button", { name: "Rotate key" }).click();
+  const secret = page.getByRole("dialog", { name: "API key rotated" });
+  await expect(secret.getByTestId("secret-value")).toHaveText(/^lw-/);
+  await secret.getByRole("button", { name: /saved it/ }).click();
+
+  // A plain member is not an administrator: the section and the key never appear.
+  await signIn(page, VIEWER, "/my-keys");
+  await expect(page.getByTestId("service-account-keys")).toHaveCount(0);
+  await expect(page.getByText("s8-sa-key")).toHaveCount(0);
+  await expect(page.getByText("s8-bot", { exact: true })).toHaveCount(0);
+});
+
 test("a team admin sets the member key limits from the team settings", async ({ page, request }) => {
   const team = await admin.ensureTeam("s8-limits");
   await admin.putMember(team.id, TEAM_ADMIN_EMAIL, "admin");

@@ -44,8 +44,8 @@ the version and skip every version that references it; the other gateways still 
 Stored rows that no longer validate read `config_invalid: true` with
 `config_problems` and are not modified. The same rule lives in
 `compiler.plugins.validate_plugin_params(session, kind, name, params, *, force)` and is what an
-MCP server's or A2A agent's auth plugin (kinds `upstream-auth` and `a2a-middleware`) uses. Full
-rules: [gateway plugins](../plugins.md).
+MCP server's, A2A agent's or LLM upstream's auth plugin (kinds `upstream-auth` and
+`a2a-middleware`) uses. Full rules: [gateway plugins](../plugins.md).
 
 The compiler lists a capability in `required_capabilities` exactly when a field needs it
 (the gateway's rule): `health_check`, `circuit_breaker`, `vllm_load` (a metrics URL), `retry`,

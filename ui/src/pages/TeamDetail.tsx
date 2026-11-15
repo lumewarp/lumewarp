@@ -5,7 +5,7 @@ import { api, ApiError, hasPolicy, type Key, type Member, type Schemas, type Ser
 import { Badge, fmtDate, fmtUsd, InheritedBadge, KeyBadge, PageHeader, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
-import { blankKeyLimits, KeyLimitFields, keyLimitsBody, keyLimitsFrom, type KeyLimitCap, type KeyLimitValues } from "../components/KeyLimits";
+import { blankKeyLimits, KeyLimitFields, keyLimitsBody, type KeyLimitCap, type KeyLimitValues } from "../components/KeyLimits";
 import { blankPolicy, Budget, PolicyFields, policyBody, policyFrom, PolicySummary, POLICY_ALIAS, type PolicyValues } from "../components/Policy";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
@@ -19,7 +19,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs"
 import { useAction, useCan, useMe, useMut, useOrgLayer, useSecretMut } from "../hooks";
 import { useShowSecret } from "../components/SecretProvider";
 import { useToast } from "../components/Toast";
-import { expiryFromDay, fmtLifetime, lastExpiryDay, localDayOf } from "./keyText";
+import { KeyEditDialog } from "./KeyDialogs";
+import { expiryFromDay, fmtLifetime, lastExpiryDay } from "./keyText";
 
 const TABS = [
   { id: "members", label: "Members" },
@@ -512,7 +513,8 @@ function KeysPanel({ team }: { team: TeamAny }) {
   const members = useQuery({ queryKey: ["members", team.id], queryFn: () => api.members(team.id), enabled: isAdmin });
   const accounts = useQuery({ queryKey: ["service-accounts", team.id], queryFn: () => api.serviceAccounts(team.id), enabled: isAdmin });
   const keys = useQuery({ queryKey: ["team-keys", team.id], queryFn: () => api.teamKeys(team.id) });
-  const [editing, setEditing] = useState<Key | "new" | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [editingKey, setEditingKey] = useState<Key | null>(null);
   const [revoking, setRevoking] = useState<Key | null>(null);
   const ownerOptions = [
     ...(perms.canCreateOwnKey(team.id) && !!me.data?.user_id
@@ -533,16 +535,6 @@ function KeysPanel({ team }: { team: TeamAny }) {
       }),
     (value) => showSecret({ value, title: "API key created" }),
   );
-  const update = useMut(
-    ({ key, values }: { key: Key; values: KeyValues }) => {
-      const body: Schemas["KeyUpdate"] = { name: values.name, ...keyLimitsBody(values) };
-      if (values.expires !== localDayOf(key.expires_at)) {
-        body.expires_at = expiryFromDay(values.expires);
-      }
-      return api.updateKey(key.id, body);
-    },
-    "Key saved",
-  );
   const setLifecycle = useAction(
     ({ key, lifecycle }: { key: Key; lifecycle: "active" | "suspended" }) =>
       api.updateKey(key.id, { lifecycle }),
@@ -555,19 +547,10 @@ function KeysPanel({ team }: { team: TeamAny }) {
   );
   const rotateKey = (key: Key) => void rotate.mutateAsync(key).catch((e: Error) => toast("error", e.message));
 
-  const open = (key: Key | "new") => {
+  const openNew = () => {
     const defaultOwner = ownerOptions[0]?.value ?? "";
-    form.reset(
-      key === "new"
-        ? { ...blankKey, service_account_id: defaultOwner }
-        : {
-            name: key.name,
-            service_account_id: key.service_account_id ?? "",
-            expires: localDayOf(key.expires_at),
-            ...keyLimitsFrom(key),
-          },
-    );
-    setEditing(key);
+    form.reset({ ...blankKey, service_account_id: defaultOwner });
+    setCreating(true);
   };
   // The owner's effective limits, where the API provides them: the caller's own
   // membership has an exact value from /users/me, and a member or service account's
@@ -601,22 +584,16 @@ function KeysPanel({ team }: { team: TeamAny }) {
   };
   const exactCap = (key: Key | "new") =>
     key === "new" ? !form.values.service_account_id : key.owner_kind === "user" && key.user_id === me.data?.user_id;
-  const memberKey = editing === "new" ? !form.values.service_account_id : editing?.owner_kind === "user";
+  const memberKey = !form.values.service_account_id;
   const lifetime = memberKey ? (team.max_member_key_lifetime_seconds ?? null) : null;
   const expiryMax = lifetime === null ? undefined : lastExpiryDay(lifetime);
   const expiryHint =
     lifetime === null
       ? "Empty means the key never expires."
-      : editing === "new"
-        ? `Optional. This team limits member keys to ${fmtLifetime(lifetime)}; empty uses that limit. The latest day is ${expiryMax}.`
-        : `Required. This team limits member keys to ${fmtLifetime(lifetime)}; the latest day is ${expiryMax}.`;
+      : `Optional. This team limits member keys to ${fmtLifetime(lifetime)}; empty uses that limit. The latest day is ${expiryMax}.`;
   const submit = async () => {
     if (!form.validate()) return false;
-    return form.run(() =>
-      editing === "new"
-        ? create.mutateAsync(form.values)
-        : update.mutateAsync({ key: editing as Key, values: form.values }),
-    );
+    return form.run(() => create.mutateAsync(form.values));
   };
   const ownerName = (key: Key) => {
     if (key.owner_kind === "service_account") {
@@ -643,7 +620,7 @@ function KeysPanel({ team }: { team: TeamAny }) {
     <>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <h2 className="m-0">Keys</h2>
-        <CreateButton can={ownerOptions.length > 0} onClick={() => open("new")}>New key</CreateButton>
+        <CreateButton can={ownerOptions.length > 0} onClick={openNew}>New key</CreateButton>
       </div>
       <DataTable
         rows={keys.data}
@@ -667,7 +644,7 @@ function KeysPanel({ team }: { team: TeamAny }) {
               return (
                 <RowActions
                   canEdit={allowed && key.lifecycle !== "revoked"}
-                  onEdit={() => open(key)}
+                  onEdit={() => setEditingKey(key)}
                   extra={key.lifecycle === "revoked" ? null : (
                     <>
                       <Button variant="outline" size="sm" disabled={!allowed} onClick={() => rotateKey(key)}>Rotate</Button>
@@ -693,14 +670,8 @@ function KeysPanel({ team }: { team: TeamAny }) {
           },
         ]}
       />
-      <FormDialog
-        open={!!editing}
-        title={editing === "new" ? "New API key" : "Edit API key"}
-        submitLabel={editing === "new" ? "Create key" : "Save"}
-        onClose={() => setEditing(null)}
-        onSubmit={submit}
-      >
-        {editing === "new" && ownerOptions.length > 1 && (
+      <FormDialog open={creating} title="New API key" submitLabel="Create key" onClose={() => setCreating(false)} onSubmit={submit}>
+        {ownerOptions.length > 1 && (
           <ComboboxField
             label="Owner"
             value={form.values.service_account_id}
@@ -714,10 +685,20 @@ function KeysPanel({ team }: { team: TeamAny }) {
           values={form.values}
           errors={form.errors}
           set={form.set}
-          cap={editing ? capFor(editing) : undefined}
-          capNote={editing && exactCap(editing) ? undefined : "the owner's limits, clamped by the team; the org may lower them further"}
+          cap={capFor("new")}
+          capNote={exactCap("new") ? undefined : "the owner's limits, clamped by the team; the org may lower them further"}
         />
       </FormDialog>
+      {editingKey && (
+        <KeyEditDialog
+          target={editingKey}
+          lifetime={editingKey.owner_kind === "user" ? team.max_member_key_lifetime_seconds : null}
+          requiredExpiry={editingKey.owner_kind === "user" && team.max_member_key_lifetime_seconds !== null}
+          cap={capFor(editingKey)}
+          capNote={exactCap(editingKey) ? undefined : "the owner's limits, clamped by the team; the org may lower them further"}
+          onClose={() => setEditingKey(null)}
+        />
+      )}
       <ConfirmDialog
         open={!!revoking}
         title="Revoke key"

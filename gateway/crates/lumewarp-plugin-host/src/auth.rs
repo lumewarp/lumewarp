@@ -63,6 +63,8 @@ const UNCACHEABLE: u8 = 2;
 pub enum Traffic {
     Mcp,
     A2a,
+    /// An LLM `Upstream`.
+    Llm,
 }
 
 impl Traffic {
@@ -70,14 +72,16 @@ impl Traffic {
         match self {
             Self::Mcp => wire::Traffic::Mcp,
             Self::A2a => wire::Traffic::A2a,
+            Self::Llm => wire::Traffic::Llm,
         }
     }
 
-    /// `mcp` or `a2a`, for logs and spans.
+    /// `mcp`, `a2a` or `llm`, for logs and spans.
     pub fn label(self) -> &'static str {
         match self {
             Self::Mcp => "mcp",
             Self::A2a => "a2a",
+            Self::Llm => "llm",
         }
     }
 }
@@ -142,6 +146,8 @@ pub struct Headers {
     /// The plugin's promise, in milliseconds. `0` means "this result must not be
     /// reused", and the gateway will call the plugin again next time.
     pub cache_ms: u32,
+    /// True when this answer came from the cache without entering the sandbox.
+    pub cached: bool,
 }
 
 /// What the auth layer sees of the request about to be sent upstream. Client
@@ -564,6 +570,7 @@ impl Authenticator {
         (entry.expires > Instant::now()).then(|| Headers {
             headers: entry.headers.clone(),
             cache_ms: entry.cache_ms,
+            cached: true,
         })
     }
 
@@ -632,6 +639,7 @@ impl Authenticator {
                 Ok(Headers {
                     headers: answer.headers,
                     cache_ms: answer.cache_ms,
+                    cached: false,
                 })
             }
             Ok(Err(message)) => {

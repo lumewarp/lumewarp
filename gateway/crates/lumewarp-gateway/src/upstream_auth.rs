@@ -33,6 +33,8 @@
 // caller, which `-D warnings` would reject.
 #![allow(dead_code)]
 
+use std::sync::Arc;
+
 use hyper::{
     header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION},
     Method, Uri,
@@ -41,8 +43,12 @@ use lumewarp_plugin_host::{
     authenticator::{self, Error as PluginError, Spec, Traffic},
     fetch,
 };
+use lumewarp_proto::config::v1::Snapshot;
+use prometheus_client::metrics::counter::Counter;
+use tracing::Instrument;
 
 use crate::{
+    metrics::{Metrics, UPSTREAM_AUTH_RESULTS},
     snapshot::ApplyError,
     targets::{A2aTarget, Auth, McpTarget, Plugin, Targets},
 };
@@ -66,6 +72,69 @@ pub const MAX_PLUGIN_HEADER_BYTES: usize = 16 * 1024;
 /// (`Mcp-Session-Id`, `MCP-Protocol-Version`, `A2A-Version`, `Last-Event-ID`),
 /// and the client's `Cookie`, which plan L9 removes from every upstream
 /// request. A plugin may read them; setting one is an auth failure.
+/// One LLM upstream and the WASM auth plugin configured for it. Built once per
+/// snapshot (apply time); the request path only checks whether a model has one.
+#[derive(Clone)]
+pub struct LlmAuth {
+    /// `Upstream.name`: the cache identity and metric/log label.
+    pub upstream: Arc<str>,
+    /// `Upstream.base_url`: the destination the plugin is configured for.
+    pub url: Uri,
+    pub plugin: Arc<Plugin>,
+    /// The manifest's `needs_body`: the plugin reads the LLM request body.
+    needs_body: bool,
+    /// One counter per [`UPSTREAM_AUTH_RESULTS`] entry, resolved at apply time.
+    handles: [Counter; UPSTREAM_AUTH_RESULTS.len()],
+}
+
+impl LlmAuth {
+    pub fn new(upstream: &str, url: Uri, plugin: Plugin, metrics: &Metrics) -> Self {
+        let upstream: Arc<str> = upstream.into();
+        let needs_body = lumewarp_plugin_host::global()
+            .get(authenticator::KIND, &plugin.name)
+            .is_some_and(|loaded| loaded.needs_body());
+        Self {
+            handles: metrics.upstream_auth_handles(&upstream),
+            upstream,
+            url,
+            plugin: Arc::new(plugin),
+            needs_body,
+        }
+    }
+
+    /// Whether this plugin reads the LLM request body; false keeps large
+    /// payloads out of the sandbox and out of any copy on the request path.
+    pub fn needs_body(&self) -> bool {
+        self.needs_body
+    }
+
+    fn record(&self, result: &'static str) {
+        let index = UPSTREAM_AUTH_RESULTS
+            .iter()
+            .position(|known| *known == result)
+            .unwrap_or(2);
+        self.handles[index].inc();
+    }
+}
+
+impl std::fmt::Debug for LlmAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmAuth")
+            .field("upstream", &self.upstream)
+            .field("url", &self.url)
+            .field("plugin", &self.plugin.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for LlmAuth {
+    fn eq(&self, other: &Self) -> bool {
+        self.upstream == other.upstream && self.url == other.url && self.plugin == other.plugin
+    }
+}
+
+impl Eq for LlmAuth {}
+
 pub const HOST_HEADERS: [&str; 7] = [
     "host",
     "content-length",
@@ -158,17 +227,115 @@ pub async fn authorize_a2a(
     .await
 }
 
-/// Configures outbound auth for every MCP server and A2A agent of one compiled
-/// configuration, reusing unchanged targets. Call from `RoutingTable::compile`,
-/// after validation: a refused plugin then NACKs the version (`INVALID_CONFIG`)
-/// instead of failing the first request to that target.
+/// Applies the header policy and an LLM upstream's outbound credentials. `url`
+/// is the endpoint actually being requested (the model's endpoint, the health
+/// URL or the metrics URL), while the plugin was configured for `auth.url`
+/// (`Upstream.base_url`). The body reaches the plugin only when its manifest
+/// declares `needs_body`; otherwise it is empty, so a cached plugin call can
+/// never depend on a body the gateway did not pass.
+///
+/// Every attempt of a retry or fallback calls this for the upstream that attempt
+/// targets. A configured `cache-ms` is honoured by the adapter, and a cache hit
+/// never enters the sandbox.
+pub async fn authorize_llm(
+    auth: &LlmAuth,
+    url: &Uri,
+    method: &Method,
+    body: &[u8],
+    headers: &mut HeaderMap,
+) -> Result<(), Failure> {
+    let span = tracing::info_span!(
+        "upstream_auth",
+        upstream = %auth.upstream,
+        plugin = %auth.plugin.name,
+        method = %method,
+        result = tracing::field::Empty,
+        cached = tracing::field::Empty,
+    );
+    let result = authorize_llm_inner(auth, url, method, body, headers)
+        .instrument(span.clone())
+        .await;
+    let label = match &result {
+        Ok(true) => "cached",
+        Ok(false) => "ok",
+        Err(failure) => failure.label(),
+    };
+    span.record("result", label);
+    if let Ok(cached) = &result {
+        span.record("cached", *cached);
+    }
+    auth.record(label);
+    result.map(|_| ())
+}
+
+async fn authorize_llm_inner(
+    auth: &LlmAuth,
+    url: &Uri,
+    method: &Method,
+    body: &[u8],
+    headers: &mut HeaderMap,
+) -> Result<bool, Failure> {
+    let body = if auth.needs_body { body } else { &[] };
+    let (credentials, cached) = match plugin_credentials(
+        Traffic::Llm,
+        &auth.upstream,
+        &auth.upstream,
+        &auth.url,
+        &auth.plugin,
+        url,
+        method,
+        body,
+        headers,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(failure) => {
+            // Nothing will be sent, but the client's credentials are stripped
+            // anyway so a caller cannot accidentally forward them after a
+            // failed authorization.
+            outbound(headers, Vec::new());
+            return Err(failure);
+        }
+    };
+    outbound(headers, credentials);
+    Ok(cached)
+}
+
+/// Configures outbound auth for every LLM upstream, MCP server and A2A agent of
+/// one compiled configuration, reusing unchanged targets. Call from
+/// `RoutingTable::compile`, after validation: a refused plugin then NACKs the
+/// version (`INVALID_CONFIG`) instead of failing the first request to that
+/// target.
 ///
 /// The result is **staged**: nothing serves until [`publish`] is called, which
 /// a later step can still skip when the version is refused (m1). A `configure`
 /// that never returns is bounded by [`lumewarp_plugin_host::CONFIGURE_TIMEOUT`]
 /// and refuses the version too (M4). This is apply-time work only.
-pub fn precompile(targets: &Targets) -> Result<authenticator::Staged, ApplyError> {
+pub fn precompile(
+    targets: &Targets,
+    snapshot: &Snapshot,
+) -> Result<authenticator::Staged, ApplyError> {
     let mut specs = Vec::new();
+    for upstream in &snapshot.upstreams {
+        let what = format!("upstream {:?}", upstream.name);
+        let Some(plugin) = crate::targets::compile_llm_auth(upstream.auth.as_ref(), &what)? else {
+            continue;
+        };
+        if !loaded(&plugin) {
+            continue;
+        }
+        let Some(url) = crate::router::plain_http_uri(&upstream.base_url) else {
+            continue;
+        };
+        specs.push(spec_of(
+            Traffic::Llm,
+            &upstream.name,
+            &upstream.name,
+            &url,
+            &plugin,
+        ));
+    }
     for server in targets.servers() {
         if let Auth::Plugin(plugin) = &server.auth {
             if !loaded(plugin) {
@@ -287,7 +454,7 @@ async fn apply(
             )
             .await
             {
-                Ok(credentials) => credentials,
+                Ok((credentials, _)) => credentials,
                 Err(failure) => {
                     // Nothing will be sent, but the client's credentials are
                     // stripped anyway so a caller cannot accidentally forward
@@ -326,7 +493,7 @@ async fn plugin_credentials(
     method: &Method,
     body: &[u8],
     headers: &HeaderMap,
-) -> Result<Vec<(HeaderName, HeaderValue)>, Failure> {
+) -> Result<(Vec<(HeaderName, HeaderValue)>, bool), Failure> {
     let target_url = target_url.to_string();
     let key = target_key(id, name);
     let configured = match authenticator::get(traffic, key) {
@@ -388,7 +555,8 @@ async fn plugin_credentials(
         tracing::debug!(%name, plugin = %plugin.name, error = %error, "outbound auth failure detail");
             failure
         })?;
-    plugin_headers(&result.headers)
+    let cached = result.cached;
+    plugin_headers(&result.headers).map(|headers| (headers, cached))
 }
 
 fn is_client_credential(name: &str) -> bool {
@@ -829,6 +997,156 @@ mod tests {
         assert_ne!(signature, second);
     }
 
+    fn llm_auth(
+        runtime: &crate::runtime::Runtime,
+        upstream: &str,
+        plugin: pb::UpstreamAuth,
+    ) -> LlmAuth {
+        let plugin = crate::targets::compile_llm_auth(Some(&plugin), "upstream")
+            .unwrap()
+            .expect("a plugin");
+        LlmAuth::new(
+            upstream,
+            format!("https://{upstream}.example.test/v1")
+                .parse()
+                .unwrap(),
+            plugin,
+            &runtime.metrics,
+        )
+    }
+
+    #[tokio::test]
+    async fn llm_auth_applies_headers_strips_client_credentials_and_caches() {
+        if !init_plugins() {
+            return;
+        }
+        let runtime = crate::runtime::Runtime::new();
+        let auth = llm_auth(
+            &runtime,
+            "llm-cache",
+            plugin(
+                "auth_fixture",
+                serde_json::json!({
+                    "mode": "fixed",
+                    "headers": ["x-auth: llm"],
+                    "cache_ms": 60_000
+                }),
+            ),
+        );
+        let uri: Uri = "https://llm-cache.example.test/v1/chat/completions"
+            .parse()
+            .unwrap();
+        let mut headers = client_headers();
+        authorize_llm(
+            &auth,
+            &uri,
+            &Method::POST,
+            b"{\"model\":\"x\"}",
+            &mut headers,
+        )
+        .await
+        .unwrap();
+        assert_eq!(header(&headers, "x-auth"), Some("llm"));
+        assert_eq!(
+            header(&headers, "x-body-len"),
+            Some("0"),
+            "fixture does not declare needs_body"
+        );
+        assert_eq!(header(&headers, "authorization"), None);
+        assert_eq!(header(&headers, "x-lumewarp-key"), None);
+        assert_eq!(header(&headers, "cookie"), None);
+        assert_eq!(header(&headers, "proxy-authorization"), None);
+        assert_eq!(header(&headers, "content-type"), Some("application/json"));
+
+        // The plugin promised a cache and is not called again: x-calls would
+        // become 2 if it were.
+        let mut second = client_headers();
+        authorize_llm(
+            &auth,
+            &uri,
+            &Method::POST,
+            b"{\"model\":\"x\"}",
+            &mut second,
+        )
+        .await
+        .unwrap();
+        assert_eq!(header(&second, "x-calls"), Some("1"));
+        let text = runtime.encode_metrics().unwrap();
+        assert!(
+            text.contains("lumewarp_upstream_auth_total{upstream=\"llm-cache\",result=\"ok\"} 1"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "lumewarp_upstream_auth_total{upstream=\"llm-cache\",result=\"cached\"} 1"
+            ),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn llm_auth_passes_the_body_only_when_its_manifest_asks() {
+        if !init_plugins() {
+            return;
+        }
+        std::env::set_var("LUMEWARP_PLUGIN_SECRET_LLM_AUTH_TEST", "llm-secret");
+        let runtime = crate::runtime::Runtime::new();
+        let auth = llm_auth(
+            &runtime,
+            "llm-body",
+            plugin(
+                "hmac_signature",
+                serde_json::json!({"secret_name": "LLM_AUTH_TEST"}),
+            ),
+        );
+        assert!(auth.needs_body(), "hmac_signature declares needs_body");
+        let uri: Uri = "https://llm-body.example.test/v1/chat/completions"
+            .parse()
+            .unwrap();
+        let body = br#"{"model":"actual"}"#;
+        let mut headers = client_headers();
+        authorize_llm(&auth, &uri, &Method::POST, body, &mut headers)
+            .await
+            .unwrap();
+        let signature = header(&headers, "x-hmac-signature").expect("signed");
+        let (time, mac) = signature.split_once(",v1=").expect("t=...,v1=...");
+        let time: u64 = time.strip_prefix("t=").expect("t=").parse().unwrap();
+        let canonical = format!(
+            "{time}.POST./v1/chat/completions.{}",
+            hex::encode(Sha256::digest(body))
+        );
+        assert_eq!(mac, hmac_sha256(b"llm-secret", canonical.as_bytes()));
+    }
+
+    #[tokio::test]
+    async fn llm_auth_failure_is_counted_and_strips_the_client_credentials() {
+        if !init_plugins() {
+            return;
+        }
+        let runtime = crate::runtime::Runtime::new();
+        let auth = llm_auth(
+            &runtime,
+            "llm-error",
+            plugin("auth_fixture", serde_json::json!({"mode": "error"})),
+        );
+        let uri: Uri = "https://llm-error.example.test/v1/chat/completions"
+            .parse()
+            .unwrap();
+        let mut headers = client_headers();
+        let failure = authorize_llm(&auth, &uri, &Method::POST, b"{}", &mut headers)
+            .await
+            .unwrap_err();
+        assert_eq!(failure, Failure::Plugin);
+        assert_eq!(header(&headers, "authorization"), None);
+        let text = runtime.encode_metrics().unwrap();
+        assert!(
+            text.contains(
+                "lumewarp_upstream_auth_total{upstream=\"llm-error\",result=\"plugin\"} 1"
+            ),
+            "{text}"
+        );
+    }
+
     #[tokio::test]
     async fn an_a2a_card_fetch_uses_the_agent_credentials_and_target_url() {
         if !init_plugins() {
@@ -875,7 +1193,7 @@ mod tests {
                 Some(builtin("passthrough")),
             )],
         );
-        precompile(&good).unwrap();
+        precompile(&good, &Snapshot::default()).unwrap();
         // A configure error refuses the configuration with a reason that does
         // not carry the plugin's own text. `Targets::compile` calls the hook,
         // so a bad plugin never reaches a routing table.

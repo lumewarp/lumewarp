@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { api, type UsageQuery, type UsageRow } from "../api";
 import { Badge, fmtNumber as n, fmtUsd, PageHeader, TypeBadge } from "../components/Bits";
@@ -10,6 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs"
 import { DataTable, type Column } from "../components/Table";
 import { dayStart, isoDay, shiftDay } from "../lib/days";
 import { MODEL_TYPES, type ModelType } from "../lib/modelType";
+import type { RequestsSearch } from "../lib/requests";
 import { useUsageMetric } from "../lib/usageMetric";
 import { useCan, useCatalog, useMe, useModels, useNames, useTeamDirectory, useTeams } from "../hooks";
 
@@ -348,6 +350,18 @@ function LlmUsage({ range }: { range: RangeProps }) {
     key: [{ key: "key", header: "API key", cell: (row) => row.key_id?.slice(0, 8) ?? "—" }],
   };
   const peak = Math.max(1, ...(query.data ?? []).map((r) => r.total_tokens));
+  // The same names, key and range the row was grouped by, so Requests opens on the matching rows.
+  const requestsSearchFor = (row: Row): RequestsSearch => ({
+    kind: "llm",
+    from: range.from,
+    to: range.to,
+    team_id: row.team_id ?? (range.teamId || undefined),
+    key_id: row.key_id ?? undefined,
+    requested: row.requested || undefined,
+    model: row.model || undefined,
+    alias: row.alias || undefined,
+    router: row.router || undefined,
+  });
 
   return (
     <>
@@ -411,6 +425,15 @@ function LlmUsage({ range }: { range: RangeProps }) {
           { key: "completion", header: "Completion", align: "right", hideBelow: "md", cell: (row) => n(row.completion_tokens) },
           ...(total.audio > 0 ? [{ key: "audio", header: "Audio (s)", align: "right" as const, hideBelow: "md" as const, sort: (a: Row, b: Row) => a.audio_ms - b.audio_ms, cell: (row: Row) => (row.audio_ms ? fmtSeconds(row.audio_ms) : <span className="text-muted-foreground">—</span>) }] : []),
           { key: "cost", header: "Cost", align: "right", sort: (a, b) => a.cost_nano_usd - b.cost_nano_usd, cell: (row) => fmtUsd(row.cost_nano_usd) },
+          {
+            key: "requests",
+            header: "Log",
+            cell: (row) => (
+              <Link to="/requests" search={requestsSearchFor(row)} className="font-medium whitespace-nowrap">
+                View
+              </Link>
+            ),
+          },
         ]}
       />
     </>

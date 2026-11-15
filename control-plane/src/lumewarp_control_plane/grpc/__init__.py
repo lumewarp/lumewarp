@@ -14,7 +14,7 @@ import contextvars
 import logging
 import time
 import uuid
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -107,6 +107,18 @@ _identity_var: contextvars.ContextVar[GatewayIdentity | None] = contextvars.Cont
 
 def _identity() -> GatewayIdentity | None:
     return _identity_var.get()
+
+
+class ProbeUnavailable(Exception):
+    """No connected gateway can run the probe (capability plus the named plugin)."""
+
+
+class ProbeTimeout(Exception):
+    """The chosen gateway did not answer a probe in time."""
+
+
+class ProbeGatewayGone(Exception):
+    """The gateway's stream ended while its probe was outstanding."""
 
 
 class _GatewayAuthInterceptor(grpc.aio.ServerInterceptor):
@@ -252,6 +264,14 @@ class _StreamState:
     last_nack_reason: str | None = None
     upstream_health: dict[str, bool] = field(default_factory=dict)
     model_health: dict[str, bool] = field(default_factory=dict)
+    # ProbeRequests waiting for this stream; drained by the Stream loop. A deque, not an
+    # asyncio queue: both sides run on the same event loop and the stream's wake event is
+    # what drives the send.
+    probe_requests: deque[config_service_pb2.ProbeRequest] = field(default_factory=deque)
+    # request_id -> future the HTTP call awaits. Resolved by ProbeResult or stream end.
+    pending_probes: dict[str, asyncio.Future[config_service_pb2.ProbeResult]] = field(
+        default_factory=dict
+    )
     # Set when the stream must end (replaced by a newer connection, token revoked).
     closed: tuple[grpc.StatusCode, str] | None = None
 
@@ -327,6 +347,62 @@ class SessionRegistry:
         for state in tuple(self._sessions.values()):
             if state.scope == scope:
                 state.quarantined_versions.add(version)
+
+    async def probe(
+        self,
+        scope: str,
+        plugin: str,
+        upstream: str,
+        model: str = "",
+        *,
+        timeout_seconds: float = 15.0,
+    ) -> config_service_pb2.ProbeResult:
+        """Run one control-plane Test now through a connected gateway.
+
+        The gateway must advertise `upstream_probe` and report the plugin (its `auth:<plugin>`
+        capability). The registry is process-local, so on a multi-replica control plane only
+        gateways connected to this process are candidates.
+
+        Raises ProbeUnavailable when no candidate exists, ProbeTimeout when the answer does
+        not arrive in `timeout_seconds`, and ProbeGatewayGone when the stream ends first.
+        """
+        capability = f"auth:{plugin}"
+        loop = asyncio.get_running_loop()
+        request_id = uuid.uuid4().hex
+        async with self._lock:
+            state = next(
+                (
+                    item
+                    for item in reversed(tuple(self._sessions.values()))
+                    if item.scope == scope
+                    and item.closed is None
+                    and "upstream_probe" in item.capabilities
+                    and capability in item.capabilities
+                ),
+                None,
+            )
+            if state is None:
+                raise ProbeUnavailable(
+                    f"no connected gateway advertises upstream_probe with {capability}"
+                )
+            future: asyncio.Future[config_service_pb2.ProbeResult] = loop.create_future()
+            state.pending_probes[request_id] = future
+            state.probe_requests.append(
+                config_service_pb2.ProbeRequest(
+                    request_id=request_id, upstream=upstream, model=model
+                )
+            )
+            state.wake.set()
+        try:
+            return await asyncio.wait_for(future, timeout_seconds)
+        except TimeoutError:
+            raise ProbeTimeout(
+                f"gateway {state.gateway_id} did not answer the probe in time"
+            ) from None
+        finally:
+            async with self._lock:
+                if state.pending_probes.get(request_id) is future:
+                    del state.pending_probes[request_id]
 
     def close_token(self, token_id: uuid.UUID) -> int:
         """End every live stream authenticated with ``token_id`` (PERMISSION_DENIED).
@@ -634,6 +710,14 @@ class SessionRegistry:
                 if self._sessions.get(key) is state:
                     self._sessions.pop(key, None)
                 self.metrics.gateway_sessions.set(len(self._sessions))
+            # A probe in flight on a stream that ended can never be answered. Resolve it
+            # instead of leaving its HTTP call waiting for the full timeout.
+            for future in state.pending_probes.values():
+                if not future.done():
+                    future.set_exception(
+                        ProbeGatewayGone(f"gateway {state.gateway_id} disconnected")
+                    )
+            state.pending_probes.clear()
             await self._mirror(state, disconnected=True)
 
 
@@ -757,6 +841,9 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
                 while True:
                     if state.closed is not None:
                         await context.abort(*state.closed)
+                    # One-off probes are independent of the config ACK state machine.
+                    while state.probe_requests:
+                        yield config_service_pb2.ConfigUpdate(probe=state.probe_requests.popleft())
                     if wake_task is None:
                         wake_task = asyncio.create_task(state.wake.wait())
                     pending = state.pending
@@ -857,6 +944,14 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
             return
         if kind == "catalog":
             await self._ingest_catalog(state, incoming.catalog)
+            return
+        if kind == "probe_result":
+            # A late answer for a timed-out or cancelled probe is ignored; the request id
+            # only ever matches a future this stream created.
+            result = incoming.probe_result
+            future = state.pending_probes.get(result.request_id)
+            if future is not None and not future.done():
+                future.set_result(result)
             return
         if kind == "hello":
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Hello may only be sent once")

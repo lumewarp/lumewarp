@@ -616,6 +616,35 @@ pub async fn forward(
                 );
             }
         };
+        // A failed upstream-auth plugin call is an attempt that never reached
+        // the upstream: it may retry or fall back like a connect error, it is
+        // recorded in usage as a 502, and it gives the model no breaker
+        // verdict or latency sample (the plugin, not the model, failed).
+        let mut auth_failed = false;
+        if let Some(auth) = &model.auth {
+            // The exact bytes this attempt sends, copied only when the plugin
+            // declared that it reads the body.
+            let auth_body = auth.needs_body().then(|| rewritten.to_bytes());
+            if let Err(failure) = crate::upstream_auth::authorize_llm(
+                auth,
+                &parts.uri,
+                &parts.method,
+                auth_body.as_deref().unwrap_or_default(),
+                &mut parts.headers,
+            )
+            .await
+            {
+                // The plugin's own text stays in the log; the client learns
+                // only that outbound authentication failed.
+                tracing::warn!(
+                    upstream = %auth.upstream,
+                    plugin = %auth.plugin.name,
+                    kind = failure.label(),
+                    "LLM upstream auth failed"
+                );
+                auth_failed = true;
+            }
+        }
         if let Some(value) = &model.authorization {
             parts.headers.insert(header::AUTHORIZATION, value.clone());
         }
@@ -658,61 +687,76 @@ pub async fn forward(
         // Only models behind a LOWEST_LATENCY router pay for a clock read.
         let attempt_started = model.track_latency.then(Instant::now);
         observation.served(model, attempt, used_fallback);
-        let result = tokio::time::timeout(timeout, client.request(upstream_request))
-            .instrument(span.clone())
-            .await;
-        let (response, outcome, retryable, error_status) = match result {
-            Ok(Ok(response)) => {
-                let status = response.status();
-                span.record("upstream_status", status.as_u16());
-                let retryable = retry_status(router.retry.as_ref(), status.as_u16());
-                if matches!(status.as_u16(), 429 | 503) {
-                    if let Some(delay) = response
-                        .headers()
-                        .get(header::RETRY_AFTER)
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| retry_after(v, SystemTime::now()))
-                    {
-                        guard.model.breaker.retry_after.fetch_max(
-                            clock::mono_ms()
-                                .saturating_add(cooldown_ms(delay, guard.model.circuit)),
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                    }
-                }
-                let outcome = if status.is_success() {
-                    0
-                } else if retryable {
-                    1
-                } else {
-                    5
-                };
-                (
-                    Some(response),
-                    outcome,
-                    retryable && !stream,
-                    StatusCode::BAD_GATEWAY,
-                )
-            }
-            Ok(Err(err)) => {
-                guard.metrics.upstream_error(if err.is_connect() {
-                    UpstreamError::Connect
-                } else {
-                    UpstreamError::Protocol
-                });
-                (None, 2, true, StatusCode::BAD_GATEWAY)
-            }
-            Err(_) => {
-                guard.metrics.upstream_error(UpstreamError::Timeout);
-                (None, 3, true, StatusCode::GATEWAY_TIMEOUT)
-            }
+        let result = if auth_failed {
+            drop(upstream_request);
+            None
+        } else {
+            Some(
+                tokio::time::timeout(timeout, client.request(upstream_request))
+                    .instrument(span.clone())
+                    .await,
+            )
         };
-        guard.metrics.attempts[outcome].inc();
-        span.record("outcome", ATTEMPT_OUTCOMES[outcome]);
+        let (response, outcome, retryable, error_status) = match result {
+            // Nothing was sent; `outcome` is unused for an auth failure.
+            None => (None, 2, true, StatusCode::BAD_GATEWAY),
+            Some(result) => match result {
+                Ok(Ok(response)) => {
+                    let status = response.status();
+                    span.record("upstream_status", status.as_u16());
+                    let retryable = retry_status(router.retry.as_ref(), status.as_u16());
+                    if matches!(status.as_u16(), 429 | 503) {
+                        if let Some(delay) = response
+                            .headers()
+                            .get(header::RETRY_AFTER)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| retry_after(v, SystemTime::now()))
+                        {
+                            guard.model.breaker.retry_after.fetch_max(
+                                clock::mono_ms()
+                                    .saturating_add(cooldown_ms(delay, guard.model.circuit)),
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+                    }
+                    let outcome = if status.is_success() {
+                        0
+                    } else if retryable {
+                        1
+                    } else {
+                        5
+                    };
+                    (
+                        Some(response),
+                        outcome,
+                        retryable && !stream,
+                        StatusCode::BAD_GATEWAY,
+                    )
+                }
+                Ok(Err(err)) => {
+                    guard.metrics.upstream_error(if err.is_connect() {
+                        UpstreamError::Connect
+                    } else {
+                        UpstreamError::Protocol
+                    });
+                    (None, 2, true, StatusCode::BAD_GATEWAY)
+                }
+                Err(_) => {
+                    guard.metrics.upstream_error(UpstreamError::Timeout);
+                    (None, 3, true, StatusCode::GATEWAY_TIMEOUT)
+                }
+            },
+        };
+        if auth_failed {
+            span.record("outcome", "auth_failed");
+        } else {
+            guard.metrics.attempts[outcome].inc();
+            span.record("outcome", ATTEMPT_OUTCOMES[outcome]);
+        }
         // An attempt cut short by the router's total_timeout says nothing
         // about the model: no breaker verdict, no latency sample (it
         // still counts as outcome="timeout" in the attempts metric).
-        let cut_short = outcome == 3 && capped;
+        let cut_short = (outcome == 3 && capped) || auth_failed;
         let failed = matches!(outcome, 2 | 3)
             || (outcome == 1
                 && response
@@ -799,7 +843,13 @@ pub async fn forward(
                 let mut capture = pending.take();
                 capture.status = error_status.as_u16();
                 capture.finalize(RequestOutcome::UpstreamError, UsageState::Missing, None);
-                return if error_status == StatusCode::GATEWAY_TIMEOUT {
+                return if auth_failed {
+                    error::json(
+                        StatusCode::BAD_GATEWAY,
+                        "upstream_auth_failed",
+                        "Upstream authentication failed",
+                    )
+                } else if error_status == StatusCode::GATEWAY_TIMEOUT {
                     error::json(
                         error_status,
                         "upstream_timeout",

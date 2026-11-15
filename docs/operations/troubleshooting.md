@@ -1,7 +1,7 @@
 # Troubleshooting
 
 Start with the request id. Every gateway response carries `x-lumewarp-request-id`; usage
-events and traces are stored under it
+events, the request log and traces are stored under it
 ([Looking up a request](./observability.md#looking-up-a-request)).
 
 ## A client gets an error
@@ -15,6 +15,7 @@ events and traces are stored under it
 | 429 `rate_limit_exceeded` | A limit at org, team, owner or key level. | `lumewarp_requests_total` with status 429 for the team; the limits along the chain in the Admin UI. |
 | 429 `insufficient_quota` | A monthly budget is spent. | Usage against the org, team and owner budgets. |
 | 502 `upstream_error` / 504 `upstream_timeout` | The upstream failed after retries and fallbacks. | **Test now** on the upstream and the model; `lumewarp_upstream_errors_total`. |
+| 502 `upstream_auth_failed` | The upstream's WASM auth plugin failed, timed out or returned a refused header. | `lumewarp_upstream_auth_total{upstream,result}` and the `upstream_auth` span; the plugin's secrets (`LUMEWARP_PLUGIN_SECRET_*`) and whether every gateway loaded it. |
 | 503 `not_ready` | The gateway has no snapshot. | See below. |
 | MCP or A2A answers 503 | `LUMEWARP_GATEWAY_ID_KEY` (and, for A2A, `LUMEWARP_GATEWAY_PUBLIC_URL`) is not set on the gateway. | The gateway's environment. |
 
@@ -40,6 +41,15 @@ admin listener answers 503 until then.
   or its value differs from the control plane's.
 - `lumewarp_config_stream_connected` is 0: the gateway cannot reach the control plane's
   gRPC port, or its token was revoked.
+
+## Test now for an upstream with a plugin
+
+- 409 `no_gateway_for_plugin`: no connected gateway on the control-plane process advertises
+  `upstream_probe` and the upstream's plugin. Connect one, or check `Hello.plugins`.
+- 504 `probe_timeout`: the gateway did not answer in time; check the upstream and the plugin.
+- 502 `probe_gateway_gone`: the gateway disconnected while probing.
+- `not_found` or `not_found_model` right after a save: the gateway has not applied the new
+  version yet; retry in a moment.
 
 ## The control plane is not ready
 

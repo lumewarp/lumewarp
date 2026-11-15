@@ -106,7 +106,9 @@ produces one event with a UUIDv7 `request_id`, returned to the client in the
 computed from `models[].price`, the name the client called (`requested`), the
 model that served it (`model`), how it got there (`alias`, `router`, `fallback`),
 what the final attempt used (`upstream`, `upstream_model`) and `attempts`; see
-[the table](../config-protocol.md). Events
+[the table](../config-protocol.md). The control plane's
+[request log](../admin/requests.md) is built from these events and stores the same
+metadata, never a prompt or response. Events
 enter a bounded in-memory queue (100,000) and are reported every 1 s or every
 500 events. Failed batches retry from the queue with backoff; when the queue is
 full new events are dropped and `lumewarp_usage_events_dropped_total`

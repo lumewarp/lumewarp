@@ -11,12 +11,15 @@ use std::{
 
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use hyper::{header::HeaderValue, Request, Uri};
+use hyper::{
+    header::{self, HeaderValue},
+    HeaderMap, Method, Request, Uri,
+};
 use lumewarp_proto::config::v1::{CircuitBreaker, HealthCheck};
 use prometheus_client::metrics::gauge::Gauge;
 use tokio::{sync::Notify, task::JoinHandle};
 
-use crate::{proxy::UpstreamClient, ratelimit::clock};
+use crate::{proxy::UpstreamClient, ratelimit::clock, upstream_auth::LlmAuth};
 
 pub struct Breaker {
     // 0 closed, 1 half-open, otherwise open until (value - 2) monotonic ms.
@@ -253,39 +256,73 @@ fn spawn_probe(probe: Probe, client: UpstreamClient, changed: Arc<Notify>) -> Jo
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            let mut request = Request::new(crate::request_body::RequestBody::from(
-                probe.body.clone().unwrap_or_default(),
-            ));
-            *request.uri_mut() = probe.uri.clone();
+            let method = if probe.body.is_some() {
+                Method::POST
+            } else {
+                Method::GET
+            };
+            let mut headers = HeaderMap::new();
             if probe.body.is_some() {
-                *request.method_mut() = hyper::Method::POST;
-                request.headers_mut().insert(
-                    hyper::header::CONTENT_TYPE,
+                headers.insert(
+                    header::CONTENT_TYPE,
                     HeaderValue::from_static(probe.content_type),
                 );
             }
-            if let Some(value) = &probe.authorization {
-                request
-                    .headers_mut()
-                    .insert(hyper::header::AUTHORIZATION, value.clone());
-            }
-            let ok = tokio::time::timeout(
-                Duration::from_millis(probe.config.timeout_ms.into()),
-                async {
-                    let response = client.request(request).await?;
-                    let ok = response.status().is_success();
-                    // Drain each frame, without buffering the probe body.
-                    let mut body = response.into_body();
-                    while let Some(frame) = body.frame().await {
-                        if frame.is_err() {
-                            return Ok::<_, hyper_util::client::legacy::Error>(false);
+            let authorized = match &probe.auth {
+                Some(auth) => {
+                    let body = probe.body.as_deref().unwrap_or_default();
+                    match crate::upstream_auth::authorize_llm(
+                        auth,
+                        &probe.uri,
+                        &method,
+                        body,
+                        &mut headers,
+                    )
+                    .await
+                    {
+                        Ok(()) => true,
+                        Err(failure) => {
+                            tracing::warn!(
+                                upstream = %auth.upstream,
+                                target = %probe.name,
+                                kind = failure.label(),
+                                "health probe auth failed"
+                            );
+                            false
                         }
                     }
-                    Ok(ok)
-                },
-            )
-            .await
-            .is_ok_and(|result| result.unwrap_or(false));
+                }
+                None => true,
+            };
+            let ok = authorized
+                && tokio::time::timeout(
+                    Duration::from_millis(probe.config.timeout_ms.into()),
+                    async {
+                        let mut request = Request::new(crate::request_body::RequestBody::from(
+                            probe.body.clone().unwrap_or_default(),
+                        ));
+                        *request.uri_mut() = probe.uri.clone();
+                        *request.method_mut() = method;
+                        *request.headers_mut() = headers;
+                        if let Some(value) = &probe.authorization {
+                            request
+                                .headers_mut()
+                                .insert(hyper::header::AUTHORIZATION, value.clone());
+                        }
+                        let response = client.request(request).await?;
+                        let ok = response.status().is_success();
+                        // Drain each frame, without buffering the probe body.
+                        let mut body = response.into_body();
+                        while let Some(frame) = body.frame().await {
+                            if frame.is_err() {
+                                return Ok::<_, hyper_util::client::legacy::Error>(false);
+                            }
+                        }
+                        Ok(ok)
+                    },
+                )
+                .await
+                .is_ok_and(|result| result.unwrap_or(false));
             if ok {
                 failures = 0;
                 successes = successes.saturating_add(1);
@@ -357,6 +394,9 @@ pub struct Probe {
     pub body: Option<Bytes>,
     pub content_type: &'static str,
     pub authorization: Option<HeaderValue>,
+    /// WASM outbound auth for the upstream; mutually exclusive with
+    /// `authorization` (the request is refused at apply time).
+    pub auth: Option<LlmAuth>,
     pub config: HealthCheck,
     pub healthy: Arc<AtomicBool>,
     pub gauge: Gauge,
@@ -373,6 +413,7 @@ impl Probe {
             && self.content_type == other.content_type
             && self.config == other.config
             && self.authorization == other.authorization
+            && self.auth == other.auth
     }
 }
 
@@ -533,6 +574,7 @@ mod tests {
             body: None,
             content_type: "application/json",
             authorization: None,
+            auth: None,
             config: HealthCheck {
                 interval_ms: 60_000,
                 timeout_ms: 1,

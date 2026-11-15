@@ -151,6 +151,9 @@ impl CandidateSource for WireSource<'_> {
 pub use auth::exports::lumewarp::plugin::upstream_auth as auth_types;
 pub use middleware::exports::lumewarp::plugin::a2a_middleware as middleware_types;
 
+/// One configured `upstream-auth` plugin. `request.body` is empty for LLM
+/// traffic unless the manifest declares `needs_body: true` (see
+/// `register!`); MCP and A2A traffic always carries the body.
 pub trait Authenticator: Send + Sync + 'static {
     fn authorize(
         &self,
@@ -190,12 +193,46 @@ pub fn manifest<P: schemars::JsonSchema>(
     serde_json::json!({"abi": 1, "kind": kind, "name": name, "title": title, "description": description, "params_schema": schema_for::<P>()}).to_string()
 }
 
+#[doc(hidden)]
+pub fn upstream_auth_manifest<P: schemars::JsonSchema>(
+    name: &str,
+    title: &str,
+    description: &str,
+    needs_body: bool,
+) -> String {
+    serde_json::json!({"abi": 1, "kind": "upstream-auth", "name": name, "title": title, "description": description, "needs_body": needs_body, "params_schema": schema_for::<P>()}).to_string()
+}
+
 #[macro_export]
 macro_rules! register {
     (kind: "router-strategy", name: $name:literal, title: $title:literal, description: $description:literal,
      params: $params:ty, member_params: $member:ty, strategy: $strategy:ty $(,)?) => {
         $crate::register! { kind: "router-strategy", name: $name, title: $title, description: $description,
             uses_weight: false, needs: $crate::Needs::default(), params: $params, member_params: $member, strategy: $strategy }
+    };
+    // `needs_body` is optional; a plugin that signs or inspects the request
+    // body must set it, or LLM traffic reaches `authorize` with an empty body.
+    (kind: "upstream-auth", name: $name:literal, title: $title:literal, description: $description:literal,
+     needs_body: $needs_body:expr, params: $params:ty, authenticator: $auth:ty $(,)?) => {
+        struct Component;
+        impl $crate::auth_types::Guest for Component {
+            type Authenticator = GuestAuth;
+            fn manifest() -> String { $crate::upstream_auth_manifest::<$params>($name, $title, $description, $needs_body) }
+        }
+        struct GuestAuth($auth);
+        impl $crate::auth_types::GuestAuthenticator for GuestAuth {
+            fn configure(target: $crate::auth_types::TargetInfo) -> Result<$crate::auth_types::Authenticator, String> {
+                let params: $params = $crate::serde_json::from_str(&target.params_json).map_err(|e| e.to_string())?;
+                <$auth as $crate::ConfigureAuth<$params>>::configure(&target, params)
+                    .map(|a| $crate::auth_types::Authenticator::new(Self(a))).map_err(|e| e.to_string())
+            }
+            fn authorize(&self, request: $crate::auth_types::OutboundRequest) -> Result<$crate::auth_types::AuthResult, String> {
+                <$auth as $crate::Authenticator>::authorize(&self.0, request)
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        $crate::auth::export!(Component with_types_in $crate::auth);
+        #[cfg(test)] #[test] fn plugin_schema_subset() { $crate::assert_schema_subset::<$params>(); }
     };
     (kind: "upstream-auth", name: $name:literal, title: $title:literal, description: $description:literal,
      params: $params:ty, authenticator: $auth:ty $(,)?) => {

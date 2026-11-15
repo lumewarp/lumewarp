@@ -75,7 +75,11 @@ test("a 403 from a permission-dependent read revalidates /users/me", async ({ pa
   page.on("request", (request) => {
     if (new URL(request.url()).pathname === "/api/v1/users/me") meRequests++;
   });
+  // The invalidation must happen after the initial me load settles: a 403 while that request is
+  // still in flight marks the query stale but cannot start a second fetch for it.
+  const meLoaded = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/users/me" && response.status() === 200);
   await signIn(page, TEAM_ADMIN, "/usage");
+  await meLoaded;
   await expect.poll(() => meRequests).toBe(1);
   await page.route("**/api/v1/usage?*", (route) =>
     route.fulfill({

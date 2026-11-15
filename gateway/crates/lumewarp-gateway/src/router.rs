@@ -35,6 +35,7 @@ use crate::{
     sealed,
     snapshot::{self, ApplyError},
     transform::Transform,
+    upstream_auth::LlmAuth,
 };
 
 /// URI slots derived from the single endpoint table.
@@ -50,6 +51,9 @@ pub struct Model {
     pub model_type: pb::ModelType,
     pub host: HeaderValue,
     pub authorization: Option<HeaderValue>,
+    /// WASM outbound auth for this model's upstream. At most one of this and
+    /// `authorization` is set; `None` costs the request path one check.
+    pub auth: Option<LlmAuth>,
     pub upstream_model_json: Bytes,
     pub timeout: Duration,
     /// Shared through `Runtime::inflight` by model name, so it survives swaps.
@@ -536,12 +540,14 @@ impl RoutingTable {
         // do not serve yet: a refused `configure` (or one that outlives the
         // configure budget) NACKs this version, and a version refused by any
         // later step leaves the previous plugins serving (m1, M4).
-        let staged_auth = Some(crate::upstream_auth::precompile(&mcp_targets)?);
+        let staged_auth = Some(crate::upstream_auth::precompile(&mcp_targets, snapshot)?);
         let staged_middleware = Some(crate::a2a::precompile(&mcp_targets)?);
         let mut upstreams = HashMap::new();
         let mut probes = Vec::new();
         let mut unprobed = Vec::new();
         let mut metrics_uris = HashMap::new();
+        // LLM upstream auth, resolved once per snapshot (`None` for most).
+        let mut llm_auths: HashMap<&str, Option<LlmAuth>> = HashMap::new();
         // Which models need latency samples, which upstreams scraping.
         let upstream_of: HashMap<&str, &str> = snapshot
             .models
@@ -601,6 +607,12 @@ impl RoutingTable {
             let host =
                 HeaderValue::from_str(base.authority().expect("validated authority").as_str())
                     .map_err(|_| invalid(format!("upstream {name:?} has an invalid host")))?;
+            let llm_auth = crate::targets::compile_llm_auth(
+                upstream.auth.as_ref(),
+                &format!("upstream {name:?}"),
+            )?
+            .map(|plugin| LlmAuth::new(name, base.clone(), plugin, &runtime.metrics));
+            llm_auths.insert(name.as_str(), llm_auth.clone());
             let endpoint = |suffix: &str| -> Result<Uri, ApplyError> {
                 let mut parts = base.clone().into_parts();
                 parts.path_and_query = Some(
@@ -650,6 +662,7 @@ impl RoutingTable {
                     body: None,
                     content_type: "application/json",
                     authorization,
+                    auth: llm_auth.clone(),
                     config: config.clone(),
                     healthy: healthy.clone(),
                     gauge,
@@ -713,6 +726,7 @@ impl RoutingTable {
                         "application/json"
                     },
                     authorization: authorization.clone(),
+                    auth: llm_auths[d.upstream.as_str()].clone(),
                     config: HealthCheck {
                         url: String::new(),
                         interval_ms: check.interval_ms,
@@ -735,6 +749,7 @@ impl RoutingTable {
                     endpoints: endpoints.clone(),
                     host: host.clone(),
                     authorization: authorization.clone(),
+                    auth: llm_auths[d.upstream.as_str()].clone(),
                     upstream_model_json: Bytes::from(
                         serde_json::to_vec(&d.upstream_model).expect("string serializes"),
                     ),
@@ -773,6 +788,7 @@ impl RoutingTable {
                 upstream: name.into(),
                 uri,
                 authorization,
+                auth: llm_auths[name].clone(),
                 targets: snapshot
                     .models
                     .iter()

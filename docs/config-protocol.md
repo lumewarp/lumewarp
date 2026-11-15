@@ -14,7 +14,7 @@ Normative rules for `lumewarp.config.v1.ConfigService` and `lumewarp.usage.v1.Us
 1. Every source mutation (API write, budget flip, rollover) and its audit row commit in one DB transaction together with an outbox row "recompile scope".
 2. A single compiler loop per scope (serialized with a Postgres advisory lock) reads source state at one consistent snapshot, compiles, validates and stores `config_versions(scope, version, payload, digest, source_revision, created_at)`. A compile failure leaves the previous version current and marks the outbox row failed with a reason; it never publishes a partial snapshot.
 3. A later compile always sees a later source revision; a slower, older compile must not publish after a newer one (check `source_revision` under the lock).
-4. Rollback restores models, aliases, routers, MCP servers and A2A agents and their names by id from the version's `catalog_state` and re-publishes its **routing** content (upstreams, models, aliases, routers, MCP servers, A2A agents) as a new version. Grants are not restored: grants on a catalog item deleted since then stay gone, while an MCP server or A2A agent absent from the state is archived rather than deleted, so its definitions and grants survive. Reviewed definition states are not part of the state: a rollback never re-decides a definition. API keys, teams, policies and statuses are always taken from current source state, so a revoked key can never be revived by a rollback. Restored routers meet the same plugin rules as a router write, against the gateways of today: a rejection is a 422 that changes nothing, and `force` saves past connected gateways lacking a strategy, with the same audit.
+4. Rollback restores upstreams, models, aliases, routers, MCP servers and A2A agents and their names by id from the version's `catalog_state` and re-publishes its **routing** content (upstreams, models, aliases, routers, MCP servers, A2A agents) as a new version. An upstream's auth plugin is restored as stored and is not re-checked; a gateway lacking it NACKs the version. Grants are not restored: grants on a catalog item deleted since then stay gone, while an MCP server or A2A agent absent from the state is archived rather than deleted, so its definitions and grants survive. Reviewed definition states are not part of the state: a rollback never re-decides a definition. API keys, teams, policies and statuses are always taken from current source state, so a revoked key can never be revived by a rollback. Restored routers meet the same plugin rules as a router write, against the gateways of today: a rejection is a 422 that changes nothing, and `force` saves past connected gateways lacking a strategy, with the same audit.
 5. Retention: keep the latest version, the last 50 versions and anything referenced by a connected session; older payloads may be compacted. A gateway whose base was compacted gets a full snapshot.
 6. Limits: a snapshot larger than 64 MiB or with more than 200k keys fails compilation. gRPC max message size is 64 MiB on both sides.
 
@@ -32,6 +32,7 @@ gateway                                   control plane
 ```
 
 - **At most one un-ACKed update per session.** If several versions are published while one is pending, the next update goes straight from the session's ACKed version to the current desired version (delta if the base is retained, otherwise full).
+- Besides updates, the control plane may send a `ProbeRequest` on the same stream. It is not a configuration version and is never ACKed or NACKed ([Probes from the control plane](#probes-from-the-control-plane)).
 - The base of a delta is always the session's ACKed version (or Hello.have_version before the first ACK) — never a global "last sent" version.
 - The first update after Hello is a delta only when `Hello.scope` matches, `have_version` is retained, `have_version <= desired` and `Hello.have_digest` equals the stored digest of `have_version`; otherwise full. Until the first ACK after a full, the session has **no** delta base (a NACKed full is never followed by a delta).
 - Digest = `config_versions.digest` (sha256 of the control plane's serialized payload). It is sent as `ConfigUpdate.target_digest`; the gateway treats it as opaque, persists it with the snapshot and echoes it in `Hello.have_digest` (serialization is not byte-identical across languages, so the gateway never recomputes it). `have_version > desired` (control plane restored from backup) → full.
@@ -63,6 +64,31 @@ A gateway is one process. At startup it generates its id (`<hostname>-<8 hex>`) 
 - `UNSUPPORTED_FEATURE` is per gateway: only the gateway that lacks the plugin or capability skips the version; the others apply it. It keeps its previous config and NACKs later versions that still need it.
 - During a rolling upgrade, a gateway still on the old build can therefore serve an older config than the new-build gateways. Publish a config that needs the new build only when every gateway can apply it; the old-build gateways stay on their previous config until the rollout finishes or the requirement goes away.
 
+
+## Probes from the control plane
+
+A saved Test now for an upstream or model with a WASM auth plugin runs on a gateway, because
+the control plane cannot run WASM. The control plane sends `ConfigUpdate.probe` carrying
+`ProbeRequest { request_id, upstream, model }` on an existing stream; it is not a
+configuration version and the gateway never ACKs or NACKs it. `upstream` is an
+`Upstream.name` and `model` is a `Model.name`; an empty `model` probes the upstream with
+`GET <base_url>/models`, otherwise the model's typed endpoint is called.
+
+The gateway answers with `GatewayMessage.probe_result` carrying `ProbeResult { request_id,
+ok, status, latency_ms, error_class }`; it never includes an upstream response body.
+`status` is 0 when no response arrived. `error_class` is empty on success, otherwise one of
+`not_found` (unknown upstream), `not_found_model` (unknown model, or a model on another
+upstream), `config` (the auth plugin cannot be configured), `auth` (the plugin failed or
+its headers were refused), `connect`, `timeout`, `protocol`, or `upstream_status` (a
+non-2xx answer; `status` carries it).
+
+The probe runs against the snapshot active when it arrives; a later snapshot does not
+change it. A gateway advertises `upstream_probe` in `Hello.supported_capabilities`. The
+control plane sends a probe only to a connected gateway that advertises it and, for a
+plugin upstream, `auth:<plugin>`, correlates the answer by `request_id` and applies its own
+timeout. A late or unknown `request_id` is ignored, and a gateway disconnect ends the
+outstanding probes. Only gateways connected to the control-plane process serving the
+request are candidates.
 
 ## Catalog reports
 
@@ -119,6 +145,15 @@ receive → apply to a private copy → validate (capabilities, references, hash
   probe unchanged (e.g. key-only) keeps that probe running with its failure
   counts. Removing `Upstream.circuit_breaker` resets the breakers of its
   models to closed on activation.
+
+### Upstreams
+
+An upstream carries exactly one credential: `api_key_ref` (a gateway environment
+variable), `api_key_ciphertext` (sealed), or `auth` (a WASM `upstream-auth` plugin;
+capability `auth:<plugin>`). `auth` is an `UpstreamAuth` whose `plugin` is a
+`PluginRef`; on an LLM upstream the built-ins and `secret_ref`/`secret_ciphertext` are
+refused, and `auth` cannot be combined with the API-key fields. A gateway without the
+plugin NACKs `UNSUPPORTED_FEATURE`.
 
 ### Names: models, aliases, routers
 
@@ -192,10 +227,11 @@ also carries the id so the control plane can reject stale data.
   optional `PluginRef` naming an `a2a-middleware` plugin (at most one per
   agent); `card_json` is the card served when the gateway has not fetched one
   (at most 64 KiB).
-- `PluginRef { plugin, params_json, timeout_ms }` is the same reference an MCP
-  server's `auth` and an A2A agent's `middleware` use. A plugin a gateway does
-  not have is `UNSUPPORTED_FEATURE` for that gateway; using one without its
-  `auth:<name>` or `a2a_middleware:<name>` capability is `INVALID_CONFIG`.
+- `PluginRef { plugin, params_json, timeout_ms }` is the reference inside an MCP
+  server's `auth`, an A2A agent's `middleware` and an LLM upstream's `auth`. A
+  plugin a gateway does not have is `UNSUPPORTED_FEATURE` for that gateway; using
+  one without its `auth:<name>` or `a2a_middleware:<name>` capability is
+  `INVALID_CONFIG`.
 - `ApiKey.policy` carries the MCP and A2A grants: `allow_all_mcp` with
   `mcp_grants []McpGrant{server, all_tools, tools}`, and `allow_all_agents`
   with `allowed_agents`. A server absent from `mcp_grants` is invisible. A
@@ -220,10 +256,11 @@ Standalone YAML has no previous-hash field.
 
 The gateway advertises `retry`, `fallbacks`, `health_check`, `circuit_breaker`,
 `traffic_split`, `vllm_load`, `rotation_grace`, `model_chat_check`, `model_types`,
-`audio_price`, `mcp`, `a2a`,
+`audio_price`, `mcp`, `a2a`, `upstream_probe`,
 `strategy:<name>`, `auth:<name>` and `a2a_middleware:<name>`: the last three name
-plugins the gateway has (built-ins included), and `mcp`/`a2a` gate MCP servers
-and A2A agents. Compilers add a capability only when it is used:
+plugins the gateway has (built-ins included), `mcp`/`a2a` gate MCP servers
+and A2A agents, and `upstream_probe` says it can run a saved Test now. Compilers
+add a capability only when it is used:
 
 | Capability | Fields |
 | --- | --- |
@@ -240,7 +277,8 @@ and A2A agents. Compilers add a capability only when it is used:
 | `mcp` | Nonempty `Snapshot.mcp_servers` |
 | `a2a` | Nonempty `Snapshot.a2a_agents` |
 | `strategy:<name>` | Any router with `Router.strategy = <name>`, including `strategy:weighted` |
-| `auth:<name>` | Any MCP server or A2A agent whose `auth.plugin = <name>` |
+| `auth:<name>` | Any MCP server, A2A agent or LLM upstream whose `auth.plugin = <name>` |
+| `upstream_probe` | No snapshot field; gateways advertise it when they can answer a `ProbeRequest` |
 | `a2a_middleware:<name>` | Any A2A agent whose `middleware.plugin = <name>` |
 
 Using a field without its capability is `INVALID_CONFIG`; requiring an

@@ -101,6 +101,10 @@ struct Manifest {
     title: String,
     description: String,
     params_schema: Value,
+    /// Upstream-auth only: the guest reads `outbound-request.body` for LLM
+    /// traffic. Absent means false, so the body stays empty outside MCP/A2A.
+    #[serde(default)]
+    needs_body: bool,
     router: Option<RouterManifest>,
 }
 #[derive(Deserialize)]
@@ -386,6 +390,9 @@ pub struct Plugin {
     component: Component,
     prepared: Prepared,
     pub descriptor: PluginDescriptor,
+    /// Upstream-auth only: pass LLM request bodies to `authorize`. False keeps
+    /// large payloads out of the sandbox.
+    needs_body: bool,
     /// Calls cut short by their configured timeout.
     pub timeouts: AtomicU64,
     /// Calls that trapped or could not get an instance.
@@ -404,6 +411,11 @@ impl Plugin {
 
     pub fn component(&self) -> &Component {
         &self.component
+    }
+
+    /// Whether an LLM `authorize` call must receive the request body.
+    pub fn needs_body(&self) -> bool {
+        self.needs_body
     }
 
     /// The world bindings, pre-linked once per component.
@@ -600,6 +612,9 @@ impl Registry {
         check_manifest_text("title", &manifest.title, MAX_TITLE_CHARS)?;
         check_manifest_text("description", &manifest.description, MAX_DESCRIPTION_CHARS)?;
         check_schema(&manifest.params_schema)?;
+        if manifest.needs_body && kind != 2 {
+            bail!("needs_body is only for upstream-auth plugins")
+        }
         let router = match (kind, manifest.router) {
             (1, Some(r)) => {
                 check_schema(&r.member_schema)?;
@@ -634,6 +649,7 @@ impl Registry {
                 component,
                 prepared,
                 descriptor,
+                needs_body: manifest.needs_body,
                 timeouts: AtomicU64::new(0),
                 traps: AtomicU64::new(0),
                 failures: std::sync::atomic::AtomicU32::new(0),

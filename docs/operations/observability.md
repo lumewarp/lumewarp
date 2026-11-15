@@ -1,14 +1,19 @@
 # Metrics, alerts and tracing
 
 The gateway and the control plane each expose Prometheus metrics on their own listener;
-every metric is listed in the [metrics reference](../reference/metrics.md). The gateway
-writes no access log: a single request is looked up by its id in traces.
+every metric is listed in the [metrics reference](../reference/metrics.md). The control
+plane's [request log](../admin/requests.md) keeps one metadata row per request; a request's
+spans, including every upstream attempt, are looked up by its id in traces.
 
 ## Looking up a request
 
-The gateway writes no access log. Each response carries `x-lumewarp-request-id`, the same
-id as its usage event, and the `request` span carries it as `request_id`, with the called
-name, alias, router, final model and one `upstream_attempt` child per try. To turn this on:
+The gateway writes no access log of its own. The control plane's request log keeps one row
+per gateway request from its usage event: the called name, alias, router, fallback, final
+model and upstream, status, attempts, tokens, cost and duration. It never stores prompts,
+responses or headers. Each response carries `x-lumewarp-request-id`, the same id as its
+usage event, request-log row and trace; the `request` span carries it as `request_id`, with
+the called name, alias, router, final model and one `upstream_attempt` child per try. Use
+the request log for the metadata and OTel for the per-attempt detail. To turn OTel on:
 
 ```yaml
 gateway:
@@ -19,9 +24,9 @@ gateway:
 
 What the lookup depends on:
 
-- With `gateway.otel.endpoint` empty there is no record at all.
+- With `gateway.otel.endpoint` empty there is no trace record at all; the request log still has the metadata row.
 - With `samplingRatio` below 1, or a full exporter queue, some requests cannot be found.
-  Use 1 if this serves as an access log. A slow collector loses spans without any log line
+  Use 1 if you need every request in OTel. A slow collector loses spans without any log line
   or metric; the queue is tuned with `OTEL_BSP_MAX_QUEUE_SIZE`,
   `OTEL_BSP_SCHEDULE_DELAY` and `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` in `gateway.extraEnv`
   (measurements in the [Gateway](./gateway.md)).
@@ -29,7 +34,7 @@ What the lookup depends on:
 - The gateway ignores the sampled flag of a client's `traceparent`, so a client cannot erase
   its own record; it still joins the client's trace.
 
-Usage events do not depend on any of this, but they have no per-attempt detail.
+The request log and usage events do not depend on any of this, but they have no per-attempt detail.
 
 ## Tracing and OTLP
 
@@ -60,13 +65,15 @@ compiled exporter/SDK:
 
 Use an HTTP/protobuf collector endpoint, not a gRPC-only endpoint.
 
-The gateway writes no access log: OTel is where a single request is looked up,
-starting from the `x-lumewarp-request-id` response header. The `request` span has
-`request_id`, `endpoint`, `team_id`, `key_id`, `requested`, `alias`, `router`,
-`model`, `upstream`, `upstream_model`, `attempts`, `fallback`, `config_version`,
-`status` and `stream`. Each `upstream_attempt` child has `model`, `upstream`,
-`upstream_model`, `attempt`, `fallback`, `outcome` and `upstream_status`. Prompts,
-responses and keys are never span attributes; `key_id` is the public id.
+The request log holds metadata only; OTel is where a single request's detailed
+record is looked up, starting from the `x-lumewarp-request-id` response header. The
+`request` span has `request_id`, `endpoint`, `team_id`, `key_id`, `requested`, `alias`,
+`router`, `model`, `upstream`, `upstream_model`, `attempts`, `fallback`,
+`config_version`, `status` and `stream`. Each `upstream_attempt` child has `model`,
+`upstream`, `upstream_model`, `attempt`, `fallback`, `outcome` and `upstream_status`.
+When an LLM upstream uses a WASM auth plugin, an `upstream_auth` span records
+`upstream`, `plugin`, `method`, `result` and `cached`. Prompts, responses and keys are
+never span attributes; `key_id` is the public id.
 
 Every `/v1/*` response has the header, including a 503 `not_ready` before any
 snapshot is loaded (`config_version` 0 and no `key_id`; there is no usage event,
@@ -79,16 +86,16 @@ known name, which the response does not reveal. Authentication rejections have n
 
 This only works under these conditions:
 
-- Without `OTEL_EXPORTER_OTLP_ENDPOINT` there is no record at all.
+- Without `OTEL_EXPORTER_OTLP_ENDPOINT` there is no trace record at all.
 - Sampling below 100%, or a full export queue, loses records, and the gateway
   neither logs nor counts that loss. A request produces at least 2 spans, so at
   1000 RPS the default queue of 2048 spans holds about one second. Measured at
   1000 RPS for 30 s (60000 spans): with a collector answering at once the defaults
   lost nothing; with a collector taking 1 s per export the defaults delivered 17408
   (71% lost), while `OTEL_BSP_MAX_QUEUE_SIZE=65536`, `OTEL_BSP_SCHEDULE_DELAY=200`
-  and `OTEL_BSP_MAX_EXPORT_BATCH_SIZE=2048` delivered all 60000. To use OTel as an
-  access log keep the 100% default and size the queue for your rate and for how long
-  the collector may stall.
+  and `OTEL_BSP_MAX_EXPORT_BATCH_SIZE=2048` delivered all 60000. To keep a detailed
+  record for every request, keep the 100% default and size the queue for your rate and
+  for how long the collector may stall.
 - How long records are kept is decided by the OTel backend.
 
 Usage events do not depend on any of this; they just have no per-attempt detail.

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { PlusIcon, Trash2Icon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { api, ApiError, type Model, type ModelTest } from "../api";
 import { Badge, nanoToUsd, usdToNano } from "../components/Bits";
@@ -11,13 +11,14 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { DescriptionDetails, DescriptionList, DescriptionTerm } from "../components/ui/description-list";
+import { HelpTip } from "../components/ui/help-tip";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { useAliases, useModels, useMut, useNames, useRouters, useUpstreams } from "../hooks";
 import { usedBy } from "../lib/catalog";
 import { MODEL_TYPES, type ModelType, typeLabel } from "../lib/modelType";
 import { PageLoading } from "./Access";
-import { ProbeRow } from "./UpstreamEdit";
+import { probeErrorText, ProbeRow, savedTestError } from "./UpstreamEdit";
 import { HealthBadge } from "./Upstreams";
 
 type Mode = Model["reasoning"]["mode"];
@@ -249,7 +250,14 @@ function ModelForm({ existing }: { existing?: Model }) {
   const v = form.values;
   const shows = v.model_type ? SHOWS[v.model_type] : null;
   const dirty = JSON.stringify(v) !== JSON.stringify(initial);
-  const test = useChatTest(v, existing?.id);
+  const selectedUpstream = upstreams.data?.find((u) => u.id === v.upstream_id);
+  const savedUpstream = existing ? upstreams.data?.find((u) => u.id === existing.upstream_id) : undefined;
+  const pluginMode = !!selectedUpstream?.auth || !!savedUpstream?.auth;
+  const saveFirst =
+    pluginMode && (!existing || dirty)
+      ? "Save the model first: Test now for an auth plugin upstream runs on a gateway with the saved configuration."
+      : undefined;
+  const test = useChatTest(v, existing?.id, pluginMode, saveFirst, upstreams.isPending);
   const renamed = !!existing && v.name.trim() !== existing.name;
   const save = useMut(
     (x: Values) => (existing ? api.updateModel(existing.id, { ...body(x), keep_old_name_as_alias: renamed && x.keep_old_name_as_alias }) : api.createModel(body(x))),
@@ -295,6 +303,7 @@ function ModelForm({ existing }: { existing?: Model }) {
         <>
           {existing && <HealthBadge health={existing.health} probe={existing.probe} />}
           {test.button}
+          {test.hint && <HelpTip label="Test now" text={test.hint} />}
         </>
       }
       onSubmit={async () => {
@@ -326,6 +335,11 @@ function ModelForm({ existing }: { existing?: Model }) {
         <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus={!existing} hint="What clients send as model." />
         {renamed && <CheckField label="Keep old name as alias" checked={v.keep_old_name_as_alias} onChange={(c) => form.set("keep_old_name_as_alias", c)} />}
         <ComboboxField label="Upstream" value={v.upstream_id} onChange={(x) => form.set("upstream_id", x)} error={form.errors.upstream_id} options={(upstreams.data ?? []).map((u) => ({ value: u.id, label: u.name }))} />
+        {saveFirst && (
+          <p className="text-xs text-muted-foreground" data-testid="test-now-hint">
+            {saveFirst}
+          </p>
+        )}
         <ComboboxField
           free
           label="Upstream model"
@@ -444,19 +458,27 @@ function ModelForm({ existing }: { existing?: Model }) {
 }
 
 const CREDENTIAL: Record<ModelTest["credential"], string> = {
+  plugin: "Tested through a connected gateway with the saved auth plugin.",
   stored: "Sent with the upstream's stored key.",
   env: "Sent with the variable from the control plane's environment.",
   env_unset: "The upstream's variable is not set on the control plane, so this test sent no key; gateways use their own environment.",
   none: "Sent without a key.",
 };
-/** One probe request now, from the control plane, of the form as it stands: the button goes in the page actions, the result at the top of the form. */
-function useChatTest(values: Values, modelId: string | undefined) {
+/**
+ * One probe request now. Without an auth plugin it tests the form as it stands; with one only a
+ * saved model can be probed, by a gateway, so the button waits for a save.
+ */
+function useChatTest(values: Values, modelId: string | undefined, pluginMode: boolean, saveReason: string | undefined, upstreamsPending: boolean) {
   const [result, setResult] = useState<ModelTest | null>(null);
   const qc = useQueryClient();
   const run = useMutation({
     // The control plane keeps the result on the saved model only when the form matches it.
     onSettled: () => modelId && void qc.invalidateQueries({ queryKey: ["models"] }),
     mutationFn: () => {
+      if (pluginMode) {
+        if (!modelId) throw new Error(saveReason ?? "Save the model first.");
+        return api.testSavedModel(modelId);
+      }
       let defaultBody: Record<string, unknown> | null = null;
       try {
         defaultBody = values.model_type && SHOWS[values.model_type].body ? parseObject(values.default_body) : null;
@@ -467,7 +489,18 @@ function useChatTest(values: Values, modelId: string | undefined) {
     },
     onSuccess: setResult,
   });
-  const missing = !values.model_type ? "Pick the type first." : !values.upstream_id ? "Pick the upstream first." : !values.upstream_model.trim() ? "Enter the upstream model first." : null;
+  useEffect(() => setResult(null), [modelId, pluginMode, values.model_type, values.upstream_id]);
+  const missing = upstreamsPending
+    ? "Loading the upstream…"
+    : pluginMode
+      ? saveReason ?? null
+      : !values.model_type
+        ? "Pick the type first."
+        : !values.upstream_id
+          ? "Pick the upstream first."
+          : !values.upstream_model.trim()
+            ? "Enter the upstream model first."
+            : null;
   const button = (
     <Button type="button" variant="outline" size="sm" title={missing ?? undefined} disabled={!!missing || run.isPending} onClick={() => run.mutate()}>
       {run.isPending ? "Testing…" : "Test now"}
@@ -475,7 +508,11 @@ function useChatTest(values: Values, modelId: string | undefined) {
   );
   const panel = (run.error || result) && (
     <div className="flex flex-col gap-2 rounded-lg border border-dashed p-3">
-      {run.error && <p className="text-sm text-destructive">{run.error.message}</p>}
+      {run.error && (
+        <p className="text-sm text-destructive" data-testid="model-test-error">
+          {savedTestError(run.error)}
+        </p>
+      )}
       {result && <p className={result.credential === "env_unset" ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>{CREDENTIAL[result.credential]}</p>}
       {result && (
         <DescriptionList data-testid="model-test-result">
@@ -488,9 +525,14 @@ function useChatTest(values: Values, modelId: string | undefined) {
           )}
         </DescriptionList>
       )}
+      {result && probeErrorText(result.probe.error) && (
+        <p className="text-sm text-destructive" data-testid="model-probe-error">
+          {probeErrorText(result.probe.error)}
+        </p>
+      )}
     </div>
   );
-  return { button, panel };
+  return { button, hint: saveReason, panel };
 }
 
 function JsonField({ label, hideLabel, value, onChange, error, placeholder, rows }: { label: string; hideLabel?: boolean; value: string; onChange: (v: string) => void; error?: string; placeholder?: string; rows: number }) {

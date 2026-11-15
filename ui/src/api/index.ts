@@ -36,6 +36,9 @@ export type McpDiscover = Schemas["McpDiscoverOut"];
 export type CatalogEntry = Schemas["CatalogEntryOut"];
 export type CatalogKind = Schemas["CatalogKind"];
 export type UsageRow = Schemas["UsageRowOut"];
+export type RequestRow = Schemas["RequestOut"];
+export type RequestOutcome = Schemas["RequestOutcome"];
+export type TrafficKind = Schemas["TrafficKind"];
 export type User = Schemas["UserOut"];
 export type Me = Schemas["MeOut"];
 export type Org = Schemas["OrgOut"];
@@ -111,6 +114,7 @@ export async function listAll<T>(fetchPage: (cursor: string | undefined) => Prom
 }
 
 export type UsageQuery = NonNullable<paths["/api/v1/usage"]["get"]["parameters"]["query"]>;
+export type RequestsQuery = NonNullable<paths["/api/v1/requests"]["get"]["parameters"]["query"]>;
 
 const q = (cursor: string | undefined) => ({ limit: 200, cursor });
 
@@ -167,7 +171,14 @@ export const api = {
   teamKeys: (teamId: string) => listAll((c) => unwrap(client.GET("/api/v1/teams/{team_id}/keys", { params: { path: { team_id: teamId }, query: q(c) } }))),
   createKey: (teamId: string, body: Schemas["KeyCreate"]) =>
     unwrap(client.POST("/api/v1/teams/{team_id}/keys", { params: { path: { team_id: teamId } }, body })),
-  ownKeys: () => listAll((c) => unwrap(client.GET("/api/v1/users/me/keys", { params: { query: q(c) } }))),
+  ownKeys: (includeServiceAccounts = false) =>
+    listAll((c) =>
+      unwrap(
+        client.GET("/api/v1/users/me/keys", {
+          params: { query: { ...q(c), ...(includeServiceAccounts ? { include_service_accounts: true } : {}) } },
+        }),
+      ),
+    ),
   updateKey: (id: string, body: Schemas["KeyUpdate"]) => unwrap(client.PATCH("/api/v1/keys/{key_id}", { params: { path: { key_id: id } }, body })),
   revokeKey: (id: string) => unwrap(client.POST("/api/v1/keys/{key_id}/revoke", { params: { path: { key_id: id } } })),
   rotateKey: (id: string, body: Schemas["KeyRotate"] = { grace_seconds: 0 }) =>
@@ -179,7 +190,11 @@ export const api = {
   deleteUpstream: (id: string) => unwrap(client.DELETE("/api/v1/upstreams/{upstream_id}", { params: { path: { upstream_id: id } } })),
   upstreamModels: (id: string) => unwrap(client.GET("/api/v1/upstreams/{upstream_id}/models", { params: { path: { upstream_id: id } } })),
   testUpstream: (body: Schemas["UpstreamTestIn"]) => unwrap(client.POST("/api/v1/upstreams/test", { body })),
+  testSavedUpstream: (id: string) =>
+    unwrap(client.POST("/api/v1/upstreams/{upstream_id}/test", { params: { path: { upstream_id: id } } })),
   testModel: (body: Schemas["ModelTestIn"]) => unwrap(client.POST("/api/v1/models/test", { body })),
+  testSavedModel: (id: string) =>
+    unwrap(client.POST("/api/v1/models/{model_id}/test", { params: { path: { model_id: id } } })),
 
   models: () => listAll((c) => unwrap(client.GET("/api/v1/models", { params: { query: q(c) } }))),
   createModel: (body: Schemas["ModelCreate"]) => unwrap(client.POST("/api/v1/models", { body })),
@@ -228,6 +243,9 @@ export const api = {
 
   usage: (query: UsageQuery) =>
     listAll((c) => unwrap(client.GET("/api/v1/usage", { params: { query: { ...query, ...q(c) } } }))),
+  /** One page of the request log, newest first; follow `next_cursor` for older rows. */
+  requests: (query: RequestsQuery) =>
+    unwrap(client.GET("/api/v1/requests", { params: { query: { limit: 50, ...query } } })),
   audit: (query: { team_id?: string; org_id?: string; actor_id?: string; action?: string; resource_type?: string; resource_id?: string; from?: string; to?: string } = {}) =>
     listAll((c) => unwrap(client.GET("/api/v1/audit", { params: { query: { ...query, ...q(c) } } }))),
 

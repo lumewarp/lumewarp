@@ -26,7 +26,7 @@ comparison method and a worked example; the template here is the same crate shap
 | The user wants to | Kind | Template | Runs |
 | --- | --- | --- | --- |
 | Choose which member of a router serves a request | `router-strategy` | `templates/router-strategy` | Gateway, every LLM request on that router |
-| Compute the credential sent to an MCP server or A2A agent | `upstream-auth` | `templates/upstream-auth` | Gateway, per outbound MCP/A2A request unless cached |
+| Compute the credential sent to an MCP server, A2A agent or LLM upstream | `upstream-auth` | `templates/upstream-auth` | Gateway, per outbound MCP/A2A/LLM request unless cached |
 | Inspect, rewrite or filter A2A JSON-RPC messages | `a2a-middleware` | `templates/a2a-middleware` | Gateway, per A2A request, response and stream event |
 | Decide who a first-time SSO login is (email, display name) or refuse it | `lumewarp.auth` | `templates/python-auth` | Control plane, first login only |
 | Answer "is this user an admin or member of this team or org?" from their IAM | `lumewarp.authz` | `templates/python-authz` | Control plane, admin API and the key reconciler |
@@ -44,8 +44,6 @@ Say no, and explain why, when the request needs any of these; no plugin kind can
   origins listed in `allowed_origins`), `secret()` and `now-unix-ms()`.
 - **Reading prompts or responses in a router strategy.** It sees the called name, team and
   key ids, opted-in headers, and per-candidate signals (in flight, latency EWMA, vLLM load).
-- **Changing an LLM upstream's credential.** `upstream-auth` applies to MCP servers and A2A
-  agents only; LLM upstreams use their stored key.
 - **Granting roles from identity claims.** `lumewarp.auth` says who the user is; it grants
   nothing. Roles come from Lumewarp's database or the `lumewarp.authz` backend.
 - **Hot reload.** A new `.wasm` file takes effect after a gateway restart.
@@ -118,6 +116,12 @@ Replace the example behaviour; keep the structure. What every kind has to get ri
 - `authorize` returns headers to add and `cache_ms`. `cache_ms: 0` is required when the
   result depends on the request (a body signature); otherwise cache as long as the credential
   lives, capped at one hour by the gateway.
+- `outbound-request.body` is empty for LLM traffic unless `register!` declares
+  `needs_body: true`. Set it when the plugin signs or inspects the body; leaving it off lets
+  the gateway avoid copying large payloads (such as transcription uploads) into the sandbox.
+  MCP and A2A traffic always carries the body.
+- An LLM upstream names this plugin in `Upstream.auth`; the builtins `none`, `static_bearer`
+  and `passthrough` are MCP/A2A-only there (a static bearer is the upstream's `api_key_*`).
 - `http-fetch` reaches only origins an administrator lists in the reserved
   `params.allowed_origins` (not declared in `Params`). No redirects, 1 MiB response bodies.
 - Do not return `Host`, `Content-Length`, `Cookie`, hop-by-hop headers, `Mcp-Session-Id`,
