@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSearch } from "@tanstack/react-router";
 import { CheckIcon, CopyIcon, SlidersHorizontalIcon } from "lucide-react";
-import { useState } from "react";
+import { useState, type MouseEvent } from "react";
 
 import { api, type RequestRow, type RequestsQuery, type Schemas } from "../api";
 import { Badge, fmtUsd, PageHeader } from "../components/Bits";
@@ -16,6 +16,7 @@ import { useCan, useCatalog, useMe, useNames, useTeamDirectory, useTeams } from 
 import { dayStart, shiftDay } from "../lib/days";
 import type { RequestsSearch } from "../lib/requests";
 import { localDayOf } from "./keyText";
+import { OUTCOME_TONE, outcomeLabel, RequestDetail } from "./RequestDetail";
 
 const KINDS: { value: Schemas["TrafficKind"]; label: string }[] = [
   { value: "llm", label: "LLM" },
@@ -31,16 +32,6 @@ const OUTCOMES: { value: Schemas["RequestOutcome"] | ""; label: string }[] = [
   { value: "rejected", label: "Rejected" },
   { value: "unspecified", label: "Unspecified" },
 ];
-
-const TONE: Record<Schemas["RequestOutcome"], "ok" | "warn" | "danger" | "muted"> = {
-  completed: "ok",
-  client_cancelled: "muted",
-  upstream_error: "danger",
-  rejected: "warn",
-  unspecified: "muted",
-};
-
-const outcomeLabel = (outcome: Schemas["RequestOutcome"]) => OUTCOMES.find((item) => item.value === outcome)?.label ?? outcome.replaceAll("_", " ");
 
 /** A short local timestamp. */
 const fmtWhen = (iso: string) => new Date(iso).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
@@ -116,6 +107,7 @@ export function Requests() {
   const [filters, setFilters] = useState<Filters>(() => initialFilters(search));
   const [trail, setTrail] = useState<(string | undefined)[]>([undefined]);
   const cursor = trail[trail.length - 1];
+  const [selected, setSelected] = useState<RequestRow | null>(null);
   const teams = useTeams();
   const perms = useCan();
   const me = useMe();
@@ -259,6 +251,8 @@ export function Requests() {
         error={query.error ?? teams.error ?? (directoryEnabled ? directory.error : null)}
         onRetry={() => void query.refetch()}
         rowKey={(row) => row.request_id}
+        onRowClick={setSelected}
+        selectedKey={selected?.request_id}
         empty="No requests in this range."
         paging={{
           summary: `Page ${trail.length}${next ? " · more" : ""}`,
@@ -285,7 +279,20 @@ export function Requests() {
           {
             key: "requested",
             header: "Requested",
-            cell: (row) => <strong className="[overflow-wrap:anywhere]" data-testid="request-requested">{row.requested || row.endpoint || "—"}</strong>,
+            cell: (row) => (
+              <Button
+                type="button"
+                variant="link"
+                className="h-auto p-0 text-left font-semibold whitespace-normal text-foreground [overflow-wrap:anywhere]"
+                data-testid="request-requested"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setSelected(row);
+                }}
+              >
+                {row.requested || row.endpoint || "—"}
+              </Button>
+            ),
           },
           { key: "resolved", header: "Resolved", cell: (row) => <Resolved row={row} /> },
           {
@@ -294,11 +301,9 @@ export function Requests() {
             hideBelow: "sm",
             cell: (row) => (
               <span className="flex flex-wrap items-center gap-1">
-                <span className="[overflow-wrap:anywhere]" title={`${teamName(row.team_id)} · ${ownerLabel(row)}`}>
-                  {row.key_name ?? `${row.key_id.slice(0, 8)}…`}
-                </span>
+                <span className="[overflow-wrap:anywhere]">{row.key_name ?? `${row.key_id.slice(0, 8)}…`}</span>
                 {row.playground_user_id && (
-                  <span data-testid="playground-badge" title={`Sent from the Playground by ${personName(row.playground_user_id)}`}>
+                  <span data-testid="playground-badge">
                     <Badge tone="info">Playground</Badge>
                   </span>
                 )}
@@ -311,7 +316,7 @@ export function Requests() {
             align: "right",
             hideBelow: "sm",
             cell: (row) => (
-              <span className="whitespace-nowrap" title="Total (input + output)">
+              <span className="whitespace-nowrap">
                 {(row.prompt_tokens + row.completion_tokens).toLocaleString()}
                 <span className="text-muted-foreground">
                   {" "}({row.prompt_tokens.toLocaleString()}+{row.completion_tokens.toLocaleString()})
@@ -323,40 +328,37 @@ export function Requests() {
             key: "cost",
             header: "Cost",
             align: "right",
-            cell: (row) => (
-              <span title={row.usage_state === "reported" ? undefined : `Usage was ${row.usage_state}: cost may be partial.`}>
-                {fmtUsd(row.cost_nano_usd)}
-              </span>
-            ),
+            cell: (row) => fmtUsd(row.cost_nano_usd),
           },
         ]}
+      />
+      <RequestDetail
+        row={selected}
+        onClose={() => setSelected(null)}
+        team={selected ? teamName(selected.team_id) : ""}
+        owner={selected ? ownerLabel(selected) : ""}
+        playgroundUser={selected?.playground_user_id ? personName(selected.playground_user_id) : null}
+        requestId={selected ? <RequestId id={selected.request_id} /> : null}
       />
     </>
   );
 }
 
 /**
- * The name the request resolved to: the model that served it. How it got there (alias, router,
- * fallback, upstream) is in the tooltip; a request that did not complete shows its outcome.
+ * The name the request resolved to: the model that served it. How it got there is in the detail
+ * sheet; a request that did not complete shows its outcome.
  */
 function Resolved({ row }: { row: RequestRow }) {
-  const path = [
-    row.alias && `alias ${row.alias}`,
-    row.router && `router ${row.router}`,
-    row.fallback && "fallback",
-    row.upstream && `${row.upstream}/${row.upstream_model || "—"}`,
-  ].filter(Boolean).join(" → ");
   return (
-    <span className="flex flex-wrap items-center gap-1" data-testid="request-chain" title={path || undefined}>
+    <span className="flex flex-wrap items-center gap-1" data-testid="request-chain">
       <span className="[overflow-wrap:anywhere]">{row.model || "—"}</span>
       {row.fallback && <Badge tone="warn">fallback</Badge>}
       {row.outcome !== "completed" && (
-        <Badge tone={TONE[row.outcome]}>
+        <Badge tone={OUTCOME_TONE[row.outcome]}>
           {outcomeLabel(row.outcome)}
           {row.status ? ` ${row.status}` : ""}
         </Badge>
       )}
-      <span className="sr-only">{path}</span>
     </span>
   );
 }
@@ -364,12 +366,13 @@ function Resolved({ row }: { row: RequestRow }) {
 /** The gateway request id, short on screen and copyable for an OTel lookup. */
 function RequestId({ id }: { id: string }) {
   const [copied, setCopied] = useState(false);
-  const copy = async () => {
+  const copy = async (event: MouseEvent) => {
+    event.stopPropagation();
     try {
       await navigator.clipboard.writeText(id);
       setCopied(true);
     } catch {
-      // Clipboard blocked: the id is still selectable through its title.
+      // Clipboard blocked: the id is shown in full in the detail sheet.
     }
   };
   return (
@@ -380,8 +383,7 @@ function RequestId({ id }: { id: string }) {
         size="icon"
         className="size-6"
         aria-label={copied ? "Copied request id" : "Copy request id"}
-        title={id}
-        onClick={() => void copy()}
+        onClick={(event) => void copy(event)}
       >
         {copied ? <CheckIcon aria-hidden="true" /> : <CopyIcon aria-hidden="true" />}
       </Button>

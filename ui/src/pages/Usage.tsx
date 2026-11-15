@@ -14,6 +14,7 @@ import { MODEL_TYPES, type ModelType } from "../lib/modelType";
 import type { RequestsSearch } from "../lib/requests";
 import { useUsageMetric } from "../lib/usageMetric";
 import { useCan, useCatalog, useMe, useModels, useNames, useTeamDirectory, useTeams } from "../hooks";
+import { ENDPOINTS, endpointLabel } from "../lib/endpoints";
 
 /** `value`, once it has stopped changing for `ms`: typed filters do not query on every keystroke. */
 function useDebounced<T>(value: T, ms: number): T {
@@ -58,18 +59,6 @@ const A2A_GROUPS = [
   { value: "target", label: "Agent" },
 ];
 
-/** The gateway's endpoint labels, as the usage API filters them. */
-const ENDPOINTS = [
-  { value: "chat_completions", label: "Chat completions" },
-  { value: "completions", label: "Completions" },
-  { value: "responses", label: "Responses" },
-  { value: "embeddings", label: "Embeddings" },
-  { value: "audio_transcriptions", label: "Audio transcriptions" },
-  { value: "audio_translations", label: "Audio translations" },
-  { value: "decisions", label: "Decisions" },
-  { value: "systemone", label: "SystemOne" },
-];
-const endpointLabel = (value: string | null | undefined) => ENDPOINTS.find((e) => e.value === value)?.label ?? value ?? "—";
 /** Audio is stored in milliseconds and read in seconds. */
 const fmtSeconds = (ms: number) => (ms / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 });
 

@@ -73,6 +73,10 @@ test("manual screenshots", async ({ page, request, browser }) => {
   await expect(page.getByRole("heading", { name: "Requests" })).toBeVisible();
   await expect(page.getByTestId("request-chain").first()).toBeVisible();
   await shot(page, "requests");
+  await page.getByTestId("request-requested").getByText("chat", { exact: true }).first().click();
+  await expect(page.getByTestId("request-timeline")).toBeVisible();
+  await shot(page, "request-detail");
+  await page.keyboard.press("Escape");
   await page.goto("/audit");
   await expect(page.getByRole("heading", { name: "Audit log" })).toBeVisible();
   await shot(page, "audit");

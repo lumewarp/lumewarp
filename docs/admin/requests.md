@@ -6,25 +6,34 @@ aggregates the same events; the audit log records administrative changes only.
 ![The Requests page](/screenshots/requests.png)
 
 The page shows one row per request: **Date**, **Requested** (the name the client called),
-**Resolved** (the model that served it; hover for the alias, router, fallback and upstream
-it went through, and a badge shows the outcome of a request that did not complete),
-**Key** (with a Playground badge when sent from the Playground), **Tokens** (total, with input + output in brackets) and
-**Cost**. The filter bar holds the range, team, key, requested and resolved names; the
-other filters are under **More filters**. The copy button next to the date copies the
-request id.
+**Resolved** (the model that served it, with a badge for a request that did not complete),
+**Key** (with a Playground badge when sent from the Playground), **Tokens** (total, with
+input + output in brackets) and **Cost**. The filter bar holds the range, team, key,
+requested and resolved names; the other filters are under **More filters**. The copy button
+next to the date copies the request id.
 
-A row shows where a call went:
+## Request details
 
-`requested` → `alias` → `router` → (`fallback`) → `model` → `upstream`/`upstream_model`
+Click a row to open its details beside the log.
 
-- `requested` is the name the client sent, kept even when it does not exist.
-- `alias`, `router` and `fallback` describe how the name was resolved.
-- `model` is the model that served the request; `upstream` and `upstream_model` are what
-  the final attempt used.
-- The rest of the row is the HTTP status and outcome (`completed`, `client_cancelled`,
-  `upstream_error`, `rejected` or `unspecified`), whether the response was streamed, the number of
-  upstream attempts, prompt and completion tokens, audio duration, cost, usage state and
-  duration, plus the key, team and owner.
+![A request's details](/screenshots/request-detail.png)
+
+**Route** is a timeline of where the call went:
+
+`requested` → `alias` → `router` → (`fallback`) → `model` → `upstream`/`upstream_model` → response
+
+- **Received** is the name the client sent, kept even when it does not exist, with the
+  endpoint, the key and whether the response was streamed.
+- **Alias**, **Router** and **Fallback** appear only when the name was resolved through them.
+- **Model** is the model that served the request; **Upstream** is the upstream and its model
+  name used by the final attempt, with the number of attempts when there were retries.
+- **Response** is the HTTP status, the outcome (`completed`, `client_cancelled`,
+  `upstream_error`, `rejected` or `unspecified`) and the duration.
+
+A step the request never reached is left out, so a request rejected before routing shows
+only **Received** and **Response**. **Usage** shows the tokens, audio duration, cost and whether the upstream
+reported usage; **Sender** shows the key, team, owner, who sent it from the Playground, and
+the request id.
 
 No prompt, response or header content is stored. To see the per-attempt detail of one
 request, copy its `request_id` and look it up in

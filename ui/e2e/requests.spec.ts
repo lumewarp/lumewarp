@@ -37,17 +37,24 @@ test("lists requests newest first, renders the name chain, and defaults to LLM f
     await expect(page.getByRole("columnheader", { name: header, exact: true })).toBeVisible();
   }
 
-  // Resolved shows the serving model; the alias, router and upstream it went through are its tooltip.
-  const viaAliasAndRouter = chain(page).filter({ hasText: "use/a" }).filter({ hasText: "alias use-alias" }).first();
-  await expect(viaAliasAndRouter).toContainText("router use-router");
-  await expect(viaAliasAndRouter).toContainText("use-up/Qwen/UseA");
-  await expect(viaAliasAndRouter).toHaveAttribute("title", /alias use-alias → router use-router/);
+  // Resolved shows the serving model and nothing on hover; the route it took is in the detail sheet.
+  await expect(chain(page).filter({ hasText: "use/a" }).first()).toBeVisible();
+  await expect(page.locator("[data-testid=request-chain][title], [data-testid=request-requested][title]")).toHaveCount(0);
 
-  const directAlias = chain(page).filter({ hasText: "use-direct" }).first();
-  await expect(directAlias).toContainText("alias use-direct");
-  await expect(directAlias).not.toContainText("router ");
-  await expect(directAlias).toContainText("use/c");
-  await expect(page.getByTestId("request-requested").getByText("use-direct", { exact: true }).first()).toBeVisible();
+  await page.getByTestId("request-requested").getByText("use-alias", { exact: true }).first().click();
+  const detail = page.getByTestId("request-detail");
+  await expect(detail.getByRole("heading", { name: "use-alias" })).toBeVisible();
+  const timeline = detail.getByTestId("request-timeline");
+  await expect(timeline.locator("li")).toHaveText([/Received\s*use-alias/, /Alias\s*use-alias/, /Router\s*use-router/, /Model\s*use\/[ab]/, /Upstream\s*use-up.*Qwen\/UseA/, /Response\s*HTTP 200/]);
+  await expect(detail).toContainText("Request id");
+  await page.keyboard.press("Escape");
+  await expect(detail).toBeHidden();
+
+  await page.getByTestId("request-requested").getByText("use-direct", { exact: true }).first().click();
+  await expect(timeline.locator("li[data-step=alias]")).toContainText("use-direct");
+  await expect(timeline.locator("li[data-step=router]")).toHaveCount(0);
+  await expect(timeline.locator("li[data-step=model]")).toContainText("use/c");
+  await page.keyboard.press("Escape");
 
   await expect(page.getByRole("button", { name: "Copy request id", exact: true }).first()).toBeVisible();
   await expect(page.getByTestId("request-chain").first()).toBeVisible();
@@ -81,7 +88,7 @@ test("filters send the names, status, outcome, kind and request id to the API", 
     page.getByRole("combobox", { name: "Alias", exact: true }).fill("use-direct"),
   ]);
   expect(aliasResponse.ok()).toBe(true);
-  await expect(chain(page).filter({ hasText: "use-direct" }).first()).toBeVisible();
+  await expect(page.getByTestId("request-requested").filter({ hasText: "use-direct" }).first()).toBeVisible();
 
   const [outcomeRequest] = await Promise.all([
     page.waitForRequest((r) => new URL(r.url()).searchParams.get("outcome") === "completed"),
@@ -157,6 +164,12 @@ test("follows next_cursor and shows the Playground attribution", async ({ page }
   await nextPage;
   await expect(chain(page).filter({ hasText: "second-page" })).toBeVisible();
   await expect(page.getByTestId("playground-badge")).toContainText("Playground");
+  // A row click opens the same sheet; it names who sent the request from the Playground.
+  await page.getByRole("cell", { name: "15 (10+5)", exact: true }).click();
+  await expect(page.getByTestId("request-detail-playground")).toContainText("Sent by");
+  await expect(page.getByTestId("request-detail")).toContainText("15 (10 in + 5 out)");
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("request-detail")).toBeHidden();
   await page.getByRole("button", { name: "Previous page" }).click();
   await expect(chain(page).filter({ hasText: "first-page" })).toBeVisible();
 });
