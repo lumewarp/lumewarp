@@ -8,7 +8,9 @@ of the lumewarp chart go under `lumewarp:`. The full reference is
 ## Quick start (evaluation)
 
 ```bash
-helm dependency build deploy/helm/lumewarp-stack   # once, from a checkout
+# From a checkout of the release tag; this chart is not published to a registry.
+helm repo add openfga https://openfga.github.io/helm-charts
+helm dependency build deploy/helm/lumewarp-stack
 helm install lumewarp deploy/helm/lumewarp-stack -n lumewarp --create-namespace \
   --set global.encryptionKey.secretName=lumewarp-encryption   # Secret with encryption-key, 32+ chars
 ```

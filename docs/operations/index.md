@@ -23,8 +23,8 @@ Each release publishes:
 - `ghcr.io/lumewarp/lumewarp-gateway:<version>` and
   `ghcr.io/lumewarp/lumewarp-control-plane:<version>` (stable releases also `X.Y` and
   `latest`);
-- the Helm charts at `oci://ghcr.io/lumewarp/charts/lumewarp` and
-  `oci://ghcr.io/lumewarp/charts/lumewarp-stack`;
+- the Helm chart at `oci://ghcr.io/lumewarp/charts/lumewarp` (`lumewarp-stack` is not
+  published: install it from a checkout of the release tag);
 - on the GitHub release: `lumewarp-<version>.yaml`, the plain Kubernetes manifests;
 - on the GitHub release: the example WASM plugins with their `SHA256SUMS`, and both OpenAPI
   documents (`openapi-control-plane.json`, `openapi-gateway.json`).

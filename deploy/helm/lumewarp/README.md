@@ -4,7 +4,7 @@ Deploys the Lumewarp control plane and Rust gateway. The control plane owns Post
 compiles versioned config snapshots and serves the Admin UI; the gateway follows the
 config stream and keeps the last ACKed snapshot on a local volume. Each release publishes
 the chart as `oci://ghcr.io/lumewarp/charts/lumewarp`. For a database and OpenFGA in the
-same install, use `oci://ghcr.io/lumewarp/charts/lumewarp-stack`; for a cluster without
+same install, use [`deploy/helm/lumewarp-stack`](../lumewarp-stack) from a checkout; for a cluster without
 Helm, see the plain manifests in [`deploy/kubernetes`](../../kubernetes).
 
 ## Quick start

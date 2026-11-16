@@ -13,9 +13,8 @@ keywords:
 sources:
   - https://github.com/lumewarp/lumewarp
 dependencies:
-  # In the repository the lumewarp chart is a sibling directory. The release job rewrites this
-  # repository to oci://ghcr.io/lumewarp/charts before packaging, so a published stack
-  # resolves the lumewarp chart of the same version from the registry.
+  # The lumewarp chart is a sibling directory: this chart is not published, it is installed
+  # from a checkout (docs/operations/helm.md, "Full stack: lumewarp-stack").
   - name: lumewarp
     version: 0.2.0
     repository: file://../lumewarp

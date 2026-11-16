@@ -491,15 +491,21 @@ is an umbrella chart for an install that should work from one command. It depend
 
 The stack's `global.*` values are the `lumewarp` chart's (`global.imageTag`, `global.scope`,
 `global.encryptionKey`, ...); everything else of the `lumewarp` chart goes under a
-`lumewarp:` key, for example `lumewarp.gateway.replicaCount`. Each release publishes the
-stack as `oci://ghcr.io/lumewarp/charts/lumewarp-stack`:
+`lumewarp:` key, for example `lumewarp.gateway.replicaCount`. The stack is not published to
+the registry: install it from a checkout of the release tag, after fetching its dependencies
+(the `lumewarp` chart beside it and the OpenFGA chart from its repository):
 
 ```sh
+git clone --depth 1 --branch "v$VERSION" https://github.com/lumewarp/lumewarp.git
+cd lumewarp
+helm repo add openfga https://openfga.github.io/helm-charts
+helm dependency build deploy/helm/lumewarp-stack
+
 kubectl create namespace lumewarp
 kubectl -n lumewarp create secret generic lumewarp-encryption \
   --from-literal=encryption-key="$(openssl rand -base64 48)"
 
-helm install lumewarp oci://ghcr.io/lumewarp/charts/lumewarp-stack --version "$VERSION" \
+helm install lumewarp deploy/helm/lumewarp-stack \
   -n lumewarp \
   --set global.encryptionKey.secretName=lumewarp-encryption \
   --set lumewarp.gateway.enabled=false
@@ -524,7 +530,7 @@ turn the bundled one off:
 kubectl -n lumewarp create secret generic lumewarp-control-plane \
   --from-literal=database-url='postgresql+asyncpg://lumewarp:secret@postgres.example:5432/lumewarp'
 
-helm install lumewarp oci://ghcr.io/lumewarp/charts/lumewarp-stack --version "$VERSION" \
+helm install lumewarp deploy/helm/lumewarp-stack \
   -n lumewarp \
   --set postgres.enabled=false \
   --set lumewarp.controlPlane.databaseUrl.secretName=lumewarp-control-plane \
@@ -535,7 +541,7 @@ helm install lumewarp oci://ghcr.io/lumewarp/charts/lumewarp-stack --version "$V
 ### Enabling OpenFGA
 
 ```sh
-helm upgrade lumewarp oci://ghcr.io/lumewarp/charts/lumewarp-stack --version "$VERSION" \
+helm upgrade lumewarp deploy/helm/lumewarp-stack \
   -n lumewarp --reuse-values \
   --set openfga.enabled=true \
   --set lumewarp.controlPlane.authz.backend=openfga
