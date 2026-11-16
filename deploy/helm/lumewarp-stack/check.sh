@@ -14,7 +14,8 @@ if command -v helm >/dev/null 2>&1; then
   H() { (cd "$here" && helm "$@"); }
 else
   command -v docker >/dev/null 2>&1 || { echo "check.sh needs helm or docker" >&2; exit 1; }
-  H() { docker run --rm -v "$here:/c" -w /c alpine/helm:3.16.3 "$@"; }
+  # As the caller, so nothing written under the chart is owned by root.
+  H() { docker run --rm -e HOME=/tmp -u "$(id -u):$(id -g)" -v "$here:/c" -w /c alpine/helm:3.16.3 "$@"; }
 fi
 chart=lumewarp-stack
 
@@ -38,7 +39,7 @@ if command -v helm >/dev/null 2>&1; then
   helm repo add openfga "$repo" >/dev/null 2>&1
   (cd "$here" && helm dependency build "$chart") >"$tmp/dep.log" 2>&1 || { cat "$tmp/dep.log"; bad "helm dependency build failed"; }
 else
-  docker run --rm --entrypoint sh -e HOME=/tmp -v "$here:/c" -w /c alpine/helm:3.16.3 \
+  docker run --rm --entrypoint sh -e HOME=/tmp -u "$(id -u):$(id -g)" -v "$here:/c" -w /c alpine/helm:3.16.3 \
     -c "helm repo add openfga $repo >/dev/null && helm dependency build $chart" >"$tmp/dep.log" 2>&1 || { cat "$tmp/dep.log"; bad "helm dependency build failed"; }
 fi
 

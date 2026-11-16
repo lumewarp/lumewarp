@@ -42,7 +42,8 @@ if command -v helm >/dev/null 2>&1; then
   helm dependency build "$chart" >/dev/null
   helm_run=(helm)
 elif command -v docker >/dev/null 2>&1; then
-  docker run --rm --entrypoint sh -e HOME=/tmp -v "$root:/c" -w /c alpine/helm:3.16.4 \
+  # As the caller, so the fetched charts in deploy/helm/lumewarp-stack/charts stay theirs.
+  docker run --rm --entrypoint sh -e HOME=/tmp -u "$(id -u):$(id -g)" -v "$root:/c" -w /c alpine/helm:3.16.4 \
     -c "helm repo add openfga $repo >/dev/null && helm dependency build $chart >/dev/null"
   helm_run=(docker run --rm -v "$root:/c:ro" -w /c alpine/helm:3.16.4)
 else
