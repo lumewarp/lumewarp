@@ -391,7 +391,9 @@ controlPlane:
 ```
 
 With `init: true` the pod waits until OpenFGA answers; an existing model is never replaced.
-The `http` backend and plugins take their settings through `extraEnv`, with
+The `http` backend (`LUMEWARP_AUTHZ_HTTP_URL`, `LUMEWARP_AUTHZ_HTTP_TOKEN` and the optional
+`LUMEWARP_AUTHZ_HTTP_LIST_URL` and `LUMEWARP_AUTHZ_HTTP_CHANGES_URL`) and plugins take their
+settings through `extraEnv`, with
 `controlPlane.authz.backend` naming them. Lumewarp answers direct `admin` (org/team) and
 `member` (team) relations only; org administration is inherited from `team.org_id` by the
 control plane.

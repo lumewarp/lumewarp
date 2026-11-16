@@ -157,7 +157,22 @@ Two external backends ship with the control plane:
 - `http`: `LUMEWARP_AUTHZ_HTTP_URL` (+ optional `LUMEWARP_AUTHZ_HTTP_TOKEN`).
   `check` becomes `POST {"user_id", "relation", "resource": {"type", "id"}}` answered by
   `{"decision": "allow" | "deny"}`, with `type` `"org"` or `"team"`; anything else (non-2xx,
-  timeout, bad body) is `ERROR`.
+  timeout, bad body) is `ERROR`. Two optional endpoints make it faster, each used only when its
+  variable is set:
+  - `LUMEWARP_AUTHZ_HTTP_LIST_URL`: `POST {"user_id", "relation": "admin" | "member",
+    "resource_type": "org" | "team"}` answered by `{"ids": ["<id>", ...]}`, the objects where the
+    user holds the direct relation (no org-to-team inheritance; a team admin is also a member).
+    Without it Lumewarp asks one `check` per candidate.
+  - `LUMEWARP_AUTHZ_HTTP_CHANGES_URL`: `POST {"cursor": <string or null>}` answered by
+    `{"user_ids": ["<uuid>", ...], "cursor": "<non-empty string>", "reset": false}`, the users
+    whose relations may have changed since `cursor`. A null cursor (the first call) asks for the
+    current position, and Lumewarp rescans everything whatever the answer; `reset: true` asks for a rescan when the cursor is unknown or
+    expired. With it the key reconciler suspends the keys of a removed member on the next poll
+    (`LUMEWARP_KEY_RECONCILE_POLL_SECONDS`, 2 s); without it only the full rescan
+    (`LUMEWARP_KEY_RECONCILE_FULL_SECONDS`, 300 s) notices.
+
+  Both endpoints use the same bearer token and timeout as `check`. A non-2xx status, a timeout or
+  an invalid body is an error, answered with 503, never an empty list or a deny.
 
 Every backend call is bounded by `LUMEWARP_AUTHZ_TIMEOUT_SECONDS` (default 2 s); a
 timeout is `ERROR`.

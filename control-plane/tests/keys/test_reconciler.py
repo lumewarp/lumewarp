@@ -1,8 +1,10 @@
 import asyncio
+import json
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -18,6 +20,7 @@ from lumewarp_control_plane.authz import (
     RequestAuthz,
 )
 from lumewarp_control_plane.authz.builtin import BuiltinBackend
+from lumewarp_control_plane.authz.http import HttpBackend
 from lumewarp_control_plane.keys import reconciler
 from lumewarp_control_plane.models import (
     ActorType,
@@ -352,6 +355,51 @@ async def test_changes_only_rechecks_listed_users_next_poll(store, monkeypatch):
     delays = await run_ticks(monkeypatch, factory, settings, backend, 2, tick)
     assert delays == [2, 2]
     assert backend.cursors == [None, "first"]
+
+
+async def test_http_backend_changes_suspend_removed_member_on_poll(store, monkeypatch):
+    """With a changes endpoint a revocation lands on the next poll, not the full rescan."""
+    factory, settings, rows = store
+    owner = str(rows["owner"].id)
+    removed = False
+    requests = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        requests.append((request.url.path, body))
+        if request.url.path == "/changes":
+            users = [owner] if removed and body["cursor"] == "first" else []
+            return httpx.Response(200, json={"user_ids": users, "cursor": "first"})
+        allowed = not (removed and body["user_id"] == owner)
+        return httpx.Response(200, json={"decision": "allow" if allowed else "deny"})
+
+    backend = HttpBackend(
+        Settings(
+            authz_http_url="https://authz.test/check",
+            authz_http_changes_url="https://authz.test/changes",
+        )
+    )
+    await backend._client.aclose()
+    backend._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+
+    async def tick(number):
+        nonlocal removed
+        if number == 1:
+            removed = True
+            requests.clear()
+        else:
+            current = await states(factory)
+            assert current[rows["owned"].id] == (KeyLifecycle.SUSPENDED, "owner_removed")
+            assert current[rows["second"].id] == (KeyLifecycle.SUSPENDED, "owner_removed")
+            assert current[rows["unrelated"].id][0] is KeyLifecycle.ACTIVE
+
+    try:
+        # The full rescan is pushed far away: only the changes poll can find the removal.
+        await run_ticks(monkeypatch, factory, settings, backend, 2, tick, full=10_000)
+    finally:
+        await backend.aclose()
+    assert [path for path, _ in requests if path == "/changes"] == ["/changes"]
+    assert {body["user_id"] for path, body in requests if path == "/check"} == {owner}
 
 
 async def test_invalid_changed_user_ids_do_not_abort_valid_reconciliation(store, caplog):

@@ -90,6 +90,6 @@ The backend conformance suite is importable from
 (`src/lumewarp_control_plane/authz/contract_tests.py`). Run it against a backend before
 setting `LUMEWARP_AUTHZ_BACKEND`; it covers the implied relations, org admin as a direct
 relation only, inactive and unknown users, batch ordering, `list_objects` consistency and
-`ERROR` handling. `tests/authz` runs it for the built-in backend, the HTTP backend and a live
-OpenFGA when `LUMEWARP_TEST_OPENFGA_URL` is set (the dev instance from `scripts/dev-idp.sh up`
+`ERROR` handling. `tests/authz` runs it for the built-in backend, the HTTP backend (with and
+without its optional list endpoint) and a live OpenFGA when `LUMEWARP_TEST_OPENFGA_URL` is set (the dev instance from `scripts/dev-idp.sh up`
 is `http://127.0.0.1:18081`).

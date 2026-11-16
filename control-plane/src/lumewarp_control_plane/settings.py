@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     # `http` backend (authz/http.py): POST {user_id, relation, resource} -> {decision}.
     authz_http_url: str | None = None
     authz_http_token: SecretStr | None = None
+    # Optional: POST {user_id, relation, resource_type} -> {ids} (direct relations), and
+    # POST {cursor} -> {user_ids, cursor, reset}. Unset = per-candidate checks / periodic rescans.
+    authz_http_list_url: str | None = None
+    authz_http_changes_url: str | None = None
 
     # Key reconciler (keys/reconciler.py): suspends keys whose owner lost team membership.
     # Polls the backend's changes() this often when it has one; otherwise rescans every

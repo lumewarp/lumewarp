@@ -484,6 +484,161 @@ async def test_authorizer_timeout_cancels_hung_backend(method):
     )
 
 
+@pytest.fixture
+async def http_full():
+    backend = HttpBackend(
+        Settings(
+            authz_http_url="https://authz.test/check",
+            authz_http_list_url="https://authz.test/list",
+            authz_http_changes_url="https://authz.test/changes",
+            authz_http_token="http-secret",
+        )
+    )
+    yield backend
+    await backend.aclose()
+
+
+async def test_http_optional_endpoints_absent_when_unset():
+    backend = HttpBackend(Settings(authz_http_url="https://authz.test/check"))
+    try:
+        assert getattr(backend, "list_objects", None) is None
+        assert getattr(backend, "changes", None) is None
+        assert Authorizer(backend).has_changes is False
+        only_list = HttpBackend(
+            Settings(
+                authz_http_url="https://authz.test/check",
+                authz_http_list_url="https://authz.test/list",
+            )
+        )
+        assert only_list.list_objects is not None
+        assert getattr(only_list, "changes", None) is None
+        await only_list.aclose()
+    finally:
+        await backend.aclose()
+
+
+async def test_http_list_objects_request_and_answer(http_full):
+    def respond(request):
+        assert request.url == "https://authz.test/list"
+        assert request.headers["authorization"] == "Bearer http-secret"
+        assert json.loads(request.content) == {
+            "user_id": ALICE,
+            "relation": "admin",
+            "resource_type": "org",
+        }
+        return httpx.Response(200, json={"ids": ["one", "two"]})
+
+    await mock_client(http_full, respond)
+    assert await http_full.list_objects(ALICE, Relation.ADMIN, "org") == ["one", "two"]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, json=None),
+        httpx.Response(200, json=[]),
+        httpx.Response(200, json={}),
+        httpx.Response(200, json={"ids": "one"}),
+        httpx.Response(200, json={"ids": [1]}),
+        httpx.Response(200, content=b"not JSON"),
+        httpx.Response(500, json={"ids": []}),
+        httpx.Response(403, json={"ids": []}),
+    ],
+)
+async def test_http_list_objects_errors_are_not_empty(http_full, response):
+    await mock_client(http_full, lambda request: response)
+    with pytest.raises(Exception):  # noqa: B017 - ValueError, JSON or HTTP status errors
+        await http_full.list_objects(ALICE, Relation.MEMBER, "team")
+    team = uuid.uuid4()
+    assert await Authorizer(http_full).list_objects(ALICE, Relation.MEMBER, "team", [team]) is None
+
+
+async def test_http_list_objects_transport_error_is_none(http_full):
+    def disconnected(request):
+        raise httpx.ConnectError("unavailable", request=request)
+
+    await mock_client(http_full, disconnected)
+    authz = Authorizer(http_full)
+    assert await authz.list_objects(ALICE, Relation.MEMBER, "team", [uuid.uuid4()]) is None
+
+
+async def test_http_list_objects_through_authorizer_intersects_candidates(http_full):
+    team, other = uuid.uuid4(), uuid.uuid4()
+    await mock_client(
+        http_full, lambda request: httpx.Response(200, json={"ids": [str(team), str(other)]})
+    )
+    found = await Authorizer(http_full).list_objects(ALICE, Relation.MEMBER, "team", [team])
+    assert found == {team}
+
+
+async def test_http_changes_request_and_answer(http_full):
+    seen = []
+
+    def respond(request):
+        assert request.url == "https://authz.test/changes"
+        assert request.headers["authorization"] == "Bearer http-secret"
+        body = json.loads(request.content)
+        seen.append(body)
+        return httpx.Response(200, json={"user_ids": [ALICE, BOB], "cursor": "next"})
+
+    await mock_client(http_full, respond)
+    assert await http_full.changes("start") == ChangeBatch(frozenset({ALICE, BOB}), "next")
+    assert await http_full.changes(None) == ChangeBatch(frozenset({ALICE, BOB}), "next", reset=True)
+    assert seen == [{"cursor": "start"}, {"cursor": None}]
+    assert Authorizer(http_full).has_changes is True
+
+
+async def test_http_changes_service_reset_passes_through(http_full):
+    await mock_client(
+        http_full,
+        lambda request: httpx.Response(200, json={"user_ids": [], "cursor": "c", "reset": True}),
+    )
+    assert await http_full.changes("old") == ChangeBatch(frozenset(), "c", reset=True)
+    await mock_client(
+        http_full,
+        lambda request: httpx.Response(200, json={"user_ids": [], "cursor": "c", "reset": False}),
+    )
+    assert await http_full.changes("old") == ChangeBatch(frozenset(), "c")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        None,
+        [],
+        {},
+        {"cursor": "c"},
+        {"user_ids": [], "cursor": ""},
+        {"user_ids": [], "cursor": 3},
+        {"user_ids": [], "cursor": None},
+        {"user_ids": "alice", "cursor": "c"},
+        {"user_ids": [1], "cursor": "c"},
+        {"user_ids": [], "cursor": "c", "reset": "yes"},
+        {"user_ids": [], "cursor": "c", "reset": 1},
+    ],
+)
+async def test_http_changes_invalid_body_raises(http_full, body):
+    await mock_client(http_full, lambda request: httpx.Response(200, json=body))
+    with pytest.raises(ValueError):
+        await http_full.changes("c")
+    assert await Authorizer(http_full).changes("c") is None
+
+
+@pytest.mark.parametrize("status", [302, 400, 401, 403, 500, 503])
+async def test_http_changes_non_success_and_transport_errors_raise(http_full, status):
+    await mock_client(http_full, lambda request: httpx.Response(status))
+    with pytest.raises(httpx.HTTPStatusError):
+        await http_full.changes("c")
+
+    def disconnected(request):
+        raise httpx.ConnectError("unavailable", request=request)
+
+    await mock_client(http_full, disconnected)
+    with pytest.raises(httpx.ConnectError):
+        await http_full.changes("c")
+    assert await Authorizer(http_full).changes("c") is None
+
+
 @pytest.mark.parametrize("backend", [OpenFGABackend, HttpBackend])
 def test_missing_settings_rejected(backend):
     with pytest.raises(ValueError):
