@@ -1,9 +1,10 @@
 # Deploy with plain manifests
 
 For a cluster without Helm, Lumewarp ships Kubernetes manifests for a complete installation:
-PostgreSQL, OpenFGA, the control plane and a gateway. They come as a kustomize base in
-[`deploy/kubernetes`](https://github.com/lumewarp/lumewarp/tree/main/deploy/kubernetes) and as
-one `lumewarp-<version>.yaml` file attached to every GitHub Release. Both are generated from
+PostgreSQL, OpenFGA, the control plane and a gateway. They come as one file per component in
+[`deploy/kubernetes/manifests`](https://github.com/lumewarp/lumewarp/tree/main/deploy/kubernetes/manifests)
+and as one `lumewarp-<version>.yaml` file attached to every GitHub Release; both apply with
+plain `kubectl apply -f`. Both are generated from
 the [lumewarp-stack chart](./helm.md#full-stack-lumewarp-stack), so they run what that chart
 runs; the charts stay the place for options such as autoscaling, persistence or monitoring.
 For what the parts are, see [Deploy](./index.md).
@@ -11,7 +12,9 @@ For what the parts are, see [Deploy](./index.md).
 ## What the manifests contain
 
 Everything lives in the `lumewarp` namespace. The Lumewarp image tags are the release
-version; PostgreSQL and OpenFGA images are pinned.
+version; PostgreSQL and OpenFGA images are pinned. The files are numbered in the order the
+pieces depend on each other: `00-namespace.yaml`, `10-postgres.yaml`, `20-openfga.yaml`,
+`30-control-plane.yaml` (with its migration Job) and `40-gateway.yaml`.
 
 | Object | Notes |
 | --- | --- |
@@ -28,7 +31,7 @@ The manifests have no Valkey, no persistent gateway state and no monitoring obje
 
 ## Prerequisites
 
-- Kubernetes 1.25+ and `kubectl` (kustomize is built in).
+- Kubernetes 1.25+ and `kubectl`.
 - A default StorageClass for the PostgreSQL volume claim.
 
 ## Create the Secrets
@@ -39,7 +42,7 @@ values; a Secret that already exists is left alone, so a rerun never changes a p
 database already uses. Without a checkout, the same by hand:
 
 ```sh
-kubectl create namespace lumewarp
+kubectl create namespace lumewarp --save-config
 PASSWORD="$(openssl rand -hex 24)"
 
 kubectl -n lumewarp create secret generic lumewarp-postgres --from-literal=password="$PASSWORD"
@@ -61,14 +64,14 @@ kubectl -n lumewarp create secret generic lumewarp-encryption-key \
 
 ## Apply and bootstrap
 
-Apply the release asset, or the base from a checkout:
+Apply the release asset, or the files from a checkout:
 
 ```sh
 VERSION=0.2.0
 kubectl apply -f "https://github.com/lumewarp/lumewarp/releases/download/v${VERSION}/lumewarp-${VERSION}.yaml"
 
 # or, from a checkout
-kubectl apply -k deploy/kubernetes/base
+kubectl apply -f deploy/kubernetes/manifests/
 ```
 
 Everything starts at once and waits for what it needs:
@@ -102,34 +105,43 @@ port turns 200 when the gateway has loaded a snapshot.
 Installation admins, first login and the break-glass password work as in
 [Deploy with Helm](./helm.md#install): the first verified login whose email matches
 `LUMEWARP_INITIAL_ADMIN_EMAIL` becomes the proxy_admin, so add that variable (and the
-settings of [Control plane settings](./control-plane.md)) through an overlay. Team and org
+settings of [Control plane settings](./control-plane.md)) to the control plane's `env` ([Customize](#customize)). Team and org
 roles live in OpenFGA ([OpenFGA](./identity.md#openfga)). Reach the UI with
 `kubectl -n lumewarp port-forward svc/lumewarp-control-plane 8091:8091`.
 
-## Customize with an overlay
+## Customize
 
-Do not edit the base; copy
-[`overlays/example`](https://github.com/lumewarp/lumewarp/tree/main/deploy/kubernetes/overlays/example),
-point its `resources` at the base (a path, or a remote reference to this repository) and
-change it. The example shows three things:
+The manifests are ordinary YAML: copy `deploy/kubernetes/manifests/` (or the release file)
+and edit the copy. The usual changes:
 
-- **Image tag.** `images:` pins both Lumewarp images; `kustomize edit set image` does the
-  same from a script. Use your own repositories here for custom images.
-- **Gateway replicas.** A JSON patch on `/spec/replicas` of the gateway Deployment. Every pod
-  is its own gateway and all share the token, but rpm, tpm and max_parallel are counted per
-  gateway unless they share a Redis ([Shared rate limits](./helm.md#shared-rate-limits)).
-- **SSO.** Patches that append `LUMEWARP_OIDC_ISSUER`, `LUMEWARP_OIDC_CLIENT_ID`,
-  `LUMEWARP_OIDC_CLIENT_SECRET`, `LUMEWARP_SECRET_KEY` and `LUMEWARP_PUBLIC_URL` to the
-  control plane's `env`, the last two secrets from a Secret you create. Other settings are
-  more environment entries in the same way.
+- **Image tag.** The `image:` of the control plane (Deployment and migration Job) and of the
+  gateway; use your own repositories here for custom images.
+- **Gateway replicas.** `spec.replicas` of the `lumewarp-gateway` Deployment. Every pod is its
+  own gateway and all share the token, but rpm, tpm and max_parallel are counted per gateway
+  unless they share a Redis ([Shared rate limits](./helm.md#shared-rate-limits)).
+- **Settings.** More entries in the control plane's `env`. SSO, for example, with a Secret
+  `lumewarp-oidc` you create holding `client-secret` and `secret-key` (32+ random
+  characters):
 
-```sh
-kubectl kustomize deploy/kubernetes/overlays/example   # review the result
-kubectl apply -k deploy/kubernetes/overlays/example
-```
+  ```yaml
+  - name: LUMEWARP_OIDC_ISSUER
+    value: https://idp.example.com/realms/main
+  - name: LUMEWARP_OIDC_CLIENT_ID
+    value: lumewarp
+  - name: LUMEWARP_OIDC_CLIENT_SECRET
+    valueFrom: {secretKeyRef: {name: lumewarp-oidc, key: client-secret}}
+  - name: LUMEWARP_SECRET_KEY
+    valueFrom: {secretKeyRef: {name: lumewarp-oidc, key: secret-key}}
+  - name: LUMEWARP_PUBLIC_URL
+    value: https://lumewarp.example.com
+  - name: LUMEWARP_INITIAL_ADMIN_EMAIL
+    value: admin@example.com
+  ```
 
-The control plane stays at one replica: the compiler and rollover scheduler run once per
-installation.
+To carry such changes across versions, edit `deploy/kubernetes/values.yaml` (the values of
+the [lumewarp-stack chart](./helm.md#full-stack-lumewarp-stack)) and regenerate, or install
+the chart with Helm. The control plane stays at one replica: the compiler and rollover
+scheduler run once per installation.
 
 ## Upgrading
 
@@ -151,7 +163,7 @@ See [Upgrades and limits](./upgrades.md).
   Operator objects use the chart with `monitoring.*`
   ([Observability](./observability.md#alert-rules-and-grafana-dashboards)).
 - **Shared rate limits.** No Valkey. Run your own Redis or Valkey, put its full URL in a
-  Secret and add it to the gateway as `LUMEWARP_SHARED_LIMITS_REDIS_URL` in an overlay, or
+  Secret and add it to the gateway as `LUMEWARP_SHARED_LIMITS_REDIS_URL`, or
   use the chart's `valkey.enabled`.
 - **Gateway state volume, plugins and autoscaling.** The gateway keeps its snapshot in an
   `emptyDir`, so a new pod is unready until the control plane sends one. A persistent
@@ -159,12 +171,12 @@ See [Upgrades and limits](./upgrades.md).
   ([Gateway replicas](./helm.md#gateway-replicas)).
 - **A production database, ingress and TLS.** The bundled PostgreSQL is one pod without
   backups. For production, point the control plane and OpenFGA at your own database (change
-  the URLs in `lumewarp-database` and `lumewarp-openfga-datastore` and remove the
-  `lumewarp-postgres` StatefulSet in an overlay), or use the [Helm chart](./helm.md).
+  the URLs in `lumewarp-database` and `lumewarp-openfga-datastore` and leave out
+  `10-postgres.yaml`), or use the [Helm chart](./helm.md).
 
 ## Regenerating
 
-`deploy/kubernetes/base/` is generated; do not edit it. After a chart change, run
+`deploy/kubernetes/manifests/` is generated; do not edit it. After a chart change, run
 
 ```sh
 deploy/kubernetes/generate.sh
@@ -173,6 +185,6 @@ deploy/kubernetes/generate.sh
 which renders `deploy/helm/lumewarp-stack` with `deploy/kubernetes/values.yaml` (`helm` from
 `PATH`, or the `alpine/helm` image through docker; the OpenFGA chart is fetched from its
 repository), removes the Helm-only labels, hook annotations and test pods, and writes one file
-per kind. CI regenerates the base and fails when it differs from what is committed.
+per component. CI regenerates the files and fails when it differs from what is committed.
 `generate.sh --single FILE [--version X]` writes the one-file release asset. To change what
 the manifests contain, edit `deploy/kubernetes/values.yaml` and regenerate.

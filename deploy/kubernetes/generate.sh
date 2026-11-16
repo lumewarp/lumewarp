@@ -2,7 +2,7 @@
 # Render the plain Kubernetes manifests from the lumewarp-stack chart: PostgreSQL, OpenFGA,
 # the control plane and a gateway.
 #
-#   deploy/kubernetes/generate.sh                         rewrite base/ (one file per kind + kustomization.yaml)
+#   deploy/kubernetes/generate.sh                         rewrite manifests/ (one file per component)
 #   deploy/kubernetes/generate.sh --single FILE [--version X]
 #                                                         one combined YAML with a Namespace, for the release asset
 #
@@ -53,9 +53,7 @@ fi
 rendered="$("${helm_run[@]}" template lumewarp "$chart" -n "$namespace" --skip-tests \
   -f deploy/kubernetes/values.yaml ${set_args[@]+"${set_args[@]}"})"
 
-app_version="$(sed -n 's/^appVersion: "\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$root/deploy/helm/lumewarp/Chart.yaml")"
-
-HELM_OUT="$rendered" NAMESPACE="$namespace" SINGLE="$single" HERE="$here" APP_VERSION="${version:-$app_version}" \
+HELM_OUT="$rendered" NAMESPACE="$namespace" SINGLE="$single" HERE="$here" \
   python3 -I - <<'PY'
 import os, re
 from pathlib import Path
@@ -63,7 +61,6 @@ from pathlib import Path
 namespace = os.environ["NAMESPACE"]
 single = os.environ["SINGLE"]
 here = Path(os.environ["HERE"])
-tag = os.environ["APP_VERSION"]
 
 docs = []
 for chunk in re.split(r"^---\s*$", os.environ["HELM_OUT"], flags=re.M):
@@ -82,46 +79,54 @@ for chunk in re.split(r"^---\s*$", os.environ["HELM_OUT"], flags=re.M):
     text = re.sub(r"^(\s*#[^\n]*\n)*(\s*)annotations:\n(?!\2\s)", "", text + "\n", flags=re.M).rstrip("\n")
     docs.append(text + "\n")
 
-by_kind = {}
-for text in docs:
-    kind = re.search(r"^kind: (\S+)", text, flags=re.M)[1]
-    by_kind.setdefault(kind, []).append(text)
-
 ns_doc = f"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {namespace}\n"
 
+
+def with_namespace(text):
+    """An explicit namespace on every object, so each file applies as is with kubectl."""
+    return re.sub(r"^metadata:\n", f"metadata:\n  namespace: {namespace}\n", text, count=1, flags=re.M)
+
+
+# One file per component, numbered in the order the pieces depend on each other; inside a
+# file, the objects in the order kubectl should create them.
+COMPONENTS = [
+    ("10-postgres.yaml", ("lumewarp-postgres",)),
+    ("20-openfga.yaml", ("lumewarp-openfga",)),
+    ("30-control-plane.yaml", ("lumewarp-control-plane", "lumewarp-migrate")),
+    ("40-gateway.yaml", ("lumewarp-gateway",)),
+]
+KIND_ORDER = ["ServiceAccount", "Role", "RoleBinding", "ConfigMap", "Secret", "Service",
+              "StatefulSet", "Deployment", "Job"]
+
+
+def component(text):
+    name = re.search(r"^  name: (\S+)", text, flags=re.M)[1]
+    for file, prefixes in COMPONENTS:
+        if name.startswith(prefixes):
+            return file
+    raise SystemExit(f"generate.sh: no component for object {name!r}; extend COMPONENTS")
+
+
+def kind_rank(text):
+    kind = re.search(r"^kind: (\S+)", text, flags=re.M)[1]
+    return KIND_ORDER.index(kind) if kind in KIND_ORDER else len(KIND_ORDER)
+
+
+files = {"00-namespace.yaml": [ns_doc]}
+for text in docs:
+    files.setdefault(component(text), []).append(with_namespace(text))
+for name in files:
+    if name != "00-namespace.yaml":
+        files[name].sort(key=kind_rank)  # stable: Helm's order within a kind is kept
+
 if single:
-    parts = [ns_doc] + [t for kind in sorted(by_kind) for t in by_kind[kind]]
-    Path(single).write_text("---\n" + "---\n".join(
-        # An explicit namespace on everything namespaced, so the file applies as is.
-        re.sub(r"^metadata:\n", f"metadata:\n  namespace: {namespace}\n", t, count=1, flags=re.M)
-        if not t.startswith("apiVersion: v1\nkind: Namespace") else t
-        for t in parts
-    ))
+    Path(single).write_text("---\n" + "---\n".join(t for n in sorted(files) for t in files[n]))
     raise SystemExit
 
-base = here / "base"
-base.mkdir(parents=True, exist_ok=True)
-for old in base.glob("*.yaml"):
+out = here / "manifests"
+out.mkdir(parents=True, exist_ok=True)
+for old in out.glob("*.yaml"):
     old.unlink()
-files = {"namespace.yaml": ns_doc}
-for kind, texts in by_kind.items():
-    files[f"{kind.lower()}.yaml"] = "---\n".join(texts)
-# Only the Lumewarp images follow the release; PostgreSQL, OpenFGA and helpers stay pinned.
-images = sorted({
-    m for t in docs for m in re.findall(r'image: "?([^":\s]+):[^"\s]*"?', t)
-    if m.startswith("ghcr.io/lumewarp/")
-})
-for name, text in files.items():
-    (base / name).write_text(text)
-kustomization = [
-    "apiVersion: kustomize.config.k8s.io/v1beta1",
-    "kind: Kustomization",
-    f"namespace: {namespace}",
-    "resources:",
-    *[f"  - {n}" for n in sorted(files)],
-    "images:",
-]
-for image in images:
-    kustomization += [f"  - name: {image}", f"    newTag: \"{tag}\""]
-(base / "kustomization.yaml").write_text("\n".join(kustomization) + "\n")
+for name, texts in files.items():
+    (out / name).write_text("---\n".join(texts))
 PY

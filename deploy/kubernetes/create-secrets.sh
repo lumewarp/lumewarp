@@ -20,7 +20,8 @@ exists() { k get secret "$1" >/dev/null 2>&1; }
 # Finite input, so no stage dies of SIGPIPE under pipefail.
 random() { head -c 4096 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c "1-$1"; }
 
-kubectl get namespace "$namespace" >/dev/null 2>&1 || kubectl create namespace "$namespace"
+# --save-config: the manifests apply the same Namespace later without a warning.
+kubectl get namespace "$namespace" >/dev/null 2>&1 || kubectl create namespace "$namespace" --save-config
 
 if exists lumewarp-postgres; then
   password="$(k get secret lumewarp-postgres -o jsonpath='{.data.password}' | base64 -d)"

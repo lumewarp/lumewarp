@@ -1,0 +1,197 @@
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: lumewarp
+  name: lumewarp-control-plane
+  labels:
+    app.kubernetes.io/name: lumewarp
+    app.kubernetes.io/instance: lumewarp
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/component: control-plane
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8091
+      targetPort: http
+      protocol: TCP
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+      protocol: TCP
+    - name: metrics
+      port: 9465
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: lumewarp
+    app.kubernetes.io/instance: lumewarp
+    app.kubernetes.io/component: control-plane
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: lumewarp
+  name: lumewarp-control-plane
+  labels:
+    app.kubernetes.io/name: lumewarp
+    app.kubernetes.io/instance: lumewarp
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/component: control-plane
+spec:
+  # Always one pod: the compiler and rollover scheduler run once per installation.
+  replicas: 1
+  # One writer: the compiler and rollover scheduler must not run in two pods. Recreate
+  # avoids overlap during upgrades.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lumewarp
+      app.kubernetes.io/instance: lumewarp
+      app.kubernetes.io/component: control-plane
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lumewarp
+        app.kubernetes.io/instance: lumewarp
+        app.kubernetes.io/component: control-plane
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 20
+      initContainers:
+        # Idempotent: creates the store and writes the model only when they are missing.
+        - name: openfga-init
+          image: "ghcr.io/lumewarp/lumewarp-control-plane:0.2.0"
+          imagePullPolicy: IfNotPresent
+          command: [python, -m, lumewarp_control_plane, openfga, init]
+          env:
+
+            - name: LUMEWARP_AUTHZ_BACKEND
+              value: "openfga"
+            - name: LUMEWARP_OPENFGA_URL
+              value: "http://lumewarp-openfga:8080"
+            - name: LUMEWARP_OPENFGA_STORE
+              value: "lumewarp"
+      containers:
+        - name: control-plane
+          image: "ghcr.io/lumewarp/lumewarp-control-plane:0.2.0"
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - lumewarp_control_plane
+          args:
+            - serve
+          ports:
+            - name: http
+              containerPort: 8091
+              protocol: TCP
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+            - name: metrics
+              containerPort: 9465
+              protocol: TCP
+          env:
+            - name: LUMEWARP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: lumewarp-database
+                  key: database-url
+            - name: LUMEWARP_HTTP_BIND
+              value: "0.0.0.0:8091"
+            - name: LUMEWARP_GRPC_BIND
+              value: "0.0.0.0:50051"
+            - name: LUMEWARP_SCOPE
+              value: "default"
+            - name: LUMEWARP_METRICS_BIND
+              value: "0.0.0.0:9465"
+            - name: LUMEWARP_INITIAL_ADMIN_EMAIL
+              value: ""
+            - name: LUMEWARP_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lumewarp-encryption-key
+                  key: encryption-key
+
+            - name: LUMEWARP_AUTHZ_BACKEND
+              value: "openfga"
+            - name: LUMEWARP_OPENFGA_URL
+              value: "http://lumewarp-openfga:8080"
+            - name: LUMEWARP_OPENFGA_STORE
+              value: "lumewarp"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  namespace: lumewarp
+  name: lumewarp-migrate-1
+  labels:
+    app.kubernetes.io/name: lumewarp-stack
+    app.kubernetes.io/instance: lumewarp
+    app.kubernetes.io/component: migrate
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lumewarp-stack
+        app.kubernetes.io/instance: lumewarp
+        app.kubernetes.io/component: migrate
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      initContainers:
+        - name: wait-for-postgres
+          image: "postgres:17.12-alpine"
+          command:
+            - sh
+            - -c
+            - 'until pg_isready -h lumewarp-postgres -p 5432; do echo waiting for postgres; sleep 2; done'
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 70
+            capabilities:
+              drop:
+                - ALL
+      containers:
+        - name: migrate
+          image: "ghcr.io/lumewarp/lumewarp-control-plane:0.2.0"
+          imagePullPolicy: IfNotPresent
+          command: [python, -m, lumewarp_control_plane]
+          args: [migrate]
+          env:
+            - name: LUMEWARP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: lumewarp-database
+                  key: database-url
+            - name: LUMEWARP_SCOPE
+              value: "default"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi

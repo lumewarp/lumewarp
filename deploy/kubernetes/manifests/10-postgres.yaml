@@ -1,6 +1,42 @@
+# Evaluation and small installs only: one pod, no replication, no backups.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  namespace: lumewarp
+  name: lumewarp-postgres-init
+  labels:
+    app.kubernetes.io/name: lumewarp-stack
+    app.kubernetes.io/instance: lumewarp
+    app.kubernetes.io/component: postgres
+data:
+  # Runs once, on an empty data directory: the database OpenFGA uses when openfga.enabled.
+  10-openfga.sql: |
+    CREATE DATABASE openfga;
+---
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: lumewarp
+  name: lumewarp-postgres
+  labels:
+    app.kubernetes.io/name: lumewarp-stack
+    app.kubernetes.io/instance: lumewarp
+    app.kubernetes.io/component: postgres
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+  selector:
+    app.kubernetes.io/name: lumewarp-stack
+    app.kubernetes.io/instance: lumewarp
+    app.kubernetes.io/component: postgres
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
+  namespace: lumewarp
   name: lumewarp-postgres
   labels:
     app.kubernetes.io/name: lumewarp-stack

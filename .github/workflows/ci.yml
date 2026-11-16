@@ -252,10 +252,10 @@ jobs:
             echo "::error::generate.sh produced untracked files under deploy/kubernetes; commit them"
             exit 1
           fi
-      - name: Build the kustomizations
+      - name: Validate the plain manifests
         run: |
-          kubectl kustomize deploy/kubernetes/base >/dev/null
-          kubectl kustomize deploy/kubernetes/overlays/example >/dev/null
+          docker run --rm -v "$PWD/deploy/kubernetes/manifests:/m:ro" ghcr.io/yannh/kubeconform:v0.6.7 \
+            -strict -summary /m
 
   gateway:
     needs: changes

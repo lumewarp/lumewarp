@@ -12,7 +12,7 @@ a gateway keeps serving while the control plane is down.
 | --- | --- | --- |
 | Helm | Kubernetes: the control plane, a gateway (several pods may share one token), migrations as a hook, optional ServiceMonitors. | [Deploy with Helm](./helm.md) |
 | Helm, full stack | The same plus a single-pod PostgreSQL and optional OpenFGA (`lumewarp-stack`), for evaluation and small installs. | [Full stack](./helm.md#full-stack-lumewarp-stack) |
-| Plain manifests | Kubernetes without Helm: PostgreSQL, OpenFGA, the control plane and a gateway, both migrations as Jobs; one YAML file per release, or a kustomize base. | [Deploy with plain manifests](./kubernetes.md) |
+| Plain manifests | Kubernetes without Helm: PostgreSQL, OpenFGA, the control plane and a gateway, both migrations as Jobs; one YAML file per release, or one file per component in the repository. | [Deploy with plain manifests](./kubernetes.md) |
 | Docker Compose | One host: Postgres, the control plane and a gateway from the published images. | [Deploy with Docker](./docker.md) |
 | Standalone gateway | A gateway alone, configured by one YAML file: no control plane, database, Admin UI, usage or self-service. | [Deploy with Docker](./docker.md#a-standalone-gateway), [Quick start](../guide/quickstart-standalone.md) |
 
