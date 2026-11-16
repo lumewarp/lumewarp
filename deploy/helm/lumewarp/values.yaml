@@ -50,6 +50,29 @@ controlPlane:
       key: password-hash
   # Snapshot scope this installation publishes; gateways must use the same value.
   scope: default
+  # Authorization backend for org and team relations (LUMEWARP_AUTHZ_BACKEND): builtin,
+  # openfga, http or a `lumewarp.authz` plugin name. Settings of `http` and of plugins go in
+  # extraEnv.
+  authz:
+    backend: builtin
+    openfga:
+      url: ""
+      # The store by name (looked up at startup) or, when storeId is set, by id.
+      store: lumewarp
+      storeId: ""
+      # Empty = the store's latest model.
+      modelId: ""
+      # Existing Secret with a bearer token for OpenFGA's API, if it needs one.
+      apiTokenSecret:
+        name: ""
+        key: api-token
+      # Names in an existing store that differ from Lumewarp's (see docs/operations/identity.md).
+      objectTypes: {}  # e.g. {team: llm_team, org: llm_org}
+      relations: {}    # e.g. {team.admin: owner}
+      # Run `openfga init` in an init container: create the store if missing and write the
+      # model if it has none (an existing model is never replaced). The pod waits for
+      # OpenFGA while this is on.
+      init: false
   service:
     type: ClusterIP
     httpPort: 8091

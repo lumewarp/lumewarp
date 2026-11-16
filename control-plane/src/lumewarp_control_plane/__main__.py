@@ -1,4 +1,4 @@
-"""CLI: `python -m lumewarp_control_plane {serve,migrate,openapi,bootstrap}`."""
+"""CLI: `python -m lumewarp_control_plane {serve,migrate,openapi,bootstrap,openfga}`."""
 
 import argparse
 import asyncio
@@ -108,6 +108,26 @@ def _bootstrap(settings: Settings, args: argparse.Namespace) -> None:
     print(secret)
 
 
+def _openfga(settings: Settings, args: argparse.Namespace) -> None:
+    import httpx
+
+    from lumewarp_control_plane.authz.openfga import OpenFGABackend
+
+    async def run() -> tuple[str, str, bool]:
+        backend = OpenFGABackend(settings)
+        try:
+            return await backend.init(write=args.openfga_command == "init")
+        finally:
+            await backend.aclose()
+
+    try:
+        store, model, written = asyncio.run(run())
+    except (ValueError, httpx.HTTPError) as exc:
+        raise SystemExit(f"openfga: {exc}") from None
+    model_note = "written" if written else "checked"
+    print(f"OpenFGA store {store}, model {model} ({model_note})", file=sys.stderr)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lumewarp-control-plane")
     sub = parser.add_subparsers(dest="command")
@@ -134,6 +154,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--name", default="", help="label for the token")
     p.add_argument("--scope", help="default: LUMEWARP_SCOPE")
+
+    p = sub.add_parser("openfga", help="prepare or check the OpenFGA store (LUMEWARP_OPENFGA_*)")
+    actions = p.add_subparsers(dest="openfga_command", required=True)
+    actions.add_parser(
+        "init",
+        help=(
+            "create the store if missing and write Lumewarp's model if it has none, then check"
+            " it; an existing model is never replaced"
+        ),
+    )
+    actions.add_parser("check", help="check the store and model without writing anything")
     return parser
 
 
@@ -156,6 +187,7 @@ COMMANDS = {
     "openapi": _openapi,
     "bootstrap": _bootstrap,
     "hash-password": _hash_password,
+    "openfga": _openfga,
 }
 
 

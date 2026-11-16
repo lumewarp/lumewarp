@@ -77,7 +77,8 @@ required. Only loopback services and the mock upstream receive traffic.
 
 Each backend uses its own disposable database. The OpenFGA run creates a fresh store
 and model from `deploy/openfga/model.fga` using `openfga/cli:v0.8.2`, deleting the store
-afterwards. Keycloak admin credentials are the dev compose credentials
+afterwards; the control plane names the store by `LUMEWARP_OPENFGA_STORE` without a model
+id, so its startup check and latest-model path run too. Keycloak admin credentials are the dev compose credentials
 (`admin` / `lumewarp`). Tests temporarily register the exact dynamic-port callback
 on `lumewarp-cp` and remove only that URI on teardown. Alice and Bob use their
 `@example.com` usernames and password `lumewarp`. Disable-login checks create,

@@ -118,3 +118,45 @@ The gateway image reference.
 {{- define "lumewarp.gateway.image" -}}
 {{- printf "%s:%s" .Values.gateway.image.repository (default .Chart.AppVersion .Values.gateway.image.tag) }}
 {{- end }}
+
+{{/*
+Authorization backend env for the control plane and its `openfga init` container.
+*/}}
+{{- define "lumewarp.controlPlane.authzEnv" -}}
+{{- $authz := .Values.controlPlane.authz -}}
+{{- if ne $authz.backend "builtin" }}
+- name: LUMEWARP_AUTHZ_BACKEND
+  value: {{ $authz.backend | quote }}
+{{- end }}
+{{- if eq $authz.backend "openfga" }}
+{{- $fga := $authz.openfga }}
+- name: LUMEWARP_OPENFGA_URL
+  value: {{ required "controlPlane.authz.openfga.url is required for the openfga backend" $fga.url | quote }}
+{{- if $fga.storeId }}
+- name: LUMEWARP_OPENFGA_STORE_ID
+  value: {{ $fga.storeId | quote }}
+{{- else }}
+- name: LUMEWARP_OPENFGA_STORE
+  value: {{ required "controlPlane.authz.openfga.store or storeId is required" $fga.store | quote }}
+{{- end }}
+{{- if $fga.modelId }}
+- name: LUMEWARP_OPENFGA_MODEL_ID
+  value: {{ $fga.modelId | quote }}
+{{- end }}
+{{- if $fga.apiTokenSecret.name }}
+- name: LUMEWARP_OPENFGA_API_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ $fga.apiTokenSecret.name }}
+      key: {{ $fga.apiTokenSecret.key }}
+{{- end }}
+{{- with $fga.objectTypes }}
+- name: LUMEWARP_OPENFGA_OBJECT_TYPES
+  value: {{ toJson . | quote }}
+{{- end }}
+{{- with $fga.relations }}
+- name: LUMEWARP_OPENFGA_RELATIONS
+  value: {{ toJson . | quote }}
+{{- end }}
+{{- end }}
+{{- end -}}

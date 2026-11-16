@@ -74,7 +74,7 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 | `LUMEWARP_BREAK_GLASS_SESSION_TTL_SECONDS` | `3600` | Emergency session lifetime, 60–14400. |
 | `LUMEWARP_BREAK_GLASS_ALLOWED_CIDRS` | empty (any) | Client networks allowed to use the emergency login; others get 404. |
 | `LUMEWARP_TRUSTED_PROXIES` | empty | Proxy networks whose `X-Forwarded-For` is followed to find the client address for the two limits above. |
-| `LUMEWARP_AUTHZ_BACKEND` | `builtin` | Authorization backend for direct org/team relations: `builtin` (`org_admins` + `team_members`), `openfga`, `http` or a `lumewarp.authz` entry-point name. See [Authorization](../admin/index.md). |
+| `LUMEWARP_AUTHZ_BACKEND` | `builtin` | Authorization backend for direct org/team relations: `builtin` (`org_admins` + `team_members`), `openfga`, `http` or a `lumewarp.authz` entry-point name. See [Authorization](../admin/index.md); the OpenFGA settings are in [Identity](./identity.md#openfga). |
 | `LUMEWARP_SCOPE` | `default` | `Snapshot.scope` this installation publishes. Gateways must use the same value. |
 | `LUMEWARP_MAX_SNAPSHOT_BYTES` | `67108864` (64 MiB) | Compilation fails above this serialized size. |
 | `LUMEWARP_MAX_SNAPSHOT_KEYS` | `200000` | Compilation fails above this key count. |

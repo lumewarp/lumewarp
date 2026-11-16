@@ -171,14 +171,15 @@ def identity_stack(
             object_type=object_type,
         )
         if backend == "openfga":
-            state.store, model = cleanup.enter_context(fga_store(model_path))
+            state.store, store_name = cleanup.enter_context(fga_store(model_path))
             state.proxy = FGAProxy()
             cleanup.callback(state.proxy.close)
+            # By name and without a model id: the control plane resolves the store and
+            # uses its latest model, as a hand-configured deployment would.
             stack.cp_env.update(
                 {
                     "LUMEWARP_OPENFGA_URL": state.proxy.url,
-                    "LUMEWARP_OPENFGA_STORE_ID": state.store,
-                    "LUMEWARP_OPENFGA_MODEL_ID": model,
+                    "LUMEWARP_OPENFGA_STORE": store_name,
                     **(extra_env or {}),
                 }
             )
@@ -384,7 +385,8 @@ def fga_store(model_path=None):
     )
     assert process.returncode == 0, process.stderr
     with httpx.Client(base_url=OPENFGA, timeout=10, trust_env=False) as client:
-        response = client.post("/stores", json={"name": f"e2e-identity-{uuid.uuid4()}"})
+        name = f"e2e-identity-{uuid.uuid4()}"
+        response = client.post("/stores", json={"name": name})
         response.raise_for_status()
         store = response.json()["id"]
         try:
@@ -392,6 +394,6 @@ def fga_store(model_path=None):
                 f"/stores/{store}/authorization-models", json=json.loads(process.stdout)
             )
             response.raise_for_status()
-            yield store, response.json()["authorization_model_id"]
+            yield store, name
         finally:
             client.delete(f"/stores/{store}").raise_for_status()

@@ -153,23 +153,7 @@ from `team_members`.
 
 Two external backends ship with the control plane:
 
-- `openfga`: `LUMEWARP_OPENFGA_URL`, `LUMEWARP_OPENFGA_STORE_ID`,
-  `LUMEWARP_OPENFGA_MODEL_ID`, optional `LUMEWARP_OPENFGA_API_TOKEN`. Users are
-  `user:<lumewarp user uuid>`; the standalone model is `deploy/openfga/model.fga` (`org` with
-  `admin`, `team` with `admin`/`member`, `admin` implies `member`, no org -> team relation).
-  Implements `batch_check`, `list_objects` (ListObjects) and `changes` (ReadChanges), all
-  through the same name mapping:
-  - `LUMEWARP_OPENFGA_OBJECT_TYPES='{"team": "llm_team", "org": "llm_org"}'` renames types;
-  - `LUMEWARP_OPENFGA_RELATIONS='{"team.admin": "owner"}'` renames relations.
-
-  Defaults are today's names. `deploy/openfga/model-renamed.fga` is the same model under
-  `llm_org`/`llm_team` with `owner` as the team admin relation. `changes()` maps every changed
-  tuple back to Lumewarp users; a change it cannot map to users (a userset or wildcard subject)
-  asks the reconciler for a full rescan instead of being dropped. In a store shared with other
-  applications, a change to any other object type (or to a relation Lumewarp does not map) makes
-  the reconciler check that user, or rescan everything when no user can be named: expect extra
-  checks in a busy store. `scripts/dev-idp.sh up`
-  starts a local OpenFGA, writes the model and prints these variables.
+- `openfga`: see [OpenFGA](#openfga) below.
 - `http`: `LUMEWARP_AUTHZ_HTTP_URL` (+ optional `LUMEWARP_AUTHZ_HTTP_TOKEN`).
   `check` becomes `POST {"user_id", "relation", "resource": {"type", "id"}}` answered by
   `{"decision": "allow" | "deny"}`, with `type` `"org"` or `"team"`; anything else (non-2xx,
@@ -178,7 +162,60 @@ Two external backends ship with the control plane:
 Every backend call is bounded by `LUMEWARP_AUTHZ_TIMEOUT_SECONDS` (default 2 s); a
 timeout is `ERROR`.
 
-OpenFGA Check and BatchCheck always request `HIGHER_CONSISTENCY`, including
+### OpenFGA
+
+Three settings are enough:
+
+```sh
+LUMEWARP_AUTHZ_BACKEND=openfga
+LUMEWARP_OPENFGA_URL=http://openfga:8080
+LUMEWARP_OPENFGA_STORE=lumewarp          # the store's name
+lumewarp-control-plane openfga init      # once: creates the store and writes the model
+```
+
+`openfga init` creates the store when no store has that name and writes Lumewarp's model when
+the store has none; it never replaces an existing model, so it is safe to run on every
+deploy (the [Helm chart](./helm.md#sso-and-authorization-backend) can run it as an init
+container). `openfga check` runs the same checks without writing.
+
+| Setting | Meaning |
+| --- | --- |
+| `LUMEWARP_OPENFGA_URL` | OpenFGA's HTTP API. |
+| `LUMEWARP_OPENFGA_STORE` | The store by name, looked up once. Two stores with the name are an error. |
+| `LUMEWARP_OPENFGA_STORE_ID` | The store by id instead of `LUMEWARP_OPENFGA_STORE`; set exactly one of the two. |
+| `LUMEWARP_OPENFGA_MODEL_ID` | Optional. Pins one model; unset, every request uses the store's latest model, so writing a new model needs no restart. |
+| `LUMEWARP_OPENFGA_API_TOKEN` | Optional bearer token for OpenFGA's API. |
+| `LUMEWARP_OPENFGA_OBJECT_TYPES`, `LUMEWARP_OPENFGA_RELATIONS` | Optional JSON maps for a store whose names differ, below. |
+
+At startup the control plane resolves the store and checks that the model (the pinned one,
+or the latest) has the `user` type and every type and relation Lumewarp asks about, under the
+mapped names. A store that does not exist, a model that lacks a name, or a request OpenFGA
+refuses (4xx, such as a wrong token) stops the control plane with a message naming the
+problem. An unreachable OpenFGA (or a 5xx) only logs a warning: startup continues, the store
+name is resolved on first use and admin calls answer 503 until then, while break-glass keeps
+working.
+
+Users are `user:<lumewarp user uuid>`. The model, `deploy/openfga/model.fga`, has `org` with
+`admin` and `team` with `admin`/`member`, where `admin` implies `member` and there is no
+org -> team relation. The backend implements `batch_check`, `list_objects` (ListObjects) and
+`changes` (ReadChanges).
+
+An existing store may name things differently; map Lumewarp's names to the store's:
+
+- `LUMEWARP_OPENFGA_OBJECT_TYPES='{"team": "llm_team", "org": "llm_org"}'` renames types;
+- `LUMEWARP_OPENFGA_RELATIONS='{"team.admin": "owner"}'` renames relations.
+
+Every request path and `openfga init` use the same mapping (init writes the model under the
+mapped names into an empty store). `deploy/openfga/model-renamed.fga` is the same model under
+`llm_org`/`llm_team` with `owner` as the team admin relation. `changes()` maps every changed
+tuple back to Lumewarp users; a change it cannot map to users (a userset or wildcard subject)
+asks the reconciler for a full rescan instead of being dropped. In a store shared with other
+applications, a change to any other object type (or to a relation Lumewarp does not map) makes
+the reconciler check that user, or rescan everything when no user can be named: expect extra
+checks in a busy store. `scripts/dev-idp.sh up` starts a local OpenFGA, runs `openfga init`
+and prints these variables.
+
+Check and BatchCheck always request `HIGHER_CONSISTENCY`, including
 checks made by the key reconciler, so suspension decisions do not use cached
 permission results.
 

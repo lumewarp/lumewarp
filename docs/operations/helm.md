@@ -350,8 +350,8 @@ rotation invalidates MCP sessions and the A2A task ids already handed out.
 ## SSO and authorization backend
 
 The control plane reads every setting from `LUMEWARP_*` environment variables (see the
-[Control plane](./control-plane.md)); pass SSO and authorization
-settings through `controlPlane.extraEnv`, secrets through `secretKeyRef`:
+[Control plane](./control-plane.md)); pass SSO settings through `controlPlane.extraEnv`,
+secrets through `secretKeyRef`:
 
 ```yaml
 controlPlane:
@@ -369,27 +369,32 @@ controlPlane:
     # logins only. Keep it in a Secret, never in values.yaml.
     - name: LUMEWARP_SECRET_KEY
       valueFrom: {secretKeyRef: {name: lumewarp-oidc, key: secret-key}}
-    # Optional: grants in OpenFGA instead of the built-in membership table.
-    - name: LUMEWARP_AUTHZ_BACKEND
-      value: openfga
-    - name: LUMEWARP_OPENFGA_URL
-      value: http://openfga.openfga:8080
-    - name: LUMEWARP_OPENFGA_STORE_ID
-      value: 01H...
-    - name: LUMEWARP_OPENFGA_MODEL_ID
-      value: 01H...
-    # Optional: when the store names its objects/relations differently.
-    - name: LUMEWARP_OPENFGA_OBJECT_TYPES
-      value: '{"team": "llm_team", "org": "llm_org"}'
-    - name: LUMEWARP_OPENFGA_RELATIONS
-      value: '{"team.admin": "owner"}'
 ```
 
 The IdP must allow the redirect URI `<LUMEWARP_PUBLIC_URL>/api/v1/session/oidc/callback`.
-Write the OpenFGA model from `deploy/openfga/model.fga` before switching the backend;
-`deploy/openfga/model-renamed.fga` is the same model under the names of the mapping example
-above. Lumewarp answers direct `admin` (org/team) and `member` (team) relations only; org
-administration is inherited from `team.org_id` by the control plane.
+
+The authorization backend has its own values. For [OpenFGA](./identity.md#openfga):
+
+```yaml
+controlPlane:
+  authz:
+    backend: openfga
+    openfga:
+      url: http://openfga.openfga:8080
+      store: lumewarp          # by name; or storeId
+      init: true               # init container: create the store and model when missing
+      # Optional:
+      # modelId: 01H...        # pin a model; empty = the store's latest
+      # apiTokenSecret: {name: lumewarp-openfga, key: api-token}
+      # objectTypes: {team: llm_team, org: llm_org}
+      # relations: {team.admin: owner}
+```
+
+With `init: true` the pod waits until OpenFGA answers; an existing model is never replaced.
+The `http` backend and plugins take their settings through `extraEnv`, with
+`controlPlane.authz.backend` naming them. Lumewarp answers direct `admin` (org/team) and
+`member` (team) relations only; org administration is inherited from `team.org_id` by the
+control plane.
 
 ## Values
 
@@ -404,6 +409,11 @@ Common values (see [`values.yaml`](https://github.com/lumewarp/lumewarp/blob/mai
 | `controlPlane.initialAdminEmail` | `""` | `LUMEWARP_INITIAL_ADMIN_EMAIL`: the email that becomes proxy_admin on its first verified login while no proxy_admin exists. Empty leaves emergency access only. |
 | `controlPlane.breakGlass.passwordHashSecret.name` / `.key` | unset / `password-hash` | Existing Secret with `LUMEWARP_BREAK_GLASS_PASSWORD_HASH` (argon2id). Unset disables the emergency login. |
 | `controlPlane.scope` | `default` | Config scope published to gateways. |
+| `controlPlane.authz.backend` | `builtin` | `LUMEWARP_AUTHZ_BACKEND`. |
+| `controlPlane.authz.openfga.url` / `.store` / `.storeId` / `.modelId` | `""` / `lumewarp` / `""` / `""` | The OpenFGA API and store (by name, or by id when `storeId` is set); empty `modelId` = the latest model. |
+| `controlPlane.authz.openfga.apiTokenSecret.name` / `.key` | unset / `api-token` | Existing Secret with `LUMEWARP_OPENFGA_API_TOKEN`. |
+| `controlPlane.authz.openfga.objectTypes` / `.relations` | `{}` | Name mapping for an existing store. |
+| `controlPlane.authz.openfga.init` | `false` | Run `openfga init` in an init container. |
 | `controlPlane.service.httpPort` / `.grpcPort` | `8091` / `50051` | Service and container ports. |
 | `controlPlane.service.metricsPort` | `9465` | Control-plane Prometheus listener (`LUMEWARP_METRICS_BIND`), separate from the API port. |
 | `controlPlane.metrics.enabled` | `true` | Serve and expose `lumewarp_cp_*` metrics; `false` leaves `LUMEWARP_METRICS_BIND` empty. |

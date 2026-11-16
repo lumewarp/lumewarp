@@ -36,6 +36,20 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       terminationGracePeriodSeconds: {{ .Values.controlPlane.terminationGracePeriodSeconds }}
+      {{- if and (eq .Values.controlPlane.authz.backend "openfga") .Values.controlPlane.authz.openfga.init }}
+      initContainers:
+        # Idempotent: creates the store and writes the model only when they are missing.
+        - name: openfga-init
+          image: {{ include "lumewarp.controlPlane.image" . | quote }}
+          imagePullPolicy: {{ .Values.controlPlane.image.pullPolicy }}
+          command: [python, -m, lumewarp_control_plane, openfga, init]
+          env:
+            {{- include "lumewarp.controlPlane.authzEnv" . | nindent 12 }}
+          {{- with .Values.controlPlane.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- end }}
       containers:
         - name: control-plane
           image: {{ include "lumewarp.controlPlane.image" . | quote }}
@@ -97,6 +111,7 @@ spec:
                   name: {{ .Values.encryptionKey.secretName }}
                   key: {{ .Values.encryptionKey.key }}
             {{- end }}
+            {{- include "lumewarp.controlPlane.authzEnv" . | nindent 12 }}
             {{- with .Values.controlPlane.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -17,7 +17,13 @@ from lumewarp_control_plane.authz import (
     team_resource,
 )
 from lumewarp_control_plane.authz.http import HttpBackend
-from lumewarp_control_plane.authz.openfga import OpenFGABackend
+from lumewarp_control_plane.authz.openfga import (
+    ObjectMapping,
+    OpenFGABackend,
+    OpenFGAConfigError,
+    authorization_model,
+    validate_model,
+)
 from lumewarp_control_plane.settings import Settings
 
 ITEM = ("alice", Relation.MEMBER, team_resource("one"))
@@ -691,3 +697,200 @@ async def test_plugin_loading_contract(monkeypatch, value, loaded) -> None:
     if loaded == "PluginWithContext":
         assert backend.backend.context.settings.authz_backend == "custom"
         assert backend.backend.context.session_factory is None
+
+
+# ------------------------------------------------------------------ store, model and init
+
+
+MAPPED = ObjectMapping({"team": "llm_team", "org": "llm_org"}, {"team.admin": "owner"})
+
+
+class FakeFGA:
+    """A minimal OpenFGA HTTP API: stores by name, models per store, check."""
+
+    def __init__(self, stores=None, models=None, fail=None):
+        self.stores = dict(stores or {})  # id -> name
+        self.models = {k: list(v) for k, v in (models or {}).items()}  # store -> [model]
+        self.fail = fail
+        self.calls = []
+
+    def __call__(self, request):
+        path = request.url.path
+        self.calls.append((request.method, path))
+        if self.fail is not None:
+            return self.fail(request)
+        parts = path.strip("/").split("/")
+        if parts == ["stores"] and request.method == "GET":
+            name = request.url.params.get("name")
+            rows = [{"id": i, "name": n} for i, n in self.stores.items() if n == name]
+            return httpx.Response(200, json={"stores": rows, "continuation_token": ""})
+        if parts == ["stores"] and request.method == "POST":
+            store = f"s{len(self.stores) + 1}"
+            self.stores[store] = json.loads(request.content)["name"]
+            return httpx.Response(201, json={"id": store})
+        store = parts[1]
+        if store not in self.stores:
+            return httpx.Response(404, json={"code": "store_id_not_found"})
+        if parts[2:] == ["authorization-models"]:
+            models = self.models.setdefault(store, [])
+            if request.method == "POST":
+                model = {"id": f"m{len(models) + 1}", **json.loads(request.content)}
+                models.insert(0, model)
+                return httpx.Response(201, json={"authorization_model_id": model["id"]})
+            return httpx.Response(200, json={"authorization_models": models[:1]})
+        if parts[2] == "authorization-models":
+            for model in self.models.get(store, []):
+                if model["id"] == parts[3]:
+                    return httpx.Response(200, json={"authorization_model": model})
+            return httpx.Response(404, json={"code": "authorization_model_not_found"})
+        if parts[2:] == ["check"]:
+            assert "authorization_model_id" not in json.loads(request.content)
+            return httpx.Response(200, json={"allowed": True})
+        raise AssertionError(path)
+
+
+async def fga_with(fake, **settings):
+    backend = OpenFGABackend(Settings(openfga_url="https://fga.test", **settings))
+    await mock_client(backend, fake)
+    return backend
+
+
+def stored_model(mapping=None, model_id="m1"):
+    return {"id": model_id, **authorization_model(mapping or ObjectMapping())}
+
+
+async def test_store_name_resolved_once_and_model_id_omitted():
+    fake = FakeFGA({"s1": "lumewarp", "s2": "other"}, {"s1": [stored_model()]})
+    backend = await fga_with(fake, openfga_store="lumewarp")
+    assert await backend.check(*ITEM) is Decision.ALLOW
+    assert await backend.check(*ITEM) is Decision.ALLOW
+    assert fake.calls == [
+        ("GET", "/stores"),
+        ("POST", "/stores/s1/check"),
+        ("POST", "/stores/s1/check"),
+    ]
+    await backend.aclose()
+
+
+@pytest.mark.parametrize("stores", [{}, {"s1": "lumewarp", "s2": "lumewarp"}])
+async def test_missing_or_ambiguous_store_name(stores):
+    backend = await fga_with(FakeFGA(stores), openfga_store="lumewarp")
+    assert await Authorizer(backend).check(*ITEM) is Decision.ERROR
+    with pytest.raises(OpenFGAConfigError):
+        await backend.start()
+    await backend.aclose()
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"openfga_store": "lumewarp", "openfga_store_id": "s1"}])
+def test_exactly_one_store_setting(kwargs):
+    with pytest.raises(ValueError, match="exactly one"):
+        OpenFGABackend(Settings(openfga_url="https://fga.test", **kwargs))
+
+
+@pytest.mark.parametrize("mapping", [ObjectMapping(), MAPPED])
+def test_generated_model_passes_its_own_validation(mapping):
+    validate_model(authorization_model(mapping), mapping)
+
+
+def test_validation_names_every_missing_type_and_relation():
+    with pytest.raises(OpenFGAConfigError) as error:
+        validate_model(authorization_model(ObjectMapping()), MAPPED)
+    assert "type 'llm_team'" in str(error.value) and "type 'llm_org'" in str(error.value)
+    model = authorization_model(ObjectMapping())
+    del model["type_definitions"][2]["relations"]["member"]
+    with pytest.raises(OpenFGAConfigError, match="relation team#member"):
+        validate_model(model, ObjectMapping())
+
+
+async def test_start_checks_the_pinned_or_latest_model():
+    fake = FakeFGA({"s1": "lumewarp"}, {"s1": [stored_model(model_id="m1")]})
+    await (await fga_with(fake, openfga_store="lumewarp")).start()
+    await (await fga_with(fake, openfga_store_id="s1", openfga_model_id="m1")).start()
+    with pytest.raises(OpenFGAConfigError, match="authorization_model_not_found"):
+        await (await fga_with(fake, openfga_store_id="s1", openfga_model_id="m9")).start()
+    with pytest.raises(OpenFGAConfigError, match="llm_team"):
+        await (
+            await fga_with(
+                fake,
+                openfga_store_id="s1",
+                openfga_object_types={"team": "llm_team", "org": "llm_org"},
+            )
+        ).start()
+    with pytest.raises(OpenFGAConfigError, match="no authorization model"):
+        await (await fga_with(FakeFGA({"s1": "x"}), openfga_store_id="s1")).start()
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_start_aborts_on_a_refused_request(status):
+    fake = FakeFGA(fail=lambda request: httpx.Response(status, json={}))
+    with pytest.raises(OpenFGAConfigError, match=str(status)):
+        await (await fga_with(fake, openfga_store="lumewarp")).start()
+
+
+async def test_start_tolerates_an_unreachable_openfga():
+    def down(request):
+        raise httpx.ConnectError("unavailable", request=request)
+
+    for fail in (down, lambda request: httpx.Response(503, json={})):
+        backend = await fga_with(FakeFGA(fail=fail), openfga_store="lumewarp")
+        await backend.start()
+        assert await Authorizer(backend).check(*ITEM) is Decision.ERROR
+        await backend.aclose()
+
+
+async def test_init_creates_store_and_model_once():
+    fake = FakeFGA({"s1": "other"})
+    backend = await fga_with(fake, openfga_store="lumewarp", **MAPPED_SETTINGS)
+    with pytest.raises(OpenFGAConfigError, match="no OpenFGA store"):
+        await backend.init(write=False)
+    assert await backend.init(write=True) == ("s2", "m1", True)
+    assert fake.stores["s2"] == "lumewarp"
+    validate_model(fake.models["s2"][0], MAPPED)
+    assert await backend.init(write=True) == ("s2", "m1", False)
+    assert len(fake.models["s2"]) == 1
+
+
+async def test_init_never_replaces_a_mismatched_model():
+    fake = FakeFGA({"s1": "lumewarp"}, {"s1": [stored_model()]})
+    backend = await fga_with(fake, openfga_store="lumewarp", **MAPPED_SETTINGS)
+    with pytest.raises(OpenFGAConfigError):
+        await backend.init(write=True)
+    assert len(fake.models["s1"]) == 1
+
+
+MAPPED_SETTINGS = {
+    "openfga_object_types": {"team": "llm_team", "org": "llm_org"},
+    "openfga_relations": {"team.admin": "owner"},
+}
+
+
+async def test_live_init_writes_a_working_model(openfga_settings, authz_seed):
+    """The generated model behaves like deploy/openfga/model.fga: admin implies member."""
+    name = f"lumewarp-init-{uuid.uuid4()}"
+    backend = OpenFGABackend(Settings(openfga_url=openfga_settings.openfga_url, openfga_store=name))
+    try:
+        _, _, written = await backend.init(write=True)
+        assert written
+        await backend.start()
+        team = team_resource(authz_seed.teams[0])
+        await backend._post(
+            "write",
+            {"writes": {"tuple_keys": [backend._tuple(authz_seed.admin, Relation.ADMIN, team)]}},
+        )
+        assert await backend.check(authz_seed.admin, Relation.MEMBER, team) is Decision.ALLOW
+        assert await backend.check(authz_seed.member, Relation.MEMBER, team) is Decision.DENY
+    finally:
+        if backend._store_id is not None:
+            url = f"{openfga_settings.openfga_url}/stores/{backend._store_id}"
+            (await backend._client.delete(url)).raise_for_status()
+        await backend.aclose()
+
+
+async def test_live_dsl_model_passes_validation(openfga_settings):
+    """deploy/openfga/model.fga (written by the fixture) satisfies the startup check."""
+    backend = OpenFGABackend(openfga_settings)
+    try:
+        await backend.start()
+        assert (await backend.init(write=False))[2] is False
+    finally:
+        await backend.aclose()

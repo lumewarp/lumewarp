@@ -74,6 +74,10 @@ Optional members are filled in from `check` when absent:
   Without it the reconciler relies on its periodic rescan.
 - `manages_grants: bool` defaults to `False`: memberships live in the external system and the
   member write endpoints answer `409 managed_externally`. The built-in backend sets it to `True`.
+- `async start()` runs once when the control plane starts, before it serves anything; an
+  exception aborts startup. Use it for configuration that can be checked against the external
+  system (the OpenFGA backend checks its store and model), and only log when that system is
+  unreachable, so break-glass keeps working.
 
 ```toml
 # pyproject.toml

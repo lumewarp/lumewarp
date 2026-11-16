@@ -60,6 +60,7 @@ Everything besides `check` is optional and filled in by `Authorizer`:
   rescans periodically.
 - `manages_grants`: default False, i.e. memberships live in the external system and the
   admin API's member endpoints are read-only.
+- `start()`: awaited once at control-plane startup; an exception aborts startup.
 
 Every backend call is bounded by `LUMEWARP_AUTHZ_TIMEOUT_SECONDS`; a timeout or exception is
 `Decision.ERROR`.

@@ -53,7 +53,10 @@ class Settings(BaseSettings):
     # Every authorization backend call is bounded; a timeout is Decision.ERROR (503).
     authz_timeout_seconds: float = Field(default=2.0, gt=0)
     # `openfga` backend (authz/openfga.py). dev: scripts/dev-idp.sh up prints these.
+    # The store by name (looked up once) or by id, exactly one of the two; `openfga init`
+    # creates a missing store and writes the model. No model id = the store's latest model.
     openfga_url: str | None = None
+    openfga_store: str | None = None
     openfga_store_id: str | None = None
     openfga_model_id: str | None = None
     openfga_api_token: SecretStr | None = None

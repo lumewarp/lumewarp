@@ -185,6 +185,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ) as playground_client:
         app.state.playground_client = playground_client
         app.state.playground_warned_misconfigured = False
+        # An optional backend hook: a misconfigured backend aborts startup here.
+        if (start := getattr(app.state.authorizer.backend, "start", None)) is not None:
+            await start()
         runtime = await start_background(app) if settings.background_enabled else Runtime()
         app.state.runtime = runtime
         app.state.tasks = runtime.tasks
