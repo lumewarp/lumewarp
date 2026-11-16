@@ -38,6 +38,7 @@ locations=(
   'deploy/helm/lumewarp-stack/Chart.yaml|(?m)^version: (\S+)$|umbrella chart version'
   'deploy/helm/lumewarp-stack/Chart.yaml|(?m)^appVersion: "([^"]+)"|umbrella chart appVersion'
   'deploy/helm/lumewarp-stack/Chart.yaml|(?m)^  - name: lumewarp\n(?:    (?!version:).*\n)*?    version: "?([^"\n]+?)"?$|umbrella dependency on lumewarp'
+  'deploy/helm/lumewarp-stack/Chart.lock|(?m)^- name: lumewarp\n  repository: [^\n]*\n  version: (\S+)$|umbrella Chart.lock lumewarp'
 )
 # Every workspace member of the gateway in Cargo.lock.
 while IFS= read -r manifest; do
@@ -88,9 +89,22 @@ git rev-parse -q --verify "refs/tags/v${version}" >/dev/null && die "tag v${vers
 versions "$version" "$version" >/dev/null
 scripts/release.sh --check "$version"
 
+# The lock's digest covers the dependency versions: let helm recompute it (helm from PATH,
+# or the alpine/helm image through docker; the OpenFGA chart comes from its repository).
+stack=deploy/helm/lumewarp-stack
+openfga_repo=https://openfga.github.io/helm-charts
+if command -v helm >/dev/null 2>&1; then
+  helm repo add openfga "$openfga_repo" >/dev/null 2>&1 || true
+  helm dependency update "$stack" >/dev/null
+else
+  docker run --rm --entrypoint sh -e HOME=/tmp -u "$(id -u):$(id -g)" -v "$PWD:/c" -w /c alpine/helm:3.16.4 \
+    -c "helm repo add openfga $openfga_repo >/dev/null && helm dependency update $stack >/dev/null"
+fi
+scripts/release.sh --check "$version"
+
 git add gateway/Cargo.toml gateway/Cargo.lock control-plane/pyproject.toml \
   control-plane/src/lumewarp_control_plane/__init__.py control-plane/uv.lock \
-  ui/package.json deploy/helm/lumewarp/Chart.yaml deploy/helm/lumewarp-stack/Chart.yaml
+  ui/package.json deploy/helm/lumewarp/Chart.yaml "$stack/Chart.yaml" "$stack/Chart.lock"
 # The images in the plain manifests carry the new version.
 deploy/kubernetes/generate.sh
 git add deploy/kubernetes
