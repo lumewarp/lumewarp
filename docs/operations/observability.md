@@ -140,17 +140,17 @@ Enable the bundled observability resources independently:
 
 ```sh
 helm template lumewarp deploy/helm/lumewarp -n lumewarp \
-  --set serviceMonitor.enabled=true \
-  --set prometheusRule.enabled=true \
-  --set prometheusRule.labels.release=kube-prometheus-stack \
-  --set grafanaDashboards.enabled=true
+  --set monitoring.serviceMonitor.enabled=true \
+  --set monitoring.prometheusRule.enabled=true \
+  --set monitoring.prometheusRule.labels.release=kube-prometheus-stack \
+  --set monitoring.grafanaDashboards.enabled=true
 ```
 
-`prometheusRule.enabled` defaults to `false` and requires Prometheus Operator
-CRDs. `prometheusRule.labels` must match your Prometheus `ruleSelector`.
-`grafanaDashboards.enabled` defaults to `false` and creates a ConfigMap containing
+`monitoring.prometheusRule.enabled` defaults to `false` and requires Prometheus Operator
+CRDs. `monitoring.prometheusRule.labels` must match your Prometheus `ruleSelector`.
+`monitoring.grafanaDashboards.enabled` defaults to `false` and creates a ConfigMap containing
 five dashboards. The sidecar label defaults to `grafana_dashboard: "1"`; override
-`grafanaDashboards.sidecarLabel` / `sidecarLabelValue` to match your Grafana
+`monitoring.grafanaDashboards.sidecarLabel` / `sidecarLabelValue` to match your Grafana
 sidecar, which must watch the release namespace. Select a Prometheus datasource
 using the dashboard's `datasource` variable. The `Lumewarp / MCP & A2A` dashboard
 reads gateway MCP/A2A, plugin and catalog metrics plus the control plane's
@@ -181,7 +181,7 @@ selector. Missing targets are not detected by `up == 0`; configure scrape target
 discovery separately. Standalone YAML gateways are excluded from config-stream
 and version-mismatch alerts via `lumewarp_config_info{source="yaml"}`.
 
-`serviceMonitor.enabled` scrapes both the gateway admin port and the control
+`monitoring.serviceMonitor.enabled` scrapes both the gateway admin port and the control
 plane's dedicated `metrics` port (`lumewarp_cp_*`, see [Metrics](../reference/metrics.md)).
 Panels whose exporters are not deployed stay empty; missing metrics do not trigger
 these threshold alerts. The control plane exports

@@ -1,0 +1,40 @@
+# A starting point: copy this directory, point `resources` at the base (or a remote ref
+# of this repository) and edit. Build with `kubectl kustomize overlays/example`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+# Pin the release; `kustomize edit set image` does the same from a script.
+images:
+  - name: ghcr.io/lumewarp/lumewarp-control-plane
+    newTag: "0.2.0"
+  - name: ghcr.io/lumewarp/lumewarp-gateway
+    newTag: "0.2.0"
+patches:
+  # Gateway replicas. Every pod is its own gateway; rpm/tpm limits are per gateway unless
+  # LUMEWARP_SHARED_LIMITS_REDIS_URL points at a Redis or Valkey you run yourself (a
+  # Secret key holding the full redis:// URL, added as one more env entry like the SSO one).
+  - target: {kind: Deployment, name: lumewarp-gateway}
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+  # SSO: the base has no OIDC. Create the Secret `lumewarp-oidc` with `client-secret` and
+  # `secret-key` (32+ random characters) first, then add the settings as env entries.
+  - target: {kind: Deployment, name: lumewarp-control-plane}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: LUMEWARP_OIDC_ISSUER, value: "https://idp.example.com/realms/main"}
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: LUMEWARP_OIDC_CLIENT_ID, value: lumewarp}
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: LUMEWARP_OIDC_CLIENT_SECRET, valueFrom: {secretKeyRef: {name: lumewarp-oidc, key: client-secret}}}
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: LUMEWARP_SECRET_KEY, valueFrom: {secretKeyRef: {name: lumewarp-oidc, key: secret-key}}}
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: LUMEWARP_PUBLIC_URL, value: "https://lumewarp.example.com"}

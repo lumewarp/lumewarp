@@ -108,9 +108,9 @@ expect "autoscaling: CPU target" 'averageUtilization: 80' "$hpa"
 refute "autoscaling: the workload has no replicas" '^  replicas:' "$workload"
 
 # --- persistence: StatefulSet, one claim per pod, governing headless Service --------------
-render persistence --set gateway.stateDir.persistence.enabled=true \
-  --set gateway.stateDir.persistence.storageClass=fast \
-  --set gateway.stateDir.persistence.size=5Gi
+render persistence --set gateway.persistence.enabled=true \
+  --set gateway.persistence.storageClass=fast \
+  --set gateway.persistence.size=5Gi
 workload="$(doc gateway-statefulset.yaml)"
 whole="$(cat "$file")"
 replaced="$(doc gateway-deployment.yaml)"
@@ -133,8 +133,8 @@ refute "persistence: claim template has no app version label" 'app.kubernetes.io
 expect "persistence: claim template keeps the selector labels" '^          app.kubernetes.io/component: gateway$' "$claims"
 
 # --- persistence plus the ServiceMonitor: one scrape target per pod, not two --------------
-render persistence-monitor --set gateway.stateDir.persistence.enabled=true \
-  --set serviceMonitor.enabled=true
+render persistence-monitor --set gateway.persistence.enabled=true \
+  --set monitoring.serviceMonitor.enabled=true
 whole="$(cat "$file")"
 headless="$(sed -n '/^  name: lumewarp-gateway-headless$/,/^---$/p' "$file")"
 expect "headless Service exposes http" '^    - name: http$' "$headless"
@@ -149,58 +149,58 @@ expect "persistence + ServiceMonitor: the monitor scrapes the admin port" '^    
   "$(doc servicemonitor.yaml)"
 
 # --- bundled Valkey ----------------------------------------------------------------------
-render redis --set redis.enabled=true --set gateway.replicaCount=3 \
+render valkey --set valkey.enabled=true --set gateway.replicaCount=3 \
   --set gateway.sharedLimits.syncMs=200 --set gateway.sharedLimits.namespace=prod
 workload="$(doc gateway-deployment.yaml)"
-valkey="$(doc redis-deployment.yaml)"
+valkey="$(doc valkey-deployment.yaml)"
 whole="$(cat "$file")"
-expect "redis: Valkey Deployment" '^  name: lumewarp-redis$' "$valkey"
-expect "redis: pinned image" 'image: "valkey/valkey:8.1.11-alpine"' "$valkey"
-expect "redis: no persistence" '\-\-save "" --appendonly no' "$valkey"
-expect "redis: password read from the mounted Secret" 'password="\$\(cat /etc/lumewarp-redis/password\)"' "$valkey"
-expect "redis: config file on the writable data volume" "printf 'requirepass %s" "$valkey"
-expect "redis: server started from the config file" 'exec valkey-server /data/valkey.conf' "$valkey"
-expect "redis: non-root" '^ +runAsUser: 999$' "$valkey"
-expect "redis: read-only root filesystem" '^ +readOnlyRootFilesystem: true$' "$valkey"
-expect "redis: /data is an emptyDir" '^          emptyDir: \{\}$' "$valkey"
-expect "redis: ClusterIP Service" '^  name: lumewarp-redis$' "$(doc redis-service.yaml)"
-expect "redis: gateway URL built from the Service" 'value: "redis://:\$\(LUMEWARP_SHARED_LIMITS_REDIS_PASSWORD\)@lumewarp-redis:6379/0"' "$workload"
-expect "redis: password from the Secret" 'name: lumewarp-redis' "$workload"
-expect "redis: chart-created Secret" '^  password: "' "$(doc redis-secret.yaml)"
-expect "redis: sync interval" '^              value: "200"$' "$workload"
-expect "redis: namespace" '^              value: "prod"$' "$workload"
-refute "redis: no literal password in the URL" 'redis://:[^$]' "$whole"
-refute "redis: the password is not a command-line argument" '\-\-requirepass' "$whole"
+expect "valkey: Valkey Deployment" '^  name: lumewarp-valkey$' "$valkey"
+expect "valkey: pinned image" 'image: "valkey/valkey:8.1.11-alpine"' "$valkey"
+expect "valkey: no persistence" '\-\-save "" --appendonly no' "$valkey"
+expect "valkey: password read from the mounted Secret" 'password="\$\(cat /etc/lumewarp-valkey/password\)"' "$valkey"
+expect "valkey: config file on the writable data volume" "printf 'requirepass %s" "$valkey"
+expect "valkey: server started from the config file" 'exec valkey-server /data/valkey.conf' "$valkey"
+expect "valkey: non-root" '^ +runAsUser: 999$' "$valkey"
+expect "valkey: read-only root filesystem" '^ +readOnlyRootFilesystem: true$' "$valkey"
+expect "valkey: /data is an emptyDir" '^          emptyDir: \{\}$' "$valkey"
+expect "valkey: ClusterIP Service" '^  name: lumewarp-valkey$' "$(doc valkey-service.yaml)"
+expect "valkey: gateway URL built from the Service" 'value: "redis://:\$\(LUMEWARP_SHARED_LIMITS_REDIS_PASSWORD\)@lumewarp-valkey:6379/0"' "$workload"
+expect "valkey: password from the Secret" 'name: lumewarp-valkey' "$workload"
+expect "valkey: chart-created Secret" '^  password: "' "$(doc valkey-secret.yaml)"
+expect "valkey: sync interval" '^              value: "200"$' "$workload"
+expect "valkey: namespace" '^              value: "prod"$' "$workload"
+refute "valkey: no literal password in the URL" 'redis://:[^$]' "$whole"
+refute "valkey: the password is not a command-line argument" '\-\-requirepass' "$whole"
 
 # The kubelet expands $(VAR) from the variables declared before it, so the password has to
 # come first.
 password_line="$(grep -n 'name: LUMEWARP_SHARED_LIMITS_REDIS_PASSWORD' "$file" | head -1 | cut -d: -f1)"
 url_line="$(grep -n 'name: LUMEWARP_SHARED_LIMITS_REDIS_URL' "$file" | head -1 | cut -d: -f1)"
 if [ -n "$password_line" ] && [ -n "$url_line" ] && [ "$password_line" -lt "$url_line" ]; then
-  ok "redis: the password variable is declared before the URL that interpolates it"
+  ok "valkey: the password variable is declared before the URL that interpolates it"
 else
-  bad "redis: the URL must follow the password variable in the container env"
+  bad "valkey: the URL must follow the password variable in the container env"
 fi
 
 # The generated password exists once, base64, in the Secret and nowhere in plain text.
-password_b64="$(doc redis-secret.yaml | sed -n 's/^  password: "\(.*\)"$/\1/p' | head -1)"
+password_b64="$(doc valkey-secret.yaml | sed -n 's/^  password: "\(.*\)"$/\1/p' | head -1)"
 if [ -n "$password_b64" ]; then
   password="$(printf '%s' "$password_b64" | base64 -d 2>/dev/null)"
   if [ -n "$password" ] && grep -qF -- "$password" "$file"; then
-    bad "redis: the generated password appears in plain text in the rendered output"
+    bad "valkey: the generated password appears in plain text in the rendered output"
   else
-    ok "redis: the generated password appears only base64-encoded in the Secret"
+    ok "valkey: the generated password appears only base64-encoded in the Secret"
   fi
 else
-  bad "redis: could not read the generated password from the Secret"
+  bad "valkey: could not read the generated password from the Secret"
 fi
 
 # --- Valkey with a password Secret the operator supplies ----------------------------------
-render redis-existing-secret --set redis.enabled=true --set redis.auth.existingSecret=valkey-auth \
+render valkey-existing-secret --set valkey.enabled=true --set valkey.auth.existingSecret=valkey-auth \
   --set gateway.replicaCount=2
 whole="$(cat "$file")"
-expect "redis existingSecret: mounts the named Secret" '^            secretName: valkey-auth$' "$whole"
-refute "redis existingSecret: the chart creates no Secret" '^kind: Secret' "$whole"
+expect "valkey existingSecret: mounts the named Secret" '^            secretName: valkey-auth$' "$whole"
+refute "valkey existingSecret: the chart creates no Secret" '^kind: Secret' "$whole"
 
 # --- external Redis ----------------------------------------------------------------------
 render external-redis --set gateway.sharedLimits.redis.existingSecret=external-redis \
@@ -232,19 +232,61 @@ expect "pdb: rendered for an autoscaled gateway" '^kind: PodDisruptionBudget' \
   "$(doc gateway-poddisruptionbudget.yaml)"
 
 # --- everything at once ------------------------------------------------------------------
-render combined --set redis.enabled=true --set gateway.stateDir.persistence.enabled=true \
+render combined --set valkey.enabled=true --set gateway.persistence.enabled=true \
   --set gateway.replicaCount=3 --set gateway.podDisruptionBudget.enabled=true
 whole="$(cat "$file")"
 expect "combined: StatefulSet" '^kind: StatefulSet' "$(doc gateway-statefulset.yaml)"
 expect "combined: PodDisruptionBudget" '^kind: PodDisruptionBudget' \
   "$(doc gateway-poddisruptionbudget.yaml)"
-expect "combined: Valkey" 'image: "valkey/valkey:8.1.11-alpine"' "$(doc redis-deployment.yaml)"
+expect "combined: Valkey" 'image: "valkey/valkey:8.1.11-alpine"' "$(doc valkey-deployment.yaml)"
 expect "combined: shared-limit URL" 'LUMEWARP_SHARED_LIMITS_REDIS_URL' \
   "$(doc gateway-statefulset.yaml)"
 expect "combined: 3 replicas" '^  replicas: 3$' "$(doc gateway-statefulset.yaml)"
 
+# --- OIDC: environment rendered only when set ---------------------------------------------
+render oidc-off
+refute "oidc off: no OIDC variables" 'LUMEWARP_OIDC_|LUMEWARP_SECRET_KEY|LUMEWARP_PUBLIC_URL' "$(cat "$file")"
+render oidc --set controlPlane.oidc.issuer=https://idp.example.com \
+  --set controlPlane.oidc.clientId=lumewarp \
+  --set controlPlane.oidc.clientSecret.secretName=oidc \
+  --set controlPlane.oidc.secretKey.secretName=oidc \
+  --set controlPlane.oidc.secretKey.key=session-key \
+  --set controlPlane.oidc.publicUrl=https://lw.example.com
+cp="$(doc control-plane-deployment.yaml)"
+expect "oidc: issuer" '^ +value: "https://idp.example.com"$' "$cp"
+expect "oidc: client id" 'name: LUMEWARP_OIDC_CLIENT_ID' "$cp"
+expect "oidc: client secret from the Secret" 'name: oidc' "$cp"
+expect "oidc: secret key from the named key" 'key: session-key' "$cp"
+expect "oidc: public URL" '^ +value: "https://lw.example.com"$' "$cp"
+expect "oidc: LUMEWARP_SECRET_KEY" 'name: LUMEWARP_SECRET_KEY' "$cp"
+render oidc-public-client --set controlPlane.oidc.issuer=https://idp.example.com \
+  --set controlPlane.oidc.clientId=lumewarp --set controlPlane.oidc.secretKey.secretName=oidc
+cp="$(doc control-plane-deployment.yaml)"
+refute "oidc public client: no client secret variable" 'LUMEWARP_OIDC_CLIENT_SECRET' "$cp"
+
+# --- listen addresses follow the Service ports ---------------------------------------------
+render ports --set gateway.service.port=8080 --set gateway.service.adminPort=9090
+cm="$(doc gateway-configmap.yaml)"
+expect "ports: listen derived from service.port" 'listen: "0.0.0.0:8080"' "$cm"
+expect "ports: admin listen derived from service.adminPort" 'admin_listen: "0.0.0.0:9090"' "$cm"
+expect "ports: container ports follow" '^ +containerPort: 9090$' "$(doc gateway-deployment.yaml)"
+render defaults
+cm="$(doc gateway-configmap.yaml)"
+expect "defaults: listen on 4000" 'listen: "0.0.0.0:4000"' "$cm"
+expect "defaults: admin listen on 9464" 'admin_listen: "0.0.0.0:9464"' "$cm"
+
+# --- global: scope, image tag, plugins ------------------------------------------------------
+render global --set global.scope=prod --set global.imageTag=9.9.9 \
+  --set gateway.plugins.volume.persistentVolumeClaim.claimName=plug
+whole="$(cat "$file")"
+expect "global: scope on the control plane" '^ +value: "prod"$' "$(doc control-plane-deployment.yaml)"
+expect "global: scope on the gateway" '^ +value: "prod"$' "$(doc gateway-deployment.yaml)"
+expect "global: imageTag on both components" 'lumewarp-gateway:9.9.9' "$whole"
+expect "global: imageTag on the control plane" 'lumewarp-control-plane:9.9.9' "$whole"
+expect "plugins: fixed directories" 'value: "/etc/lumewarp/plugins/a2a-middleware"' "$(doc gateway-deployment.yaml)"
+
 # --- rejected value sets -----------------------------------------------------------------
-reject redis-conflict 'mutually exclusive' --set redis.enabled=true \
+reject redis-conflict 'mutually exclusive' --set valkey.enabled=true \
   --set gateway.sharedLimits.redis.existingSecret=external-redis
 reject sync-ms-range 'syncMs must be an integer number of milliseconds from 10 to 1000' \
   --set gateway.sharedLimits.syncMs=5
@@ -256,8 +298,10 @@ reject pdb-both 'takes either minAvailable or maxUnavailable' --set gateway.repl
 reject autoscaling-order 'maxReplicas must be greater than or equal to minReplicas' \
   --set gateway.autoscaling.enabled=true --set gateway.autoscaling.minReplicas=5 \
   --set gateway.autoscaling.maxReplicas=2
-reject existing-claim 'existingClaim was removed' \
-  --set gateway.stateDir.persistence.existingClaim=old-state
+reject oidc-without-secret-key 'controlPlane.oidc.secretKey.secretName is required' \
+  --set controlPlane.oidc.issuer=https://idp.example.com
+reject controlplane-url-required 'gateway.controlPlaneUrl is required' --set controlPlane.enabled=false
+reject openfga-url-required 'openfga.url is required' --set controlPlane.authz.backend=openfga
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures check(s) failed"

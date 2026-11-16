@@ -20,7 +20,7 @@ spec:
       protocol: TCP
   selector:
     {{- include "lumewarp.gateway.selectorLabels" . | nindent 4 }}
-{{- if .Values.gateway.stateDir.persistence.enabled }}
+{{- if .Values.gateway.persistence.enabled }}
 ---
 # The governing Service of the gateway StatefulSet: no cluster IP, so Kubernetes creates one
 # DNS name per pod. Clients keep calling the Service above, which load balances. It exposes

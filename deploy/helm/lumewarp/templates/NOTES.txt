@@ -19,21 +19,21 @@ Control plane
 {{- end }}
 
 {{- if .Values.gateway.enabled }}
-{{- $kind := ternary "StatefulSet" "Deployment" .Values.gateway.stateDir.persistence.enabled }}
-{{- $kubectlKind := ternary "statefulset" "deploy" .Values.gateway.stateDir.persistence.enabled }}
+{{- $kind := ternary "StatefulSet" "Deployment" .Values.gateway.persistence.enabled }}
+{{- $kubectlKind := ternary "statefulset" "deploy" .Values.gateway.persistence.enabled }}
 
 Gateway
   API:       http://{{ include "lumewarp.gateway.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.gateway.service.port }}/v1
   Metrics:   http://{{ include "lumewarp.gateway.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.gateway.service.adminPort }}/metrics
-  {{- if .Values.redis.enabled }}
+  {{- if .Values.valkey.enabled }}
   Limits:    rpm, tpm and max_parallel are counted across every gateway that shares the
-             bundled Valkey ({{ include "lumewarp.redis.name" . }}).
+             bundled Valkey ({{ include "lumewarp.valkey.name" . }}).
   {{- else if .Values.gateway.sharedLimits.redis.existingSecret }}
   Limits:    rpm, tpm and max_parallel are counted across every gateway that shares the
              Redis in Secret {{ .Values.gateway.sharedLimits.redis.existingSecret | quote }}.
   {{- else }}
   Limits:    rpm, tpm and max_parallel are counted per gateway. With more than one
-             replica, set redis.enabled=true (or gateway.sharedLimits.redis.existingSecret)
+             replica, set valkey.enabled=true (or gateway.sharedLimits.redis.existingSecret)
              to share them.
   {{- end }}
 

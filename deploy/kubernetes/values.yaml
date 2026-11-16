@@ -1,0 +1,32 @@
+# Values that render the plain manifests in base/ (see generate.sh). Everything the
+# manifests need from the outside is a Secret referenced by name; create them first.
+global:
+  encryptionKey:
+    secretName: lumewarp-encryption-key
+    key: encryption-key
+
+controlPlane:
+  databaseUrl:
+    secretName: lumewarp-control-plane
+    key: database-url
+  migrate:
+    enabled: true
+
+gateway:
+  replicaCount: 1
+  token:
+    secretName: lumewarp-gateway
+    key: token
+  persistence:
+    enabled: false
+
+valkey:
+  enabled: false
+
+monitoring:
+  serviceMonitor:
+    enabled: false
+  prometheusRule:
+    enabled: false
+  grafanaDashboards:
+    enabled: false

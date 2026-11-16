@@ -1,0 +1,42 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lumewarp-control-plane-migrate
+  labels:
+    app.kubernetes.io/name: lumewarp
+    app.kubernetes.io/instance: lumewarp
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/component: control-plane
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lumewarp
+        app.kubernetes.io/instance: lumewarp
+        app.kubernetes.io/component: control-plane
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: "ghcr.io/lumewarp/lumewarp-control-plane:0.2.0"
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - lumewarp_control_plane
+          args:
+            - migrate
+          env:
+            - name: LUMEWARP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: lumewarp-control-plane
+                  key: database-url
+            - name: LUMEWARP_SCOPE
+              value: "default"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi

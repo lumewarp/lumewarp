@@ -1,63 +1,64 @@
-# Default values for the lumewarp chart.
-#
-# The chart deploys two components:
-#   - controlPlane: FastAPI HTTP API + Admin UI, gRPC config/usage services, config
-#     compiler, budget rollover scheduler and a Prometheus metrics listener.
-#   - gateway: Rust data plane. It follows the control-plane config stream and keeps its
-#     last ACKed snapshot on a local state volume.
-#
-# Images are not built by this chart. Build and push them, then set
-# image.repository and image.tag. The gateway image must contain the `lumewarp` binary;
-# the control-plane image must contain the `lumewarp_control_plane` Python package (and
-# the built Admin UI if it should be served at /).
+# Default values for the lumewarp chart: a control plane (API, Admin UI, config stream) and
+# a gateway (Rust data plane) that keeps its last ACKed snapshot on a local state volume.
+# Both images are published with each release; the tag defaults to the chart appVersion.
 
+# Per-chart naming (top level, as Helm charts conventionally do, so a parent chart can
+# set them for this subchart only).
 nameOverride: ""
 fullnameOverride: ""
 
-imagePullSecrets: []
-commonLabels: {}
-
-# Existing Secret holding LUMEWARP_ENCRYPTION_KEY (at least 32 characters). It seals the
-# upstream API keys stored in the database; the control plane and the gateway both get it.
-# Required once an upstream stores an API key. Changing it makes stored keys unreadable
-# until they are entered again.
-encryptionKey:
-  secretName: ""
-  key: encryption-key
+global:
+  # Image tag of both components. Empty = the chart appVersion; a component's own image.tag wins.
+  imageTag: ""
+  imagePullSecrets: []
+  # Extra labels on every resource.
+  commonLabels: {}
+  # Snapshot scope this installation publishes; the gateway uses the same one.
+  scope: default
+  # Existing Secret with LUMEWARP_ENCRYPTION_KEY (32+ characters) that seals stored upstream
+  # API keys; both components get it. Required once an upstream stores a key; changing it makes stored keys unreadable.
+  encryptionKey:
+    secretName: ""
+    key: encryption-key
 
 controlPlane:
   enabled: true
-  # The gRPC server, compiler loop and rollover scheduler must run exactly once per
-  # installation. Scaling this Deployment is not supported.
-  replicaCount: 1
+  # Always one pod: the compiler and rollover scheduler run once per installation (Recreate strategy).
   image:
     repository: ghcr.io/lumewarp/lumewarp-control-plane
-    # Empty = .Chart.AppVersion.
     tag: ""
     pullPolicy: IfNotPresent
-  # Existing Secret holding the SQLAlchemy async URL, e.g.
-  # postgresql+asyncpg://user:password@postgres:5432/lumewarp
+  # Existing Secret with the SQLAlchemy async URL (postgresql+asyncpg://user:password@host:5432/db).
   databaseUrl:
     secretName: lumewarp-control-plane
     key: database-url
-  # Email that becomes proxy_admin on its first verified OIDC login while no proxy_admin
-  # exists. Empty = emergency access only (break-glass can assign the first one).
+  # Email that becomes proxy_admin on its first verified OIDC login while none exists.
   initialAdminEmail: ""
-  # Optional existing Secret containing an argon2id password hash.
+  # Optional Secret with an argon2id password hash that enables emergency password login.
   breakGlass:
     passwordHashSecret:
       name: ""
       key: password-hash
-  # Snapshot scope this installation publishes; gateways must use the same value.
-  scope: default
-  # Authorization backend for org and team relations (LUMEWARP_AUTHZ_BACKEND): builtin,
-  # openfga, http or a `lumewarp.authz` plugin name. Settings of `http` and of plugins go in
-  # extraEnv.
+  # SSO login. Rendered only when set; issuer requires secretKey.secretName (the control plane refuses to start without it).
+  oidc:
+    issuer: ""
+    clientId: ""
+    # Existing Secret with the client secret; empty for a public PKCE client.
+    clientSecret:
+      secretName: ""
+      key: client-secret
+    # Existing Secret with LUMEWARP_SECRET_KEY (32+ random characters) for the login-state cookie.
+    secretKey:
+      secretName: ""
+      key: secret-key
+    # External base URL; the redirect URI is <publicUrl>/api/v1/session/oidc/callback.
+    publicUrl: ""
+  # Authorization backend (LUMEWARP_AUTHZ_BACKEND): builtin, openfga, http or a `lumewarp.authz` plugin name; settings of http and plugins go in extraEnv.
   authz:
     backend: builtin
     openfga:
       url: ""
-      # The store by name (looked up at startup) or, when storeId is set, by id.
+      # The store by name (looked up at startup), or by id when storeId is set.
       store: lumewarp
       storeId: ""
       # Empty = the store's latest model.
@@ -66,34 +67,26 @@ controlPlane:
       apiTokenSecret:
         name: ""
         key: api-token
-      # Names in an existing store that differ from Lumewarp's (see docs/operations/identity.md).
-      objectTypes: {}  # e.g. {team: llm_team, org: llm_org}
-      relations: {}    # e.g. {team.admin: owner}
-      # Run `openfga init` in an init container: create the store if missing and write the
-      # model if it has none (an existing model is never replaced). The pod waits for
-      # OpenFGA while this is on.
+      # Names in an existing store that differ from Lumewarp's.
+      objectTypes: {}
+      relations: {}
+      # Init container that creates a missing store and writes a missing model (never replaces one); the pod waits for OpenFGA.
       init: false
   service:
     type: ClusterIP
     httpPort: 8091
     grpcPort: 50051
-    # Prometheus metrics listener (LUMEWARP_METRICS_BIND), separate from the admin API.
     metricsPort: 9465
-  # Serve lumewarp_cp_* metrics on service.metricsPort. Disabled = LUMEWARP_METRICS_BIND
-  # is empty and the port is not exposed.
+  # Serve lumewarp_cp_* metrics on service.metricsPort; off = the port is not exposed.
   metrics:
     enabled: true
-  # Optional TLS for the gateway-facing gRPC listener. Both files are read from one
-  # Secret. The gateway verifies with the WebPKI root store, so a private CA certificate
-  # will not work unless that CA is installed in the gateway image. When enabled and
-  # gateway.controlPlaneUrl is empty, the gateway URL defaults to https://.
+  # TLS for the gateway-facing gRPC listener, both files from one Secret; the gateway verifies with the WebPKI roots, so a private CA does not work.
   grpcTls:
     enabled: false
     secretName: ""
     certKey: tls.crt
     keyKey: tls.key
-  # Run `python -m lumewarp_control_plane migrate` as a pre-install/pre-upgrade Job.
-  # Requires the database to exist and be reachable when Helm installs the release.
+  # Pre-install/pre-upgrade Job running the database migration; the database must be reachable at install time.
   migrate:
     enabled: true
     backoffLimit: 3
@@ -107,31 +100,22 @@ controlPlane:
   nodeSelector: {}
   tolerations: []
   affinity: {}
-  # SSO needs LUMEWARP_SECRET_KEY, passed here with a secretKeyRef (see "SSO and authorization backend" in docs/operations/helm.md).
+  # Extra container env entries (an `http` authz backend's settings, LUMEWARP_OIDC_SCOPES, ...).
   extraEnv: []
-  extraArgs: []
   # Readiness drains background services; uvicorn allows about 10 s of graceful shutdown.
   terminationGracePeriodSeconds: 20
 
 gateway:
   enabled: true
-  # Every pod is a gateway: the process generates its own id at startup, so a rolling
-  # update adds new gateways instead of reusing one identity. All pods share the token.
-  # Rate limits are counted per gateway unless they share a Redis: see redis.enabled and
-  # gateway.sharedLimits below.
+  # Every pod is its own gateway (id generated at startup); all share the token. Rate limits are per gateway unless they share Valkey or Redis.
   replicaCount: 1
-  # HorizontalPodAutoscaler (autoscaling/v2) for the gateway. When enabled it replaces
-  # replicaCount: the workload carries no fixed replica count and the HPA keeps between
-  # minReplicas and maxReplicas pods. The CPU target is an average over the pods' CPU
-  # requests (gateway.resources), so a target of 0 or no request never scales.
+  # HorizontalPodAutoscaler; replaces replicaCount. The CPU target is an average over the pods' CPU requests, so no request means no scaling.
   autoscaling:
     enabled: false
     minReplicas: 2
     maxReplicas: 5
     targetCPUUtilizationPercentage: 80
-  # Only rendered when enabled and the gateway can have more than one pod (replicaCount > 1
-  # or autoscaling). Set exactly one of minAvailable and maxUnavailable: minAvailable: 1
-  # keeps one pod serving while a node drains.
+  # Rendered only when the gateway can have more than one pod; set exactly one of minAvailable and maxUnavailable.
   podDisruptionBudget:
     enabled: false
     minAvailable: 1
@@ -140,123 +124,63 @@ gateway:
     repository: ghcr.io/lumewarp/lumewarp-gateway
     tag: ""
     pullPolicy: IfNotPresent
-  # Existing Secret holding a gateway token created by the control plane (`lwg-...`).
-  # See the chart README for the bootstrap order.
+  # Existing Secret with a gateway token (`lwg-...`) created by the control plane, passed as LUMEWARP_GATEWAY_TOKEN.
   token:
     secretName: lumewarp-gateway
     key: token
-  # Environment variable that carries the token to the gateway. The token is never
-  # written to the state volume.
-  tokenEnvVar: LUMEWARP_GATEWAY_TOKEN
-  # Empty = http://<control-plane Service>:<controlPlane.service.grpcPort> in this namespace.
+  # Empty = this release's control-plane Service on controlPlane.service.grpcPort; required when controlPlane.enabled=false.
   controlPlaneUrl: ""
-  # Empty = controlPlane.scope.
-  scope: ""
-  # Local listener settings. Only the `server:` block is used in control-plane mode.
-  # adminListen must be reachable from the kubelet for /readyz and /metrics probes.
+  # Listener timeouts; the listen addresses follow service.port and service.adminPort.
   server:
-    listen: "0.0.0.0:4000"
-    adminListen: "0.0.0.0:9464"
     shutdownGraceMs: 25000
     headerReadTimeoutMs: 30000
     bodyReadTimeoutMs: 30000
-  # WASM plugins. Components are not in the gateway image: a plugin is one `.wasm` file
-  # in one of three directories, read once at startup, so replacing a file is a file
-  # write plus a pod restart (`kubectl rollout restart`). Built-in strategies and auth
-  # are native and never need a file.
+  # Off = a Deployment with an emptyDir state directory (a new pod is unready until the control plane sends a snapshot).
+  # On = a StatefulSet with one ReadWriteOnce claim per pod, so a restarted pod serves its cached snapshot at once.
+  persistence:
+    enabled: false
+    # Fixed once the StatefulSet exists; changing size, storageClass or annotations needs the StatefulSet deleted with --cascade=orphan.
+    size: 1Gi
+    storageClass: ""
+    annotations: {}
+  # WASM plugins (router strategies, upstream auth, A2A middleware): `.wasm` files read once at startup, so a replaced file needs a pod restart.
   plugins:
-    # Existing volume holding the components; a Kubernetes volume source rendered as is,
-    # for example
-    #   {persistentVolumeClaim: {claimName: gateway-plugins}}
-    #   {configMap: {name: gateway-plugins, items: [{key: cheapest-first.wasm, path: router/cheapest-first.wasm}]}}
-    # Empty = no plugin volume and no directory variables: nothing is loaded, which is
-    # valid for LLM, MCP and A2A traffic alike.
+    # Existing volume source rendered as is (mounted at /etc/lumewarp/plugins with router/, auth/ and a2a-middleware/ below it, all three must exist); empty = no plugins.
     volume: {}
-    # Where the volume is mounted. Each kind reads one directory below it, defined by
-    # `dirs`; a directory that does not exist refuses to start the gateway, so create all
-    # three even when they stay empty.
-    mountPath: /etc/lumewarp/plugins
-    # Directory per kind, member of the gateway's capability set:
-    #   router        LUMEWARP_ROUTER_PLUGIN_DIR,     strategy:<name> per file
-    #   auth          LUMEWARP_AUTH_PLUGIN_DIR,       auth:<name> per file
-    #   a2aMiddleware LUMEWARP_A2A_MIDDLEWARE_DIR,    a2a_middleware:<name> per file
-    dirs:
-      router: router
-      auth: auth
-      a2aMiddleware: a2a-middleware
-    # Process-wide WASM memory budget in bytes; every plugin instance is additionally
-    # capped at 32 MiB. Empty = the gateway default, 1073741824 (1 GiB).
+    # Process-wide WASM memory budget in bytes; empty = the gateway default (1 GiB).
     memoryLimitBytes: ""
-    # Existing Secrets whose keys become environment variables for the gateway. Name each
-    # key LUMEWARP_PLUGIN_SECRET_<NAME>: an `upstream-auth` plugin reads those through
-    # secret(), and the host exposes no variable without that prefix. The host does not
-    # scope them per plugin, so put the plugin name in the key.
+    # Existing Secrets whose keys become env variables; name each key LUMEWARP_PLUGIN_SECRET_<NAME> (not scoped per plugin).
     secretEnvs: []
-    #  - gateway-plugin-secrets
-  # External base URL of the MCP and A2A endpoints, e.g. https://gateway.example.com
-  # (no query, no userinfo). Agent-card URLs are built from it, never from the Host
-  # header. Empty = the A2A endpoints answer 503; MCP and LLM traffic is unaffected.
+  # External base URL of the MCP and A2A endpoints, used for agent cards; empty = A2A answers 503.
   publicUrl: ""
-  # Existing Secret holding LUMEWARP_GATEWAY_ID_KEY (base64, at least 32 bytes). It MACs
-  # A2A task and context ids and, through HKDF, seals MCP sessions, so every gateway of
-  # this installation must use the same value; it is never in a config snapshot. Empty =
-  # the MCP and A2A endpoints answer 503; LLM traffic is unaffected.
+  # Existing Secret with LUMEWARP_GATEWAY_ID_KEY (base64, 32+ bytes), identical on every gateway; empty = MCP and A2A answer 503.
   idKey:
     secretName: ""
     key: gateway-id-key
-  stateDir:
-    path: /var/lib/lumewarp
-    # Off = the gateway is a Deployment and the state directory is an emptyDir, so a new
-    # pod has no cached snapshot and stays unready until the control plane sends one.
-    # On = a StatefulSet with one ReadWriteOnce claim per pod (the chart creates it), so a
-    # restarted pod keeps its snapshot and serves before the control plane answers.
-    persistence:
-      enabled: false
-      # size, storageClass and annotations are fixed once the StatefulSet exists: changing
-      # one needs `kubectl delete statefulset ... --cascade=orphan` first (see
-      # "State volume" in docs/operations/helm.md).
-      storageClass: ""
-      # One claim per pod; shared state across gateways is not a thing.
-      accessModes:
-        - ReadWriteOnce
-      size: 1Gi
-      # For example {helm.sh/resource-policy: keep} to survive `helm uninstall`.
-      annotations: {}
-  # Rate limits across gateways. By default rpm, tpm and max_parallel are counted per
-  # gateway, so N pods admit up to N times a key's limit. Point them at one Redis (or
-  # Valkey) and the counts hold across every gateway of the installation that uses it.
+  # Rate limits across gateways through an external Redis; exclusive with valkey.enabled.
   sharedLimits:
-    # An existing Redis instead of redis.enabled: a Secret whose key holds the full URL,
-    # redis://:password@host:6379/0 or rediss://... Mutually exclusive with redis.enabled.
     redis:
+      # Secret whose key holds the full redis:// or rediss:// URL.
       existingSecret: ""
       existingSecretKey: url
-    # Sync interval in milliseconds, 10 to 1000. Empty = the gateway default (100). A
-    # shorter interval is more accurate and more Redis traffic; the fair share between
-    # syncs keeps 100 ms close to exact.
+    # Sync interval in milliseconds, 10 to 1000; empty = the gateway default (100).
     syncMs: ""
-    # Namespace of the Redis keys. Empty = the config scope (gateway.scope here).
-    # Gateways that should share counts must use the same value.
+    # Namespace of the Redis keys; empty = the scope. Gateways that share counts must use the same one.
     namespace: ""
   service:
     type: ClusterIP
     port: 4000
     adminPort: 9464
-  # OTLP/HTTP traces. The gateway writes no access log: this is where one request is looked
-  # up, by the x-lumewarp-request-id of its response. See "Looking up a request" in
-  # docs/operations/observability.md for what the lookup depends on.
+  # OTLP/HTTP traces, where a request is looked up by its x-lumewarp-request-id.
   otel:
-    # Base URL, for example http://otel-collector.observability:4318 (/v1/traces is
-    # appended). Empty = no traces, and nothing to look a request up in.
+    # Base URL of the collector (/v1/traces is appended); empty = no traces.
     endpoint: ""
-    # Share of requests exported, 0 to 1, decided by the gateway and not by the client's
-    # traceparent. Keep 1 if this is used as an access log.
+    # Share of requests exported, 0 to 1; keep 1 when traces serve as the access log.
     samplingRatio: 1
   # Must exceed server.shutdownGraceMs / 1000 + 5 s (OTLP exporter shutdown) + margin.
   terminationGracePeriodSeconds: 35
   podAnnotations: {}
-  # The gateway image runs as 65532:65532. fsGroup makes emptyDir and RWO PVC mounts
-  # writable by that user; override only if a custom image uses another UID/GID.
+  # The image runs as 65532:65532; fsGroup makes the state volume writable for that user.
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 65532
@@ -272,52 +196,21 @@ gateway:
   tolerations: []
   affinity: {}
   extraEnv: []
-  extraArgs: []
 
-serviceMonitor:
-  # Requires the Prometheus Operator CRDs. Renders one ServiceMonitor for the gateway admin
-  # listener (gateway.enabled) and one for the control-plane metrics port
-  # (controlPlane.enabled and controlPlane.metrics.enabled).
-  enabled: false
-  interval: 30s
-  scrapeTimeout: ""
-  labels: {}
-
-prometheusRule:
-  # Requires the Prometheus Operator CRDs. Contains recording rules and alerts.
-  enabled: false
-  # Match your Prometheus ruleSelector (e.g. release: kube-prometheus-stack).
-  labels: {}
-
-grafanaDashboards:
-  enabled: false
-  # Match the Grafana sidecar's label and labelValue settings.
-  sidecarLabel: grafana_dashboard
-  sidecarLabelValue: "1"
-
-# One Valkey (Redis protocol, BSD-licensed) for shared rate limits, in this release.
-# Enable it when gateway.replicaCount > 1 so a key's rpm, tpm and max_parallel hold across
-# the replicas; a gateway-only release elsewhere points at the same server through
-# gateway.sharedLimits.redis.existingSecret. Nothing is persisted: every key expires within
-# 150 s, and a restart only means a short window of per-gateway counts.
-redis:
+# One Valkey in this release for shared rate limits across gateway replicas (nothing persisted; keys expire within 150 s).
+valkey:
   enabled: false
   image:
     repository: valkey/valkey
-    # Pinned exact tag, no floating 8-alpine.
     tag: 8.1.11-alpine
     pullPolicy: IfNotPresent
-  # The server password. Leave existingSecret empty and the chart creates a Secret once
-  # (`lookup` keeps it across upgrades) holding a random 32-character password. With your
-  # own Secret the key below holds just the password, and it must be URL-safe: the gateway
-  # receives it inside a redis:// URL.
+  # Empty existingSecret = the chart creates a random password once (kept by `lookup`); your own Secret's key holds just a URL-safe password.
   auth:
     existingSecret: ""
     existingSecretKey: password
   service:
     port: 6379
-  # The image's valkey user is 999:1000; /data is an emptyDir and the root filesystem is
-  # read-only. Override only for a custom image.
+  # The image's valkey user is 999:1000; /data is an emptyDir and the root filesystem is read-only.
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 999
@@ -338,3 +231,22 @@ redis:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+
+# Prometheus Operator and Grafana integration.
+monitoring:
+  # ServiceMonitors for the gateway admin listener and the control-plane metrics port; needs the Operator CRDs.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: ""
+    labels: {}
+  # PrometheusRule with the recording rules and alerts; needs the Operator CRDs.
+  prometheusRule:
+    enabled: false
+    # Match your Prometheus ruleSelector.
+    labels: {}
+  # ConfigMap with the bundled dashboards for the Grafana sidecar.
+  grafanaDashboards:
+    enabled: false
+    sidecarLabel: grafana_dashboard
+    sidecarLabelValue: "1"

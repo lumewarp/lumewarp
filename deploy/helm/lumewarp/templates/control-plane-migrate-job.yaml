@@ -24,7 +24,7 @@ spec:
     spec:
       automountServiceAccountToken: false
       restartPolicy: Never
-      {{- with .Values.imagePullSecrets }}
+      {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -49,7 +49,7 @@ spec:
                   name: {{ required "controlPlane.databaseUrl.secretName is required" .Values.controlPlane.databaseUrl.secretName }}
                   key: {{ .Values.controlPlane.databaseUrl.key }}
             - name: LUMEWARP_SCOPE
-              value: {{ .Values.controlPlane.scope | quote }}
+              value: {{ .Values.global.scope | quote }}
           resources:
             {{- toYaml .Values.controlPlane.resources | nindent 12 }}
           {{- with .Values.controlPlane.securityContext }}

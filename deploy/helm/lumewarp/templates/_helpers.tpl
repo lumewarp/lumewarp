@@ -35,7 +35,7 @@ helm.sh/chart: {{ include "lumewarp.chart" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-{{- with .Values.commonLabels }}
+{{- with .Values.global.commonLabels }}
 {{ toYaml . }}
 {{- end }}
 {{- end }}
@@ -74,49 +74,49 @@ app.kubernetes.io/component: gateway
 {{- end }}
 
 {{/*
-The headless Service that governs the gateway StatefulSet (gateway.stateDir.persistence).
+The headless Service that governs the gateway StatefulSet (gateway.persistence).
 */}}
 {{- define "lumewarp.gateway.headlessServiceName" -}}
 {{- printf "%s-headless" (include "lumewarp.gateway.name" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "lumewarp.redis.name" -}}
-{{- printf "%s-redis" (include "lumewarp.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- define "lumewarp.valkey.name" -}}
+{{- printf "%s-valkey" (include "lumewarp.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "lumewarp.redis.labels" -}}
+{{- define "lumewarp.valkey.labels" -}}
 {{ include "lumewarp.labels" . }}
-app.kubernetes.io/component: redis
+app.kubernetes.io/component: valkey
 {{- end }}
 
-{{- define "lumewarp.redis.selectorLabels" -}}
+{{- define "lumewarp.valkey.selectorLabels" -}}
 {{ include "lumewarp.selectorLabels" . }}
-app.kubernetes.io/component: redis
+app.kubernetes.io/component: valkey
 {{- end }}
 
 {{/*
-The Secret holding the Valkey password: the one the chart creates, or redis.auth.existingSecret.
+The Secret holding the Valkey password: the one the chart creates, or valkey.auth.existingSecret.
 */}}
-{{- define "lumewarp.redis.secretName" -}}
-{{- default (include "lumewarp.redis.name" .) .Values.redis.auth.existingSecret }}
+{{- define "lumewarp.valkey.secretName" -}}
+{{- default (include "lumewarp.valkey.name" .) .Values.valkey.auth.existingSecret }}
 {{- end }}
 
-{{- define "lumewarp.redis.secretKey" -}}
-{{- default "password" .Values.redis.auth.existingSecretKey }}
+{{- define "lumewarp.valkey.secretKey" -}}
+{{- default "password" .Values.valkey.auth.existingSecretKey }}
 {{- end }}
 
 {{/*
 The control-plane image reference.
 */}}
 {{- define "lumewarp.controlPlane.image" -}}
-{{- printf "%s:%s" .Values.controlPlane.image.repository (default .Chart.AppVersion .Values.controlPlane.image.tag) }}
+{{- printf "%s:%s" .Values.controlPlane.image.repository (default (default .Chart.AppVersion .Values.global.imageTag) .Values.controlPlane.image.tag) }}
 {{- end }}
 
 {{/*
 The gateway image reference.
 */}}
 {{- define "lumewarp.gateway.image" -}}
-{{- printf "%s:%s" .Values.gateway.image.repository (default .Chart.AppVersion .Values.gateway.image.tag) }}
+{{- printf "%s:%s" .Values.gateway.image.repository (default (default .Chart.AppVersion .Values.global.imageTag) .Values.gateway.image.tag) }}
 {{- end }}
 
 {{/*

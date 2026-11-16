@@ -11,6 +11,8 @@ a gateway keeps serving while the control plane is down.
 | | Use it for | Page |
 | --- | --- | --- |
 | Helm | Kubernetes: the control plane, a gateway (several pods may share one token), migrations as a hook, optional ServiceMonitors. | [Deploy with Helm](./helm.md) |
+| Helm, full stack | The same plus a single-pod PostgreSQL and optional OpenFGA (`lumewarp-stack`), for evaluation and small installs. | [Full stack](./helm.md#full-stack-lumewarp-stack) |
+| Plain manifests | Kubernetes without Helm: one YAML file per release, or a kustomize base. | [Deploy with plain manifests](./kubernetes.md) |
 | Docker Compose | One host: Postgres, the control plane and a gateway from the published images. | [Deploy with Docker](./docker.md) |
 | Standalone gateway | A gateway alone, configured by one YAML file: no control plane, database, Admin UI, usage or self-service. | [Deploy with Docker](./docker.md#a-standalone-gateway), [Quick start](../guide/quickstart-standalone.md) |
 
@@ -21,7 +23,9 @@ Each release publishes:
 - `ghcr.io/lumewarp/lumewarp-gateway:<version>` and
   `ghcr.io/lumewarp/lumewarp-control-plane:<version>` (stable releases also `X.Y` and
   `latest`);
-- the Helm chart at `oci://ghcr.io/lumewarp/charts/lumewarp`;
+- the Helm charts at `oci://ghcr.io/lumewarp/charts/lumewarp` and
+  `oci://ghcr.io/lumewarp/charts/lumewarp-stack`;
+- on the GitHub release: `lumewarp-<version>.yaml`, the plain Kubernetes manifests;
 - on the GitHub release: the example WASM plugins with their `SHA256SUMS`, and both OpenAPI
   documents (`openapi-control-plane.json`, `openapi-gateway.json`).
 

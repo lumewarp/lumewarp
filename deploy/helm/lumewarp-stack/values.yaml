@@ -1,0 +1,76 @@
+# lumewarp-stack: the lumewarp chart plus the services it needs, for a one-command install.
+# Values for the lumewarp chart go under `lumewarp:`; its full reference is the lumewarp
+# chart's values.yaml and docs/operations/helm.md.
+
+# Shared with the lumewarp chart: image tag, pull secrets, labels, scope and the encryption key.
+# Empty imageTag = the chart appVersion.
+global:
+  imageTag: ""
+  imagePullSecrets: []
+  commonLabels: {}
+  scope: default
+  # Existing Secret with LUMEWARP_ENCRYPTION_KEY (32+ characters); required once an upstream stores an API key.
+  encryptionKey:
+    secretName: ""
+    key: encryption-key
+
+# Bundled PostgreSQL for evaluation and small installs: ONE pod, no replication, NO BACKUPS.
+# For production set postgres.enabled=false and point
+# lumewarp.controlPlane.databaseUrl at your own database (a Secret holding the URL).
+postgres:
+  enabled: true
+  image:
+    repository: postgres
+    tag: 17.12-alpine
+    pullPolicy: IfNotPresent
+  auth:
+    username: lumewarp
+    database: lumewarp
+    # Empty = a random password is generated once and kept across upgrades. Your own Secret
+    # holds just the password; then you also create the database-URL Secret yourself and
+    # name it in lumewarp.controlPlane.databaseUrl (the stack does not build one).
+    existingSecret: ""
+    existingSecretKey: password
+  persistence:
+    size: 10Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  nodeSelector: {}
+  tolerations: []
+
+# Schema migration of the control plane, run as a Job after the bundled database exists
+# (the lumewarp chart's own migration is a pre-install hook and is turned off below).
+migrate:
+  enabled: true
+  backoffLimit: 6
+
+# Official OpenFGA chart. Turn on together with the authz settings: `-f values-openfga.yaml`
+# does both (see README.md). With the bundled PostgreSQL it uses the database "openfga" there;
+# with your own database set openfga.datastore.uriSecret (Secret key `uri`) as well.
+openfga:
+  enabled: false
+  fullnameOverride: lumewarp-openfga
+  replicaCount: 1
+  datastore:
+    engine: postgres
+    uriSecret: lumewarp-stack-openfga-datastore
+    # Migrate in an init container: the chart's default Job is a pre-install hook that would run before the database exists.
+    migrationType: initContainer
+
+lumewarp:
+  controlPlane:
+    # The Secret the stack creates for the bundled database; fixed because these values cannot use the release name.
+    databaseUrl:
+      secretName: lumewarp-stack-database
+      key: database-url
+    # The stack runs the migration itself (migrate.enabled above).
+    migrate:
+      enabled: false
+    # Used when openfga.enabled and authz.backend=openfga: the service of the OpenFGA subchart (fixed by its fullnameOverride).
+    authz:
+      openfga:
+        url: http://lumewarp-openfga:8080
+        init: true

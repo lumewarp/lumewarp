@@ -1,0 +1,71 @@
+{{- if and .Values.lumewarp.controlPlane.enabled .Values.migrate.enabled }}
+{{- /*
+The lumewarp chart's own migration is a pre-install hook, which runs before any resource of
+this release exists, so the bundled database could not be reached. The stack therefore turns
+that hook off (lumewarp.controlPlane.migrate.enabled=false) and runs the same command here as
+an ordinary Job, one per release revision, that first waits for the bundled PostgreSQL.
+*/}}
+{{- $cp := .Values.lumewarp.controlPlane }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-migrate-{{ .Release.Revision }}
+  labels:
+    {{- include "stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+spec:
+  backoffLimit: {{ .Values.migrate.backoffLimit }}
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "stack.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $cp.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.postgres.enabled }}
+      initContainers:
+        - name: wait-for-postgres
+          image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
+          command:
+            - sh
+            - -c
+            - 'until pg_isready -h {{ include "stack.postgres.name" . }} -p 5432; do echo waiting for postgres; sleep 2; done'
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 70
+            capabilities:
+              drop:
+                - ALL
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "stack.controlPlane.image" . | quote }}
+          imagePullPolicy: {{ $cp.image.pullPolicy }}
+          command: [python, -m, lumewarp_control_plane]
+          args: [migrate]
+          env:
+            - name: LUMEWARP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "lumewarp.controlPlane.databaseUrl.secretName is required" $cp.databaseUrl.secretName }}
+                  key: {{ $cp.databaseUrl.key }}
+            - name: LUMEWARP_SCOPE
+              value: {{ .Values.global.scope | quote }}
+          resources:
+            {{- toYaml $cp.resources | nindent 12 }}
+          {{- with $cp.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

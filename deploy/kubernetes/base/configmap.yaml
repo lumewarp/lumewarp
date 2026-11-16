@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lumewarp-gateway-config
+  labels:
+    app.kubernetes.io/name: lumewarp
+    app.kubernetes.io/instance: lumewarp
+    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/component: gateway
+data:
+  # Control-plane mode only reads the `server:` block from --local-config; upstreams,
+  # models, routers, teams and keys come from the control-plane snapshot.
+  config.yaml: |
+    server:
+      listen: "0.0.0.0:4000"
+      admin_listen: "0.0.0.0:9464"
+      shutdown_grace_ms: 25000
+      header_read_timeout_ms: 30000
+      body_read_timeout_ms: 30000

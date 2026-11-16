@@ -2,121 +2,54 @@
 
 Deploys the Lumewarp control plane and Rust gateway. The control plane owns Postgres,
 compiles versioned config snapshots and serves the Admin UI; the gateway follows the
-config stream, keeps the last ACKed snapshot on a local volume and never calls the
-control plane from the request path.
+config stream and keeps the last ACKed snapshot on a local volume. Each release publishes
+the chart as `oci://ghcr.io/lumewarp/charts/lumewarp`. For a database and OpenFGA in the
+same install, use `oci://ghcr.io/lumewarp/charts/lumewarp-stack`; for a cluster without
+Helm, see the plain manifests in [`deploy/kubernetes`](../../kubernetes).
 
-This page covers installing the chart. Everything else is in the manual:
-[Deploy with Helm](../../../docs/operations/helm.md) has the full values reference, upstream API
-keys, gateway plugins, MCP and A2A, SSO, important limits and verifying a release, and
-[Observability](../../../docs/operations/observability.md) the alert rules, dashboards and
-request lookup in OTel.
+## Quick start
 
-## Prerequisites
-
-- Kubernetes 1.25+ and Helm 3.
-- A reachable PostgreSQL 16+ database and a Secret containing its SQLAlchemy async URL
-  (`postgresql+asyncpg://user:password@host:5432/db`).
-- Container images for both components, built from `gateway/Dockerfile` and
-  `control-plane/Dockerfile`, or the published `ghcr.io/lumewarp/lumewarp-gateway` and
-  `ghcr.io/lumewarp/lumewarp-control-plane`; set the repositories/tags in `values.yaml`
-  (empty tags mean the chart's app version).
-  - Gateway image: the `lumewarp` binary on `PATH`.
-  - Control-plane image: the `lumewarp_control_plane` Python package installed for
-    `python -m lumewarp_control_plane`; include the built Admin UI
-    (`cd ui && pnpm build:cp`) if the UI should be served at `/`.
-
-## Install
-
-Create the database secret first:
+You need Kubernetes 1.25+, Helm 3 and a PostgreSQL 16+ database. Create the Secrets the
+chart reads (names are values; these are the defaults):
 
 ```sh
 kubectl create namespace lumewarp
 kubectl -n lumewarp create secret generic lumewarp-control-plane \
   --from-literal=database-url='postgresql+asyncpg://lumewarp:secret@postgres.example:5432/lumewarp'
+kubectl -n lumewarp create secret generic lumewarp-encryption \
+  --from-literal=encryption-key="$(openssl rand -base64 48)"
 ```
 
-The control plane creates gateway tokens itself, so a fresh install has no gateway token
-yet. A token is a scope credential with a label, not bound to a gateway id; any number of
-gateways may use one. Install the control plane first, bootstrap a token, then enable the
-gateway:
+A fresh install has no gateway token, and the control plane creates it. Install with the
+gateway off, bootstrap a token, then turn the gateway on:
 
 ```sh
-helm install lumewarp deploy/helm/lumewarp -n lumewarp \
+CHART=oci://ghcr.io/lumewarp/charts/lumewarp
+VERSION=0.2.0   # a release; from a checkout use deploy/helm/lumewarp and drop --version
+
+helm install lumewarp "$CHART" --version "$VERSION" -n lumewarp \
+  --set global.encryptionKey.secretName=lumewarp-encryption \
   --set gateway.enabled=false
 
-# Optional: the pre-install hook Job ran `migrate`. Create a gateway token:
 kubectl -n lumewarp exec deploy/lumewarp-control-plane -- \
   python -m lumewarp_control_plane bootstrap --name lumewarp-gateway
-
 kubectl -n lumewarp create secret generic lumewarp-gateway \
   --from-literal=token='lwg-...'
 
-helm upgrade lumewarp deploy/helm/lumewarp -n lumewarp \
+helm upgrade lumewarp "$CHART" --version "$VERSION" -n lumewarp \
   --reuse-values --set gateway.enabled=true
 ```
 
-The gateway runs one replica by default. `gateway.replicaCount` (or `gateway.autoscaling`)
-can raise that: every pod is its own gateway, with an id it generates at startup, and all
-pods share the token. A restart therefore adds a new gateway instead of reusing one identity.
-Rate limits are counted per gateway unless the gateways share a Redis; `redis.enabled` ships
-one with the release. The manual's
-[Gateway replicas](../../../docs/operations/helm.md#gateway-replicas) and
-[Shared rate limits](../../../docs/operations/helm.md#shared-rate-limits) have the details.
+Reach the UI with `kubectl -n lumewarp port-forward svc/lumewarp-control-plane 8091:8091`
+and probe the gateway with `kubectl -n lumewarp port-forward svc/lumewarp-gateway 4000:4000`
+and `curl localhost:4000/healthz`.
 
-Installation admins are stored in Postgres: the first verified login whose email matches
-`controlPlane.initialAdminEmail` becomes the proxy_admin, who can then assign other admins (and
-every admin can assign more). Break-glass can create the first proxy_admin too when the setting
-is empty, and is the recovery path when the proxy_admin leaves. A user must sign in through OIDC
-once before receiving an installation role (assign/transfer return 409 otherwise), because a new
-identity cannot be linked to an already privileged account. Set
-`controlPlane.breakGlass.passwordHashSecret.name` to an existing Secret holding an argon2id hash
-(`lumewarp-control-plane hash-password`). Neither replaces the first `bootstrap` call: that
-command creates the scope row, and gateway tokens can only be created after the scope exists.
+## More
 
-`controlPlane.databaseUrl.secretName` defaults to `lumewarp-control-plane` and
-`gateway.token.secretName` to `lumewarp-gateway`; both must exist before the respective
-pods start.
-
-## What gets deployed
-
-| Object | Notes |
-| --- | --- |
-| Control-plane Deployment | One replica. Runs the HTTP API + UI, gRPC ConfigService/UsageService, compiler loop and monthly rollover. `strategy: Recreate`. |
-| Control-plane Service | `http` (8091), `grpc` (50051) and `metrics` (9465, Prometheus `/metrics`; only with `controlPlane.metrics.enabled`) ports. |
-| Migration Job | Helm `pre-install,pre-upgrade` hook running `python -m lumewarp_control_plane migrate` with the database Secret. |
-| Gateway Deployment | One replica by default. Each pod is a gateway with its own generated id and the shared token; boots from its state volume, then follows the config stream; `/readyz` stays 503 until a snapshot is loaded. |
-| Gateway StatefulSet | Instead of the Deployment when `gateway.stateDir.persistence.enabled`: one ReadWriteOnce claim per pod from a `volumeClaimTemplate`, plus the headless Service it needs. |
-| Gateway Service | `http` (4000) and `admin` (9464, `/metrics` + `/readyz`) ports. |
-| Gateway PodDisruptionBudget / HorizontalPodAutoscaler | Optional, `gateway.podDisruptionBudget` and `gateway.autoscaling`. |
-| Valkey Deployment, Service and Secret | Only when `redis.enabled`: shared rate limits across gateway replicas, password in a Secret the chart creates once. |
-| ServiceMonitors | Optional: one for the gateway admin port, one for the control-plane `metrics` port. Requires the Prometheus Operator CRDs. |
-
-Readiness/liveness:
-
-- Control plane: `/readyz` requires a reachable database, migrations at head and live
-  gRPC/compiler/rollover tasks; `/healthz` is liveness.
-- Gateway: `/readyz` on the admin port requires a loaded snapshot; `/healthz` stays
-  healthy during a control-plane outage so Kubernetes does not restart a gateway that is
-  correctly serving its cached config.
-
-## Chart checks
-
-```sh
-# Lints and renders every supported value combination (replicas, autoscaling, persistence,
-# the bundled Valkey, an external Redis) and checks the result.
-bash deploy/helm/check.sh
-
-helm lint deploy/helm/lumewarp --strict
-helm template lumewarp deploy/helm/lumewarp -n lumewarp \
-  --set controlPlane.databaseUrl.secretName=db \
-  --set gateway.token.secretName=gw
-
-# Expected to fail: the bundled Valkey and an external Redis URL are exclusive.
-helm template lumewarp deploy/helm/lumewarp -n lumewarp \
-  --set redis.enabled=true \
-  --set gateway.sharedLimits.redis.existingSecret=redis-url
-```
-
-`kubectl port-forward svc/lumewarp-control-plane 8091:8091` reaches the UI/API; probe the
-gateway with `kubectl port-forward svc/lumewarp-gateway 4000:4000` and
-`curl localhost:4000/healthz`.
+- [Deploy with Helm](../../../docs/operations/helm.md): every value, gateway replicas and
+  the state volume, shared rate limits (Valkey), upstream API keys, plugins, MCP and A2A,
+  SSO and authorization, and the `lumewarp-stack` umbrella chart.
+- [Deploy with plain manifests](../../../docs/operations/kubernetes.md)
+- [Observability](../../../docs/operations/observability.md): alerts, dashboards and
+  tracing (`monitoring.*`).
+- `bash deploy/helm/check.sh` lints the chart and renders its value matrix.

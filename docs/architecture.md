@@ -303,7 +303,7 @@ LLM upstream auth 另輸出 `upstream_auth` span（upstream、plugin、method、
 
 **部署**
 
-- `deploy/helm/lumewarp`：control plane 與 gateway 的 Deployment／Service、DB URL 與 gateway token 的既有 Secret 參照、`/readyz`＋`/healthz` probes、gateway 多個 pod（同一個 token、每個 pod 各自產生 gateway id；預設 Deployment＋每個 pod 的 emptyDir，開啟持久化時改為 StatefulSet 每 pod 一個 PVC；選用 PDB 與 HPA）、選用的 Valkey（`redis.enabled`，供共享限流）、plugin 目錄的 volume 掛載（三個子目錄與 `LUMEWARP_PLUGIN_MEMORY_LIMIT_BYTES`、`LUMEWARP_GATEWAY_ID_KEY`、`LUMEWARP_GATEWAY_PUBLIC_URL`）、migration hook Job、可選 ServiceMonitor。
+- `deploy/helm/lumewarp`：control plane 與 gateway 的 Deployment／Service、DB URL 與 gateway token 的既有 Secret 參照、`/readyz`＋`/healthz` probes、gateway 多個 pod（同一個 token、每個 pod 各自產生 gateway id；預設 Deployment＋每個 pod 的 emptyDir，開啟持久化時改為 StatefulSet 每 pod 一個 PVC；選用 PDB 與 HPA）、選用的 Valkey（`valkey.enabled`，供共享限流）、plugin 目錄的 volume 掛載（三個子目錄與 `LUMEWARP_PLUGIN_MEMORY_LIMIT_BYTES`、`LUMEWARP_GATEWAY_ID_KEY`、`LUMEWARP_GATEWAY_PUBLIC_URL`）、migration hook Job、可選 ServiceMonitor。
 - `deploy/dev/compose.yaml` 提供本機 Postgres 16。
 
 **已知限制**
@@ -319,7 +319,7 @@ LLM upstream auth 另輸出 `upstream_auth` span（upstream、plugin、method、
 - 限流演算法：rpm、tpm 為對齊牆鐘整分鐘的滑動窗口計數（前一分鐘依剩餘比例加權＋本分鐘），tpm 仍在用量確定後才扣；max_parallel 為進行中請求數。每個計數分成「本機」與「其他 gateway」兩部分。
 - 共享：設定 `LUMEWARP_SHARED_LIMITS_REDIS_URL` 時，背景工作每 `--shared-limits-sync-ms`（預設 100 ms，慢時自動加倍到 1 s）以一支 Lua 腳本把本機各 scope 每分鐘的絕對計數 `HSET` 到 Redis（重送不會重複計數）、寫入進行中請求數（以 Redis 的時間判斷 3 秒內是否新鮮），並讀回其他 gateway 的總和與參與的 gateway 數 n。兩次同步之間每個 gateway 最多用 `ceil(剩餘額度 ÷ n)`。key 以 `{lw:<namespace>}` 為 hash tag，namespace 在 control-plane 模式預設為 scope；Redis 的欄位是各 gateway 的 id。請求路徑不做任何 I/O。
 - Redis 不可用超過 1 秒時退回本機計數（每個 gateway 各算一份，與 LiteLLM 相同），`/readyz` 不受影響，恢復後自動回到共享；`lumewarp_shared_limits_fallback` 與告警 `LumewarpSharedLimitsFallback` 反映這個狀態。沒有「Redis 不可用就拒絕」的模式。
-- Helm 可用 `redis.enabled` 部署一個不持久化的 Valkey，或以 `gateway.sharedLimits.redis.existingSecret` 指向外部 Redis。每個 pod 是一個 gateway；`gateway.replicaCount` 或 autoscaling 開幾個 pod，Gateways 頁就顯示幾個 gateway。
+- Helm 可用 `valkey.enabled` 部署一個不持久化的 Valkey，或以 `gateway.sharedLimits.redis.existingSecret` 指向外部 Redis。每個 pod 是一個 gateway；`gateway.replicaCount` 或 autoscaling 開幾個 pod，Gateways 頁就顯示幾個 gateway。
 
 ## 權限、路由與可觀測性
 

@@ -234,7 +234,7 @@ gateway without it rejects the whole config version, and the control plane refus
 that names a plugin a connected gateway lacks unless the save is forced.
 
 - Helm: put the files in the volume `gateway.plugins.volume` mounts (`router/`, `auth/`,
-  `a2a-middleware/` below `gateway.plugins.mountPath`, all three present even if empty), add
+  `a2a-middleware/` at the volume's root, mounted at `/etc/lumewarp/plugins`; all three present even if empty), add
   plugin secrets as `LUMEWARP_PLUGIN_SECRET_*` keys of a Secret listed in
   `gateway.plugins.secretEnvs`, then `kubectl rollout restart` the gateway.
 - Elsewhere: set `LUMEWARP_ROUTER_PLUGIN_DIR`, `LUMEWARP_AUTH_PLUGIN_DIR`,

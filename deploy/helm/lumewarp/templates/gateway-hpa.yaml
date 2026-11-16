@@ -24,8 +24,8 @@ metadata:
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
-    # Follows the state directory: see gateway.stateDir.persistence.
-    kind: {{ ternary "StatefulSet" "Deployment" .Values.gateway.stateDir.persistence.enabled }}
+    # Follows the state directory: see gateway.persistence.
+    kind: {{ ternary "StatefulSet" "Deployment" .Values.gateway.persistence.enabled }}
     name: {{ include "lumewarp.gateway.name" . }}
   minReplicas: {{ int $min }}
   maxReplicas: {{ int $max }}

@@ -1,0 +1,29 @@
+lumewarp-stack {{ .Chart.Version }} installed in namespace {{ .Release.Namespace }}.
+{{- if .Values.postgres.enabled }}
+
+PostgreSQL (bundled): {{ include "stack.postgres.name" . }}, ONE pod, NO BACKUPS.
+  This is for evaluation and small installs. For production install with
+  `--set postgres.enabled=false --set lumewarp.controlPlane.databaseUrl.secretName=<your Secret>`.
+{{- end }}
+{{- if .Values.openfga.enabled }}
+
+OpenFGA: {{ .Values.lumewarp.controlPlane.authz.openfga.url }}{{ if ne .Values.lumewarp.controlPlane.authz.backend "openfga" }}
+  NOTE: it is deployed but unused: set lumewarp.controlPlane.authz.backend=openfga (or install with -f values-openfga.yaml).{{ else }}
+  The control plane creates the "{{ .Values.lumewarp.controlPlane.authz.openfga.store }}" store and its model at startup.{{ end }}
+{{- end }}
+
+The database migration runs as Job {{ .Release.Name }}-migrate-{{ .Release.Revision }}; the control plane
+becomes ready once it has finished:
+  kubectl -n {{ .Release.Namespace }} wait --for=condition=complete job/{{ .Release.Name }}-migrate-{{ .Release.Revision }}
+
+Next, the gateway needs a token issued by the control plane (it waits until the Secret
+{{ .Values.lumewarp.gateway.token.secretName | quote }} exists):
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "stack.controlPlaneName" . }} -- \
+    python -m lumewarp_control_plane bootstrap --name {{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.lumewarp.gateway.token.secretName }} \
+    --from-literal={{ .Values.lumewarp.gateway.token.key }}="<the printed lwg-... token>"
+  kubectl -n {{ .Release.Namespace }} rollout restart {{ ternary "statefulset" "deploy" .Values.lumewarp.gateway.persistence.enabled }}/{{ include "stack.gatewayName" . }}
+
+Log in to the Admin UI over SSO (lumewarp.controlPlane.oidc.*) or the break-glass password;
+the first login matching lumewarp.controlPlane.initialAdminEmail becomes proxy_admin.
+Manual: https://lumewarp.github.io/lumewarp/operations/helm.html

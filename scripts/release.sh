@@ -7,8 +7,9 @@
 #
 # Versions kept in step: the gateway workspace (and its Cargo.lock entries), the
 # control-plane package (pyproject, __init__, uv.lock), the UI package and the
-# Helm chart (version and appVersion). Pushing `main` and then the tag runs the
-# full CI once on the release commit and the release workflow reuses it.
+# Helm charts (version and appVersion, the umbrella's dependency on lumewarp) and
+# the plain manifests in deploy/kubernetes, which are regenerated. Pushing `main`
+# and then the tag runs the full CI once on the release commit and the release workflow reuses it.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -34,6 +35,9 @@ locations=(
   'ui/package.json|(?m)^  "version": "([^"]+)"|ui package.json'
   'deploy/helm/lumewarp/Chart.yaml|(?m)^version: (\S+)$|chart version'
   'deploy/helm/lumewarp/Chart.yaml|(?m)^appVersion: "([^"]+)"|chart appVersion'
+  'deploy/helm/lumewarp-stack/Chart.yaml|(?m)^version: (\S+)$|umbrella chart version'
+  'deploy/helm/lumewarp-stack/Chart.yaml|(?m)^appVersion: "([^"]+)"|umbrella chart appVersion'
+  'deploy/helm/lumewarp-stack/Chart.yaml|(?m)^  - name: lumewarp\n(?:    (?!version:).*\n)*?    version: "?([^"\n]+?)"?$|umbrella dependency on lumewarp'
 )
 # Every workspace member of the gateway in Cargo.lock.
 while IFS= read -r manifest; do
@@ -86,7 +90,10 @@ scripts/release.sh --check "$version"
 
 git add gateway/Cargo.toml gateway/Cargo.lock control-plane/pyproject.toml \
   control-plane/src/lumewarp_control_plane/__init__.py control-plane/uv.lock \
-  ui/package.json deploy/helm/lumewarp/Chart.yaml
+  ui/package.json deploy/helm/lumewarp/Chart.yaml deploy/helm/lumewarp-stack/Chart.yaml
+# The images in the plain manifests carry the new version.
+deploy/kubernetes/generate.sh
+git add deploy/kubernetes
 # --allow-empty: the first release can already carry its version everywhere.
 git commit -q --allow-empty -m "Release v${version}"
 git tag -a "v${version}" -m "Release v${version}"

@@ -1,6 +1,7 @@
 {{- if .Values.controlPlane.enabled }}
-{{- if ne (int .Values.controlPlane.replicaCount) 1 }}
-{{- fail "controlPlane.replicaCount must be 1; the compiler and background loops are single-process" }}
+{{- $oidc := .Values.controlPlane.oidc }}
+{{- if and $oidc.issuer (not $oidc.secretKey.secretName) }}
+{{- fail "controlPlane.oidc.secretKey.secretName is required when controlPlane.oidc.issuer is set: the control plane refuses to start with SSO and no LUMEWARP_SECRET_KEY" }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
@@ -9,7 +10,8 @@ metadata:
   labels:
     {{- include "lumewarp.controlPlane.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.controlPlane.replicaCount }}
+  # Always one pod: the compiler and rollover scheduler run once per installation.
+  replicas: 1
   # One writer: the compiler and rollover scheduler must not run in two pods. Recreate
   # avoids overlap during upgrades.
   strategy:
@@ -27,7 +29,7 @@ spec:
       {{- end }}
     spec:
       automountServiceAccountToken: false
-      {{- with .Values.imagePullSecrets }}
+      {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -60,9 +62,6 @@ spec:
             - lumewarp_control_plane
           args:
             - serve
-            {{- with .Values.controlPlane.extraArgs }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.controlPlane.service.httpPort }}
@@ -86,7 +85,7 @@ spec:
             - name: LUMEWARP_GRPC_BIND
               value: "0.0.0.0:{{ .Values.controlPlane.service.grpcPort }}"
             - name: LUMEWARP_SCOPE
-              value: {{ .Values.controlPlane.scope | quote }}
+              value: {{ .Values.global.scope | quote }}
             - name: LUMEWARP_METRICS_BIND
               value: {{ ternary (printf "0.0.0.0:%v" .Values.controlPlane.service.metricsPort) "" .Values.controlPlane.metrics.enabled | quote }}
             - name: LUMEWARP_INITIAL_ADMIN_EMAIL
@@ -104,12 +103,38 @@ spec:
             - name: LUMEWARP_GRPC_TLS_KEY_FILE
               value: /etc/lumewarp/tls/{{ .Values.controlPlane.grpcTls.keyKey }}
             {{- end }}
-            {{- if .Values.encryptionKey.secretName }}
+            {{- if .Values.global.encryptionKey.secretName }}
             - name: LUMEWARP_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.encryptionKey.secretName }}
-                  key: {{ .Values.encryptionKey.key }}
+                  name: {{ .Values.global.encryptionKey.secretName }}
+                  key: {{ .Values.global.encryptionKey.key }}
+            {{- end }}
+            {{- if $oidc.issuer }}
+            - name: LUMEWARP_OIDC_ISSUER
+              value: {{ $oidc.issuer | quote }}
+            {{- end }}
+            {{- if $oidc.clientId }}
+            - name: LUMEWARP_OIDC_CLIENT_ID
+              value: {{ $oidc.clientId | quote }}
+            {{- end }}
+            {{- if $oidc.clientSecret.secretName }}
+            - name: LUMEWARP_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $oidc.clientSecret.secretName }}
+                  key: {{ $oidc.clientSecret.key }}
+            {{- end }}
+            {{- if $oidc.secretKey.secretName }}
+            - name: LUMEWARP_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $oidc.secretKey.secretName }}
+                  key: {{ $oidc.secretKey.key }}
+            {{- end }}
+            {{- if $oidc.publicUrl }}
+            - name: LUMEWARP_PUBLIC_URL
+              value: {{ $oidc.publicUrl | quote }}
             {{- end }}
             {{- include "lumewarp.controlPlane.authzEnv" . | nindent 12 }}
             {{- with .Values.controlPlane.extraEnv }}

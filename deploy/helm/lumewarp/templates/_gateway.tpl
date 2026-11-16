@@ -3,12 +3,12 @@ The gateway workload, rendered once for both kinds so a change cannot land in on
 missed in the other:
 
 - gateway-deployment.yaml   the state directory is an emptyDir, one per pod (the default)
-- gateway-statefulset.yaml  gateway.stateDir.persistence.enabled: one ReadWriteOnce claim
+- gateway-statefulset.yaml  gateway.persistence.enabled: one ReadWriteOnce claim
                             per pod from a volumeClaimTemplate, so a restarted pod keeps
                             its cached snapshot
 
 Every pod is a gateway: each process generates its own id at startup and they share one
-token. Rate limits are counted per gateway unless they share a Redis (redis.enabled or
+token. Rate limits are counted per gateway unless they share a Redis (valkey.enabled or
 gateway.sharedLimits.redis.existingSecret).
 
 Usage: include "lumewarp.gateway.workload" (dict "root" $ "kind" "Deployment")
@@ -18,18 +18,12 @@ Usage: include "lumewarp.gateway.workload" (dict "root" $ "kind" "Deployment")
 {{- $kind := .kind -}}
 {{- $stateful := eq $kind "StatefulSet" -}}
 {{- $values := $root.Values.gateway -}}
-{{- $persistence := $values.stateDir.persistence -}}
+{{- $persistence := $values.persistence -}}
 {{- $autoscaling := $values.autoscaling -}}
 {{- $sharedLimits := $values.sharedLimits -}}
-{{- $valkey := $root.Values.redis -}}
+{{- $valkey := $root.Values.valkey -}}
 {{- if and $valkey.enabled $sharedLimits.redis.existingSecret -}}
-{{- fail "redis.enabled and gateway.sharedLimits.redis.existingSecret are mutually exclusive: the bundled Valkey and an external Redis URL cannot both configure the gateway" -}}
-{{- end -}}
-{{- if not (hasSuffix (printf ":%v" $values.service.port) $values.server.listen) -}}
-{{- fail "gateway.server.listen must end with gateway.service.port; the Service and probes use the named container ports" -}}
-{{- end -}}
-{{- if not (hasSuffix (printf ":%v" $values.service.adminPort) $values.server.adminListen) -}}
-{{- fail "gateway.server.adminListen must end with gateway.service.adminPort; the Service and probes use the named container ports" -}}
+{{- fail "valkey.enabled and gateway.sharedLimits.redis.existingSecret are mutually exclusive: the bundled Valkey and an external Redis URL cannot both configure the gateway" -}}
 {{- end -}}
 {{- $controlPlaneUrl := $values.controlPlaneUrl -}}
 {{- if not $controlPlaneUrl -}}
@@ -39,24 +33,16 @@ Usage: include "lumewarp.gateway.workload" (dict "root" $ "kind" "Deployment")
 {{- $scheme := ternary "https" "http" $root.Values.controlPlane.grpcTls.enabled -}}
 {{- $controlPlaneUrl = printf "%s://%s:%v" $scheme (include "lumewarp.controlPlane.name" $root) $root.Values.controlPlane.service.grpcPort -}}
 {{- end -}}
-{{- $scope := default $root.Values.controlPlane.scope $values.scope -}}
+{{- $scope := $root.Values.global.scope -}}
 {{- $plugins := $values.plugins -}}
-{{- $pluginMountPath := trimSuffix "/" $plugins.mountPath -}}
+{{- $pluginMountPath := "/etc/lumewarp/plugins" -}}
 {{- $pluginDirs := list
-      (dict "var" "LUMEWARP_ROUTER_PLUGIN_DIR" "key" "router" "subPath" $plugins.dirs.router)
-      (dict "var" "LUMEWARP_AUTH_PLUGIN_DIR" "key" "auth" "subPath" $plugins.dirs.auth)
-      (dict "var" "LUMEWARP_A2A_MIDDLEWARE_DIR" "key" "a2aMiddleware" "subPath" $plugins.dirs.a2aMiddleware) }}
+      (dict "var" "LUMEWARP_ROUTER_PLUGIN_DIR" "subPath" "router")
+      (dict "var" "LUMEWARP_AUTH_PLUGIN_DIR" "subPath" "auth")
+      (dict "var" "LUMEWARP_A2A_MIDDLEWARE_DIR" "subPath" "a2a-middleware") }}
 {{- if $plugins.volume }}
 {{- if not (kindIs "map" $plugins.volume) }}
 {{- fail "gateway.plugins.volume must be a Kubernetes volume source map, for example {persistentVolumeClaim: {claimName: gateway-plugins}}, or empty for no plugins" }}
-{{- end }}
-{{- if not $pluginMountPath }}
-{{- fail "gateway.plugins.mountPath is required when gateway.plugins.volume is set" }}
-{{- end }}
-{{- range $pluginDirs }}
-{{- if not .subPath }}
-{{- fail (printf "gateway.plugins.dirs.%s is required when gateway.plugins.volume is set" .key) }}
-{{- end }}
 {{- end }}
 {{- end }}
 {{- $memoryLimit := "" }}
@@ -83,14 +69,6 @@ Usage: include "lumewarp.gateway.workload" (dict "root" $ "kind" "Deployment")
 {{- end }}
 {{- if not (and (ge (int $syncMs) 10) (le (int $syncMs) 1000)) }}
 {{- fail (printf "gateway.sharedLimits.syncMs must be an integer number of milliseconds from 10 to 1000, got %s" $syncMs) }}
-{{- end }}
-{{- end }}
-{{- if $persistence.existingClaim -}}
-{{- fail "gateway.stateDir.persistence.existingClaim was removed: the gateway StatefulSet creates one ReadWriteOnce claim per pod, so a single claim cannot be used. Delete the value from your values file; the old <release>-gateway-state claim is unmanaged now, delete it when nothing uses it." -}}
-{{- end -}}
-{{- if $stateful }}
-{{- if not (and (eq (len $persistence.accessModes) 1) (has "ReadWriteOnce" $persistence.accessModes)) }}
-{{- fail "gateway.stateDir.persistence.accessModes must be [ReadWriteOnce]; one claim per pod, and no other mode is supported" }}
 {{- end }}
 {{- end }}
 apiVersion: apps/v1
@@ -125,7 +103,7 @@ spec:
         {{- end }}
     spec:
       automountServiceAccountToken: false
-      {{- with $root.Values.imagePullSecrets }}
+      {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -142,13 +120,10 @@ spec:
             - lumewarp
           args:
             - --control-plane=$(LUMEWARP_CONTROL_PLANE_URL)
-            - --gateway-token-env={{ required "gateway.tokenEnvVar is required" $values.tokenEnvVar }}
-            - --state-dir={{ $values.stateDir.path }}
+            - --gateway-token-env=LUMEWARP_GATEWAY_TOKEN
+            - --state-dir=/var/lib/lumewarp
             - --scope=$(LUMEWARP_SCOPE)
             - --local-config=/etc/lumewarp/config.yaml
-            {{- with $values.extraArgs }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
           ports:
             - name: http
               containerPort: {{ $values.service.port }}
@@ -161,7 +136,7 @@ spec:
               value: {{ $controlPlaneUrl | quote }}
             - name: LUMEWARP_SCOPE
               value: {{ $scope | quote }}
-            - name: {{ $values.tokenEnvVar }}
+            - name: LUMEWARP_GATEWAY_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ required "gateway.token.secretName is required" $values.token.secretName }}
@@ -174,12 +149,12 @@ spec:
             - name: OTEL_TRACES_SAMPLER_ARG
               value: {{ $samplingRatio | quote }}
             {{- end }}
-            {{- if $root.Values.encryptionKey.secretName }}
+            {{- if $root.Values.global.encryptionKey.secretName }}
             - name: LUMEWARP_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ $root.Values.encryptionKey.secretName }}
-                  key: {{ $root.Values.encryptionKey.key }}
+                  name: {{ $root.Values.global.encryptionKey.secretName }}
+                  key: {{ $root.Values.global.encryptionKey.key }}
             {{- end }}
             {{- if $values.publicUrl }}
             - name: LUMEWARP_GATEWAY_PUBLIC_URL
@@ -208,10 +183,10 @@ spec:
             - name: LUMEWARP_SHARED_LIMITS_REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "lumewarp.redis.secretName" $root }}
-                  key: {{ include "lumewarp.redis.secretKey" $root }}
+                  name: {{ include "lumewarp.valkey.secretName" $root }}
+                  key: {{ include "lumewarp.valkey.secretKey" $root }}
             - name: LUMEWARP_SHARED_LIMITS_REDIS_URL
-              value: {{ printf "redis://:$(LUMEWARP_SHARED_LIMITS_REDIS_PASSWORD)@%s:%v/0" (include "lumewarp.redis.name" $root) $valkey.service.port | quote }}
+              value: {{ printf "redis://:$(LUMEWARP_SHARED_LIMITS_REDIS_PASSWORD)@%s:%v/0" (include "lumewarp.valkey.name" $root) $valkey.service.port | quote }}
             {{- else if $sharedLimits.redis.existingSecret }}
             - name: LUMEWARP_SHARED_LIMITS_REDIS_URL
               valueFrom:
@@ -268,7 +243,7 @@ spec:
               mountPath: /etc/lumewarp
               readOnly: true
             - name: state
-              mountPath: {{ $values.stateDir.path }}
+              mountPath: /var/lib/lumewarp
             {{- if $plugins.volume }}
             {{- range $pluginDirs }}
             - name: plugins
@@ -316,7 +291,7 @@ spec:
         {{- end }}
       spec:
         accessModes:
-          {{- toYaml $persistence.accessModes | nindent 10 }}
+          - ReadWriteOnce
         {{- with $persistence.storageClass }}
         storageClassName: {{ . | quote }}
         {{- end }}

@@ -46,6 +46,7 @@ jobs:
       actions: read
     outputs:
       observability: ${{ steps.decide.outputs.observability }}
+      helm: ${{ steps.decide.outputs.helm }}
       gateway: ${{ steps.decide.outputs.gateway }}
       bench-crate: ${{ steps.decide.outputs.bench-crate }}
       control-plane: ${{ steps.decide.outputs.control-plane }}
@@ -114,6 +115,9 @@ jobs:
             observability:
               - 'deploy/**'
               - '!**/*.md'
+            helm:
+              - '{deploy/helm,deploy/kubernetes,deploy/prometheus,deploy/grafana}/**'
+              - '!**/*.md'
             gateway:
               - '{gateway,proto,bench/mock-upstream}/**'
               - '!**/*.md'
@@ -147,7 +151,7 @@ jobs:
         run: |
           python3 -I - <<'PY'
           import json, os
-          jobs = ["observability", "gateway", "bench-crate", "control-plane", "ui", "proto", "e2e",
+          jobs = ["observability", "helm", "gateway", "bench-crate", "control-plane", "ui", "proto", "e2e",
                   "docs", "plugin-templates"]
           called = os.environ["FULL_INPUT"] != ""
           paths = json.loads(os.environ["PATHS"] or "{}") or {}
@@ -219,6 +223,39 @@ jobs:
                               "check", "rules", path.name], check=True)
           print(f"Validated {len(dashboards)} dashboards, {len(rules)} expressions and chart copies")
           PY
+
+  helm:
+    needs: changes
+    if: needs.changes.outputs.helm == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Chart render matrix
+        run: |
+          helm lint --strict deploy/helm/lumewarp
+          bash deploy/helm/check.sh
+          bash deploy/helm/check-otel-render.sh
+      - name: Umbrella chart
+        # Adds the OpenFGA repository, builds the dependencies and lints every case.
+        run: bash deploy/helm/lumewarp-stack/check.sh
+      - name: Plain manifests are current
+        run: |
+          deploy/kubernetes/generate.sh
+          if ! git diff --exit-code -- deploy/kubernetes; then
+            echo "::error::deploy/kubernetes is stale; run deploy/kubernetes/generate.sh and commit the result"
+            exit 1
+          fi
+          status="$(git status --porcelain -- deploy/kubernetes)"
+          if [[ -n "$status" ]]; then
+            printf '%s\n' "$status"
+            echo "::error::generate.sh produced untracked files under deploy/kubernetes; commit them"
+            exit 1
+          fi
+      - name: Build the kustomizations
+        run: |
+          kubectl kustomize deploy/kubernetes/base >/dev/null
+          kubectl kustomize deploy/kubernetes/overlays/example >/dev/null
 
   gateway:
     needs: changes

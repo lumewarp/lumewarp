@@ -1,0 +1,7 @@
+# Turns on OpenFGA and uses it for authorization: helm install ... -f values-openfga.yaml
+openfga:
+  enabled: true
+lumewarp:
+  controlPlane:
+    authz:
+      backend: openfga

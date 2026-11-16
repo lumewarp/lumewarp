@@ -1,13 +1,13 @@
-{{- if .Values.redis.enabled }}
-{{- $values := .Values.redis }}
-{{- $secretName := include "lumewarp.redis.secretName" . }}
-{{- $secretKey := include "lumewarp.redis.secretKey" . }}
+{{- if .Values.valkey.enabled }}
+{{- $values := .Values.valkey }}
+{{- $secretName := include "lumewarp.valkey.secretName" . }}
+{{- $secretKey := include "lumewarp.valkey.secretKey" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "lumewarp.redis.name" . }}
+  name: {{ include "lumewarp.valkey.name" . }}
   labels:
-    {{- include "lumewarp.redis.labels" . | nindent 4 }}
+    {{- include "lumewarp.valkey.labels" . | nindent 4 }}
 spec:
   # One replica on purpose: every key the shared limiter writes expires within 150 s, so
   # a restart only means a short window of per-gateway counts. A second replica would need
@@ -17,18 +17,18 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      {{- include "lumewarp.redis.selectorLabels" . | nindent 6 }}
+      {{- include "lumewarp.valkey.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "lumewarp.redis.selectorLabels" . | nindent 8 }}
+        {{- include "lumewarp.valkey.selectorLabels" . | nindent 8 }}
       {{- with $values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
       automountServiceAccountToken: false
-      {{- with .Values.imagePullSecrets }}
+      {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -37,7 +37,7 @@ spec:
         {{- toYaml $podSecurityContext | nindent 8 }}
       containers:
         - name: valkey
-          image: {{ printf "%s:%s" $values.image.repository (required "redis.image.tag is required: pin an exact Valkey tag" $values.image.tag) | quote }}
+          image: {{ printf "%s:%s" $values.image.repository (required "valkey.image.tag is required: pin an exact Valkey tag" $values.image.tag) | quote }}
           imagePullPolicy: {{ $values.image.pullPolicy }}
           # The image's entrypoint wants to be root to chown /data, so it is bypassed and
           # the server runs directly as the image's `valkey` user. No persistence: the
@@ -49,7 +49,7 @@ spec:
             - -c
             - |
               set -eu
-              password="$(cat /etc/lumewarp-redis/password)"
+              password="$(cat /etc/lumewarp-valkey/password)"
               umask 077
               printf 'requirepass %s\n' "$password" > /data/valkey.conf
               exec valkey-server /data/valkey.conf --save "" --appendonly no --dir /data
@@ -64,7 +64,7 @@ spec:
               command:
                 - sh
                 - -c
-                - REDISCLI_AUTH="$(cat /etc/lumewarp-redis/password)" valkey-cli -h 127.0.0.1 -p 6379 ping | grep -q PONG
+                - REDISCLI_AUTH="$(cat /etc/lumewarp-valkey/password)" valkey-cli -h 127.0.0.1 -p 6379 ping | grep -q PONG
             initialDelaySeconds: 2
             periodSeconds: 5
             timeoutSeconds: 2
@@ -74,7 +74,7 @@ spec:
               command:
                 - sh
                 - -c
-                - REDISCLI_AUTH="$(cat /etc/lumewarp-redis/password)" valkey-cli -h 127.0.0.1 -p 6379 ping | grep -q PONG
+                - REDISCLI_AUTH="$(cat /etc/lumewarp-valkey/password)" valkey-cli -h 127.0.0.1 -p 6379 ping | grep -q PONG
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 2
@@ -88,7 +88,7 @@ spec:
               mountPath: /data
             # The password never lands in this manifest or in an environment variable.
             - name: auth
-              mountPath: /etc/lumewarp-redis
+              mountPath: /etc/lumewarp-valkey
               readOnly: true
       volumes:
         - name: data

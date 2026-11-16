@@ -1,0 +1,25 @@
+apiVersion: v2
+name: lumewarp-stack
+description: Lumewarp with an optional bundled PostgreSQL and OpenFGA, installed in one step
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+kubeVersion: ">=1.25.0-0"
+keywords:
+  - llm
+  - gateway
+  - openai
+  - vllm
+sources:
+  - https://github.com/lumewarp/lumewarp
+dependencies:
+  # In the repository the lumewarp chart is a sibling directory. The release job rewrites this
+  # repository to oci://ghcr.io/lumewarp/charts before packaging, so a published stack
+  # resolves the lumewarp chart of the same version from the registry.
+  - name: lumewarp
+    version: 0.2.0
+    repository: file://../lumewarp
+  - name: openfga
+    version: 0.4.1
+    repository: https://openfga.github.io/helm-charts
+    condition: openfga.enabled

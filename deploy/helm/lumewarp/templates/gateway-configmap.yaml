@@ -10,8 +10,8 @@ data:
   # models, routers, teams and keys come from the control-plane snapshot.
   config.yaml: |
     server:
-      listen: {{ .Values.gateway.server.listen | quote }}
-      admin_listen: {{ .Values.gateway.server.adminListen | quote }}
+      listen: "0.0.0.0:{{ .Values.gateway.service.port }}"
+      admin_listen: "0.0.0.0:{{ .Values.gateway.service.adminPort }}"
       shutdown_grace_ms: {{ .Values.gateway.server.shutdownGraceMs }}
       header_read_timeout_ms: {{ .Values.gateway.server.headerReadTimeoutMs }}
       body_read_timeout_ms: {{ .Values.gateway.server.bodyReadTimeoutMs }}

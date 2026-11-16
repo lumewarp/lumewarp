@@ -17,7 +17,7 @@ when the snapshot format changed; the release notes say when.
   `gateway.autoscaling`) starts several pods that all use the token in
   `gateway.token.secretName`, and each pod generates its own gateway id at startup. The
   Gateways page shows one row per pod. Rate limits are
-  counted per gateway unless the gateways share a Redis (`redis.enabled`, or
+  counted per gateway unless the gateways share a Redis (`valkey.enabled`, or
   `gateway.sharedLimits.redis.existingSecret`).
 - **A rolling upgrade can leave an older gateway behind.** A gateway on the old build that
   lacks a plugin or capability NACKs `UNSUPPORTED_FEATURE`; only that gateway skips the
@@ -27,7 +27,7 @@ when the snapshot format changed; the release notes say when.
   rollout before publishing anything that needs the new build.
 - **Gateway state volume.** With the default `emptyDir`, a new pod has no cache and returns
   503 on `/readyz` and `/v1/*` until the first full snapshot arrives. With
-  `gateway.stateDir.persistence.enabled` the gateway is a StatefulSet with one
+  `gateway.persistence.enabled` the gateway is a StatefulSet with one
   `ReadWriteOnce` claim per pod, so a restarted pod serves from its cached snapshot; `size`,
   `storageClass` and `annotations` of that claim template cannot change once the StatefulSet
   exists (see [Deploy with Helm](./helm.md#state-volume)). The chart runs the gateway as

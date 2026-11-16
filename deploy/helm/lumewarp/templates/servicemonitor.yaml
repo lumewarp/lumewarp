@@ -1,8 +1,8 @@
-{{- if .Values.serviceMonitor.enabled }}
+{{- if .Values.monitoring.serviceMonitor.enabled }}
 {{- $gateway := .Values.gateway.enabled }}
 {{- $controlPlane := and .Values.controlPlane.enabled .Values.controlPlane.metrics.enabled }}
 {{- if not (or $gateway $controlPlane) }}
-{{- fail "serviceMonitor.enabled requires gateway.enabled=true or controlPlane.enabled=true with controlPlane.metrics.enabled=true" }}
+{{- fail "monitoring.serviceMonitor.enabled requires gateway.enabled=true or controlPlane.enabled=true with controlPlane.metrics.enabled=true" }}
 {{- end }}
 {{- if $gateway }}
 apiVersion: monitoring.coreos.com/v1
@@ -11,7 +11,7 @@ metadata:
   name: {{ include "lumewarp.gateway.name" . }}
   labels:
     {{- include "lumewarp.gateway.labels" . | nindent 4 }}
-    {{- with .Values.serviceMonitor.labels }}
+    {{- with .Values.monitoring.serviceMonitor.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
@@ -21,8 +21,8 @@ spec:
   endpoints:
     - port: admin
       path: /metrics
-      interval: {{ .Values.serviceMonitor.interval }}
-      {{- with .Values.serviceMonitor.scrapeTimeout }}
+      interval: {{ .Values.monitoring.serviceMonitor.interval }}
+      {{- with .Values.monitoring.serviceMonitor.scrapeTimeout }}
       scrapeTimeout: {{ . }}
       {{- end }}
 {{- end }}
@@ -34,7 +34,7 @@ metadata:
   name: {{ include "lumewarp.controlPlane.name" . }}
   labels:
     {{- include "lumewarp.controlPlane.labels" . | nindent 4 }}
-    {{- with .Values.serviceMonitor.labels }}
+    {{- with .Values.monitoring.serviceMonitor.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
@@ -44,8 +44,8 @@ spec:
   endpoints:
     - port: metrics
       path: /metrics
-      interval: {{ .Values.serviceMonitor.interval }}
-      {{- with .Values.serviceMonitor.scrapeTimeout }}
+      interval: {{ .Values.monitoring.serviceMonitor.interval }}
+      {{- with .Values.monitoring.serviceMonitor.scrapeTimeout }}
       scrapeTimeout: {{ . }}
       {{- end }}
 {{- end }}
