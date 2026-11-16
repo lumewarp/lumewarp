@@ -6,7 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/name: lumewarp
     app.kubernetes.io/instance: lumewarp
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/component: control-plane
 spec:
   type: ClusterIP
@@ -36,7 +36,7 @@ metadata:
   labels:
     app.kubernetes.io/name: lumewarp
     app.kubernetes.io/instance: lumewarp
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
     app.kubernetes.io/component: control-plane
 spec:
   # Always one pod: the compiler and rollover scheduler run once per installation.
@@ -62,7 +62,7 @@ spec:
       initContainers:
         # Idempotent: creates the store and writes the model only when they are missing.
         - name: openfga-init
-          image: "ghcr.io/lumewarp/lumewarp-control-plane:0.2.0"
+          image: "ghcr.io/lumewarp/lumewarp-control-plane:0.2.1"
           imagePullPolicy: IfNotPresent
           command: [python, -m, lumewarp_control_plane, openfga, init]
           env:
@@ -75,7 +75,7 @@ spec:
               value: "lumewarp"
       containers:
         - name: control-plane
-          image: "ghcr.io/lumewarp/lumewarp-control-plane:0.2.0"
+          image: "ghcr.io/lumewarp/lumewarp-control-plane:0.2.1"
           imagePullPolicy: IfNotPresent
           command:
             - python
@@ -179,7 +179,7 @@ spec:
                 - ALL
       containers:
         - name: migrate
-          image: "ghcr.io/lumewarp/lumewarp-control-plane:0.2.0"
+          image: "ghcr.io/lumewarp/lumewarp-control-plane:0.2.1"
           imagePullPolicy: IfNotPresent
           command: [python, -m, lumewarp_control_plane]
           args: [migrate]

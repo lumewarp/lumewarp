@@ -2,8 +2,8 @@ apiVersion: v2
 name: lumewarp-stack
 description: Lumewarp with an optional bundled PostgreSQL and OpenFGA, installed in one step
 type: application
-version: 0.2.0
-appVersion: "0.2.0"
+version: 0.2.1
+appVersion: "0.2.1"
 kubeVersion: ">=1.25.0-0"
 keywords:
   - llm
@@ -16,7 +16,7 @@ dependencies:
   # The lumewarp chart is a sibling directory: this chart is not published, it is installed
   # from a checkout (docs/operations/helm.md, "Full stack: lumewarp-stack").
   - name: lumewarp
-    version: 0.2.0
+    version: 0.2.1
     repository: file://../lumewarp
   - name: openfga
     version: 0.4.1

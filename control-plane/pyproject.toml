@@ -1,6 +1,6 @@
 [project]
 name = "lumewarp-control-plane"
-version = "0.2.0"
+version = "0.2.1"
 description = "Lumewarp control plane: management API, config compiler, plugins"
 readme = "README.md"
 license = "Apache-2.0"
