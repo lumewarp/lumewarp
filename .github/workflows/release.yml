@@ -153,6 +153,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
+      # Before the push step rewrites lumewarp-stack's dependency to the OCI registry: the
+      # manifests render from the charts in the tree.
+      - name: Render the plain manifests
+        run: |
+          mkdir -p dist
+          deploy/kubernetes/generate.sh --single "dist/lumewarp-${VERSION}.yaml" --version "${VERSION}"
       - name: Package and push the charts
         env:
           ACTOR: ${{ github.actor }}
@@ -173,8 +179,6 @@ jobs:
           helm lint --strict deploy/helm/lumewarp-stack
           helm package deploy/helm/lumewarp-stack --destination dist
           helm push "dist/lumewarp-stack-${VERSION}.tgz" "$oci"
-      - name: Render the plain manifests
-        run: deploy/kubernetes/generate.sh --single "dist/lumewarp-${VERSION}.yaml" --version "${VERSION}"
       - uses: actions/upload-artifact@v4
         with:
           name: chart

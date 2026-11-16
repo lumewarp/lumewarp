@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# Render the plain Kubernetes manifests from the Helm chart.
+# Render the plain Kubernetes manifests from the lumewarp-stack chart: PostgreSQL, OpenFGA,
+# the control plane and a gateway.
 #
 #   deploy/kubernetes/generate.sh                         rewrite base/ (one file per kind + kustomization.yaml)
 #   deploy/kubernetes/generate.sh --single FILE [--version X]
 #                                                         one combined YAML with a Namespace, for the release asset
 #
 # The input is deploy/kubernetes/values.yaml; the release is `lumewarp` in namespace
-# `lumewarp`, and image tags are the chart appVersion (--version overrides them in
-# --single mode). Helm-only metadata is removed, and the migration Job is a plain Job:
-# the control plane reports /readyz only once the database is at the migration head, so
-# it may start before the Job finishes and just stays unready until then.
-# Uses helm from PATH, or the alpine/helm image through docker. Output is deterministic.
+# `lumewarp`, and the Lumewarp image tags are the chart appVersion (--version overrides them
+# in --single mode). Helm-only metadata and test hooks are removed. Both schema migrations
+# are plain Jobs that wait for PostgreSQL: the control plane reports /readyz only once its
+# database is at the migration head, and OpenFGA's pods wait for their Job to complete.
+# Nothing secret is rendered (create-secrets.sh makes the Secrets).
+# Uses helm from PATH, or the alpine/helm image through docker; the OpenFGA chart is fetched
+# from its repository for `helm dependency build`. Output is deterministic.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -31,19 +34,23 @@ done
 set_args=()
 [[ -n "$version" ]] && set_args=(--set "global.imageTag=${version}")
 
+chart=deploy/helm/lumewarp-stack
+repo=https://openfga.github.io/helm-charts
 if command -v helm >/dev/null 2>&1; then
-  helm_run=(helm)
-  chart=deploy/helm/lumewarp
   cd "$root"
+  helm repo add openfga "$repo" >/dev/null 2>&1 || true
+  helm dependency build "$chart" >/dev/null
+  helm_run=(helm)
 elif command -v docker >/dev/null 2>&1; then
+  docker run --rm --entrypoint sh -e HOME=/tmp -v "$root:/c" -w /c alpine/helm:3.16.4 \
+    -c "helm repo add openfga $repo >/dev/null && helm dependency build $chart >/dev/null"
   helm_run=(docker run --rm -v "$root:/c:ro" -w /c alpine/helm:3.16.4)
-  chart=deploy/helm/lumewarp
 else
   echo "generate.sh needs helm on PATH, or docker for alpine/helm:3.16.4" >&2
   exit 1
 fi
 
-rendered="$("${helm_run[@]}" template lumewarp "$chart" -n "$namespace" \
+rendered="$("${helm_run[@]}" template lumewarp "$chart" -n "$namespace" --skip-tests \
   -f deploy/kubernetes/values.yaml ${set_args[@]+"${set_args[@]}"})"
 
 app_version="$(sed -n 's/^appVersion: "\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$root/deploy/helm/lumewarp/Chart.yaml")"
@@ -69,8 +76,10 @@ for chunk in re.split(r"^---\s*$", os.environ["HELM_OUT"], flags=re.M):
     text = "\n".join(lines).strip("\n")
     if not re.search(r"^kind:", text, flags=re.M):
         continue
-    # Hook annotations (and the comment above them) are all the Job's annotations carry.
-    text = re.sub(r"^  annotations:\n(?:    .*\n?)+", "", text, flags=re.M) if "helm.sh/hook" in text else text
+    # Hook annotations (on an object or a pod template) make no sense without Helm; an
+    # annotations block left empty, with any comment line above it, goes too.
+    text = "\n".join(l for l in text.splitlines() if not re.match(r"\s*helm\.sh/hook", l))
+    text = re.sub(r"^(\s*#[^\n]*\n)*(\s*)annotations:\n(?!\2\s)", "", text + "\n", flags=re.M).rstrip("\n")
     docs.append(text + "\n")
 
 by_kind = {}
@@ -97,7 +106,11 @@ for old in base.glob("*.yaml"):
 files = {"namespace.yaml": ns_doc}
 for kind, texts in by_kind.items():
     files[f"{kind.lower()}.yaml"] = "---\n".join(texts)
-images = sorted({m for t in docs for m in re.findall(r'image: "([^":]+):[^"]*"', t)})
+# Only the Lumewarp images follow the release; PostgreSQL, OpenFGA and helpers stay pinned.
+images = sorted({
+    m for t in docs for m in re.findall(r'image: "?([^":\s]+):[^"\s]*"?', t)
+    if m.startswith("ghcr.io/lumewarp/")
+})
 for name, text in files.items():
     (base / name).write_text(text)
 kustomization = [

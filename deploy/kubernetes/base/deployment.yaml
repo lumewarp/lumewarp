@@ -28,6 +28,20 @@ spec:
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 20
+      initContainers:
+        # Idempotent: creates the store and writes the model only when they are missing.
+        - name: openfga-init
+          image: "ghcr.io/lumewarp/lumewarp-control-plane:0.2.0"
+          imagePullPolicy: IfNotPresent
+          command: [python, -m, lumewarp_control_plane, openfga, init]
+          env:
+
+            - name: LUMEWARP_AUTHZ_BACKEND
+              value: "openfga"
+            - name: LUMEWARP_OPENFGA_URL
+              value: "http://lumewarp-openfga:8080"
+            - name: LUMEWARP_OPENFGA_STORE
+              value: "lumewarp"
       containers:
         - name: control-plane
           image: "ghcr.io/lumewarp/lumewarp-control-plane:0.2.0"
@@ -52,7 +66,7 @@ spec:
             - name: LUMEWARP_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: lumewarp-control-plane
+                  name: lumewarp-database
                   key: database-url
             - name: LUMEWARP_HTTP_BIND
               value: "0.0.0.0:8091"
@@ -70,6 +84,12 @@ spec:
                   name: lumewarp-encryption-key
                   key: encryption-key
 
+            - name: LUMEWARP_AUTHZ_BACKEND
+              value: "openfga"
+            - name: LUMEWARP_OPENFGA_URL
+              value: "http://lumewarp-openfga:8080"
+            - name: LUMEWARP_OPENFGA_STORE
+              value: "lumewarp"
           readinessProbe:
             httpGet:
               path: /readyz
@@ -194,3 +214,132 @@ spec:
             name: lumewarp-gateway-config
         - name: state
           emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lumewarp-openfga
+  labels:
+    app.kubernetes.io/name: openfga
+    app.kubernetes.io/instance: lumewarp
+    app.kubernetes.io/component: authorization-controller
+    app.kubernetes.io/version: "v1.22.1"
+    app.kubernetes.io/part-of: openfga
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openfga
+      app.kubernetes.io/instance: lumewarp
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "2112"
+      labels:
+        app.kubernetes.io/name: openfga
+        app.kubernetes.io/instance: lumewarp
+        app.kubernetes.io/component: authorization-controller
+        app.kubernetes.io/version: "v1.22.1"
+        app.kubernetes.io/part-of: openfga
+    spec:
+      serviceAccountName: lumewarp-openfga
+      securityContext:
+        {}
+
+      initContainers:
+        - name: wait-for-migration
+          securityContext:
+            {}
+          image: "groundnuty/k8s-wait-for:v2.0"
+          imagePullPolicy: IfNotPresent
+          args: ["job-wr", 'lumewarp-openfga-migrate']
+          resources:
+            {}
+      containers:
+        - name: openfga
+          securityContext:
+            {}
+          image: "openfga/openfga:v1.22.1"
+          imagePullPolicy: Always
+          args: ["run"]
+          ports:
+            - name: grpc
+              containerPort: 8081
+
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+            - name: profiler
+              containerPort: 3001
+              protocol: TCP
+
+            - name: playground
+              containerPort: 3000
+              protocol: TCP
+            - name: metrics
+              containerPort: 2112
+              protocol: TCP
+
+          env:
+            - name: OPENFGA_DATASTORE_ENGINE
+              value: "postgres"
+            - name: OPENFGA_DATASTORE_URI
+              valueFrom:
+                secretKeyRef:
+                  name: "lumewarp-openfga-datastore"
+                  key: uri
+
+
+            - name: OPENFGA_DATASTORE_METRICS_ENABLED
+              value: "false"
+            - name: OPENFGA_GRPC_ADDR
+              value: "0.0.0.0:8081"
+
+            - name: OPENFGA_HTTP_ENABLED
+              value: "true"
+            - name: OPENFGA_HTTP_ADDR
+              value: "0.0.0.0:8080"
+            - name: OPENFGA_HTTP_CORS_ALLOWED_ORIGINS
+              value: "*"
+            - name: OPENFGA_HTTP_CORS_ALLOWED_HEADERS
+              value: "*"
+
+            - name: OPENFGA_PLAYGROUND_ENABLED
+              value: "true"
+            - name: OPENFGA_PLAYGROUND_PORT
+              value: "3000"
+            - name: OPENFGA_LOG_FORMAT
+              value: json
+            - name: OPENFGA_LOG_LEVEL
+              value: info
+            - name: OPENFGA_LOG_TIMESTAMP_FORMAT
+              value: Unix
+            - name: OPENFGA_REQUEST_DURATION_DATASTORE_QUERY_COUNT_BUCKETS
+              value: "50,200"
+
+            - name: OPENFGA_METRICS_ENABLED
+              value: "true"
+            - name: OPENFGA_METRICS_ADDR
+              value: "0.0.0.0:2112"
+          readinessProbe:
+            failureThreshold: 6
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+            grpc:
+              port: 8081
+          livenessProbe:
+            failureThreshold: 12
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+            grpc:
+              port: 8081
+
+          resources:
+            {}

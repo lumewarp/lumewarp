@@ -6,7 +6,11 @@ resources:
   - deployment.yaml
   - job.yaml
   - namespace.yaml
+  - role.yaml
+  - rolebinding.yaml
   - service.yaml
+  - serviceaccount.yaml
+  - statefulset.yaml
 images:
   - name: ghcr.io/lumewarp/lumewarp-control-plane
     newTag: "0.2.0"

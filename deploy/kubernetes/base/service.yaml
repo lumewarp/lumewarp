@@ -53,3 +53,56 @@ spec:
     app.kubernetes.io/name: lumewarp
     app.kubernetes.io/instance: lumewarp
     app.kubernetes.io/component: gateway
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lumewarp-openfga
+  labels:
+    app.kubernetes.io/name: openfga
+    app.kubernetes.io/instance: lumewarp
+    app.kubernetes.io/component: authorization-controller
+    app.kubernetes.io/version: "v1.22.1"
+    app.kubernetes.io/part-of: openfga
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: 8081
+      targetPort: grpc
+      protocol: TCP
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+    - name: playground
+      port: 3000
+      targetPort: playground
+      protocol: TCP
+    - name: metrics
+      port: 2112
+      targetPort: metrics
+      protocol: TCP
+
+  selector:
+    app.kubernetes.io/name: openfga
+    app.kubernetes.io/instance: lumewarp
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lumewarp-postgres
+  labels:
+    app.kubernetes.io/name: lumewarp-stack
+    app.kubernetes.io/instance: lumewarp
+    app.kubernetes.io/component: postgres
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+  selector:
+    app.kubernetes.io/name: lumewarp-stack
+    app.kubernetes.io/instance: lumewarp
+    app.kubernetes.io/component: postgres

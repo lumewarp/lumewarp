@@ -1,32 +1,58 @@
-# Values that render the plain manifests in base/ (see generate.sh). Everything the
-# manifests need from the outside is a Secret referenced by name; create them first.
+# Values that render the plain manifests in base/ from the lumewarp-stack chart (see
+# generate.sh): PostgreSQL, OpenFGA, the control plane and a gateway, with both schema
+# migrations as Jobs. Nothing secret is rendered: every credential is a Secret referenced by
+# name, created first (create-secrets.sh, or the commands in docs/operations/kubernetes.md).
 global:
   encryptionKey:
     secretName: lumewarp-encryption-key
     key: encryption-key
 
-controlPlane:
-  databaseUrl:
-    secretName: lumewarp-control-plane
-    key: database-url
+postgres:
+  enabled: true
+  auth:
+    # Holds `password`; the database URLs below are built from it by create-secrets.sh.
+    existingSecret: lumewarp-postgres
+    existingSecretKey: password
+
+# The control plane's migration: a Job that waits for PostgreSQL, then migrates.
+migrate:
+  enabled: true
+
+openfga:
+  enabled: true
+  datastore:
+    # Secret key `uri`: postgres://lumewarp:<password>@lumewarp-postgres:5432/openfga?sslmode=disable
+    uriSecret: lumewarp-openfga-datastore
+    # A Job here (not an init container): OpenFGA's pods wait for it to complete.
+    migrationType: job
   migrate:
-    enabled: true
+    extraInitContainers:
+      - name: wait-for-postgres
+        image: postgres:17.12-alpine
+        command: [sh, -c, "until pg_isready -h lumewarp-postgres -p 5432; do sleep 2; done"]
 
-gateway:
-  replicaCount: 1
-  token:
-    secretName: lumewarp-gateway
-    key: token
-  persistence:
+lumewarp:
+  controlPlane:
+    databaseUrl:
+      # Key `database-url`: postgresql+asyncpg://lumewarp:<password>@lumewarp-postgres:5432/lumewarp
+      secretName: lumewarp-database
+      key: database-url
+    authz:
+      backend: openfga
+  gateway:
+    replicaCount: 1
+    token:
+      # Created after bootstrap (see docs/operations/kubernetes.md); the gateway waits for it.
+      secretName: lumewarp-gateway
+      key: token
+    persistence:
+      enabled: false
+  valkey:
     enabled: false
-
-valkey:
-  enabled: false
-
-monitoring:
-  serviceMonitor:
-    enabled: false
-  prometheusRule:
-    enabled: false
-  grafanaDashboards:
-    enabled: false
+  monitoring:
+    serviceMonitor:
+      enabled: false
+    prometheusRule:
+      enabled: false
+    grafanaDashboards:
+      enabled: false

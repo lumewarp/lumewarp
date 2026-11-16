@@ -17,3 +17,17 @@ data:
       shutdown_grace_ms: 25000
       header_read_timeout_ms: 30000
       body_read_timeout_ms: 30000
+---
+# Evaluation and small installs only: one pod, no replication, no backups.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lumewarp-postgres-init
+  labels:
+    app.kubernetes.io/name: lumewarp-stack
+    app.kubernetes.io/instance: lumewarp
+    app.kubernetes.io/component: postgres
+data:
+  # Runs once, on an empty data directory: the database OpenFGA uses when openfga.enabled.
+  10-openfga.sql: |
+    CREATE DATABASE openfga;
