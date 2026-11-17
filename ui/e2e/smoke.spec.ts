@@ -263,7 +263,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await expect(page.getByRole("alert")).toBeVisible();
 
   await login(page, BREAK_GLASS);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
   await expect(page.getByTestId("principal")).toContainText("break-glass");
   await expect(page.getByRole("link", { name: "Organizations" })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Projects" })).toHaveCount(0);
@@ -408,7 +408,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await expect(viewerPage.getByRole("heading", { name: "My keys" })).toBeVisible();
   await expect(viewerPage).toHaveURL(/\/my-keys$/);
   await expect(viewerPage.getByRole("link", { name: "Users", exact: true })).toHaveCount(0);
-  await expect(viewerPage.getByRole("link", { name: "Overview", exact: true })).toHaveCount(0);
+  await expect(viewerPage.getByRole("link", { name: "Settings", exact: true })).toHaveCount(0);
   await viewerPage.goto("/users");
   await expect(viewerPage.getByRole("heading", { name: "You do not have access to this page" })).toBeVisible();
   await expect(viewerPage.getByTestId("state-error")).toHaveCount(0);
@@ -470,10 +470,11 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await confirmDialog(viewerPage).getByRole("button", { name: "Revoke" }).click();
   await expect(viewerPage.locator("tr", { hasText: "personal-key" }).getByText("Revoked")).toBeVisible();
 
-  await viewerPage.getByRole("link", { name: "Settings" }).click();
-  await expect(viewerPage.getByText("Research · member")).toBeVisible();
+  await viewerPage.getByTestId("principal").click();
+  await expect(viewerPage.getByTestId("session-roles").getByText("Research · member")).toBeVisible();
+  await viewerPage.keyboard.press("Escape");
   await viewerPage.getByRole("link", { name: "Usage" }).click();
-  await pick(viewerPage, "Group by", "Team × owner × key");
+  await pick(viewerPage, "Group by", "API key");
   await expect(viewerPage.getByRole("heading", { name: "Usage" })).toBeVisible();
 
   // The team view works at narrow and wide widths in both explicit themes.

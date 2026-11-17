@@ -149,14 +149,6 @@ export function useTeams() {
   });
 }
 
-export function useAllTeamKeys(teams: TeamAny[] | undefined) {
-  return useQuery({
-    queryKey: ["team-keys", teams?.map((t) => t.id)],
-    enabled: !!teams,
-    queryFn: async () => (await Promise.all(teams!.map((t) => api.teamKeys(t.id)))).flat(),
-  });
-}
-
 export function useTeamDirectory(teams: TeamAny[] | undefined, enabled = true) {
   return useQuery({
     queryKey: ["team-directory", teams?.map((t) => t.id)],

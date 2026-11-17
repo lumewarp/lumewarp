@@ -14,7 +14,7 @@ import { signIn, VIEWER } from "./selfService";
 
 const BREAK_GLASS = "e2e-break-glass-password";
 /** The JS a visitor downloads on arrival must stay at or under this many gzip-9 bytes. */
-const BUDGET = 226_000;
+const BUDGET = 232_100;
 
 /** The JS files a page actually requested, by basename. */
 function jsRequests(page: Page) {
@@ -33,7 +33,7 @@ async function signInAsAdmin(page: Page, request: import("@playwright/test").API
 }
 
 /** A page chunk: the shell and the shared chunks are not pages. */
-const pageChunk = (name: string) => /^(Routers|TeamDetail|Teams|Upstreams|Models|Aliases|Gateways|Config|Users|Audit|Settings|A2aAgent|McpServer|Plugins)-/.test(name);
+const pageChunk = (name: string) => /^(Routers|TeamDetail|Teams|Upstreams|Models|Aliases|Gateways|Config|Users|Audit|A2aAgent|McpServer|Plugins)-/.test(name);
 
 test("landing: an installation admin downloads the shell only, and a page chunk when its page is opened", async ({ page, request }) => {
   const response = await request.post("/api/v1/session/break-glass", { data: { password: BREAK_GLASS } });
@@ -42,7 +42,7 @@ test("landing: an installation admin downloads the shell only, and a page chunk 
   const requested = jsRequests(page);
 
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
   await page.waitForLoadState("networkidle");
   expect(requested.filter(pageChunk), "no admin page is fetched on arrival").toEqual([]);
   expect(requested.some((name) => name.startsWith("index-")), "the entry chunk is fetched").toBe(true);

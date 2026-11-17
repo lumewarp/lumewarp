@@ -48,7 +48,7 @@ PAT_SCHEME = HTTPBearer(
     scheme_name="PersonalAccessToken",
     bearerFormat="lwp-",
     description=(
-        "A personal access token (`lwp-…`), created under Settings in the Admin UI or with "
+        "A personal access token (`lwp-…`), created under My keys in the Admin UI or with "
         "`POST /api/v1/users/me/tokens`. Virtual API keys (`lw-…`) and gateway tokens "
         "(`lwg-…`) do not authenticate here."
     ),

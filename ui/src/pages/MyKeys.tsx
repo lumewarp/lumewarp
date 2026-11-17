@@ -5,7 +5,7 @@ import { lazy, Suspense, useState, type ComponentProps, type ReactNode } from "r
 import { api, type Key, type Me } from "../api";
 import { Badge, fmtDate, fmtUsd, InheritedBadge, KeyBadge, ModelPill, PageHeader, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
-import { IconAction } from "../components/RowActions";
+import { CreateButton, IconAction } from "../components/RowActions";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
 import { blankKeyLimits, KeyLimitFields, keyLimitsBody, type KeyLimitValues } from "../components/KeyLimits";
 import { DataTable } from "../components/Table";
@@ -17,6 +17,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/toolti
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { HelpTip } from "../components/ui/help-tip";
 import { useAction, useCan, useMe, useMut, useOwnKeys, useSecretMut } from "../hooks";
+import { runTokenSecretMutation } from "../lib/keySecret";
 import { useShowSecret } from "../components/SecretProvider";
 import { AuthzTemporary, BreakGlassNoKeys, CheckFailed, PageLoading } from "./Access";
 import { blankKeyModels, KeyModels, keyModelsBody, type KeyModelState } from "../components/keyModels";
@@ -115,6 +116,7 @@ export function MyKeys() {
           />
         </>
       )}
+      {!me.data?.authz_unavailable && <PersonalAccessTokens />}
     </>
   );
 }
@@ -913,5 +915,54 @@ function MyUsage({ teams, userId }: { teams: Team[]; userId: string }) {
         ]}
       />
     </section>
+  );
+}
+
+function PersonalAccessTokens() {
+  const me = useMe();
+  const list = useQuery({ queryKey: ["tokens"], queryFn: () => api.tokens(), enabled: me.data?.kind !== "break_glass" && !!me.data?.user_id });
+  const showSecret = useShowSecret();
+  const [creating, setCreating] = useState(false);
+  const [revoking, setRevoking] = useState<string | null>(null);
+  const form = useForm({ name: "" }, { name: required("Name") });
+  const create = useMut((name: string) =>
+    runTokenSecretMutation(() => api.createToken({ name }), (value) => showSecret({ value, title: "Token created" })),
+  );
+  const revoke = useMut((id: string) => api.revokeToken(id), "Token revoked");
+
+  if (me.data && !me.data.user_id) return <><h2 className="mt-6">Personal access tokens</h2><p className="text-muted-foreground">The break-glass session is not tied to a user, so it has no personal access tokens.</p></>;
+  return (
+    <>
+      <h2 className="mt-6">Personal access tokens</h2>
+      <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
+        <CreateButton
+          onClick={() => {
+            form.reset();
+            setCreating(true);
+          }}
+        >
+          New token
+        </CreateButton>
+      </div>
+      <DataTable
+        rows={list.data}
+        loading={list.isPending}
+        error={list.error}
+        onRetry={() => void list.refetch()}
+        rowKey={(r) => r.id}
+        empty="No tokens."
+        columns={[
+          { key: "name", header: "Name", cell: (r) => (<><strong>{r.name}</strong> <code className="text-muted-foreground">{r.display_prefix}…</code></>) },
+          { key: "created", header: "Created", cell: (r) => fmtDate(r.created_at) },
+          { key: "expires", header: "Expires", cell: (r) => fmtDate(r.expires_at) },
+          { key: "used", header: "Last used", cell: (r) => fmtDate(r.last_used_at) },
+          { key: "actions", header: "", cell: (r) => (r.revoked_at ? <Badge>Revoked</Badge> : <div className="flex justify-end gap-1.5 whitespace-nowrap"><Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={() => setRevoking(r.id)}>Revoke</Button></div>) },
+        ]}
+      />
+      <FormDialog open={creating} title="New personal access token" submitLabel="Create token" onClose={() => setCreating(false)} onSubmit={() => (form.validate() ? form.run(() => create.mutateAsync(form.values.name)) : false)}>
+        <TextField label="Name" value={form.values.name} onChange={(v) => form.set("name", v)} error={form.errors.name} autoFocus placeholder="laptop" />
+      </FormDialog>
+      <ConfirmDialog open={!!revoking} title="Revoke token" confirmLabel="Revoke" message="Anything using this token stops working immediately." onConfirm={() => revoke.mutateAsync(revoking!)} onClose={() => setRevoking(null)} />
+    </>
   );
 }

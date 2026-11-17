@@ -11,7 +11,6 @@ import {
   Layers,
   History,
   KeyRound,
-  LayoutDashboard,
   ListOrdered,
   ChevronDown,
   LogOut,
@@ -25,7 +24,6 @@ import {
   Route,
   ScrollText,
   Server,
-  Settings,
   ShieldCheck,
   Sun,
   Users,
@@ -78,7 +76,6 @@ const NAV: { group: string | null; items: NavItem[] }[] = [
     items: [
       { to: "/my-keys", label: "My keys", icon: KeyRound },
       { to: "/playground", label: "Playground", icon: MessageSquare, noBreakGlass: true },
-      { to: "/", label: "Overview", icon: LayoutDashboard, access: "teamAdmin" },
     ],
   },
   {
@@ -120,7 +117,6 @@ const NAV: { group: string | null; items: NavItem[] }[] = [
       { to: "/gateways", label: "Gateways", icon: Radio, access: "installationAdmin" },
       { to: "/plugins", label: "Plugins", icon: Plug, access: "installationAdmin" },
       { to: "/config", label: "Config versions", icon: History, access: "installationAdmin" },
-      { to: "/settings", label: "Settings", icon: Settings },
     ],
   },
 ];
@@ -212,7 +208,7 @@ function NavSidebar({ installationAdmin, orgAdmin, teamAdmin, breakGlass }: { in
                             asChild
                             className="text-sidebar-foreground/80 data-[status=active]:bg-sidebar-primary data-[status=active]:text-sidebar-primary-foreground data-[status=active]:hover:bg-sidebar-primary data-[status=active]:hover:text-sidebar-primary-foreground"
                           >
-                            <Link to={n.to} title={collapsed ? n.label : undefined} activeProps={{ "aria-current": "page" }} activeOptions={{ exact: n.to === "/" }} onClick={() => setOpenMobile(false)}>
+                            <Link to={n.to} title={collapsed ? n.label : undefined} activeProps={{ "aria-current": "page" }} onClick={() => setOpenMobile(false)}>
                               <Icon aria-hidden="true" />
                               <span>{n.label}</span>
                             </Link>
@@ -254,6 +250,26 @@ function AccountMenu({ me, theme, onTheme, onSignOut }: { me: Me | undefined; th
             <span className="truncate">{name}</span>
             {me.email && me.email !== name && <span className="truncate text-xs font-normal text-muted-foreground">{me.email}</span>}
           </DropdownMenuLabel>
+        )}
+        {me && (
+          <div className="flex flex-wrap gap-1 px-2 pb-1.5" data-testid="session-roles">
+            {me.installation_role && <Badge tone="info">{me.installation_role === "proxy_admin" ? "proxy admin" : "installation admin"}</Badge>}
+            {!me.installation_role &&
+              me.admin_orgs?.map((org) => (
+                <Badge key={org.id} tone="info">
+                  {org.name} · org admin
+                </Badge>
+              ))}
+            {/* Direct memberships only: inherited teams follow from the roles above. */}
+            {me.teams
+              .filter((team) => team.direct)
+              .map((team) => (
+                <Badge key={team.team_id} tone="info">
+                  {team.team_name} · {team.role}
+                </Badge>
+              ))}
+            {!me.is_admin && !me.admin_orgs?.length && me.teams.length === 0 && <span className="text-xs text-muted-foreground">No team memberships.</span>}
+          </div>
         )}
         <DropdownMenuSeparator />
         <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Theme</DropdownMenuLabel>

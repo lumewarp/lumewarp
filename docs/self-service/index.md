@@ -54,7 +54,7 @@ Rotating again during the grace ends the older secret immediately.
 
 ## Personal access tokens
 
-To script the management API, create a personal access token (`lwp-…`) under **Settings**.
+To script the management API, create a personal access token (`lwp-…`) under **Personal access tokens** at the bottom of **My keys**.
 It acts as you, with your roles. It does not call models; that is what API keys are for.
 
 ## Limits on these actions

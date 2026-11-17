@@ -481,7 +481,21 @@ test("a user on no team sees an empty state, not an empty table", async ({ page 
   await expect(page).toHaveURL(/\/my-keys$/);
   await expect(page.getByTestId("no-teams")).toContainText("Ask an administrator to add you to a team");
   await expect(page.getByRole("table")).toHaveCount(0);
-  await expect(page.getByRole("link", { name: "Overview", exact: true })).toHaveCount(0);
+  await expect(page.getByText("No tokens.")).toBeVisible();
+});
+
+test("personal access tokens are created and revoked from My keys", async ({ page }) => {
+  await signIn(page, OUTSIDER, "/my-keys");
+  await expect(page.getByRole("heading", { name: "Personal access tokens" })).toBeVisible();
+  await page.getByRole("button", { name: "New token" }).click();
+  await page.getByRole("dialog").getByLabel("Name").fill("s8-pat");
+  await page.getByRole("dialog").getByRole("button", { name: "Create token" }).click();
+  await expect(page.getByTestId("secret-value")).toBeVisible();
+  await page.getByRole("button", { name: /saved it/ }).click();
+  const row = page.locator("tr", { hasText: "s8-pat" });
+  await row.getByRole("button", { name: "Revoke" }).click();
+  await confirmDialog(page).getByRole("button", { name: "Revoke" }).click();
+  await expect(row.getByText("Revoked")).toBeVisible();
 });
 
 test("the emergency session has its own text, not the ask-an-admin state", async ({ page, request }) => {
@@ -501,7 +515,7 @@ test("a team admin's own keys rotate and revoke; the team page lists every key",
   await memberKey(browser, VIEWER, team.id, "s8-admin-other");
 
   await signIn(page, TEAM_ADMIN, "/");
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
   const nav = page.getByRole("navigation", { name: "Main" });
   await expect(nav.getByRole("link", { name: "Keys", exact: true })).toHaveCount(0);
   await page.goto("/my-keys");
