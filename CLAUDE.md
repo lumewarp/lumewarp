@@ -7,7 +7,7 @@ The owner, Andy, writes in Traditional Chinese — reply to him in Traditional C
 ## Layout (monorepo)
 
 - `gateway/` — data plane, Rust (tokio, hyper, rustls, arc-swap). Cargo workspace. `gateway/plugins/` holds the example WASM plugins (`router/`, `auth/`, `a2a-middleware/`) and `build.sh`.
-- `control-plane/` — Python 3.12+, FastAPI, SQLAlchemy + Alembic (one squashed baseline migration; Lumewarp has never been deployed, so keep no upgrade path), Authlib, grpcio. Managed with uv.
+- `control-plane/` — Python 3.12+, FastAPI, SQLAlchemy + Alembic, Authlib, grpcio. Managed with uv.
 - `ui/` — Admin UI, React + Vite static SPA (TanStack Query/Router), components are shadcn/ui on Radix. Built output is served by the control plane; no Node at runtime. `pnpm check` runs the type check and `scripts/check-shadcn.mjs` (no legacy classes, no native elements or Radix imports outside `components/ui/`, no `@layer components`; no allowlist), and CI runs Playwright.
   - Help text: static help goes in a `hint` prop, which every field, `Section`, `EditPage` and `PageHeader` renders as a "?" tooltip, never inline. Keep only help that changes what is entered or warns about a non-obvious consequence (a bound, what empty means, a secret shown once), in one sentence and without examples ("e.g.", "such as"). Drop text that restates the label or describes the page. Live text derived from state (a formatted value, a loading or fetch error, what an empty value resolves to) is a field's `note` and stays visible; errors, empty states and confirmations stay inline. A toggle that turns a settings group on or off is a switch: on an EditPage it is the `Section`'s `toggle` (at the right of the header, with buttons such as Test now in `actions` beside it), elsewhere a `SwitchField`; the group's fields show only while it is on. `CheckField` is for one-off choices.
 - `proto/` — protobuf schema for the config snapshot and the config-stream gRPC service. Single source of truth for types on both sides.
@@ -23,7 +23,8 @@ The owner, Andy, writes in Traditional Chinese — reply to him in Traditional C
 3. **Providers: OpenAI-compatible only.** Upstreams are vLLM and OpenAI (plus any OpenAI-compatible endpoint). Do not add translation layers for other providers. Pass through unknown request fields (e.g. vLLM `extra_body`, guided decoding) untouched.
 4. **Config is an immutable versioned snapshot** pushed over a gRPC stream (full, then deltas; ACK/NACK). Gateway swaps atomically and persists the last good snapshot to disk so it can boot without the control plane. Gateway also supports a standalone YAML mode with the same schema.
 5. **Observability is a feature, not an afterthought.** Every new gateway path gets Prometheus metrics (`lumewarp_*`, see the table in `docs/architecture.md`) and OTel spans. No API-key-level labels on metrics. Never log prompts/responses by default.
-6. **Performance claims need numbers.** Any change on the gateway request path must run the `bench/` suite; don't regress p99 overhead.
+6. **The database migrates.** From v0.2.1 on, every release upgrades an existing control-plane database in place: the baseline `20261106_0001` is frozen as the v0.2.1 schema, and every schema change is a new Alembic revision that keeps existing rows (backfill new required columns, never drop data without a decision from Andy). Do not edit a migration that has shipped in a release. A test upgrades a database seeded at the previous revision. Downgrades are not supported; roll back by restoring a database backup.
+7. **Performance claims need numbers.** Any change on the gateway request path must run the `bench/` suite; don't regress p99 overhead.
 
 ## Current state
 
