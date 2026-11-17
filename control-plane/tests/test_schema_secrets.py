@@ -66,6 +66,8 @@ CLASSIFIED: dict[tuple[str, str], ColumnClass] = {
     ("audit_log", "resource_type"): ColumnClass.PUBLIC,
     ("catalog_name_history", "old_name"): ColumnClass.PUBLIC,
     ("catalog_names", "name"): ColumnClass.PUBLIC,
+    ("model_groups", "description"): ColumnClass.PUBLIC,
+    ("model_groups", "name"): ColumnClass.PUBLIC,
     ("config_outbox", "last_error"): ColumnClass.ERROR_CLASS,
     ("config_outbox", "reason"): ColumnClass.PUBLIC,
     ("config_outbox", "scope"): ColumnClass.PUBLIC,
