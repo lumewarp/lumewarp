@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 
 import { api, type Key, type Schemas } from "../api";
-import { SecretOnce } from "../components/Bits";
 import { Dialog } from "../components/Dialog";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
 import { KeyLimitFields, keyLimitsBody, keyLimitsFrom, type KeyLimitCap, type KeyLimitValues } from "../components/KeyLimits";
@@ -10,40 +9,6 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { useCan, useMut, useSecretMut } from "../hooks";
 import { expiryFromDay, fmtLifetime, lastExpiryDay, localDayOf, refusalText, rotationConfirmation } from "./keyText";
-
-/** The secret is in a dialog's children only while `secret` is set; closing drops it from React state. */
-export function SecretDialog({
-  secret,
-  title,
-  note,
-  onClose,
-}: {
-  secret: string | null;
-  title: string;
-  note?: string | null;
-  onClose: () => void;
-}) {
-  return (
-    <Dialog
-      open={!!secret}
-      title={title}
-      onClose={onClose}
-      dismissible={false}
-      footer={<Button onClick={onClose}>I’ve saved it</Button>}
-    >
-      {secret && (
-        <>
-          <SecretOnce key={secret} secret={secret} />
-          {note && (
-            <p className="mt-3 text-sm text-muted-foreground" data-testid="secret-note">
-              {note}
-            </p>
-          )}
-        </>
-      )}
-    </Dialog>
-  );
-}
 
 type EditValues = KeyLimitValues & { name: string; expires: string; models: KeyModelState };
 

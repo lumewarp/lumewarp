@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { BanIcon, BotIcon, BoxesIcon, CableIcon, ChevronDownIcon, ChevronRightIcon, PauseIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { lazy, Suspense, useState, type ComponentProps, type ReactNode } from "react";
 
 import { api, type Key, type Me } from "../api";
 import { Badge, fmtDate, fmtUsd, InheritedBadge, KeyBadge, ModelPill, PageHeader, SuspendedReason } from "../components/Bits";
@@ -19,8 +19,27 @@ import { HelpTip } from "../components/ui/help-tip";
 import { useAction, useCan, useMe, useMut, useOwnKeys, useSecretMut } from "../hooks";
 import { useShowSecret } from "../components/SecretProvider";
 import { AuthzTemporary, BreakGlassNoKeys, CheckFailed, PageLoading } from "./Access";
-import { blankKeyModels, KeyModelPicker, KeyModels, keyModelsBody, type KeyModelState } from "../components/PermissionPicker";
-import { KeyEditDialog, RotateKeyDialog } from "./KeyDialogs";
+import { blankKeyModels, KeyModels, keyModelsBody, type KeyModelState } from "../components/keyModels";
+
+// The key forms and the model picker are a lazy chunk: this page ships in the entry chunk.
+const LazyKeyModelPicker = lazy(() => import("../components/PermissionPicker").then((m) => ({ default: m.KeyModelPicker })));
+const LazyKeyEditDialog = lazy(() => import("./KeyDialogs").then((m) => ({ default: m.KeyEditDialog })));
+const LazyRotateKeyDialog = lazy(() => import("./KeyDialogs").then((m) => ({ default: m.RotateKeyDialog })));
+const KeyModelPicker = (props: ComponentProps<typeof LazyKeyModelPicker>) => (
+  <Suspense fallback={null}>
+    <LazyKeyModelPicker {...props} />
+  </Suspense>
+);
+const KeyEditDialog = (props: ComponentProps<typeof LazyKeyEditDialog>) => (
+  <Suspense fallback={null}>
+    <LazyKeyEditDialog {...props} />
+  </Suspense>
+);
+const RotateKeyDialog = (props: ComponentProps<typeof LazyRotateKeyDialog>) => (
+  <Suspense fallback={null}>
+    <LazyRotateKeyDialog {...props} />
+  </Suspense>
+);
 import {
   expiryFromDay,
   fmtLifetime,

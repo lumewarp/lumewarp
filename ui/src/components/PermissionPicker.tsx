@@ -3,15 +3,11 @@ import { useMemo } from "react";
 import type { ModelAccess, ModelGroup } from "../api";
 import { useCatalog, useModelGroups } from "../hooks";
 import { CatalogMultiSelect, type PickerGroup } from "./CatalogPicker";
+import type { ModelGrant } from "./keyModels";
 import { HelpTip } from "./ui/help-tip";
 import { Label } from "./ui/label";
 import { RadioGroup, RadioGroupItem } from "./ui/radio-group";
 
-/** Granted names and granted groups, kept apart in the API and shown in one list. */
-export interface ModelGrant {
-  names: string[];
-  groups: string[];
-}
 
 /**
  * The picker's groups and "via <group>" map for one level. A group with any member outside `scope` is
@@ -124,18 +120,6 @@ export function PermissionPicker({ isTeam, access, onAccess, selected, onSelecte
   );
 }
 
-export type KeyModelState = { access: "inherit" | "list"; grant: ModelGrant };
-export const blankKeyModels = (): KeyModelState => ({ access: "inherit", grant: { names: [], groups: [] } });
-export const keyModelsFrom = (key: { model_access: ModelAccess; allowed_models: string[]; allowed_groups: string[] }): KeyModelState => ({
-  access: key.model_access === "list" ? "list" : "inherit",
-  grant: { names: [...key.allowed_models], groups: [...key.allowed_groups] },
-});
-/** Request fields for a key; lists are only sent with "list" (the API refuses them on inherit). */
-export const keyModelsBody = (state: KeyModelState) =>
-  state.access === "list"
-    ? { model_access: "list" as const, allowed_models: state.grant.names, allowed_groups: state.grant.groups }
-    : { model_access: "inherit" as const };
-
 /** The key's own models: inherit the owner's, or narrow to a list (names and groups) within the owner's set. */
 export function KeyModelPicker({
   access,
@@ -201,14 +185,4 @@ export function KeyModelPicker({
   );
 }
 
-/** What a key can call: the owner's models for an inheriting key, else its grants within the owner's set. */
-export function KeyModels({ keyRef }: { keyRef: { model_access: ModelAccess; granted_models: string[]; owner_models?: string[] | null } }) {
-  if (keyRef.model_access !== "list") return <span className="text-muted-foreground">Inherits owner's</span>;
-  const owner = keyRef.owner_models ? new Set(keyRef.owner_models) : null;
-  const names = keyRef.granted_models.filter((name) => !owner || owner.has(name));
-  return (
-    <span title={names.join(", ")} data-testid="key-models">
-      {names.length} model{names.length === 1 ? "" : "s"}
-    </span>
-  );
-}
+export { blankKeyModels, KeyModels, keyModelsBody, keyModelsFrom, type KeyModelState, type ModelGrant } from "./keyModels";

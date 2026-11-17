@@ -1,13 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState, type ComponentProps } from "react";
 import { api, type UsageQuery, type UsageRow } from "../api";
 import { Badge, fmtNumber as n, fmtUsd, PageHeader, TypeBadge } from "../components/Bits";
 import { FilterBar } from "../components/FilterBar";
 import { SelectField, TextField } from "../components/Form";
 import { UsageChart } from "../components/UsageChart";
 import { Card } from "../components/ui/card";
-import { CatalogFilter } from "../components/CatalogPicker";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { DataTable, type Column } from "../components/Table";
@@ -18,6 +17,14 @@ import { useUsageMetric } from "../lib/usageMetric";
 import { useCan, useMe, useModels, useNames, useTeamDirectory, useTeams } from "../hooks";
 import { ENDPOINTS, endpointLabel } from "../lib/endpoints";
 import { KeyPill } from "../components/KeyPill";
+
+// The catalog picker is a lazy chunk: this page ships in the entry chunk.
+const LazyCatalogFilter = lazy(() => import("../components/CatalogPicker").then((m) => ({ default: m.CatalogFilter })));
+const CatalogFilter = (props: ComponentProps<typeof LazyCatalogFilter>) => (
+  <Suspense fallback={null}>
+    <LazyCatalogFilter {...props} />
+  </Suspense>
+);
 
 /** `value`, once it has stopped changing for `ms`: typed filters do not query on every keystroke. */
 function useDebounced<T>(value: T, ms: number): T {

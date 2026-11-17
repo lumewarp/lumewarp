@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { SecretDialog } from "../pages/KeyDialogs";
+import { SecretDialog } from "../pages/SecretDialog";
 
 export type PendingSecret = { value: string; title: string; note?: string };
 type ShowSecret = (secret: PendingSecret) => void;

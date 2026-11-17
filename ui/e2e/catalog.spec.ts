@@ -115,7 +115,7 @@ test("models, aliases and routers: create through the forms, search by upstream 
 
   // --- Aliases (a new page in the Routing group)
   const nav = page.getByRole("navigation", { name: "Main" });
-  await expect(nav.getByRole("group", { name: "Routing" }).getByRole("link")).toHaveText(["Upstreams", "Models", "Aliases", "Routers"]);
+  await expect(nav.getByRole("group", { name: "Routing" }).getByRole("link")).toHaveText(["Upstreams", "Models", "Aliases", "Model groups", "Routers"]);
   await nav.getByRole("link", { name: "Aliases" }).click();
   await page.getByRole("button", { name: "New alias" }).click();
   await page.locator("#main").getByLabel("Name").fill("cat-alias");
