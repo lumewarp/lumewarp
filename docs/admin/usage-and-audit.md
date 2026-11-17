@@ -27,6 +27,8 @@ Visibility follows the caller's role:
   falls back to the narrower rule: in a team the member does not administer they see only
   their own user-owned keys. Other members' keys and owners are never split out for a
   plain member, whatever they ask for.
+  In a team of two, the team total minus the member's own still tells them the other
+  member's total; no name or id is shown.
 - A team admin (including an org admin by inheritance) and an installation admin keep the
   whole-team view, including owner and key grouping and filtering.
 - An installation admin sees every team as well.

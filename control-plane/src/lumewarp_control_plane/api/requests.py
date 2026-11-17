@@ -235,8 +235,8 @@ async def list_requests(
         candidates = set(await session.scalars(select(Team.id)))
         # A narrowing filter already proved TEAM_READ; otherwise limit to readable teams.
         readable = None if scoped_team is not None else await authz.readable_teams(candidates)
-        # The same server-side predicate as `/usage`: a plain member only ever sees rows of
-        # their own user-owned keys, whatever filters or grouping asked for.
+        # Narrower than `/usage`, which sums whole teams for a plain member: requests are
+        # per-request, so a plain member only ever sees rows of their own user-owned keys.
         admin_teams = await authz.admin_teams(candidates)
     if readable is not None and not readable:
         return Page[RequestOut](items=[], next_cursor=None)

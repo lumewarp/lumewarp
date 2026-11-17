@@ -116,7 +116,7 @@ export function MyKeys() {
           />
         </>
       )}
-      {!me.data?.authz_unavailable && <PersonalAccessTokens />}
+      <PersonalAccessTokens />
     </>
   );
 }
