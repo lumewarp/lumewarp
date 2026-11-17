@@ -988,7 +988,9 @@ test("tooltip: measured, not estimated, so two-line names stay inside a 390 px p
     return { tip, plot, toggle, total };
   };
   // It fits the plot, the total stays visible, and nothing covers the table's toggle.
+  // Hover again on each poll: the leaderboards below load late and can move the page under a stale hover.
   await expect.poll(async () => {
+    await daySlots(page).last().hover();
     const { tip, plot } = await geometry();
     return Math.round(tip.y + tip.height) <= Math.round(plot.y + plot.height);
   }).toBe(true);
