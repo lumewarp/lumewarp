@@ -67,7 +67,8 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 | `LUMEWARP_GRPC_BIND` | `127.0.0.1:50051` | Gateway-facing gRPC bind address. |
 | `LUMEWARP_METRICS_BIND` | `127.0.0.1:9465` | Prometheus metrics listener started by `serve` (`host:port`); empty string disables it. Not the admin API port, and not 9464 (the gateway admin listener's default). A bind failure aborts startup. |
 | `LUMEWARP_GRPC_TLS_CERT_FILE` / `LUMEWARP_GRPC_TLS_KEY_FILE` | unset | PEM certificate chain and key. Both or neither; unset means plaintext gRPC. |
-| `LUMEWARP_INITIAL_ADMIN_EMAIL` | unset | Email that becomes `proxy_admin` on its first verified OIDC login while no proxy_admin exists. Unset leaves break-glass as the only way to create the first one. |
+| `LUMEWARP_INITIAL_ADMIN_EMAIL` | unset | Email that becomes `proxy_admin` on its first OIDC login while no proxy_admin exists. Unset leaves break-glass as the only way to create the first one. |
+| `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED` | `true` | Require `email_verified: true` before an OIDC email links an existing account, creates a user or bootstraps the initial admin. `false` trusts the claim and startup logs a warning; see [Sign-in and authorization](./identity.md#sso-login-oidc). |
 | `LUMEWARP_BREAK_GLASS_PASSWORD_HASH` | unset | Argon2id hash of the emergency password (`lumewarp-control-plane hash-password`); an invalid hash aborts startup. See [Emergency access](./identity.md#emergency-access-break-glass). |
 | `LUMEWARP_BREAK_GLASS_PASSWORD` | unset | Plaintext emergency password; refused unless `LUMEWARP_DEV_MODE=true`. The hash wins if both are set. |
 | `LUMEWARP_DEV_MODE` | `false` | Development only: allows the plaintext password above. |

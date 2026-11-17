@@ -231,6 +231,11 @@ def create_app(
         log.warning("Break-glass password login is enabled")
     if settings.break_glass_password:
         log.warning("Break-glass uses a plaintext environment password; use a hash in production")
+    if settings.oidc_issuer and not settings.oidc_require_email_verified:
+        log.warning(
+            "LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED=false: OIDC emails are trusted without "
+            "email_verified"
+        )
     app.state.metrics = Metrics()
     for reason in usage.SKIP_REASONS:
         app.state.metrics.usage_skipped.labels(reason)

@@ -37,8 +37,9 @@ class Settings(BaseSettings):
     grpc_tls_cert_file: str | None = None
     grpc_tls_key_file: str | None = None
 
-    # The email that becomes proxy_admin on its first verified login while no proxy_admin
-    # exists. Unset = only break-glass can create the first one.
+    # The email that becomes proxy_admin on its first login while no proxy_admin exists
+    # (`email_verified` is required unless LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED=false).
+    # Unset = only break-glass can create the first one.
     initial_admin_email: str | None = None
     break_glass_password_hash: SecretStr | None = None
     break_glass_password: SecretStr | None = None
@@ -101,8 +102,12 @@ class Settings(BaseSettings):
     # URI (<public_url>/api/v1/session/oidc/callback). Unset = derived from the request.
     public_url: str | None = None
     # Create a user with no grants on first SSO login. Off = only pre-created users
-    # (matched by verified email on first login) may sign in.
+    # (matched by email on first login) may sign in.
     oidc_jit_users: bool = True
+    # Require `email_verified: true` before the email claim links an account or creates one.
+    # Off trusts the IdP's word: anyone who controls an unverified address there can take
+    # over the matching Lumewarp account. Startup logs one warning; see docs/operations/identity.md.
+    oidc_require_email_verified: bool = True
     session_ttl_seconds: int = Field(default=12 * 3600, ge=60)
     # `Secure` on the session cookie. Turn off only for plain-http dev on a non-localhost.
     session_cookie_secure: bool = True

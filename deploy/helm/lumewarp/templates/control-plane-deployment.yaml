@@ -113,6 +113,8 @@ spec:
             {{- if $oidc.issuer }}
             - name: LUMEWARP_OIDC_ISSUER
               value: {{ $oidc.issuer | quote }}
+            - name: LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED
+              value: {{ $oidc.requireEmailVerified | quote }}
             {{- end }}
             {{- if $oidc.clientId }}
             - name: LUMEWARP_OIDC_CLIENT_ID

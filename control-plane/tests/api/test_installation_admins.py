@@ -269,6 +269,45 @@ async def test_only_a_matching_verified_configured_email_gets_a_role(
     assert await proxy_rows(roles_engine) == []
 
 
+@pytest.mark.parametrize("verified", [False, None])
+async def test_a_configured_email_bootstraps_without_verified_when_not_required(
+    roles_app, roles_client, roles_idp, roles_engine: AsyncEngine, monkeypatch, verified
+) -> None:
+    email = f"unverified-initial-{suffix()}@example.com"
+    monkeypatch.setattr(roles_app.state.settings, "oidc_require_email_verified", False)
+    monkeypatch.setattr(roles_app.state.settings, "initial_admin_email", email.upper())
+    if verified is None:
+        del roles_idp.claims["email_verified"]
+    else:
+        roles_idp.claims["email_verified"] = verified
+    response = sign_in(roles_client, roles_idp, email=email)
+    assert response.headers["location"] == "/"
+    me = roles_client.get("/api/v1/users/me").json()
+    assert (me["is_admin"], me["installation_role"]) == (True, "proxy_admin")
+    assert await proxy_rows(roles_engine) == [uuid.UUID(me["user_id"])]
+    assert len(await audit_rows(roles_engine, "installation_admin.bootstrap")) == 1
+
+
+@pytest.mark.parametrize("verified", [False, None])
+async def test_an_unverified_login_still_needs_the_configured_email_to_bootstrap(
+    roles_app, roles_client, roles_idp, roles_engine: AsyncEngine, monkeypatch, verified
+) -> None:
+    email = f"candidate-{suffix()}@example.com"
+    monkeypatch.setattr(roles_app.state.settings, "oidc_require_email_verified", False)
+    monkeypatch.setattr(
+        roles_app.state.settings, "initial_admin_email", f"other-{suffix()}@example.com"
+    )
+    if verified is None:
+        del roles_idp.claims["email_verified"]
+    else:
+        roles_idp.claims["email_verified"] = verified
+    response = sign_in(roles_client, roles_idp, email=email)
+    assert response.headers["location"] == "/"
+    me = roles_client.get("/api/v1/users/me").json()
+    assert (me["is_admin"], me["installation_role"]) == (False, None)
+    assert await proxy_rows(roles_engine) == []
+
+
 async def test_jit_off_still_creates_the_initial_admin_only(
     roles_app, roles_client, roles_idp, roles_engine: AsyncEngine, monkeypatch
 ) -> None:

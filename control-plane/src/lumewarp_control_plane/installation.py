@@ -155,6 +155,15 @@ def matches_initial_admin(settings: Settings, email: str | None) -> bool:
     return bool(configured) and bool(email) and email.strip().lower() == configured.lower()
 
 
+def email_claim_trusted(claims: Mapping[str, object], settings: Settings) -> bool:
+    """Whether a login may trust the IdP's `email` claim for linking or creating a user.
+
+    `email_verified` must be exactly true unless `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED` is
+    false, which trusts the claim as it stands (startup logs a warning).
+    """
+    return not settings.oidc_require_email_verified or claims.get("email_verified") is True
+
+
 async def prepare_bootstrap_lock(
     session: AsyncSession, claims: Mapping[str, object], settings: Settings
 ) -> bool:
@@ -164,10 +173,12 @@ async def prepare_bootstrap_lock(
     User row and later bootstrap uses one order: installation lock, then the User row.
     Ordinary logins (no setting, a different claim email, or a proxy_admin already exists)
     do not take the lock. A True result means bootstrap may run; `bootstrap_initial_admin`
-    still re-checks every condition under the lock.
+    still re-checks every condition under the lock. The claim email must match the setting
+    case-insensitively; `email_verified` is required unless
+    `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED` is false.
     """
     claim_email = claims.get("email")
-    if claims.get("email_verified") is not True:
+    if not email_claim_trusted(claims, settings):
         return False
     if not isinstance(claim_email, str) or not matches_initial_admin(settings, claim_email):
         return False
@@ -187,14 +198,15 @@ async def bootstrap_initial_admin(
 ) -> bool:
     """Make `user` the proxy_admin when this login is the configured first one.
 
-    Runs inside the login transaction. The IdP email claim must be verified and match the
-    setting; the persisted user is re-read under the installation lock, so a concurrent
+    Runs inside the login transaction. The IdP email claim must match the setting
+    case-insensitively and be verified unless `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED` is
+    false; the persisted user is re-read under the installation lock, so a concurrent
     email change or deactivation that committed first is respected. `locked=True` means
     the caller already took the lock via `prepare_bootstrap_lock` before `resolve_user`.
     The partial unique index remains the invariant.
     """
     claim_email = claims.get("email")
-    if claims.get("email_verified") is not True:
+    if not email_claim_trusted(claims, settings):
         return False
     if not isinstance(claim_email, str) or not matches_initial_admin(settings, claim_email):
         return False

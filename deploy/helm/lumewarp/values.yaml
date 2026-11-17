@@ -53,6 +53,8 @@ controlPlane:
       key: secret-key
     # External base URL; the redirect URI is <publicUrl>/api/v1/session/oidc/callback.
     publicUrl: ""
+    # Require the IdP's email_verified claim before an email links or creates a user; false trusts it.
+    requireEmailVerified: true
   # Authorization backend (LUMEWARP_AUTHZ_BACKEND): builtin, openfga, http or a `lumewarp.authz` plugin name; settings of http and plugins go in extraEnv.
   authz:
     backend: builtin

@@ -26,15 +26,17 @@ credential is stored in plaintext: the OIDC nonce and PKCE verifier live only in
 encrypted login cookie, and an upstream stores only its `api_key_ref` name, a sealed key,
 or a WASM auth plugin's non-secret settings.
 
-Installation admins live in Postgres (`installation_admins`). The first verified login whose
-email matches `LUMEWARP_INITIAL_ADMIN_EMAIL` becomes the `proxy_admin`; break-glass can create
-the first one when the setting is empty, and is the recovery path afterwards. Any installation
-admin can then assign more admins. A user must have signed in through OIDC at least once before
-receiving an installation role: otherwise the identity-link protection would leave a privileged
-account unable to log in. Assign and transfer return 409 for an account with no linked identity;
-let the person sign in once first. The Admin UI manages these rows on the Users page (its Role column and row actions). An installation admin can issue a PAT for an active user with
-`POST /api/v1/users/{user_id}/tokens` using `{"name":"initial access"}` (optional
-`expires_at`). The secret is returned only on creation; issuance is audited with the
+Installation admins live in Postgres (`installation_admins`). The first login whose email
+matches `LUMEWARP_INITIAL_ADMIN_EMAIL` becomes the `proxy_admin`; the email must also pass the
+`email_verified` check below unless `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED=false`. Break-glass
+can create the first one when the setting is empty, and is the recovery path afterwards. Any
+installation admin can then assign more admins. A user must have signed in through OIDC at
+least once before receiving an installation role: otherwise the identity-link protection would
+leave a privileged account unable to log in. Assign and transfer return 409 for an account with
+no linked identity; let the person sign in once first. The Admin UI manages these rows on the
+Users page (its Role column and row actions). An installation admin can issue a PAT for an
+active user with `POST /api/v1/users/{user_id}/tokens` using `{"name":"initial access"}`
+(optional `expires_at`). The secret is returned only on creation; issuance is audited with the
 actor and target user, never the secret. Team admins cannot use this endpoint.
 
 ## SSO login (OIDC)
@@ -53,9 +55,10 @@ never come from the IdP.
 | `LUMEWARP_OIDC_ISSUER` | Issuer URL; unset disables SSO. |
 | `LUMEWARP_OIDC_CLIENT_ID`, `LUMEWARP_OIDC_CLIENT_SECRET` | Client credentials (secret optional for a public PKCE client). |
 | `LUMEWARP_OIDC_SCOPES` | Default `openid email profile`. |
-| `LUMEWARP_INITIAL_ADMIN_EMAIL` | The first verified login with this email becomes `proxy_admin` while no proxy_admin exists. Changing the setting afterwards never moves the role. |
+| `LUMEWARP_INITIAL_ADMIN_EMAIL` | The first login with this email becomes `proxy_admin` while no proxy_admin exists (it must also pass `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED`). Changing the setting afterwards never moves the role. |
 | `LUMEWARP_PUBLIC_URL` | External base URL; the redirect URI is `<public_url>/api/v1/session/oidc/callback`. |
 | `LUMEWARP_OIDC_JIT_USERS` | Create a user with no grants on first login (default true). |
+| `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED` | Require `email_verified: true` before an OIDC email links an account or creates a user (default true). See the rules below. |
 | `LUMEWARP_SESSION_TTL_SECONDS` | Absolute session lifetime (default 12 h). |
 | `LUMEWARP_SESSION_COOKIE_SECURE` | `Secure` cookie flag (default true; turn off only for plain-http dev). |
 
@@ -63,11 +66,16 @@ With the Helm chart, pass `LUMEWARP_SECRET_KEY` through `controlPlane.extraEnv` 
 `secretKeyRef`, as in the [Helm SSO
 example](./helm.md#sso-and-authorization-backend).
 
-- Users are identified by the token's `iss` + `sub`. On a first login with a verified
-  email, the identity links to an existing account with that email that
-  has no identity from this issuer yet; otherwise a new user is created (JIT, only with a
-  verified email). An account holding an installation role is never linked by email: a login
+- Users are identified by the token's `iss` + `sub`. On a first login whose email passes the
+  `email_verified` check (on by default), the identity links to an existing account with that
+  email that has no identity from this issuer yet; otherwise a new user is created (JIT, same
+  check). An account holding an installation role is never linked by email: a login
   with a new IdP identity for such an account is refused.
+- With `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED=false` the `email_verified` claim is not checked
+  at all: the email alone links an existing account, creates a JIT user and bootstraps the
+  initial admin, and startup logs a warning. **Anyone who controls an email address at the IdP
+  can take over the matching Lumewarp account**, so use it only with an IdP that does not let
+  users set unverified emails.
 - No IdP claim grants any Lumewarp role: groups and roles claims are ignored. Installation
   roles are read from Postgres on every request; org and team relations come from the
   authorization backend, which only ever answers direct relations (`RequestAuthz` applies

@@ -223,6 +223,45 @@ async def test_unverified_jit_cannot_preclaim_email(client, idp, committed, veri
     assert await committed.scalar(select(User).where(User.email == idp.claims["email"])) is None
 
 
+@pytest.mark.parametrize("verified", [False, None])
+async def test_link_existing_email_when_verified_is_not_required(client, idp, committed, verified):
+    client.app.state.settings.oidc_require_email_verified = False
+    user, _ = await user_with_token(committed, email=idp.claims["email"].upper())
+    await committed.commit()
+    if verified is None:
+        del idp.claims["email_verified"]
+    else:
+        idp.claims["email_verified"] = verified
+    idp.login(client)
+    response = idp.callback(client)
+    assert response.headers["location"] == "/"
+    info = client.get("/api/v1/session").json()
+    assert info["user"]["id"] == str(user.id)
+    assert info["user"]["is_admin"] is False
+    identity = await committed.scalar(
+        select(UserIdentity).where(UserIdentity.user_id == user.id, UserIdentity.issuer == ISSUER)
+    )
+    assert identity is not None
+
+
+@pytest.mark.parametrize("verified", [False, None])
+async def test_jit_creates_a_user_without_a_verified_email_when_not_required(
+    client, idp, committed, verified
+):
+    client.app.state.settings.oidc_require_email_verified = False
+    if verified is None:
+        del idp.claims["email_verified"]
+    else:
+        idp.claims["email_verified"] = verified
+    idp.login(client)
+    assert idp.callback(client).headers["location"] == "/"
+    info = client.get("/api/v1/session").json()
+    assert info["authenticated"] is True
+    assert info["user"]["email"] == idp.claims["email"]
+    assert info["user"]["is_admin"] is False
+    assert await committed.scalar(select(User).where(User.email == idp.claims["email"])) is not None
+
+
 @pytest.mark.parametrize("existing", ["installation_admin", "same_issuer", "other_issuer"])
 async def test_email_link_cannot_take_over_privileged_or_linked_user(
     client, idp, committed, existing

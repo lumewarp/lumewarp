@@ -436,6 +436,7 @@ the gateway take `extraEnv`. `nameOverride` and `fullnameOverride` are top-level
 | `controlPlane.oidc.issuer` / `.clientId` / `.publicUrl` | empty | OIDC sign-in; the variables render only with an `issuer`. See [SSO](#sso-and-authorization-backend). |
 | `controlPlane.oidc.clientSecret.secretName` / `.key` | empty / `client-secret` | Existing Secret with the client secret; empty for a public PKCE client. |
 | `controlPlane.oidc.secretKey.secretName` / `.key` | empty / `secret-key` | Existing Secret with `LUMEWARP_SECRET_KEY`; required with an `issuer`. |
+| `controlPlane.oidc.requireEmailVerified` | `true` | `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED`: require `email_verified` before an OIDC email links or creates a user; `false` trusts the claim. See [Sign-in and authorization](./identity.md#sso-login-oidc). |
 | `controlPlane.authz.backend` | `builtin` | `LUMEWARP_AUTHZ_BACKEND`: `builtin`, `openfga`, `http` or a plugin name. |
 | `controlPlane.authz.openfga.url` / `.store` / `.storeId` / `.modelId` / `.init` | empty / `lumewarp` / empty / empty / `false` | OpenFGA backend; needs `url` and a `store` or `storeId`. |
 | `controlPlane.authz.openfga.apiTokenSecret.name` / `.key` | empty / `api-token` | Existing Secret with OpenFGA's bearer token. |

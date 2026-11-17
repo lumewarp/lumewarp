@@ -185,7 +185,7 @@ async def resolve_user(session: AsyncSession, claims: dict, request: Request) ->
         user = await session.scalar(
             select(User).where(func.lower(User.email) == mapping.email.lower()).with_for_update()
         )
-        if claims.get("email_verified") is not True:
+        if not installation.email_claim_trusted(claims, settings):
             raise LoginDenied()
         if user is not None:
             linked = await session.scalar(
@@ -201,9 +201,10 @@ async def resolve_user(session: AsyncSession, claims: dict, request: Request) ->
                 raise LoginDenied()
         elif settings.oidc_jit_users or (
             isinstance(claim_email, str)
-            # The same conditions as the bootstrap: the verified raw claim email and the
-            # mapped email must both be the configured initial admin, and no proxy_admin
-            # may exist yet. A plugin cannot mint that account from another IdP email.
+            # The same conditions as the bootstrap: the raw claim email (verified unless
+            # LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED=false) and the mapped email must both be
+            # the configured initial admin, and no proxy_admin may exist yet. A plugin
+            # cannot mint that account from another IdP email.
             and installation.matches_initial_admin(settings, claim_email)
             and installation.matches_initial_admin(settings, mapping.email)
             and await installation.proxy_admin_id(session) is None
