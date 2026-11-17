@@ -8,27 +8,80 @@ usage events; audit answers a different question.
 
 Every request a gateway finishes becomes one usage event, reported to the control plane
 about once a second. The Usage page and `GET /api/v1/usage` aggregate them by team, owner,
-key, name, endpoint and model type. A member sees only their own keys' usage; a team admin
-sees the team's; an org admin its org's teams; an installation admin everything.
+key, called name, endpoint and model type.
+
+Only an installation admin sees where a request was served: the `model`, `upstream_model`,
+`alias` and `router` dimensions, their ids and `_missing` filters, and the `served_by`,
+`via_aliases`, `via_routers` and `upstream_model(s)` provenance. Any other caller gets
+`403` with the error code `routing_detail_forbidden` for those dimensions or filters, and
+the provenance fields are null or empty. Everyone else groups by the name the client
+called (`requested`) together with `day`, `team`, `owner`, `key`, `endpoint`, `model type`,
+`kind`, `target`, `method` and `tool`.
+
+Visibility follows the caller's role:
+
+- A plain member sees the **whole team's totals** when the query neither groups nor filters
+  by owner or key: the team's requests by called name, day, endpoint and so on are summed
+  over every key in the team, service accounts included.
+- Grouping by `owner` or `key`, or filtering by `user_id`, `service_account_id` or `key_id`,
+  falls back to the narrower rule: in a team the member does not administer they see only
+  their own user-owned keys. Other members' keys and owners are never split out for a
+  plain member, whatever they ask for.
+- A team admin (including an org admin by inheritance) and an installation admin keep the
+  whole-team view, including owner and key grouping and filtering.
+- An installation admin sees every team as well.
+
+A renamed model, alias or router appears as separate called names before and after the
+rename: usage stores the name the client sent, not the catalog's current name. The
+`requested` filter therefore selects that exact spelling.
 
 ![Usage by day, by model](/screenshots/usage.png)
 
 The filter bar matches the one on Requests: the range (both days inclusive), team, model and
 **Group by** on one row, and upstream model, alias, router, endpoint and model type under
 **More filters**, whose button counts the ones set. The MCP and A2A tabs have the range, team
-and **Group by** only.
+and **Group by** only. The routing-specific filters and group-by choices are only available
+to an installation admin.
 
 Grouped by **API key**, each key is a pill; hover or focus it for its org, team, owner or
 service account (when known), prefix and id. `GET /api/v1/usage` rows grouped by
 `key` carry `key` in the same shape as the request log's `key`.
 
 An event records the name the client called, the model that served it, the alias, router
-and fallback it went through, the number of attempts, tokens, audio duration and cost.
-Prompts and responses are never recorded. The same events back the
+and fallback it went through, the number of attempts, tokens, audio duration and cost. Only
+an installation admin sees the served model and routing chain; every other caller sees the
+called name. Prompts and responses are never recorded. The same events back the
 [request log](./requests.md), which lists one row per request with the full
 name-resolution chain; to look at one request's per-attempt detail, use its
 `x-lumewarp-request-id` in your tracing backend
 ([Metrics, alerts and tracing](../operations/observability.md)).
+
+## Leaderboard
+
+`GET /api/v1/usage/leaderboard` (`getUsageLeaderboard`) ranks the caller's readable teams by
+tokens and spend. Installation admins rank every team; everyone else only the teams they
+can read. `by` selects the board:
+
+| `by` | Ranks | Extra row fields |
+| --- | --- | --- |
+| `requested` | The names clients called, summed across the readable teams | `requested` |
+| `key` | API keys, grouped within their team | `team_id`, `key` (when readable) |
+| `owner` | Users and service accounts, grouped within their team | `team_id`, `owner_kind`, `owner_id`, `is_me` |
+
+Rows are ordered by `total_tokens` descending, then `cost_nano_usd`, and numbered from
+`rank=1`. The other query parameters are the same range (`from`, `to`, defaulting to the
+current UTC month), `team_id`, `kind` (`llm` by default) and `limit` (default 10, maximum
+50). Each row also carries `requests`, `prompt_tokens`, `completion_tokens`, `total_tokens`,
+`cost_nano_usd` and `unknown_cost_count`.
+
+An identity is named only when the caller may read it. For `by=key`, `key` is a
+[key reference](./requests.md#the-api) for an installation admin, the key's team admin, or
+the key's user owner; otherwise it is null and `label` is `Key #<rank>`. For `by=owner`,
+`owner_kind` and `owner_id` are filled for an installation admin, that team's admin, or the
+row's own owner; otherwise both are null and `label` is `Member #<rank>`. In both cases the
+unreadable key's or owner's id stays hidden, and `label` names the readable row. `is_me` is
+true only for the caller's own owner row, which is always named.
+
 
   ones absent from the state so their definitions and grants survive) and republishes an
   older version's **routing** only; keys

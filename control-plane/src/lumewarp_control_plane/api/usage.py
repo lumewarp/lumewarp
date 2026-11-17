@@ -10,6 +10,17 @@ over whole UTC months is served from the pre-aggregated `usage_totals` table, wh
 requests only: every other shape is aggregated from `usage_events`, limited to the caller's
 readable teams.
 
+Only an installation admin sees routing internals: the `model`, `upstream_model`, `alias`
+and `router` dimensions and filters, plus their `served_by`/`via_*`/`upstream_model(s)`
+provenance. Every other caller sees the called name (`requested`); asking for one of those
+dimensions or filters answers 403 `routing_detail_forbidden`.
+
+A plain member sees the totals of every readable team (the whole team) when the request
+neither groups nor filters by `owner` or `key`. Grouping by `owner`/`key`, or filtering by
+`user_id`/`service_account_id`/`key_id`, keeps the narrower predicate: in a team the caller
+does not administer, only their own user-owned keys are visible. This is what lets a member
+read team totals without splitting out another member's keys or identity.
+
 Every row carries `error_count` (requests whose outcome is `upstream_error` or `rejected`, or
 whose status is 4xx/5xx without being a client cancellation) and `total_duration_ms` (summed, so
 the mean is the sum over the requests) beside the LLM amounts: the MCP and A2A tabs read them
@@ -22,7 +33,7 @@ import base64
 import json
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Query
 from sqlalchemy import String, and_, case, cast, distinct, func, or_, select, tuple_
@@ -41,9 +52,9 @@ from lumewarp_control_plane.api.common import (
     validation_error,
 )
 from lumewarp_control_plane.api.key_refs import key_refs
-from lumewarp_control_plane.api.schemas import Page, UsageRowOut
+from lumewarp_control_plane.api.schemas import Page, UsageLeaderboardRowOut, UsageRowOut
 from lumewarp_control_plane.authz import Authz
-from lumewarp_control_plane.errors import not_found
+from lumewarp_control_plane.errors import not_found, routing_detail_forbidden
 from lumewarp_control_plane.models import (
     ApiKey,
     CatalogKind,
@@ -52,10 +63,12 @@ from lumewarp_control_plane.models import (
     ModelType,
     RequestOutcome,
     ScopeType,
+    ServiceAccount,
     Team,
     TrafficKind,
     UsageEvent,
     UsageTotal,
+    User,
 )
 
 router = APIRouter(tags=["usage"])
@@ -96,6 +109,9 @@ COLUMNS = {
     "key": ("key",),
 }
 UUID_COLUMNS = {"team", "owner_id", "key"}
+# Dimensions that name where a request was served. Only an installation admin may ask for
+# them; everyone else groups by `requested`, the name the client actually called.
+ROUTING_DIMENSIONS = frozenset({"model", "upstream_model", "alias", "router"})
 # Dimensions that are plain columns of the event: no catalog name to resolve.
 PLAIN_DIMENSIONS = frozenset({"kind", "target", "method", "tool", "endpoint", "model_type"})
 
@@ -508,6 +524,16 @@ async def get_usage(
 ) -> Page[UsageRowOut]:
     """Aggregate usage within the caller's existing team/key permission scope.
 
+    `day,requested` is the default; `requested` is the name the client called, so a renamed
+    model, alias or router appears as separate before/after called names. Only an
+    installation admin may group or filter by `model`, `upstream_model`, `alias` or `router`
+    and their ids/`_missing` variants; any other caller gets 403 `routing_detail_forbidden`
+    and never receives `served_by`, `via_aliases`, `via_routers` or `upstream_model(s)`.
+
+    A plain member gets whole-team totals when neither `owner` nor `key` is grouped and no
+    `user_id`/`service_account_id`/`key_id` filter is set. Grouping or filtering by owner or
+    key keeps the own-user-keys predicate inside teams the caller does not administer.
+
     Catalog identity uses request started_at (completion ts for old gateways).
     If no exact interval matches, a unique same-kind owner within
     LUMEWARP_USAGE_CATALOG_GRACE_SECONDS (default 300) is used. Same-kind name
@@ -530,10 +556,28 @@ async def get_usage(
     if end <= start:
         raise validation_error("to", "must be after from")
     groups = _parse_group_by(group_by)
+    is_admin = await authz.is_admin()
+    if not is_admin:
+        # Refuse before any scope lookup: a caller without routing access learns nothing
+        # about a team's routing shape, and the answer does not depend on which team exists.
+        if ROUTING_DIMENSIONS.intersection(groups):
+            raise routing_detail_forbidden()
+        routing_filters = (
+            model,
+            upstream_model,
+            alias,
+            router,
+            model_id,
+            alias_id,
+            router_id,
+            alias_missing,
+            router_missing,
+        )
+        if any(value is not None for value in routing_filters):
+            raise routing_detail_forbidden()
     scoped_team = await _check_scope_filters(
         session, authz, team_id, user_id, service_account_id, key_id
     )
-    is_admin = await authz.is_admin()
     if is_admin:
         # An installation admin reads every team; neither listing is needed.
         readable = None
@@ -542,9 +586,6 @@ async def get_usage(
         candidates = set(await session.scalars(select(Team.id)))
         # A narrowing filter already proved TEAM_READ; otherwise limit to the readable teams.
         readable = None if scoped_team is not None else await authz.readable_teams(candidates)
-        # Team admins keep whole-team views; a plain member only sees rows of their own
-        # keys. This predicate is applied server-side and cannot be widened by
-        # key_id/user_id/service_account_id/team_id filters or by grouping.
         admin_teams = await authz.admin_teams(candidates)
     use_totals = (
         is_admin
@@ -633,15 +674,213 @@ async def get_usage(
     if key_id is not None:
         filters.append(UsageEvent.key_id == key_id)
     if admin_teams is not None:
-        # Per team: administered teams keep the whole view, every other team is narrowed
-        # to the caller's own user-owned keys.
-        filters.append(
-            or_(
-                UsageEvent.team_id.in_(admin_teams),
-                and_(
-                    UsageEvent.owner_kind == KeyOwnerKind.USER,
-                    UsageEvent.owner_id == authz.user_id,
-                ),
-            )
+        # A team admin keeps the whole-team view. A plain member sees whole-team totals only
+        # when the result cannot identify another member: no `owner`/`key` dimension and no
+        # owner/key filter. `requested`, `day`, `team`, `endpoint` and the rest are team
+        # totals, so widening them to every readable team (the `readable` filter above, or
+        # `scoped_team`) reveals no other member's keys. Any per-owner or per-key shape keeps
+        # today's predicate: in a team the caller does not administer, only their own
+        # user-owned keys. This is applied server-side and cannot be widened by a filter.
+        splits_owner = (
+            "owner" in groups
+            or "key" in groups
+            or user_id is not None
+            or service_account_id is not None
+            or key_id is not None
         )
+        if splits_owner:
+            filters.append(
+                or_(
+                    UsageEvent.team_id.in_(admin_teams),
+                    and_(
+                        UsageEvent.owner_kind == KeyOwnerKind.USER,
+                        UsageEvent.owner_id == authz.user_id,
+                    ),
+                )
+            )
     return await _events_page(session, groups, readable, start, end, filters, limit, cursor)
+
+
+LeaderboardBy = Literal["requested", "key", "owner"]
+
+
+@router.get(
+    "/usage/leaderboard",
+    response_model=Page[UsageLeaderboardRowOut],
+    operation_id="getUsageLeaderboard",
+)
+async def get_usage_leaderboard(
+    authz: Authz,
+    session: SessionDep,
+    by: Annotated[
+        LeaderboardBy,
+        Query(
+            description=(
+                "Board to rank: `requested` (called name), `key` (API key) or `owner` (user"
+                " or service account)."
+            )
+        ),
+    ],
+    from_: Annotated[
+        datetime | None,
+        Query(
+            alias="from",
+            description=(
+                "Start of the range (inclusive); defaults to the start of the current UTC month."
+            ),
+        ),
+    ] = None,
+    to_: Annotated[
+        datetime | None,
+        Query(alias="to", description="End of the range (exclusive); defaults to now."),
+    ] = None,
+    team_id: Annotated[
+        uuid.UUID | None,
+        Query(description="Only rows of this team; it must be readable by the caller."),
+    ] = None,
+    kind: Annotated[
+        TrafficKind,
+        Query(description="Gateway protocol to rank; `llm` by default."),
+    ] = TrafficKind.LLM,
+    limit: Annotated[
+        int,
+        Query(ge=1, le=50, description="How many rows to return, 1 to 50; default 10."),
+    ] = 10,
+) -> Page[UsageLeaderboardRowOut]:
+    """Rank called names, keys or owners inside the caller's readable teams.
+
+    Rows are ordered by total tokens (input plus output) descending, then by spend; `rank`
+    restarts at 1 on each page. `by=requested` aggregates the name the client called across
+    the readable teams (a renamed model, alias or router shows as separate called names).
+    `by=key` and `by=owner` group within the team and return `team_id`.
+
+    An installation admin ranks every team. Everyone else ranks only their readable teams;
+    a plain member therefore sees another member in the ranking but not their identity:
+    `key` is null and `label` is `Key #<rank>` for a key the caller may not read, and
+    `owner_kind`/`owner_id` are null with `label` `Member #<rank>` for an owner the caller
+    may not read. The caller's own owner row is always named and has `is_me=true`.
+    """
+    now = datetime.now(UTC)
+    start = (aware(from_, "from") or month_start(now)).astimezone(UTC)
+    end = (aware(to_, "to") or now).astimezone(UTC)
+    if end <= start:
+        raise validation_error("to", "must be after from")
+    ensure_range(start, end)
+    scoped_team = await _check_scope_filters(session, authz, team_id, None, None, None)
+    is_admin = await authz.is_admin()
+    if is_admin:
+        readable = None
+        admin_teams = None
+    else:
+        candidates = set(await session.scalars(select(Team.id)))
+        readable = None if scoped_team is not None else await authz.readable_teams(candidates)
+        admin_teams = await authz.admin_teams(candidates)
+    if readable is not None and not readable:
+        return Page[UsageLeaderboardRowOut](items=[], next_cursor=None)
+
+    if by == "requested":
+        group_columns = [UsageEvent.requested]
+    elif by == "key":
+        group_columns = [UsageEvent.team_id, UsageEvent.key_id]
+    else:
+        group_columns = [UsageEvent.team_id, UsageEvent.owner_kind, UsageEvent.owner_id]
+    total_tokens = func.coalesce(func.sum(UsageEvent.prompt_tokens), 0) + func.coalesce(
+        func.sum(UsageEvent.completion_tokens), 0
+    )
+    spend = func.coalesce(func.sum(UsageEvent.cost_nano_usd), 0)
+    stmt = (
+        select(
+            *group_columns,
+            func.count().label("requests"),
+            func.coalesce(func.sum(UsageEvent.prompt_tokens), 0).label("prompt_tokens"),
+            func.coalesce(func.sum(UsageEvent.completion_tokens), 0).label("completion_tokens"),
+            total_tokens.label("total_tokens"),
+            spend.label("cost_nano_usd"),
+            func.coalesce(func.sum(case((UsageEvent.cost_known.is_(False), 1), else_=0)), 0).label(
+                "unknown_cost_count"
+            ),
+        )
+        .where(UsageEvent.ts >= start, UsageEvent.ts < end, UsageEvent.kind == kind)
+        .group_by(*group_columns)
+        .order_by(total_tokens.desc(), spend.desc(), *group_columns)
+        .limit(limit)
+    )
+    if scoped_team is not None:
+        stmt = stmt.where(UsageEvent.team_id == scoped_team)
+    elif readable is not None:
+        stmt = stmt.where(UsageEvent.team_id.in_(readable))
+    rows = (await session.execute(stmt)).mappings().all()
+
+    admin_team_ids = admin_teams or set()
+
+    def may_read_owner(team: uuid.UUID, owner_kind: KeyOwnerKind, owner_id: uuid.UUID) -> bool:
+        if is_admin or team in admin_team_ids:
+            return True
+        return owner_kind is KeyOwnerKind.USER and owner_id == authz.user_id
+
+    refs = await key_refs(session, [row["key_id"] for row in rows]) if by == "key" else {}
+    # Resolve the names of visible owners only: a hidden row keeps no id and no name.
+    wanted_users: set[uuid.UUID] = set()
+    wanted_accounts: set[uuid.UUID] = set()
+    if by == "owner":
+        for row in rows:
+            if may_read_owner(row["team_id"], row["owner_kind"], row["owner_id"]):
+                target = wanted_users if row["owner_kind"] is KeyOwnerKind.USER else wanted_accounts
+                target.add(row["owner_id"])
+    user_labels: dict[uuid.UUID, str] = {}
+    if wanted_users:
+        for user_id, display_name, email in await session.execute(
+            select(User.id, User.display_name, User.email).where(User.id.in_(wanted_users))
+        ):
+            user_labels[user_id] = display_name or email
+    account_labels: dict[uuid.UUID, str] = {}
+    if wanted_accounts:
+        for account_id, name in await session.execute(
+            select(ServiceAccount.id, ServiceAccount.name).where(
+                ServiceAccount.id.in_(wanted_accounts)
+            )
+        ):
+            account_labels[account_id] = name
+
+    items: list[UsageLeaderboardRowOut] = []
+    for rank, row in enumerate(rows, start=1):
+        values: dict[str, Any] = {
+            "rank": rank,
+            "requests": int(row["requests"]),
+            "prompt_tokens": int(row["prompt_tokens"]),
+            "completion_tokens": int(row["completion_tokens"]),
+            "total_tokens": int(row["total_tokens"]),
+            "cost_nano_usd": int(row["cost_nano_usd"]),
+            "unknown_cost_count": int(row["unknown_cost_count"]),
+        }
+        if by == "requested":
+            values["requested"] = row["requested"]
+            values["label"] = row["requested"] or ""
+        elif by == "key":
+            values["team_id"] = row["team_id"]
+            ref = refs.get(row["key_id"])
+            readable_key = ref is not None and (
+                is_admin
+                or ref.team_id in admin_team_ids
+                or (ref.user_id is not None and ref.user_id == authz.user_id)
+            )
+            if readable_key:
+                values["key"] = ref
+                values["label"] = ref.name
+            else:
+                values["label"] = f"Key #{rank}"
+        else:
+            team = row["team_id"]
+            owner_kind = row["owner_kind"]
+            owner_id = row["owner_id"]
+            values["team_id"] = team
+            values["is_me"] = owner_kind is KeyOwnerKind.USER and owner_id == authz.user_id
+            if may_read_owner(team, owner_kind, owner_id):
+                values["owner_kind"] = owner_kind
+                values["owner_id"] = owner_id
+                labels = user_labels if owner_kind is KeyOwnerKind.USER else account_labels
+                values["label"] = labels.get(owner_id) or f"Member #{rank}"
+            else:
+                values["label"] = f"Member #{rank}"
+        items.append(UsageLeaderboardRowOut(**values))
+    return Page[UsageLeaderboardRowOut](items=items, next_cursor=None)

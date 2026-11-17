@@ -21,6 +21,7 @@ from tests.factories import (
     make_member,
     make_model,
     make_org,
+    make_org_admin,
     make_router,
     make_service_account,
     make_team,
@@ -210,7 +211,9 @@ async def test_usage_visibility_and_filter_rules(client, committed) -> None:
     assert query(client, auth(outsider_token)).json()["items"] == []
 
 
-async def test_a_plain_member_sees_only_their_own_rows(client, committed) -> None:
+async def test_a_plain_member_sees_whole_team_totals_but_not_other_owners(
+    client, committed
+) -> None:
     team = await make_team(committed)
     member, token = await user_with_token(committed)
     colleague, _ = await user_with_token(committed)
@@ -226,27 +229,53 @@ async def test_a_plain_member_sees_only_their_own_rows(client, committed) -> Non
     await committed.commit()
     headers = auth(token)
 
-    # The owner predicate is server-side: the team's other members and the service
-    # account are not visible, and no filter or grouping widens it.
     def requests_for(**params):
         response = query(client, headers, **params)
         assert response.status_code == 200, response.text
         return sum(row["requests"] for row in response.json()["items"])
 
-    assert requests_for() == 2
+    # A shape that is a team total (no owner/key split, no owner/key filter) is the whole
+    # team's, so it includes the colleague's and the service account's requests.
+    for params in (
+        {},
+        {"group_by": "requested"},
+        {"group_by": "day"},
+        {"group_by": "team"},
+        {"group_by": "team", "team_id": str(team.id)},
+        {"group_by": "endpoint", "team_id": str(team.id)},
+    ):
+        assert requests_for(**params) == 4, params
+
+    # Nothing that names where a request was served is ever populated for a member.
+    for row in query(client, headers, group_by="requested").json()["items"]:
+        assert row["model"] is None and row["model_id"] is None
+        assert row["alias"] is None and row["alias_id"] is None
+        assert row["router"] is None and row["router_id"] is None
+        assert row["upstream_model"] is None and row["upstream_models"] == []
+        assert row["served_by"] == []
+        assert row["via_aliases"] == [] and row["via_routers"] == []
+
+    # A per-owner or per-key shape keeps the old predicate: in a team the member does not
+    # administer, only their own user-owned keys are visible.
     assert requests_for(group_by="owner") == 2
-    assert requests_for(group_by="team") == 2
-    assert requests_for(group_by="team", team_id=str(team.id)) == 2
-    assert requests_for(group_by="owner", team_id=str(team.id)) == 2
     assert requests_for(group_by="key") == 2
+    assert requests_for(group_by="owner,requested") == 2
+    assert requests_for(group_by="key,requested") == 2
+    for params in (
+        {"group_by": "requested", "team_id": str(team.id), "user_id": str(colleague.id)},
+        {
+            "group_by": "requested",
+            "team_id": str(team.id),
+            "service_account_id": str(account.id),
+        },
+    ):
+        assert requests_for(**params) == 0, params
+    assert requests_for(group_by="requested", team_id=str(team.id), user_id=str(member.id)) == 2
     people = query(client, headers, group_by="owner").json()["items"]
     assert {(row["owner_kind"], row["owner_id"]) for row in people} == {("user", str(member.id))}
-    # Filters for someone else return nothing instead of their rows.
-    assert requests_for(group_by="owner", team_id=str(team.id), user_id=str(colleague.id)) == 0
-    assert (
-        requests_for(group_by="owner", team_id=str(team.id), service_account_id=str(account.id))
-        == 0
-    )
+    keys = query(client, headers, group_by="key").json()["items"]
+    assert {row["key"]["id"] for row in keys} == {str(own.id)}
+
     # Another member's key cannot be selected at all.
     forbidden = query(client, headers, group_by="key", key_id=str(other.id))
     assert forbidden.status_code == 403, forbidden.text
@@ -376,27 +405,49 @@ async def test_literal_none_distinct_from_missing_and_deleted_names(client, comm
     assert [(r["router"], r["requests"]) for r in missing] == [("", 2)]
 
 
-@pytest.mark.parametrize("dimension", ["model", "upstream_model", "alias", "router"])
-async def test_new_dimensions_keep_permission_scope(client, committed, dimension):
-    team = await make_team(committed)
-    owner, token = await user_with_token(committed)
-    await make_member(committed, team, owner)
-    own = await make_key(committed, team, owner)
-    foreign = await key_for(committed)
-    unique = uuid.uuid4().hex
-    for key, name in ((own, f"own-{unique}"), (foreign, f"foreign-{unique}")):
-        event = wire(key, **{dimension: name})
-        assert await ingest(committed, "gateway", [event]) == 1
+async def test_routing_detail_is_installation_admin_only(client, committed) -> None:
+    org = await make_org(committed)
+    team = await make_team(committed, org=org)
+    member, member_token = await user_with_token(committed)
+    team_admin, team_admin_token = await user_with_token(committed)
+    org_admin, org_admin_token = await user_with_token(committed)
+    _, installation_token = await user_with_token(committed, installation_admin=True)
+    await make_member(committed, team, member)
+    await make_member(committed, team, team_admin, role=TeamRole.ADMIN)
+    await make_org_admin(committed, org, org_admin)
     await committed.commit()
-    response = query(client, auth(token), group_by=dimension)
-    assert response.status_code == 200, response.text
-    assert [(r[dimension], r["requests"]) for r in response.json()["items"]] == [
-        (f"own-{unique}", 1)
-    ]
-    hidden = query(client, auth(token), group_by=dimension, **{dimension: f"foreign-{unique}"})
-    assert hidden.json()["items"] == []
-    forbidden = query(client, auth(token), group_by=dimension, team_id=str(foreign.team_id))
-    assert forbidden.status_code == 404
+
+    routing_groups = ("model", "upstream_model", "alias", "router")
+    routing_filters = (
+        {"model": "some-model"},
+        {"upstream_model": "served-name"},
+        {"alias": "some-alias"},
+        {"router": "some-router"},
+        {"model_id": str(uuid.uuid4())},
+        {"alias_id": str(uuid.uuid4())},
+        {"router_id": str(uuid.uuid4())},
+        {"alias_missing": "true"},
+        {"router_missing": "false"},
+    )
+    for headers in (auth(member_token), auth(team_admin_token), auth(org_admin_token)):
+        for group in routing_groups:
+            response = query(client, headers, group_by=group, team_id=str(team.id))
+            assert response.status_code == 403, (group, response.text)
+            assert response.json()["error"]["code"] == "routing_detail_forbidden"
+        for filters in routing_filters:
+            response = query(client, headers, group_by="requested", team_id=str(team.id), **filters)
+            assert response.status_code == 403, (filters, response.text)
+            assert response.json()["error"]["code"] == "routing_detail_forbidden"
+
+    # An installation admin keeps the full routing view.
+    for group in routing_groups:
+        response = query(client, auth(installation_token), group_by=group, team_id=str(team.id))
+        assert response.status_code == 200, (group, response.text)
+    for filters in routing_filters:
+        response = query(
+            client, auth(installation_token), group_by="requested", team_id=str(team.id), **filters
+        )
+        assert response.status_code == 200, (filters, response.text)
 
 
 async def test_mcp_and_a2a_events_are_filtered_and_grouped_by_kind(client, committed) -> None:

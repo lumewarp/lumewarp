@@ -38,6 +38,7 @@ Every non-2xx response of the management API is:
 | 401 | `unauthorized` | Missing or invalid credentials. |
 | 401 | `invalid_credentials` | Wrong break-glass password. |
 | 403 | `forbidden` | The caller may read the resource but not do this. |
+| 403 | `routing_detail_forbidden` | Usage or requests asked for served-model, upstream, alias or router detail; only an installation admin sees it. |
 | 403 | `csrf_failed` | A cookie-authenticated write without a valid `X-Lumewarp-CSRF`. |
 | 404 | `not_found` | The resource does not exist, or the caller may not read it. |
 | 404 | `user_not_found` | No user has the email given when adding a member. |

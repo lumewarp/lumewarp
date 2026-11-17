@@ -68,49 +68,28 @@ async def test_rejected_event_under_every_group(client, committed, group):
         assert row["requested"] == "not-found"
 
 
-async def test_ids_and_missing_filters_never_expand_member_scope(client, committed):
+async def test_routing_ids_and_missing_filters_are_refused_for_a_member(client, committed):
     team = await make_team(committed)
     user, token = await user_with_token(committed)
     await make_member(committed, team, user)
-    own = await make_key(committed, team, user)
-    foreign = await key_for(committed)
-    identities = []
-    for key in (own, foreign):
-        suffix = uuid.uuid4().hex
-        model = await make_model(committed, f"m-{suffix}", created_at=CREATED)
-        pool = await make_router(committed, f"r-{suffix}", created_at=CREATED)
-        alias = await make_alias(committed, f"a-{suffix}", model)
-        alias.created_at = CREATED
-        await committed.flush()
-        identities.append(
-            {"model_id": str(model.id), "alias_id": str(alias.id), "router_id": str(pool.id)}
-        )
-        assert (
-            await ingest(
-                committed,
-                "gateway",
-                [
-                    wire(key, model=model.name),
-                    wire(key, model=model.name, alias=f"a-{suffix}", router=f"r-{suffix}"),
-                ],
-            )
-            == 2
-        )
+    await make_key(committed, team, user)
     await committed.commit()
     headers = auth(token)
-    for group in ("model", "alias", "router"):
-        for id_field in ("model_id", "alias_id", "router_id"):
-            visible = query(client, headers, group_by=group, **{id_field: identities[0][id_field]})
-            assert visible.status_code == 200, visible.text
-            assert sum(row["requests"] for row in visible.json()["items"]) == (
-                2 if id_field == "model_id" else 1
-            )
-            hidden = query(client, headers, group_by=group, **{id_field: identities[1][id_field]})
-            assert hidden.status_code == 200 and hidden.json()["items"] == []
-        for missing in ("alias_missing", "router_missing"):
-            for value in ("true", "false"):
-                rows = query(client, headers, group_by=group, **{missing: value}).json()["items"]
-                assert sum(row["requests"] for row in rows) == 1
+    for group in ("model", "upstream_model", "alias", "router"):
+        response = query(client, headers, group_by=group)
+        assert response.status_code == 403, response.text
+        assert response.json()["error"]["code"] == "routing_detail_forbidden"
+    # Ids and the `_missing` filters name routing columns too: they are refused instead of
+    # silently narrowing (and thereby revealing) the readable teams.
+    for id_field in ("model_id", "alias_id", "router_id"):
+        response = query(client, headers, group_by="requested", **{id_field: str(uuid.uuid4())})
+        assert response.status_code == 403, response.text
+        assert response.json()["error"]["code"] == "routing_detail_forbidden"
+    for missing in ("alias_missing", "router_missing"):
+        for value in ("true", "false"):
+            response = query(client, headers, group_by="requested", **{missing: value})
+            assert response.status_code == 403, response.text
+            assert response.json()["error"]["code"] == "routing_detail_forbidden"
 
 
 @pytest.mark.parametrize("kind", ["alias", "router"])

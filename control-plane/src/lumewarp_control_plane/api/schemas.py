@@ -1723,6 +1723,64 @@ class UsageRowOut(ApiModel):
     total_duration_ms: int = 0
 
 
+class UsageLeaderboardRowOut(ApiModel):
+    """One ranked row of `GET /usage/leaderboard`.
+
+    `label` always names the row: the called name for `by=requested`, the key's name for a
+    readable key and the owner's name for a readable owner. A key or owner the caller may not
+    read is anonymised to `Key #<rank>` / `Member #<rank>` and its id and ref stay null, so an
+    unreadable identity never leaks. `is_me` marks the caller's own owner row.
+    """
+
+    rank: int = Field(description="1-based position, ordered by total tokens, then cost.")
+    label: str = Field(
+        description=(
+            "What the row names: the called name, the key's name or the owner's name; an"
+            " unreadable key or owner is `Key #<rank>` or `Member #<rank>`."
+        )
+    )
+    requested: str | None = Field(
+        default=None, description="The called name; only for `by=requested`."
+    )
+    team_id: uuid.UUID | None = Field(
+        default=None,
+        description="The row's team for `by=key` and `by=owner`; null for `by=requested`.",
+    )
+    key: KeyRefOut | None = Field(
+        default=None,
+        description=(
+            "The key for `by=key` when the caller may read it (installation admin, team"
+            " admin, or its user owner); null otherwise and for every other board."
+        ),
+    )
+    owner_kind: KeyOwnerKind | None = Field(
+        default=None,
+        description=(
+            "`user` or `service_account` for `by=owner` when the caller may read it; null"
+            " otherwise and for every other board."
+        ),
+    )
+    owner_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "The owner's id for `by=owner` when the caller may read it (installation admin,"
+            " the team's admin, or the owner themself); null otherwise."
+        ),
+    )
+    is_me: bool = Field(
+        default=False,
+        description="True only for the caller's own row on `by=owner`.",
+    )
+    requests: int = Field(description="Requests in the group.")
+    prompt_tokens: int = Field(description="Summed input tokens.")
+    completion_tokens: int = Field(description="Summed output tokens.")
+    total_tokens: int = Field(description="Input plus output tokens; the ranking key.")
+    cost_nano_usd: int = Field(description="Summed cost in nano-USD; the tie-break.")
+    unknown_cost_count: int = Field(
+        description="Requests whose cost is unknown (no price on the served model)."
+    )
+
+
 class UsageEventOut(ReadModel):
     """Optional recent-event view (`include_events=1`), never the default list."""
 
