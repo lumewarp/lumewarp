@@ -88,3 +88,7 @@ The stack runs two gateways sharing one token, each with an id generated at star
 <http://127.0.0.1:4000/> (admin `127.0.0.1:9464`) and <http://127.0.0.1:4001/> (admin
 `127.0.0.1:9466`). They share rate limits through a Valkey at `127.0.0.1:56379`, without
 persistence ([shared limits](../operations/gateway.md#shared-rate-limits)).
+
+Authorization uses the built-in backend, and OpenFGA is not started. Use
+`DEV_AUTHZ=openfga make dev` to also start an OpenFGA at `127.0.0.1:18081`, create its store
+and make it the authorization backend.

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Local dev preview: dev Postgres (+ Keycloak/OpenFGA), mock upstream, control plane,
+# Local dev preview: dev Postgres, Keycloak (+ OpenFGA with DEV_AUTHZ=openfga), mock upstream,
+# control plane,
 # gateway and the Vite UI.
 #
 #   scripts/dev.sh tab        inside herdr: open a `lumewarp-dev` tab, one pane per service
@@ -9,7 +10,7 @@
 #
 # `make dev` picks `tab` inside herdr and `all` elsewhere.
 #
-#   DEV_AUTHZ=openfga         authorization backend (default builtin)
+#   DEV_AUTHZ=openfga         authorization backend (default builtin); only then is OpenFGA started
 #   LUMEWARP_BREAK_GLASS_PASSWORD  override the development emergency password
 #   DEV_DATABASE=name         use this database in the dev Postgres, created if missing
 #   DEV_OPENWEBUI=0           do not start Open WebUI
@@ -31,7 +32,6 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 self="$root/scripts/dev.sh"
 state="$root/.dev"
-sso=1
 authz="${DEV_AUTHZ:-builtin}"
 break_glass_password="${LUMEWARP_BREAK_GLASS_PASSWORD:-dev-break-glass}"
 admin_csrf=""
@@ -80,18 +80,25 @@ prepare() {
   log "starting dev Postgres and Valkey"
   "$root/scripts/dev-db.sh" up
   docker compose -f "$root/deploy/dev/compose.yaml" up -d --wait redis
-  if [[ $sso == 1 ]]; then
+  case $authz in
+    builtin | openfga) ;;
+    *) die "DEV_AUTHZ=$authz: use builtin or openfga" ;;
+  esac
+  # OpenFGA runs only when it is the authorization backend.
+  if [[ $authz == openfga ]]; then
     log "starting Keycloak and OpenFGA"
-    "$root/scripts/dev-idp.sh" up | grep '^export ' >>"$env"
-    {
-      echo "export LUMEWARP_PUBLIC_URL=$ui_url"
-      echo "export LUMEWARP_SESSION_COOKIE_SECURE=false"
-      echo "export LUMEWARP_SECRET_KEY=dev-only-lumewarp-secret-key-0123456789abcdef"
-      if [[ $authz == openfga ]]; then echo "export LUMEWARP_AUTHZ_BACKEND=openfga"; fi
-    } >>"$env"
-  elif [[ $authz != builtin ]]; then
-    die "DEV_AUTHZ=$authz needs DEV_SSO=1"
+    with_openfga=1
+  else
+    log "starting Keycloak"
+    with_openfga=0
   fi
+  DEV_IDP_OPENFGA=$with_openfga "$root/scripts/dev-idp.sh" up | grep '^export ' >>"$env"
+  {
+    echo "export LUMEWARP_PUBLIC_URL=$ui_url"
+    echo "export LUMEWARP_SESSION_COOKIE_SECURE=false"
+    echo "export LUMEWARP_SECRET_KEY=dev-only-lumewarp-secret-key-0123456789abcdef"
+    if [[ $authz == openfga ]]; then echo "export LUMEWARP_AUTHZ_BACKEND=openfga"; fi
+  } >>"$env"
 
   log "building mock upstream, example MCP/A2A servers and gateway"
   cargo build --release -q --bins --manifest-path "$root/bench/mock-upstream/Cargo.toml"
