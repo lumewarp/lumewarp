@@ -174,6 +174,7 @@ class PolicyFields(ApiModel):
 
     model_access: ModelAccess | None = None
     allowed_models: list[str] | None = None
+    allowed_groups: list[Name] | None = None
     mcp_access: ModelAccess | None = None
     mcp_servers: list[McpGrantIn] | None = None
     a2a_access: ModelAccess | None = None
@@ -194,6 +195,11 @@ class PolicyFields(ApiModel):
             if name not in cleaned:
                 cleaned.append(name)
         return cleaned
+
+    @field_validator("allowed_groups")
+    @classmethod
+    def _clean_groups(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else list(dict.fromkeys(value))
 
     @field_validator("mcp_servers")
     @classmethod
@@ -222,7 +228,7 @@ class PolicyFields(ApiModel):
         for name in ("model_access", "mcp_access", "a2a_access"):
             if name in self.model_fields_set and getattr(self, name) is None:
                 raise ValueError(f"{name} cannot be null")
-        for name in ("allowed_models", "mcp_servers", "a2a_agents"):
+        for name in ("allowed_models", "allowed_groups", "mcp_servers", "a2a_agents"):
             if name in self.model_fields_set and getattr(self, name) is None:
                 raise ValueError(f"{name} cannot be null; send [] to deny all")
         return self
@@ -230,7 +236,12 @@ class PolicyFields(ApiModel):
 
 class PolicyOut(ReadModel):
     model_access: ModelAccess
-    allowed_models: list[str]
+    allowed_models: list[str] = Field(description="The level's own directly granted names.")
+    allowed_groups: list[str] = Field(description="The level's own granted model groups.")
+    granted_models: list[str] = Field(
+        description="`allowed_models` plus the current members of `allowed_groups`: the"
+        " level's own set under `list`, before the parent narrows it."
+    )
     mcp_access: ModelAccess
     mcp_servers: list[McpGrantOut]
     a2a_access: ModelAccess
@@ -274,11 +285,18 @@ class OrgUpdate(PolicyFields):
     name: Name | None = None
 
 
+_EFFECTIVE_MODELS = (
+    "The callable names this level allows after inheritance (groups expanded, intersected"
+    " down from the org); null = every name in the catalog."
+)
+
+
 class OrgOut(PolicyOut):
     id: uuid.UUID
     name: str
     created_at: datetime
     updated_at: datetime
+    effective_models: list[str] | None = Field(default=None, description=_EFFECTIVE_MODELS)
     # Present for an installation admin reading an archived org; the list endpoint only
     # returns live orgs.
     deleted_at: datetime | None = None
@@ -357,6 +375,8 @@ class TeamBasicOut(ReadModel, TeamKeyLimits):
 class TeamOut(PolicyOut, TeamBasicOut, TeamMemberDefaults):
     """The whole team, including its policy: team admins and installation admins only."""
 
+    effective_models: list[str] | None = Field(default=None, description=_EFFECTIVE_MODELS)
+
 
 class MemberUpsert(PolicyFields):
     role: TeamRole
@@ -425,6 +445,27 @@ class ServiceAccountOut(PolicyOut):
     updated_at: datetime
 
 
+# A key narrows its owner or inherits it; it never widens to `all`.
+KeyModelAccess = Literal[ModelAccess.INHERIT, ModelAccess.LIST]
+
+
+def _clean_model_list(cls, value: list[str] | None) -> list[str] | None:
+    if value is None:
+        return None
+    return list(dict.fromkeys(_model_name(item) for item in value))
+
+
+def _clean_group_list(cls, value: list[str] | None) -> list[str] | None:
+    return None if value is None else list(dict.fromkeys(value))
+
+
+def _key_models_not_null[T: BaseModel](body: T) -> T:
+    for name in ("model_access", "allowed_models", "allowed_groups"):
+        if name in body.model_fields_set and getattr(body, name) is None:
+            raise ValueError(f"{name} cannot be null")
+    return body
+
+
 class KeyCreate(ApiModel):
     name: Name
     expires_at: datetime | None = None
@@ -435,6 +476,12 @@ class KeyCreate(ApiModel):
     rpm_limit: int | None = Field(default=None, gt=0)
     tpm_limit: int | None = Field(default=None, gt=0)
     max_parallel: int | None = Field(default=None, gt=0)
+    model_access: KeyModelAccess | None = None
+    allowed_models: list[str] | None = None
+    allowed_groups: list[Name] | None = None
+
+    _clean_models = field_validator("allowed_models")(_clean_model_list)
+    _clean_groups = field_validator("allowed_groups")(_clean_group_list)
 
     @field_validator("expires_at")
     @classmethod
@@ -442,6 +489,10 @@ class KeyCreate(ApiModel):
         if value is not None and value.tzinfo is None:
             raise ValueError("expires_at must include a timezone")
         return _future(value)
+
+    @model_validator(mode="after")
+    def _non_nullable(self) -> KeyCreate:
+        return _key_models_not_null(self)
 
 
 class KeyUpdate(ApiModel):
@@ -453,6 +504,12 @@ class KeyUpdate(ApiModel):
     rpm_limit: int | None = Field(default=None, gt=0)
     tpm_limit: int | None = Field(default=None, gt=0)
     max_parallel: int | None = Field(default=None, gt=0)
+    model_access: KeyModelAccess | None = None
+    allowed_models: list[str] | None = None
+    allowed_groups: list[Name] | None = None
+
+    _clean_models = field_validator("allowed_models")(_clean_model_list)
+    _clean_groups = field_validator("allowed_groups")(_clean_group_list)
 
     @field_validator("expires_at")
     @classmethod
@@ -460,6 +517,10 @@ class KeyUpdate(ApiModel):
         if value is not None and value.tzinfo is None:
             raise ValueError("expires_at must include a timezone")
         return value
+
+    @model_validator(mode="after")
+    def _non_nullable(self) -> KeyUpdate:
+        return _key_models_not_null(self)
 
 
 MAX_ROTATION_GRACE_SECONDS = 24 * 3600
@@ -522,6 +583,15 @@ class KeyOut(ReadModel):
     created_by_user_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
+    model_access: ModelAccess = Field(
+        description="`inherit` (the owner's models) or `list` (narrowed to the grants below)."
+    )
+    allowed_models: list[str] = Field(description="The key's own directly granted names.")
+    allowed_groups: list[str] = Field(description="The key's own granted model groups.")
+    granted_models: list[str] = Field(
+        description="`allowed_models` plus the members of `allowed_groups`, before the"
+        " owner's set narrows them."
+    )
 
 
 class KeyCreated(ApiModel):
@@ -1113,6 +1183,51 @@ class AliasOut(ReadModel):
     target: uuid.UUID = Field(validation_alias="target_name_id")
     target_kind: CatalogKind
     target_name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelGroupCreate(ApiModel):
+    name: Name
+    description: str = Field(default="", max_length=2000)
+    members: list[ModelName] = Field(default_factory=list)
+
+    @field_validator("members")
+    @classmethod
+    def _unique_members(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(value))
+
+
+class ModelGroupUpdate(ApiModel):
+    """PATCH: omitted fields are unchanged; `members` replaces the whole list."""
+
+    name: Name | None = None
+    description: str | None = Field(default=None, max_length=2000)
+    members: list[ModelName] | None = None
+
+    @field_validator("members")
+    @classmethod
+    def _unique_members(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else list(dict.fromkeys(value))
+
+
+class ModelGroupMemberOut(ReadModel):
+    id: uuid.UUID = Field(description="The catalog name's id.")
+    name: str = Field(description="The current callable name.")
+    kind: CatalogKind = Field(description="`model`, `alias` or `router`.")
+    model_type: ModelType | None = Field(
+        default=None, description="The member's model type, when it resolves."
+    )
+
+
+class ModelGroupOut(ReadModel):
+    id: uuid.UUID
+    name: str
+    description: str
+    members: list[ModelGroupMemberOut] = Field(description="The members, sorted by name.")
+    grants: int = Field(
+        description="How many orgs, teams, members, service accounts and keys hold the group."
+    )
     created_at: datetime
     updated_at: datetime
 

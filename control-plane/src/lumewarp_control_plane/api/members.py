@@ -71,6 +71,8 @@ def _out(member: TeamMember, user: User, policy: MemberPolicy | None) -> MemberO
         updated_at=member.updated_at,
         model_access=(policy.model_access if policy is not None else ModelAccess.INHERIT),
         allowed_models=(list(policy.allowed_models) if policy is not None else []),
+        allowed_groups=(list(policy.allowed_groups) if policy is not None else []),
+        granted_models=(list(policy.granted_models) if policy is not None else []),
         mcp_access=(policy.mcp_access if policy is not None else ModelAccess.INHERIT),
         mcp_servers=(list(policy.mcp_servers) if policy is not None else []),
         a2a_access=(policy.a2a_access if policy is not None else ModelAccess.INHERIT),

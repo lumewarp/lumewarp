@@ -3,10 +3,11 @@
 Revision ID: 0001
 Revises:
 
-The one and only schema migration. Lumewarp has never been deployed, so the history was
-squashed into a baseline generated from `models.py`: a fresh database runs this file and
-nothing else, and there is no upgrade path from an earlier revision. When the schema
-changes, edit `models.py` and regenerate this file (the migration test compares the two).
+The baseline, frozen as the v0.2.1 schema: the history before v0.2.1 was squashed into
+this file, and databases created by v0.2.1 are at this revision. It is never edited or
+regenerated again. Every later schema change is a new revision on top of it that upgrades
+an existing database in place and keeps its rows; downgrades are not supported (restore a
+backup instead). `tests/test_migrations.py` compares the head with `models.py`.
 
 Org data is not seeded here. The `orgs` table starts empty and there is no implicit
 default: `POST /teams` takes an explicit `org_id`, so there is no backfill and no

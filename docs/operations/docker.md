@@ -110,7 +110,7 @@ from [Sign-in and authorization](./identity.md) to `.env`, with
 | WASM plugins | Mount a directory into the gateway and set `LUMEWARP_ROUTER_PLUGIN_DIR`, `LUMEWARP_AUTH_PLUGIN_DIR` and `LUMEWARP_A2A_MIDDLEWARE_DIR` ([Gateway plugins](../plugins.md#loading)); plugin secrets are `LUMEWARP_PLUGIN_SECRET_*` variables |
 | Metrics | Scrape `127.0.0.1:9464/metrics` and `127.0.0.1:9465/metrics` ([Metrics, alerts and tracing](./observability.md)) |
 | Backups | The `postgres` volume holds everything; the gateway's `gateway-state` volume is a cache it rebuilds from the control plane |
-| A new release | Lumewarp 0.x keeps no upgrade path: `docker compose --profile gateway down -v` (this **deletes the database**), set `LUMEWARP_VERSION`, and start again from step 2 |
+| A new release | Back up the `postgres` volume, set `LUMEWARP_VERSION`, and `docker compose --profile gateway up -d`: `migrate` upgrades the database in place before the control plane starts. There is no downgrade; to go back, restore the backup ([Upgrades](./upgrades.md)) |
 
 The gateway keeps serving its last config while the control plane is stopped, and a
 restarted gateway boots from the snapshot in its volume.

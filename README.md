@@ -93,9 +93,10 @@ docker build -f control-plane/Dockerfile -t ghcr.io/lumewarp/lumewarp-control-pl
 
 ## Releases and CI
 
-Releases are tags `vX.Y.Z` (`vX.Y.Z-<pre>` for a pre-release). While Lumewarp is
-0.x there is no upgrade path: drop the control-plane database before installing
-a new release.
+Releases are tags `vX.Y.Z` (`vX.Y.Z-<pre>` for a pre-release). From v0.2.1 on, a
+release migrates the control-plane database in place (Helm pre-upgrade hook, or
+the compose `migrate` service on start). Back up the database first: there is no
+downgrade, and going back means restoring that backup.
 
 ```sh
 scripts/release.sh 0.2.0                 # sets every version, commits "Release v0.2.0", tags it

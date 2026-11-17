@@ -23,6 +23,8 @@ from lumewarp_control_plane.models import (
     KeyLifecycle,
     Model,
     ModelAccess,
+    ModelGroup,
+    ModelGroupMember,
     PolicyGrant,
     Router,
     RouterFallback,
@@ -258,3 +260,39 @@ async def test_rollback_removing_a_name_audits_its_grants(factory):
         assert (await session.get(Team, team_id)).allowed_models == []
         row = await session.scalar(select(AuditLog).where(AuditLog.action == "grant.delete"))
         assert row.team_id == team_id and row.details["name"] == "late"
+
+
+async def test_rollback_removing_a_name_audits_its_group_membership(factory):
+    """Groups are not rolled back, but a name the rollback deletes leaves its groups, and
+    each removed membership is audited with the rollback as the actor.
+    """
+    await seed_scope(factory)
+    async with factory() as session, session.begin():
+        await factories.make_upstream(session, "u")
+        kept = await factories.make_model(session, "kept")
+    assert await _publish(factory) == 1
+    async with factory() as session, session.begin():
+        late = await factories.make_model(session, "late")
+        group = ModelGroup(name="g")
+        session.add(group)
+        await session.flush()
+        session.add_all(
+            ModelGroupMember(group_id=group.id, name_id=name_id) for name_id in (kept.id, late.id)
+        )
+        group_id = group.id
+    assert await _publish(factory) == 2
+    async with factory() as session, session.begin():
+        await rollback_routing(session, SCOPE, 1, require_local_membership=True)
+    async with factory() as session:
+        members = set(
+            await session.scalars(
+                select(ModelGroupMember.name_id).where(ModelGroupMember.group_id == group_id)
+            )
+        )
+        assert members == {kept.id}
+        row = await session.scalar(
+            select(AuditLog).where(AuditLog.action == "model_group.member_remove")
+        )
+        assert row.resource_id == str(group_id)
+        assert row.details == {"name": "g", "member": "late", "member_id": str(late.id)}
+        assert (row.actor_type, row.actor_id) == ("system", "rollback")

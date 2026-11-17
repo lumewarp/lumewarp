@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 from lumewarp_control_plane.compiler.plugins import BUILTIN_PLUGINS, params_json
@@ -39,10 +40,12 @@ from lumewarp_control_plane.models import (
     MemberPolicy,
     Model,
     ModelAccess,
+    ModelGroupMember,
     Org,
     OrgAdmin,
     PluginKind,
     PolicyGrant,
+    PolicyGroupGrant,
     Router,
     RouterFallback,
     RouterMember,
@@ -61,6 +64,7 @@ from lumewarp_control_plane.models import (
     User,
 )
 from lumewarp_control_plane.quota import (
+    key_effective,
     org_effective,
     owner_effective,
     policy_of,
@@ -282,10 +286,11 @@ async def compile_scope(
     is `scopes.source_revision` as seen there.
 
     Contract:
-    - Expands team -> owner (member or service account) policy into each key's
-      EffectivePolicy. Model access: resolve INHERIT first (the owner takes the team's
+    - Expands org -> team -> owner (member or service account) -> key policy into each
+      key's EffectivePolicy. Model access: resolve INHERIT first (the owner takes the team's
       effective set unchanged; teams are never INHERIT), then intersect: ALL is the
-      universal set, LIST is exactly `allowed_models`. `allow_all_models` is true iff the
+      universal set, LIST is exactly `allowed_models` plus the current members of the
+      level's model groups. A key is INHERIT or LIST, never ALL. `allow_all_models` is true iff the
       resulting effective set is still universal, e.g. ALL -> INHERIT (the defaults)
       allows every name. A LIST with an empty list on either level is deny-all
       (`allow_all_models=false`, `allowed_models=[]`), never "all".
@@ -673,30 +678,23 @@ async def compile_scope(
     orgs = {o.id: o for o in await session.scalars(select(Org))}
     all_teams = {t.id: t for t in await session.scalars(select(Team))}
     teams = {team_id: t for team_id, t in all_teams.items() if t.deleted_at is None}
-    granted: dict[
-        tuple[uuid.UUID | None, uuid.UUID | None, uuid.UUID | None, uuid.UUID | None],
-        list[str],
-    ] = {}
-    for org_id, team_id, user_id, account_id, name in await session.execute(
-        select(
-            PolicyGrant.org_id,
-            PolicyGrant.team_id,
-            PolicyGrant.user_id,
-            PolicyGrant.service_account_id,
-            CatalogName.name,
-        ).join(CatalogName, CatalogName.id == PolicyGrant.name_id)
+    # A key's own model list (LIST only): its direct names plus its groups' current
+    # members, read for every key in two queries instead of three correlated subqueries per
+    # key (the key query below defers those columns).
+    key_granted: dict[uuid.UUID, set[str]] = {}
+    for key_id, name in await session.execute(
+        select(PolicyGrant.key_id, CatalogName.name)
+        .join(CatalogName, CatalogName.id == PolicyGrant.name_id)
+        .where(PolicyGrant.key_id.is_not(None))
     ):
-        # The org id is dropped for every non-org grant: org grants are keyed by /org only.
-        granted.setdefault((org_id, team_id, user_id, account_id), []).append(name)
-
-    def allowed_names(entity: Org | Team | MemberPolicy | ServiceAccount) -> list[str]:
-        if isinstance(entity, Org):
-            return granted.get((entity.id, None, None, None), [])
-        if isinstance(entity, Team):
-            return granted.get((None, entity.id, None, None), [])
-        if isinstance(entity, MemberPolicy):
-            return granted.get((None, entity.team_id, entity.user_id, None), [])
-        return granted.get((None, entity.team_id, None, entity.id), [])
+        key_granted.setdefault(key_id, set()).add(name)
+    for key_id, name in await session.execute(
+        select(PolicyGroupGrant.key_id, CatalogName.name)
+        .join(ModelGroupMember, ModelGroupMember.group_id == PolicyGroupGrant.group_id)
+        .join(CatalogName, CatalogName.id == ModelGroupMember.name_id)
+        .where(PolicyGroupGrant.key_id.is_not(None))
+    ):
+        key_granted.setdefault(key_id, set()).add(name)
 
     members = {(m.team_id, m.user_id): m for m in await session.scalars(select(TeamMember))}
     # Inherited administrators may own keys in the teams they administer (keys/owners.py).
@@ -709,7 +707,14 @@ async def compile_scope(
     active_users = set(await session.scalars(select(User.id).where(User.is_active.is_(True))))
     keys = (
         await session.scalars(
-            select(ApiKey).where(ApiKey.lifecycle != KeyLifecycle.REVOKED).order_by(ApiKey.id)
+            select(ApiKey)
+            .options(
+                defer(ApiKey.allowed_models),
+                defer(ApiKey.allowed_groups),
+                defer(ApiKey.granted_models),
+            )
+            .where(ApiKey.lifecycle != KeyLifecycle.REVOKED)
+            .order_by(ApiKey.id)
         )
     ).all()
     if len(keys) > max_keys:
@@ -789,9 +794,11 @@ async def compile_scope(
             policy_of(owner_policy) if owner_policy is not None else None,
             service_account=service_account,
         )
+        # The key level narrows the owner's models (owner ∩ key under LIST).
+        key_eff = key_effective(owner_eff, k, key_granted.get(k.id, ()))
         key_policy = pb.EffectivePolicy(
-            allow_all_models=owner_eff.models is None,
-            allowed_models=sorted(owner_eff.models or ()),
+            allow_all_models=key_eff.models is None,
+            allowed_models=sorted(key_eff.models or ()),
             # MCP and A2A mirror the model set: universal (`None`) means every server with
             # every approved tool / every agent. Grants naming a server or agent the
             # snapshot left out (an archived target) are dropped, so the gateway never

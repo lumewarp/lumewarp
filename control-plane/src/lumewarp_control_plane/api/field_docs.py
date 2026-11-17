@@ -35,6 +35,10 @@ BY_NAME: dict[str, str] = {
         "Callable names (models, aliases, routers) granted when `model_access` is `list`;"
         " empty denies all."
     ),
+    "allowed_groups": (
+        "Model groups granted when `model_access` is `list`; each stands for its current"
+        " members, added to `allowed_models`."
+    ),
     "mcp_access": _ACCESS.format(rows="mcp_servers"),
     "mcp_servers": "MCP server grants used when `mcp_access` is `list`; empty denies all.",
     "a2a_access": _ACCESS.format(rows="a2a_agents"),
@@ -193,6 +197,40 @@ BY_MODEL: dict[tuple[str, str], str] = {
     ),
     ("KeyUpdate", "lifecycle"): (
         "`active` resumes the key and `suspended` suspends it. `revoked` is refused here."
+    ),
+    ("KeyCreate", "model_access"): (
+        "`inherit` (default) gives the key its owner's models; `list` narrows them to"
+        " `allowed_models` and `allowed_groups`. `all` is refused."
+    ),
+    ("KeyUpdate", "model_access"): (
+        "`inherit` gives the key its owner's models; `list` narrows them to `allowed_models`"
+        " and `allowed_groups`. `all` is refused."
+    ),
+    ("KeyCreate", "allowed_models"): (
+        "Callable names the key keeps when `model_access` is `list`; each must be allowed"
+        " to the owner. Empty denies all."
+    ),
+    ("KeyUpdate", "allowed_models"): (
+        "Callable names the key keeps when `model_access` is `list`; each must be allowed"
+        " to the owner. Empty denies all."
+    ),
+    ("KeyCreate", "allowed_groups"): (
+        "Model groups the key keeps when `model_access` is `list`; every member must be"
+        " allowed to the owner."
+    ),
+    ("KeyUpdate", "allowed_groups"): (
+        "Model groups the key keeps when `model_access` is `list`; every member must be"
+        " allowed to the owner."
+    ),
+    ("ModelGroupCreate", "name"): "Group name, unique among groups. It is not a callable name.",
+    ("ModelGroupUpdate", "name"): "Group name, unique among groups. It is not a callable name.",
+    ("ModelGroupCreate", "members"): (
+        "Callable names (models, aliases, routers) in the group; not other groups."
+    ),
+    ("ModelGroupUpdate", "members"): (
+        "Replaces the members: callable names (models, aliases, routers), not other groups."
+        " Holders are not re-validated; a member a holder's parent does not allow is dropped"
+        " for that holder."
     ),
     ("KeyRotate", "grace_seconds"): (
         "How long the previous secret keeps authenticating, at most 86400; 0 replaces it at once."

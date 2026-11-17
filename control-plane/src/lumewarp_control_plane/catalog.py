@@ -17,6 +17,8 @@ from lumewarp_control_plane.models import (
     CatalogKind,
     CatalogName,
     CatalogNameHistory,
+    ModelGroup,
+    ModelGroupMember,
     PolicyGrant,
     Router,
     RouterFallback,
@@ -101,8 +103,9 @@ async def audit_grant_removal(
     *,
     principal: Principal | None = None,
 ) -> int:
-    """Audit every grant on these (id, name) pairs; the caller deletes the names, which
-    cascades to the grants. Without a principal the actor is the rollback.
+    """Audit every grant and every model-group membership on these (id, name) pairs; the
+    caller deletes the names, which cascades to both. Without a principal the actor is the
+    rollback. Returns the number of grants.
     """
     actor = (
         {"principal": principal}
@@ -118,6 +121,7 @@ async def audit_grant_removal(
                 PolicyGrant.team_id,
                 PolicyGrant.user_id,
                 PolicyGrant.service_account_id,
+                PolicyGrant.key_id,
             )
             .where(PolicyGrant.name_id == name_id)
             .order_by(PolicyGrant.id)
@@ -136,7 +140,23 @@ async def audit_grant_removal(
                     "org_id": grant.org_id,
                     "user_id": grant.user_id,
                     "service_account_id": grant.service_account_id,
+                    "key_id": grant.key_id,
                 },
+                **actor,
+            )
+        groups = await session.execute(
+            select(ModelGroup.id, ModelGroup.name)
+            .join(ModelGroupMember, ModelGroupMember.group_id == ModelGroup.id)
+            .where(ModelGroupMember.name_id == name_id)
+            .order_by(ModelGroup.name)
+        )
+        for group_id, group_name in groups:
+            audit.record(
+                session,
+                action="model_group.member_remove",
+                resource_type="model_group",
+                resource_id=group_id,
+                details={"name": group_name, "member": name, "member_id": name_id},
                 **actor,
             )
     return count
@@ -156,10 +176,11 @@ async def copy_grants(session: AsyncSession, source: uuid.UUID, target: uuid.UUI
                 PolicyGrant.team_id,
                 PolicyGrant.user_id,
                 PolicyGrant.service_account_id,
+                PolicyGrant.key_id,
             ).where(PolicyGrant.name_id == source)
         )
     ).all()
-    for org_id, team_id, user_id, service_account_id in grants:
+    for org_id, team_id, user_id, service_account_id, key_id in grants:
         session.add(
             PolicyGrant(
                 name_id=target,
@@ -167,6 +188,7 @@ async def copy_grants(session: AsyncSession, source: uuid.UUID, target: uuid.UUI
                 team_id=team_id,
                 user_id=user_id,
                 service_account_id=service_account_id,
+                key_id=key_id,
             )
         )
     await session.flush()

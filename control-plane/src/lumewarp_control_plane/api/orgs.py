@@ -43,6 +43,7 @@ from lumewarp_control_plane.api.common import (
 from lumewarp_control_plane.api.policy import (
     apply_policy,
     grant_ids,
+    org_effective,
     policy_from_fields,
     policy_of,
     save_grants,
@@ -106,6 +107,14 @@ async def _readable_org_or_404(
     return row
 
 
+def _org_out(row: Org) -> OrgOut:
+    """The org with its effective model set (groups expanded; None = every name)."""
+    out = OrgOut.model_validate(row)
+    models = org_effective(row).models
+    out.effective_models = None if models is None else sorted(models)
+    return out
+
+
 @router.get("/orgs", response_model=Page[OrgOut], operation_id="listOrgs")
 async def list_orgs(
     authz: Authz,
@@ -121,7 +130,7 @@ async def list_orgs(
     if administered is not None:
         stmt = stmt.where(Org.id.in_(administered))
     rows, next_cursor = await uuid_page(session, stmt, Org.id, limit, cursor)
-    return Page[OrgOut](items=[OrgOut.model_validate(row) for row in rows], next_cursor=next_cursor)
+    return Page[OrgOut](items=[_org_out(row) for row in rows], next_cursor=next_cursor)
 
 
 @router.post(
@@ -134,8 +143,10 @@ async def create_org(body: OrgCreate, authz: Authz, session: SessionDep) -> OrgO
     """Create an org. Requires an installation admin."""
     await authz.require(Action.ORG_MANAGE)
     policy = policy_from_fields(body, default_mode=ModelAccess.ALL)
-    await grant_ids(session, policy.allowed_models)
     async with mutation(session):
+        # Inside the transaction: a read before `mutation` would autobegin one and make
+        # `session.begin()` fail.
+        await grant_ids(session, policy.allowed_models)
         row = Org(name=body.name)
         apply_policy(row, policy)
         session.add(row)
@@ -151,14 +162,14 @@ async def create_org(body: OrgCreate, authz: Authz, session: SessionDep) -> OrgO
             org_id=row.id,
             details={"name": row.name},
         )
-    return OrgOut.model_validate(row)
+    return _org_out(row)
 
 
 @router.get("/orgs/{org_id}", response_model=OrgOut, operation_id="getOrg")
 async def get_org(org_id: uuid.UUID, authz: Authz, session: SessionDep) -> OrgOut:
     """Readable by installation admins and by the org's own admins; anyone else gets 404."""
     row = await _readable_org_or_404(session, authz, org_id)
-    return OrgOut.model_validate(row)
+    return _org_out(row)
 
 
 def _budget_change_can_clear(old: int | None, new: int | None) -> bool:
@@ -220,7 +231,7 @@ async def update_org(
         )
         if changed:
             await enqueue_recompile(session, settings, "api.org.update")
-    return OrgOut.model_validate(row)
+    return _org_out(row)
 
 
 @router.delete(

@@ -83,6 +83,11 @@ TAGS = [
         "gateways report.",
     },
     {
+        "name": "model-groups",
+        "description": "Named sets of models, aliases and routers that any policy level can "
+        "grant as one unit.",
+    },
+    {
         "name": "mcp",
         "description": "MCP servers and A2A agents proxied by the gateway, and the review of "
         "MCP tool and prompt definitions.",

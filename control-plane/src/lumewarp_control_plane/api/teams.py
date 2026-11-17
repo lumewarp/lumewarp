@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Response, status
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import audit
 from lumewarp_control_plane.api.common import (
@@ -53,6 +54,14 @@ MEMBER_DEFAULT_FIELDS = (
 )
 
 
+async def _team_out(session: AsyncSession, row: Team) -> TeamOut:
+    """The full team with its effective model set: org ∩ team, groups expanded."""
+    out = TeamOut.model_validate(row)
+    models = (await team_effective_of(session, row)).models
+    out.effective_models = None if models is None else sorted(models)
+    return out
+
+
 @router.get(
     "/teams",
     response_model=Page[TeamOut | TeamBasicOut],
@@ -81,7 +90,7 @@ async def list_teams(
     # record and reads their own effective policy from /users/me.
     admin_teams = None if is_admin else await authz.admin_teams([row.id for row in rows])
     items = [
-        TeamOut.model_validate(row)
+        await _team_out(session, row)
         if admin_teams is None or row.id in admin_teams
         else TeamBasicOut.model_validate(row)
         for row in rows
@@ -142,7 +151,7 @@ async def create_team(
             details={"name": row.name},
         )
         await enqueue_recompile(session, settings, "api.team.create")
-    return TeamOut.model_validate(row)
+    return await _team_out(session, row)
 
 
 @router.get(
@@ -156,7 +165,7 @@ async def get_team(team_id: uuid.UUID, authz: Authz, session: SessionDep) -> Tea
     """
     row = await get_team_or_404(session, authz, team_id)
     if await authz.allowed(Action.TEAM_ADMIN_READ, row.id):
-        return TeamOut.model_validate(row)
+        return await _team_out(session, row)
     return TeamBasicOut.model_validate(row)
 
 
@@ -245,7 +254,7 @@ async def update_team(
             },
         )
         await enqueue_recompile(session, settings, "api.team.update")
-    return TeamOut.model_validate(row)
+    return await _team_out(session, row)
 
 
 @router.delete(

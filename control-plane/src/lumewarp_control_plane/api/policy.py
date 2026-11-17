@@ -14,6 +14,7 @@ accidental grant after a later edit.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, select
@@ -23,6 +24,7 @@ from lumewarp_control_plane.errors import ApiError
 from lumewarp_control_plane.models import (
     A2aAgent,
     A2aAgentGrant,
+    ApiKey,
     CatalogName,
     McpDefinition,
     McpDefinitionKind,
@@ -30,8 +32,11 @@ from lumewarp_control_plane.models import (
     McpServerGrant,
     MemberPolicy,
     ModelAccess,
+    ModelGroup,
+    ModelGroupMember,
     Org,
     PolicyGrant,
+    PolicyGroupGrant,
     ServiceAccount,
     Team,
 )
@@ -56,14 +61,18 @@ __all__ = [
     "apply_policy",
     "effective",
     "ensure_unique_ids",
+    "expand_groups",
     "grant_ids",
+    "group_ids",
     "mcp_grant_ids",
     "org_effective",
     "owner_effective_of",
     "policy_from_fields",
     "policy_of",
     "save_grants",
+    "save_model_grants",
     "team_effective_of",
+    "validate_key_models",
     "validate_owner_policy",
     "validate_team_policy",
 ]
@@ -85,6 +94,38 @@ async def grant_ids(session: AsyncSession, names: tuple[str, ...]) -> dict[str, 
     if missing:
         raise violation("allowed_models", f"unknown names: {', '.join(missing)}")
     return found
+
+
+async def group_ids(session: AsyncSession, names: tuple[str, ...]) -> dict[str, uuid.UUID]:
+    """Model group name -> id; 422 listing the groups that do not exist."""
+    if not names:
+        return {}
+    rows = await session.execute(
+        select(ModelGroup.name, ModelGroup.id).where(ModelGroup.name.in_(names))
+    )
+    found = {name: group_id for name, group_id in rows}
+    missing = sorted(set(names) - set(found))
+    if missing:
+        raise violation("allowed_groups", f"unknown groups: {', '.join(missing)}")
+    return found
+
+
+async def expand_groups(session: AsyncSession, policy: Policy) -> Policy:
+    """The policy with `group_models` set to the current members of its groups.
+
+    422 for an unknown group. The narrowing checks run on the expanded set
+    (`Policy.granted_models`), exactly what the compiler will intersect.
+    """
+    ids = await group_ids(session, policy.allowed_groups)
+    if not ids:
+        return replace(policy, group_models=())
+    members = await session.scalars(
+        select(CatalogName.name)
+        .join(ModelGroupMember, ModelGroupMember.name_id == CatalogName.id)
+        .where(ModelGroupMember.group_id.in_(ids.values()))
+        .distinct()
+    )
+    return replace(policy, group_models=tuple(sorted(members)))
 
 
 async def mcp_grant_ids(
@@ -165,26 +206,55 @@ def _owner(row: Org | Team | MemberPolicy | ServiceAccount) -> dict[str, uuid.UU
     }
 
 
+def _model_owner(
+    row: Org | Team | MemberPolicy | ServiceAccount | ApiKey,
+) -> dict[str, uuid.UUID | None]:
+    """`_owner` plus the key shape, for `policy_grants` and `policy_group_grants`."""
+    if isinstance(row, ApiKey):
+        return {
+            "org_id": None,
+            "team_id": None,
+            "user_id": None,
+            "service_account_id": None,
+            "key_id": row.id,
+        }
+    return {**_owner(row), "key_id": None}
+
+
+async def save_model_grants(
+    session: AsyncSession,
+    row: Org | Team | MemberPolicy | ServiceAccount | ApiKey,
+    policy: Policy,
+) -> None:
+    """Replace the row's direct model grants and group grants (422 for unknown names)."""
+    ids = await grant_ids(session, policy.allowed_models)
+    groups = await group_ids(session, policy.allowed_groups)
+    owner = _model_owner(row)
+    for grant_model in (PolicyGrant, PolicyGroupGrant):
+        await session.execute(
+            delete(grant_model).where(
+                *(
+                    column.is_(None) if value is None else column == value
+                    for column, value in (
+                        (grant_model.org_id, owner["org_id"]),
+                        (grant_model.team_id, owner["team_id"]),
+                        (grant_model.user_id, owner["user_id"]),
+                        (grant_model.service_account_id, owner["service_account_id"]),
+                        (grant_model.key_id, owner["key_id"]),
+                    )
+                )
+            )
+        )
+    session.add_all(PolicyGrant(name_id=name_id, **owner) for name_id in ids.values())
+    session.add_all(PolicyGroupGrant(group_id=group_id, **owner) for group_id in groups.values())
+    await session.flush()
+
+
 async def save_grants(
     session: AsyncSession, row: Org | Team | MemberPolicy | ServiceAccount, policy: Policy
 ) -> None:
     """Replace the row's grants. The row must be flushed; refresh it to read them back."""
-    ids = await grant_ids(session, policy.allowed_models)
-    owner = _owner(row)
-    await session.execute(
-        delete(PolicyGrant).where(
-            *(
-                column.is_(None) if value is None else column == value
-                for column, value in (
-                    (PolicyGrant.org_id, owner["org_id"]),
-                    (PolicyGrant.team_id, owner["team_id"]),
-                    (PolicyGrant.user_id, owner["user_id"]),
-                    (PolicyGrant.service_account_id, owner["service_account_id"]),
-                )
-            )
-        )
-    )
-    session.add_all(PolicyGrant(name_id=name_id, **owner) for name_id in ids.values())
+    await save_model_grants(session, row, policy)
     await save_mcp_grants(session, row, policy)
     await save_agent_grants(session, row, policy)
     await session.flush()
@@ -279,6 +349,9 @@ def policy_from_fields(
         if fields.allowed_models and mode is not ModelAccess.LIST:
             raise violation("allowed_models", "only allowed when model_access is 'list'")
         allowed = tuple(sorted(fields.allowed_models or ())) if mode is ModelAccess.LIST else ()
+        if fields.allowed_groups and mode is not ModelAccess.LIST:
+            raise violation("allowed_groups", "only allowed when model_access is 'list'")
+        groups = tuple(sorted(fields.allowed_groups or ())) if mode is ModelAccess.LIST else ()
         mcp_access = fields.mcp_access if "mcp_access" in supplied else default_mode
         mcp_access = _access(mcp_access, "mcp_access", default_mode)
         if fields.mcp_servers and mcp_access is not ModelAccess.LIST:
@@ -290,6 +363,7 @@ def policy_from_fields(
         return Policy(
             model_access=mode,
             allowed_models=allowed,
+            allowed_groups=groups,
             rpm_limit=fields.rpm_limit,
             tpm_limit=fields.tpm_limit,
             max_parallel=fields.max_parallel,
@@ -312,6 +386,16 @@ def policy_from_fields(
         allowed = base.allowed_models if base.model_access is ModelAccess.LIST else ()
     else:
         allowed = ()
+    if "allowed_groups" in supplied:
+        if mode is not ModelAccess.LIST and fields.allowed_groups:
+            raise violation("allowed_groups", "only allowed when model_access is 'list'")
+        groups = tuple(sorted(fields.allowed_groups or ()))
+    elif mode is ModelAccess.LIST:
+        groups = base.allowed_groups if base.model_access is ModelAccess.LIST else ()
+    else:
+        groups = ()
+    if mode is not ModelAccess.LIST:
+        groups = ()
 
     mcp_access = fields.mcp_access if "mcp_access" in supplied else base.mcp_access
     mcp_access = _access(mcp_access, "mcp_access", default_mode)
@@ -338,6 +422,7 @@ def policy_from_fields(
     return Policy(
         model_access=mode,
         allowed_models=allowed,
+        allowed_groups=groups,
         rpm_limit=(fields.rpm_limit if "rpm_limit" in supplied else base.rpm_limit),
         tpm_limit=(fields.tpm_limit if "tpm_limit" in supplied else base.tpm_limit),
         max_parallel=(fields.max_parallel if "max_parallel" in supplied else base.max_parallel),
@@ -379,9 +464,13 @@ def check_narrowing(
     if check_models and changed("model_access") and policy.model_access is ModelAccess.ALL:
         if parent.models is not None:
             raise violation(field("model_access"), "cannot widen to all under a restricted parent")
-    if check_models and (changed("allowed_models") or changed("model_access")):
+    if check_models and (
+        changed("allowed_models") or changed("allowed_groups") or changed("model_access")
+    ):
+        # Groups are expanded first (`expand_groups`): a group whose members reach outside
+        # the parent is refused like the same names listed one by one.
         if policy.model_access is ModelAccess.LIST and parent.models is not None:
-            own = set(policy.allowed_models)
+            own = set(policy.granted_models)
             if not own <= set(parent.models):
                 extra = sorted(own - set(parent.models))
                 raise violation(
@@ -468,6 +557,14 @@ async def owner_effective_of(
     )
 
 
+def _models_changed(base: Policy, proposed: Policy) -> bool:
+    return (base.model_access, base.allowed_models, base.allowed_groups) != (
+        proposed.model_access,
+        proposed.allowed_models,
+        proposed.allowed_groups,
+    )
+
+
 async def validate_team_policy(
     session: AsyncSession, team: Team, proposed: Policy, base: Policy | None
 ) -> None:
@@ -475,10 +572,8 @@ async def validate_team_policy(
     parent = org_effective(await _org_of(session, team))
     check_narrowing(
         parent,
-        proposed,
-        check_models=base is None
-        or (base.model_access, base.allowed_models)
-        != (proposed.model_access, proposed.allowed_models),
+        await expand_groups(session, proposed),
+        check_models=base is None or _models_changed(base, proposed),
         base=base,
     )
 
@@ -487,15 +582,12 @@ async def validate_owner_policy(
     session: AsyncSession, team: Team, proposed: Policy, base: Policy | None = None
 ) -> None:
     """Names exist and changed limits/models stay within the team's effective policy."""
-    models_changed = base is None or (base.model_access, base.allowed_models) != (
-        proposed.model_access,
-        proposed.allowed_models,
-    )
+    models_changed = base is None or _models_changed(base, proposed)
     if models_changed:
         await grant_ids(session, proposed.allowed_models)
     check_narrowing(
         await team_effective_of(session, team),
-        proposed,
+        await expand_groups(session, proposed),
         check_models=models_changed,
         base=base,
     )
@@ -512,6 +604,26 @@ async def validate_key_limits(
     ):
         if parent_value is not None and value is not None and value > parent_value:
             raise violation(name, f"must be <= owner value {parent_value} (got {value})")
+
+
+async def validate_key_models(
+    session: AsyncSession, owner: Effective, proposed: Policy, base: Policy | None
+) -> Policy:
+    """A key's model list: names and groups exist, and a changed list stays within the
+    owner's effective set (422). Returns the proposed policy with its groups expanded.
+
+    Only INHERIT and LIST are accepted; a key never widens to ALL. As for the other
+    levels, an unchanged list is not rechecked after the owner shrank.
+    """
+    if proposed.model_access is ModelAccess.ALL:
+        raise violation("model_access", "a key is 'inherit' or 'list'")
+    expanded = await expand_groups(session, proposed)
+    if base is None or _models_changed(base, proposed):
+        await grant_ids(session, proposed.allowed_models)
+        # The key policy carries only its model half: limits and MCP/A2A stay None/INHERIT
+        # and are never flagged here (key limits have `validate_key_limits`).
+        check_narrowing(owner, expanded, base=base)
+    return expanded
 
 
 def ensure_unique_ids(ids: list[uuid.UUID], field: str = "model_ids") -> None:

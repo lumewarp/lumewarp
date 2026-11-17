@@ -36,17 +36,24 @@ Tests create `lumewarp_test_<random>` on the server from `LUMEWARP_TEST_DATABASE
 
 ### Schema changes
 
-The history is one baseline, `20261106_0001_baseline.py`, generated from `models.py`:
-Lumewarp has never been deployed, so there is no upgrade path from an earlier revision and
-no data-preserving migration code. Edit `models.py`, then with the dev database at head:
+From v0.2.1 on, every release upgrades an existing database in place. The baseline
+`20261106_0001_baseline.py` is frozen as the v0.2.1 schema, and every schema change is a
+new revision on top of the last one that keeps existing rows (backfill a new required
+column, for instance with a server default). Never edit a revision that shipped in a
+release. Downgrades are not supported: `downgrade()` raises, and going back means restoring
+a database backup.
+
+Edit `models.py`, then with the dev database at head:
 
 ```sh
 uv run alembic revision --autogenerate -m "what changed"
 ```
 
-Review the generated file (autogenerate duplicates enum CHECK constraints; keep the ones on
-the `sa.Enum` columns). `tests/test_migrations.py::test_models_match_migrations` fails if
-models and migrations drift.
+Review the generated file: autogenerate does not compare CHECK constraints, so add, replace
+or drop them yourself, and make sure existing rows satisfy the new ones.
+`tests/test_migrations.py::test_models_match_migrations` fails if models and migrations
+drift, and `tests/test_migration_upgrade.py` upgrades a database seeded at the previous
+revision; extend it when a revision transforms data.
 
 ### Protobuf
 

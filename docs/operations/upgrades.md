@@ -2,10 +2,21 @@
 
 ## Releases
 
-Releases are tags `vX.Y.Z` (`vX.Y.Z-<pre>` for a pre-release). **While Lumewarp is 0.x
-there is no upgrade path: drop the control-plane database before installing a new
-release.** The gateway boots from its cached snapshot, so delete its state directory too
-when the snapshot format changed; the release notes say when.
+Releases are tags `vX.Y.Z` (`vX.Y.Z-<pre>` for a pre-release). From v0.2.1 on, a release
+upgrades the control-plane database in place and keeps its data: the Helm chart migrates
+it in a pre-upgrade hook, and the Docker Compose deployment runs its `migrate` service on
+every start.
+
+1. **Back up the database first.** There is no downgrade: to go back to the previous
+   release, restore that backup and install the previous release.
+2. Install the new release (`helm upgrade`, or set `LUMEWARP_VERSION` and
+   `docker compose up -d`). The migration runs before the new control plane starts.
+
+The gateway boots from its cached snapshot, so delete its state directory too when the
+snapshot format changed; the release notes say when.
+
+A schema change is always a new Alembic revision on top of the last one; a revision that
+shipped in a release is never edited ([Schema changes](https://github.com/lumewarp/lumewarp/blob/main/control-plane/README.md#schema-changes)).
 
 ## Important limits
 

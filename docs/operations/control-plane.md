@@ -46,7 +46,7 @@ it off the public admin ingress.
 | Command | What it does |
 | --- | --- |
 | `serve` | HTTP API + Admin UI (uvicorn, one worker), gRPC servers and background loops. `--http-bind` / `--grpc-bind` override the env settings. |
-| `migrate [REV]` / `migrate --downgrade REV` | Apply or roll back Alembic migrations (default `head`). |
+| `migrate [REV]` | Apply Alembic migrations up to `REV` (default `head`). `--downgrade REV` exists but every revision after the v0.2.1 baseline refuses it: restore a database backup instead. |
 | `openapi [-o FILE]` | Print the OpenAPI document; builds the app without connecting to the database. |
 | `bootstrap [--name N] [--scope S]` | Create the config scope row and an optionally labeled `lwg-...` gateway token; the secret goes to stdout once. |
 | `hash-password` | Read a password from stdin (or prompt for it) and print its argon2id hash for `LUMEWARP_BREAK_GLASS_PASSWORD_HASH`. |

@@ -49,6 +49,10 @@ async def test_enum_check_constraints_exist(engine) -> None:
         "ck_upstreams_health_check_bounds",
         "ck_upstreams_circuit_breaker_shape",
         "ck_router_splits_name_charset",
+        "ck_api_keys_model_access",
+        "ck_api_keys_no_all_models",
+        "ck_policy_grants_owner_shape",
+        "ck_policy_group_grants_owner_shape",
     ):
         assert name in names
 

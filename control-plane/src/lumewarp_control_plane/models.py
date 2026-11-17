@@ -308,7 +308,10 @@ class PolicyMixin:
     state narrowing its parent (only changed values are rechecked).
 
     - Model access: see `ModelAccess`. The list lives in `policy_grants` (by name id, so a
-      rename keeps it); `allowed_models` is its read-only expansion to current names.
+      rename keeps it) and `policy_group_grants` (model groups); `allowed_models` and
+      `allowed_groups` are their read-only expansions to current names, and
+      `granted_models` is both together with the groups' members (what the resolver uses).
+      Keys carry the same three columns and a `model_access` of their own.
     - MCP and A2A access mirror model access at the same four levels, with the same mode
       enum and defaults: `mcp_server_grants` (one row per server, optionally narrowed to a
       tool list) and `a2a_agent_grants` (one row per agent).
@@ -753,6 +756,8 @@ class ApiKey(TimestampMixin, Base):
         CheckConstraint("rpm_limit IS NULL OR rpm_limit > 0", name="rpm_positive"),
         CheckConstraint("tpm_limit IS NULL OR tpm_limit > 0", name="tpm_positive"),
         CheckConstraint("max_parallel IS NULL OR max_parallel > 0", name="parallel_positive"),
+        # A key narrows its owner or inherits it; it can never widen to every model.
+        CheckConstraint("model_access <> 'all'", name="no_all_models"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
@@ -791,6 +796,15 @@ class ApiKey(TimestampMixin, Base):
     rpm_limit: Mapped[int | None] = mapped_column(Integer)
     tpm_limit: Mapped[int | None] = mapped_column(BigInteger)
     max_parallel: Mapped[int | None] = mapped_column(Integer)
+    # The key level of the model list: INHERIT takes the owner's effective set unchanged,
+    # LIST narrows it to the key's own `policy_grants` and `policy_group_grants` rows
+    # (`key_id`). ALL is refused by a CHECK: a key never widens its owner.
+    model_access: Mapped[ModelAccess] = mapped_column(
+        _enum(ModelAccess, "model_access"),
+        nullable=False,
+        default=ModelAccess.INHERIT,
+        server_default=ModelAccess.INHERIT.value,
+    )
 
     @property
     def owner_id(self) -> uuid.UUID:
@@ -1177,7 +1191,7 @@ class McpServerGrant(Base):
     `all_tools` grants every approved tool; otherwise `tools` names the allowed ones
     (prompts follow the server). A level with `mcp_access=LIST` contributes exactly its
     rows; the compiler intersects them along org -> team -> owner, and a key inherits its
-    owner's set unchanged (there is no key-level list, as for models).
+    owner's set unchanged (unlike models, there is no key-level list).
     """
 
     __tablename__ = "mcp_server_grants"
@@ -1558,14 +1572,24 @@ class RouterSplitMember(Base):
     position: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
-class PolicyGrant(Base):
-    """A name in the `allowed_models` of an org (only `org_id` set), a team (only
-    `team_id` set), a member (team and user) or a service account. By name id, so a
-    rename keeps it.
-    """
+# The five owner shapes of a model grant: org only, team only, team + member, team +
+# service account, or key only. Shared by `policy_grants` and `policy_group_grants`.
+_POLICY_OWNER_SHAPE = (
+    "(key_id IS NULL AND ("
+    "(org_id IS NOT NULL AND team_id IS NULL AND user_id IS NULL"
+    " AND service_account_id IS NULL)"
+    " OR (org_id IS NULL AND team_id IS NOT NULL"
+    " AND NOT (user_id IS NOT NULL AND service_account_id IS NOT NULL))))"
+    " OR (key_id IS NOT NULL AND org_id IS NULL AND team_id IS NULL AND user_id IS NULL"
+    " AND service_account_id IS NULL)"
+)
 
-    __tablename__ = "policy_grants"
-    __table_args__ = (
+
+def _policy_owner_args(table: str, target_column: str) -> tuple:
+    """Constraints and indexes of a model grant table: the composite owner FKs, the five
+    owner shapes and one partial unique index per shape.
+    """
+    return (
         ForeignKeyConstraint(
             ["team_id", "user_id"],
             ["member_policies.team_id", "member_policies.user_id"],
@@ -1576,47 +1600,57 @@ class PolicyGrant(Base):
             ["service_accounts.id", "service_accounts.team_id"],
             ondelete="CASCADE",
         ),
-        # Exactly four shapes: org only, team only, team + member, team + service account.
-        CheckConstraint(
-            "(org_id IS NOT NULL AND team_id IS NULL AND user_id IS NULL"
-            " AND service_account_id IS NULL)"
-            " OR (org_id IS NULL AND team_id IS NOT NULL"
-            " AND NOT (user_id IS NOT NULL AND service_account_id IS NOT NULL))",
-            name="owner_shape",
-        ),
+        CheckConstraint(_POLICY_OWNER_SHAPE, name="owner_shape"),
         Index(
-            "uq_policy_grants_org",
+            f"uq_{table}_org",
             "org_id",
-            "name_id",
+            target_column,
             unique=True,
             postgresql_where=text("org_id IS NOT NULL"),
         ),
         Index(
-            "uq_policy_grants_team",
+            f"uq_{table}_team",
             "team_id",
-            "name_id",
+            target_column,
             unique=True,
             postgresql_where=text(
                 "user_id IS NULL AND service_account_id IS NULL AND org_id IS NULL"
             ),
         ),
         Index(
-            "uq_policy_grants_member",
+            f"uq_{table}_member",
             "team_id",
             "user_id",
-            "name_id",
+            target_column,
             unique=True,
             postgresql_where=text("user_id IS NOT NULL"),
         ),
         Index(
-            "uq_policy_grants_service_account",
+            f"uq_{table}_service_account",
             "service_account_id",
-            "name_id",
+            target_column,
             unique=True,
             postgresql_where=text("service_account_id IS NOT NULL"),
         ),
-        Index(None, "name_id"),
+        Index(
+            f"uq_{table}_key",
+            "key_id",
+            target_column,
+            unique=True,
+            postgresql_where=text("key_id IS NOT NULL"),
+        ),
+        Index(None, target_column),
     )
+
+
+class PolicyGrant(Base):
+    """A name in the `allowed_models` of an org (only `org_id` set), a team (only
+    `team_id` set), a member (team and user), a service account or a key (only `key_id`
+    set). By name id, so a rename keeps it.
+    """
+
+    __tablename__ = "policy_grants"
+    __table_args__ = _policy_owner_args("policy_grants", "name_id")
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     name_id: Mapped[uuid.UUID] = mapped_column(
@@ -1626,6 +1660,57 @@ class PolicyGrant(Base):
     team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"))
     user_id: Mapped[uuid.UUID | None] = mapped_column()
     service_account_id: Mapped[uuid.UUID | None] = mapped_column()
+    key_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("api_keys.id", ondelete="CASCADE"))
+
+
+class ModelGroup(TimestampMixin, Base):
+    """A named set of catalog names (models, aliases, routers) granted as one unit.
+
+    A group is not callable: its name lives outside `catalog_names` and never reaches the
+    snapshot. Groups do not nest. A grant of a group (`policy_group_grants`) stands for
+    its current members, so changing the members changes every holder at the next compile;
+    the compiler intersects down the chain as usual, so a member a parent does not allow
+    is simply dropped. Groups are not part of a rollback's catalog state.
+    """
+
+    __tablename__ = "model_groups"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    description: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+
+
+class ModelGroupMember(Base):
+    """One catalog name in a model group. Deleting the name removes it (audited)."""
+
+    __tablename__ = "model_group_members"
+    __table_args__ = (PrimaryKeyConstraint("group_id", "name_id"), Index(None, "name_id"))
+
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("model_groups.id", ondelete="CASCADE"), nullable=False
+    )
+    name_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("catalog_names.id", ondelete="CASCADE"), nullable=False
+    )
+
+
+class PolicyGroupGrant(Base):
+    """A model group in the `allowed_groups` of an org, team, member, service account or
+    key: the same five owner shapes as `PolicyGrant`.
+    """
+
+    __tablename__ = "policy_group_grants"
+    __table_args__ = _policy_owner_args("policy_group_grants", "group_id")
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("model_groups.id", ondelete="CASCADE"), nullable=False
+    )
+    org_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"))
+    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"))
+    user_id: Mapped[uuid.UUID | None] = mapped_column()
+    service_account_id: Mapped[uuid.UUID | None] = mapped_column()
+    key_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("api_keys.id", ondelete="CASCADE"))
 
 
 def _current_name(id_column) -> Any:
@@ -1645,7 +1730,7 @@ Router.name = column_property(_current_name(Router.name_id))
 
 
 def _granted_names(*owner) -> Any:
-    """The owner's grants as current names, sorted (empty array, not NULL, when none)."""
+    """The owner's direct grants as current names, sorted (empty array, not NULL, when none)."""
     return (
         select(
             func.coalesce(
@@ -1661,22 +1746,85 @@ def _granted_names(*owner) -> Any:
     )
 
 
-Team.allowed_models = column_property(
-    _granted_names(
-        PolicyGrant.team_id == Team.id,
-        PolicyGrant.user_id.is_(None),
-        PolicyGrant.service_account_id.is_(None),
+def _granted_groups(*owner) -> Any:
+    """The owner's granted model groups as names, sorted (empty array when none)."""
+    return (
+        select(
+            func.coalesce(
+                func.array_agg(aggregate_order_by(cast(ModelGroup.name, Text), ModelGroup.name)),
+                cast(text("'{}'"), ARRAY(Text)),
+            )
+        )
+        .select_from(PolicyGroupGrant)
+        .join(ModelGroup, ModelGroup.id == PolicyGroupGrant.group_id)
+        .where(*owner)
+        .correlate_except(PolicyGroupGrant, ModelGroup)
+        .scalar_subquery()
     )
-)
-Org.allowed_models = column_property(_granted_names(PolicyGrant.org_id == Org.id))
-MemberPolicy.allowed_models = column_property(
-    _granted_names(
-        PolicyGrant.team_id == MemberPolicy.team_id, PolicyGrant.user_id == MemberPolicy.user_id
+
+
+def _granted_union(direct_owner: tuple, group_owner: tuple) -> Any:
+    """Direct grants plus the current members of the granted groups, as sorted unique names.
+
+    This is the set the resolver intersects (`quota.policy_of`); `allowed_models` and
+    `allowed_groups` stay the level's own rows, for the policy responses.
+    """
+    direct = (
+        select(PolicyGrant.name_id.label("name_id"))
+        .where(*direct_owner)
+        .correlate_except(PolicyGrant)
     )
-)
-ServiceAccount.allowed_models = column_property(
-    _granted_names(PolicyGrant.service_account_id == ServiceAccount.id)
-)
+    via_groups = (
+        select(ModelGroupMember.name_id.label("name_id"))
+        .join(PolicyGroupGrant, PolicyGroupGrant.group_id == ModelGroupMember.group_id)
+        .where(*group_owner)
+        .correlate_except(PolicyGroupGrant, ModelGroupMember)
+    )
+    ids = direct.union(via_groups).subquery()
+    return (
+        select(
+            func.coalesce(
+                func.array_agg(aggregate_order_by(cast(CatalogName.name, Text), CatalogName.name)),
+                cast(text("'{}'"), ARRAY(Text)),
+            )
+        )
+        .select_from(ids)
+        .join(CatalogName, CatalogName.id == ids.c.name_id)
+        .correlate_except(CatalogName)
+        .scalar_subquery()
+    )
+
+
+def _model_owner_columns(grant: type, row: type) -> tuple:
+    """Owner predicates of a model grant table (`PolicyGrant` or `PolicyGroupGrant`)."""
+    if row is Org:
+        return (grant.org_id == Org.id,)
+    if row is Team:
+        return (
+            grant.team_id == Team.id,
+            grant.user_id.is_(None),
+            grant.service_account_id.is_(None),
+        )
+    if row is MemberPolicy:
+        return (grant.team_id == MemberPolicy.team_id, grant.user_id == MemberPolicy.user_id)
+    if row is ServiceAccount:
+        return (grant.service_account_id == ServiceAccount.id,)
+    return (grant.key_id == ApiKey.id,)
+
+
+for _grant_row in (Org, Team, MemberPolicy, ServiceAccount, ApiKey):
+    _grant_row.allowed_models = column_property(
+        _granted_names(*_model_owner_columns(PolicyGrant, _grant_row))
+    )
+    _grant_row.allowed_groups = column_property(
+        _granted_groups(*_model_owner_columns(PolicyGroupGrant, _grant_row))
+    )
+    _grant_row.granted_models = column_property(
+        _granted_union(
+            _model_owner_columns(PolicyGrant, _grant_row),
+            _model_owner_columns(PolicyGroupGrant, _grant_row),
+        )
+    )
 
 
 def _granted_mcp_servers(*owner) -> Any:

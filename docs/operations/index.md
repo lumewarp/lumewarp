@@ -34,8 +34,8 @@ Each release publishes:
 | `lumewarp-gateway` | `lumewarp` (distroless). Arguments are the gateway's [flags](./gateway.md#flags). | 65532 | `/var/lib/lumewarp`, for the cached snapshot |
 | `lumewarp-control-plane` | `python -m lumewarp_control_plane serve` (Python 3.12, with the Admin UI built in). The command is a [CLI command](./control-plane.md#cli): `migrate`, `bootstrap`, `hash-password`, ... | 10001 | none |
 
-While Lumewarp is 0.x a release has no upgrade path: drop the control-plane database before
-installing a new one ([Upgrades](./upgrades.md)).
+From v0.2.1 on, a release migrates the control-plane database in place; back it up first,
+since there is no downgrade ([Upgrades](./upgrades.md)).
 
 ### Building images
 

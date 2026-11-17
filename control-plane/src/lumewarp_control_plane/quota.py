@@ -12,7 +12,11 @@ is validated against is the same value the gateway enforces:
   spend; the remaining amount is `min(org, team, owner)` of each level's own remaining
   (see `remaining_nano_usd`).
 - keys add one last level to the limits (`ApiKey.rpm_limit` etc.) and form their own
-  limiter scope. A key without a limit emits no scope.
+  limiter scope. A key without a limit emits no scope. A key's model list is INHERIT
+  (the owner's set) or LIST (intersected with the owner's set); it is never ALL.
+- model groups: a level's LIST is its direct names plus the current members of its
+  granted groups (`Policy.granted_models`). Groups are expanded before any intersection,
+  so a member the parent does not allow is dropped like any other name.
 
 The org's spend is not a row in `usage_totals`: it is the sum of its teams' monthly
 totals, so it never drifts from the teams beneath it (`usage.org_budget`).
@@ -21,7 +25,8 @@ totals, so it never drifts from the teams beneath it (`usage.org_budget`).
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 
 from lumewarp_control_plane.models import (
     ApiKey,
@@ -70,6 +75,16 @@ class Policy:
     mcp_grants: tuple[McpGrant, ...] = ()
     a2a_access: ModelAccess = ModelAccess.INHERIT
     a2a_agents: tuple[str, ...] = ()
+    # Granted model groups by name, and the names they expand to (filled from the
+    # database: `policy_of` or `api.policy.expand_groups`). Derived, so it takes no part in
+    # equality: comparing a stored policy with a proposed one compares what was written.
+    allowed_groups: tuple[str, ...] = ()
+    group_models: tuple[str, ...] = field(default=(), compare=False)
+
+    @property
+    def granted_models(self) -> frozenset[str]:
+        """The level's own model set under LIST: direct names plus group members."""
+        return frozenset(self.allowed_models) | frozenset(self.group_models)
 
 
 @dataclass(frozen=True)
@@ -95,10 +110,14 @@ PolicyRow = Org | Team | MemberPolicy | ServiceAccount
 
 
 def policy_of(row: PolicyRow) -> Policy:
-    """The row's own (stored) policy. The row's `allowed_models` is a loaded column."""
+    """The row's own (stored) policy. `allowed_models`, `allowed_groups` and
+    `granted_models` (direct names plus group members) are loaded columns.
+    """
     return Policy(
         model_access=row.model_access,
         allowed_models=tuple(row.allowed_models or ()),
+        allowed_groups=tuple(row.allowed_groups or ()),
+        group_models=tuple(row.granted_models or ()),
         rpm_limit=row.rpm_limit,
         tpm_limit=row.tpm_limit,
         max_parallel=row.max_parallel,
@@ -188,7 +207,7 @@ def effective(parent: Effective | None, policy: Policy) -> Effective:
     that member back to the whole catalog.
     """
     if policy.model_access is ModelAccess.LIST:
-        own = frozenset(policy.allowed_models)
+        own = policy.granted_models
         models = own if parent is None or parent.models is None else parent.models & own
     else:
         models = parent.models if parent is not None else MODEL_UNIVERSAL
@@ -281,10 +300,26 @@ def owner_effective(
     )
 
 
-def key_effective(owner_effective_policy: Effective, key: ApiKey) -> Effective:
-    """The key level: only its own limits, clamped by its owner's effective values."""
+def key_models(
+    owner_models: frozenset[str] | None, key: ApiKey, granted: Iterable[str] | None = None
+) -> frozenset[str] | None:
+    """The key's model set: the owner's under INHERIT, else owner ∩ the key's granted names.
+
+    `granted` is the key's direct names plus its groups' members; when None it is read from
+    the key's loaded `granted_models` column (the compiler preloads it in bulk instead).
+    """
+    if key.model_access is not ModelAccess.LIST:
+        return owner_models
+    own = frozenset((key.granted_models or ()) if granted is None else granted)
+    return own if owner_models is None else owner_models & own
+
+
+def key_effective(
+    owner_effective_policy: Effective, key: ApiKey, granted: Iterable[str] | None = None
+) -> Effective:
+    """The key level: its own limits and model list, clamped by its owner's effective values."""
     return Effective(
-        models=owner_effective_policy.models,
+        models=key_models(owner_effective_policy.models, key, granted),
         rpm_limit=_limit(owner_effective_policy.rpm_limit, key.rpm_limit),
         tpm_limit=_limit(owner_effective_policy.tpm_limit, key.tpm_limit),
         max_parallel=_limit(owner_effective_policy.max_parallel, key.max_parallel),
