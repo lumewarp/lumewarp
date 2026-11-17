@@ -17,6 +17,7 @@ import { useUsageMetric } from "../lib/usageMetric";
 import { useCan, useMe, useModels, useNames, useTeamDirectory, useTeams } from "../hooks";
 import { ENDPOINTS, endpointLabel } from "../lib/endpoints";
 import { KeyPill } from "../components/KeyPill";
+import { Leaderboard } from "../components/Leaderboard";
 
 // The catalog picker is a lazy chunk: this page ships in the entry chunk.
 const LazyCatalogFilter = lazy(() => import("../components/CatalogPicker").then((m) => ({ default: m.CatalogFilter })));
@@ -51,6 +52,16 @@ const GROUPS = [
   { value: "day,model", label: "Day × model" },
   { value: "team,owner,key", label: "Team × owner × key" },
 ];
+
+/** What everyone but an installation admin may group by: no served model, upstream, alias or router. */
+const MEMBER_GROUPS = [
+  { value: "requested", label: "Requested name" },
+  { value: "day", label: "Day" },
+  { value: "day,requested", label: "Day × requested name" },
+  { value: "team", label: "Team" },
+  { value: "key", label: "API key" },
+];
+const OWNER_GROUP = { value: "owner", label: "Owner" };
 
 /** MCP traffic read by server, method and tool; the first entry is the default (the most detail). */
 const MCP_GROUPS = [
@@ -221,7 +232,7 @@ export function Usage() {
 }
 
 function LlmUsage({ range }: { range: RangeProps }) {
-  const [groupBy, setGroupBy] = useState("model");
+  const [pickedGroup, setGroupBy] = useState("");
   const [model, setModel] = useState(ANY);
   const [upstreamText, setUpstreamText] = useState("");
   const upstreamModel = useDebounced(upstreamText.trim(), 300);
@@ -230,6 +241,7 @@ function LlmUsage({ range }: { range: RangeProps }) {
   const [endpoint, setEndpoint] = useState(ANY);
   const [modelType, setModelType] = useState<ModelType | "">("");
   const perms = useCan();
+  const routing = perms.canReadRouting;
   const me = useMe();
   const teams = useTeams();
   // Upstream suggestions come from the routing details, which only an installation admin
@@ -241,6 +253,10 @@ function LlmUsage({ range }: { range: RangeProps }) {
   // from the same set, so changing the role changes the cache entry too.
   const administered = (teams.data ?? []).filter((team) => perms.teamAdmin(team.id));
   const directoryEnabled = administered.length > 0;
+  // Owner is offered where the caller sees other people: the selected team's admin, or any team's.
+  const ownerOffered = range.teamId ? perms.teamAdmin(range.teamId) : directoryEnabled;
+  const groupOptions = routing ? GROUPS : ownerOffered ? [...MEMBER_GROUPS, OWNER_GROUP] : MEMBER_GROUPS;
+  const groupBy = groupOptions.some((option) => option.value === pickedGroup) ? pickedGroup : groupOptions[0].value;
   const directory = useTeamDirectory(administered, directoryEnabled);
   const teamName = useNames(teams.data);
   const memberName = useNames(directory.data?.members.map((member) => ({ id: member.user_id, name: member.email })));
@@ -264,20 +280,21 @@ function LlmUsage({ range }: { range: RangeProps }) {
     kind: "llm",
     group_by: groupBy,
     team_id: range.teamId || undefined,
-    model: model || undefined,
-    upstream_model: upstreamModel || undefined,
     endpoint: endpoint || undefined,
     model_type: modelType || undefined,
-    ...provenanceFilter("alias", alias),
-    ...provenanceFilter("router", router),
+    // Routing filters answer 403 for everyone but an installation admin: never sent.
+    ...(routing
+      ? { model: model || undefined, upstream_model: upstreamModel || undefined, ...provenanceFilter("alias", alias), ...provenanceFilter("router", router) }
+      : {}),
   };
   const query = useQuery({
     queryKey: ["usage", filters],
     queryFn: () => api.usage(filters),
     enabled: !!range.from && !!range.to,
   });
-  // The chart keeps the page's range and filters but is always day × model, whatever the table groups by.
-  const chartFilters: UsageQuery = { ...filters, group_by: "day,model" };
+  // The chart keeps the page's range and filters but is always by day and name, whatever the table groups by.
+  const seriesBy = routing ? "model" : "requested";
+  const chartFilters: UsageQuery = { ...filters, group_by: `day,${seriesBy}` };
   const chart = useQuery({
     queryKey: ["usage", chartFilters],
     queryFn: () => api.usage(chartFilters),
@@ -355,18 +372,16 @@ function LlmUsage({ range }: { range: RangeProps }) {
     team_id: row.team_id ?? (range.teamId || undefined),
     key_id: row.key_id ?? undefined,
     requested: row.requested || undefined,
-    model: row.model || undefined,
-    alias: row.alias || undefined,
-    router: row.router || undefined,
+    ...(routing ? { model: row.model || undefined, alias: row.alias || undefined, router: row.router || undefined } : {}),
   });
 
   return (
     <>
       <FilterBar
         testId="usage-filters"
-        className="lg:grid-cols-[10rem_10rem_repeat(3,minmax(0,1fr))_auto]"
+        className={routing ? "lg:grid-cols-[10rem_10rem_repeat(3,minmax(0,1fr))_auto]" : "lg:grid-cols-[10rem_10rem_repeat(2,minmax(0,1fr))_auto]"}
         more={{
-          active: [upstreamText, alias, router, endpoint, modelType].filter(Boolean).length,
+          active: [routing && upstreamText, routing && alias, routing && router, endpoint, modelType].filter(Boolean).length,
           onClear: () => {
             setUpstreamText("");
             setAlias(ANY);
@@ -376,9 +391,11 @@ function LlmUsage({ range }: { range: RangeProps }) {
           },
           children: (
             <>
+              {routing && (<>
               <ComboboxField free label="Upstream model" hint="Any name, including one no model uses any more." placeholder="All upstream models" value={upstreamText} onChange={setUpstreamText} options={upstreamSuggestions.map((name) => ({ value: name, label: name }))} />
               <CatalogFilter label="Alias" kinds={["alias"]} value={alias} onChange={setAlias} entryValue={byId} leading={provenanceModes("alias")} />
               <CatalogFilter label="Router" kinds={["router"]} value={router} onChange={setRouter} entryValue={byId} leading={provenanceModes("router")} />
+              </>)}
               <ComboboxField label="Endpoint" value={endpoint} onChange={setEndpoint} options={[{ value: ANY, label: "All endpoints" }, ...ENDPOINTS]} />
               <SelectField label="Model type" value={modelType} onChange={(x) => setModelType(x as ModelType | "")} options={[{ value: "", label: "All types" }, ...MODEL_TYPES]} />
             </>
@@ -386,8 +403,8 @@ function LlmUsage({ range }: { range: RangeProps }) {
         }}
       >
         <RangeFields range={range} teams={teams.data} />
-        <CatalogFilter label="Model" kinds={["model"]} value={model} onChange={setModel} leading={[{ value: ANY, label: "All models" }]} />
-        <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={GROUPS} />
+        {routing && <CatalogFilter label="Model" kinds={["model"]} value={model} onChange={setModel} leading={[{ value: ANY, label: "All models" }]} />}
+        <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={groupOptions} />
       </FilterBar>
       <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
         <Stat label="Requests" value={n(total.requests)} />
@@ -399,6 +416,7 @@ function LlmUsage({ range }: { range: RangeProps }) {
       {total.unpriced > 0 && <p className="text-muted-foreground">{n(total.unpriced)} request(s) had no price configured and are counted at $0.</p>}
       <div className="my-4">
         <UsageChart
+          seriesBy={seriesBy}
           rows={ranged ? chart.data : []}
           from={range.from}
           to={range.to}
@@ -411,6 +429,7 @@ function LlmUsage({ range }: { range: RangeProps }) {
           title="Usage by day"
         />
       </div>
+      {ranged && <Leaderboard from={rangeQuery.from} to={rangeQuery.to} teamId={range.teamId} />}
       <DataTable
         rows={query.data}
         loading={query.isPending || teams.isPending || (directoryEnabled && directory.isPending)}

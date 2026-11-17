@@ -3,7 +3,7 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 import { signIn, VIEWER } from "./selfService";
 
 /*
- * The usage chart: real rows from `GET /usage?group_by=day,model`, on Overview and on the Usage page, in tokens
+ * The usage chart: real rows from `GET /usage?group_by=day,model`, on the Usage page, in tokens
  * or cost. serve.py seeds a trend across UTC days (with an empty day), a model with no price, a partly priced
  * model, and nine models on one day so the tail has to fold into "Other".
  */
@@ -205,56 +205,11 @@ test("usage: the chart draws the API's rows, and its table and the page's table 
   }
 });
 
-test("overview: real usage for the last 14 UTC days, and no sample data anywhere", async ({ page, request }) => {
+test("empty states: a quiet window says so", async ({ page, request }) => {
   await signInAsAdmin(page, request);
-  await page.goto("/");
-  await expect(chart(page)).toBeVisible();
-  await expect(daySlots(page)).toHaveCount(14);
-  const days = await chart(page).getByTestId("usage-day").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-day")));
-  expect(days).toEqual(Array.from({ length: 14 }, (_, i) => daysAgo(13 - i)));
-  await expect(page.getByText(/sample/i)).toHaveCount(0);
-
-  // What the card shows is the API's answer for the same window.
-  const today = isoDay(new Date());
-  const rows = await apiRows(request, daysAgo(13), today);
-  expect(rows.length).toBeGreaterThan(0);
-  await hoverSlot(page, today);
-  await expect(tooltip(page)).toBeVisible();
-  await expect(tooltip(page)).toContainText(`${sumBy(rows.filter((row) => row.date === today), "total_tokens").toLocaleString()} tokens`);
-
-  // And it links to the page that explains it.
-  await chart(page).getByRole("link", { name: "Open Usage" }).click();
-  await expect(page).toHaveURL(/\/usage$/);
-  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
-});
-
-test("overview: a failed usage query stays in its card and retries without taking the page down", async ({ page, request }) => {
-  await signInAsAdmin(page, request);
-  await page.route("**/api/v1/usage?*", (route) => route.fulfill({ status: 500, json: { error: { code: "internal", message: "usage is unavailable" } } }));
-  await page.goto("/");
-  await expect(chart(page).getByText("usage is unavailable")).toBeVisible();
-  // The rest of the page is unaffected: the counters are still there, and the page's own error slot stays empty.
-  await expect(page.getByText("Active keys", { exact: true })).toBeVisible();
-  await expect(page.getByText("Gateways connected", { exact: true })).toBeVisible();
-  await expect(page.getByTestId("state-error")).toHaveCount(0);
-
-  await page.unroute("**/api/v1/usage?*");
-  await chart(page).getByRole("button", { name: "Try again" }).click();
-  await expect(chart(page).getByTestId("usage-day")).toHaveCount(14);
-  await expect(chart(page).getByText("usage is unavailable")).toHaveCount(0);
-});
-
-test("empty states: a quiet window says so, on both pages", async ({ page, request }) => {
-  await signInAsAdmin(page, request);
-  await page.route("**/api/v1/usage?*", (route) => route.fulfill({ status: 200, json: { items: [], next_cursor: null } }));
-  await page.goto("/");
-  await expect(chart(page).getByTestId("usage-chart-empty")).toHaveText("No usage in the last 14 days.");
-  await page.unroute("**/api/v1/usage?*");
-
   await page.goto("/usage");
   await setRange(page, "2020-01-01", "2020-01-01");
   await expect(chart(page).getByTestId("usage-chart-empty")).toHaveText("No usage in this range.");
-  await expect(chart(page).getByText("No usage in the last 14 days.")).toHaveCount(0);
 });
 
 test("toggle: switches tokens to cost, survives a reload, and works when storage throws", async ({ page, request, browser }) => {
@@ -410,7 +365,7 @@ test("phone: the card scrolls, the page does not, and a tap opens the tooltip", 
   await context.addCookies((await request.storageState()).cookies);
   const phone = await context.newPage();
   try {
-    for (const path of ["/", "/usage"]) {
+    for (const path of ["/usage"]) {
       await phone.goto(path);
       await expect(phone.getByTestId("usage-chart")).toBeVisible();
       await expect(daySlots(phone).first()).toBeVisible();
@@ -677,27 +632,19 @@ test("subtitle: the date range never breaks across lines on a phone", async ({ p
   }
 });
 
-test("colours: a model drawn in two consecutive renders keeps its fill across pages, ranges and the toggle", async ({ page, request }) => {
+test("colours: a model drawn in two consecutive renders keeps its fill across ranges and the toggle", async ({ page, request }) => {
   await signInAsAdmin(page, request);
-  // Overview draws a and b; Usage draws b and c; widening Usage brings a back.
-  const answer = async (route: import("@playwright/test").Route, names: string[]) =>
-    route.fulfill({ status: 200, json: { items: names.map((name) => usageRow(isoDay(new Date()), name, 100, 1000)), next_cursor: null } });
+  // Usage draws b and c; widening brings a in without repainting the survivors.
   await page.route("**/api/v1/usage?*", (route) =>
-    new URL(route.request().url()).searchParams.get("group_by") === "day,model" ? answer(route, page.url().endsWith("/usage") ? ["b", "c"] : ["a", "b"]) : route.continue(),
+    new URL(route.request().url()).searchParams.get("group_by") === "day,model"
+      ? route.fulfill({ status: 200, json: { items: ["b", "c"].map((name) => usageRow(isoDay(new Date()), name, 100, 1000)), next_cursor: null } })
+      : route.continue(),
   );
   const legendCount = (count: number) => expect(chart(page).getByTestId("usage-chart-legend").locator("[data-series]")).toHaveCount(count);
-  await page.goto("/");
-  await legendCount(2);
-  const overview = await legendColours(page);
-  expect([...overview.keys()]).toEqual(["a", "b"]);
-
-  await chart(page).getByRole("link", { name: "Open Usage" }).click();
-  await expect(page).toHaveURL(/\/usage$/);
+  await page.goto("/usage");
   await legendCount(2);
   const usage = await legendColours(page);
   expect([...usage.keys()]).toEqual(["b", "c"]);
-  // b was drawn on both pages: same fill. c is new.
-  expect(usage.get("b")).toBe(overview.get("b"));
   expect(usage.get("c")).not.toBe(usage.get("b"));
 
   // Widen the set: a comes back as a returning model, and no survivor is repainted.

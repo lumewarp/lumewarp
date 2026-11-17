@@ -1343,6 +1343,16 @@ export interface paths {
          * Get Usage
          * @description Aggregate usage within the caller's existing team/key permission scope.
          *
+         *     `day,requested` is the default; `requested` is the name the client called, so a renamed
+         *     model, alias or router appears as separate before/after called names. Only an
+         *     installation admin may group or filter by `model`, `upstream_model`, `alias` or `router`
+         *     and their ids/`_missing` variants; any other caller gets 403 `routing_detail_forbidden`
+         *     and never receives `served_by`, `via_aliases`, `via_routers` or `upstream_model(s)`.
+         *
+         *     A plain member gets whole-team totals when neither `owner` nor `key` is grouped and no
+         *     `user_id`/`service_account_id`/`key_id` filter is set. Grouping or filtering by owner or
+         *     key keeps the own-user-keys predicate inside teams the caller does not administer.
+         *
          *     Catalog identity uses request started_at (completion ts for old gateways).
          *     If no exact interval matches, a unique same-kind owner within
          *     LUMEWARP_USAGE_CATALOG_GRACE_SECONDS (default 300) is used. Same-kind name
@@ -1360,6 +1370,37 @@ export interface paths {
          *     so any of them (and every non-LLM kind) reads raw events.
          */
         get: operations["getUsage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/usage/leaderboard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Usage Leaderboard
+         * @description Rank called names, keys or owners inside the caller's readable teams.
+         *
+         *     Rows are ordered by total tokens (input plus output) descending, then by spend; `rank`
+         *     restarts at 1 on each page. `by=requested` aggregates the name the client called across
+         *     the readable teams (a renamed model, alias or router shows as separate called names).
+         *     `by=key` and `by=owner` group within the team and return `team_id`.
+         *
+         *     An installation admin ranks every team. Everyone else ranks only their readable teams;
+         *     a plain member therefore sees another member in the ranking but not their identity:
+         *     `key` is null and `label` is `Key #<rank>` for a key the caller may not read, and
+         *     `owner_kind`/`owner_id` are null with `label` `Member #<rank>` for an owner the caller
+         *     may not read. The caller's own owner row is always named and has `is_me=true`.
+         */
+        get: operations["getUsageLeaderboard"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1386,8 +1427,11 @@ export interface paths {
          *     need an explicit `kind`. The permission scope is `/usage`'s: a plain member sees their
          *     own user-owned keys only, a team admin (inherited org admin included) their teams, and
          *     an installation admin everything. An out-of-scope `team_id` or `key_id` answers exactly
-         *     as it does on `/usage` (404 or 403). `playground_user_id` is set when the request came
-         *     from the Admin UI Playground.
+         *     as it does on `/usage` (404 or 403). Only an installation admin sees the routing chain:
+         *     for every other caller the `model`, `alias`, `router`, `upstream`, `upstream_model`,
+         *     `fallback` and `attempts` fields are null, and those name filters answer 403
+         *     `routing_detail_forbidden`. `playground_user_id` is set when the request came from the
+         *     Admin UI Playground.
          */
         get: operations["listRequests"];
         put?: never;
@@ -3999,6 +4043,13 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
+        /** Page[UsageLeaderboardRowOut] */
+        Page_UsageLeaderboardRowOut_: {
+            /** Items */
+            items: components["schemas"]["UsageLeaderboardRowOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
         /** Page[UsageRowOut] */
         Page_UsageRowOut_: {
             /** Items */
@@ -4285,6 +4336,10 @@ export interface components {
         /**
          * RequestOut
          * @description One gateway request: the name the client called and where it landed.
+         *
+         *     The routing fields (`alias`, `router`, `fallback`, `model`, `upstream`,
+         *     `upstream_model`, `attempts`) are filled only for an installation admin; every other
+         *     caller receives them as null.
          */
         RequestOut: {
             /**
@@ -4303,25 +4358,25 @@ export interface components {
             /** Requested */
             requested: string;
             /** Alias */
-            alias: string;
+            alias?: string | null;
             /** Alias Id */
             alias_id?: string | null;
             /** Router */
-            router: string;
+            router?: string | null;
             /** Router Id */
             router_id?: string | null;
             /** Fallback */
-            fallback: boolean;
+            fallback?: boolean | null;
             /** Model */
-            model: string;
+            model?: string | null;
             /** Model Id */
             model_id?: string | null;
             /** Upstream */
-            upstream: string;
+            upstream?: string | null;
             /** Upstream Model */
-            upstream_model: string;
+            upstream_model?: string | null;
             /** Attempts */
-            attempts: number;
+            attempts?: number | null;
             /** Status */
             status: number;
             outcome: components["schemas"]["RequestOutcome"];
@@ -5503,6 +5558,82 @@ export interface components {
              * @description Save although connected gateways lack the plugin; they will NACK.
              */
             force?: boolean;
+        };
+        /**
+         * UsageLeaderboardRowOut
+         * @description One ranked row of `GET /usage/leaderboard`.
+         *
+         *     `label` always names the row: the called name for `by=requested`, the key's name for a
+         *     readable key and the owner's name for a readable owner. A key or owner the caller may not
+         *     read is anonymised to `Key #<rank>` / `Member #<rank>` and its id and ref stay null, so an
+         *     unreadable identity never leaks. `is_me` marks the caller's own owner row.
+         */
+        UsageLeaderboardRowOut: {
+            /**
+             * Rank
+             * @description 1-based position, ordered by total tokens, then cost.
+             */
+            rank: number;
+            /**
+             * Label
+             * @description What the row names: the called name, the key's name or the owner's name; an unreadable key or owner is `Key #<rank>` or `Member #<rank>`.
+             */
+            label: string;
+            /**
+             * Requested
+             * @description The called name; only for `by=requested`.
+             */
+            requested?: string | null;
+            /**
+             * Team Id
+             * @description The row's team for `by=key` and `by=owner`; null for `by=requested`.
+             */
+            team_id?: string | null;
+            /** @description The key for `by=key` when the caller may read it (installation admin, team admin, or its user owner); null otherwise and for every other board. */
+            key?: components["schemas"]["KeyRefOut"] | null;
+            /** @description `user` or `service_account` for `by=owner` when the caller may read it; null otherwise and for every other board. */
+            owner_kind?: components["schemas"]["KeyOwnerKind"] | null;
+            /**
+             * Owner Id
+             * @description The owner's id for `by=owner` when the caller may read it (installation admin, the team's admin, or the owner themself); null otherwise.
+             */
+            owner_id?: string | null;
+            /**
+             * Is Me
+             * @description True only for the caller's own row on `by=owner`.
+             * @default false
+             */
+            is_me: boolean;
+            /**
+             * Requests
+             * @description Requests in the group.
+             */
+            requests: number;
+            /**
+             * Prompt Tokens
+             * @description Summed input tokens.
+             */
+            prompt_tokens: number;
+            /**
+             * Completion Tokens
+             * @description Summed output tokens.
+             */
+            completion_tokens: number;
+            /**
+             * Total Tokens
+             * @description Input plus output tokens; the ranking key.
+             */
+            total_tokens: number;
+            /**
+             * Cost Nano Usd
+             * @description Summed cost in nano-USD; the tie-break.
+             */
+            cost_nano_usd: number;
+            /**
+             * Unknown Cost Count
+             * @description Requests whose cost is unknown (no price on the served model).
+             */
+            unknown_cost_count: number;
         };
         /**
          * UsageNameOut
@@ -12121,6 +12252,84 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Page_UsageRowOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getUsageLeaderboard: {
+        parameters: {
+            query: {
+                /** @description Board to rank: `requested` (called name), `key` (API key) or `owner` (user or service account). */
+                by: "requested" | "key" | "owner";
+                /** @description Start of the range (inclusive); defaults to the start of the current UTC month. */
+                from?: string | null;
+                /** @description End of the range (exclusive); defaults to now. */
+                to?: string | null;
+                /** @description Only rows of this team; it must be readable by the caller. */
+                team_id?: string | null;
+                /** @description Gateway protocol to rank; `llm` by default. */
+                kind?: components["schemas"]["TrafficKind"];
+                /** @description How many rows to return, 1 to 50; default 10. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_UsageLeaderboardRowOut_"];
                 };
             };
             /** @description Missing or invalid credentials */

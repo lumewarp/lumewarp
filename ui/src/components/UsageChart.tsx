@@ -94,14 +94,14 @@ interface Series {
  * zero bar, while a model priced at zero is drawn and says $0. The eight named models are ranked by total
  * tokens whichever metric is drawn, so a toggle cannot change who is named.
  */
-function build(rows: UsageRow[] | undefined, days: string[], metric: UsageMetric) {
+function build(rows: UsageRow[] | undefined, days: string[], metric: UsageMetric, by: SeriesBy) {
   const index = new Map(days.map((day, at) => [day, at]));
   const zeroes = () => days.map(() => 0);
   const models = new Map<string, Model>();
   for (const row of rows ?? []) {
     const at = row.date ? index.get(row.date) : undefined;
     if (at === undefined) continue;
-    const name = row.model || "—";
+    const name = (by === "requested" ? row.requested : row.model) || "—";
     let model = models.get(name);
     if (!model) {
       model = { tokens: zeroes(), costs: zeroes(), requests: zeroes(), tokenTotal: 0, costTotal: 0, priced: false, unknown: 0 };
@@ -220,7 +220,12 @@ function useWidth(element: HTMLDivElement | null) {
   return width;
 }
 
+/** What a series is: the serving model (`group_by=day,model`) or the called name (`day,requested`). */
+export type SeriesBy = "model" | "requested";
+
 export interface UsageChartProps {
+  /** The row field one series is drawn for; default `model`. */
+  seriesBy?: SeriesBy;
   /** `GET /usage` rows with `group_by=day,model`: one UTC day and one model per row. */
   rows: UsageRow[] | undefined;
   /** First and last UTC day drawn (`YYYY-MM-DD`), both inclusive. Every day in between gets a slot. */
@@ -237,9 +242,9 @@ export interface UsageChartProps {
   footer?: ReactNode;
 }
 
-export function UsageChart({ rows, from, to, metric, onMetricChange, loading, error, onRetry, empty = "No usage in this period.", title = "Usage by day", footer }: UsageChartProps) {
+export function UsageChart({ seriesBy = "model", rows, from, to, metric, onMetricChange, loading, error, onRetry, empty = "No usage in this period.", title = "Usage by day", footer }: UsageChartProps) {
   const days = useMemo(() => daysBetween(from, to), [from, to]);
-  const { series, totals, dayRequests, peak, unpriced, unknown } = useMemo(() => build(rows, days, metric), [rows, days, metric]);
+  const { series, totals, dayRequests, peak, unpriced, unknown } = useMemo(() => build(rows, days, metric, seriesBy), [rows, days, metric, seriesBy]);
   const axis = axisFor(peak);
 
   // One shown day and the input that chose it: whichever came last wins, so a keyboard move is not hidden by
@@ -411,7 +416,7 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
                 );
               }}
             >
-              <svg ref={setSvgEl} width={inner + PAD.right} height={base + PAD.bottom} data-max={axis.max} role="group" aria-label={`${METRIC_LABEL[metric]} per UTC day, by model, ${from} to ${to}`} className="block max-w-none">
+              <svg ref={setSvgEl} width={inner + PAD.right} height={base + PAD.bottom} data-max={axis.max} role="group" aria-label={`${METRIC_LABEL[metric]} per UTC day, by ${seriesBy === "requested" ? "called name" : "model"}, ${from} to ${to}`} className="block max-w-none">
                 {axis.ticks.length > 1 && <path d={ticks.filter((t) => t.value).map((t) => `M0 ${t.y}H${inner}`).join("")} className="stroke-border" strokeDasharray="3 3" />}
                 <line x1={0} x2={inner} y1={base} y2={base} className="stroke-border" />
                 {shownAt !== null && <rect x={slot * shownAt} y={PAD.top} width={slot} height={PLOT_H} className="fill-muted/60" />}
@@ -568,7 +573,7 @@ export function UsageChart({ rows, from, to, metric, onMetricChange, loading, er
             <span data-testid="usage-chart-range" className="whitespace-nowrap">
               {from} to {to}
             </span>
-            , by model.
+            , by {seriesBy === "requested" ? "called name" : "model"}.
           </CardDescription>
         </div>
         <div role="group" aria-label="Chart metric" data-testid="usage-chart-metric" className="inline-flex shrink-0 gap-0.5 rounded-md border bg-muted p-0.5">

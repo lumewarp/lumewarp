@@ -78,7 +78,7 @@ const initialFilters = (search: RequestsSearch): Filters => ({
 const trimmed = (value: string) => value.trim() || undefined;
 
 /** The API query: the day range is inclusive on screen and exclusive at its end, as on Usage. */
-function queryOf(filters: Filters, cursor: string | undefined): RequestsQuery {
+function queryOf(filters: Filters, cursor: string | undefined, routing: boolean): RequestsQuery {
   return {
     kind: filters.kind,
     team_id: filters.teamId || undefined,
@@ -86,9 +86,10 @@ function queryOf(filters: Filters, cursor: string | undefined): RequestsQuery {
     user_id: filters.owner.startsWith("user:") ? filters.owner.slice("user:".length) : undefined,
     service_account_id: filters.owner.startsWith("sa:") ? filters.owner.slice("sa:".length) : undefined,
     requested: trimmed(filters.requested),
-    model: trimmed(filters.model),
-    alias: trimmed(filters.alias),
-    router: trimmed(filters.router),
+    // Routing filters answer 403 for anyone but an installation admin: never sent.
+    model: routing ? trimmed(filters.model) : undefined,
+    alias: routing ? trimmed(filters.alias) : undefined,
+    router: routing ? trimmed(filters.router) : undefined,
     status: filters.status ?? undefined,
     outcome: filters.outcome || undefined,
     request_id: trimmed(filters.requestId),
@@ -136,8 +137,8 @@ export function Requests() {
   });
 
   const query = useQuery({
-    queryKey: ["requests", filters, cursor],
-    queryFn: () => api.requests(queryOf(filters, cursor)),
+    queryKey: ["requests", filters, cursor, perms.canReadRouting],
+    queryFn: () => api.requests(queryOf(filters, cursor, perms.canReadRouting)),
   });
 
   const set = (patch: Partial<Filters>) =>
@@ -187,8 +188,8 @@ export function Requests() {
   const extraActive = [
     filters.kind !== "llm",
     !!filters.owner,
-    !!filters.alias,
-    !!filters.router,
+    perms.canReadRouting && !!filters.alias,
+    perms.canReadRouting && !!filters.router,
     filters.status !== null,
     !!filters.outcome,
     !!filters.requestId,
@@ -201,7 +202,7 @@ export function Requests() {
       <PageHeader title="Requests" hint="No prompt or response content is stored; copy a request id to look it up in OTel." />
       <FilterBar
         testId="request-filters"
-        className="lg:grid-cols-[10rem_10rem_repeat(4,minmax(0,1fr))_auto]"
+        className={perms.canReadRouting ? "lg:grid-cols-[10rem_10rem_repeat(4,minmax(0,1fr))_auto]" : "lg:grid-cols-[10rem_10rem_repeat(3,minmax(0,1fr))_auto]"}
         more={{
           active: extraActive,
           onClear: clearExtra,
@@ -209,8 +210,12 @@ export function Requests() {
             <>
               <SelectField label="Kind" value={filters.kind} onChange={(value) => change({ kind: value as Schemas["TrafficKind"] })} options={KINDS} />
               {ownersEnabled && <ComboboxField label="Owner" value={filters.owner} onChange={(value) => change({ owner: value })} options={ownerOptions} />}
-              <CatalogFilter free kinds={["alias"]} label="Alias" value={filters.alias} onChange={(value) => change({ alias: value })} placeholder="Any alias" />
-              <CatalogFilter free kinds={["router"]} label="Router" value={filters.router} onChange={(value) => change({ router: value })} placeholder="Any router" />
+              {perms.canReadRouting && (
+                <>
+                  <CatalogFilter free kinds={["alias"]} label="Alias" value={filters.alias} onChange={(value) => change({ alias: value })} placeholder="Any alias" />
+                  <CatalogFilter free kinds={["router"]} label="Router" value={filters.router} onChange={(value) => change({ router: value })} placeholder="Any router" />
+                </>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <NumberField label="Status" value={filters.status} onChange={(value) => change({ status: value })} min={100} placeholder="Any" />
                 <SelectField label="Outcome" value={filters.outcome} onChange={(value) => change({ outcome: value as Filters["outcome"] })} options={OUTCOMES} />
@@ -237,7 +242,7 @@ export function Requests() {
           placeholder={!filters.teamId ? "Choose a team first" : undefined}
         />
         <CatalogFilter free label="Requested" value={filters.requested} onChange={(value) => change({ requested: value })} placeholder="Any name" />
-        <CatalogFilter free kinds={["model"]} label="Resolved" value={filters.model} onChange={(value) => change({ model: value })} placeholder="Any model" />
+        {perms.canReadRouting && <CatalogFilter free kinds={["model"]} label="Resolved" value={filters.model} onChange={(value) => change({ model: value })} placeholder="Any model" />}
       </FilterBar>
       <DataTable
         rows={query.data?.items}
@@ -295,7 +300,7 @@ export function Requests() {
               </Button>
             ),
           },
-          { key: "resolved", header: "Resolved", cell: (row) => <Resolved row={row} /> },
+          ...(perms.canReadRouting ? [{ key: "resolved", header: "Resolved", cell: (row: RequestRow) => <Resolved row={row} /> }] : []),
           {
             key: "key",
             header: "Key",

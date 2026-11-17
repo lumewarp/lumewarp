@@ -38,6 +38,7 @@ export type CatalogEntry = Schemas["CatalogEntryOut"];
 export type CatalogKind = Schemas["CatalogKind"];
 export type UsageRow = Schemas["UsageRowOut"];
 export type RequestRow = Schemas["RequestOut"];
+export type LeaderboardRow = Schemas["UsageLeaderboardRowOut"];
 export type RequestOutcome = Schemas["RequestOutcome"];
 export type TrafficKind = Schemas["TrafficKind"];
 export type User = Schemas["UserOut"];
@@ -117,6 +118,7 @@ export async function listAll<T>(fetchPage: (cursor: string | undefined) => Prom
 }
 
 export type UsageQuery = NonNullable<paths["/api/v1/usage"]["get"]["parameters"]["query"]>;
+export type LeaderboardQuery = NonNullable<paths["/api/v1/usage/leaderboard"]["get"]["parameters"]["query"]>;
 export type RequestsQuery = NonNullable<paths["/api/v1/requests"]["get"]["parameters"]["query"]>;
 
 const q = (cursor: string | undefined) => ({ limit: 200, cursor });
@@ -259,6 +261,9 @@ export const api = {
 
   usage: (query: UsageQuery) =>
     listAll((c) => unwrap(client.GET("/api/v1/usage", { params: { query: { ...query, ...q(c) } } }))),
+  /** The top rows of one ranking (called name, key or owner) over the readable teams. */
+  usageLeaderboard: (query: LeaderboardQuery) =>
+    unwrap(client.GET("/api/v1/usage/leaderboard", { params: { query } })).then((page) => page.items),
   /** One page of the request log, newest first; follow `next_cursor` for older rows. */
   requests: (query: RequestsQuery) =>
     unwrap(client.GET("/api/v1/requests", { params: { query: { limit: 50, ...query } } })),

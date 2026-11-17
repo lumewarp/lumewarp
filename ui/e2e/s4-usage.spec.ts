@@ -1,6 +1,7 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Response } from "@playwright/test";
 
 import { moreFilters, optionNames, pick } from "./helpers";
+import { Admin, MEMBER, MEMBER_EMAIL, TEAM_ADMIN, TEAM_ADMIN_EMAIL } from "./selfService";
 
 /*
  * Usage filters on the shared ComboboxField: the free-text mode of Upstream model (typed text is the value,
@@ -136,4 +137,177 @@ test("usage filters: Team, Model, Alias and Router are searchable comboboxes tha
   expect(new URL(req.url()).searchParams.get("model")).toBe("use/a");
   await pick(page, "Model", "All models");
   await expect(page.getByRole("combobox", { name: "Model", exact: true })).toHaveText("All models");
+});
+
+/*
+ * Roles. Only an installation admin reads routing detail (served model, upstream, alias, router): everyone else gets
+ * the called name, whole-team totals and the three leaderboards, and the page never asks for what the API refuses.
+ */
+const ROUTING_GROUPS = /(^|,)(model|upstream_model|alias|router)(,|$)/;
+const ROUTING_FILTERS = ["model", "upstream_model", "alias", "router", "model_id", "alias_id", "router_id", "alias_missing", "router_missing"];
+
+/** Every usage, leaderboard and request response of the page, so a 403 or a routing parameter fails the test. */
+function watchApi(page: Page) {
+  const seen: { path: string; status: number; params: URLSearchParams }[] = [];
+  page.on("response", (response: Response) => {
+    const url = new URL(response.url());
+    if (/^\/api\/v1\/(usage|requests)/.test(url.pathname)) seen.push({ path: url.pathname, status: response.status(), params: url.searchParams });
+  });
+  return seen;
+}
+
+async function roleTeam(request: import("@playwright/test").APIRequestContext) {
+  const admin = await Admin.login(request);
+  const team = await admin.ensureTeam("usage-roles");
+  await admin.putMember(team.id, MEMBER_EMAIL, "member");
+  await admin.putMember(team.id, TEAM_ADMIN_EMAIL, "admin");
+  return team;
+}
+
+async function asRole(browser: import("@playwright/test").Browser, token: string, path: string) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const seen = watchApi(page);
+  await context.addCookies([{ name: "lumewarp_session", value: token, url: test.info().project.use.baseURL! }]);
+  await page.goto(path);
+  return { context, page, seen };
+}
+
+function expectNoRouting(seen: ReturnType<typeof watchApi>) {
+  expect(seen.length).toBeGreaterThan(0);
+  for (const call of seen) {
+    expect(call.status, `${call.path}?${call.params}`).toBeLessThan(400);
+    expect(call.params.get("group_by") ?? "", call.params.toString()).not.toMatch(ROUTING_GROUPS);
+    for (const name of ROUTING_FILTERS) expect(call.params.has(name), `${name} in ${call.params}`).toBe(false);
+  }
+}
+
+for (const [role, token] of [["member", MEMBER], ["team admin", TEAM_ADMIN]] as const) {
+  test(`usage as a ${role}: called names, team totals and three leaderboards, no routing and no 403`, async ({ browser, request }) => {
+    await roleTeam(request);
+    const { context, page, seen } = await asRole(browser, token, "/usage");
+    try {
+      await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
+      await expect(page.getByTestId("leaderboards")).toBeVisible();
+      for (const board of ["requested", "key", "owner"]) await expect(page.getByTestId(`leaderboard-${board}`)).toBeVisible();
+      await expect(page.getByTestId("leaderboard-requested").getByText("Models", { exact: true })).toBeVisible();
+      await expect(page.getByTestId("leaderboard-key").getByText("Keys", { exact: true })).toBeVisible();
+      await expect(page.getByTestId("leaderboard-owner").getByText("Users", { exact: true })).toBeVisible();
+      await expect(page.getByTestId("state-error")).toHaveCount(0);
+
+      // No routing control: no Model filter, and Group by has the called name and no served model.
+      await expect(page.getByRole("combobox", { name: "Model", exact: true })).toHaveCount(0);
+      // Owner is offered once the administered teams have loaded; wait for that before reading the options.
+      if (role === "team admin") await expect.poll(async () => (await optionNames(page, "Group by")).includes("Owner")).toBe(true);
+      const groups = await optionNames(page, "Group by");
+      expect(groups).toEqual(expect.arrayContaining(["Requested name", "Day", "Day × requested name", "Team", "API key"]));
+      for (const routing of ["Model", "Upstream model", "Alias", "Router", "Day × model"]) expect(groups).not.toContain(routing);
+      expect(groups.includes("Owner")).toBe(role === "team admin");
+      await moreFilters(page);
+      for (const routing of ["Upstream model", "Alias", "Router"]) await expect(page.getByRole("combobox", { name: routing, exact: true })).toHaveCount(0);
+
+      expect(seen.some((call) => call.path === "/api/v1/usage/leaderboard")).toBe(true);
+      expectNoRouting(seen);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test(`requests as a ${role}: no routing columns, filters or detail steps`, async ({ browser, request }) => {
+    await roleTeam(request);
+    const { context, page, seen } = await asRole(browser, token, "/requests");
+    try {
+      await expect(page.getByRole("heading", { name: "Requests", level: 1 })).toBeVisible();
+      await expect(page.getByRole("combobox", { name: "Resolved", exact: true })).toHaveCount(0);
+      await moreFilters(page);
+      for (const routing of ["Alias", "Router"]) await expect(page.getByRole("combobox", { name: routing, exact: true })).toHaveCount(0);
+      expectNoRouting(seen);
+    } finally {
+      await context.close();
+    }
+  });
+}
+
+test("leaderboards: rank, bar, spend, the 'you' badge and muted anonymous rows", async ({ browser, request }) => {
+  await roleTeam(request);
+  const row = (rank: number, label: string, tokens: number, extra: object = {}) => ({
+    rank, label, requested: null, team_id: null, key: null, owner_kind: null, owner_id: null, is_me: false,
+    requests: 1, prompt_tokens: tokens, completion_tokens: 0, total_tokens: tokens, cost_nano_usd: tokens * 10, unknown_cost_count: 0, ...extra,
+  });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await page.route("**/api/v1/usage/leaderboard?*", (route) => {
+      const by = new URL(route.request().url()).searchParams.get("by");
+      const items =
+        by === "requested"
+          ? [row(1, "shared-chat", 900, { requested: "shared-chat" }), row(2, "embed", 100, { requested: "embed" })]
+          : by === "key"
+            ? [row(1, "ci-key", 500, { key: { id: "k1", name: "ci-key", display_prefix: "lw-abc", team_id: "t", team_name: "usage-roles", lifecycle: "active" } }), row(2, "Key #2", 50)]
+            : [row(1, "E2E Member", 700, { owner_kind: "user", owner_id: "u1", is_me: true }), row(2, "Member #2", 20)];
+      return route.fulfill({ status: 200, json: { items, next_cursor: null } });
+    });
+    await context.addCookies([{ name: "lumewarp_session", value: MEMBER, url: test.info().project.use.baseURL! }]);
+    await page.goto("/usage");
+    const board = (by: string) => page.getByTestId(`leaderboard-${by}`);
+    await expect(board("requested").getByTestId("leaderboard-row")).toHaveCount(2);
+    await expect(board("requested").getByTestId("leaderboard-row").first()).toContainText("shared-chat");
+    await expect(board("key").getByTestId("key-pill").first()).toContainText("ci-key");
+    await expect(board("key").getByText("Key #2")).toHaveClass(/text-muted-foreground/);
+    await expect(board("owner").getByTestId("leaderboard-row").first()).toContainText("you");
+    await expect(board("owner").getByText("Member #2")).toHaveClass(/text-muted-foreground/);
+    await expect(board("owner").getByTestId("leaderboard-row").first()).toContainText("$");
+    // Three cards side by side on a wide screen, stacked on a phone.
+    const tops = async () => Promise.all(["requested", "key", "owner"].map(async (by) => (await board(by).boundingBox())!.y));
+    const wide = await tops();
+    expect(new Set(wide.map(Math.round)).size).toBe(1);
+    await page.setViewportSize({ width: 390, height: 800 });
+    const narrow = await tops();
+    expect(narrow[0]).toBeLessThan(narrow[1]);
+    expect(narrow[1]).toBeLessThan(narrow[2]);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  } finally {
+    await context.close();
+  }
+});
+
+test("usage as an installation admin keeps the routing page and its leaderboards", async ({ page }) => {
+  // The suite's beforeEach signed this page in with the break-glass session.
+  await expect(page.getByRole("combobox", { name: "Model", exact: true })).toBeVisible();
+  const groups = await optionNames(page, "Group by");
+  expect(groups).toEqual(expect.arrayContaining(["Model", "Upstream model", "Alias", "Router", "Day × model", "Requested name"]));
+  await expect(page.getByRole("columnheader", { name: "Upstream model", exact: true })).toBeVisible();
+  for (const board of ["requested", "key", "owner"]) await expect(page.getByTestId(`leaderboard-${board}`)).toBeVisible();
+  await expect(page.getByTestId("leaderboard-requested").getByTestId("leaderboard-row").first()).toBeVisible();
+});
+
+test("a team admin's tables carry no routing column, and a request with null routing fields opens", async ({ browser, request }) => {
+  await roleTeam(request);
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const usage = { date: null, requested: "shared-chat", model: null, team_id: null, owner_kind: null, owner_id: null, key_id: null, key: null, endpoint: null, model_type: null, requests: 3, prompt_tokens: 10, completion_tokens: 20, total_tokens: 30, audio_ms: 0, cost_nano_usd: 300, unknown_cost_count: 0, error_count: 0, total_duration_ms: 0 };
+  const logged = {
+    request_id: "req-null-1", ts: new Date().toISOString(), kind: "llm", endpoint: "/v1/chat/completions", requested: "shared-chat",
+    model: null, model_id: null, alias: null, alias_id: null, router: null, router_id: null, fallback: null, attempts: null, upstream: null, upstream_model: null,
+    status: 200, outcome: "completed", stream: false, duration_ms: 12, prompt_tokens: 1, completion_tokens: 2, cost_nano_usd: 10,
+    team_id: "00000000-0000-0000-0000-000000000001", key_id: null, key: null, owner_kind: "user", owner_id: "00000000-0000-0000-0000-000000000002", playground_user_id: null,
+  };
+  try {
+    await page.route("**/api/v1/usage?*", (route) => route.fulfill({ status: 200, json: { items: [usage], next_cursor: null } }));
+    await page.route("**/api/v1/requests?*", (route) => route.fulfill({ status: 200, json: { items: [logged], next_cursor: null } }));
+    await context.addCookies([{ name: "lumewarp_session", value: TEAM_ADMIN, url: test.info().project.use.baseURL! }]);
+    await page.goto("/usage");
+    await expect(page.getByRole("columnheader", { name: "Requested", exact: true })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: /^(Model|Upstream model|Via alias|Via router|Served by)$/ })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "View" }).first()).not.toHaveAttribute("href", /(model|alias|router)=/);
+
+    await page.goto("/requests");
+    await expect(page.getByRole("columnheader")).toHaveText(["Date", "Status", "Requested", "Key", "Tokens", "Cost"]);
+    await page.getByTestId("request-requested").getByText("shared-chat", { exact: true }).click();
+    const timeline = page.getByTestId("request-detail").getByTestId("request-timeline");
+    await expect(timeline.locator("li")).toHaveText([/Received\s*shared-chat/, /Response\s*HTTP\s*200/]);
+    await expect(page.getByTestId("state-error")).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
 });
