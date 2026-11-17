@@ -1,4 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import {
   BarChart3,
@@ -14,6 +15,7 @@ import {
   ListOrdered,
   LogOut,
   Menu,
+  PanelLeft,
   MessageSquare,
   Monitor,
   Moon,
@@ -50,6 +52,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
+  SidebarRail,
   useSidebar,
 } from "./ui/sidebar";
 
@@ -122,24 +125,53 @@ function roleLabel(me: Me) {
 const THEME_LABEL = { system: "Auto", light: "Light", dark: "Dark" } as const;
 const THEME_ICON = { system: Monitor, light: Sun, dark: Moon } as const;
 
+/** Opens the drawer on a phone; on a wider screen collapses the sidebar to icons and back. */
 function NavToggle() {
-  const { openMobile, toggleSidebar } = useSidebar();
+  const { isMobile, open, openMobile, toggleSidebar } = useSidebar();
+  const expanded = isMobile ? openMobile : open;
+  const Icon = isMobile ? Menu : PanelLeft;
   return (
-    <Button variant="outline" size="icon" className="size-8 md:hidden" aria-label="Toggle navigation" aria-expanded={openMobile} onClick={toggleSidebar}>
-      <Menu className="size-4" aria-hidden="true" />
+    <Button
+      variant="outline"
+      size="icon"
+      className="size-8"
+      aria-label={isMobile ? "Toggle navigation" : expanded ? "Collapse navigation" : "Expand navigation"}
+      aria-expanded={expanded}
+      onClick={toggleSidebar}
+    >
+      <Icon className="size-4" aria-hidden="true" />
     </Button>
   );
 }
 
+// The desktop sidebar's expanded/collapsed choice is a per-browser convenience.
+const SIDEBAR_KEY = "lumewarp.sidebar";
+function readSidebarOpen(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_KEY) !== "collapsed";
+  } catch {
+    return true;
+  }
+}
+function writeSidebarOpen(open: boolean) {
+  try {
+    localStorage.setItem(SIDEBAR_KEY, open ? "expanded" : "collapsed");
+  } catch {
+    // Storage blocked: the choice lasts until the page reloads.
+  }
+}
+
 function NavSidebar({ installationAdmin, orgAdmin, teamAdmin, breakGlass }: { installationAdmin: boolean; orgAdmin: boolean; teamAdmin: boolean; breakGlass: boolean }) {
-  const { setOpenMobile } = useSidebar();
+  const { isMobile, setOpenMobile, state } = useSidebar();
+  // Collapsed to icons, a link names itself on hover.
+  const collapsed = state === "collapsed" && !isMobile;
   const perms = { isInstallationAdmin: installationAdmin, isOrgAdmin: orgAdmin, isTeamAdmin: teamAdmin };
   return (
-    <Sidebar>
-      <SidebarHeader className="px-5 pt-4 pb-1">
-        <div className="flex items-center gap-2.5 text-base font-bold">
-          <img src="/favicon.svg" alt="" aria-hidden="true" className="size-6" />
-          Lumewarp
+    <Sidebar collapsible="icon">
+      <SidebarHeader className="px-5 pt-4 pb-1 group-data-[collapsible=icon]:px-2">
+        <div className="flex items-center gap-2.5 text-base font-bold group-data-[collapsible=icon]:justify-center">
+          <img src="/favicon.svg" alt="" aria-hidden="true" className="size-6 shrink-0" />
+          <span className="group-data-[collapsible=icon]:hidden">Lumewarp</span>
         </div>
       </SidebarHeader>
       <SidebarContent>
@@ -160,9 +192,9 @@ function NavSidebar({ installationAdmin, orgAdmin, teamAdmin, breakGlass }: { in
                             asChild
                             className="text-sidebar-foreground/80 data-[status=active]:bg-sidebar-primary data-[status=active]:text-sidebar-primary-foreground data-[status=active]:hover:bg-sidebar-primary data-[status=active]:hover:text-sidebar-primary-foreground"
                           >
-                            <Link to={n.to} activeProps={{ "aria-current": "page" }} activeOptions={{ exact: n.to === "/" }} onClick={() => setOpenMobile(false)}>
+                            <Link to={n.to} title={collapsed ? n.label : undefined} activeProps={{ "aria-current": "page" }} activeOptions={{ exact: n.to === "/" }} onClick={() => setOpenMobile(false)}>
                               <Icon aria-hidden="true" />
-                              {n.label}
+                              <span>{n.label}</span>
                             </Link>
                           </SidebarMenuButton>
                         </SidebarMenuItem>
@@ -175,6 +207,7 @@ function NavSidebar({ installationAdmin, orgAdmin, teamAdmin, breakGlass }: { in
           })}
         </nav>
       </SidebarContent>
+      <SidebarRail />
     </Sidebar>
   );
 }
@@ -188,6 +221,7 @@ export function Layout() {
   const toast = useToast();
   const clearSecrets = useClearSecrets();
   const ThemeIcon = THEME_ICON[theme];
+  const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
 
   const logout = async () => {
     try {
@@ -203,7 +237,14 @@ export function Layout() {
   };
 
   return (
-    <SidebarProvider className="bg-background">
+    <SidebarProvider
+      className="bg-background"
+      open={sidebarOpen}
+      onOpenChange={(open) => {
+        setSidebarOpen(open);
+        writeSidebarOpen(open);
+      }}
+    >
       <a
         className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:rounded-md focus:border focus:bg-background focus:px-3 focus:py-2 focus:shadow"
         href="#main"

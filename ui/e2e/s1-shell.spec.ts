@@ -49,7 +49,7 @@ test("phone: the Close button shuts the navigation in place and returns focus", 
 });
 
 test("the navigation is reachable on both sides of the breakpoint, and with a larger browser font", async ({ page }) => {
-  // Below md: the toggle opens the sheet. From md up: the sidebar is there and there is no toggle.
+  // Below md: the toggle opens the sheet. From md up: the sidebar is there and the toggle collapses it instead.
   const assertPhone = async () => {
     await expect(toggle(page)).toBeVisible();
     await toggle(page).click();
@@ -92,16 +92,35 @@ test("phone: clicking the overlay or a link closes the navigation", async ({ pag
   await expect(page.getByRole("link", { name: "Routers", exact: true })).toHaveAttribute("aria-current", "page");
 });
 
-test("desktop: the navigation is always there, 15rem wide, with no toggle", async ({ page }) => {
+test("desktop: the navigation is 15rem wide and collapses to icons, remembered across a reload", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await expect(toggle(page)).toBeHidden();
   const nav = page.getByRole("navigation", { name: "Main" });
+  const container = page.locator("[data-slot=sidebar-container]");
+  const width = async () => (await container.boundingBox())?.width ?? 0;
   await expect(nav).toBeVisible();
-  expect((await page.locator("[data-slot=sidebar-container]").boundingBox())?.width).toBeCloseTo(240, 0);
+  expect(await width()).toBeCloseTo(240, 0);
   await expect(page.getByRole("link", { name: "Overview", exact: true })).toHaveAttribute("aria-current", "page");
   await page.keyboard.press("Control+b");
   await expect(nav).toBeVisible();
   expect(await page.evaluate(() => document.cookie)).not.toContain("sidebar_state");
+
+  // Collapsed: icons only, every link still there by name, and named on hover.
+  const collapse = page.getByRole("button", { name: "Collapse navigation" });
+  await expect(collapse).toHaveAttribute("aria-expanded", "true");
+  await collapse.click();
+  const expand = page.getByRole("button", { name: "Expand navigation" });
+  await expect(expand).toHaveAttribute("aria-expanded", "false");
+  await expect.poll(width).toBeCloseTo(48, 0);
+  const routers = page.getByRole("link", { name: "Routers", exact: true });
+  await expect(routers).toBeVisible();
+  await expect(routers).toHaveAttribute("title", "Routers");
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Expand navigation" })).toBeVisible();
+  await expect.poll(width).toBeCloseTo(48, 0);
+  await page.getByRole("button", { name: "Expand navigation" }).click();
+  await expect.poll(width).toBeCloseTo(240, 0);
+  await expect(page.getByRole("button", { name: "Collapse navigation" })).toHaveAttribute("aria-expanded", "true");
 });
 
 test("Overview: real usage over 14 UTC days, with no sample data, and it fits 390 px", async ({ page }) => {
