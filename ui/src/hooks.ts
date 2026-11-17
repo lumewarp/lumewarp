@@ -189,6 +189,7 @@ export const useOwnKeys = (includeServiceAccounts = false) =>
 
 export const useModels = (enabled = true) =>
   useQuery({ queryKey: ["models"], queryFn: () => api.models(), enabled });
+export const useModelGroups = (enabled = true) => useQuery({ queryKey: ["model-groups"], queryFn: () => api.modelGroups(), enabled });
 export const useAliases = () => useQuery({ queryKey: ["aliases"], queryFn: () => api.aliases() });
 // Settings and schemas may hold a `__proto__` key; structural sharing would rebuild them by assignment and lose it.
 export const useRouters = () => useQuery({ queryKey: ["routers"], queryFn: () => api.routers(), structuralSharing: false });

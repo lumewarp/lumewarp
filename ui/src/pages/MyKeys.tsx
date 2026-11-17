@@ -19,6 +19,7 @@ import { HelpTip } from "../components/ui/help-tip";
 import { useAction, useCan, useMe, useMut, useOwnKeys, useSecretMut } from "../hooks";
 import { useShowSecret } from "../components/SecretProvider";
 import { AuthzTemporary, BreakGlassNoKeys, CheckFailed, PageLoading } from "./Access";
+import { blankKeyModels, KeyModelPicker, KeyModels, keyModelsBody, type KeyModelState } from "../components/PermissionPicker";
 import { KeyEditDialog, RotateKeyDialog } from "./KeyDialogs";
 import {
   expiryFromDay,
@@ -351,6 +352,7 @@ function KeysTable({
               );
             },
           },
+          { key: "models", header: "Models", hideBelow: "sm", cell: (key) => <KeyModels keyRef={key} /> },
           { key: "expires", header: "Expires", hideBelow: "sm", cell: (key) => fmtDate(key.expires_at) },
           {
             key: "actions",
@@ -577,8 +579,8 @@ function KeyLimitFact({ team, atCap }: { team: Team; atCap: boolean }) {
   );
 }
 
-type CreateValues = KeyLimitValues & { name: string; expires: string };
-const blankCreate: CreateValues = { name: "", expires: "", ...blankKeyLimits() };
+type CreateValues = KeyLimitValues & { name: string; expires: string; models: KeyModelState };
+const blankCreate: CreateValues = { name: "", expires: "", models: blankKeyModels(), ...blankKeyLimits() };
 
 function CreateKeyDialog({
   teams,
@@ -599,12 +601,15 @@ function CreateKeyDialog({
   const [teamError, setTeamError] = useState<string>();
   const team = given ?? teams.find((item) => item.team_id === picked) ?? null;
   const create = useSecretMut(
-    (values: CreateValues) =>
-      api.createKey(team!.team_id, {
+    (values: CreateValues) => {
+      const { models, ...rest } = values;
+      return api.createKey(team!.team_id, {
         name: values.name.trim(),
         expires_at: expiryFromDay(values.expires),
-        ...keyLimitsBody(values),
-      }),
+        ...keyLimitsBody(rest),
+        ...keyModelsBody(models),
+      });
+    },
     (secret) => onCreated(secret),
   );
   const lifetime = team?.key_limits.max_member_key_lifetime_seconds ?? null;
@@ -620,7 +625,7 @@ function CreateKeyDialog({
     if (!team) setTeamError("Choose a team");
     if (!team || !valid) return false;
     try {
-      return await form.run(() => create.mutateAsync(form.values), { expires_at: "expires" });
+      return await form.run(() => create.mutateAsync(form.values), { expires_at: "expires", model_access: "models", allowed_models: "models", allowed_groups: "models" });
     } catch (e) {
       // A 409 (the cap) or a 429 (with its wait) is the server's own message, kept in the dialog.
       throw new Error(refusalText(e));
@@ -669,6 +674,16 @@ function CreateKeyDialog({
       />
       {team && <KeyLimitFields values={form.values} errors={form.errors} set={form.set} cap={team.limits} />}
       {team && (
+        <KeyModelPicker
+          access={form.values.models.access}
+          onAccess={(access) => form.set("models", { ...form.values.models, access })}
+          grant={form.values.models.grant}
+          onGrant={(grant) => form.set("models", { ...form.values.models, grant })}
+          scope={team.all_models ? null : team.models}
+          error={form.errors.models}
+        />
+      )}
+      {team && form.values.models.access === "inherit" && (
         <div className="flex flex-col gap-1.5">
           <span className="text-sm font-semibold">This key can call</span>
           <CallableModels team={team} />

@@ -5,6 +5,7 @@ import { SecretOnce } from "../components/Bits";
 import { Dialog } from "../components/Dialog";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
 import { KeyLimitFields, keyLimitsBody, keyLimitsFrom, type KeyLimitCap, type KeyLimitValues } from "../components/KeyLimits";
+import { KeyModelPicker, keyModelsBody, keyModelsFrom, type KeyModelState } from "../components/PermissionPicker";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { useCan, useMut, useSecretMut } from "../hooks";
@@ -44,7 +45,7 @@ export function SecretDialog({
   );
 }
 
-type EditValues = KeyLimitValues & { name: string; expires: string };
+type EditValues = KeyLimitValues & { name: string; expires: string; models: KeyModelState };
 
 /**
  * Editing an existing key, shared by the team Keys tab and the service-account table on My keys.
@@ -68,10 +69,12 @@ export function KeyEditDialog({
   onClose: () => void;
 }) {
   const initialExpiry = localDayOf(target.expires_at);
-  const initial: EditValues = { name: target.name, expires: initialExpiry, ...keyLimitsFrom(target) };
+  const initial: EditValues = { name: target.name, expires: initialExpiry, models: keyModelsFrom(target), ...keyLimitsFrom(target) };
   const form = useForm<EditValues>(initial, { name: required("Name") });
   const update = useMut((values: EditValues) => {
-    const body: Schemas["KeyUpdate"] = { name: values.name.trim(), ...keyLimitsBody(values) };
+    const { models, ...rest } = values;
+    const body: Schemas["KeyUpdate"] = { name: values.name.trim(), ...keyLimitsBody(rest) };
+    if (JSON.stringify(models) !== JSON.stringify(initial.models)) Object.assign(body, keyModelsBody(models));
     if (values.expires !== initialExpiry) body.expires_at = expiryFromDay(values.expires);
     return api.updateKey(target.id, body);
   }, "Key saved");
@@ -82,7 +85,7 @@ export function KeyEditDialog({
   };
   const submit = async () => {
     if (!form.validate()) return false;
-    return form.run(() => update.mutateAsync(form.values), { expires_at: "expires" });
+    return form.run(() => update.mutateAsync(form.values), { expires_at: "expires", model_access: "models", allowed_models: "models", allowed_groups: "models" });
   };
   return (
     <FormDialog open title={`Edit “${target.name}” (${target.display_prefix}…)`} submitLabel="Save" onClose={close} onSubmit={submit}>
@@ -101,6 +104,14 @@ export function KeyEditDialog({
         }
       />
       <KeyLimitFields values={form.values} errors={form.errors} set={form.set} cap={cap} capNote={capNote} />
+      <KeyModelPicker
+        access={form.values.models.access}
+        onAccess={(access) => form.set("models", { ...form.values.models, access })}
+        grant={form.values.models.grant}
+        onGrant={(grant) => form.set("models", { ...form.values.models, grant })}
+        scope={target.owner_models ?? null}
+        error={form.errors.models}
+      />
     </FormDialog>
   );
 }

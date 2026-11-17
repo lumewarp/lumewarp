@@ -33,6 +33,8 @@ const AuditPage = lazy(() => import("./pages/Audit").then((module) => ({ default
 const RequestsPage = lazy(() => import("./pages/Requests").then((module) => ({ default: module.Requests })));
 const TeamsPage = lazy(() => import("./pages/Teams").then((module) => ({ default: module.Teams })));
 const InstallationAdminsPage = lazy(() => import("./pages/InstallationAdmins").then((module) => ({ default: module.InstallationAdmins })));
+const ModelGroupsPage = lazy(() => import("./pages/ModelGroups").then((module) => ({ default: module.ModelGroups })));
+const ModelGroupEditPage = lazy(() => import("./pages/ModelGroupEdit").then((module) => ({ default: module.ModelGroupEdit })));
 const OrgsPage = lazy(() => import("./pages/Orgs").then((module) => ({ default: module.Orgs })));
 const OrgDetailPage = lazy(() => import("./pages/Orgs").then((module) => ({ default: module.OrgDetail })));
 const PlaygroundPage = lazy(() => import("./pages/Playground").then((module) => ({ default: module.Playground })));
@@ -191,6 +193,9 @@ const routeTree = rootRoute.addChildren([
     page("/aliases", () => <AliasesPage />, "installationAdmin"),
     page("/aliases/new", () => <AliasEditPage />, "installationAdmin"),
     page("/aliases/$aliasId", () => <AliasEditPage />, "installationAdmin"),
+    page("/model-groups", () => <ModelGroupsPage />, "installationAdmin"),
+    page("/model-groups/new", () => <ModelGroupEditPage />, "installationAdmin"),
+    page("/model-groups/$groupId", () => <ModelGroupEditPage />, "installationAdmin"),
     page("/upstreams", () => <UpstreamsPage />, "installationAdmin"),
     page("/upstreams/new", () => <UpstreamEditPage />, "installationAdmin"),
     page("/upstreams/$upstreamId", () => <UpstreamEditPage />, "installationAdmin"),

@@ -64,6 +64,32 @@ direction is implied. A router's fallback is not re-checked. The API still reads
 `allowed_models` as names, which must exist; a member's or service account's list must be a
 subset of its team's.
 
+A grant is a name or a [model group](#model-groups): `allowed_groups` sits next to
+`allowed_models` on an org, team, member, service account or key. A policy's effective
+models are the intersection down the chain of its own names plus the current members of its
+groups, so a group member the level above does not allow is simply left out. `PolicyOut`
+and `KeyOut` return `granted_models` (names plus group members, before the parent narrows)
+next to the two lists; orgs and teams also return `effective_models` (`null` means
+unrestricted), which is what the pickers below them offer.
+
+## Model groups
+
+A model group is a named set of models, aliases and routers granted as one unit: an
+installation admin creates it on **Model groups** (Routing group in the sidebar) or with
+`POST /model-groups` (`name`, `description`, `members` as catalog names). A group is never
+callable, its name is not a catalog name (the page refuses a name already used by a model,
+alias or router) and it cannot contain another group. Everyone signed in may read groups
+(`GET /model-groups`, `GET /model-groups/{id}`) for the pickers; writes need an installation
+admin.
+
+A grant of a group stands for its members at the time, so `PATCH /model-groups/{id}` with a
+new `members` list changes every holder at the next compile. Holders are not re-validated:
+a member the holder's parent does not allow drops out of that holder's effective models, as
+when a parent narrows. The list shows each group's member count and grants. Deleting a group
+removes every grant of it (each one audited as `grant.delete`, and `model_group.delete`
+records the count), so its holders lose the members at the next compile. Groups are not part
+of a rollback's catalog state.
+
 ## Model types
 
 `POST /models` requires `model_type`: `llm`, `embedding`,

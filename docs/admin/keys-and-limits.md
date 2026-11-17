@@ -16,6 +16,14 @@ the team, and a service account never takes the member defaults. Remaining budge
 `min(org, team, owner)`, each from its own accumulated spend: the org has no
 `usage_totals` row, its spend is the sum of every one of its teams (archived included).
 
+A key is the last level: with `model_access: "inherit"` (the default) it calls whatever its
+owner may, and with `"list"` it narrows to its own `allowed_models` and `allowed_groups`,
+never beyond the owner's effective models (422 for a name outside them). `KeyOut` returns
+`granted_models` (the key's own grants) and `owner_models` (the owner's effective models,
+`null` for every name), and the key's effective models are their intersection. In the Admin
+UI the key dialogs have a **Models** control (Inherit or Selected) scoped to the owner's
+models, and the key tables show what each key can call.
+
 Writes only check values they actually change: a changed value may not exceed the parent's
 current effective value (422), while an unchanged old value is not rechecked, so a parent
 decrease always succeeds and the effective value clamps. Team totals and models are

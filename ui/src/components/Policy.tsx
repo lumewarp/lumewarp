@@ -8,6 +8,7 @@ import { AgentGrants, McpGrants, type TargetScope } from "./TargetGrants";
 export interface PolicyValues {
   model_access: ModelAccess;
   allowed_models: string[];
+  allowed_groups: string[];
   mcp_access: ModelAccess;
   mcp_servers: McpGrant[];
   a2a_access: ModelAccess;
@@ -21,6 +22,7 @@ export interface PolicyValues {
 export const blankPolicy = (isTeam = false): PolicyValues => ({
   model_access: isTeam ? "all" : "inherit",
   allowed_models: [],
+  allowed_groups: [],
   mcp_access: isTeam ? "all" : "inherit",
   mcp_servers: [],
   a2a_access: isTeam ? "all" : "inherit",
@@ -41,6 +43,7 @@ const accessFrom = (access: ModelAccess | undefined, isTeam: boolean): ModelAcce
 export const policyFrom = (p: PolicyOut, isTeam = false): PolicyValues => ({
   model_access: accessFrom(p.model_access, isTeam),
   allowed_models: p.allowed_models,
+  allowed_groups: [...(p.allowed_groups ?? [])],
   mcp_access: accessFrom(p.mcp_access, isTeam),
   mcp_servers: (p.mcp_servers ?? []).map((grant) => ({ server: grant.server, all_tools: grant.all_tools, tools: [...grant.tools] })),
   a2a_access: accessFrom(p.a2a_access, isTeam),
@@ -59,6 +62,7 @@ export const policyFrom = (p: PolicyOut, isTeam = false): PolicyValues => ({
 export const policyBody = (v: PolicyValues) => ({
   model_access: v.model_access,
   allowed_models: v.model_access === "list" ? v.allowed_models : [],
+  allowed_groups: v.model_access === "list" ? v.allowed_groups : [],
   mcp_access: v.mcp_access,
   mcp_servers:
     v.mcp_access === "list"
@@ -84,7 +88,7 @@ interface Props {
   /** The team a member or service account belongs to: its names bound what can be picked. */
   team?: Team;
   /** The level above a team: the org whose policy bounds it. Unset on an org's own policy. */
-  parent?: PolicyOut;
+  parent?: PolicyOut & { effective_models?: string[] | null };
 }
 
 /** The parent's grants, or null when it places no restriction (every name may be handed down). */
@@ -97,12 +101,13 @@ function targetScope(p: PolicyOut | undefined) {
 }
 
 export function PolicyFields({ values, errors, set, isTeam, team, parent }: Props) {
-  const scope = isTeam || !team || team.model_access !== "list" ? null : team.allowed_models;
+  // Names a level may hand down: a team's list is bounded by its org's effective models, a member's by the team's.
+  const scope = (isTeam ? parent?.effective_models : team?.effective_models) ?? null;
   // A member or service account narrows its team; a team narrows its org.
   const targets: TargetScope = targetScope(isTeam ? parent : team);
   return (
     <>
-      <PermissionPicker isTeam={isTeam} access={values.model_access} onAccess={(a) => set("model_access", a)} selected={values.allowed_models} onSelected={(names) => set("allowed_models", names)} scope={scope} error={errors.model_access ?? errors.allowed_models} />
+      <PermissionPicker isTeam={isTeam} access={values.model_access} onAccess={(a) => set("model_access", a)} selected={values.allowed_models} onSelected={(names) => set("allowed_models", names)} selectedGroups={values.allowed_groups} onSelectedGroups={(groups) => set("allowed_groups", groups)} scope={scope} parentName={isTeam ? "the org" : "the team"} error={errors.model_access ?? errors.allowed_models} />
       <McpGrants isTeam={isTeam} access={values.mcp_access} onAccess={(a) => set("mcp_access", a)} selected={values.mcp_servers} onSelected={(grants) => set("mcp_servers", grants)} scope={targets.mcp} error={errors.mcp_access ?? errors.mcp_servers} />
       <AgentGrants isTeam={isTeam} access={values.a2a_access} onAccess={(a) => set("a2a_access", a)} selected={values.a2a_agents} onSelected={(names) => set("a2a_agents", names)} scope={targets.agents} error={errors.a2a_access ?? errors.a2a_agents} />
       <NumberField label="Requests per minute" value={values.rpm_limit} onChange={(v) => set("rpm_limit", v)} error={errors.rpm_limit} hint="Shared across gateways that use the same Redis namespace; otherwise counted per gateway." />
@@ -119,10 +124,18 @@ function targets(access: ModelAccess, count: number, what: string) {
   return access === "all" ? `all ${what}s` : `inherits ${what}s`;
 }
 
+/** "2 models", "1 model + 1 group": what a level's own list holds. */
+function models(p: PolicyOut) {
+  const names = p.allowed_models.length;
+  const groups = p.allowed_groups?.length ?? 0;
+  const text = `${names} model${names === 1 ? "" : "s"}`;
+  return groups ? `${text} + ${groups} group${groups === 1 ? "" : "s"}` : text;
+}
+
 /** One-line summary of a level's policy for tables. */
 export function PolicySummary({ p }: { p: PolicyOut }) {
   const parts = [
-    p.model_access === "list" ? `${p.allowed_models.length} model${p.allowed_models.length === 1 ? "" : "s"}` : p.model_access === "all" ? "all models" : "inherits models",
+    p.model_access === "list" ? models(p) : p.model_access === "all" ? "all models" : "inherits models",
     targets(p.mcp_access ?? "inherit", p.mcp_servers?.length ?? 0, "MCP server"),
     targets(p.a2a_access ?? "inherit", p.a2a_agents?.length ?? 0, "agent"),
     p.rpm_limit !== null && `${p.rpm_limit} rpm`,

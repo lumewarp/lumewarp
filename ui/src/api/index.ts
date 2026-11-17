@@ -23,6 +23,7 @@ export type Model = Schemas["ModelOut"];
 export type Router = Schemas["RouterOut"];
 export type A2aAgent = Schemas["A2aAgentOut"];
 export type Alias = Schemas["AliasOut"];
+export type ModelGroup = Schemas["ModelGroupOut"];
 /** A gateway plugin of any kind; its title, description and schema are untrusted gateway data. */
 export type Plugin = Schemas["PluginOut"];
 export type PluginKind = Schemas["PluginKind"];
@@ -52,6 +53,7 @@ export type PolicyOut = Pick<
   Team,
   | "model_access"
   | "allowed_models"
+  | "allowed_groups"
   | "mcp_access"
   | "mcp_servers"
   | "a2a_access"
@@ -216,6 +218,11 @@ export const api = {
   deleteRouter: (id: string) => unwrap(client.DELETE("/api/v1/routers/{router_id}", { params: { path: { router_id: id } } })),
 
   aliases: () => listAll((c) => unwrap(client.GET("/api/v1/aliases", { params: { query: q(c) } }))),
+  modelGroups: () => listAll((c) => unwrap(client.GET("/api/v1/model-groups", { params: { query: q(c) } }))),
+  createModelGroup: (body: Schemas["ModelGroupCreate"]) => unwrap(client.POST("/api/v1/model-groups", { body })),
+  updateModelGroup: (id: string, body: Schemas["ModelGroupUpdate"]) =>
+    unwrap(client.PATCH("/api/v1/model-groups/{group_id}", { params: { path: { group_id: id } }, body })),
+  deleteModelGroup: (id: string) => unwrap(client.DELETE("/api/v1/model-groups/{group_id}", { params: { path: { group_id: id } } })),
   createAlias: (body: Schemas["AliasCreate"]) => unwrap(client.POST("/api/v1/aliases", { body })),
   updateAlias: (id: string, body: Schemas["AliasUpdate"]) => unwrap(client.PATCH("/api/v1/aliases/{alias_id}", { params: { path: { alias_id: id } }, body })),
   deleteAlias: (id: string) => unwrap(client.DELETE("/api/v1/aliases/{alias_id}", { params: { path: { alias_id: id } } })),

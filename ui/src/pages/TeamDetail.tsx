@@ -6,6 +6,7 @@ import { Badge, fmtDate, fmtUsd, InheritedBadge, KeyBadge, PageHeader, Suspended
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
 import { blankKeyLimits, KeyLimitFields, keyLimitsBody, type KeyLimitCap, type KeyLimitValues } from "../components/KeyLimits";
+import { blankKeyModels, KeyModelPicker, KeyModels, keyModelsBody, type KeyModelState } from "../components/PermissionPicker";
 import { blankPolicy, Budget, PolicyFields, policyBody, policyFrom, PolicySummary, POLICY_ALIAS, type PolicyValues } from "../components/Policy";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
@@ -481,8 +482,8 @@ function ServiceAccountsPanel({ team }: { team: Team }) {
   );
 }
 
-type KeyValues = KeyLimitValues & { name: string; service_account_id: string; expires: string };
-const blankKey: KeyValues = { name: "", service_account_id: "", expires: "", ...blankKeyLimits() };
+type KeyValues = KeyLimitValues & { name: string; service_account_id: string; expires: string; models: KeyModelState };
+const blankKey: KeyValues = { name: "", service_account_id: "", expires: "", models: blankKeyModels(), ...blankKeyLimits() };
 
 const minLimit = (own: number | null, parent: number | null | undefined) =>
   own === null ? (parent ?? null) : parent === null || parent === undefined ? own : Math.min(own, parent);
@@ -527,13 +528,16 @@ function KeysPanel({ team }: { team: TeamAny }) {
   ];
   const form = useForm<KeyValues>(blankKey, { name: required("Name") });
   const create = useSecretMut(
-    (values: KeyValues) =>
-      api.createKey(team.id, {
+    (values: KeyValues) => {
+      const { models, ...rest } = values;
+      return api.createKey(team.id, {
         name: values.name,
         expires_at: expiryFromDay(values.expires),
         service_account_id: values.service_account_id || null,
-        ...keyLimitsBody(values),
-      }),
+        ...keyLimitsBody(rest),
+        ...keyModelsBody(models),
+      });
+    },
     (value) => showSecret({ value, title: "API key created" }),
   );
   const setLifecycle = useAction(
@@ -594,7 +598,15 @@ function KeysPanel({ team }: { team: TeamAny }) {
       : `Optional. This team limits member keys to ${fmtLifetime(lifetime)}; empty uses that limit. The latest day is ${expiryMax}.`;
   const submit = async () => {
     if (!form.validate()) return false;
-    return form.run(() => create.mutateAsync(form.values));
+    return form.run(() => create.mutateAsync(form.values), { model_access: "models", allowed_models: "models", allowed_groups: "models" });
+  };
+  // The models the new key's owner may call, which bound what the key can be narrowed to (null = every name).
+  const ownerScope = (accountId: string): string[] | null => {
+    if (!accountId) return myTeam ? (myTeam.all_models ? null : myTeam.models) : null;
+    const account = accounts.data?.find((row) => row.id === accountId);
+    const parent = full?.effective_models ?? null;
+    if (!account || account.model_access !== "list") return parent;
+    return parent ? account.granted_models.filter((name) => parent.includes(name)) : account.granted_models;
   };
   const ownerName = (key: Key) => {
     if (key.owner_kind === "service_account") {
@@ -639,6 +651,7 @@ function KeysPanel({ team }: { team: TeamAny }) {
           ) },
           { key: "owner", header: "Owner", cell: (key) => <>{key.owner_kind === "service_account" ? "Service account: " : ""}{ownerName(key)}</> },
           { key: "lifecycle", header: "Lifecycle", cell: (key) => <><KeyBadge k={key} /><SuspendedReason reason={key.suspended_reason} /></> },
+          { key: "models", header: "Models", hideBelow: "sm", cell: (key) => <KeyModels keyRef={key} /> },
           { key: "expires", header: "Expires", cell: (key) => fmtDate(key.expires_at) },
           { key: "created", header: "Created", cell: (key) => fmtDate(key.created_at) },
           {
@@ -693,6 +706,14 @@ function KeysPanel({ team }: { team: TeamAny }) {
           set={form.set}
           cap={capFor("new")}
           capNote={exactCap("new") ? undefined : "the owner's limits, clamped by the team; the org may lower them further"}
+        />
+        <KeyModelPicker
+          access={form.values.models.access}
+          onAccess={(access) => form.set("models", { ...form.values.models, access })}
+          grant={form.values.models.grant}
+          onGrant={(grant) => form.set("models", { ...form.values.models, grant })}
+          scope={ownerScope(form.values.service_account_id)}
+          error={form.errors.models}
         />
       </FormDialog>
       {editingKey && (

@@ -331,7 +331,8 @@ export interface paths {
          *     `service_account_id` the key belongs to the caller, who must belong to or administer the
          *     team, and the team's `max_keys_per_member` and `max_member_key_lifetime_seconds` apply. A
          *     key for a service account requires a team admin. The key's limits may not exceed its owner's
-         *     effective limits. Limited to 30 attempts per 60 seconds per caller (429).
+         *     effective limits, and with `model_access` `list` its models must be within the owner's.
+         *     Limited to 30 attempts per 60 seconds per caller (429).
          */
         post: operations["createKey"];
         delete?: never;
@@ -360,8 +361,9 @@ export interface paths {
         head?: never;
         /**
          * Update Key
-         * @description Rename, change limits, or suspend and resume (`lifecycle`). The owner manages their own key
-         *     and a team admin any key of the team. An owner may resume only their own `owner` and
+         * @description Rename, change limits or the model list, or suspend and resume (`lifecycle`). The owner
+         *     manages their own key and a team admin any key of the team. A changed model list must stay
+         *     within the owner's effective models. An owner may resume only their own `owner` and
          *     `owner_removed` suspensions; `admin` and `owner_deactivated` need a team admin. Revoked keys
          *     are immutable and revoking has its own operation. Limited to 30 attempts per 60 seconds per
          *     caller (429).
@@ -838,6 +840,62 @@ export interface paths {
          *     not block other changes.
          */
         patch: operations["updateRouter"];
+        trace?: never;
+    };
+    "/api/v1/model-groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Model Groups
+         * @description Readable by every signed-in caller, like the catalog names, for the allowlist pickers.
+         */
+        get: operations["listModelGroups"];
+        put?: never;
+        /**
+         * Create Model Group
+         * @description Create a group of models, aliases and routers. Requires an installation admin. The name is
+         *     unique among groups (409) and is not a callable name.
+         */
+        post: operations["createModelGroup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/model-groups/{group_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Model Group
+         * @description Readable by every signed-in caller.
+         */
+        get: operations["getModelGroup"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Model Group
+         * @description Requires an installation admin. Every grant of the group is removed with it (each one
+         *     audited), so its holders lose its members at the next compile.
+         */
+        delete: operations["deleteModelGroup"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Model Group
+         * @description Rename, describe or replace the members. Requires an installation admin. Every holder of
+         *     the group gets the new members at the next compile; the holders are not re-validated, and a
+         *     member a holder's parent does not allow is dropped from that holder's effective set.
+         */
+        patch: operations["updateModelGroup"];
         trace?: never;
     };
     "/api/v1/mcp-servers": {
@@ -2249,6 +2307,21 @@ export interface components {
              * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
              */
             max_parallel?: number | null;
+            /**
+             * Model Access
+             * @description `inherit` (default) gives the key its owner's models; `list` narrows them to `allowed_models` and `allowed_groups`. `all` is refused.
+             */
+            model_access?: ("inherit" | "list") | null;
+            /**
+             * Allowed Models
+             * @description Callable names the key keeps when `model_access` is `list`; each must be allowed to the owner. Empty denies all.
+             */
+            allowed_models?: string[] | null;
+            /**
+             * Allowed Groups
+             * @description Model groups the key keeps when `model_access` is `list`; every member must be allowed to the owner.
+             */
+            allowed_groups?: string[] | null;
         };
         /** KeyCreated */
         KeyCreated: {
@@ -2311,6 +2384,23 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+            /** @description `inherit` (the owner's models) or `list` (narrowed to the grants below). */
+            model_access: components["schemas"]["ModelAccess"];
+            /**
+             * Allowed Models
+             * @description The key's own directly granted names.
+             */
+            allowed_models: string[];
+            /**
+             * Allowed Groups
+             * @description The key's own granted model groups.
+             */
+            allowed_groups: string[];
+            /**
+             * Granted Models
+             * @description `allowed_models` plus the members of `allowed_groups`, before the owner's set narrows them.
+             */
+            granted_models: string[];
             /** Owner Active */
             owner_active: boolean | null;
             /** Service Account Name */
@@ -2330,6 +2420,11 @@ export interface components {
              * @description The name of the team's org.
              */
             org_name: string | null;
+            /**
+             * Owner Models
+             * @description The owner's effective models, the most the key can be narrowed to; null = every name in the catalog.
+             */
+            owner_models?: string[] | null;
         };
         /**
          * KeyOwnerKind
@@ -2446,6 +2541,21 @@ export interface components {
              * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
              */
             max_parallel?: number | null;
+            /**
+             * Model Access
+             * @description `inherit` gives the key its owner's models; `list` narrows them to `allowed_models` and `allowed_groups`. `all` is refused.
+             */
+            model_access?: ("inherit" | "list") | null;
+            /**
+             * Allowed Models
+             * @description Callable names the key keeps when `model_access` is `list`; each must be allowed to the owner. Empty denies all.
+             */
+            allowed_models?: string[] | null;
+            /**
+             * Allowed Groups
+             * @description Model groups the key keeps when `model_access` is `list`; every member must be allowed to the owner.
+             */
+            allowed_groups?: string[] | null;
         };
         /**
          * McpDefinitionKind
@@ -2910,6 +3020,11 @@ export interface components {
              * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
              */
             allowed_models?: string[] | null;
+            /**
+             * Allowed Groups
+             * @description Model groups granted when `model_access` is `list`; each stands for its current members, added to `allowed_models`.
+             */
+            allowed_groups?: string[] | null;
             /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
             /**
@@ -2968,8 +3083,21 @@ export interface components {
          */
         MemberOut: {
             model_access: components["schemas"]["ModelAccess"];
-            /** Allowed Models */
+            /**
+             * Allowed Models
+             * @description The level's own directly granted names.
+             */
             allowed_models: string[];
+            /**
+             * Allowed Groups
+             * @description The level's own granted model groups.
+             */
+            allowed_groups: string[];
+            /**
+             * Granted Models
+             * @description `allowed_models` plus the current members of `allowed_groups`: the level's own set under `list`, before the parent narrows it.
+             */
+            granted_models: string[];
             mcp_access: components["schemas"]["ModelAccess"];
             /** Mcp Servers */
             mcp_servers: components["schemas"]["McpGrantOut"][];
@@ -3032,6 +3160,11 @@ export interface components {
              * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
              */
             allowed_models?: string[] | null;
+            /**
+             * Allowed Groups
+             * @description Model groups granted when `model_access` is `list`; each stands for its current members, added to `allowed_models`.
+             */
+            allowed_groups?: string[] | null;
             /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
             /**
@@ -3078,6 +3211,11 @@ export interface components {
              * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
              */
             allowed_models?: string[] | null;
+            /**
+             * Allowed Groups
+             * @description Model groups granted when `model_access` is `list`; each stands for its current members, added to `allowed_models`.
+             */
+            allowed_groups?: string[] | null;
             /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
             /**
@@ -3184,6 +3322,96 @@ export interface components {
              * @description Price of a million output tokens in nano-USD. Set the input and output prices together, or leave both null (cost unknown).
              */
             price_output_nano_usd_per_mtok?: number | null;
+        };
+        /** ModelGroupCreate */
+        ModelGroupCreate: {
+            /**
+             * Name
+             * @description Group name, unique among groups. It is not a callable name.
+             */
+            name: string;
+            /**
+             * Description
+             * @description Free text.
+             * @default
+             */
+            description: string;
+            /**
+             * Members
+             * @description Callable names (models, aliases, routers) in the group; not other groups.
+             */
+            members?: string[];
+        };
+        /** ModelGroupMemberOut */
+        ModelGroupMemberOut: {
+            /**
+             * Id
+             * Format: uuid
+             * @description The catalog name's id.
+             */
+            id: string;
+            /**
+             * Name
+             * @description The current callable name.
+             */
+            name: string;
+            /** @description `model`, `alias` or `router`. */
+            kind: components["schemas"]["CatalogKind"];
+            /** @description The member's model type, when it resolves. */
+            model_type?: components["schemas"]["ModelType"] | null;
+        };
+        /** ModelGroupOut */
+        ModelGroupOut: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /** Description */
+            description: string;
+            /**
+             * Members
+             * @description The members, sorted by name.
+             */
+            members: components["schemas"]["ModelGroupMemberOut"][];
+            /**
+             * Grants
+             * @description How many orgs, teams, members, service accounts and keys hold the group.
+             */
+            grants: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /**
+         * ModelGroupUpdate
+         * @description PATCH: omitted fields are unchanged; `members` replaces the whole list.
+         */
+        ModelGroupUpdate: {
+            /**
+             * Name
+             * @description Group name, unique among groups. It is not a callable name.
+             */
+            name?: string | null;
+            /**
+             * Description
+             * @description Free text.
+             */
+            description?: string | null;
+            /**
+             * Members
+             * @description Replaces the members: callable names (models, aliases, routers), not other groups. Holders are not re-validated; a member a holder's parent does not allow is dropped for that holder.
+             */
+            members?: string[] | null;
         };
         /** ModelOut */
         ModelOut: {
@@ -3403,6 +3631,11 @@ export interface components {
              * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
              */
             allowed_models?: string[] | null;
+            /**
+             * Allowed Groups
+             * @description Model groups granted when `model_access` is `list`; each stands for its current members, added to `allowed_models`.
+             */
+            allowed_groups?: string[] | null;
             /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
             /**
@@ -3446,8 +3679,21 @@ export interface components {
         /** OrgOut */
         OrgOut: {
             model_access: components["schemas"]["ModelAccess"];
-            /** Allowed Models */
+            /**
+             * Allowed Models
+             * @description The level's own directly granted names.
+             */
             allowed_models: string[];
+            /**
+             * Allowed Groups
+             * @description The level's own granted model groups.
+             */
+            allowed_groups: string[];
+            /**
+             * Granted Models
+             * @description `allowed_models` plus the current members of `allowed_groups`: the level's own set under `list`, before the parent narrows it.
+             */
+            granted_models: string[];
             mcp_access: components["schemas"]["ModelAccess"];
             /** Mcp Servers */
             mcp_servers: components["schemas"]["McpGrantOut"][];
@@ -3479,6 +3725,11 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+            /**
+             * Effective Models
+             * @description The callable names this level allows after inheritance (groups expanded, intersected down from the org); null = every name in the catalog.
+             */
+            effective_models?: string[] | null;
             /** Deleted At */
             deleted_at?: string | null;
         };
@@ -3518,6 +3769,11 @@ export interface components {
              * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
              */
             allowed_models?: string[] | null;
+            /**
+             * Allowed Groups
+             * @description Model groups granted when `model_access` is `list`; each stands for its current members, added to `allowed_models`.
+             */
+            allowed_groups?: string[] | null;
             /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
             /**
@@ -3663,6 +3919,13 @@ export interface components {
         Page_MemberOut_: {
             /** Items */
             items: components["schemas"]["MemberOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
+        /** Page[ModelGroupOut] */
+        Page_ModelGroupOut_: {
+            /** Items */
+            items: components["schemas"]["ModelGroupOut"][];
             /** Next Cursor */
             next_cursor?: string | null;
         };
@@ -4361,6 +4624,11 @@ export interface components {
              * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
              */
             allowed_models?: string[] | null;
+            /**
+             * Allowed Groups
+             * @description Model groups granted when `model_access` is `list`; each stands for its current members, added to `allowed_models`.
+             */
+            allowed_groups?: string[] | null;
             /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
             /**
@@ -4410,8 +4678,21 @@ export interface components {
         /** ServiceAccountOut */
         ServiceAccountOut: {
             model_access: components["schemas"]["ModelAccess"];
-            /** Allowed Models */
+            /**
+             * Allowed Models
+             * @description The level's own directly granted names.
+             */
             allowed_models: string[];
+            /**
+             * Allowed Groups
+             * @description The level's own granted model groups.
+             */
+            allowed_groups: string[];
+            /**
+             * Granted Models
+             * @description `allowed_models` plus the current members of `allowed_groups`: the level's own set under `list`, before the parent narrows it.
+             */
+            granted_models: string[];
             mcp_access: components["schemas"]["ModelAccess"];
             /** Mcp Servers */
             mcp_servers: components["schemas"]["McpGrantOut"][];
@@ -4464,6 +4745,11 @@ export interface components {
              * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
              */
             allowed_models?: string[] | null;
+            /**
+             * Allowed Groups
+             * @description Model groups granted when `model_access` is `list`; each stands for its current members, added to `allowed_models`.
+             */
+            allowed_groups?: string[] | null;
             /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
             /**
@@ -4672,6 +4958,11 @@ export interface components {
              * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
              */
             allowed_models?: string[] | null;
+            /**
+             * Allowed Groups
+             * @description Model groups granted when `model_access` is `list`; each stands for its current members, added to `allowed_models`.
+             */
+            allowed_groups?: string[] | null;
             /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
             /**
@@ -4756,8 +5047,21 @@ export interface components {
              */
             updated_at: string;
             model_access: components["schemas"]["ModelAccess"];
-            /** Allowed Models */
+            /**
+             * Allowed Models
+             * @description The level's own directly granted names.
+             */
             allowed_models: string[];
+            /**
+             * Allowed Groups
+             * @description The level's own granted model groups.
+             */
+            allowed_groups: string[];
+            /**
+             * Granted Models
+             * @description `allowed_models` plus the current members of `allowed_groups`: the level's own set under `list`, before the parent narrows it.
+             */
+            granted_models: string[];
             mcp_access: components["schemas"]["ModelAccess"];
             /** Mcp Servers */
             mcp_servers: components["schemas"]["McpGrantOut"][];
@@ -4772,6 +5076,11 @@ export interface components {
             max_parallel: number | null;
             /** Budget Nano Usd */
             budget_nano_usd: number | null;
+            /**
+             * Effective Models
+             * @description The callable names this level allows after inheritance (groups expanded, intersected down from the org); null = every name in the catalog.
+             */
+            effective_models?: string[] | null;
         };
         /**
          * TeamRole
@@ -4812,6 +5121,11 @@ export interface components {
              * @description Callable names (models, aliases, routers) granted when `model_access` is `list`; empty denies all.
              */
             allowed_models?: string[] | null;
+            /**
+             * Allowed Groups
+             * @description Model groups granted when `model_access` is `list`; each stands for its current members, added to `allowed_models`.
+             */
+            allowed_groups?: string[] | null;
             /** @description `inherit` keeps the parent's set, `all` grants everything the parent allows, `list` grants exactly `mcp_servers`. */
             mcp_access?: components["schemas"]["ModelAccess"] | null;
             /**
@@ -9391,6 +9705,346 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RouterOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listModelGroups: {
+        parameters: {
+            query?: {
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_ModelGroupOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    createModelGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelGroupCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelGroupOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getModelGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelGroupOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    deleteModelGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    updateModelGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelGroupUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelGroupOut"];
                 };
             };
             /** @description Missing or invalid credentials */

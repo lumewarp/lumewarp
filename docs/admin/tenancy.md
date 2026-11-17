@@ -29,6 +29,13 @@ accounts) → keys. This page describes each level; limits and budgets along the
   database for usage, the request log and audit (`GET /usage?team_id=`,
   `GET /requests?team_id=`, `GET /audit?team_id=`, the org usage summary) but every
   write path and every team-scoped read answers 404.
+- **Model pickers are scoped to the parent.** The model access picker of a team lists only
+  its org's `effective_models`; the picker of a member or service account lists only the
+  team's `effective_models`. Names granted earlier that fell outside the scope stay visible
+  under "Not offered" so they can be unticked. [Model groups](./catalog.md#model-groups) are
+  granted alongside names (`allowed_groups`) and show their members as "via `group`"; a
+  group with any member outside the scope is disabled, because it could not be granted
+  whole.
 - **Team member**: a user in a team with role `admin` or `member`. The member's own
   exception policy and grants live in `member_policies`, keyed by `(team_id, user_id)` and
   deliberately independent of `team_members`: an external authorization backend has no
