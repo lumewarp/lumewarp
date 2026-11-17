@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { confirmDialog, expectKeyPill, pick, SHOTS, shot } from "./helpers";
+import { confirmDialog, expectKeyPill, pick, SHOTS, shot, signOut } from "./helpers";
 import {
   Admin,
   daysFromNow,
@@ -745,7 +745,7 @@ test("the real Sign out button drops a create still in flight", async ({ page })
   await page.keyboard.press("Escape");
   await expect(form).toBeHidden();
 
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await signOut(page);
   await expect(page).toHaveURL(/\/login/);
   const postResponse = page.waitForResponse(
     (response) => new URL(response.url()).pathname === `/api/v1/teams/${team.id}/keys` && response.request().method() === "POST",
@@ -771,7 +771,7 @@ test("a failed sign-out keeps the page and a later secret still shows", async ({
       body: JSON.stringify({ error: { code: "server_error", message: "logout failed" } }),
     }),
   );
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await signOut(page);
   await expect(page.getByText("logout failed")).toBeVisible();
   await expect(page).toHaveURL(/\/my-keys$/);
   await expect(page.getByRole("heading", { name: "My keys" })).toBeVisible();

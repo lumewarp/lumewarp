@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { confirmDialog, dialog, keyPrefix, pick, shot } from "./helpers";
+import { chooseTheme, confirmDialog, dialog, keyPrefix, pick, shot, signOut } from "./helpers";
 import { myKeyRow } from "./selfService";
 
 const BREAK_GLASS = "e2e-break-glass-password";
@@ -250,7 +250,7 @@ test("cookie session: CSRF on writes, inline member errors, key owner state, log
     signedIn = false;
     await route.fulfill({ status: 204 });
   });
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await signOut(page);
   await expect(page).toHaveURL(/\/login$/);
   expect(logoutCsrf).toBe(csrfToken);
   await expect(page.getByRole("button", { name: "Sign in with SSO" })).toBeVisible();
@@ -282,19 +282,19 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await expect(createdUser.getByText("Inactive")).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole("button", { name: "Theme: Auto" }).click();
+  await chooseTheme(page, "Light");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
   await shot(page, "smoke-users-phone-light");
-  await page.getByRole("button", { name: "Theme: Light" }).click();
+  await chooseTheme(page, "Dark");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await shot(page, "smoke-users-phone-dark");
   await page.setViewportSize({ width: 1280, height: 900 });
   await expect(page.getByRole("button", { name: "Toggle navigation" })).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
   await shot(page, "smoke-users-desktop-dark");
-  await page.getByRole("button", { name: "Theme: Dark" }).click();
-  await page.getByRole("button", { name: "Theme: Auto" }).click();
+  await chooseTheme(page, "Auto");
+  await chooseTheme(page, "Light");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await shot(page, "smoke-users-desktop-light");
 
@@ -488,10 +488,10 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   // The open navigation is a modal sheet over the toggle, so it closes with Escape.
   await viewerPage.keyboard.press("Escape");
   await expect(viewerNav.getByRole("link", { name: "My keys", exact: true })).toHaveCount(0);
-  await viewerPage.getByRole("button", { name: "Theme: Auto" }).click();
+  await chooseTheme(viewerPage, "Light");
   await expect(viewerPage.locator("html")).toHaveAttribute("data-theme", "light");
   await shot(viewerPage, "smoke-team-detail-phone-light");
-  await viewerPage.getByRole("button", { name: "Theme: Light" }).click();
+  await chooseTheme(viewerPage, "Dark");
   await shot(viewerPage, "smoke-team-detail-phone-dark");
   await expect(viewerPage.locator("html")).toHaveAttribute("data-theme", "dark");
   expect(await viewerPage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
@@ -522,7 +522,7 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   expect(missing.status()).toBe(404);
   expect((await missing.json()).error.code).toBe("not_found");
 
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await signOut(page);
   await expect(page).toHaveURL(/\/login$/);
   await page.goto("/my-keys");
   await expect(page).toHaveURL(/\/login\?next=%2Fmy-keys$/);

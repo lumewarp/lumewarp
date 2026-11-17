@@ -115,6 +115,13 @@ test("desktop: the navigation is 15rem wide and collapses to icons, remembered a
   const routers = page.getByRole("link", { name: "Routers", exact: true });
   await expect(routers).toBeVisible();
   await expect(routers).toHaveAttribute("title", "Routers");
+  // Nothing in the narrow column can be scrolled sideways.
+  const sideways = await container.evaluate((root) =>
+    [root, ...root.querySelectorAll("*")]
+      .filter((el) => ["auto", "scroll"].includes(getComputedStyle(el).overflowX) && el.scrollWidth > el.clientWidth)
+      .map((el) => el.getAttribute("data-slot") ?? el.tagName),
+  );
+  expect(sideways).toEqual([]);
   await page.reload();
   await expect(page.getByRole("button", { name: "Expand navigation" })).toBeVisible();
   await expect.poll(width).toBeCloseTo(48, 0);

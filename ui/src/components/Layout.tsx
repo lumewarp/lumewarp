@@ -13,6 +13,7 @@ import {
   KeyRound,
   LayoutDashboard,
   ListOrdered,
+  ChevronDown,
   LogOut,
   Menu,
   PanelLeft,
@@ -42,8 +43,19 @@ import { Badge } from "./Bits";
 import { useToast } from "./Toast";
 import { Button } from "./ui/button";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
+import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
@@ -125,22 +137,30 @@ function roleLabel(me: Me) {
 const THEME_LABEL = { system: "Auto", light: "Light", dark: "Dark" } as const;
 const THEME_ICON = { system: Monitor, light: Sun, dark: Moon } as const;
 
-/** Opens the drawer on a phone; on a wider screen collapses the sidebar to icons and back. */
+/** Phones only: opens the navigation drawer. From md up the sidebar has its own collapse button. */
 function NavToggle() {
-  const { isMobile, open, openMobile, toggleSidebar } = useSidebar();
-  const expanded = isMobile ? openMobile : open;
-  const Icon = isMobile ? Menu : PanelLeft;
+  const { openMobile, toggleSidebar } = useSidebar();
   return (
-    <Button
-      variant="outline"
-      size="icon"
-      className="size-8"
-      aria-label={isMobile ? "Toggle navigation" : expanded ? "Collapse navigation" : "Expand navigation"}
-      aria-expanded={expanded}
-      onClick={toggleSidebar}
-    >
-      <Icon className="size-4" aria-hidden="true" />
+    <Button variant="outline" size="icon" className="size-8 md:hidden" aria-label="Toggle navigation" aria-expanded={openMobile} onClick={toggleSidebar}>
+      <Menu className="size-4" aria-hidden="true" />
     </Button>
+  );
+}
+
+/** Desktop: collapses the sidebar to its icons and back, at the bottom of the sidebar. */
+function CollapseButton() {
+  const { isMobile, open, toggleSidebar } = useSidebar();
+  if (isMobile) return null;
+  const label = open ? "Collapse navigation" : "Expand navigation";
+  return (
+    <SidebarMenu>
+      <SidebarMenuItem>
+        <SidebarMenuButton aria-label={label} title={open ? undefined : label} aria-expanded={open} onClick={toggleSidebar} className="text-sidebar-foreground/80">
+          <PanelLeft aria-hidden="true" />
+          <span>Collapse</span>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    </SidebarMenu>
   );
 }
 
@@ -175,7 +195,7 @@ function NavSidebar({ installationAdmin, orgAdmin, teamAdmin, breakGlass }: { in
         </div>
       </SidebarHeader>
       <SidebarContent>
-        <nav aria-label="Main" className="flex min-h-0 flex-col gap-1 overflow-y-auto">
+        <nav aria-label="Main" className="flex min-h-0 flex-col gap-1 overflow-x-hidden overflow-y-auto">
           {NAV.map((section) => {
             const items = section.items.filter((n) => hasAccess(perms, n.access ?? "member") && !(breakGlass && n.noBreakGlass));
             if (!items.length) return null;
@@ -207,20 +227,65 @@ function NavSidebar({ installationAdmin, orgAdmin, teamAdmin, breakGlass }: { in
           })}
         </nav>
       </SidebarContent>
+      <SidebarFooter className="p-2">
+        <CollapseButton />
+      </SidebarFooter>
       <SidebarRail />
     </Sidebar>
+  );
+}
+
+/** Who is signed in, the theme and Sign out, in one menu at the top right. */
+function AccountMenu({ me, theme, onTheme, onSignOut }: { me: Me | undefined; theme: keyof typeof THEME_LABEL; onTheme: (theme: keyof typeof THEME_LABEL) => void; onSignOut: () => void }) {
+  const name = me ? me.display_name || me.email || "Bootstrap admin" : "Account";
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="sm" className="max-w-[260px]" title={me?.email ?? undefined} data-testid="principal">
+          <span className="hidden min-w-0 truncate sm:inline">{name}</span>
+          {me && <Badge tone="info">{roleLabel(me)}</Badge>}
+          <ChevronDown className="size-4" aria-hidden="true" />
+          <span className="sr-only">Account menu</span>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56">
+        {me && (
+          <DropdownMenuLabel className="flex flex-col gap-0.5">
+            <span className="truncate">{name}</span>
+            {me.email && me.email !== name && <span className="truncate text-xs font-normal text-muted-foreground">{me.email}</span>}
+          </DropdownMenuLabel>
+        )}
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Theme</DropdownMenuLabel>
+        <DropdownMenuRadioGroup value={theme} onValueChange={(value) => onTheme(value as keyof typeof THEME_LABEL)}>
+          {(Object.keys(THEME_LABEL) as (keyof typeof THEME_LABEL)[]).map((key) => {
+            const Icon = THEME_ICON[key];
+            return (
+              <DropdownMenuRadioItem key={key} value={key}>
+                <Icon aria-hidden="true" />
+                {THEME_LABEL[key]}
+              </DropdownMenuRadioItem>
+            );
+          })}
+        </DropdownMenuRadioGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onSignOut}>
+          <LogOut aria-hidden="true" />
+          Sign out
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
 export function Layout() {
   const me = useMe();
   const perms = useCan();
-  const { theme, cycle } = useTheme();
+  const { theme, setTheme } = useTheme();
   const qc = useQueryClient();
   const navigate = useNavigate();
   const toast = useToast();
   const clearSecrets = useClearSecrets();
-  const ThemeIcon = THEME_ICON[theme];
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
 
   const logout = async () => {
@@ -256,20 +321,7 @@ export function Layout() {
         <header className="sticky top-0 z-40 flex items-center gap-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur md:px-6">
           <NavToggle />
           <span className="flex-1" />
-          <Button variant="outline" size="sm" onClick={cycle} title="Cycle theme">
-            <ThemeIcon className="size-4" aria-hidden="true" />
-            <span>Theme: {THEME_LABEL[theme]}</span>
-          </Button>
-          {me.data && (
-            <span className="flex min-w-0 items-center gap-2" title={me.data.email ?? undefined} data-testid="principal">
-              <span className="hidden max-w-[180px] truncate sm:inline">{me.data.display_name || me.data.email || "Bootstrap admin"}</span>
-              <Badge tone="info">{roleLabel(me.data)}</Badge>
-            </span>
-          )}
-          <Button variant="outline" size="sm" onClick={() => void logout()}>
-            <LogOut className="size-4 sm:hidden" aria-hidden="true" />
-            <span className="sr-only sm:not-sr-only">Sign out</span>
-          </Button>
+          <AccountMenu me={me.data} theme={theme} onTheme={setTheme} onSignOut={() => void logout()} />
         </header>
         {me.data?.authz_unavailable && (
           <div className="border-b bg-background px-4 py-3 md:px-6">
