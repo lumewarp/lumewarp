@@ -293,7 +293,7 @@ async def test_delete_removes_and_audits_grants_and_frees_the_name(client, commi
     rows = (
         await committed.scalars(select(AuditLog).where(AuditLog.action == "grant.delete"))
     ).all()
-    mine = [r for r in rows if r.details["name_id"] == model["id"]]
+    mine = [r for r in rows if r.details.get("name_id") == model["id"]]
     assert len(mine) == 2
     assert {str(r.team_id) for r in mine} == {team["id"]}
     assert {r.details["service_account_id"] for r in mine} == {None, account["id"]}

@@ -179,6 +179,15 @@ async def test_upgrade_from_0001_keeps_rows_and_compiles_the_same_policy() -> No
         with pytest.raises(IntegrityError):
             async with engine.begin() as conn:
                 await conn.execute(
+                    text(
+                        "INSERT INTO policy_grants (id, name_id, key_id, team_id)"
+                        " VALUES (:id, :n, :k, :t)"
+                    ),
+                    {"id": _id(), "n": names["b"], "k": ids["user_key"], "t": ids["team"]},
+                )
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as conn:
+                await conn.execute(
                     text("UPDATE api_keys SET model_access = 'all' WHERE id = :k"),
                     {"k": ids["user_key"]},
                 )

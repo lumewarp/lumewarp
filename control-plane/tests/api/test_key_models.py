@@ -240,3 +240,64 @@ async def test_limits_only_patch_is_unchanged(client, committed) -> None:
         f"/api/v1/keys/{key['id']}", json={"allowed_models": None}, headers=auth(token)
     )
     assert null.status_code == 422, null.text
+
+
+async def test_playground_offers_only_the_key_list(client, committed) -> None:
+    from lumewarp_control_plane.auth import sessions
+
+    a, b = await _models(committed, 2)
+    team = await make_team(committed, model_access=ModelAccess.LIST, allowed_models=[a, b])
+    user, token = await user_with_token(committed)
+    await make_member(committed, team, user)
+    cookie = await sessions.create_session(committed, user.id, 3600)
+    await committed.commit()
+    created = client.post(
+        f"/api/v1/teams/{team.id}/keys",
+        json={"name": "k", "model_access": "list", "allowed_models": [a]},
+        headers=auth(token),
+    )
+    assert created.status_code == 201, created.text
+    key_id = created.json()["key"]["id"]
+    body = client.get("/api/v1/playground", headers=auth("session:" + cookie)).json()
+    assert next(k for k in body["keys"] if k["id"] == key_id)["models"] == [a]
+
+
+async def test_group_and_catalog_names_share_one_namespace(client, committed) -> None:
+    model = await make_model(committed, f"km-{suffix()}")
+    await committed.commit()
+    clash = client.post(
+        "/api/v1/model-groups", json={"name": model.name, "members": []}, headers=ADMIN_AUTH
+    )
+    assert clash.status_code == 409, clash.text
+    group = f"km-group-{suffix()}"
+    created = client.post(
+        "/api/v1/model-groups", json={"name": group, "members": [model.name]}, headers=ADMIN_AUTH
+    )
+    assert created.status_code == 201, created.text
+    alias = client.post(
+        "/api/v1/aliases", json={"name": group, "target": str(model.id)}, headers=ADMIN_AUTH
+    )
+    assert alias.status_code == 422, alias.text
+    assert "model group" in alias.text
+    rename = client.patch(f"/api/v1/models/{model.id}", json={"name": group}, headers=ADMIN_AUTH)
+    assert rename.status_code == 422, rename.text
+
+
+async def test_old_name_alias_keeps_group_membership(client, committed) -> None:
+    model = await make_model(committed, f"km-{suffix()}")
+    await committed.commit()
+    old, new = model.name, f"km-{suffix()}"
+    created = client.post(
+        "/api/v1/model-groups",
+        json={"name": f"km-group-{suffix()}", "members": [old]},
+        headers=ADMIN_AUTH,
+    )
+    assert created.status_code == 201, created.text
+    renamed = client.patch(
+        f"/api/v1/models/{model.id}",
+        json={"name": new, "keep_old_name_as_alias": True},
+        headers=ADMIN_AUTH,
+    )
+    assert renamed.status_code == 200, renamed.text
+    group = client.get(f"/api/v1/model-groups/{created.json()['id']}", headers=ADMIN_AUTH)
+    assert sorted(m["name"] for m in group.json()["members"]) == sorted([old, new])

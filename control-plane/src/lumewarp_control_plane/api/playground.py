@@ -36,6 +36,7 @@ from lumewarp_control_plane.models import (
     ServiceAccount,
     Team,
 )
+from lumewarp_control_plane.quota import key_models
 from lumewarp_control_plane.security import PrincipalKind
 
 log = logging.getLogger(__name__)
@@ -209,8 +210,9 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
             Action.KEY_MANAGE_OWN, team.id
         ):
             continue
-        effective = await _owner_effective(session, team, key)
-        models = sorted(llm_names) if effective.models is None else sorted(effective.models)
+        # What the key itself may call: the owner's set, narrowed by a key `list`.
+        key_set = key_models((await _owner_effective(session, team, key)).models, key)
+        models = sorted(llm_names) if key_set is None else sorted(key_set)
         keys.append(
             PlaygroundKey(
                 id=key.id,
@@ -301,12 +303,12 @@ async def chat_completions(
         raise HTTPException(400, "invalid JSON body") from None
     model = payload.get("model") if isinstance(payload, dict) else None
     if isinstance(model, str):
-        effective = await _owner_effective(session, team, key)
+        key_set = key_models((await _owner_effective(session, team, key)).models, key)
         allowed = (
             await session.scalar(select(CatalogName.name).where(CatalogName.name == model))
             is not None
-            if effective.models is None
-            else model in effective.models
+            if key_set is None
+            else model in key_set
         )
         if allowed:
             from lumewarp_control_plane.model_types import called_name_type

@@ -70,6 +70,11 @@ async def _name_free(session: AsyncSession, name: str, current: uuid.UUID | None
     existing = await session.scalar(select(ModelGroup.id).where(ModelGroup.name == name))
     if existing is not None and existing != current:
         raise conflict(f"a model group named {name!r} already exists")
+    # One namespace with the catalog (`catalog._ensure_free` checks the other way), so a
+    # picker never has to tell a group from a model, alias or router of the same name.
+    kind = await session.scalar(select(CatalogName.kind).where(CatalogName.name == name))
+    if kind is not None:
+        raise conflict(f"{name!r} is already used by a {kind.value}")
 
 
 async def _outs(session: AsyncSession, rows: list[ModelGroup]) -> list[ModelGroupOut]:

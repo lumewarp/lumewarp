@@ -594,12 +594,14 @@ export function CatalogMultiSelect({
     },
   ) => {
     const checked = !!opts.via || isOn(key);
+    // A direct choice stays removable even while a group also covers it.
+    const locked = !!opts.via && !isOn(key);
     const domId = `${idPrefix}-${opts.stale ? "stale-" : ""}${opts.entry?.id ?? key}`;
     return (
       <div key={`${opts.stale ? "s" : "e"}:${key}`} className={cn("flex min-w-0 flex-col gap-2", rowClassName)} data-testid={opts.entry && rowTestId?.(opts.entry)} title={opts.title}>
         <div className="flex items-center gap-2">
-          <Checkbox id={domId} checked={checked} disabled={!!opts.via || opts.disabled} onCheckedChange={(c) => toggle(key, c === true)} />
-          <Label htmlFor={domId} className={cn("min-w-0 flex-1 cursor-pointer gap-2 font-normal", (opts.via || opts.disabled) && "cursor-default")}>
+          <Checkbox id={domId} checked={checked} disabled={locked || opts.disabled} onCheckedChange={(c) => toggle(key, c === true)} />
+          <Label htmlFor={domId} className={cn("min-w-0 flex-1 cursor-pointer gap-2 font-normal", (locked || opts.disabled) && "cursor-default")}>
             {children}
             {opts.via && <span className="shrink-0 text-xs text-muted-foreground">via {opts.via}</span>}
           </Label>

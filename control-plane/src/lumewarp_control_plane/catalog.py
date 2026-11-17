@@ -39,6 +39,10 @@ async def _ensure_free(session: AsyncSession, name: str) -> None:
     kind = await session.scalar(select(CatalogName.kind).where(CatalogName.name == name))
     if kind is not None:
         raise NameProblem(f"{name!r} is already used by a {kind.value}")
+    # Model groups are not callable, but they are picked by name next to catalog names, so
+    # the two share one namespace (`api.model_groups._name_free` checks the other way).
+    if await session.scalar(select(ModelGroup.id).where(ModelGroup.name == name)) is not None:
+        raise NameProblem(f"{name!r} is already used by a model group")
 
 
 async def claim_name(session: AsyncSession, name: str, kind: CatalogKind) -> CatalogName:
@@ -191,6 +195,15 @@ async def copy_grants(session: AsyncSession, source: uuid.UUID, target: uuid.UUI
                 key_id=key_id,
             )
         )
+    # The alias keeps the old name callable for everyone who could call it, including
+    # holders that reached it through a model group.
+    groups = (
+        await session.scalars(
+            select(ModelGroupMember.group_id).where(ModelGroupMember.name_id == source)
+        )
+    ).all()
+    for group_id in groups:
+        session.add(ModelGroupMember(group_id=group_id, name_id=target))
     await session.flush()
     return len(grants)
 

@@ -77,8 +77,9 @@ unrestricted), which is what the pickers below them offer.
 A model group is a named set of models, aliases and routers granted as one unit: an
 installation admin creates it on **Model groups** (Routing group in the sidebar) or with
 `POST /model-groups` (`name`, `description`, `members` as catalog names). A group is never
-callable, its name is not a catalog name (the page refuses a name already used by a model,
-alias or router) and it cannot contain another group. Everyone signed in may read groups
+callable and cannot contain another group, but it shares one namespace with models, aliases
+and routers: a group name already used by one is refused with 409, and a catalog name
+already used by a group with 422. Everyone signed in may read groups
 (`GET /model-groups`, `GET /model-groups/{id}`) for the pickers; writes need an installation
 admin.
 
@@ -88,7 +89,9 @@ a member the holder's parent does not allow drops out of that holder's effective
 when a parent narrows. The list shows each group's member count and grants. Deleting a group
 removes every grant of it (each one audited as `grant.delete`, and `model_group.delete`
 records the count), so its holders lose the members at the next compile. Groups are not part
-of a rollback's catalog state.
+of a rollback's catalog state. A rename with `keep_old_name_as_alias` puts the alias in every
+group of the renamed entry, so holders who reached it through a group can still call the old
+name.
 
 ## Model types
 
