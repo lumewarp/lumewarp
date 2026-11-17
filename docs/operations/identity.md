@@ -32,7 +32,7 @@ the first one when the setting is empty, and is the recovery path afterwards. An
 admin can then assign more admins. A user must have signed in through OIDC at least once before
 receiving an installation role: otherwise the identity-link protection would leave a privileged
 account unable to log in. Assign and transfer return 409 for an account with no linked identity;
-let the person sign in once first. An installation admin can issue a PAT for an active user with
+let the person sign in once first. The Admin UI manages these rows on the Installation admins page. An installation admin can issue a PAT for an active user with
 `POST /api/v1/users/{user_id}/tokens` using `{"name":"initial access"}` (optional
 `expires_at`). The secret is returned only on creation; issuance is audited with the
 actor and target user, never the secret. Team admins cannot use this endpoint.

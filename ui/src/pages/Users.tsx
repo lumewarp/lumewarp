@@ -66,7 +66,7 @@ export function Users() {
     <>
       <PageHeader
         title="Users"
-        hint="Installation admin roles are managed in Postgres."
+        hint="Installation admin roles are managed on the Installation admins page."
         actions={<CreateButton can onClick={() => { form.reset(); setCreating(true); }}>New user</CreateButton>}
       />
       <DataTable

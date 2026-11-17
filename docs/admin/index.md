@@ -40,6 +40,14 @@ assigns one), and it can be transferred afterwards. Every installation admin can
 `proxy_admin` account itself is protected: only that account and break-glass may deactivate,
 delete, change its email or mint a PAT for it.
 
+The **Installation admins** page (Access, installation admins only) lists the rows with role,
+status, who assigned them and when. **Add admin** gives an active user who has signed in once the
+`admin` role; any installation admin may do it. **Remove** takes the role away from an `admin`
+(any installation admin, yourself included, in which case you lose installation access); the
+proxy_admin row has no Remove. **Transfer proxy_admin** appears on `admin` rows only for the
+current proxy_admin or a break-glass session, and asks for confirmation: the target becomes
+proxy_admin and the previous one becomes an `admin`.
+
 The endpoints are `GET /api/v1/installation-admins` (the rows with user email, display name and
 active state), `PUT /api/v1/installation-admins/{user_id}` with `{"role":"admin"}` (idempotent;
 `proxy_admin` is rejected as a normal assignment), `DELETE /api/v1/installation-admins/{user_id}`
@@ -47,7 +55,7 @@ active state), `PUT /api/v1/installation-admins/{user_id}` with `{"role":"admin"
 `POST /api/v1/installation-admins/transfer` with `{"user_id": ...}` (the previous proxy_admin
 becomes an `admin`). Assign and transfer require the target to have linked an IdP identity
 (signed in once); an account that has never signed in gets 409 `the user must sign in once
-before receiving an installation role`. Assign, remove and transfer are audited; the first-login
+before receiving a role`. Assign, remove and transfer are audited; the first-login
 bootstrap is audited as `installation_admin.bootstrap`.
 
 ## Org admins

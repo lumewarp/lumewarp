@@ -32,6 +32,7 @@ const UsersPage = lazy(() => import("./pages/Users").then((module) => ({ default
 const AuditPage = lazy(() => import("./pages/Audit").then((module) => ({ default: module.Audit })));
 const RequestsPage = lazy(() => import("./pages/Requests").then((module) => ({ default: module.Requests })));
 const TeamsPage = lazy(() => import("./pages/Teams").then((module) => ({ default: module.Teams })));
+const InstallationAdminsPage = lazy(() => import("./pages/InstallationAdmins").then((module) => ({ default: module.InstallationAdmins })));
 const OrgsPage = lazy(() => import("./pages/Orgs").then((module) => ({ default: module.Orgs })));
 const OrgDetailPage = lazy(() => import("./pages/Orgs").then((module) => ({ default: module.OrgDetail })));
 const PlaygroundPage = lazy(() => import("./pages/Playground").then((module) => ({ default: module.Playground })));
@@ -179,6 +180,7 @@ const routeTree = rootRoute.addChildren([
     orgDetailRoute,
     page("/teams", () => <TeamsPage />, "teamAdmin"),
     teamDetailRoute,
+    page("/installation-admins", () => <InstallationAdminsPage />, "installationAdmin"),
     page("/users", () => <UsersPage />, "installationAdmin"),
     page("/routers", () => <RoutersPage />, "installationAdmin"),
     page("/routers/new", () => <RouterEditPage />, "installationAdmin"),

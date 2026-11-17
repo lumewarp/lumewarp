@@ -43,6 +43,7 @@ export type User = Schemas["UserOut"];
 export type Me = Schemas["MeOut"];
 export type Org = Schemas["OrgOut"];
 export type OrgAdmin = Schemas["OrgAdminOut"];
+export type InstallationAdmin = Schemas["InstallationAdminOut"];
 export type OrgUsage = Schemas["OrgUsageOut"];
 export type ModelAccess = Schemas["ModelAccess"];
 /** One MCP server a policy level grants, and either every tool or the named ones. */
@@ -141,6 +142,14 @@ export const api = {
     unwrap(client.PUT("/api/v1/orgs/{org_id}/admins/{user_id}", { params: { path: { org_id: orgId, user_id: userId } } })),
   deleteOrgAdmin: (orgId: string, userId: string) =>
     unwrap(client.DELETE("/api/v1/orgs/{org_id}/admins/{user_id}", { params: { path: { org_id: orgId, user_id: userId } } })),
+  installationAdmins: () =>
+    listAll((c) => unwrap(client.GET("/api/v1/installation-admins", { params: { query: q(c) } }))),
+  assignInstallationAdmin: (userId: string) =>
+    unwrap(client.PUT("/api/v1/installation-admins/{user_id}", { params: { path: { user_id: userId } }, body: { role: "admin" } })),
+  removeInstallationAdmin: (userId: string) =>
+    unwrap(client.DELETE("/api/v1/installation-admins/{user_id}", { params: { path: { user_id: userId } } })),
+  transferProxyAdmin: (userId: string) =>
+    unwrap(client.POST("/api/v1/installation-admins/transfer", { body: { user_id: userId } })),
   orgUsage: (orgId: string) =>
     unwrap(client.GET("/api/v1/orgs/{org_id}/usage", { params: { path: { org_id: orgId } } })),
 

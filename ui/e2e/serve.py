@@ -54,6 +54,10 @@ TEAM_ADMIN_EMAIL = "teamadmin@e2e.test"
 TEAM_ADMIN_TOKEN = "e2e-teamadmin-session-0123456789abcdef"
 ORG_ADMIN_EMAIL = "orgadmin@e2e.test"
 ORG_ADMIN_TOKEN = "e2e-orgadmin-session-0123456789abcdef"
+INSTALL_ADMIN_EMAIL = "installadmin@e2e.test"
+INSTALL_ADMIN_TOKEN = "e2e-installadmin-session-0123456789abcdef"
+INSTALL_TARGET_EMAIL = "installtarget@e2e.test"
+INSTALL_TARGET_TOKEN = "e2e-installtarget-session-0123456789abcdef"
 SHOTS_EMAIL = "shots@e2e.test"
 SHOTS_TOKEN = "e2e-shots-session-0123456789abcdef"
 SERVER_URL = os.environ.get("LUMEWARP_TEST_DATABASE_URL", DEV_DATABASE_URL)
@@ -87,6 +91,8 @@ async def seed_users(url: str) -> None:
                 (OUTSIDER_EMAIL, "E2E Outsider", OUTSIDER_TOKEN),
                 (TEAM_ADMIN_EMAIL, "E2E Team Admin", TEAM_ADMIN_TOKEN),
                 (ORG_ADMIN_EMAIL, "E2E Org Admin", ORG_ADMIN_TOKEN),
+                (INSTALL_ADMIN_EMAIL, "E2E Install Admin", INSTALL_ADMIN_TOKEN),
+                (INSTALL_TARGET_EMAIL, "E2E Install Target", INSTALL_TARGET_TOKEN),
                 (SHOTS_EMAIL, "E2E Shots", SHOTS_TOKEN),
             ):
                 user = User(email=email, display_name=display_name)
@@ -100,8 +106,8 @@ async def seed_users(url: str) -> None:
                         expires_at=datetime.now(UTC) + timedelta(hours=1),
                     )
                 )
-                if email == ORG_ADMIN_EMAIL:
-                    # An org admin must have signed in once before the role can be
+                if email in (ORG_ADMIN_EMAIL, INSTALL_ADMIN_EMAIL, INSTALL_TARGET_EMAIL):
+                    # An org or installation admin must have signed in once before the role can be
                     # assigned (require_signed_in); a seeded identity stands in for the
                     # OIDC login the specs cannot perform.
                     session.add(

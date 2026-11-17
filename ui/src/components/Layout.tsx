@@ -22,6 +22,7 @@ import {
   ScrollText,
   Server,
   Settings,
+  ShieldAlert,
   ShieldCheck,
   Sun,
   Users,
@@ -71,6 +72,7 @@ const NAV: { group: string | null; items: NavItem[] }[] = [
       { to: "/orgs", label: "Orgs", icon: Building2, access: "orgAdmin" },
       { to: "/teams", label: "Teams", icon: Users, access: "teamAdmin" },
       { to: "/users", label: "Users", icon: ShieldCheck, access: "installationAdmin" },
+      { to: "/installation-admins", label: "Installation admins", icon: ShieldAlert, access: "installationAdmin" },
     ],
   },
   {
