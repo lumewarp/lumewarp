@@ -71,6 +71,7 @@ EXPECTED_OPERATION_IDS = {
     "getTeam",
     "getUpstream",
     "getUsage",
+    "getUsageLeaderboard",
     "getUser",
     "listAudit",
     "listConfigVersions",
