@@ -5643,6 +5643,11 @@ export interface components {
             /** Is Active */
             is_active: boolean;
             /**
+             * Has Signed In
+             * @description Signed in through the IdP at least once; needed before an admin role.
+             */
+            has_signed_in: boolean;
+            /**
              * Created At
              * Format: date-time
              */

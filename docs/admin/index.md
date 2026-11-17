@@ -40,13 +40,15 @@ assigns one), and it can be transferred afterwards. Every installation admin can
 `proxy_admin` account itself is protected: only that account and break-glass may deactivate,
 delete, change its email or mint a PAT for it.
 
-The **Installation admins** page (Access, installation admins only) lists the rows with role,
-status, who assigned them and when. **Add admin** gives an active user who has signed in once the
-`admin` role; any installation admin may do it. **Remove** takes the role away from an `admin`
-(any installation admin, yourself included, in which case you lose installation access); the
-proxy_admin row has no Remove. **Transfer proxy_admin** appears on `admin` rows only for the
-current proxy_admin or a break-glass session, and asks for confirmation: the target becomes
-proxy_admin and the previous one becomes an `admin`.
+Installation admins are managed on the **Users** page (Access, installation admins only): its
+Role column shows `proxy_admin` or `admin`, and **Admins only** narrows the list to the admins
+(`/users?admins=true`; the old `/installation-admins` address leads there). **Make admin** gives
+an active user the `admin` role; any installation admin may do it, and it is disabled for a user
+who has never signed in (`has_signed_in` on the user). **Remove admin** takes the role away from
+an `admin` (any installation admin, yourself included, in which case you lose installation
+access); the proxy_admin row has neither. **Transfer proxy_admin** appears on `admin` rows only
+for the current proxy_admin or a break-glass session, and asks for confirmation: the target
+becomes proxy_admin and the previous one becomes an `admin`.
 
 The endpoints are `GET /api/v1/installation-admins` (the rows with user email, display name and
 active state), `PUT /api/v1/installation-admins/{user_id}` with `{"role":"admin"}` (idempotent;

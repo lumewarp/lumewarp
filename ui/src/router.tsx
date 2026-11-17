@@ -32,7 +32,6 @@ const UsersPage = lazy(() => import("./pages/Users").then((module) => ({ default
 const AuditPage = lazy(() => import("./pages/Audit").then((module) => ({ default: module.Audit })));
 const RequestsPage = lazy(() => import("./pages/Requests").then((module) => ({ default: module.Requests })));
 const TeamsPage = lazy(() => import("./pages/Teams").then((module) => ({ default: module.Teams })));
-const InstallationAdminsPage = lazy(() => import("./pages/InstallationAdmins").then((module) => ({ default: module.InstallationAdmins })));
 const ModelGroupsPage = lazy(() => import("./pages/ModelGroups").then((module) => ({ default: module.ModelGroups })));
 const ModelGroupEditPage = lazy(() => import("./pages/ModelGroupEdit").then((module) => ({ default: module.ModelGroupEdit })));
 const OrgsPage = lazy(() => import("./pages/Orgs").then((module) => ({ default: module.Orgs })));
@@ -182,8 +181,21 @@ const routeTree = rootRoute.addChildren([
     orgDetailRoute,
     page("/teams", () => <TeamsPage />, "teamAdmin"),
     teamDetailRoute,
-    page("/installation-admins", () => <InstallationAdminsPage />, "installationAdmin"),
-    page("/users", () => <UsersPage />, "installationAdmin"),
+    // Installation admins are managed on Users ("Admins only").
+    createRoute({
+      getParentRoute: () => appRoute,
+      path: "/installation-admins",
+      beforeLoad: () => {
+        throw redirect({ to: "/users", search: { admins: true } });
+      },
+    }),
+    createRoute({
+      getParentRoute: () => appRoute,
+      path: "/users",
+      validateSearch: (search: Record<string, unknown>): { admins?: boolean } =>
+        search.admins === true || search.admins === "true" ? { admins: true } : {},
+      component: guarded(() => <UsersPage />, "installationAdmin"),
+    }),
     page("/routers", () => <RoutersPage />, "installationAdmin"),
     page("/routers/new", () => <RouterEditPage />, "installationAdmin"),
     page("/routers/$routerId", () => <RouterEditPage />, "installationAdmin"),

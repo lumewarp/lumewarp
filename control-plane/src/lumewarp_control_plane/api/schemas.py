@@ -1467,6 +1467,9 @@ class UserOut(ReadModel):
     email: str
     display_name: str
     is_active: bool
+    has_signed_in: bool = Field(
+        description="Signed in through the IdP at least once; needed before an admin role."
+    )
     created_at: datetime
     updated_at: datetime
 

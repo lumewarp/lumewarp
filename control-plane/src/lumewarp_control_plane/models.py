@@ -1722,6 +1722,12 @@ def _current_name(id_column) -> Any:
     )
 
 
+# Read-only: whether the user has linked an IdP identity (signed in at least once), which an
+# installation or org admin role requires (`api.common.require_signed_in`).
+User.has_signed_in = column_property(
+    select(UserIdentity.id).where(UserIdentity.user_id == User.id).exists()
+)
+
 # Read-only: a rename writes `catalog_names`.
 Model.name = column_property(_current_name(Model.name_id))
 Alias.name = column_property(_current_name(Alias.name_id))
