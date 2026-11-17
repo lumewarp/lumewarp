@@ -34,9 +34,9 @@ test.afterEach(async ({ request }) => {
   await removeIfAdmin(request, INSTALL_ADMIN_EMAIL);
 });
 
-async function asBreakGlass(page: Page, request: APIRequestContext, path = "/users") {
+async function asBreakGlass(page: Page, request: APIRequestContext) {
   await page.context().addCookies((await request.storageState()).cookies);
-  await page.goto(path);
+  await page.goto("/users");
   await expect(page.getByRole("heading", { name: "Users", level: 1 })).toBeVisible();
 }
 
@@ -61,14 +61,9 @@ test("an installation admin is made and removed from the Users page", async ({ p
   const listed = await admin.get<{ items: { email: string; role: string }[] }>("/installation-admins?limit=200");
   expect(listed.items.find((item) => item.email === INSTALL_ADMIN_EMAIL)?.role).toBe("admin");
 
-  // "Admins only" lists exactly the admins, and the old page address lands there.
-  await page.goto("/installation-admins");
-  await expect(page).toHaveURL(/\/users\?admins=true/);
-  await expect(page.getByRole("switch", { name: "Admins only" })).toBeChecked();
-  const adminRow = rowOf(page, INSTALL_ADMIN_EMAIL);
-  await adminRow.getByRole("button", { name: "Remove admin" }).click();
+  await row.getByRole("button", { name: "Remove admin" }).click();
   await confirmDialog(page).getByRole("button", { name: "Remove admin" }).click();
-  await expect(adminRow).toHaveCount(0);
+  await expect(row.getByRole("button", { name: "Make admin" })).toBeVisible();
 });
 
 test("a user who never signed in cannot be made an admin", async ({ page, request }) => {
@@ -89,9 +84,9 @@ test("a plain installation admin sees no Transfer action", async ({ page, reques
   const user = await admin.user(INSTALL_ADMIN_EMAIL);
   const assigned = await request.put(`/api/v1/installation-admins/${user.id}`, { headers: admin.headers, data: { role: "admin" } });
   expect(assigned.status()).toBe(200);
-  await signIn(page, INSTALL_ADMIN, "/users?admins=true");
+  await signIn(page, INSTALL_ADMIN, "/users");
   await expect(page.getByRole("heading", { name: "Users", level: 1 })).toBeVisible();
-  const row = rowOf(page, INSTALL_ADMIN_EMAIL);
+  const row = await userRow(page, INSTALL_ADMIN_EMAIL);
   await expect(row.getByRole("button", { name: "Remove admin" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Transfer proxy_admin" })).toHaveCount(0);
 });
@@ -100,8 +95,8 @@ test("break-glass transfers the proxy_admin role", async ({ page, request }) => 
   const target = await admin.user(INSTALL_TARGET_EMAIL);
   const assigned = await request.put(`/api/v1/installation-admins/${target.id}`, { headers: admin.headers, data: { role: "admin" } });
   expect(assigned.status()).toBe(200);
-  await asBreakGlass(page, request, "/users?admins=true");
-  const row = rowOf(page, INSTALL_TARGET_EMAIL);
+  await asBreakGlass(page, request);
+  const row = await userRow(page, INSTALL_TARGET_EMAIL);
   await row.getByRole("button", { name: "Transfer proxy_admin" }).click();
   await confirmDialog(page).getByRole("button", { name: "Transfer" }).click();
   await expect(row.getByRole("cell", { name: "proxy_admin", exact: true })).toBeVisible();

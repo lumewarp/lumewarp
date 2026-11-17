@@ -41,8 +41,7 @@ assigns one), and it can be transferred afterwards. Every installation admin can
 delete, change its email or mint a PAT for it.
 
 Installation admins are managed on the **Users** page (Access, installation admins only): its
-Role column shows `proxy_admin` or `admin`, and **Admins only** narrows the list to the admins
-(`/users?admins=true`; the old `/installation-admins` address leads there). **Make admin** gives
+Role column shows `proxy_admin` or `admin`. **Make admin** gives
 an active user the `admin` role; any installation admin may do it, and it is disabled for a user
 who has never signed in (`has_signed_in` on the user). **Remove admin** takes the role away from
 an `admin` (any installation admin, yourself included, in which case you lose installation

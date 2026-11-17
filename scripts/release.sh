@@ -5,8 +5,8 @@
 #   scripts/release.sh 0.2.0-beta.1     a pre-release
 #   scripts/release.sh --check 0.2.0    exit 1 unless every version is 0.2.0 (CI)
 #
-# Versions kept in step: the gateway workspace (and its Cargo.lock entries), the
-# control-plane package (pyproject, __init__, uv.lock), the UI package and the
+# Versions kept in step: the gateway workspace (and its Cargo.lock entries, also in the
+# example plugins' lockfiles), the control-plane package (pyproject, __init__, uv.lock), the UI package and the
 # Helm charts (version and appVersion, the umbrella's dependency on lumewarp) and
 # the plain manifests in deploy/kubernetes, which are regenerated. Pushing `main`
 # and then the tag runs the full CI once on the release commit and the release workflow reuses it.
@@ -45,6 +45,11 @@ while IFS= read -r manifest; do
   grep -q '^version.workspace = true' "$manifest" || continue
   name="$(sed -n 's/^name = "\(.*\)"/\1/p' "$manifest" | head -1)"
   locations+=("gateway/Cargo.lock|(?m)^name = \"${name}\"\\nversion = \"([^\"]+)\"|Cargo.lock ${name}")
+  # The example plugins lock the SDK crates by path; their lockfiles carry the version too.
+  while IFS= read -r lock; do
+    grep -q "^name = \"${name}\"$" "$lock" || continue
+    locations+=("${lock}|(?m)^name = \"${name}\"\\nversion = \"([^\"]+)\"|${lock#gateway/plugins/} ${name}")
+  done < <(find gateway/plugins -name Cargo.lock | sort)
 done < <(find gateway/crates -name Cargo.toml | sort)
 
 # Prints "<found>\t<description>" per location; with a second argument, rewrites it.

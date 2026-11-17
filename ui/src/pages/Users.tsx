@@ -1,11 +1,10 @@
 import { CrownIcon, ShieldMinusIcon, ShieldPlusIcon, Trash2Icon, UserCheckIcon, UserXIcon } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useState } from "react";
 import { api, type InstallationAdmin, type Schemas, type User } from "../api";
 import { Badge, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
-import { FormDialog, required, SwitchField, TextField, useForm } from "../components/Form";
+import { FormDialog, required, TextField, useForm } from "../components/Form";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { CreateButton, IconAction } from "../components/RowActions";
 import { DataTable } from "../components/Table";
@@ -23,12 +22,10 @@ export function Users() {
   const [previousCursors, setPreviousCursors] = useState<(string | undefined)[]>([]);
   const [creating, setCreating] = useState(false);
   const [confirming, setConfirming] = useState<{ user: User; kind: ConfirmationKind } | null>(null);
-  const navigate = useNavigate();
-  const adminsOnly = (useSearch({ strict: false }) as { admins?: boolean }).admins === true;
   const users = useQuery({
     queryKey: ["users", cursor],
     queryFn: () => api.usersPage(cursor),
-    enabled: !!me.data?.is_admin && !adminsOnly,
+    enabled: !!me.data?.is_admin,
   });
   // Installation admins are few: one list, joined to the user rows by id.
   const admins = useQuery({
@@ -80,18 +77,6 @@ export function Users() {
     }),
   };
   const confirmText = confirmation ? texts[confirmation.kind](confirmation.user) : null;
-  // With "Admins only" the rows are the admins themselves (every admin has signed in).
-  const adminRows: User[] | undefined = admins.data?.map((row) => ({
-    id: row.user_id,
-    email: row.email,
-    display_name: row.display_name,
-    is_active: row.is_active,
-    has_signed_in: true,
-    created_at: row.assigned_at,
-    updated_at: row.assigned_at,
-  }));
-  const shown = adminsOnly ? adminRows : users.data?.items;
-  const source = adminsOnly ? admins : users;
 
   return (
     <>
@@ -100,18 +85,17 @@ export function Users() {
         hint="Installation admins manage the whole installation; the proxy_admin is the highest role and moves only through a transfer."
         actions={<CreateButton can onClick={() => { form.reset(); setCreating(true); }}>New user</CreateButton>}
       />
-      <SwitchField
-        label="Admins only"
-        checked={adminsOnly}
-        onChange={(on) => void navigate({ to: "/users", search: on ? { admins: true } : {} })}
-      />
+
       <DataTable
-        rows={shown}
-        loading={source.isPending}
-        error={source.error ?? admins.error}
-        onRetry={() => void source.refetch()}
+        rows={users.data?.items}
+        loading={users.isPending}
+        error={users.error ?? admins.error}
+        onRetry={() => {
+          void users.refetch();
+          void admins.refetch();
+        }}
         rowKey={(user) => user.id}
-        paging={adminsOnly ? undefined : {
+        paging={{
           summary: users.data?.items.length
             ? `${previousCursors.length * PAGE_SIZE + 1}–${previousCursors.length * PAGE_SIZE + users.data.items.length}${next ? "" : ` of ${previousCursors.length * PAGE_SIZE + users.data.items.length}`}`
             : "No users",
