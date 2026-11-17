@@ -7,6 +7,7 @@ import { FilterBar } from "../components/FilterBar";
 import { SelectField, TextField } from "../components/Form";
 import { UsageChart } from "../components/UsageChart";
 import { Card } from "../components/ui/card";
+import { CatalogFilter } from "../components/CatalogPicker";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { DataTable, type Column } from "../components/Table";
@@ -14,7 +15,7 @@ import { dayStart, isoDay, shiftDay } from "../lib/days";
 import { MODEL_TYPES, type ModelType } from "../lib/modelType";
 import type { RequestsSearch } from "../lib/requests";
 import { useUsageMetric } from "../lib/usageMetric";
-import { useCan, useCatalog, useMe, useModels, useNames, useTeamDirectory, useTeams } from "../hooks";
+import { useCan, useMe, useModels, useNames, useTeamDirectory, useTeams } from "../hooks";
 import { ENDPOINTS, endpointLabel } from "../lib/endpoints";
 import { KeyPill } from "../components/KeyPill";
 
@@ -127,6 +128,7 @@ const ANY = "";
 const NONE = "mode:none";
 const HAS = "mode:has";
 const ID = "id:";
+const byId = (e: { id: string }) => `${ID}${e.id}`;
 
 function provenanceFilter(kind: "alias" | "router", value: string): Partial<UsageQuery> {
   if (value === ANY) return {};
@@ -223,7 +225,6 @@ function LlmUsage({ range }: { range: RangeProps }) {
   const perms = useCan();
   const me = useMe();
   const teams = useTeams();
-  const catalog = useCatalog();
   // Upstream suggestions come from the routing details, which only an installation admin
   // may read; member and service-account names are the team-admin view. A plain member
   // never requests either.
@@ -298,14 +299,12 @@ function LlmUsage({ range }: { range: RangeProps }) {
     [query.data],
   );
 
-  const names = (kind: "model" | "alias" | "router") => (catalog.data ?? []).filter((e) => e.kind === kind).map((e) => e.name);
   // Suggestions only: the filter takes any string, as old usage keeps the upstream name it was served under.
   const upstreamSuggestions = [...new Set((models.data ?? []).map((m) => m.upstream_model))].sort();
-  const provenanceOptions = (kind: "alias" | "router") => [
+  const provenanceModes = (kind: "alias" | "router") => [
     { value: ANY, label: "Any" },
     { value: NONE, label: kind === "alias" ? "None (no alias)" : "None (no router)" },
     { value: HAS, label: kind === "alias" ? "Via any alias" : "Via any router" },
-    ...(catalog.data ?? []).filter((e) => e.kind === kind).map((e) => ({ value: `${ID}${e.id}`, label: e.name })),
   ];
 
   const dims = groupBy.split(",");
@@ -371,8 +370,8 @@ function LlmUsage({ range }: { range: RangeProps }) {
           children: (
             <>
               <ComboboxField free label="Upstream model" hint="Any name, including one no model uses any more." placeholder="All upstream models" value={upstreamText} onChange={setUpstreamText} options={upstreamSuggestions.map((name) => ({ value: name, label: name }))} />
-              <ComboboxField label="Alias" value={alias} onChange={setAlias} options={provenanceOptions("alias")} />
-              <ComboboxField label="Router" value={router} onChange={setRouter} options={provenanceOptions("router")} />
+              <CatalogFilter label="Alias" kinds={["alias"]} value={alias} onChange={setAlias} entryValue={byId} leading={provenanceModes("alias")} />
+              <CatalogFilter label="Router" kinds={["router"]} value={router} onChange={setRouter} entryValue={byId} leading={provenanceModes("router")} />
               <ComboboxField label="Endpoint" value={endpoint} onChange={setEndpoint} options={[{ value: ANY, label: "All endpoints" }, ...ENDPOINTS]} />
               <SelectField label="Model type" value={modelType} onChange={(x) => setModelType(x as ModelType | "")} options={[{ value: "", label: "All types" }, ...MODEL_TYPES]} />
             </>
@@ -380,7 +379,7 @@ function LlmUsage({ range }: { range: RangeProps }) {
         }}
       >
         <RangeFields range={range} teams={teams.data} />
-        <ComboboxField label="Model" value={model} onChange={setModel} options={[{ value: ANY, label: "All models" }, ...names("model").map((name) => ({ value: name, label: name }))]} />
+        <CatalogFilter label="Model" kinds={["model"]} value={model} onChange={setModel} leading={[{ value: ANY, label: "All models" }]} />
         <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={GROUPS} />
       </FilterBar>
       <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">

@@ -73,11 +73,11 @@ for (const [label, viewport] of [["desktop", { width: 1280, height: 800 }], ["39
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
     expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
-    const last = popup.getByRole("option", { name: "s3c/64 (model · LLM)", exact: true });
+    const last = popup.getByRole("option", { name: "s3c/64 (LLM)", exact: true });
     await last.scrollIntoViewIfNeeded();
     await expect(last).toBeInViewport();
-    await popup.getByRole("option", { name: "s3c/00 (model · LLM)", exact: true }).scrollIntoViewIfNeeded();
-    await expect(popup.getByRole("option", { name: "s3c/00 (model · LLM)", exact: true })).toBeInViewport();
+    await popup.getByRole("option", { name: "s3c/00 (LLM)", exact: true }).scrollIntoViewIfNeeded();
+    await expect(popup.getByRole("option", { name: "s3c/00 (LLM)", exact: true })).toBeInViewport();
 
     // Search matches the label and narrows the list; no match says so.
     await page.getByRole("combobox", { name: "Search Points to" }).fill("s3c/4");
@@ -92,7 +92,7 @@ for (const [label, viewport] of [["desktop", { width: 1280, height: 800 }], ["39
     await expect(control).toHaveAttribute("aria-expanded", "false");
     await expect(popup).toHaveCount(0);
     await expect(control).toBeFocused();
-    await expect(control).toHaveText(/s3c\/07 \(model · LLM\)/);
+    await expect(control).toHaveText(/s3c\/07 \(LLM\)/);
     await expect(d).toBeVisible();
 
     // Arrow keys move through the list: a second pick moves the choice.
@@ -101,11 +101,11 @@ for (const [label, viewport] of [["desktop", { width: 1280, height: 800 }], ["39
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
     await expect(control).toHaveAttribute("aria-expanded", "false");
-    await expect(control).not.toHaveText(/s3c\/07 \(model · LLM\)/);
-    await expect(control).toHaveText(/\(model · LLM\)/);
+    await expect(control).not.toHaveText(/s3c\/07 \(LLM\)/);
+    await expect(control).toHaveText(/\(LLM\)/);
 
     // A click picks the last entry; the request carries the id, not the label.
-    await pick(d, "Points to", "s3c/64 (model · LLM)");
+    await pick(d, "Points to", "s3c/64 (LLM)");
     await d.getByLabel("Name", { exact: true }).fill("s3c-alias");
     await d.getByRole("button", { name: "Create" }).click();
     await expect(page).toHaveURL(/\/aliases$/);

@@ -54,7 +54,9 @@ async function open(scope: Page | Locator, label: string) {
  */
 export async function pick(scope: Page | Locator, label: string, optionName: string) {
   const { trigger, popup } = await open(scope, label);
-  await popup.getByRole("option", { name: optionName, exact: true }).click();
+  // A catalog name is read out with its model type after it ("gpt-4 (LLM)"): the bare name matches too.
+  const named = new RegExp(`^${optionName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?: \\([^)]*\\))?$`);
+  await popup.getByRole("option", { name: named }).click();
   await expect(trigger).toHaveAttribute("aria-expanded", "false");
   // Gone from the DOM too: a closing popup still holds options another label could match.
   await expect(popup).toHaveCount(0);

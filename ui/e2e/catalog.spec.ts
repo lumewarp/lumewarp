@@ -119,7 +119,7 @@ test("models, aliases and routers: create through the forms, search by upstream 
   await nav.getByRole("link", { name: "Aliases" }).click();
   await page.getByRole("button", { name: "New alias" }).click();
   await page.locator("#main").getByLabel("Name").fill("cat-alias");
-  await pick(page.locator("#main"), "Points to", "cat/alpha (model · LLM)");
+  await pick(page.locator("#main"), "Points to", "cat/alpha (LLM)");
   await page.locator("#main").getByRole("button", { name: "Create" }).click();
   const aliasRow = row(page, "cat-alias");
   await expect(aliasRow).toContainText("cat/alpha");
@@ -138,9 +138,9 @@ test("models, aliases and routers: create through the forms, search by upstream 
   let d = page.locator("#main");
   await d.getByLabel("Name").fill("cat-router");
   await pick(d, "Strategy", "Weighted");
-  await d.getByLabel("cat/alpha", { exact: true }).check();
+  await d.getByLabel("cat/alpha (LLM)", { exact: true }).check();
   await d.getByLabel("Weight of cat/alpha").fill("20");
-  await d.getByLabel("cat/beta", { exact: true }).check();
+  await d.getByLabel("cat/beta (LLM)", { exact: true }).check();
   await d.getByLabel("Weight of cat/beta").fill("80");
   await d.getByRole("button", { name: "Create" }).click();
   await expect(page).toHaveURL(/\/(routers|aliases)$/);
@@ -201,7 +201,7 @@ test("models, aliases and routers: create through the forms, search by upstream 
   await row(page, "cat-alias").getByRole("button", { name: "Edit" }).click();
   await expect(page.locator("#main").getByLabel("Keep old name as alias")).toHaveCount(0);
   await page.locator("#main").getByLabel("Name").fill("cat-alias2");
-  await pick(page.locator("#main"), "Points to", "cat-router (router · LLM)");
+  await pick(page.locator("#main"), "Points to", "cat-router (LLM)");
   await page.locator("#main").getByRole("button", { name: "Save" }).click();
   await expect(row(page, "cat-alias2")).toContainText("router");
   await expect(row(page, "cat-alias2")).toContainText("Org/Alpha-8B");
@@ -239,8 +239,8 @@ test("reference strategy: form from its descriptor, weight hidden, Save anyway f
   // Strategy settings from the schema; no weights because the strategy does not use them.
   await expect(d.getByTestId("strategy-settings")).toBeVisible();
   await expect(d.getByLabel("Max in flight")).toBeVisible();
-  await d.getByLabel("pf/one", { exact: true }).check();
-  await d.getByLabel("pf/two", { exact: true }).check();
+  await d.getByLabel("pf/one (LLM)", { exact: true }).check();
+  await d.getByLabel("pf/two (LLM)", { exact: true }).check();
   await expect(d.getByLabel(/^Weight of/)).toHaveCount(0);
   const memberOne = d.getByTestId("member-pf/one");
   const memberTwo = d.getByTestId("member-pf/two");
@@ -322,7 +322,7 @@ test("schema fields: required, bounds, enum, boolean, nested, header list", asyn
   // Supported by every connected gateway: nothing to confirm.
   await expect(d.getByTestId("missing-gateways")).toHaveCount(0);
   await expect(d.getByLabel("Save anyway")).toHaveCount(0);
-  await d.getByLabel("tuned/a", { exact: true }).check();
+  await d.getByLabel("tuned/a (LLM)", { exact: true }).check();
   await expect(d.getByLabel(/^Weight of/)).toHaveCount(0);
 
   await d.getByRole("button", { name: "Create" }).click();
@@ -383,7 +383,7 @@ test("no usable schema: a JSON editor, for null and for a schema outside the sub
   await expect(d.getByTestId("strategy-settings-json")).toContainText("No settings schema is known");
   const editor = d.getByLabel("Settings (JSON)", { exact: true });
   await d.getByLabel("Name").fill("json-router");
-  await d.getByLabel("json/a", { exact: true }).check();
+  await d.getByLabel("json/a (LLM)", { exact: true }).check();
   await expect(d.getByLabel("Settings for json/a (JSON)")).toBeVisible();
   await editor.fill("{ not json");
   await expect(d.getByText(/JSON|Expected|Unexpected/).first()).toBeVisible();
@@ -444,18 +444,18 @@ test("traffic split: models move under each split", async ({ page, request }) =>
   await page.getByRole("button", { name: "New router" }).click();
   const d = page.locator("#main");
   await d.getByLabel("Name").fill("split-router");
-  await d.getByLabel("split/stable", { exact: true }).check();
+  await d.getByLabel("split/stable (LLM)", { exact: true }).check();
   await d.getByRole("button", { name: "Add split" }).click();
   // The models picked so far are now the first split's; the router-level list is gone.
   await expect(d.getByTestId("members-in-splits")).toBeVisible();
   await expect(d.getByRole("group", { name: "Models", exact: true })).toHaveCount(0);
   const first = d.getByRole("group", { name: "Split 1" });
-  await expect(first.getByLabel("split/stable", { exact: true })).toBeChecked();
+  await expect(first.getByLabel("split/stable (LLM)", { exact: true })).toBeChecked();
   await d.getByRole("button", { name: "Add split" }).click();
   const second = d.getByRole("group", { name: "Split 2" });
   await second.getByLabel("Split name").fill("canary");
   await second.getByLabel("Weight", { exact: true }).fill("10");
-  await second.getByLabel("split/canary", { exact: true }).check();
+  await second.getByLabel("split/canary (LLM)", { exact: true }).check();
   await first.getByLabel("Weight", { exact: true }).fill("90");
   await expect(first.getByLabel("Share of split 1")).toHaveText("90%");
   // Fallback is optional: none picked.
@@ -476,7 +476,7 @@ test("traffic split: models move under each split", async ({ page, request }) =>
   await row(page, "split-router").getByRole("button", { name: "Edit" }).click();
   await d.getByRole("button", { name: "Remove split 2" }).click();
   await d.getByRole("button", { name: "Remove split 1" }).click();
-  await expect(d.getByRole("group", { name: "Models", exact: true }).getByLabel("split/stable", { exact: true })).toBeChecked();
+  await expect(d.getByRole("group", { name: "Models", exact: true }).getByLabel("split/stable (LLM)", { exact: true })).toBeChecked();
 });
 
 test("permission picker: team All or Selected, member Inherit or Selected within the team", async ({ page, request }) => {
@@ -883,7 +883,7 @@ test("saving a router sends only what changed: settings, hidden weights and spli
 
   // Adding a model sends the members: the ones already there keep their weights, the new one starts at 1.
   await editRouter(page, "rt-plain-renamed");
-  await page.locator("#main").getByLabel("rt/c", { exact: true }).check();
+  await page.locator("#main").getByLabel("rt/c (LLM)", { exact: true }).check();
   await page.locator("#main").getByRole("button", { name: "Save" }).click();
   await expect(page).toHaveURL(/\/(routers|aliases)$/);
   expect(Object.keys(JSON.parse(sent[sent.length - 1]))).toEqual(["members"]);
@@ -902,7 +902,7 @@ test("schema presence: required values, empty values and optional objects follow
   const d = page.locator("#main");
   await d.getByLabel("Name").fill("pres-router");
   await pick(d, "Strategy", "E2E presence");
-  await d.getByLabel("pres/a", { exact: true }).check();
+  await d.getByLabel("pres/a (LLM)", { exact: true }).check();
   await d.getByRole("button", { name: "Create" }).click();
   // Nothing is chosen yet: every required field says so (a boolean included), the optional object is left alone.
   await expect(d.getByText("Enabled is required: choose On or Off")).toBeVisible();
@@ -960,7 +960,7 @@ test("property names that are also Object.prototype members or __proto__ round-t
   const d = page.locator("#main");
   await d.getByLabel("Name").fill("proto-router");
   await pick(d, "Strategy", "E2E presence");
-  await d.getByLabel("proto/a", { exact: true }).check();
+  await d.getByLabel("proto/a (LLM)", { exact: true }).check();
   await pick(d, "Enabled *", "On");
   await pick(d, "Scope *", "wide");
   await d.getByRole("group", { name: "Regions" }).getByRole("button", { name: "Use empty list" }).click();
@@ -1023,7 +1023,7 @@ test("switching between strategies without a schema resets the JSON editors to w
   const d = page.locator("#main");
   await d.getByLabel("Name").fill("sw-router");
   await pick(d, "Strategy", "E2E schemaless");
-  await d.getByLabel("sw/a", { exact: true }).check();
+  await d.getByLabel("sw/a (LLM)", { exact: true }).check();
   const settings = d.getByLabel("Settings (JSON)", { exact: true });
   const memberSettings = d.getByLabel("Settings for sw/a (JSON)");
   await settings.fill('{"threshold": 3}');

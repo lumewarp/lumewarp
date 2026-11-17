@@ -15,7 +15,7 @@ import { JsonEditor } from "../components/SchemaForm";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
-import { ComboboxField } from "../components/ui/combobox-field";
+import { CatalogSelect } from "../components/CatalogPicker";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/ui/empty";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
@@ -286,14 +286,7 @@ function Chat({ keys, reasoning }: { keys: PlaygroundKey[]; reasoning: Record<st
     <div className="grid min-h-0 min-w-0 flex-1 gap-4 lg:grid-cols-[22rem_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)]">
       <Card className="min-h-0 gap-4 overflow-y-auto p-4" data-testid="playground-settings">
         <KeySelect keys={keys} value={keyId} onChange={chooseKey} />
-        <ComboboxField
-          label="Model"
-          value={model}
-          onChange={setModel}
-          options={key.models.map((m) => ({ value: m, label: m }))}
-          placeholder={key.models.length ? "Select a model…" : "No models"}
-          disabled={key.models.length === 0}
-        />
+        <CatalogSelect label="Model" value={model} onChange={setModel} scope={key.models} placeholder={key.models.length ? "Select a model…" : "No models"} disabled={key.models.length === 0} />
         {levels && (
           <SelectField
             label="Reasoning effort"

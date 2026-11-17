@@ -8,8 +8,8 @@ import { CheckField, Field, NumberField, required, SelectField, TextField, useFo
 import { JsonEditor, NumberInput, SchemaFields } from "../components/SchemaForm";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
-import { Checkbox } from "../components/ui/checkbox";
-import { Combobox, ComboboxField } from "../components/ui/combobox-field";
+import { CatalogMultiSelect, CatalogChoiceControl } from "../components/CatalogPicker";
+import { ComboboxField } from "../components/ui/combobox-field";
 import { Label } from "../components/ui/label";
 import { useById, useModels, useMut, useNames, useRouters, useStrategies } from "../hooks";
 import { typeOfFirst } from "../lib/modelType";
@@ -225,7 +225,7 @@ function memberErrors(scope: string, members: MemberV[], shape: Shape): Record<s
 interface MembersProps {
   scope: string;
   label: string;
-  options: Model[];
+  modelType: Model["model_type"] | undefined;
   members: MemberV[];
   onChange: (members: MemberV[]) => void;
   shape: Shape;
@@ -238,38 +238,51 @@ interface MembersProps {
 }
 
 /** Pick models for a router (or one split) and fill in what the strategy asks of each member. */
-function MemberEditor({ scope, label, options, members, onChange, shape, errors, showErrors, onProblem, id, invalid, describedBy }: MembersProps) {
+function MemberEditor({ scope, label, modelType, members, onChange, shape, errors, showErrors, onProblem, id, invalid, describedBy }: MembersProps) {
   const patch = (model_id: string, change: Partial<MemberV>) => onChange(members.map((m) => (m.model_id === model_id ? { ...m, ...change } : m)));
+  const find = (model_id: string) => members.find((m) => m.model_id === model_id);
   return (
-    <div className="flex flex-col gap-1.5" id={id} aria-invalid={invalid} aria-describedby={describedBy} role="group" aria-label={label}>
-      {options.map((d) => {
-        const member = members.find((m) => m.model_id === d.id);
+    <CatalogMultiSelect
+      id={id}
+      invalid={invalid}
+      describedBy={describedBy}
+      label={label}
+      idPrefix={scope}
+      by="id"
+      single
+      kinds={["model"]}
+      modelType={modelType}
+      selected={members.map((m) => m.model_id)}
+      onChange={(ids) => {
+        const added = ids.filter((x) => !find(x));
+        onChange([...members.filter((m) => ids.includes(m.model_id)), ...added.map((model_id) => ({ model_id, weight: 1, params: {} }))]);
+      }}
+      emptyText="Create a model first."
+      rowClassName="rounded-md bg-secondary px-2.5 py-1.5"
+      rowTestId={(d) => `member-${d.name}`}
+      renderInline={(d) => {
+        const member = find(d.id);
+        if (!member || !shape.usesWeight) return null;
         return (
-          <div key={d.id} className="flex flex-col gap-2 rounded-md bg-secondary px-2.5 py-1.5" data-testid={`member-${d.name}`}>
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id={`${scope}-${d.id}`}
-                checked={!!member}
-                onCheckedChange={(c) => onChange(c === true ? [...members, { model_id: d.id, weight: 1, params: {} }] : members.filter((m) => m.model_id !== d.id))}
-              />
-              <Label htmlFor={`${scope}-${d.id}`} className="min-w-0 flex-1 cursor-pointer font-normal [overflow-wrap:anywhere]">
-                {d.name}
-              </Label>
-              {member && shape.usesWeight && (
-                <>
-                  <Label htmlFor={`${scope}-${d.id}-w`} className="sr-only">
-                    Weight of {d.name}
-                  </Label>
-                  <span className="text-xs text-muted-foreground" aria-hidden="true">
-                    Weight
-                  </span>
-                  <div className="w-20">
-                    <NumberInput id={`${scope}-${d.id}-w`} integer min={0} value={member.weight} onChange={(n) => patch(d.id, { weight: n ?? 0 })} />
-                  </div>
-                </>
-              )}
+          <>
+            <Label htmlFor={`${scope}-${d.id}-w`} className="sr-only">
+              Weight of {d.name}
+            </Label>
+            <span className="text-xs text-muted-foreground" aria-hidden="true">
+              Weight
+            </span>
+            <div className="w-20">
+              <NumberInput id={`${scope}-${d.id}-w`} integer min={0} value={member.weight} onChange={(n) => patch(d.id, { weight: n ?? 0 })} />
             </div>
-            {member && shape.member && shape.member.fields.length > 0 && (
+          </>
+        );
+      }}
+      renderDetail={(d) => {
+        const member = find(d.id);
+        if (!member) return null;
+        return (
+          <>
+            {shape.member && shape.member.fields.length > 0 && (
               <div className="flex flex-col gap-2 border-l-2 pl-3">
                 <SchemaFields
                   fields={shape.member.fields}
@@ -288,7 +301,7 @@ function MemberEditor({ scope, label, options, members, onChange, shape, errors,
                 />
               </div>
             )}
-            {member && shape.memberJson && (
+            {shape.memberJson && (
               <JsonEditor
                 key={`${scope}-${d.id}|${shape.name}`}
                 label={`Settings for ${d.name} (JSON)`}
@@ -298,11 +311,10 @@ function MemberEditor({ scope, label, options, members, onChange, shape, errors,
                 hint="This strategy has no settings schema the form can show."
               />
             )}
-          </div>
+          </>
         );
-      })}
-      {options.length === 0 && <p className="text-muted-foreground">Create a model first.</p>}
-    </div>
+      }}
+    />
   );
 }
 
@@ -407,8 +419,7 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
   const routerType = typeOfFirst(chosenIds, (id) => modelById.get(id)?.model_type);
   // A lone member does not pin the type: picking a model of another type replaces it (see `retype`).
   const memberType = chosenIds.length === 1 && memberIds.length === 1 ? undefined : routerType;
-  const depOptions = models.filter((m) => !memberType || m.model_type === memberType);
-  const fallbackOptions = models.filter((m) => (!routerType || m.model_type === routerType) && !v.fallback_model_ids.includes(m.id));
+  const noFallback = !models.some((m) => (!routerType || m.model_type === routerType) && !v.fallback_model_ids.includes(m.id));
   /** Members just picked set the type; anything chosen of another type is dropped so the router stays single-typed. */
   const retype = (prev: MemberV[], next: MemberV[]): MemberV[] => {
     const added = next.find((m) => !prev.some((p) => p.model_id === m.model_id));
@@ -534,7 +545,7 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
                 describedBy={p["aria-describedby"]}
                 scope="m"
                 label="Models"
-                options={depOptions}
+                modelType={memberType}
                 members={v.members}
                 onChange={(next) => form.set("members", retype(v.members, next))}
                 shape={shape}
@@ -621,17 +632,17 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
                   </Button>
                 </div>
               ))}
-              <Combobox
+              <CatalogChoiceControl
                 {...p}
                 aria-label="Add fallback model"
                 searchLabel="Search fallback models"
-                value={undefined}
-                disabled={!fallbackOptions.length}
-                placeholder={fallbackOptions.length ? "None — add a fallback model…" : "No other models"}
-                options={fallbackOptions.map((r) => ({
-                  value: r.id,
-                  label: r.name,
-                }))}
+                kinds={["model"]}
+                modelType={routerType}
+                exclude={v.fallback_model_ids}
+                entryValue={(e) => e.id}
+                value=""
+                disabled={noFallback}
+                placeholder={noFallback ? "No other models" : "None — add a fallback model…"}
                 onChange={(id) => form.set("fallback_model_ids", [...v.fallback_model_ids, id])}
               />
             </div>
@@ -694,7 +705,7 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
             <MemberEditor
               scope={`s${i}`}
               label={`Models of split ${i + 1}`}
-              options={depOptions}
+              modelType={memberType}
               members={s.members}
               onChange={(next) => setSplit(i, { members: retype(s.members, next) })}
               shape={shape}

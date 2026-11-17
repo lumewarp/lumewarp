@@ -71,7 +71,7 @@ async function newRouter(page: Page, request: APIRequestContext, name: string, s
   const d = page.locator("#main");
   await d.getByLabel("Name", { exact: true }).fill(name);
   await pick(d, "Strategy", strategy);
-  await d.getByLabel(`${name}/m`, { exact: true }).check();
+  await d.getByLabel(`${name}/m (LLM)`, { exact: true }).check();
   await d.getByLabel("Max waiting requests").fill("7"); // the one setting this strategy requires
   return { d, up, m };
 }
@@ -416,7 +416,7 @@ test("combobox contract: the search matches labels and never the keys, an unmatc
   const d2 = page.locator("#main");
   await d2.getByLabel("Name", { exact: true }).fill("cb-contract");
   await pick(d2, "Strategy", "Weighted");
-  await d2.getByLabel("cb-contract/m", { exact: true }).check();
+  await d2.getByLabel("cb-contract/m (LLM)", { exact: true }).check();
   // A fallback needs a retry policy with room for a second attempt.
   await d2.getByLabel("Retry failed attempts").check();
   await d2.getByLabel("Max attempts").fill("2");
@@ -429,10 +429,10 @@ test("combobox contract: the search matches labels and never the keys, an unmatc
   await expect(page.getByText("No match")).toBeVisible();
   // Case does not matter, the match is on the label.
   await search.fill("UPPER");
-  await expect(page.getByRole("option")).toHaveText(["cb/Upper"]);
+  await expect(page.getByRole("option")).toHaveText([/^cb\/Upper \(LLM\)/]);
   // A label that looks like a key is still just a label, and it is what is picked.
   await search.fill("cb/i:1");
-  await expect(page.getByRole("option")).toHaveText(["cb/i:1"]);
+  await expect(page.getByRole("option")).toHaveText([/^cb\/i:1 \(LLM\)/]);
   await page.keyboard.press("Enter");
   await expect(d2.getByTestId("order-row")).toHaveText([/1\. cb\/i:1/]);
   await d2.getByRole("button", { name: "Create" }).click();

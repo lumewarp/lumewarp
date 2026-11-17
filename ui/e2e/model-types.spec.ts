@@ -151,12 +151,12 @@ test("a router offers only models of its type, and aliases and the list show it"
   // A lone member does not pin the type: picking another type replaces it.
   await d.getByRole("checkbox", { name: "mt-emb" }).check();
   await expect(d.getByTestId("member-mt-llm")).toBeVisible();
-  await d.getByRole("checkbox", { name: "mt-llm", exact: true }).check();
+  await d.getByRole("checkbox", { name: "mt-llm (LLM)", exact: true }).check();
   await expect(d.getByRole("checkbox", { name: "mt-emb" })).not.toBeChecked();
   // With a member of a type, only that type is offered, for members and fallbacks.
   await d.getByRole("checkbox", { name: "mt-llm2" }).check();
   for (const name of ["mt-emb", "mt-asr", "mt-dec"]) await expect(d.getByTestId(`member-${name}`)).toHaveCount(0);
-  expect((await optionNames(d, "Add fallback model")).filter((n) => n.startsWith("mt-"))).toEqual(["mt-llm", "mt-llm2"]);
+  expect((await optionNames(d, "Add fallback model")).filter((n) => n.startsWith("mt-")).map((n) => n.split(" ")[0])).toEqual(["mt-llm", "mt-llm2"]);
   await page.keyboard.press("Escape");
 
   await post(request, "/routers", { name: "mt-router", members: [{ model_id: m.asr.id }] });

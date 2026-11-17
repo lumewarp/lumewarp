@@ -9,8 +9,9 @@ import { NumberField, SelectField, TextField } from "../components/Form";
 import { FilterBar } from "../components/FilterBar";
 import { DataTable } from "../components/Table";
 import { Button } from "../components/ui/button";
+import { CatalogFilter } from "../components/CatalogPicker";
 import { ComboboxField } from "../components/ui/combobox-field";
-import { useCan, useCatalog, useMe, useNames, useTeamDirectory, useTeams } from "../hooks";
+import { useCan, useMe, useNames, useTeamDirectory, useTeams } from "../hooks";
 import { dayStart, shiftDay } from "../lib/days";
 import type { RequestsSearch } from "../lib/requests";
 import { localDayOf } from "./keyText";
@@ -110,7 +111,6 @@ export function Requests() {
   const teams = useTeams();
   const perms = useCan();
   const me = useMe();
-  const catalog = useCatalog();
   const administered = (teams.data ?? []).filter((team) => perms.teamAdmin(team.id));
   const directoryEnabled = administered.length > 0;
   const directory = useTeamDirectory(administered, directoryEnabled);
@@ -175,8 +175,6 @@ export function Requests() {
     ...(accounts.data ?? []).map((account) => ({ value: `sa:${account.id}`, label: `Service account: ${account.name}` })),
     ...(filters.owner && !ownersEnabled ? [{ value: filters.owner, label: "Selected owner" }] : []),
   ];
-  const names = (kind: "model" | "alias" | "router") => (catalog.data ?? []).filter((entry) => entry.kind === kind).map((entry) => entry.name);
-  const requestedNames = [...new Set((catalog.data ?? []).map((entry) => entry.name))];
 
   const ownerLabel = (row: RequestRow) => {
     if (row.owner_kind === "service_account") return accountName(row.owner_id);
@@ -211,8 +209,8 @@ export function Requests() {
             <>
               <SelectField label="Kind" value={filters.kind} onChange={(value) => change({ kind: value as Schemas["TrafficKind"] })} options={KINDS} />
               {ownersEnabled && <ComboboxField label="Owner" value={filters.owner} onChange={(value) => change({ owner: value })} options={ownerOptions} />}
-              <ComboboxField free label="Alias" value={filters.alias} onChange={(value) => change({ alias: String(value) })} options={names("alias").map((name) => ({ value: name, label: name }))} placeholder="Any alias" />
-              <ComboboxField free label="Router" value={filters.router} onChange={(value) => change({ router: String(value) })} options={names("router").map((name) => ({ value: name, label: name }))} placeholder="Any router" />
+              <CatalogFilter free kinds={["alias"]} label="Alias" value={filters.alias} onChange={(value) => change({ alias: value })} placeholder="Any alias" />
+              <CatalogFilter free kinds={["router"]} label="Router" value={filters.router} onChange={(value) => change({ router: value })} placeholder="Any router" />
               <div className="grid grid-cols-2 gap-3">
                 <NumberField label="Status" value={filters.status} onChange={(value) => change({ status: value })} min={100} placeholder="Any" />
                 <SelectField label="Outcome" value={filters.outcome} onChange={(value) => change({ outcome: value as Filters["outcome"] })} options={OUTCOMES} />
@@ -238,8 +236,8 @@ export function Requests() {
           disabled={!filters.teamId}
           placeholder={!filters.teamId ? "Choose a team first" : undefined}
         />
-        <ComboboxField free label="Requested" value={filters.requested} onChange={(value) => change({ requested: String(value) })} options={requestedNames.map((name) => ({ value: name, label: name }))} placeholder="Any name" />
-        <ComboboxField free label="Resolved" value={filters.model} onChange={(value) => change({ model: String(value) })} options={names("model").map((name) => ({ value: name, label: name }))} placeholder="Any model" />
+        <CatalogFilter free label="Requested" value={filters.requested} onChange={(value) => change({ requested: value })} placeholder="Any name" />
+        <CatalogFilter free kinds={["model"]} label="Resolved" value={filters.model} onChange={(value) => change({ model: value })} placeholder="Any model" />
       </FilterBar>
       <DataTable
         rows={query.data?.items}
