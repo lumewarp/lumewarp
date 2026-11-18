@@ -4,7 +4,7 @@ import { useCallback, useMemo, useState } from "react";
 import { api, type Model, type Plugin, type Router } from "../api";
 import { PageLoading } from "./Access";
 import { EditPage, Section } from "../components/EditPage";
-import { CheckField, Field, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
+import { CheckField, Field, NumberField, required, SelectControl, SelectField, TextField, useForm } from "../components/Form";
 import { JsonEditor, NumberInput, SchemaFields } from "../components/SchemaForm";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
@@ -15,6 +15,9 @@ import { useById, useModels, useMut, useNames, useRouters, useStrategies } from 
 import { typeOfFirst } from "../lib/modelType";
 import { parseSchema, sameJson, strategyDescription, strategyTitle, unknownKeys, validateValues, type ParsedSchema, type Values as Params } from "../lib/schema";
 import { splitShares } from "./Routers";
+
+/** Level names the API accepts. */
+const LEVEL_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/;
 
 type Sticky = Router["sticky"];
 
@@ -53,6 +56,7 @@ interface Values {
   retry_statuses: string;
   retry_total_timeout_ms: number | null;
   fallback_model_ids: string[];
+  reasoning_default: string;
   splits: Split[];
   sticky: Sticky;
   sticky_header: string;
@@ -69,6 +73,7 @@ const blank: Values = {
   retry_statuses: "",
   retry_total_timeout_ms: null,
   fallback_model_ids: [],
+  reasoning_default: "",
   splits: [],
   sticky: "none",
   sticky_header: "",
@@ -86,6 +91,7 @@ const fromRouter = (r: Router): Values => ({
   retry_statuses: (r.retry?.retry_on_status ?? []).join(", "),
   retry_total_timeout_ms: r.retry?.total_timeout_ms || null,
   fallback_model_ids: [...r.fallback_model_ids],
+  reasoning_default: r.reasoning_default_level ?? "",
   splits: r.traffic_split.map((s) => ({
     name: s.name,
     weight: s.weight,
@@ -153,6 +159,7 @@ const body = (v: Values, missing: boolean) => ({
       }
     : null,
   fallback_model_ids: v.fallback_model_ids,
+  reasoning_default_level: v.reasoning_default.trim() || null,
   traffic_split: v.splits.map((s) => ({
     name: s.name.trim(),
     weight: s.weight ?? 0,
@@ -163,7 +170,7 @@ const body = (v: Values, missing: boolean) => ({
   ...(v.force && missing ? { force: true } : {}),
 });
 
-const PATCHABLE = ["name", "strategy", "params", "plugin_timeout_ms", "members", "retry", "fallback_model_ids", "traffic_split", "sticky", "sticky_header"] as const;
+const PATCHABLE = ["name", "strategy", "params", "plugin_timeout_ms", "members", "retry", "fallback_model_ids", "reasoning_default_level", "traffic_split", "sticky", "sticky_header"] as const;
 
 /**
  * The PATCH of an edit: only what the form changed against the router as it was loaded. A save never
@@ -187,6 +194,7 @@ export function patchBody(original: Router, v: Values, missing: boolean): Record
 const ALIAS = {
   members: "members",
   fallback_model_ids: "fallback_model_ids",
+  reasoning_default_level: "reasoning_default",
   traffic_split: "splits",
   weight: "splits",
   sticky: "sticky",
@@ -366,12 +374,15 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
     strategy: (v) => (v ? undefined : "Pick a strategy"),
     members: (v, all) => (v.length || all.splits.length ? undefined : "Pick at least one model or add a traffic split"),
     splits: (v) => splitsError(v),
+    reasoning_default: (v) => (!v.trim() || LEVEL_NAME.test(v.trim()) ? undefined : "Letters, digits, . _ - (max 32)"),
     retry_statuses: (v, all) => (all.retry_enabled && parseStatuses(v) === undefined ? "Comma-separated HTTP statuses in 400–599" : undefined),
     retry_max_attempts: (v, all) => (all.retry_enabled && v !== null && (v < 1 || v > 5) ? "Between 1 and 5" : undefined),
     sticky_header: (v, all) => (all.splits.length && all.sticky === "header" && !HEADER_NAME.test(v.trim()) ? "Enter a header name" : undefined),
     force: (v, all) => ((strategyByName.get(all.strategy)?.missing_gateways.length ?? 0) > 0 && !v ? "Tick “Save anyway” to save while those gateways lack this strategy" : undefined),
   });
   const v = form.values;
+  // The saved router's intersection: null (any level) until the router exists.
+  const accepted = existing?.accepted_reasoning_levels ?? null;
   const dirty = JSON.stringify(v) !== JSON.stringify(initial);
   const shape = useMemo(() => shapeOf(v.strategy, strategyByName.get(v.strategy)), [strategyByName, v.strategy]);
   const missing = shape.desc?.missing_gateways ?? [];
@@ -597,6 +608,32 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
               hint="Empty uses 429, 502, 503, 504."
             />
           </>
+        )}
+      </Section>
+
+      <Section title="Reasoning effort" hint="Sent when the client sends no reasoning_effort; only levels every member, split member and fallback accepts can be chosen.">
+        {accepted && accepted.length === 0 ? (
+          <Field label="Default level" error={form.errors.reasoning_default} note="The members share no reasoning level, so no default can be set.">
+            {(p) => <SelectControl {...p} disabled value={undefined} options={[]} onChange={() => undefined} />}
+          </Field>
+        ) : accepted ? (
+          <SelectField
+            label="Default level"
+            value={v.reasoning_default || undefined}
+            onChange={(x) => form.set("reasoning_default", x)}
+            unset={{ label: "Not set", onSelect: () => form.set("reasoning_default", "") }}
+            options={[...new Set([...accepted, ...(v.reasoning_default ? [v.reasoning_default] : [])])].map((l) => ({ value: l, label: l }))}
+            error={form.errors.reasoning_default}
+          />
+        ) : (
+          <TextField
+            label="Default level"
+            value={v.reasoning_default}
+            onChange={(x) => form.set("reasoning_default", x)}
+            error={form.errors.reasoning_default}
+            placeholder="Not set"
+            hint={existing ? "Every member accepts any level." : "The levels the members accept are known once the router is saved."}
+          />
         )}
       </Section>
 
