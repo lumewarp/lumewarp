@@ -269,3 +269,43 @@ test("reasoning effort: switch on, add custom levels, set the default, and store
     default_level: "deep.think",
   });
 });
+
+test("reasoning effort: a level with empty fields and a passthrough without default are stored", async ({ page, request }) => {
+  const up = await (await request.post("/api/v1/upstreams", { headers: admin, data: { name: "pg-up4", kind: "vllm", base_url: "http://127.0.0.1:9/v1" } })).json();
+  await page.route(`**/api/v1/upstreams/${up.id}/models`, (route) => route.fulfill({ json: { models: [] } }));
+  await signIn(page, request, "/models/new");
+  const main = page.locator("#main");
+  await main.getByLabel("Name", { exact: true }).fill("pg-empty-level");
+  await pick(main, "Type", "LLM");
+  await main.getByRole("combobox", { name: "Upstream", exact: true }).click();
+  await page.getByRole("option", { name: "pg-up4" }).click();
+  await main.getByRole("combobox", { name: "Upstream model", exact: true }).fill("qwen");
+  await page.getByRole("option", { name: "Use “qwen” (custom)" }).click();
+  await main.getByLabel("Handle reasoning effort").click();
+  await main.getByRole("button", { name: "Add level" }).click();
+  await main.getByLabel("Level 1 name").fill("none");
+  await main.getByRole("button", { name: "Add level" }).click();
+  await main.getByLabel("Level 2 name").fill("high");
+  await main.getByLabel("Level 2 fields").fill('{"chat_template_kwargs": {"enable_thinking": true}}');
+  await main.getByRole("button", { name: "Create" }).click();
+  await expect(page).toHaveURL(/\/models$/);
+  const find = async () => ((await (await request.get("/api/v1/models?limit=200", { headers: admin })).json()).items as any[]).find((m) => m.name === "pg-empty-level");
+  const stored = await find();
+  expect(stored.reasoning).toEqual({ mode: "mapped", fragments: { none: {}, high: { chat_template_kwargs: { enable_thinking: true } } }, default_level: null });
+
+  // Reload: the empty level is still there with an empty field.
+  await page.goto(`/models/${stored.id}`);
+  const names = main.getByLabel(/^Level \d+ name$/);
+  await expect(names).toHaveCount(2);
+  const idx = (await names.evaluateAll((els) => els.map((e) => (e as HTMLInputElement).value))).indexOf("none");
+  expect(idx).toBeGreaterThanOrEqual(0);
+  await expect(main.getByLabel(`Level ${idx + 1} fields`)).toHaveValue("");
+
+  // Passthrough with no default level is accepted.
+  await pick(main, "Mode", "Pass through with a default level");
+  await main.getByRole("button", { name: "Save" }).click();
+  await expect(page).toHaveURL(/\/models$/);
+  expect((await find()).reasoning.mode).toBe("passthrough");
+  expect((await find()).reasoning.default_level ?? null).toBeNull();
+});
+

@@ -42,7 +42,7 @@ interface LevelRow {
 let rowSeq = 1000;
 const newRow = (name = "", json = ""): LevelRow => ({ key: rowSeq++, name, json });
 
-const thinking = (key: string, on: boolean) => JSON.stringify({ chat_template_kwargs: { [key]: on } });
+const thinking = (key: string, on: boolean) => `{"chat_template_kwargs": {"${key}": ${on}}}`;
 const rowsOf = (entries: [string, string][]): LevelRow[] => entries.map(([name, json], i) => ({ key: i, name, json }));
 const PRESETS: { label: string; mode: Mode; rows?: [string, string][]; level?: string }[] = [
   { label: "Qwen3 (enable_thinking)", mode: "mapped", rows: [["none", thinking("enable_thinking", false)], ["low", thinking("enable_thinking", true)], ["medium", thinking("enable_thinking", true)], ["high", thinking("enable_thinking", true)]] },
@@ -112,7 +112,7 @@ const fromModel = (m: Model): Values => ({
   // Pass through without a default level changes nothing, which is the same as no handling.
   reasoning_on: !(m.reasoning.mode === "passthrough" && !m.reasoning.default_level),
   reasoning_mode: m.reasoning.mode === "passthrough" && !m.reasoning.default_level ? blank.reasoning_mode : m.reasoning.mode,
-  levels: rowsOf(Object.entries(m.reasoning.fragments ?? {}).map(([k, v]) => [k, JSON.stringify(v)])),
+  levels: rowsOf(Object.entries(m.reasoning.fragments ?? {}).map(([k, v]) => [k, Object.keys(v).length ? JSON.stringify(v, null, 1) : ""])),
   reasoning_default: m.reasoning.default_level ?? "",
   check_enabled: !!m.chat_check,
   check_interval_ms: m.chat_check?.interval_ms ?? blank.check_interval_ms,
@@ -143,7 +143,7 @@ function rowProblem(r: LevelRow, rows: LevelRow[]): { name?: string; json?: stri
   const out: { name?: string; json?: string } = {};
   if (!LEVEL_NAME.test(name)) out.name = "Letters, digits, . _ - (max 32)";
   else if (rows.some((o) => o !== r && o.name.trim() === name)) out.name = "Already used";
-  out.json = r.json.trim() ? jsonObjectProblem(r.json) : "Fields required";
+  out.json = jsonObjectProblem(r.json);
   return out;
 }
 const levelsProblem = (rows: LevelRow[]) => {
@@ -156,7 +156,7 @@ const levelsProblem = (rows: LevelRow[]) => {
 /** The API value; Off sends null so the client's reasoning_effort passes through untouched. */
 function reasoning(v: Values) {
   if (!v.reasoning_on) return null;
-  const fragments = v.reasoning_mode === "mapped" ? Object.fromEntries(v.levels.map((r) => [r.name.trim(), parseObject(r.json)!])) : null;
+  const fragments = v.reasoning_mode === "mapped" ? Object.fromEntries(v.levels.map((r) => [r.name.trim(), parseObject(r.json) ?? {}])) : null;
   return { mode: v.reasoning_mode, fragments, default_level: v.reasoning_mode === "strip" ? null : v.reasoning_default.trim() || null };
 }
 
@@ -242,7 +242,7 @@ function ModelForm({ existing }: { existing?: Model }) {
     reasoning_default: (x, all) => {
       if (hidesReasoning(all) || !all.reasoning_on || all.reasoning_mode === "strip") return undefined;
       if (all.reasoning_mode === "mapped") return x && !all.levels.some((r) => r.name.trim() === x) ? "This level is not in the list" : undefined;
-      return LEVEL_NAME.test(x.trim()) ? undefined : "Letters, digits, . _ - (max 32)";
+      return !x.trim() || LEVEL_NAME.test(x.trim()) ? undefined : "Letters, digits, . _ - (max 32)";
     },
     check_interval_ms: (x, all) => (all.check_enabled && (x ?? 0) < 1000 ? "At least 1000 ms" : undefined),
     check_timeout_ms: (x, all) => (all.check_enabled && ((x ?? 0) < 1 || (x ?? 0) >= (all.check_interval_ms ?? 0)) ? "Must be above 0 and below the interval" : undefined),
@@ -370,7 +370,7 @@ function ModelForm({ existing }: { existing?: Model }) {
 
       {shows?.llm && <Section
         title="Reasoning effort"
-        hint="Off forwards the client's reasoning_effort untouched."
+        hint="Off forwards the client's reasoning_effort untouched; a mapped level with empty request fields sends nothing extra."
         toggle={{ label: "Handle reasoning effort", checked: v.reasoning_on, onChange: (x) => form.set("reasoning_on", x) }}
       >
         {v.reasoning_on && (
@@ -386,27 +386,28 @@ function ModelForm({ existing }: { existing?: Model }) {
             {v.reasoning_mode === "mapped" && (
               <div className="flex flex-col gap-2" data-testid="reasoning-levels">
                 {form.errors.levels && <p className="text-sm text-destructive">{form.errors.levels}</p>}
+                {v.levels.length > 0 && (
+                  <div className="hidden grid-cols-[10rem_1fr_2.25rem] gap-x-2 text-sm font-medium sm:grid">
+                    <span>Level</span>
+                    <span className="flex items-center gap-1">
+                      Request fields
+                      <HelpTip text="Empty request fields send nothing extra for that level." />
+                    </span>
+                  </div>
+                )}
                 {v.levels.map((r, i) => {
                   const problem = rowProblem(r, v.levels);
                   return (
-                    <div key={r.key} className="grid grid-cols-[1fr_auto] items-start gap-2 sm:grid-cols-[10rem_1fr_auto]">
-                      <div className="flex min-w-0 flex-col gap-1">
+                    <div key={r.key} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 sm:grid-cols-[10rem_minmax(0,1fr)_auto]">
+                      <div className="col-start-1 row-start-1 flex min-w-0 flex-col gap-1">
                         <Input aria-label={`Level ${i + 1} name`} aria-invalid={!!r.name.trim() && !!problem.name} value={r.name} onChange={(e) => setRow(r.key, { name: e.target.value })} placeholder="level name" spellCheck={false} />
                         {r.name.trim() && problem.name && <p className="text-sm text-destructive">{problem.name}</p>}
                       </div>
-                      <Button type="button" variant="ghost" size="icon" aria-label={`Remove level ${i + 1}`} className="sm:order-3" onClick={() => form.set("levels", v.levels.filter((o) => o.key !== r.key))}>
+                      <Button type="button" variant="ghost" size="icon" aria-label={`Remove level ${i + 1}`} className="col-start-2 row-start-1 sm:col-start-3" onClick={() => form.set("levels", v.levels.filter((o) => o.key !== r.key))}>
                         <Trash2Icon aria-hidden="true" />
                       </Button>
-                      <div className="col-span-2 sm:order-2 sm:col-span-1">
-                        <JsonField
-                          label={`Level ${i + 1} fields`}
-                          hideLabel
-                          value={r.json}
-                          onChange={(x) => setRow(r.key, { json: x })}
-                          error={r.json.trim() ? problem.json : undefined}
-                          placeholder='{"chat_template_kwargs": {"enable_thinking": true}}'
-                          rows={1}
-                        />
+                      <div className="col-span-2 row-start-2 min-w-0 sm:col-span-1 sm:col-start-2 sm:row-start-1">
+                        <JsonField label={`Level ${i + 1} fields`} hideLabel value={r.json} onChange={(x) => setRow(r.key, { json: x })} error={problem.json} placeholder="JSON object" rows={1} />
                       </div>
                     </div>
                   );
@@ -537,7 +538,7 @@ function useChatTest(values: Values, modelId: string | undefined, pluginMode: bo
 
 function JsonField({ label, hideLabel, value, onChange, error, placeholder, rows }: { label: string; hideLabel?: boolean; value: string; onChange: (v: string) => void; error?: string; placeholder?: string; rows: number }) {
   const control = (p: { id?: string; "aria-invalid"?: boolean; "aria-describedby"?: string }) => (
-    <Textarea {...p} aria-label={hideLabel ? label : undefined} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} rows={rows} spellCheck={false} className="min-h-0 font-mono text-xs" />
+    <Textarea {...p} aria-label={hideLabel ? label : undefined} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} rows={rows} spellCheck={false} className="min-h-9 font-mono text-xs [overflow-wrap:anywhere]" />
   );
   if (hideLabel) {
     return (
