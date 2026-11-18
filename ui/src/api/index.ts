@@ -16,6 +16,7 @@ export const hasPolicy = (team: TeamAny): team is Team => "model_access" in team
 export type Key = Schemas["KeyOut"];
 export type Member = Schemas["MemberOut"];
 export type ServiceAccount = Schemas["ServiceAccountOut"];
+export type Zone = Schemas["ZoneOut"];
 export type Upstream = Schemas["UpstreamOut"];
 export type UpstreamTest = Schemas["UpstreamTestOut"];
 export type ModelTest = Schemas["ModelTestOut"];
@@ -230,7 +231,8 @@ export const api = {
   deleteAlias: (id: string) => unwrap(client.DELETE("/api/v1/aliases/{alias_id}", { params: { path: { alias_id: id } } })),
 
   /** Every plugin of one kind, or all three kinds: built-ins plus what connected gateways report. */
-  plugins: async (kind?: PluginKind) => (await unwrap(client.GET("/api/v1/plugins", { params: { query: kind ? { kind } : {} } }))).items,
+  plugins: async (kind?: PluginKind, zone?: string) =>
+    (await unwrap(client.GET("/api/v1/plugins", { params: { query: { ...(kind ? { kind } : {}), ...(zone ? { zone } : {}) } } }))).items,
 
   mcpServers: () => listAll((c) => unwrap(client.GET("/api/v1/mcp-servers", { params: { query: q(c) } }))),
   mcpServer: (id: string) => unwrap(client.GET("/api/v1/mcp-servers/{server_id}", { params: { path: { server_id: id } } })),
@@ -270,14 +272,21 @@ export const api = {
   audit: (query: { team_id?: string; org_id?: string; actor_id?: string; action?: string; resource_type?: string; resource_id?: string; from?: string; to?: string } = {}) =>
     listAll((c) => unwrap(client.GET("/api/v1/audit", { params: { query: { ...query, ...q(c) } } }))),
 
-  gateways: () => listAll((c) => unwrap(client.GET("/api/v1/gateways", { params: { query: q(c) } }))),
-  gatewayTokens: () => listAll((c) => unwrap(client.GET("/api/v1/gateway-tokens", { params: { query: q(c) } }))),
+  gateways: (zone?: string) => listAll((c) => unwrap(client.GET("/api/v1/gateways", { params: { query: { ...q(c), zone } } }))),
+  gatewayTokens: (zone?: string) => listAll((c) => unwrap(client.GET("/api/v1/gateway-tokens", { params: { query: { ...q(c), zone } } }))),
   createGatewayToken: (body: Schemas["GatewayTokenCreate"]) => unwrap(client.POST("/api/v1/gateway-tokens", { body })),
   revokeGatewayToken: (tokenId: string) =>
     unwrap(client.POST("/api/v1/gateway-tokens/{token_id}/revoke", { params: { path: { token_id: tokenId } } })),
 
-  configVersions: () => listAll((c) => unwrap(client.GET("/api/v1/config/versions", { params: { query: q(c) } }))),
-  rollback: (version: number, force = false) => unwrap(client.POST("/api/v1/config/rollback", { body: force ? { version, force } : { version } })),
+  configVersions: (zone?: string) => listAll((c) => unwrap(client.GET("/api/v1/config/versions", { params: { query: { ...q(c), zone } } }))),
+  /** Installation-wide: the catalog restores for every zone; `zone` names the version list the version came from. */
+  rollback: (version: number, force = false, zone?: string) =>
+    unwrap(client.POST("/api/v1/config/rollback", { body: { version, ...(force ? { force } : {}), ...(zone ? { zone } : {}) } })),
+
+  zones: (includeArchived = false) => unwrap(client.GET("/api/v1/zones", { params: { query: { include_archived: includeArchived } } })).then((page) => page.items),
+  createZone: (body: Schemas["ZoneCreate"]) => unwrap(client.POST("/api/v1/zones", { body })),
+  updateZone: (name: string, body: Schemas["ZoneUpdate"]) => unwrap(client.PATCH("/api/v1/zones/{name}", { params: { path: { name } }, body })),
+  archiveZone: (name: string) => unwrap(client.DELETE("/api/v1/zones/{name}", { params: { path: { name } } })),
 
   a2aAgents: () => listAll((c) => unwrap(client.GET("/api/v1/a2a-agents", { params: { query: q(c) } }))),
   createA2aAgent: (body: Schemas["A2aAgentCreate"]) => unwrap(client.POST("/api/v1/a2a-agents", { body })),

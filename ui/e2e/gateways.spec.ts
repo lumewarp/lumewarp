@@ -101,7 +101,7 @@ test("gateways: different builds and shared-limit settings warn; a disconnected 
   await expect(warnings).not.toContainText("staging");
 });
 
-test("gateways: a NACK is named with its code and reason, a quarantine is scope-wide, and an empty namespace is reported", async ({ page }) => {
+test("gateways: a NACK is named with its code and reason, a quarantine is zone-wide, and an empty namespace is reported", async ({ page }) => {
   await signIn(page);
   const body = (await (await page.request.get("/api/v1/gateways?limit=200")).json()) as { items: GatewayRow[]; next_cursor: string | null };
   const rows = structuredClone(body.items);
@@ -133,7 +133,7 @@ test("gateways: a NACK is named with its code and reason, a quarantine is scope-
 
   const warnings = page.getByTestId("gateway-warnings");
   await expect(warnings).toContainText("e2e-gw NACKed config v6 (NACK_CODE_INVALID_CONFIG): snapshot failed validation.");
-  await expect(warnings).toContainText("Config v6 is quarantined and withheld from every gateway in this scope.");
+  await expect(warnings).toContainText("Config v6 is quarantined and withheld from every gateway in this zone.");
   await expect(warnings).toContainText("e2e-gw-b (no namespace reported)");
   await expect(warnings).not.toContainText("e2e-gw-old");
 
